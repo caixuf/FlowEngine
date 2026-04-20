@@ -62,15 +62,15 @@ int main() {
     // 创建任务管理器
     g_task_manager = task_manager_create();
     if (!g_task_manager) {
-        std::cerr << "❌ 任务管理器创建失败\n";
+        std::cerr << "[ERROR] 任务管理器创建失败\n";
         return -1;
     }
     
-    std::cout << "✅ 任务管理器创建完成\n";
+    std::cout << "[OK] 任务管理器创建完成\n";
     
     // 设置信号处理
     setup_signal_handlers();
-    std::cout << "✅ 信号处理设置完成\n";
+    std::cout << "[OK] 信号处理设置完成\n";
     
     try {
         // 创建C++任务
@@ -88,7 +88,7 @@ int main() {
             throw std::runtime_error("注册C++任务失败");
         }
         
-        std::cout << "✅ C++任务创建并注册完成\n";
+        std::cout << "[OK] C++任务创建并注册完成\n";
         
         // 启动任务
         std::cout << "\n--- 启动任务 ---\n";
@@ -96,7 +96,7 @@ int main() {
             throw std::runtime_error("启动C++任务失败");
         }
         
-        std::cout << "✅ C++任务启动完成\n";
+        std::cout << "[OK] C++任务启动完成\n";
         std::cout << "\n--- 监控任务运行状态 ---\n";
         std::cout << "按 Ctrl+C 退出程序...\n\n";
         
@@ -106,13 +106,13 @@ int main() {
             std::this_thread::sleep_for(std::chrono::seconds(5));
             
             if (++counter % 6 == 0) { // 每30秒输出一次状态
-                std::cout << "⏰ 程序运行中... (已运行 " << counter * 5 << " 秒)\n";
+                std::cout << "程序运行中... (已运行 " << counter * 5 << " 秒)\n";
                 
                 // 简单的健康检查
                 if (task_manager_health_check(g_task_manager)) {
-                    std::cout << "✅ 任务健康状态正常\n";
+                    std::cout << "[OK] 任务健康状态正常\n";
                 } else {
-                    std::cout << "⚠️  检测到任务健康状态异常\n";
+                    std::cout << "[WARN] 检测到任务健康状态异常\n";
                 }
             }
         }
@@ -122,19 +122,19 @@ int main() {
         
         // 停止任务
         task_manager_stop_all(g_task_manager);
-        std::cout << "✅ 任务已停止\n";
+        std::cout << "[OK] 任务已停止\n";
         
         // 销毁任务包装器
         cpp_task_destroy(cpp_wrapper);
-        std::cout << "✅ 任务包装器已销毁\n";
+        std::cout << "[OK] 任务包装器已销毁\n";
         
         // 销毁任务管理器
         task_manager_destroy(g_task_manager);
         g_task_manager = nullptr;
-        std::cout << "✅ 任务管理器已销毁\n";
+        std::cout << "[OK] 任务管理器已销毁\n";
         
     } catch (const std::exception& e) {
-        std::cerr << "❌ 程序异常: " << e.what() << std::endl;
+        std::cerr << "[ERROR] 程序异常: " << e.what() << std::endl;
         
         if (g_task_manager) {
             task_manager_destroy(g_task_manager);

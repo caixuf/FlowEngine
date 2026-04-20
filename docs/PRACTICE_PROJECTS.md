@@ -4,9 +4,9 @@
 > **难度：** 初级到中级  
 > **时间：** 每个项目1-3天
 
-## 🎯 练习项目列表
+## 练习项目列表
 
-### 项目1：系统资源监控器 ⭐⭐
+### 项目1：系统资源监控器 
 **学习目标：** 掌握系统调用和文件操作
 
 **功能要求：**
@@ -40,7 +40,7 @@ static int monitor_execute(TaskBase* base) {
         
         // 检查阈值并警告
         if (cpu_usage > task->cpu_threshold) {
-            printf("⚠️  CPU使用率过高: %.1f%%\n", cpu_usage);
+            printf("[WARN] CPU使用率过高: %.1f%%\n", cpu_usage);
         }
         
         sleep(task->check_interval);
@@ -51,7 +51,7 @@ static int monitor_execute(TaskBase* base) {
 
 ---
 
-### 项目2：HTTP服务器任务 ⭐⭐⭐
+### 项目2：HTTP服务器任务 
 **学习目标：** 网络编程和多线程处理
 
 **功能要求：**
@@ -108,7 +108,7 @@ static int http_server_execute(TaskBase* base) {
 
 ---
 
-### 项目3：定时任务调度器 ⭐⭐⭐⭐
+### 项目3：定时任务调度器 
 **学习目标：** 复杂的任务管理和调度算法
 
 **功能要求：**
@@ -172,7 +172,7 @@ static int scheduler_execute(TaskBase* base) {
 
 ---
 
-### 项目4：数据库连接池 ⭐⭐⭐⭐⭐
+### 项目4：数据库连接池 
 **学习目标：** 高级资源管理和并发控制
 
 **功能要求：**
@@ -241,7 +241,7 @@ Connection* pool_get_connection(ConnectionPoolTask* pool, int timeout_ms) {
 
 ---
 
-## 🛠️ 开发工具和调试技巧
+## 开发工具和调试技巧
 
 ### 推荐开发环境
 ```bash
@@ -290,13 +290,13 @@ void test_system_monitor() {
     float cpu = get_cpu_usage();
     assert(cpu >= 0.0 && cpu <= 100.0);
     
-    printf("✅ 系统监控测试通过\n");
+    printf("[OK] 系统监控测试通过\n");
 }
 ```
 
 ---
 
-## 📊 项目评估标准
+## 项目评估标准
 
 ### 代码质量检查清单
 - [ ] 内存管理正确（无泄漏）
@@ -321,7 +321,7 @@ netstat -an | grep :8080
 
 ---
 
-## 🎯 进阶挑战
+## 进阶挑战
 
 ### 挑战1：插件热重载
 实现不停机的插件更新机制。
@@ -337,7 +337,7 @@ netstat -an | grep :8080
 
 ---
 
-## 📚 相关学习资源
+## 相关学习资源
 
 ### 系统编程
 - 《UNIX网络编程》- 网络编程经典
@@ -353,4 +353,4 @@ netstat -an | grep :8080
 
 ---
 
-**完成这些项目后，你将具备独立开发复杂系统级应用的能力！** 🚀
+**完成这些项目后，你将具备独立开发复杂系统级应用的能力！**

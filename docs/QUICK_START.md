@@ -2,7 +2,7 @@
 
 > **目标：** 30分钟内理解核心概念并运行第一个插件
 
-## 🚀 快速体验
+## 快速体验
 
 ### 步骤1：编译运行演示程序
 
@@ -62,7 +62,7 @@ extern "C" TaskBase* create_task(const TaskConfig* config) {
 }
 ```
 
-## 🎯 第一个练习：Hello World 任务
+## 第一个练习：Hello World 任务
 
 ### 创建新文件：`hello_task.c`
 
@@ -185,7 +185,7 @@ int main() {
 }
 ```
 
-## 📊 理解执行流程
+## 理解执行流程
 
 当你运行上面的HelloTask时，执行流程是：
 
@@ -205,7 +205,7 @@ int main() {
 7. 任务结束
 ```
 
-## 🔍 关键技术点解析
+## 关键技术点解析
 
 ### 1. "继承"的实现
 ```c
@@ -236,7 +236,7 @@ task->state = TASK_STATE_RUNNING;
 pthread_mutex_unlock(&task->mutex);
 ```
 
-## 🎯 下一步学习建议
+## 下一步学习建议
 
 1. **修改HelloTask**：让它从配置文件读取打印次数
 2. **学习现有插件**：分析 `simple_cpp_task.cpp` 的C++实现
@@ -244,7 +244,7 @@ pthread_mutex_unlock(&task->mutex);
 4. **添加配置**：学习JSON配置解析
 5. **深入源码**：理解 `task_manager.c` 的管理逻辑
 
-## ❓ 常见新手问题
+## 常见新手问题
 
 **Q: 为什么TaskBase必须是第一个成员？**
 A: 这样可以安全地在基类指针和派生类指针之间转换，实现"继承"。
