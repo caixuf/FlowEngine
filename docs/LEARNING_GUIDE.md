@@ -4,20 +4,20 @@
 > **预计学习时间：** 2-4周  
 > **前置要求：** 熟悉C语言基础、了解Linux基本操作
 
-## 🎯 学习目标
+## 学习目标
 
 完成本指南后，你将能够：
-- ✅ 理解StartTool的整体架构设计
-- ✅ 掌握C语言面向对象编程技巧
-- ✅ 学会编写和集成自己的任务插件
-- ✅ 理解多线程编程和进程管理
-- ✅ 掌握动态库开发和使用
+- [x] 理解StartTool的整体架构设计
+- [x] 掌握C语言面向对象编程技巧
+- [x] 学会编写和集成自己的任务插件
+- [x] 理解多线程编程和进程管理
+- [x] 掌握动态库开发和使用
 
 ---
 
-## 📚 第一阶段：理解核心概念 (第1-2天)
+## 第一阶段：理解核心概念 (第1-2天)
 
-### 🔍 1.1 项目整体架构
+### 1.1 项目整体架构
 
 StartTool采用**插件化架构**，类似于以下结构：
 
@@ -37,7 +37,7 @@ StartTool采用**插件化架构**，类似于以下结构：
 - **任务接口**: 定义了所有任务必须实现的"契约"
 - **任务插件**: 具体的业务逻辑，编译成动态库
 
-### 🧩 1.2 核心文件结构
+### 1.2 核心文件结构
 
 ```
 include/
@@ -55,7 +55,7 @@ src/plugins/
 └── example_process.c    # C任务示例
 ```
 
-### 📖 1.3 必读代码片段
+### 1.3 必读代码片段
 
 **首先阅读这个核心结构：**
 
@@ -69,7 +69,7 @@ typedef struct TaskBase {
     pthread_mutex_t mutex;          // 状态保护互斥锁
     bool should_stop;               // 停止标志
     
-    const struct TaskInterface* vtable;  // 虚函数表指针 ⭐重点⭐
+    const struct TaskInterface* vtable;  // 虚函数表指针 [重点]
 } TaskBase;
 
 typedef struct TaskInterface {
@@ -87,9 +87,9 @@ typedef struct TaskInterface {
 
 ---
 
-## 🛠️ 第二阶段：动手实践 (第3-7天)
+## 第二阶段：动手实践 (第3-7天)
 
-### 🚀 2.1 编译和运行项目
+### 2.1 编译和运行项目
 
 ```bash
 # 1. 克隆项目
@@ -114,7 +114,7 @@ make -j$(nproc)
 ...
 ```
 
-### 🔍 2.2 分析现有插件代码
+### 2.2 分析现有插件代码
 
 **阅读顺序建议：**
 
@@ -150,7 +150,7 @@ static const TaskInterface my_vtable = {
 };
 ```
 
-### 📝 2.3 第一个练习：修改现有插件
+### 2.3 第一个练习：修改现有插件
 
 **目标：** 修改一个现有插件，加入你自己的逻辑
 
@@ -182,9 +182,9 @@ static int my_task_execute(TaskBase* base) {
 
 ---
 
-## 🧠 第三阶段：深入理解 (第8-14天)
+## 第三阶段：深入理解 (第8-14天)
 
-### 🔄 3.1 理解多线程机制
+### 3.1 理解多线程机制
 
 **关键文件：** `src/core/task_interface.c`
 
@@ -214,7 +214,7 @@ static void* task_thread_entry(void* arg) {
 2. **状态同步**：使用mutex保护共享状态
 3. **多态调用**：`TASK_CALL`宏实现了虚函数调用
 
-### 🏗️ 3.2 理解任务管理器
+### 3.2 理解任务管理器
 
 **关键文件：** `src/core/task_manager.c`
 
@@ -242,7 +242,7 @@ int task_manager_start_all(TaskManager* manager) {
 }
 ```
 
-### 📊 3.3 练习：实现自己的任务管理逻辑
+### 3.3 练习：实现自己的任务管理逻辑
 
 **目标：** 创建一个简单的任务调度器
 
@@ -264,9 +264,9 @@ typedef struct {
 
 ---
 
-## 🚀 第四阶段：实战项目 (第15-21天)
+## 第四阶段：实战项目 (第15-21天)
 
-### 🎯 4.1 项目目标：文件监控任务
+### 4.1 项目目标：文件监控任务
 
 创建一个监控指定目录文件变化的任务插件。
 
@@ -276,7 +276,7 @@ typedef struct {
 3. 支持配置监控间隔
 4. 实现优雅的启动和停止
 
-### 📋 4.2 实现步骤
+### 4.2 实现步骤
 
 **第1步：设计任务结构**
 
@@ -337,7 +337,7 @@ static int file_monitor_initialize(TaskBase* base) {
 }
 ```
 
-### 🧪 4.3 测试你的插件
+### 4.3 测试你的插件
 
 **创建测试配置：**
 
@@ -365,9 +365,9 @@ static int file_monitor_initialize(TaskBase* base) {
 
 ---
 
-## 🔧 第五阶段：高级特性 (第22-28天)
+## 第五阶段：高级特性 (第22-28天)
 
-### ⚡ 5.1 C++集成进阶
+### 5.1 C++集成进阶
 
 **学习目标：** 理解如何在C框架中使用现代C++特性
 
@@ -395,7 +395,7 @@ extern "C" TaskBase* create_task(const TaskConfig* config) {
 }
 ```
 
-### 🔍 5.2 深入理解动态库机制
+### 5.2 深入理解动态库机制
 
 **学习要点：**
 1. **符号导出**: `extern "C"` 的作用
@@ -412,7 +412,7 @@ TaskBase* (*create_func)(const TaskConfig*) =
 TaskBase* task = create_func(&config);
 ```
 
-### 📊 5.3 性能优化技巧
+### 5.3 性能优化技巧
 
 **内存管理优化：**
 ```c
@@ -434,9 +434,9 @@ static inline void update_stats_safe(TaskBase* task) {
 
 ---
 
-## 📖 学习资源和进阶方向
+## 学习资源和进阶方向
 
-### 📚 推荐阅读
+### 推荐阅读
 
 **书籍：**
 - 《C专家编程》- 深入理解C语言
@@ -447,7 +447,7 @@ static inline void update_stats_safe(TaskBase* task) {
 - [Linux多线程编程指南](https://example.com)
 - [动态库开发最佳实践](https://example.com)
 
-### 🚀 进阶方向
+### 进阶方向
 
 1. **系统编程方向：**
    - 学习epoll/kqueue高性能I/O
@@ -466,7 +466,7 @@ static inline void update_stats_safe(TaskBase* task) {
 
 ---
 
-## ❓ 常见问题 FAQ
+## 常见问题 FAQ
 
 ### Q1: 编译时出现链接错误？
 **A:** 检查CMakeLists.txt中的库依赖，确保正确链接pthread和dl库。
@@ -485,7 +485,7 @@ static inline void update_stats_safe(TaskBase* task) {
 
 ---
 
-## 🎉 学习检查清单
+## 学习检查清单
 
 完成学习后，你应该能够：
 
@@ -497,8 +497,8 @@ static inline void update_stats_safe(TaskBase* task) {
 - [ ] 集成C++代码到C框架中
 - [ ] 设计和实现一个完整的任务系统
 
-**恭喜你！** 🎊 如果完成了以上所有内容，你已经掌握了系统级C/C++编程的核心技能！
+**恭喜你！** 如果完成了以上所有内容，你已经掌握了系统级C/C++编程的核心技能！
 
 ---
 
-**📧 联系方式：** 如有问题，欢迎通过Issues或邮件交流学习心得！
+**联系方式：** 如有问题，欢迎通过Issues或邮件交流学习心得！

@@ -89,11 +89,11 @@ int run_cpp_task_demo() {
         return -1;
     }
     
-    std::cout << "✓ 任务管理器创建完成\n";
+    std::cout << "[OK] 任务管理器创建完成\n";
     
     // 设置信号处理
     setup_signal_handlers();
-    std::cout << "✓ 信号处理设置完成\n";
+    std::cout << "[OK] 信号处理设置完成\n";
     
     try {
         // 1. 创建C++示例任务
@@ -112,7 +112,7 @@ int run_cpp_task_demo() {
             throw std::runtime_error("注册C++示例任务失败");
         }
         
-        std::cout << "✓ C++示例任务创建并注册完成\n";
+        std::cout << "[OK] C++示例任务创建并注册完成\n";
         
         // 启动所有任务
         std::cout << "\n--- 启动所有任务 ---\n";
@@ -120,7 +120,7 @@ int run_cpp_task_demo() {
             throw std::runtime_error("启动任务失败");
         }
         
-        std::cout << "✓ 所有任务启动完成\n";
+        std::cout << "[OK] 所有任务启动完成\n";
         
         // 主监控循环
         std::cout << "\n--- 开始监控任务状态 ---\n";
@@ -137,7 +137,7 @@ int run_cpp_task_demo() {
             
             // 检查任务健康状态
             if (!task_manager_health_check(g_task_manager)) {
-                std::cout << "⚠️  检测到任务健康状态异常\n";
+                std::cout << "[WARN] 检测到任务健康状态异常\n";
                 print_task_status(g_task_manager);
             }
         }
@@ -147,22 +147,22 @@ int run_cpp_task_demo() {
         
         // 停止所有任务
         task_manager_stop_all(g_task_manager);
-        std::cout << "✓ 所有任务已停止\n";
+        std::cout << "[OK] 所有任务已停止\n";
         
         // 销毁任务包装器
         cpp_task_destroy(cpp_wrapper);
-        std::cout << "✓ 任务包装器已销毁\n";
+        std::cout << "[OK] 任务包装器已销毁\n";
         
         // 销毁任务管理器
         task_manager_destroy(g_task_manager);
         g_task_manager = nullptr;
-        std::cout << "✓ 任务管理器已销毁\n";
+        std::cout << "[OK] 任务管理器已销毁\n";
         
         // 释放配置内存
         if (cpp_config.custom_config) free((void*)cpp_config.custom_config);
         
     } catch (const std::exception& e) {
-        std::cerr << "❌ 程序异常: " << e.what() << std::endl;
+        std::cerr << "[ERROR] 程序异常: " << e.what() << std::endl;
         
         if (g_task_manager) {
             task_manager_destroy(g_task_manager);
@@ -180,7 +180,7 @@ int run_cpp_task_demo() {
     // 清理日志系统
     logger_destroy(g_logger);
     g_logger = nullptr;
-    std::cout << "✓ 日志系统已清理\n";
+    std::cout << "[OK] 日志系统已清理\n";
     
     std::cout << "\n=== C++ 任务演示程序正常退出 ===\n";
     return 0;
@@ -237,7 +237,7 @@ int run_interactive_demo() {
             throw std::runtime_error("注册C++任务失败");
         }
         
-        std::cout << "✓ 任务创建完成\n";
+        std::cout << "[OK] 任务创建完成\n";
         
         // 交互循环
         int choice;
@@ -258,9 +258,9 @@ int run_interactive_demo() {
                     
                 case 2:
                     if (task_manager_health_check(g_task_manager)) {
-                        std::cout << "✓ 所有任务健康状态正常\n";
+                        std::cout << "[OK] 所有任务健康状态正常\n";
                     } else {
-                        std::cout << "⚠️  检测到任务健康状态异常\n";
+                        std::cout << "[WARN] 检测到任务健康状态异常\n";
                         print_task_status(g_task_manager);
                     }
                     break;
@@ -270,19 +270,19 @@ int run_interactive_demo() {
                     task_manager_stop_all(g_task_manager);
                     std::this_thread::sleep_for(std::chrono::seconds(2));
                     task_manager_start_all(g_task_manager);
-                    std::cout << "✓ 所有任务已重启\n";
+                    std::cout << "[OK] 所有任务已重启\n";
                     break;
                     
                 case 4:
                     std::cout << "停止所有任务...\n";
                     task_manager_stop_all(g_task_manager);
-                    std::cout << "✓ 所有任务已停止\n";
+                    std::cout << "[OK] 所有任务已停止\n";
                     break;
                     
                 case 5:
                     std::cout << "启动所有任务...\n";
                     task_manager_start_all(g_task_manager);
-                    std::cout << "✓ 所有任务已启动\n";
+                    std::cout << "[OK] 所有任务已启动\n";
                     break;
                     
                 case 0:
@@ -308,7 +308,7 @@ cleanup:
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "❌ 程序异常: " << e.what() << std::endl;
+        std::cerr << "[ERROR] 程序异常: " << e.what() << std::endl;
         
         for (auto& cleanup : cleanup_functions) {
             cleanup();
