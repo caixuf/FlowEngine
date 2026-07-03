@@ -155,12 +155,12 @@ target_link_libraries(reactive_task starttool_core)
 
 # ── Step 6: flowcoro 协程任务插件 ────────────────────────
 add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
-target_link_libraries(flowcoro_task starttool_core flowcoro_headers)
+target_link_libraries(flowcoro_task starttool_core flowcoro_headers flowcoro_net)
 target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
 
 # ── Step 6: flowcoro 协程 + 消息总线综合程序 ─────────────
 add_executable(flow_coro src/coro_bus_demo.cpp)
-target_link_libraries(flow_coro starttool_core flowcoro_headers)
+target_link_libraries(flow_coro starttool_core flowcoro_headers flowcoro_net)
 target_compile_definitions(flow_coro PRIVATE FLOWCORO_INTEGRATION)
 
 # ── ADAS: 感知节点 + 控制节点全链路仿真 ──────────────────

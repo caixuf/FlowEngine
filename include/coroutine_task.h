@@ -17,6 +17,7 @@
  * 设计原则：
  *   - 默认不依赖外部协程框架（纯 C++20 标准库协程）
  *   - 通过编译宏 FLOWCORO_INTEGRATION 可选接入 flowcoro 线程池
+ *     及 flowcoro::CoroTask 协程类型（惰性启动 + continuation 链式唤醒）
  *   - 保持 C 插件接口不变，协程支持作为可选 C++ 层叠加
  *   - FlowCoroTask：消息总线线程仅触发回调，不执行协程逻辑
  *
@@ -75,11 +76,22 @@
 #include <iostream>   /* required by flowcoro/thread_pool.h (std::cout/cerr) */
 
 /* ─────────────────────────────────────────────────────────
- * 可选：flowcoro 无锁线程池调度器
+ * 可选：flowcoro 无锁线程池 + CoroTask
  * 编译时加 -DFLOWCORO_INTEGRATION 启用
  * ───────────────────────────────────────────────────────── */
 #ifdef FLOWCORO_INTEGRATION
 #include <flowcoro/thread_pool.h>
+
+/* flowcoro/logger.h 使用 PROJECT_SOURCE_DIR（CMake 生成的宏）作为
+ * 若干静态函数的默认参数。以外部依赖形式引入时该宏未定义，
+ * 在此提供默认值以保证头文件正常编译。                           */
+#ifndef PROJECT_SOURCE_DIR
+#  define PROJECT_SOURCE_DIR ""
+#endif
+/* coro_task.h 使用 CoroutineManager 但未自行包含其头文件，
+ * 须在包含 coro_task.h 前显式引入。                              */
+#include <flowcoro/coroutine_manager.h>
+#include <flowcoro/coro_task.h>
 
 namespace flowcoro_integration {
 
@@ -94,10 +106,22 @@ inline lockfree::ThreadPool& get_thread_pool() {
 }
 
 } // namespace flowcoro_integration
-#endif // FLOWCORO_INTEGRATION
 
 /* ─────────────────────────────────────────────────────────
- * 1. 基础 Task 协程类型
+ * 1. 协程任务类型（FLOWCORO_INTEGRATION 模式）
+ *
+ * 直接使用 flowcoro::CoroTask，享用其完整特性：
+ *   - initial_suspend = suspend_always（惰性启动，execute() 负责首次调度）
+ *   - final_suspend   = FinalAwaiter（对称转移，支持 co_await task）
+ *   - 内置异常捕获（promise.exception_），可通过
+ *     handle.promise().exception_ 获取并重抛
+ * ───────────────────────────────────────────────────────── */
+using Task = flowcoro::CoroTask;
+
+#else  /* !FLOWCORO_INTEGRATION */
+
+/* ─────────────────────────────────────────────────────────
+ * 1. 基础 Task 协程类型（纯 C++20 标准库，无外部依赖）
  * ───────────────────────────────────────────────────────── */
 
 struct Task {
@@ -141,6 +165,8 @@ struct Task {
 
     std::coroutine_handle<promise_type> handle_;
 };
+
+#endif /* FLOWCORO_INTEGRATION */
 
 /* ─────────────────────────────────────────────────────────
  * 2. BusAwaitable — co_await 等待一条总线消息
@@ -409,17 +435,36 @@ public:
      *
      * 与 TaskBase::execute() 对应：在 task_execute() 线程中调用。
      * 每 10ms 轮询一次，兼顾响应速度与 CPU 开销。
+     *
+     * FLOWCORO_INTEGRATION 模式：
+     *   flowcoro::CoroTask 使用 suspend_always（惰性启动），
+     *   execute() 负责在调用线程上执行第一次 resume，
+     *   使协程跑到第一个 co_await 挂起点后返回。
      */
     virtual void execute() {
         stop_flag_ = false;
         task_ = std::make_unique<Task>(run());
+
+#ifdef FLOWCORO_INTEGRATION
+        /* flowcoro::CoroTask 惰性启动：在调用线程上触发首次 resume，
+         * 协程跑到第一个 co_await 后挂起，控制权回到此处。 */
+        if (task_->handle && !task_->handle.done()) {
+            task_->handle.resume();
+        }
+#endif
 
         while (!task_->done() && !stop_flag_) {
             std::unique_lock<std::mutex> lk(coro_mutex_);
             coro_cv_.wait_for(lk, std::chrono::milliseconds(10));
         }
 
+#ifdef FLOWCORO_INTEGRATION
+        if (task_->handle && task_->handle.promise().exception_) {
+            std::rethrow_exception(task_->handle.promise().exception_);
+        }
+#else
         task_->rethrow_if_exception();
+#endif
     }
 
     /** 请求停止（可从任意线程调用） */
@@ -451,14 +496,14 @@ protected:
 #ifdef FLOWCORO_INTEGRATION
 /**
  * FlowCoroTask 在 CoroutineTask 基础上：
- *   - BusAwaitable 将协程 resume 提交到 flowcoro 线程池，
- *     消息总线分发线程不被阻塞。
- *   - execute() 阻塞等待协程完成，使用更短的 5ms 轮询。
+ *   - Task 类型为 flowcoro::CoroTask（惰性启动，支持 continuation 链）。
+ *   - execute() 将协程的首次 resume 提交到 flowcoro 线程池，
+ *     协程体从一开始就在工作线程上执行，不阻塞调用线程。
+ *   - BusAwaitable 将后续每次 resume 也提交到线程池，
+ *     消息总线分发线程永不被协程逻辑阻塞。
+ *   - execute() 以 5ms 轮询等待协程完成，CPU 负载极低。
  *
  * 使用方式与 CoroutineTask 完全相同，只需改继承类即可。
- *
- * 注意：因为 BusAwaitable::on_message 已通过全局线程池进行跨线程
- *       resume，FlowCoroTask 的 execute() 轮询期间 CPU 负载极低。
  */
 class FlowCoroTask : public CoroutineTask {
 public:
@@ -472,12 +517,23 @@ public:
         stop_flag_ = false;
         task_ = std::make_unique<Task>(run());
 
+        /* flowcoro::CoroTask 惰性启动（suspend_always）：
+         * 将首次 resume 提交到线程池，协程体立即在工作线程上开始执行，
+         * 调用线程（通常是 task_manager 的启动线程）不被阻塞。 */
+        if (task_->handle && !task_->handle.done()) {
+            auto h = task_->handle;
+            flowcoro_integration::get_thread_pool().enqueue_void(
+                [h]() mutable { if (!h.done()) h.resume(); });
+        }
+
         while (!task_->done() && !stop_flag_) {
             std::unique_lock<std::mutex> lk(coro_mutex_);
             coro_cv_.wait_for(lk, std::chrono::milliseconds(5));
         }
 
-        task_->rethrow_if_exception();
+        if (task_->handle && task_->handle.promise().exception_) {
+            std::rethrow_exception(task_->handle.promise().exception_);
+        }
     }
 };
 #endif // FLOWCORO_INTEGRATION
