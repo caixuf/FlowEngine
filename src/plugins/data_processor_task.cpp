@@ -65,6 +65,7 @@ public:
     }
     
     bool initialize(const std::string& config_data, LogCallback log_cb) {
+        (void)config_data;
         log_callback_ = log_cb;
         log("初始化数据处理任务");
         

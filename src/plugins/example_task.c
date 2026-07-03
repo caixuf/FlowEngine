@@ -180,7 +180,7 @@ static bool example_task_health_check(TaskBase* base_task) {
     uint64_t current_time = time(NULL);
     if (task->base.state == TASK_STATE_RUNNING) {
         // 如果超过工作间隔的3倍时间没有心跳，认为不健康
-        if (current_time - task->base.stats.last_heartbeat > (task->work_interval * 3)) {
+        if (current_time - task->base.stats.last_heartbeat > (uint64_t)(task->work_interval * 3)) {
             healthy = false;
             printf("示例任务 %s 心跳超时，可能已卡死\n", task->base.config.name);
         }

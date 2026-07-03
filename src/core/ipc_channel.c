@@ -223,8 +223,8 @@ int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
     Message*   slot = &arr[hdr->head];
 
     memset(slot, 0, sizeof(*slot));
-    strncpy(slot->topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
-    if (sender) strncpy(slot->sender, sender, MSG_BUS_MAX_SENDER_LEN - 1);
+    snprintf(slot->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    if (sender) snprintf(slot->sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     slot->type      = MSG_TYPE_PUBLISH;
     slot->data_size = size;
 

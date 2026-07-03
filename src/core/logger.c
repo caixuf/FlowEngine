@@ -20,8 +20,7 @@ Logger* logger_create(const char* filename, LogLevel level) {
     }
 
     if (filename && filename[0] != '\0') {
-        strncpy(logger->filename, filename, sizeof(logger->filename) - 1);
-        logger->filename[sizeof(logger->filename) - 1] = '\0';
+        snprintf(logger->filename, sizeof(logger->filename), "%s", filename);
         logger->file = fopen(filename, "a");
         if (!logger->file) {
             /* Fall back to stderr if file cannot be opened */

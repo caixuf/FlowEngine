@@ -68,7 +68,7 @@ protected:
             {
                 std::ostringstream oss;
                 oss << "[LidarTask] 帧#" << frame
-                    << " seq=" << msg.id
+                    << " seq=" << msg.msg_id
                     << " 处理线程=" << std::this_thread::get_id();
                 std::cout << oss.str() << "\n";
             }
@@ -111,8 +111,8 @@ protected:
             {
                 std::ostringstream oss;
                 oss << "[FusionTask] 融合 #" << round
-                    << " LiDAR_seq=" << lidar.id
-                    << " GPS_seq=" << gps.id
+                    << " LiDAR_seq=" << lidar.msg_id
+                    << " GPS_seq=" << gps.msg_id
                     << " 线程=" << std::this_thread::get_id();
                 std::cout << oss.str() << "\n";
             }
@@ -194,7 +194,8 @@ int main() {
         coro_stop<LidarProcessTask>,
         nullptr, nullptr, nullptr,
         coro_health<LidarProcessTask>,
-        nullptr
+        nullptr,
+        nullptr   /* on_message */
     };
     static const TaskInterface fusion_vtable = {
         nullptr,
@@ -202,7 +203,8 @@ int main() {
         coro_stop<FusionTask>,
         nullptr, nullptr, nullptr,
         coro_health<FusionTask>,
-        nullptr
+        nullptr,
+        nullptr   /* on_message */
     };
 
     CoroWrapper<LidarProcessTask>  lidar_wrapper{};
@@ -238,20 +240,20 @@ int main() {
         /* 每 tick（100ms）发一帧激光雷达 */
         {
             Message msg{};
-            msg.id = static_cast<uint32_t>(++lidar_seq);
+            msg.msg_id = static_cast<uint32_t>(++lidar_seq);
             snprintf(msg.topic,  sizeof(msg.topic),  "sensor/lidar");
             snprintf(msg.sender, sizeof(msg.sender), "lidar_driver");
-            msg.size = 0;
+            msg.data_size = 0;
             message_bus_publish(bus, msg.topic, msg.sender, nullptr, 0);
         }
 
         /* 每两个 tick 发一帧 GPS */
         if (tick % 2 == 0) {
             Message msg{};
-            msg.id = static_cast<uint32_t>(++gps_seq);
+            msg.msg_id = static_cast<uint32_t>(++gps_seq);
             snprintf(msg.topic,  sizeof(msg.topic),  "sensor/gps");
             snprintf(msg.sender, sizeof(msg.sender), "gps_driver");
-            msg.size = 0;
+            msg.data_size = 0;
             message_bus_publish(bus, msg.topic, msg.sender, nullptr, 0);
         }
 

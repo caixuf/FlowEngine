@@ -69,6 +69,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <iostream>   /* required by flowcoro/thread_pool.h (std::cout/cerr) */
 
 /* ─────────────────────────────────────────────────────────
  * 可选：flowcoro 无锁线程池调度器
@@ -333,7 +334,7 @@ static bool prefix##_health(TaskBase* b) {                                    \
 }                                                                             \
 static const TaskInterface prefix##_vtable = {                                \
     nullptr, prefix##_execute, prefix##_stop,                                 \
-    nullptr, nullptr, nullptr, prefix##_health, nullptr                       \
+    nullptr, nullptr, nullptr, prefix##_health, nullptr, nullptr              \
 };                                                                            \
 extern "C" {                                                                  \
 prefix##_Wrapper* prefix##_create(const TaskConfig* cfg, MessageBus* bus) {   \

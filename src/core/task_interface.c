@@ -203,7 +203,7 @@ int task_subscribe(TaskBase* task, struct MessageBus* bus, const char* topic) {
     if (!ctx) return -1;
     ctx->task = task;
     ctx->bus  = bus;
-    strncpy(ctx->topic, topic, sizeof(ctx->topic) - 1);
+    snprintf(ctx->topic, sizeof(ctx->topic), "%s", topic);
 
     int ret = message_bus_subscribe(bus, topic, task_sub_callback, ctx);
     if (ret != 0) { free(ctx); return -1; }

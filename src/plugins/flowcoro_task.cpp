@@ -57,7 +57,7 @@ protected:
                 oss << "[SensorFusion] LiDAR 帧 #" << lidar_frames
                     << " | 线程 ID: " << std::this_thread::get_id()
                     << " | topic: " << lidar_msg.topic
-                    << " | seq: " << lidar_msg.id;
+                    << " | seq: " << lidar_msg.msg_id;
                 std::cout << oss.str() << "\n";
             }
 

@@ -142,10 +142,10 @@ int process_manager_load_plugin(ProcessManager* mgr,
     ProcessNode* node = (ProcessNode*)calloc(1, sizeof(ProcessNode));
     if (!node) { dlclose(handle); return -1; }
 
-    strncpy(node->name, name, sizeof(node->name) - 1);
-    strncpy(node->library_path, library_path, sizeof(node->library_path) - 1);
+    snprintf(node->name, sizeof(node->name), "%s", name);
+    snprintf(node->library_path, sizeof(node->library_path), "%s", library_path);
     if (config_data)
-        strncpy(node->config_data, config_data, sizeof(node->config_data) - 1);
+        snprintf(node->config_data, sizeof(node->config_data), "%s", config_data);
     node->lib_handle    = handle;
     node->interface     = iface;
     node->is_running    = false;
