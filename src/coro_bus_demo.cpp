@@ -2,17 +2,22 @@
  * @file coro_bus_demo.cpp
  * @brief flowcoro 协程 + 消息总线综合演示
  *
- * 演示 FlowCoroTask 与 MessageBus 的完整集成：
+ * 演示 FlowCoroTask 与 MessageBus 的完整集成，充分利用两个高级原语：
  *
+ *   BusChannel   — 持久订阅 + 消息缓冲通道，适合持续消费单一 topic。
+ *                  构造时一次订阅，每次 co_await ch.recv() 直接取下一条，
+ *                  避免 subscribe_once 反复注册/注销的开销。
+ *
+ *   when_any_bus — 多 topic 竞争等待（select 语义）。
+ *                  哪个 topic 先来消息，协程就被哪个唤醒，其余订阅自动注销。
+ *
+ * 场景：
  *   1. 创建消息总线 "adas_bus"
- *   2. 注册两个 FlowCoroTask：
- *      - LidarProcessTask：co_await sensor/lidar，在线程池线程处理点云
- *      - FusionTask：轮流 co_await sensor/lidar 和 sensor/gps，融合数据
- *   3. 主线程以 10 Hz 发布激光雷达帧、5 Hz 发布 GPS 帧
- *   4. 所有协程 resume 均在 flowcoro 线程池中执行，
- *      消息总线分发线程不被阻塞
- *
- * 编译：CMakeLists.txt 中已定义 coro_bus_demo 目标并启用 FLOWCORO_INTEGRATION。
+ *   2. LidarProcessTask：通过 BusChannel 持续接收 sensor/lidar，模拟点云处理。
+ *   3. FusionTask      ：通过 when_any_bus 竞争等待 sensor/lidar 和 sensor/gps，
+ *                        体现传感器融合中"哪个先来处理哪个"的事件驱动模型。
+ *   4. 主线程以 10 Hz 发布激光雷达帧、5 Hz 发布 GPS 帧
+ *   5. 所有协程 resume 在 flowcoro 线程池中执行，不阻塞总线分发线程
  */
 
 #include "coroutine_task.h"
@@ -42,10 +47,13 @@ static void signal_handler(int /*sig*/) { g_stop = true; }
  * ════════════════════════════════════════════════════════════ */
 
 /**
- * LidarProcessTask — 专用激光雷达点云处理协程
+ * LidarProcessTask — 使用 BusChannel 持续接收激光雷达点云
  *
- * 每收到一帧 sensor/lidar 消息，在 flowcoro 工作线程上处理点云数据。
- * 打印处理线程 ID，验证协程 resume 确实发生在线程池而非分发线程。
+ * 与之前 subscribe_once 版本的区别：
+ *   - 构造时一次订阅，析构时自动注销（RAII）。
+ *   - 每次 co_await ch.recv() 从内部缓冲队列取消息，
+ *     不再有循环订阅/注销的往返开销。
+ *   - 消息积压时自动缓冲（默认 32 条），不丢帧。
  */
 class LidarProcessTask : public FlowCoroTask {
 public:
@@ -57,9 +65,13 @@ protected:
         std::cout << "[LidarTask] 协程启动 on 线程 "
                   << std::this_thread::get_id() << "\n";
 
+        /* BusChannel 在此处构造，自动订阅 sensor/lidar */
+        BusChannel lidar_ch(bus(), "sensor/lidar", 32);
+
         int frame = 0;
         while (!should_stop()) {
-            Message msg = co_await subscribe_once(bus(), "sensor/lidar");
+            /* co_await BusChannel::recv() — 有消息立即返回，否则挂起等待 */
+            Message msg = co_await lidar_ch.recv();
             frame++;
 
             /* 模拟点云处理（在线程池工作线程中执行） */
@@ -77,6 +89,7 @@ protected:
         }
 
         std::cout << "[LidarTask] 退出，共处理 " << frame << " 帧\n";
+        stop();
     }
 
 private:
@@ -84,47 +97,59 @@ private:
 };
 
 /**
- * FusionTask — 多传感器融合协程
+ * FusionTask — 使用 when_any_bus 实现多传感器竞争等待
  *
- * 交替等待 sensor/lidar 和 sensor/gps，模拟传感器融合处理。
- * 每轮融合后打印汇总信息。
+ * 与之前顺序等待版本的区别：
+ *   - 之前：先等 lidar，再等 gps（串行，GPS 必须在 LiDAR 之后才处理）。
+ *   - 现在：同时等待 lidar 和 gps，哪个先来就处理哪个（并行事件驱动）。
+ *
+ * 这正是自动驾驶中多传感器融合的真实模式：
+ *   各传感器频率不同，融合算法不应被最慢的传感器阻塞。
  */
 class FusionTask : public FlowCoroTask {
 public:
-    explicit FusionTask(MessageBus* bus, int max_rounds = -1)
-        : FlowCoroTask(bus), max_rounds_(max_rounds) {}
+    explicit FusionTask(MessageBus* bus, int max_events = -1)
+        : FlowCoroTask(bus), max_events_(max_events) {}
 
 protected:
     Task run() override {
         std::cout << "[FusionTask] 协程启动 on 线程 "
                   << std::this_thread::get_id() << "\n";
 
-        int round = 0;
+        int lidar_count = 0;
+        int gps_count   = 0;
+        int event       = 0;
+
         while (!should_stop()) {
-            /* 等待激光雷达 */
-            Message lidar = co_await subscribe_once(bus(), "sensor/lidar");
+            /* when_any_bus：同时订阅两个 topic，哪个先到唤醒协程 */
+            Message msg = co_await when_any_bus(bus(), {"sensor/lidar", "sensor/gps"});
+            event++;
 
-            /* 等待 GPS */
-            Message gps = co_await subscribe_once(bus(), "sensor/gps");
-
-            round++;
             {
                 std::ostringstream oss;
-                oss << "[FusionTask] 融合 #" << round
-                    << " LiDAR_seq=" << lidar.msg_id
-                    << " GPS_seq=" << gps.msg_id
+                oss << "[FusionTask] 事件#" << event
+                    << " topic=" << msg.topic
+                    << " seq=" << msg.msg_id
                     << " 线程=" << std::this_thread::get_id();
                 std::cout << oss.str() << "\n";
             }
 
-            if (max_rounds_ > 0 && round >= max_rounds_) break;
+            if (std::string(msg.topic) == "sensor/lidar") {
+                lidar_count++;
+            } else {
+                gps_count++;
+            }
+
+            if (max_events_ > 0 && event >= max_events_) break;
         }
 
-        std::cout << "[FusionTask] 退出，共融合 " << round << " 轮\n";
+        std::cout << "[FusionTask] 退出，共处理 LiDAR=" << lidar_count
+                  << " GPS=" << gps_count << " 事件\n";
+        stop();
     }
 
 private:
-    int max_rounds_;
+    int max_events_;
 };
 
 /* ════════════════════════════════════════════════════════════
@@ -181,11 +206,11 @@ int main() {
     std::cout << "[Main] 消息总线 'adas_bus' 创建成功\n";
 
     /* ── 创建协程任务 ─────────────────────────────────────── */
-    constexpr int MAX_LIDAR_FRAMES = 20;
-    constexpr int MAX_FUSION_ROUNDS = 8;
+    constexpr int MAX_LIDAR_FRAMES  = 20;
+    constexpr int MAX_FUSION_EVENTS = 15; /* when_any_bus 模式下每帧均计入 */
 
     auto lidar_task   = std::make_unique<LidarProcessTask>(bus, MAX_LIDAR_FRAMES);
-    auto fusion_task  = std::make_unique<FusionTask>(bus, MAX_FUSION_ROUNDS);
+    auto fusion_task  = std::make_unique<FusionTask>(bus, MAX_FUSION_EVENTS);
 
     /* ── TaskInterface vtable（模板实例化） ──────────────── */
     static const TaskInterface lidar_vtable = {

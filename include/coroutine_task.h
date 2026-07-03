@@ -69,6 +69,9 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <queue>
+#include <vector>
+#include <initializer_list>
 #include <iostream>   /* required by flowcoro/thread_pool.h (std::cout/cerr) */
 
 /* ─────────────────────────────────────────────────────────
@@ -203,6 +206,187 @@ private:
  */
 inline BusAwaitable subscribe_once(MessageBus* bus, const char* topic) {
     return BusAwaitable{bus, topic};
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 2b. BusChannel — 持久订阅 + 消息缓冲通道
+ * ───────────────────────────────────────────────────────── */
+
+/**
+ * BusChannel 在构造时订阅指定 topic，并将到达的消息缓冲在内部队列中。
+ * 协程可以循环调用 co_await ch.recv() 来逐条消费消息，而不必每次
+ * 重新订阅/取消订阅总线，大幅减少订阅开销。
+ *
+ * 对比 subscribe_once：
+ *   - subscribe_once：每次 co_await 都要注册+注销一次回调，适合"等一条就走"。
+ *   - BusChannel   ：一次订阅持续存活，消息批量缓冲，适合持续消费场景。
+ *
+ * 用法：
+ *   BusChannel lidar_ch(bus, "sensor/lidar", 32);
+ *   while (!should_stop()) {
+ *       Message msg = co_await lidar_ch.recv();
+ *       process(msg);
+ *   }
+ */
+class BusChannel {
+public:
+    BusChannel(MessageBus* bus, const char* topic, size_t capacity = 32)
+        : bus_(bus), topic_(topic), capacity_(capacity) {
+        message_bus_subscribe(bus_, topic_.c_str(), &BusChannel::on_message, this);
+    }
+
+    ~BusChannel() {
+        message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusChannel::on_message, this);
+    }
+
+    /* 禁止拷贝（订阅指针指向 this，不能移动） */
+    BusChannel(const BusChannel&) = delete;
+    BusChannel& operator=(const BusChannel&) = delete;
+
+    /** 返回等待下一条消息的 awaitable，供 co_await 使用 */
+    auto recv() { return RecvAwaitable{this}; }
+
+private:
+    static void on_message(const Message* msg, void* user_data) {
+        auto* self = static_cast<BusChannel*>(user_data);
+        std::coroutine_handle<> waiter;
+        {
+            std::lock_guard<std::mutex> lk(self->mutex_);
+            if (self->buffer_.size() < self->capacity_) {
+                self->buffer_.push(*msg);
+            }
+            waiter = self->waiter_;
+            self->waiter_ = nullptr;
+        }
+        if (!waiter || waiter.done()) return;
+
+#ifdef FLOWCORO_INTEGRATION
+        flowcoro_integration::get_thread_pool().enqueue_void(
+            [waiter]() mutable { if (!waiter.done()) waiter.resume(); });
+#else
+        waiter.resume();
+#endif
+    }
+
+    struct RecvAwaitable {
+        BusChannel* ch;
+
+        bool await_ready() {
+            std::lock_guard<std::mutex> lk(ch->mutex_);
+            return !ch->buffer_.empty();
+        }
+
+        void await_suspend(std::coroutine_handle<> h) {
+            bool should_resume = false;
+            {
+                std::lock_guard<std::mutex> lk(ch->mutex_);
+                /* 检查在 await_ready 到 await_suspend 之间是否有消息到达 */
+                if (!ch->buffer_.empty()) {
+                    should_resume = true;
+                } else {
+                    ch->waiter_ = h;
+                }
+            }
+            if (should_resume) {
+#ifdef FLOWCORO_INTEGRATION
+                flowcoro_integration::get_thread_pool().enqueue_void(
+                    [h]() mutable { if (!h.done()) h.resume(); });
+#else
+                h.resume();
+#endif
+            }
+        }
+
+        Message await_resume() {
+            std::lock_guard<std::mutex> lk(ch->mutex_);
+            Message msg = ch->buffer_.front();
+            ch->buffer_.pop();
+            return msg;
+        }
+    };
+
+    MessageBus*              bus_;
+    std::string              topic_;
+    size_t                   capacity_;
+    std::queue<Message>      buffer_;
+    std::mutex               mutex_;
+    std::coroutine_handle<>  waiter_{};
+};
+
+/* ─────────────────────────────────────────────────────────
+ * 2c. WhenAnyBusAwaitable — 多 topic 竞争等待
+ * ───────────────────────────────────────────────────────── */
+
+/**
+ * WhenAnyBusAwaitable 同时订阅多个 topic，哪个 topic 的消息先到，
+ * 协程就被哪个 topic 唤醒，其余订阅立即注销。
+ * 这是"多传感器竞争等待"的惯用模式，等价于 Go 的 select 或
+ * C++ 提案中的 when_any。
+ *
+ * 用法：
+ *   Message msg = co_await when_any_bus(bus, {"sensor/lidar", "sensor/gps"});
+ *   // msg.topic 中可查看是哪个 topic 触发的
+ */
+class WhenAnyBusAwaitable {
+public:
+    WhenAnyBusAwaitable(MessageBus* bus, std::vector<std::string> topics)
+        : bus_(bus), topics_(std::move(topics)) {}
+
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        handle_ = h;
+        fired_.store(false, std::memory_order_release);
+        for (const auto& t : topics_) {
+            message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitable::on_message, this);
+        }
+    }
+
+    Message await_resume() {
+        /* 注销所有剩余订阅 */
+        for (const auto& t : topics_) {
+            message_bus_unsubscribe_ex(bus_, t.c_str(), &WhenAnyBusAwaitable::on_message, this);
+        }
+        return received_msg_;
+    }
+
+private:
+    static void on_message(const Message* msg, void* user_data) {
+        auto* self = static_cast<WhenAnyBusAwaitable*>(user_data);
+        /* 原子 CAS：只有第一个到达的 topic 能触发 resume */
+        bool expected = false;
+        if (!self->fired_.compare_exchange_strong(expected, true,
+                                                  std::memory_order_acq_rel)) {
+            return; /* 已被其他 topic 率先触发 */
+        }
+        self->received_msg_ = *msg;
+        auto h = self->handle_;
+        if (!h || h.done()) return;
+
+#ifdef FLOWCORO_INTEGRATION
+        flowcoro_integration::get_thread_pool().enqueue_void(
+            [h]() mutable { if (!h.done()) h.resume(); });
+#else
+        h.resume();
+#endif
+    }
+
+    MessageBus*              bus_;
+    std::vector<std::string> topics_;
+    std::coroutine_handle<>  handle_{};
+    std::atomic<bool>        fired_{false};
+    Message                  received_msg_{};
+};
+
+/**
+ * 工厂函数：等待给定 topic 列表中最先到达的那条消息。
+ *
+ * 用法：
+ *   Message msg = co_await when_any_bus(bus, {"sensor/lidar", "sensor/gps"});
+ */
+inline WhenAnyBusAwaitable when_any_bus(MessageBus* bus,
+                                        std::initializer_list<const char*> topics) {
+    return WhenAnyBusAwaitable{bus, std::vector<std::string>(topics.begin(), topics.end())};
 }
 
 /* ─────────────────────────────────────────────────────────
