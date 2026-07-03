@@ -159,8 +159,18 @@ add_executable(coro_bus_demo src/coro_bus_demo.cpp)
 target_link_libraries(coro_bus_demo starttool_core flowcoro_headers)
 target_compile_definitions(coro_bus_demo PRIVATE FLOWCORO_INTEGRATION)
 
+# ── ADAS Demo: 假感知节点 + 假控制节点全链路演示 ──────────
+add_library(fake_perception_task SHARED src/plugins/fake_perception_task.c)
+target_link_libraries(fake_perception_task starttool_core)
+
+add_library(fake_control_task SHARED src/plugins/fake_control_task.c)
+target_link_libraries(fake_control_task starttool_core m)
+
+add_executable(adas_demo src/adas_demo.c)
+target_link_libraries(adas_demo starttool_core fake_perception_task fake_control_task)
+
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo adas_demo
     RUNTIME DESTINATION bin
 )
 
@@ -168,7 +178,7 @@ install(TARGETS starttool_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task fake_perception_task fake_control_task
     LIBRARY DESTINATION lib/starttool/plugins
 )
 
@@ -228,6 +238,11 @@ add_test(NAME coro_bus_demo_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+add_test(NAME adas_demo_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/adas_demo
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
@@ -235,7 +250,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo example_process example_task flowcoro_task config)
+add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo adas_demo example_process example_task flowcoro_task fake_perception_task fake_control_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")
