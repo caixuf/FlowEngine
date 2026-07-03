@@ -51,14 +51,17 @@ FlowEngine/
 │   │   ├── reactive_task.c      # 消息驱动任务示例
 │   │   ├── network_service_task.cpp  # 网络服务示例
 │   │   ├── data_processor_task.cpp   # 数据处理示例
-│   │   └── flowcoro_task.cpp    # C++20 协程任务示例（需 flowcoro）
+│   │   ├── flowcoro_task.cpp    # C++20 协程任务示例（需 flowcoro）
+│   │   ├── fake_perception_task.c  # 假感知节点（LiDAR/GPS/障碍物仿真）
+│   │   └── fake_control_task.c     # 假控制节点（油门/制动/转向决策）
 │   ├── launcher.c               # 主启动器
 │   ├── task_demo.c              # 任务演示
 │   ├── bus_demo.c               # 消息总线演示
 │   ├── simple_cpp_demo.cpp      # C++ 任务演示
 │   ├── ipc_demo.c               # IPC 通道演示
 │   ├── bag_demo.c               # Bag 录制回放演示
-│   └── coro_bus_demo.cpp        # 协程 + 总线综合演示
+│   ├── coro_bus_demo.cpp        # 协程 + 总线综合演示
+│   └── adas_demo.c              # ADAS 完整链路演示（感知 → 总线 → 控制）
 ├── include/                     # 公共头文件
 │   ├── coroutine_task.h         # 协程任务基类（BusAwaitable / FlowCoroTask）
 │   ├── task_interface.h         # 任务接口定义
@@ -122,6 +125,9 @@ make -j$(nproc)
 
 # C++20 协程 + 消息总线综合演示
 ./build/bin/coro_bus_demo
+
+# ADAS 完整链路演示（假感知节点 + 假控制节点）
+./build/bin/adas_demo
 ```
 
 ## 开发插件
