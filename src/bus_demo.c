@@ -185,8 +185,18 @@ int main(void) {
 
     /* 4. 启动传感器发布线程 */
     pthread_t t_lidar, t_gps;
-    pthread_create(&t_lidar, NULL, lidar_thread, g_bus);
-    pthread_create(&t_gps,   NULL, gps_thread,   g_bus);
+    if (pthread_create(&t_lidar, NULL, lidar_thread, g_bus) != 0) {
+        fprintf(stderr, "创建激光雷达线程失败\n");
+        message_bus_destroy(g_bus);
+        return 1;
+    }
+    if (pthread_create(&t_gps, NULL, gps_thread, g_bus) != 0) {
+        fprintf(stderr, "创建GPS线程失败\n");
+        g_running = 0;
+        pthread_join(t_lidar, NULL);
+        message_bus_destroy(g_bus);
+        return 1;
+    }
 
     /* 等待收到几帧后演示 req/reply */
     sleep(1);
