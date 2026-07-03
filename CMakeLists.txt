@@ -102,6 +102,9 @@ target_compile_features(flowcoro_headers INTERFACE cxx_std_20)
 target_compile_options(flowcoro_headers INTERFACE
     $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
 )
+target_compile_definitions(flowcoro_headers INTERFACE
+    PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 target_link_libraries(flowcoro_headers INTERFACE Threads::Threads)
 
 # 定义源文件
@@ -121,7 +124,19 @@ set(CORE_SOURCES
     src/core/state_machine.c
     src/core/discovery.c
     src/core/fusion.c
+    src/core/proto_support.c
 )
+
+# ── Optional: Protobuf support ────────────────────────────
+find_package(ProtobufC QUIET)
+if(ProtobufC_FOUND)
+    message(STATUS "Protobuf-C found: enabling FLOWENGINE_USE_PROTOBUF")
+    target_compile_definitions(starttool_core PUBLIC FLOWENGINE_USE_PROTOBUF)
+    target_link_libraries(starttool_core PUBLIC ${ProtobufC_LIBRARIES})
+    target_include_directories(starttool_core PUBLIC ${ProtobufC_INCLUDE_DIRS})
+else()
+    message(STATUS "Protobuf-C not found — protobuf support disabled (install libprotobuf-c-dev)")
+endif()
 
 set(PLUGIN_SOURCES
     src/plugins/example_process.c
@@ -206,7 +221,7 @@ target_link_libraries(reactive_task starttool_core)
 # =============================================================================
 
 # ── Phase 2: C++ 调度器 (M:N coroutine scheduling) ────────
-add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/fusion_cpp.cpp)
+add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/fusion_cpp.cpp src/cpp/network_transport.cpp)
 target_link_libraries(scheduler_cpp starttool_core flowcoro_headers)
 target_include_directories(scheduler_cpp PUBLIC ${GEN_DIR})
 target_compile_options(scheduler_cpp PRIVATE
