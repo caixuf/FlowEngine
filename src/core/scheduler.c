@@ -9,6 +9,7 @@
  */
 
 #include "scheduler.h"
+#include "message_bus.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -135,13 +136,20 @@ bool resource_usage_check(const ResourceUsage* ru) {
 #define SCHED_MAX_TASKS 128
 
 typedef struct {
-    TaskBase*      task;
-    char           name[64];
-    int            id;
-    LatencyTracker latency;
-    RateControl    rate_control;
-    ResourceUsage  resource;
-    bool           active;
+    TaskBase*       task;
+    char            name[64];
+    int             id;
+    LatencyTracker  latency;
+    RateControl     rate_control;
+    ResourceUsage   resource;
+    bool            active;
+
+    /* Choreo mode */
+    char            trigger_topic[64];   /**< 触发的 topic（空=无） */
+    bool            choreo_triggered;    /**< 是否有待处理的触发 */
+    pthread_cond_t  trigger_cv;          /**< 触发条件变量 */
+    pthread_mutex_t trigger_mutex;       /**< 保护 trigger_cv */
+    ChoreoStats     choreo_stats;
 } SchedTaskEntry;
 
 struct Scheduler {
@@ -150,9 +158,11 @@ struct Scheduler {
     int              entry_count;
     pthread_mutex_t  mutex;
     bool             running;
-    /* Worker threads (for future M:N model) */
     pthread_t*       workers;
     uint32_t         worker_count;
+
+    /* Choreo: topic → task_id mapping for trigger routing */
+    MessageBus*      choreo_bus;         /**< 用于注册触发回调的总线 */
 };
 
 Scheduler* scheduler_create(const SchedulerConfig* config) {
@@ -219,6 +229,8 @@ int scheduler_register_task(Scheduler* sched, TaskBase* task, const char* name) 
     e->active = true;
     if (name) snprintf(e->name, sizeof(e->name), "%s", name);
     rate_control_init(&e->rate_control, task->config.max_frequency_hz);
+    pthread_mutex_init(&e->trigger_mutex, NULL);
+    pthread_cond_init(&e->trigger_cv, NULL);
     sched->entry_count++;
 
     pthread_mutex_unlock(&sched->mutex);
@@ -271,4 +283,100 @@ RateControl* scheduler_get_rate_control(Scheduler* sched, int task_id) {
 
 int scheduler_task_count(Scheduler* sched) {
     return sched ? sched->entry_count : 0;
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* Choreo 模式: 数据流驱动                                    */
+/* ══════════════════════════════════════════════════════════ */
+
+/* Callback: when a message arrives on a trigger topic, wake the task */
+static void choreo_trigger_callback(const Message* msg, void* user_data) {
+    Scheduler* sched = (Scheduler*)user_data;
+    if (!sched || sched->config.mode != SCHEDULER_MODE_CHOREO) return;
+
+    /* Find all tasks triggered by this topic */
+    pthread_mutex_lock(&sched->mutex);
+    for (int i = 0; i < sched->entry_count; i++) {
+        SchedTaskEntry* e = &sched->entries[i];
+        if (!e->active || e->trigger_topic[0] == '\0') continue;
+        if (strcmp(e->trigger_topic, msg->topic) != 0) continue;
+
+        /* Wake the waiting task */
+        pthread_mutex_lock(&e->trigger_mutex);
+        e->choreo_triggered = true;
+        e->choreo_stats.triggers_fired++;
+        pthread_cond_signal(&e->trigger_cv);
+        pthread_mutex_unlock(&e->trigger_mutex);
+    }
+    pthread_mutex_unlock(&sched->mutex);
+}
+
+int scheduler_choreo_trigger_on(Scheduler* sched, int task_id, const char* topic) {
+    if (!sched || task_id < 0 || task_id >= sched->entry_count || !topic) return -1;
+
+    SchedTaskEntry* e = &sched->entries[task_id];
+    snprintf(e->trigger_topic, sizeof(e->trigger_topic), "%s", topic);
+
+    /* Subscribe to the trigger topic on the choreo bus */
+    if (sched->choreo_bus) {
+        message_bus_subscribe(sched->choreo_bus, topic,
+                              choreo_trigger_callback, sched);
+    }
+
+    printf("[scheduler:choreo] task '%s' triggered by topic '%s'\n",
+           e->name, topic);
+    return 0;
+}
+
+int scheduler_choreo_wait(Scheduler* sched, int task_id, uint64_t timeout_us) {
+    if (!sched || task_id < 0 || task_id >= sched->entry_count) return -2;
+
+    SchedTaskEntry* e = &sched->entries[task_id];
+
+    pthread_mutex_lock(&e->trigger_mutex);
+
+    /* If already triggered, consume and return immediately */
+    if (e->choreo_triggered) {
+        e->choreo_triggered = false;
+        pthread_mutex_unlock(&e->trigger_mutex);
+        return 0;
+    }
+
+    if (timeout_us == 0) {
+        /* Infinite wait */
+        while (!e->choreo_triggered && e->active) {
+            pthread_cond_wait(&e->trigger_cv, &e->trigger_mutex);
+        }
+    } else {
+        /* Timed wait */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = ts.tv_nsec + timeout_us * 1000;
+        ts.tv_sec  += (time_t)(ns / 1000000000ULL);
+        ts.tv_nsec  = (long)(ns % 1000000000ULL);
+
+        int ret = 0;
+        while (!e->choreo_triggered && e->active && ret == 0) {
+            ret = pthread_cond_timedwait(&e->trigger_cv, &e->trigger_mutex, &ts);
+        }
+        if (ret == ETIMEDOUT) {
+            e->choreo_stats.wait_timeouts++;
+            pthread_mutex_unlock(&e->trigger_mutex);
+            return -1;
+        }
+    }
+
+    if (!e->active) {
+        pthread_mutex_unlock(&e->trigger_mutex);
+        return -2;  /* Stopped */
+    }
+
+    e->choreo_triggered = false;
+    pthread_mutex_unlock(&e->trigger_mutex);
+    return 0;
+}
+
+void scheduler_get_choreo_stats(Scheduler* sched, int task_id, ChoreoStats* stats) {
+    if (!sched || task_id < 0 || task_id >= sched->entry_count || !stats) return;
+    *stats = sched->entries[task_id].choreo_stats;
 }

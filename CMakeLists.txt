@@ -125,6 +125,7 @@ set(CORE_SOURCES
     src/core/discovery.c
     src/core/fusion.c
     src/core/proto_support.c
+    src/core/transport.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────

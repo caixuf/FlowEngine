@@ -102,18 +102,25 @@ bool resource_usage_check(const ResourceUsage* ru);
 
 /* ── Scheduler Configuration ──────────────────────────────── */
 
+typedef enum {
+    SCHEDULER_MODE_CLASSIC = 0,  /**< thread-per-task，轮询执行 */
+    SCHEDULER_MODE_CHOREO  = 1,  /**< DAG编排：上游publish → 自动触发下游 */
+} SchedulerMode;
+
 typedef struct {
-    uint32_t  worker_thread_count;   /**< 0 = use hardware_concurrency() */
-    uint32_t  max_coroutine_count;   /**< 0 = unlimited */
-    bool      enable_work_stealing;  /**< Work stealing between workers */
-    uint64_t  tick_us;               /**< Scheduler tick (default 1000 us) */
+    uint32_t       worker_thread_count;   /**< 0 = use hardware_concurrency() */
+    uint32_t       max_coroutine_count;   /**< 0 = unlimited */
+    bool           enable_work_stealing;  /**< Work stealing between workers */
+    uint64_t       tick_us;               /**< Scheduler tick (default 1000 us) */
+    SchedulerMode  mode;                  /**< Scheduling mode */
 } SchedulerConfig;
 
 #define SCHEDULER_CONFIG_DEFAULT \
     { .worker_thread_count  = 0,   \
       .max_coroutine_count  = 0,   \
       .enable_work_stealing = false, \
-      .tick_us              = 1000 }
+      .tick_us              = 1000, \
+      .mode                 = SCHEDULER_MODE_CLASSIC }
 
 /* ── Scheduler Handle ──────────────────────────────────────── */
 
@@ -160,6 +167,43 @@ RateControl* scheduler_get_rate_control(Scheduler* sched, int task_id);
 
 /** Get the number of registered tasks. */
 int scheduler_task_count(Scheduler* sched);
+
+/* ── Choreo 模式: 数据流驱动 ─────────────────────────────── */
+
+/**
+ * 注册 topic 触发关系：当 topic 上有消息发布时，自动唤醒 task。
+ *
+ * Choreo 模式下，task 不需要轮询——它在 condition_variable 上等待，
+ * 直到上游 publish 触发它执行。
+ *
+ * @param sched  调度器
+ * @param task_id 目标任务 ID
+ * @param topic   触发 topic（上游 publish 此 topic 时唤醒）
+ * @return 0 成功
+ */
+int scheduler_choreo_trigger_on(Scheduler* sched, int task_id, const char* topic);
+
+/**
+ * Choreo 模式下 task 的执行入口。
+ * task 在 execute() 中调用此函数，阻塞等待触发信号。
+ *
+ * @param sched    调度器
+ * @param task_id  任务 ID
+ * @param timeout_us 超时（微秒, 0=无限等待）
+ * @return 0=触发, -1=超时, -2=停止
+ */
+int scheduler_choreo_wait(Scheduler* sched, int task_id, uint64_t timeout_us);
+
+/**
+ * 获取 choreo 触发统计。
+ */
+typedef struct {
+    uint64_t triggers_fired;     /**< 触发次数 */
+    uint64_t triggers_missed;    /**< 错过（任务忙） */
+    uint64_t wait_timeouts;      /**< 等待超时 */
+} ChoreoStats;
+
+void scheduler_get_choreo_stats(Scheduler* sched, int task_id, ChoreoStats* stats);
 
 #ifdef __cplusplus
 }
