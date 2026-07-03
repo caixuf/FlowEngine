@@ -343,11 +343,25 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
     if (!bus || !topic || !callback) return -1;
 
     pthread_mutex_lock(&bus->sub_mutex);
-    if (bus->sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
-        pthread_mutex_unlock(&bus->sub_mutex);
-        return -1;
+
+    /* First try to reuse an inactive (previously unsubscribed) slot */
+    SubEntry* e = NULL;
+    for (int i = 0; i < bus->sub_count; i++) {
+        if (!bus->subs[i].active) {
+            e = &bus->subs[i];
+            break;
+        }
     }
-    SubEntry* e = &bus->subs[bus->sub_count++];
+
+    /* No free slot found — allocate a new one */
+    if (!e) {
+        if (bus->sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
+            pthread_mutex_unlock(&bus->sub_mutex);
+            return -1;
+        }
+        e = &bus->subs[bus->sub_count++];
+    }
+
     snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
     e->callback  = callback;
     e->user_data = user_data;
