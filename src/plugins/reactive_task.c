@@ -85,7 +85,11 @@ static int reactive_execute(TaskBase* base) {
         task->has_msg = false;
         pthread_mutex_unlock(&task->result_mutex);
 
-        if (msg.data_size != sizeof(LidarFrame)) continue;
+        if (msg.data_size != sizeof(LidarFrame)) {
+            fprintf(stderr, "[ReactiveTask] 消息大小不匹配: 期望 %zu, 实际 %u\n",
+                    sizeof(LidarFrame), msg.data_size);
+            continue;
+        }
 
         struct timespec now_ts;
         clock_gettime(CLOCK_MONOTONIC, &now_ts);

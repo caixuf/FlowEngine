@@ -40,7 +40,11 @@ typedef struct {
     char   type_name[64];
 } MsgSchemaEntry;
 
-/* 全局 schema 表（定义在头文件，通过 inline / static 避免多重定义）*/
+/**
+ * 注意：这是进程内全局静态表。每个包含此头文件的翻译单元共享同一进程地址空间，
+ * 所以同一进程内各模块注册的 schema 互相可见。
+ * 跨进程不共享（这与 ipc_channel 独立使用）。
+ */
 static MsgSchemaEntry g_msg_schema[MSG_SCHEMA_MAX_ENTRIES];
 static int            g_msg_schema_count = 0;
 
