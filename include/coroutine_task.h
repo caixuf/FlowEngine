@@ -191,13 +191,16 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
-        /* 每次挂起前重置触发标志，允许下一次 co_await 正常工作 */
-        fired_.store(false, std::memory_order_release);
         message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
     }
 
     Message await_resume() {
+        /* message_bus_unsubscribe_ex 持有 sub_mutex 直到返回，而 dispatch_message
+         * 在整个回调期间也持有 sub_mutex，因此 unsubscribe_ex 返回后保证没有
+         * 任何 on_message 调用仍在执行。在此处重置 fired_，
+         * 令下一次 co_await 可以正常触发。 */
         message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
+        fired_.store(false, std::memory_order_release);
         return received_msg_;
     }
 
