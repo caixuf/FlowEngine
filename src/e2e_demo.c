@@ -116,7 +116,8 @@ static int perception_execute(TaskBase* base) {
         pt->frame_id++;
     }
 
-    statem_send_event(&base->sm, SM_EVENT_STOP, base);
+    if (statem_current(&base->sm) == SM_STATE_RUNNING)
+        statem_send_event(&base->sm, SM_EVENT_STOP, base);
     LOG_INFO("perception", "stopped (%u frames)", pt->frame_id);
     return 0;
 }
@@ -250,7 +251,8 @@ static int fusion_execute(TaskBase* base) {
         }
     }
 
-    statem_send_event(&base->sm, SM_EVENT_STOP, base);
+    if (statem_current(&base->sm) == SM_STATE_RUNNING)
+        statem_send_event(&base->sm, SM_EVENT_STOP, base);
     LOG_INFO("fusion", "stopped (%u fused frames)", ft->fused_count);
     return 0;
 }
@@ -319,7 +321,8 @@ static int control_execute(TaskBase* base) {
         if (ret == -2) break;  /* stopped */
     }
 
-    statem_send_event(&base->sm, SM_EVENT_STOP, base);
+    if (statem_current(&base->sm) == SM_STATE_RUNNING)
+        statem_send_event(&base->sm, SM_EVENT_STOP, base);
     LOG_INFO("control", "stopped (%d decisions)", ct->decision_count);
     return 0;
 }

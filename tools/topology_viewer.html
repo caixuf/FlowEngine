@@ -3,213 +3,171 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FlowEngine Topology Viewer</title>
+<title>FlowEngine Topology</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f172a;color:#e2e8f0;height:100vh;display:flex}
-#sidebar{width:360px;background:#1e293b;padding:20px;overflow-y:auto;border-right:1px solid #334155;display:flex;flex-direction:column;gap:16px}
-#canvas{flex:1;position:relative;overflow:hidden}
-#graph{width:100%;height:100%}
-h1{font-size:18px;color:#38bdf8;margin-bottom:4px}
-h2{font-size:14px;color:#94a3b8;margin:12px 0 4px}
-.node{stroke-width:2;cursor:pointer;transition:opacity .15s}
-.node:hover{opacity:.85}
-.node-label{font-size:11px;fill:#cbd5e1;pointer-events:none;text-anchor:middle}
-.edge{stroke:#475569;stroke-width:1.5;fill:none;marker-end:url(#arrow)}
-.edge-label{font-size:9px;fill:#64748b}
-.pub{fill:#22c55e}.sub{fill:#3b82f6}.srv{fill:#f59e0b}.fusion{fill:#a855f7}
-.dead{opacity:.35} .alive{opacity:1}
-#input-box{width:100%;height:200px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:10px;font:12px monospace;resize:vertical}
-button{background:#2563eb;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px}
-button:hover{background:#1d4ed8}
-.stat{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #1e293b}
-.stat-val{color:#38bdf8;font-weight:600}
-.legend{display:flex;gap:8px;flex-wrap:wrap;font-size:11px}
-.legend span{display:flex;align-items:center;gap:4px}
-.legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
-.info{font-size:11px;color:#64748b;margin-top:8px}
+body{font-family:'Inter',system-ui,sans-serif;background:#0a0e17;color:#c9d1d9;display:flex;height:100vh;overflow:hidden}
+#panel{width:340px;background:#131822;padding:20px;display:flex;flex-direction:column;gap:14px;border-right:1px solid #21262d;z-index:10;overflow-y:auto}
+h1{font-size:16px;font-weight:600;color:#58a6ff;display:flex;align-items:center;gap:8px}
+h1 span{font-size:12px;color:#8b949e;font-weight:400}
+h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+textarea{width:100%;height:180px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:10px;font:11px 'JetBrains Mono',monospace;resize:vertical;outline:none}
+textarea:focus{border-color:#58a6ff}
+button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:12px;transition:.15s}
+button:hover{background:#30363d;border-color:#58a6ff}
+button.primary{background:#1f6feb;border-color:#1f6feb;color:white}
+button.primary:hover{background:#388bfd}
+#graph{flex:1;cursor:grab}
+#graph:active{cursor:grabbing}
+svg text{font-family:'Inter',system-ui,sans-serif;pointer-events:none}
+.tooltip{position:absolute;background:#1c2128;border:1px solid #30363d;border-radius:8px;padding:10px 14px;font-size:11px;pointer-events:none;opacity:0;transition:opacity .2s;max-width:260px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.tooltip .name{color:#58a6ff;font-weight:600;font-size:13px;margin-bottom:4px}
+.tooltip .kv{display:flex;justify-content:space-between;gap:12px;line-height:1.6}
+.tooltip .k{color:#8b949e}.tooltip .v{color:#c9d1d9;text-align:right}
+.link{stroke:#21262d;stroke-width:1.5;fill:none}
+.link-label{font-size:9px;fill:#484f58}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px}
+.legend span{display:flex;align-items:center;gap:5px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+.stat{display:flex;justify-content:space-between;font-size:12px;line-height:1.8;border-bottom:1px solid #21262d}
+.file-btn{cursor:pointer}
 </style>
 </head>
 <body>
-
-<div id="sidebar">
-  <h1>🔗 FlowEngine Topology</h1>
-  <p style="font-size:11px;color:#64748b">Paste discovery JSON below or drag a .json file</p>
-  <textarea id="input-box" placeholder='{"nodes":[...]}'></textarea>
-  <button onclick="loadFromText()">🔄 Render</button>
-  <button onclick="loadSample()" style="background:#334155">📋 Load Sample</button>
-  <button onclick="clearGraph()" style="background:#ef4444">✕ Clear</button>
-  <input type="file" id="file-input" accept=".json" onchange="loadFile()" style="display:none">
-  <button onclick="document.getElementById('file-input').click()" style="background:#334155">📂 Open File</button>
-
+<div id="panel">
+  <h1>🔗 FlowEngine Topo <span>v2</span></h1>
+  <textarea id="input" placeholder='{"nodes":[...]}  — 粘贴 discovery JSON 或拖拽文件'></textarea>
+  <div style="display:flex;gap:8px">
+    <button class="primary" onclick="loadText()" style="flex:1">🔄 Render</button>
+    <button onclick="loadSample()">📋 Demo</button>
+    <label class="file-btn"><button>📂</button><input type="file" accept=".json" onchange="loadFile(event)" style="display:none"></label>
+    <button onclick="clearAll()" style="color:#f85149">✕</button>
+  </div>
+  <h2>Stats</h2>
+  <div id="stats"></div>
   <h2>Legend</h2>
   <div class="legend">
-    <span><span class="dot pub"></span> Publisher</span>
-    <span><span class="dot sub"></span> Subscriber</span>
-    <span><span class="dot srv"></span> Service</span>
-    <span><span class="dot fusion"></span> Fusion</span>
+    <span><span class="dot" style="background:#3fb950"></span>Pub</span>
+    <span><span class="dot" style="background:#58a6ff"></span>Sub</span>
+    <span><span class="dot" style="background:#d29922"></span>Service</span>
+    <span><span class="dot" style="background:#bc8cff"></span>Fusion</span>
+    <span style="opacity:.4"><span class="dot" style="background:#484f58"></span>Dead</span>
   </div>
-
-  <h2>Stats</h2>
-  <div id="stats"><span class="info">No data loaded</span></div>
-
-  <div class="info">Click a node to see details. Drag nodes to rearrange. Scroll to zoom.</div>
+  <div style="font-size:10px;color:#484f58;margin-top:auto">
+    Drag nodes · Scroll zoom · DblClick node=show topics · Ctrl+click=pin
+  </div>
 </div>
-
-<div id="canvas">
-  <svg id="graph"></svg>
-</div>
+<div id="graph"></div>
+<div class="tooltip" id="tooltip"></div>
 
 <script>
-const svg = document.getElementById('graph');
-let nodes = [], edges = [];
-let scale = 1, tx = 0, ty = 0, dragging = false, dragNode = null, dragX, dragY;
+const colors = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
+let data = null;
 
-function loadFromText() {
-  const text = document.getElementById('input-box').value.trim();
-  if (!text) return;
-  try { render(JSON.parse(text)); } catch(e) { alert('Invalid JSON: '+e.message); }
-}
+const svg = d3.select('#graph').append('svg').attr('width','100%').attr('height','100%');
+const g = svg.append('g');
+const tip = d3.select('#tooltip');
 
-function loadFile() {
-  const f = document.getElementById('file-input').files[0];
-  if (!f) return;
-  const reader = new FileReader();
-  reader.onload = e => { document.getElementById('input-box').value = e.target.result; loadFromText(); };
-  reader.readAsText(f);
-}
+const zoom = d3.zoom().scaleExtent([0.1,4]).on('zoom',e=>g.attr('transform',e.transform));
+svg.call(zoom);
 
-function loadSample() {
-  document.getElementById('input-box').value = JSON.stringify({
+const sim = d3.forceSimulation()
+  .force('link',d3.forceLink().id(d=>d.id).distance(180))
+  .force('charge',d3.forceManyBody().strength(-400))
+  .force('center',d3.forceCenter(0,0))
+  .force('collision',d3.forceCollide(45))
+  .on('tick',tick);
+
+let linkG, nodeG, linkLabelG;
+
+function loadText(){try{render(JSON.parse(d3.select('#input').node().value.trim()))}catch(e){alert('Invalid JSON')}}
+function loadFile(e){const r=new FileReader();r.onload=()=>{d3.select('#input').node().value=r.result;loadText()};r.readAsText(e.target.files[0])}
+function clearAll(){d3.select('#input').node().value='';g.selectAll('*').remove();d3.select('#stats').html('');data=null}
+
+function loadSample(){
+  d3.select('#input').node().value = JSON.stringify({
     nodes:[
-      {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",type_id:"0xd712aa51",freq:10.0},{topic:"sensor/gps",type_id:"0x0596b0b7",freq:5.0}]},
-      {name:"fusion",pid:1002,alive:true,caps:9,topics:[{topic:"sensor/lidar",type_id:"0xd712aa51",freq:0},{topic:"sensor/gps",type_id:"0x0596b0b7",freq:0},{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:10.0}]},
-      {name:"control",pid:1003,alive:true,caps:2,topics:[{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:0},{topic:"control/cmd",type_id:"0x2d95c6d2",freq:0}]},
-      {name:"planning",pid:1004,alive:false,caps:2,topics:[{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:0}]}
-    ]
-  }, null, 2);
-  loadFromText();
+      {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",freq:10},{topic:"sensor/gps",freq:5}]},
+      {name:"radar",pid:1005,alive:true,caps:1,topics:[{topic:"sensor/radar",freq:20}]},
+      {name:"fusion",pid:1002,alive:true,caps:9,topics:[{topic:"sensor/lidar",freq:0},{topic:"sensor/gps",freq:0},{topic:"sensor/radar",freq:0},{topic:"fusion/objects",freq:10}]},
+      {name:"control",pid:1003,alive:true,caps:2,topics:[{topic:"fusion/objects",freq:0},{topic:"control/cmd",freq:0}]},
+      {name:"planning",pid:1004,alive:false,caps:2,topics:[{topic:"fusion/objects",freq:0}]}
+    ]},null,2);
+  loadText();
 }
 
-function capsColor(caps) {
-  if (caps & 8) return 'fusion';
-  if (caps & 4) return 'srv';
-  if (caps & 1) return 'pub';
-  if (caps & 2) return 'sub';
-  return 'sub';
-}
+function getColor(d){return d.alive===false?'#484f58':(colors[d.caps&8?8:d.caps&4?4:d.caps&2?2:d.caps&1?1:0]||'#8b949e')}
+function getName(d){return d.name||'?'}
 
-function render(data) {
-  nodes = []; edges = [];
-  const ns = data.nodes || [];
+function render(json){
+  data = json;
+  g.selectAll('*').remove();
+  const ns = (json.nodes||[]).map((n,i)=>({...n,id:i,x:0,y:0}));
+  if(!ns.length) return;
 
-  // Layout: grid
-  const cols = Math.ceil(Math.sqrt(ns.length));
-  const spacing = 200;
-
-  ns.forEach((n, i) => {
-    nodes.push({
-      id: i, name: n.name, pid: n.pid, alive: n.alive!==false,
-      caps: n.caps||0, topics: n.topics||[],
-      x: 100 + (i % cols) * spacing, y: 100 + Math.floor(i/cols) * spacing,
-      color: capsColor(n.caps||0)
-    });
-  });
-
-  // Build edges: same topic → connection
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i+1; j < nodes.length; j++) {
-      const ni = nodes[i], nj = nodes[j];
-      const shared = ni.topics.filter(ti => nj.topics.some(tj => tj.topic === ti.topic));
-      shared.forEach(t => {
-        edges.push({from:i, to:j, topic:t.topic});
-      });
-    }
+  // Build edges: shared topics between nodes
+  const links=[];
+  for(let i=0;i<ns.length;i++)for(let j=i+1;j<ns.length;j++){
+    const shared = ns[i].topics.filter(ti=>ns[j].topics.some(tj=>tj.topic===ti.topic));
+    shared.forEach(t=>links.push({source:i,target:j,topic:t.topic}));
   }
 
-  // Stats
-  document.getElementById('stats').innerHTML = `
-    <div class="stat"><span>Nodes</span><span class="stat-val">${nodes.length}</span></div>
-    <div class="stat"><span>Alive</span><span class="stat-val">${nodes.filter(n=>n.alive).length}</span></div>
-    <div class="stat"><span>Connections</span><span class="stat-val">${edges.length}</span></div>
-    <div class="stat"><span>Topics</span><span class="stat-val">${[...new Set(edges.map(e=>e.topic))].length}</span></div>
-  `;
-
-  draw();
-}
-
-function draw() {
-  const W = svg.parentElement.clientWidth;
-  const H = svg.parentElement.clientHeight;
-  svg.setAttribute('viewBox', `${-tx/scale} ${-ty/scale} ${W/scale} ${H/scale}`);
-  svg.setAttribute('width', W);
-  svg.setAttribute('height', H);
-
-  let html = `<defs><marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#475569"/></marker></defs>`;
-
-  // Edges
-  edges.forEach(e => {
-    const a = nodes[e.from], b = nodes[e.to];
-    const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
-    html += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="edge"/>`;
-    html += `<text x="${mx}" y="${my-6}" class="edge-label">${e.topic}</text>`;
-  });
+  // Links
+  linkG = g.append('g').selectAll('line').data(links).join('line').attr('class','link');
+  linkLabelG = g.append('g').selectAll('text').data(links).join('text')
+    .attr('class','link-label').text(d=>d.topic.split('/').pop());
 
   // Nodes
-  nodes.forEach(n => {
-    const r = 28;
-    html += `<circle cx="${n.x}" cy="${n.y}" r="${r}" class="node ${n.color} ${n.alive?'alive':'dead'}" data-id="${n.id}"/>`;
-    html += `<text x="${n.x}" y="${n.y+4}" class="node-label">${n.name}</text>`;
-    html += `<text x="${n.x}" y="${n.y+18}" class="node-label" style="font-size:9px;fill:#64748b">PID ${n.pid}</text>`;
+  nodeG = g.append('g').selectAll('g').data(ns).join('g').call(
+    d3.drag().on('start',(e,d)=>{if(!e.sourceEvent.ctrlKey){sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y}})
+      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y})
+      .on('end',(e,d)=>{if(!e.sourceEvent.ctrlKey){d.fx=null;d.fy=null}})
+  );
 
-    // Topics on hover area (shown as small badges)
-    n.topics.slice(0,3).forEach((t,ti) => {
-      html += `<text x="${n.x}" y="${n.y - r - 8 - ti*14}" class="edge-label" style="font-size:8px">${t.topic.split('/').pop()}</text>`;
-    });
-  });
+  nodeG.append('circle').attr('r',22).attr('fill',getColor).attr('stroke','#21262d').attr('stroke-width',2)
+    .on('mouseover',(e,d)=>{
+      nodeG.selectAll('circle').attr('opacity',.3);
+      d3.select(e.target).attr('opacity',1).attr('stroke','#58a6ff').attr('stroke-width',3);
+      const topics = (d.topics||[]).map(t=>`<div class="kv"><span class="k">${t.topic}</span><span class="v">${t.freq>0?t.freq+'Hz':(d.caps&1?'pub':'sub')}</span></div>`).join('');
+      tip.html(`<div class="name">${d.name}</div><div class="kv"><span class="k">PID</span><span class="v">${d.pid||'?'}</span></div><div class="kv"><span class="k">Status</span><span class="v">${d.alive===false?'💀 Dead':'🟢 Alive'}</span></div>${topics}`)
+        .style('left',(e.pageX+15)+'px').style('top',(e.pageY-10)+'px').style('opacity',1);
+    })
+    .on('mouseout',(e,d)=>{
+      nodeG.selectAll('circle').attr('opacity',1).attr('stroke','#21262d').attr('stroke-width',2);
+      tip.style('opacity',0);
+    })
+    .on('dblclick',(e,d)=>{d3.select('#input').node().value=JSON.stringify(d.topics,null,2)});
 
-  html += `</svg>`;
-  svg.innerHTML = html;
+  nodeG.append('text').text(getName).attr('text-anchor','middle').attr('dy',32).attr('fill','#c9d1d9').attr('font-size','10px');
+  nodeG.append('text').text(d=>`PID ${d.pid}`).attr('text-anchor','middle').attr('dy',44).attr('fill','#484f58').attr('font-size','9px');
 
-  // Click/drag handlers
-  svg.querySelectorAll('.node').forEach(circle => {
-    circle.addEventListener('mousedown', e => {
-      dragNode = parseInt(circle.dataset.id);
-      dragX = e.clientX - nodes[dragNode].x * scale;
-      dragY = e.clientY - nodes[dragNode].y * scale;
-      dragging = true;
-      e.stopPropagation();
-    });
-    circle.addEventListener('dblclick', e => {
-      const n = nodes[parseInt(circle.dataset.id)];
-      document.getElementById('input-box').value = JSON.stringify(n.topics, null, 2);
-    });
-  });
+  // Simulation
+  sim.nodes(ns);
+  sim.force('link').links(links);
+  sim.alpha(1).restart();
 
-  svg.addEventListener('mousemove', e => {
-    if (!dragging || dragNode===null) return;
-    nodes[dragNode].x = (e.clientX - dragX) / scale;
-    nodes[dragNode].y = (e.clientY - dragY) / scale;
-    draw();
-  });
-  svg.addEventListener('mouseup', () => { dragging = false; dragNode = null; });
-  svg.addEventListener('mouseleave', () => { dragging = false; dragNode = null; });
-  svg.addEventListener('wheel', e => {
-    e.preventDefault();
-    const ds = e.deltaY > 0 ? 0.9 : 1.1;
-    scale *= ds;
-    draw();
-  });
+  // Stats
+  const alive = ns.filter(n=>n.alive!==false).length;
+  const edges = links.length;
+  d3.select('#stats').html(`
+    <div class="stat"><span>Nodes</span><span style="color:#58a6ff;font-weight:600">${ns.length}</span></div>
+    <div class="stat"><span>Alive</span><span style="color:#3fb950">${alive}</span></div>
+    <div class="stat"><span>Dead</span><span style="color:#f85149">${ns.length-alive}</span></div>
+    <div class="stat"><span>Connections</span><span>${edges}</span></div>
+    <div class="stat"><span>Topics</span><span>${new Set(links.map(l=>l.topic)).size}</span></div>
+  `);
+
+  // Center
+  setTimeout(()=>{svg.transition().duration(750).call(zoom.transform,d3.zoomIdentity.translate(400,300))},100);
 }
 
-function clearGraph() {
-  document.getElementById('input-box').value = '';
-  nodes = []; edges = [];
-  document.getElementById('stats').innerHTML = '<span class="info">Cleared</span>';
-  svg.innerHTML = '';
+function tick(){
+  linkG.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+  linkLabelG.attr('x',d=>(d.source.x+d.target.x)/2).attr('y',d=>(d.source.y+d.target.y)/2-6);
+  nodeG.attr('transform',d=>`translate(${d.x},${d.y})`);
 }
 
-// Load sample on start
 loadSample();
 </script>
 </body>
