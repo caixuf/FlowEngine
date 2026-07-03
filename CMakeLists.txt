@@ -125,29 +125,29 @@ target_link_libraries(launcher starttool_core)
 add_executable(benchmark src/benchmark.c)
 target_link_libraries(benchmark starttool_core m)
 
-# 创建任务演示程序
-add_executable(task_demo src/task_demo.c)
-target_link_libraries(task_demo starttool_core example_task)
+# 任务系统可执行程序
+add_executable(flow_task src/task_demo.c)
+target_link_libraries(flow_task starttool_core example_task)
 
-# 创建通信总线演示程序
-add_executable(bus_demo src/bus_demo.c)
-target_link_libraries(bus_demo starttool_core m)
+# 消息总线可执行程序
+add_executable(flow_bus src/bus_demo.c)
+target_link_libraries(flow_bus starttool_core m)
 
-# C++任务演示程序
-add_executable(cpp_task_demo src/cpp_task_demo.cpp)
-target_link_libraries(cpp_task_demo starttool_core cpp_example_task)
+# C++ 任务可执行程序
+add_executable(flow_cpp_task src/cpp_task_demo.cpp)
+target_link_libraries(flow_cpp_task starttool_core cpp_example_task)
 
-# 简化的C++任务演示程序
-add_executable(simple_cpp_demo src/simple_cpp_demo.cpp)
-target_link_libraries(simple_cpp_demo starttool_core cpp_example_task)
+# 简化 C++ 可执行程序
+add_executable(flow_cpp src/simple_cpp_demo.cpp)
+target_link_libraries(flow_cpp starttool_core cpp_example_task)
 
-# ── Step 1: IPC 跨进程通道演示 ───────────────────────────
-add_executable(ipc_demo src/ipc_demo.c)
-target_link_libraries(ipc_demo starttool_core rt)
+# ── Step 1: IPC 跨进程通道 ───────────────────────────────
+add_executable(flow_ipc src/ipc_demo.c)
+target_link_libraries(flow_ipc starttool_core rt)
 
-# ── Step 3: Bag 录制回放演示（含 Step 5 统一时钟）────────
-add_executable(bag_demo src/bag_demo.c)
-target_link_libraries(bag_demo starttool_core m)
+# ── Step 3: Bag 录制回放（含 Step 5 统一时钟）────────────
+add_executable(flow_bag src/bag_demo.c)
+target_link_libraries(flow_bag starttool_core m)
 
 # ── Step 4: 消息驱动任务插件 ─────────────────────────────
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
@@ -158,23 +158,23 @@ add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
 target_link_libraries(flowcoro_task starttool_core flowcoro_headers)
 target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
 
-# ── Step 6: flowcoro 协程 + 消息总线综合演示 ─────────────
-add_executable(coro_bus_demo src/coro_bus_demo.cpp)
-target_link_libraries(coro_bus_demo starttool_core flowcoro_headers)
-target_compile_definitions(coro_bus_demo PRIVATE FLOWCORO_INTEGRATION)
+# ── Step 6: flowcoro 协程 + 消息总线综合程序 ─────────────
+add_executable(flow_coro src/coro_bus_demo.cpp)
+target_link_libraries(flow_coro starttool_core flowcoro_headers)
+target_compile_definitions(flow_coro PRIVATE FLOWCORO_INTEGRATION)
 
-# ── ADAS Demo: 假感知节点 + 假控制节点全链路演示 ──────────
+# ── ADAS: 感知节点 + 控制节点全链路仿真 ──────────────────
 add_library(fake_perception_task SHARED src/plugins/fake_perception_task.c)
 target_link_libraries(fake_perception_task starttool_core)
 
 add_library(fake_control_task SHARED src/plugins/fake_control_task.c)
 target_link_libraries(fake_control_task starttool_core m)
 
-add_executable(adas_demo src/adas_demo.c)
-target_link_libraries(adas_demo starttool_core fake_perception_task fake_control_task)
+add_executable(flow_adas src/adas_demo.c)
+target_link_libraries(flow_adas starttool_core fake_perception_task fake_control_task)
 
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo adas_demo benchmark
+install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas benchmark
     RUNTIME DESTINATION bin
 )
 
@@ -209,10 +209,10 @@ add_custom_target(config
 
 # 自定义目标：运行演示
 add_custom_target(run_demo
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/task_demo
-    DEPENDS task_demo config
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_task
+    DEPENDS flow_task config
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    COMMENT "Running task demo"
+    COMMENT "Running flow_task"
 )
 
 # 自定义目标：运行启动器
@@ -227,23 +227,23 @@ add_custom_target(run_launcher
 enable_testing()
 
 # 简单的测试
-add_test(NAME task_demo_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/task_demo
+add_test(NAME flow_task_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_task
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-add_test(NAME bus_demo_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/bus_demo
+add_test(NAME flow_bus_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_bus
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-add_test(NAME coro_bus_demo_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_bus_demo
+add_test(NAME flow_coro_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_coro
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-add_test(NAME adas_demo_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/adas_demo
+add_test(NAME flow_adas_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_adas
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
@@ -254,7 +254,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo adas_demo benchmark example_process example_task flowcoro_task fake_perception_task fake_control_task config)
+add_custom_target(dev DEPENDS launcher flow_task flow_bus flow_coro flow_adas benchmark example_process example_task flowcoro_task fake_perception_task fake_control_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

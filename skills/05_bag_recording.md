@@ -101,5 +101,5 @@ uint64_t now = clock_service_now();
 
 - `include/bag.h` — API 定义
 - `src/core/bag.c` — 实现
-- `src/bag_demo.c` — 录制与回放完整演示
+- `src/flow_bag.c` — 录制与回放完整演示
 - `include/clock_service.h` — 统一时钟 API

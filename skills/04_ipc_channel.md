@@ -90,4 +90,4 @@ ipc_channel_unlink("my_channel");  // 最后一个进程删除共享内存
 
 - `include/ipc_channel.h` — API 定义
 - `src/core/ipc_channel.c` — 实现（共享内存 + 信号量）
-- `src/ipc_demo.c` — 跨进程通道完整演示
+- `src/flow_ipc.c` — 跨进程通道完整演示

@@ -102,8 +102,8 @@ cmake ..
 make -j$(nproc)
 
 # 3. 运行演示程序
-./task_demo        # C语言任务演示
-./simple_cpp_demo  # C++任务演示
+./flow_task        # C语言任务演示
+./flow_cpp  # C++任务演示
 ```
 
 **期望输出：**

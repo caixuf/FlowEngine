@@ -117,5 +117,5 @@ log/error           错误日志
 
 - `include/message_bus.h` — API 定义
 - `src/core/message_bus.c` — 实现
-- `src/bus_demo.c` — 完整演示（多发布者/多订阅者）
+- `src/flow_bus.c` — 完整演示（多发布者/多订阅者）
 - `src/plugins/reactive_task.c` — 消息驱动任务插件示例

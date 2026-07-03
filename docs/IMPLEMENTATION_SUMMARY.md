@@ -90,7 +90,7 @@ startTool/
 │   │   └── ...
 │   ├── plugins/
 │   │   └── example_task.c     # 示例任务实现（继承TaskBase）
-│   ├── task_demo.c           # 演示程序
+│   ├── flow_task.c           # 演示程序
 │   └── ...
 └── docs/
     └── TASK_SYSTEM_GUIDE.md  # 详细使用指南
@@ -100,8 +100,8 @@ startTool/
 
 编译和运行：
 ```bash
-make task_demo      # 编译任务系统
-make run_task_demo  # 运行演示
+make flow_task      # 编译任务系统
+make run_demo  # 运行演示
 
 # 或者使用自动化测试
 ./test_tasks.sh

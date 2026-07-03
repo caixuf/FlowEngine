@@ -12,4 +12,4 @@ start task2
 list
 stats
 health
-quit" | ./task_demo
+quit" | ./flow_task

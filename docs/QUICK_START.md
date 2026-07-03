@@ -25,24 +25,24 @@ bash build.sh release
 
 ```bash
 # C 任务演示（3 个并发任务，展示生命周期）
-./build/bin/task_demo
+./build/bin/flow_task
 
 # 消息总线演示（发布/订阅）
-./build/bin/bus_demo
+./build/bin/flow_bus
 
 # C++ 任务演示
-./build/bin/simple_cpp_demo
+./build/bin/flow_cpp
 
 # IPC 跨进程通道演示（需两个终端）
-./build/bin/ipc_demo pub   # 终端 1
-./build/bin/ipc_demo sub   # 终端 2
+./build/bin/flow_ipc pub   # 终端 1
+./build/bin/flow_ipc sub   # 终端 2
 
 # Bag 录制 & 回放演示
-./build/bin/bag_demo record
-./build/bin/bag_demo play
+./build/bin/flow_bag record
+./build/bin/flow_bag play
 
 # C++20 协程 + 消息总线综合演示
-./build/bin/coro_bus_demo
+./build/bin/flow_coro
 ```
 
 ## 步骤 3：理解核心概念
@@ -111,7 +111,7 @@ target_link_libraries(my_plugin flowengine_core)
 
 ## 步骤 5：C++20 协程任务（进阶）
 
-参考 `src/plugins/flowcoro_task.cpp` 和 `src/coro_bus_demo.cpp`：
+参考 `src/plugins/flowcoro_task.cpp` 和 `src/flow_coro.cpp`：
 
 ```cpp
 #include "coroutine_task.h"
@@ -172,4 +172,4 @@ A: 检查网络访问 GitHub 是否正常；或将 flowcoro 源码放入 `third_
 A: 是的，这样才能在基类指针和派生类指针之间安全转换。
 
 **Q: 如何调试插件？**
-A: `gdb ./build/bin/task_demo`，设置 `LD_LIBRARY_PATH=./build/lib`。
+A: `gdb ./build/bin/flow_task`，设置 `LD_LIBRARY_PATH=./build/lib`。
