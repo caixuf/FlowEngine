@@ -8,29 +8,20 @@
 #include <string.h>
 
 static ProcessManager* g_manager = NULL;
-static Logger* g_logger = NULL;
 
 /**
  * 信号处理函数
  */
 static void signal_handler(int sig) {
-    if (g_logger) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "Received signal %d, shutting down...", sig);
-        logger_log(g_logger, LOG_LEVEL_INFO, msg);
-    }
-    
+    LOG_INFO("launcher", "Received signal %d, shutting down...", sig);
+
     if (g_manager) {
         process_manager_stop_all(g_manager);
         process_manager_destroy(g_manager);
         g_manager = NULL;
     }
-    
-    if (g_logger) {
-        logger_destroy(g_logger);
-        g_logger = NULL;
-    }
-    
+
+    log_shutdown();
     exit(0);
 }
 
@@ -137,73 +128,57 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // 创建日志器
-    g_logger = logger_create(config->log_file, config->log_level);
-    if (!g_logger) {
-        printf("Failed to create logger\n");
-        config_free(config);
-        return 1;
-    }
-    
-    logger_log(g_logger, LOG_LEVEL_INFO, "Launcher starting...");
-    
+    // 初始化全局日志系统
+    log_init((LogLevel)(config->log_level & 0xff), config->log_file);
+    LOG_INFO("launcher", "starting...");
+
     // 创建进程管理器
     g_manager = process_manager_create(default_log_callback);
     if (!g_manager) {
-        logger_log(g_logger, LOG_LEVEL_ERROR, "Failed to create process manager");
-        logger_destroy(g_logger);
+        LOG_ERROR("launcher", "Failed to create process manager");
+        log_shutdown();
         config_free(config);
         return 1;
     }
-    
+
     // 加载所有插件
     int loaded_count = 0;
     for (int i = 0; i < config->process_count; i++) {
         ProcessConfig* proc_config = &config->processes[i];
-        int ret = process_manager_load_plugin(g_manager, 
+        int ret = process_manager_load_plugin(g_manager,
                                              proc_config->name,
                                              proc_config->library_path,
                                              proc_config->config_data);
         if (ret == 0) {
             loaded_count++;
-            
-            // 如果配置为自动启动，则启动进程
             if (proc_config->auto_start) {
                 process_manager_start_process(g_manager, proc_config->name);
             }
         } else {
-            char msg[512];
-            snprintf(msg, sizeof(msg), "Failed to load plugin %s: %d", proc_config->name, ret);
-            logger_log(g_logger, LOG_LEVEL_ERROR, msg);
+            LOG_ERROR("launcher", "Failed to load plugin %s: %d", proc_config->name, ret);
         }
     }
-    
-    char msg[256];
-    snprintf(msg, sizeof(msg), "Loaded %d/%d plugins", loaded_count, config->process_count);
-    logger_log(g_logger, LOG_LEVEL_INFO, msg);
-    
+
+    LOG_INFO("launcher", "Loaded %d/%d plugins", loaded_count, config->process_count);
+
     // 启动监控线程
     if (config->enable_monitor) {
         if (process_manager_start_monitor(g_manager) == 0) {
-            logger_log(g_logger, LOG_LEVEL_INFO, "Monitor thread started");
+            LOG_INFO("launcher", "Monitor thread started");
         } else {
-            logger_log(g_logger, LOG_LEVEL_ERROR, "Failed to start monitor thread");
+            LOG_ERROR("launcher", "Failed to start monitor thread");
         }
     }
-    
+
     // 进入交互模式
     handle_interactive_commands(g_manager);
-    
+
     // 清理资源
-    logger_log(g_logger, LOG_LEVEL_INFO, "Launcher shutting down...");
-    
+    LOG_INFO("launcher", "shutting down...");
+
     if (g_manager) {
         process_manager_stop_all(g_manager);
         process_manager_destroy(g_manager);
-    }
-    
-    if (g_logger) {
-        logger_destroy(g_logger);
     }
     
     config_free(config);

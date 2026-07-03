@@ -24,7 +24,7 @@ extern "C" {
 // 全局变量
 static volatile bool g_running = true;
 static TaskManager* g_task_manager = nullptr;
-static Logger* g_logger = nullptr;
+/* Logger now uses global singleton via LOG_* macros */
 
 // 信号处理函数
 void signal_handler(int signum) {
@@ -166,17 +166,13 @@ int run_cpp_task_demo() {
             g_task_manager = nullptr;
         }
         
-        if (g_logger) {
-            logger_destroy(g_logger);
-            g_logger = nullptr;
-        }
+        log_shutdown();
         
         return -1;
     }
     
     // 清理日志系统
-    logger_destroy(g_logger);
-    g_logger = nullptr;
+    log_shutdown();
     std::cout << "[OK] 日志系统已清理\n";
     
     std::cout << "\n=== C++ 任务演示程序正常退出 ===\n";
@@ -199,17 +195,13 @@ int run_interactive_demo() {
     std::cout << "=== C++ 任务交互式演示 ===\n\n";
     
     // 初始化日志系统
-    g_logger = logger_create("logs/cpp_interactive_demo.log", LOG_LEVEL_INFO);
-    if (!g_logger) {
-        std::cerr << "日志系统初始化失败\n";
-        return -1;
-    }
-    
+    log_init(LOG_INFO, "logs/cpp_interactive_demo.log");
+
     // 创建任务管理器
     g_task_manager = task_manager_create();
     if (!g_task_manager) {
         std::cerr << "任务管理器创建失败\n";
-        logger_destroy(g_logger);
+        log_shutdown();
         return -1;
     }
     
@@ -312,13 +304,13 @@ cleanup:
         }
         
         task_manager_destroy(g_task_manager);
-        logger_destroy(g_logger);
+        log_shutdown();
         return -1;
     }
     
     task_manager_destroy(g_task_manager);
-    logger_destroy(g_logger);
-    
+    log_shutdown();
+
     std::cout << "=== 交互式演示程序退出 ===\n";
     return 0;
 }

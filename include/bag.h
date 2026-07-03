@@ -5,18 +5,24 @@
  * @file bag.h
  * @brief 消息录制与回放（Bag）
  *
- * 文件格式（纯二进制流，无外部依赖）：
- *   每条记录 = [timestamp_us(8B) | topic_len(1B) | topic | data_size(4B) | data]
+ * 文件格式 v2（带类型安全 + 索引）：
+ *   [Header: magic("FLB_") 4B | version 4B | msg_count 8B | duration_us 8B |
+ *            index_offset 8B | reserved 32B]
+ *   [Records: type_id(4B)|schema_ver(1B)|endian(1B)|ts(8B)|topic_len(1B)|
+ *             topic(N)|data_size(4B)|data(N)] × msg_count
+ *   [Index: entry_count(8B) | entries[topic(64B)|count(8B)|first_off(8B)|last_off(8B)] |
+ *            crc32(4B)]
+ *
+ * 向后兼容：reader 自动检测旧格式（前 4 字节 ≠ "FLB_"），fallback 到 legacy 解析。
  *
  * 录制：
  *   BagWriter* w = bag_writer_open("out.bag");
- *   // 订阅通配符 "*" 自动录制所有 topic
- *   bag_writer_record(w, bus);      // 阻塞，直到调用 bag_writer_close
+ *   bag_writer_attach(w, bus);       // 自动录制所有 topic
  *   bag_writer_close(w);
  *
  * 回放：
  *   BagReader* r = bag_reader_open("out.bag");
- *   bag_reader_play(r, bus, 1.0f);  // 1.0 = 实时速度，2.0 = 2倍速
+ *   bag_reader_play(r, bus, 1.0f);  // 1.0 = 实时速度
  *   bag_reader_close(r);
  */
 
@@ -92,6 +98,25 @@ int bag_reader_play_filtered(BagReader* r, MessageBus* bus, float speed,
  * @return 0 成功，-1 失败
  */
 int bag_reader_info(BagReader* r, uint64_t* msg_count, uint64_t* duration_us);
+
+/**
+ * 获取 bag 文件中的 topic 列表及其消息计数。
+ * @param topics    输出缓冲区（每个 topic 64 字节）
+ * @param max_count 最多返回的 topic 数
+ * @param counts    各 topic 的消息计数（可为 NULL）
+ * @return 实际 topic 数，-1 失败
+ */
+int bag_reader_get_topics(BagReader* r, char topics[][64], int max_count,
+                          uint64_t* counts);
+
+/**
+ * 获取指定 topic 的类型信息（仅 v2 格式有效）。
+ * @param type_id     输出：FNV-1a 类型 ID（可为 NULL）
+ * @param schema_ver  输出：schema 版本号（可为 NULL）
+ * @return 0 成功，-1 未找到或不适用
+ */
+int bag_reader_get_type_info(BagReader* r, const char* topic,
+                             uint32_t* type_id, uint8_t* schema_ver);
 
 /**
  * 关闭 bag 文件

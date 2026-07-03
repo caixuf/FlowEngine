@@ -1,93 +1,189 @@
+/**
+ * logger.c — 统一日志系统实现
+ *
+ * 全局单例模式：进程内所有模块共享一个 Logger 实例。
+ * 线程安全：pthread_mutex_t 保护并发写入。
+ *
+ * 输出格式:
+ *   [2026-07-04 10:30:45.123] [INFO ] [module_name   ] message
+ */
+
 #include "logger.h"
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <stdarg.h>
+#include <sys/time.h>
 
-static const char* level_str[] = {
-    "DEBUG", "INFO", "WARN", "ERROR", "FATAL"
-};
+/* ── 模块级别覆盖 ────────────────────────────────────────── */
 
-Logger* logger_create(const char* filename, LogLevel level) {
-    Logger* logger = (Logger*)calloc(1, sizeof(Logger));
-    if (!logger) return NULL;
+#define LOG_MAX_MODULES 64
 
-    logger->level = level;
+typedef struct {
+    char     name[32];
+    LogLevel level;
+} ModuleOverride;
 
-    if (pthread_mutex_init(&logger->mutex, NULL) != 0) {
-        free(logger);
-        return NULL;
-    }
+/* ── 全局日志器状态 ──────────────────────────────────────── */
 
-    if (filename && filename[0] != '\0') {
-        snprintf(logger->filename, sizeof(logger->filename), "%s", filename);
-        logger->file = fopen(filename, "a");
-        if (!logger->file) {
-            /* Fall back to stderr if file cannot be opened */
-            logger->file = stderr;
+static struct {
+    FILE*            output;
+    LogLevel         min_level;
+    pthread_mutex_t  mutex;
+    bool             initialized;
+
+    ModuleOverride   modules[LOG_MAX_MODULES];
+    int              module_count;
+} g_log = { NULL, LOG_INFO, PTHREAD_MUTEX_INITIALIZER, false, {{0}}, 0 };
+
+/* ══════════════════════════════════════════════════════════ */
+/* 初始化 / 关闭                                              */
+/* ══════════════════════════════════════════════════════════ */
+
+void log_init(LogLevel min_level, const char* filename) {
+    if (g_log.initialized) return;
+
+    g_log.min_level = min_level;
+
+    if (filename && filename[0]) {
+        g_log.output = fopen(filename, "a");
+        if (!g_log.output) {
+            g_log.output = stderr;
         }
     } else {
-        logger->file = stderr;
+        g_log.output = stderr;
     }
 
-    return logger;
+    g_log.initialized = true;
+
+    LOG_INFO("logger", "initialized (level=%s, output=%s)",
+             log_level_str(min_level),
+             (filename && filename[0]) ? filename : "stderr");
 }
 
-void logger_destroy(Logger* logger) {
-    if (!logger) return;
-    if (logger->file && logger->file != stderr && logger->file != stdout) {
-        fclose(logger->file);
+void log_shutdown(void) {
+    if (!g_log.initialized) return;
+
+    LOG_INFO("logger", "shutting down");
+
+    if (g_log.output && g_log.output != stderr) {
+        fclose(g_log.output);
     }
-    pthread_mutex_destroy(&logger->mutex);
-    free(logger);
+    g_log.output     = stderr;
+    g_log.initialized = false;
 }
 
-void logger_log(Logger* logger, LogLevel level, const char* message) {
-    if (!logger || !message) return;
-    if (level < logger->level) return;
+/* ══════════════════════════════════════════════════════════ */
+/* 运行时配置                                                 */
+/* ══════════════════════════════════════════════════════════ */
 
-    time_t now = time(NULL);
+void log_set_level(LogLevel level) {
+    g_log.min_level = level;
+}
+
+LogLevel log_get_level(void) {
+    return g_log.min_level;
+}
+
+void log_set_module_level(const char* module, LogLevel level) {
+    if (!module) return;
+
+    for (int i = 0; i < g_log.module_count; i++) {
+        if (strcmp(g_log.modules[i].name, module) == 0) {
+            g_log.modules[i].level = level;
+            return;
+        }
+    }
+
+    if (g_log.module_count < LOG_MAX_MODULES) {
+        ModuleOverride* m = &g_log.modules[g_log.module_count++];
+        snprintf(m->name, sizeof(m->name), "%s", module);
+        m->level = level;
+    }
+}
+
+LogLevel log_get_module_level(const char* module) {
+    if (!module) return g_log.min_level;
+    for (int i = 0; i < g_log.module_count; i++) {
+        if (strcmp(g_log.modules[i].name, module) == 0)
+            return g_log.modules[i].level;
+    }
+    return g_log.min_level;
+}
+
+void log_set_output_file(const char* filename) {
+    if (g_log.output && g_log.output != stderr) {
+        fclose(g_log.output);
+    }
+    if (filename && filename[0]) {
+        g_log.output = fopen(filename, "a");
+    }
+    if (!g_log.output) {
+        g_log.output = stderr;
+    }
+}
+
+FILE* log_get_output(void) {
+    return g_log.output ? g_log.output : stderr;
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* 核心日志输出                                               */
+/* ══════════════════════════════════════════════════════════ */
+
+void log_write(const char* module, LogLevel level,
+               const char* file, int line, const char* func,
+               const char* fmt, ...) {
+    /* Auto-init if never initialized */
+    if (!g_log.initialized) {
+        log_init(LOG_INFO, NULL);
+    }
+
+    /* Level check */
+    LogLevel effective = log_get_module_level(module);
+    if (level < effective) return;
+
+    /* Timestamp */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
     struct tm tm_buf;
-    localtime_r(&now, &tm_buf);
-    char timebuf[32];
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+    time_t sec = tv.tv_sec;
+    localtime_r(&sec, &tm_buf);
 
-    const char* lvl = (level >= 0 && level <= LOG_LEVEL_FATAL)
-                      ? level_str[level] : "UNKNOWN";
+    pthread_mutex_lock(&g_log.mutex);
 
-    pthread_mutex_lock(&logger->mutex);
-    fprintf(logger->file, "[%s][%s] %s\n", timebuf, lvl, message);
-    fflush(logger->file);
-    pthread_mutex_unlock(&logger->mutex);
+    FILE* out = g_log.output ? g_log.output : stderr;
+
+    /* [2026-07-04 10:30:45.123] [INFO ] [module       ] */
+    fprintf(out, "[%04d-%02d-%02d %02d:%02d:%02d.%03d] [%-5s] [%-14s] ",
+            tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+            tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
+            (int)(tv.tv_usec / 1000),
+            log_level_str(level),
+            module ? module : "?");
+
+    /* Body */
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(out, fmt, args);
+    va_end(args);
+
+    /* Source location for DEBUG/TRACE */
+    if (level <= LOG_DEBUG) {
+        const char* fname = strrchr(file, '/');
+        fname = fname ? fname + 1 : file;
+        fprintf(out, "  [%s:%d %s()]", fname, line, func ? func : "?");
+    }
+
+    fprintf(out, "\n");
+    fflush(out);
+
+    pthread_mutex_unlock(&g_log.mutex);
 }
 
-void logger_logf(Logger* logger, LogLevel level, const char* fmt, ...) {
-    if (!logger || !fmt) return;
-    if (level < logger->level) return;
-
-    char buf[2048];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-
-    logger_log(logger, level, buf);
-}
-
-/* Global default logger for default_log_callback */
-static Logger g_default_logger = {
-    .file  = NULL,
-    .level = LOG_LEVEL_DEBUG,
-    .filename = ""
-};
-static pthread_once_t g_default_logger_once = PTHREAD_ONCE_INIT;
-
-static void init_default_logger_mutex(void) {
-    if (!g_default_logger.file) g_default_logger.file = stderr;
-    pthread_mutex_init(&g_default_logger.mutex, NULL);
-}
+/* ══════════════════════════════════════════════════════════ */
+/* 兼容旧 API                                                 */
+/* ══════════════════════════════════════════════════════════ */
 
 void default_log_callback(LogLevel level, const char* message) {
-    pthread_once(&g_default_logger_once, init_default_logger_mutex);
-    logger_log(&g_default_logger, level, message);
+    log_write("core", level, __FILE__, __LINE__, __func__, "%s", message);
 }

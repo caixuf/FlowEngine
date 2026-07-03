@@ -1,4 +1,19 @@
-# StartTool 文档中心
+# FlowEngine 文档中心
+
+## 技术深度文档 (skills/)
+
+| # | 主题 | 内容 |
+|---|------|------|
+| 01 | [C语言OOP模式](../skills/01_oop_in_c.md) | struct继承 + vtable多态 |
+| 02 | [插件系统](../skills/02_plugin_system.md) | dlopen/dlsym 动态加载 |
+| 03 | [消息总线](../skills/03_message_bus.md) | Pub/Sub + Req/Reply + Zero-Copy |
+| 04 | [IPC通道](../skills/04_ipc_channel.md) | POSIX共享内存跨进程通信 |
+| 05 | [Bag录制回放](../skills/05_bag_recording.md) | 二进制录制 + 时间感知回放 |
+| 06 | [时钟服务](../skills/06_clock_service.md) | 真实/仿真时钟统一 |
+| **07** | **[序列化层](../skills/07_serializer.md)** 🆕 | FNV-1a 类型ID + IDL代码生成 + 字节序 |
+| **08** | **[反射式状态机](../skills/08_state_machine.md)** 🆕 | 转移表反射 + guard运行时替换 + ADAS驾驶模式 |
+| **09** | **[服务发现](../skills/09_discovery.md)** 🆕 | UDP组播 + 拓扑追踪 + 自动IPC |
+| **10** | **[数据融合](../skills/10_fusion.md)** 🆕 | MessageBuffer + 时间对齐 + FusionNodeCpp |
 
 ## 学习路径
 

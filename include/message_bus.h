@@ -52,6 +52,13 @@ typedef struct {
     MessageType type;                             /**< 消息类型 */
     uint64_t    timestamp_us;                     /**< 时间戳（微秒，CLOCK_MONOTONIC） */
     uint32_t    data_size;                        /**< 有效数据字节数 */
+
+    /* ── 类型安全序列化字段 (Phase 1) ─────────────────────── */
+    uint32_t    type_id;          /**< FNV-1a hash 类型标识 (0=raw/unknown) */
+    uint8_t     schema_version;   /**< schema 版本号 (0=unknown, 1=initial) */
+    uint8_t     endian_marker;    /**< 字节序标记: 0x12=LE, 0x21=BE, 0=unknown */
+    uint8_t     _reserved[6];     /**< 对齐保留，便于后续扩展 */
+
     uint8_t     data[MSG_BUS_MAX_DATA_SIZE];      /**< 负载数据 */
 } Message;
 

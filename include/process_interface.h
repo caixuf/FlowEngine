@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "logger.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,16 +44,13 @@ typedef struct {
     uint32_t restart_times; // 已重启次数
 } ProcessStats;
 
-/**
- * 日志级别
- */
-typedef enum {
-    LOG_LEVEL_DEBUG = 0,
-    LOG_LEVEL_INFO,
-    LOG_LEVEL_WARN,
-    LOG_LEVEL_ERROR,
-    LOG_LEVEL_FATAL
-} LogLevel;
+/* LogLevel is now defined in logger.h (unified logging system).
+ * Legacy aliases provided for backward compatibility. */
+#define LOG_LEVEL_DEBUG  LOG_DEBUG
+#define LOG_LEVEL_INFO   LOG_INFO
+#define LOG_LEVEL_WARN   LOG_WARN
+#define LOG_LEVEL_ERROR  LOG_ERROR
+#define LOG_LEVEL_FATAL  LOG_FATAL
 
 /**
  * 日志回调函数类型

@@ -8,8 +8,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 设置编译选项
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -fcoroutines")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -fcoroutines -D_GNU_SOURCE")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
@@ -31,9 +31,37 @@ include_directories(include)
 # 查找依赖库
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # 查找cjson库
 pkg_check_modules(CJSON REQUIRED libcjson)
+
+# =============================================================================
+# Phase 1: IDL 代码生成 (msg/*.msg -> 序列化头文件)
+# =============================================================================
+set(MSG_CODEGEN "${CMAKE_SOURCE_DIR}/tools/msg_codegen.py")
+set(GEN_DIR     "${CMAKE_BINARY_DIR}/gen")
+
+# 主 IDL 文件
+set(MSG_FILES
+    msg/adas_msgs.msg
+)
+
+# 为每个 .msg 生成对应的 _gen.h
+foreach(MSG_FILE ${MSG_FILES})
+    get_filename_component(MSG_NAME ${MSG_FILE} NAME_WE)
+    set(GEN_HEADER "${GEN_DIR}/${MSG_NAME}_gen.h")
+    add_custom_command(
+        OUTPUT ${GEN_HEADER}
+        COMMAND ${Python3_EXECUTABLE} ${MSG_CODEGEN} "${CMAKE_SOURCE_DIR}/${MSG_FILE}" ${GEN_HEADER}
+        DEPENDS ${MSG_CODEGEN} ${CMAKE_SOURCE_DIR}/${MSG_FILE}
+        COMMENT "Generating serialization code from ${MSG_FILE}"
+    )
+    list(APPEND GEN_HEADERS ${GEN_HEADER})
+endforeach()
+
+# 便捷目标：只生成代码
+add_custom_target(msg_codegen DEPENDS ${GEN_HEADERS})
 
 # =============================================================================
 # flowcoro — C++20 高性能协程库 (https://github.com/caixuf/flowcoro)
@@ -88,6 +116,11 @@ set(CORE_SOURCES
     src/core/clock_service.c
     src/core/bag.c
     src/core/msg_schema.c
+    src/core/serializer.c
+    src/core/scheduler.c
+    src/core/state_machine.c
+    src/core/discovery.c
+    src/core/fusion.c
 )
 
 set(PLUGIN_SOURCES
@@ -97,12 +130,17 @@ set(PLUGIN_SOURCES
 
 # 创建核心静态库
 add_library(starttool_core STATIC ${CORE_SOURCES})
-target_link_libraries(starttool_core 
+# 依赖代码生成（msg_codegen 先完成再编译 core）
+add_dependencies(starttool_core msg_codegen)
+target_link_libraries(starttool_core
     Threads::Threads
     ${CMAKE_DL_LIBS}
     ${CJSON_LIBRARIES}
 )
-target_include_directories(starttool_core PUBLIC ${CJSON_INCLUDE_DIRS})
+target_include_directories(starttool_core PUBLIC
+    ${CJSON_INCLUDE_DIRS}
+    ${GEN_DIR}              # 代码生成的头文件
+)
 target_compile_options(starttool_core PUBLIC ${CJSON_CFLAGS_OTHER})
 
 # 创建插件动态库
@@ -167,14 +205,22 @@ target_link_libraries(reactive_task starttool_core)
 # 确保编译开关与头文件路径一致。
 # =============================================================================
 
+# ── Phase 2: C++ 调度器 (M:N coroutine scheduling) ────────
+add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/fusion_cpp.cpp)
+target_link_libraries(scheduler_cpp starttool_core flowcoro_headers)
+target_include_directories(scheduler_cpp PUBLIC ${GEN_DIR})
+target_compile_options(scheduler_cpp PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+)
+
 # ── 协程任务插件（动态库，供 launcher 动态加载）────────────
 add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
-target_link_libraries(flowcoro_task starttool_core flowcoro_headers flowcoro_net)
+target_link_libraries(flowcoro_task starttool_core flowcoro_headers flowcoro_net scheduler_cpp)
 target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程 + 消息总线综合演示程序 ───────────────────────────
 add_executable(flow_coro src/coro_bus_demo.cpp)
-target_link_libraries(flow_coro starttool_core flowcoro_headers flowcoro_net)
+target_link_libraries(flow_coro starttool_core flowcoro_headers flowcoro_net scheduler_cpp)
 target_compile_definitions(flow_coro PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程路径性能基准测试程序 ──────────────────────────────
@@ -197,8 +243,14 @@ target_link_libraries(fake_control_task starttool_core m)
 add_executable(flow_adas src/adas_demo.c)
 target_link_libraries(flow_adas starttool_core fake_perception_task fake_control_task)
 
+# ── Full-stack multi-process demo (Phase 3+4 integration) ──
+add_executable(flow_fullstack src/fullstack_demo.c)
+target_link_libraries(flow_fullstack starttool_core scheduler_cpp)
+# Depends on codegen for ADAS type registration
+add_dependencies(flow_fullstack msg_codegen)
+
 # 安装规则
-install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_fullstack benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -277,6 +329,16 @@ add_test(NAME coro_correctness_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(coro_correctness_test PROPERTIES TIMEOUT 60)
+
+# ── Unit tests ────────────────────────────────────────────
+# Rename to .cpp for C++ compilation (uses lambdas in tests)
+add_executable(test_modules tests/test_modules.c)
+set_source_files_properties(tests/test_modules.c PROPERTIES LANGUAGE CXX)
+target_link_libraries(test_modules starttool_core scheduler_cpp)
+add_dependencies(test_modules msg_codegen)
+target_include_directories(test_modules PRIVATE ${GEN_DIR})
+
+add_test(NAME unit_tests COMMAND test_modules)
 
 add_test(NAME flow_adas_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_adas

@@ -107,6 +107,16 @@ int task_manager_restart_task(TaskManager* manager, const char* name);
 int task_manager_start_all(TaskManager* manager);
 
 /**
+ * 按依赖顺序启动所有任务 (Kahn 拓扑排序)
+ *
+ * 无依赖的任务优先启动。检测到循环依赖时，剩余任务按注册顺序启动并输出 warning。
+ *
+ * @param manager 任务管理器指针
+ * @return 失败任务的数量
+ */
+int task_manager_start_all_deps(TaskManager* manager);
+
+/**
  * 停止所有任务
  * @param manager 任务管理器指针
  * @return 失败任务的数量

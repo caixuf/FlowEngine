@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include "state_machine.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +57,10 @@ typedef struct {
     bool auto_restart;          // 是否自动重启
     bool enable_stats;          // 是否启用统计
     void* custom_config;        // 自定义配置数据
+
+    /* ── Phase 2: 调度器扩展 ──────────────────────────── */
+    uint64_t cpu_affinity_mask;  /**< CPU 亲和性掩码 (bit 0=core 0, 0=不绑定) */
+    double   max_frequency_hz;   /**< 最大执行频率 (0=不限制) */
 } TaskConfig;
 
 // 前向声明
@@ -68,15 +73,19 @@ struct TaskInterface;
 typedef struct TaskBase {
     // 基类数据成员
     TaskConfig config;              // 任务配置
-    TaskState state;                // 当前状态
+    TaskState state;                // 当前状态（与 sm.current 保持同步）
     TaskStats stats;                // 统计信息
     pthread_t thread;               // 任务线程
     pthread_mutex_t mutex;          // 状态保护互斥锁
     bool should_stop;               // 停止标志
     uint32_t restart_count;         // 已重启次数
-    
+
     // 虚函数表指针 (类似C++的vtable)
     const struct TaskInterface* vtable;
+
+    /* ── Phase 2: 反射式状态机 ─────────────────────────── */
+    ReflectiveStateMachine sm;      /**< 反射式状态机（转移表可查询/可打印） */
+    bool sm_enabled;                /**< true = 启用状态机反射层 */
 } TaskBase;
 
 /**
@@ -193,6 +202,35 @@ int task_restart(TaskBase* task);
  * @return 任务状态
  */
 TaskState task_get_state(TaskBase* task);
+
+/**
+ * 查询：任务能否从当前状态接收指定事件？
+ * 使用内嵌的反射式状态机进行查询。
+ *
+ * 用法：
+ *   if (!task_can_event(task, SM_EVENT_STOP)) {
+ *       printf("当前状态不允许 STOP\n");
+ *   }
+ *   statem_dump_table(&task->sm);  // 打印完整转移表
+ */
+static inline bool task_can_event(const TaskBase* task, EventId event) {
+    return task && task->sm_enabled && statem_can_transition(&task->sm, event);
+}
+
+/**
+ * 获取当前状态允许的事件列表。
+ * @return 事件数量
+ */
+static inline int task_allowed_events(const TaskBase* task, EventId* events, int max) {
+    return (task && task->sm_enabled) ? statem_allowed_events(&task->sm, events, max) : 0;
+}
+
+/**
+ * 打印任务的完整状态转移表 + 当前状态。
+ */
+static inline void task_dump_sm(const TaskBase* task) {
+    if (task && task->sm_enabled) statem_dump_table(&task->sm);
+}
 
 /**
  * 获取任务统计信息

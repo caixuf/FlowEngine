@@ -155,6 +155,19 @@ int task_manager_start_task(TaskManager* mgr, const char* name) {
     pthread_mutex_unlock(&mgr->mutex);
     if (!node) return -1;
 
+    /* Reflective check: can this task accept START? */
+    if (node->task->sm_enabled && !task_can_event(node->task, SM_EVENT_START)) {
+        fprintf(stderr, "[task_manager] '%s': cannot START — current state=%s, allowed=[",
+                name, statem_state_name(&node->task->sm, statem_current(&node->task->sm)));
+        EventId allowed[8];
+        int n = task_allowed_events(node->task, allowed, 8);
+        for (int i = 0; i < n; i++)
+            fprintf(stderr, "%s%s", statem_event_name(&node->task->sm, allowed[i]),
+                    (i < n - 1) ? "," : "");
+        fprintf(stderr, "]\n");
+        return -1;
+    }
+
     TaskState old = task_get_state(node->task);
     int ret = task_start(node->task);
     if (ret == 0) notify_event(mgr, name, old, TASK_STATE_RUNNING);
@@ -200,6 +213,107 @@ int task_manager_start_all(TaskManager* mgr) {
         pthread_mutex_lock(&mgr->mutex);
     }
     pthread_mutex_unlock(&mgr->mutex);
+    return failed;
+}
+
+/**
+ * Start all tasks in dependency order (Kahn's algorithm).
+ *
+ * Tasks with no dependencies start first.  If a dependency cycle is detected,
+ * remaining tasks are started in registration order with a warning.
+ *
+ * @return number of tasks that failed to start
+ */
+int task_manager_start_all_deps(TaskManager* mgr) {
+    if (!mgr) return -1;
+
+    /* Build name-to-index map */
+    char  names[64][64];
+    int   indeg[64];
+    int   n = 0;
+
+    pthread_mutex_lock(&mgr->mutex);
+    TaskNode* node;
+    TAILQ_FOREACH(node, &mgr->task_list, entries) {
+        if (n >= 64) break;
+        snprintf(names[n], 64, "%s", node->name);
+        indeg[n] = 0;
+        n++;
+    }
+
+    /* Compute in-degrees from dependency graph */
+    for (int i = 0; i < n; i++) {
+        /* Find node i's dependencies */
+        TAILQ_FOREACH(node, &mgr->task_list, entries) {
+            if (strcmp(node->name, names[i]) == 0) break;
+        }
+        if (!node) continue;
+        DepEntry* dep = node->deps;
+        while (dep) {
+            for (int j = 0; j < n; j++) {
+                if (strcmp(names[j], dep->dep_name) == 0) {
+                    indeg[i]++;  /* task i depends on task j */
+                    break;
+                }
+            }
+            dep = dep->next;
+        }
+    }
+    pthread_mutex_unlock(&mgr->mutex);
+
+    /* Kahn's algorithm */
+    bool started[64] = {false};
+    int  started_count = 0;
+    int  failed = 0;
+
+    while (started_count < n) {
+        bool progress = false;
+        for (int i = 0; i < n; i++) {
+            if (started[i]) continue;
+            if (indeg[i] == 0) {
+                if (task_manager_start_task(mgr, names[i]) != 0) {
+                    fprintf(stderr, "[task_manager] failed to start '%s'\n", names[i]);
+                    failed++;
+                }
+                started[i] = true;
+                started_count++;
+                progress = true;
+
+                /* Decrement in-degrees of tasks that depend on i */
+                pthread_mutex_lock(&mgr->mutex);
+                TAILQ_FOREACH(node, &mgr->task_list, entries) {
+                    DepEntry* dep = node->deps;
+                    while (dep) {
+                        if (strcmp(dep->dep_name, names[i]) == 0) {
+                            /* node depends on task i — find node's index */
+                            for (int k = 0; k < n; k++) {
+                                if (strcmp(names[k], node->name) == 0 && indeg[k] > 0) {
+                                    indeg[k]--;
+                                    break;
+                                }
+                            }
+                        }
+                        dep = dep->next;
+                    }
+                }
+                pthread_mutex_unlock(&mgr->mutex);
+            }
+        }
+        if (!progress) {
+            /* Cycle detected — start remaining in registration order */
+            fprintf(stderr, "[task_manager] WARNING: dependency cycle detected. "
+                    "Starting %d remaining tasks in registration order.\n",
+                    n - started_count);
+            for (int i = 0; i < n; i++) {
+                if (!started[i]) {
+                    if (task_manager_start_task(mgr, names[i]) != 0) failed++;
+                    started[i] = true;
+                }
+            }
+            break;
+        }
+    }
+
     return failed;
 }
 

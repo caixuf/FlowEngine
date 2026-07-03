@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <sched.h>
+#include <errno.h>
 
 /* ── helpers ─────────────────────────────────────────── */
 
@@ -13,10 +15,33 @@ static uint64_t now_us(void) {
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
+/* Map TaskState to StateMachine event for state transitions */
+static EventId task_state_to_event(TaskState old, TaskState new) {
+    switch (new) {
+        case TASK_STATE_RUNNING:     return SM_EVENT_START;
+        case TASK_STATE_STOPPING:    return SM_EVENT_STOP;
+        case TASK_STATE_STOPPED:     return SM_EVENT_DONE;
+        case TASK_STATE_ERROR:       return SM_EVENT_ERROR;
+        case TASK_STATE_INITIALIZED: return SM_EVENT_RESTART;
+        default:                     return SM_EVENT_NONE;
+    }
+    (void)old;
+}
+
 static void set_state(TaskBase* task, TaskState new_state) {
+    TaskState old;
     pthread_mutex_lock(&task->mutex);
+    old = task->state;
     task->state = new_state;
     pthread_mutex_unlock(&task->mutex);
+
+    /* Sync with reflective state machine if enabled */
+    if (task->sm_enabled && new_state != old) {
+        EventId ev = task_state_to_event(old, new_state);
+        if (ev != SM_EVENT_NONE) {
+            statem_send_event(&task->sm, ev, task);
+        }
+    }
 }
 
 /* ── Thread entry ─────────────────────────────────────── */
@@ -80,6 +105,13 @@ int task_base_init(TaskBase* task, const TaskInterface* vtable, const TaskConfig
     task->config = *config;
     task->state  = TASK_STATE_INITIALIZED;
 
+    /* Initialize reflective state machine */
+    statem_init(&task->sm, SM_TABLE_STANDARD,
+                SM_STATE_INITIALIZED, config->name);
+    task->sm_enabled = true;  /* enabled by default */
+    /* Enable trace by default for easy debugging */
+    task->sm.trace_enabled = true;
+
     if (pthread_mutex_init(&task->mutex, NULL) != 0) return -1;
     return 0;
 }
@@ -102,12 +134,54 @@ int task_start(TaskBase* task) {
     task->should_stop = false;
     pthread_mutex_unlock(&task->mutex);
 
-    int ret = pthread_create(&task->thread, NULL, task_thread_fn, task);
+    /* ── Phase 2: Build thread attributes with scheduling + affinity ── */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+
+    /* Apply priority-based scheduling (best-effort; SCHED_FIFO requires root) */
+    if (task->config.priority >= TASK_PRIORITY_HIGH) {
+        struct sched_param sp;
+        int policy = SCHED_FIFO;
+        sp.sched_priority = (task->config.priority == TASK_PRIORITY_CRITICAL) ? 80 : 60;
+        int r = pthread_attr_setschedpolicy(&attr, policy);
+        if (r == 0) {
+            pthread_attr_setschedparam(&attr, &sp);
+            /* Inherit scheduling from attr (don't need explicit inherit) */
+        }
+        /* If SCHED_FIFO fails (e.g., no root), silently fall back to SCHED_OTHER */
+    }
+
+    /* Apply CPU affinity if mask is set */
+    if (task->config.cpu_affinity_mask != 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        for (int core = 0; core < CPU_SETSIZE && core < 64; core++) {
+            if (task->config.cpu_affinity_mask & (1ULL << core)) {
+                CPU_SET(core, &cpuset);
+            }
+        }
+        pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
+    }
+
+    int ret = pthread_create(&task->thread, &attr, task_thread_fn, task);
+    pthread_attr_destroy(&attr);
+
     if (ret != 0) {
-        fprintf(stderr, "[task_start] pthread_create failed: %d\n", ret);
+        fprintf(stderr, "[task_start] pthread_create failed for '%s': %s\n",
+                task->config.name, strerror(ret));
         set_state(task, TASK_STATE_ERROR);
         return -1;
     }
+
+    /* Log scheduling info for debug */
+    if (task->config.priority >= TASK_PRIORITY_HIGH || task->config.cpu_affinity_mask) {
+        printf("[task_start] '%s': prio=%d, policy=%s, cpu_mask=0x%lx\n",
+               task->config.name, task->config.priority,
+               (task->config.priority >= TASK_PRIORITY_HIGH) ? "FIFO" : "OTHER",
+               (unsigned long)task->config.cpu_affinity_mask);
+    }
+
     return 0;
 }
 
