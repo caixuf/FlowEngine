@@ -56,8 +56,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flowcoro)
 
-# 创建精简集成目标：只暴露头文件路径 + C++20协程支持
-# 避免继承 flowcoro INTERFACE 的激进编译参数影响整个项目
+# =============================================================================
+# flowcoro_headers — 全局 INTERFACE 目标
+#
+# 暴露 flowcoro 头文件路径 + C++20 协程支持，供所有协程相关目标统一引用。
+# 避免继承 flowcoro INTERFACE 的激进编译参数影响整个项目。
+# 使用方式：
+#   target_link_libraries(<target> flowcoro_headers)
+#   target_compile_definitions(<target> PRIVATE FLOWCORO_INTEGRATION)
+# =============================================================================
 add_library(flowcoro_headers INTERFACE)
 target_include_directories(flowcoro_headers INTERFACE
     ${flowcoro_SOURCE_DIR}/include
@@ -153,15 +160,32 @@ target_link_libraries(flow_bag starttool_core m)
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task starttool_core)
 
-# ── Step 6: flowcoro 协程任务插件 ────────────────────────
+# =============================================================================
+# flowcoro 协程集成目标（统一管理）
+#
+# 所有协程相关目标均链接 flowcoro_headers 并定义 FLOWCORO_INTEGRATION，
+# 确保编译开关与头文件路径一致。
+# =============================================================================
+
+# ── 协程任务插件（动态库，供 launcher 动态加载）────────────
 add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
 target_link_libraries(flowcoro_task starttool_core flowcoro_headers flowcoro_net)
 target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
 
-# ── Step 6: flowcoro 协程 + 消息总线综合程序 ─────────────
+# ── 协程 + 消息总线综合演示程序 ───────────────────────────
 add_executable(flow_coro src/coro_bus_demo.cpp)
 target_link_libraries(flow_coro starttool_core flowcoro_headers flowcoro_net)
 target_compile_definitions(flow_coro PRIVATE FLOWCORO_INTEGRATION)
+
+# ── 协程路径性能基准测试程序 ──────────────────────────────
+add_executable(benchmark_coro src/benchmark_coro.cpp)
+target_link_libraries(benchmark_coro starttool_core flowcoro_headers flowcoro_net m)
+target_compile_definitions(benchmark_coro PRIVATE FLOWCORO_INTEGRATION)
+
+# ── 协程集成层正确性测试程序 ──────────────────────────────
+add_executable(coro_correctness_test test/coro_correctness_test.cpp)
+target_link_libraries(coro_correctness_test starttool_core flowcoro_headers flowcoro_net)
+target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
 # ── ADAS: 感知节点 + 控制节点全链路仿真 ──────────────────
 add_library(fake_perception_task SHARED src/plugins/fake_perception_task.c)
@@ -174,7 +198,7 @@ add_executable(flow_adas src/adas_demo.c)
 target_link_libraries(flow_adas starttool_core fake_perception_task fake_control_task)
 
 # 安装规则
-install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas benchmark
+install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -242,6 +266,18 @@ add_test(NAME flow_coro_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+add_test(NAME flow_coro_bench
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/benchmark_coro
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(flow_coro_bench PROPERTIES TIMEOUT 120)
+
+add_test(NAME coro_correctness_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_correctness_test
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(coro_correctness_test PROPERTIES TIMEOUT 60)
+
 add_test(NAME flow_adas_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_adas
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -254,7 +290,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher flow_task flow_bus flow_coro flow_adas benchmark example_process example_task flowcoro_task fake_perception_task fake_control_task config)
+add_custom_target(dev DEPENDS launcher flow_task flow_bus flow_coro flow_adas benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task fake_perception_task fake_control_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")
