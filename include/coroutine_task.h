@@ -88,8 +88,8 @@
 #ifndef PROJECT_SOURCE_DIR
 #  define PROJECT_SOURCE_DIR ""
 #endif
-/* coro_task.h 使用 CoroutineManager 但未自行包含其头文件，
- * 须在包含 coro_task.h 前显式引入。                              */
+/* coro_task.h 自身使用了 CoroutineManager 但未包含其头文件，
+ * 必须在包含 coro_task.h 之前显式引入，否则编译报错。         */
 #include <flowcoro/coroutine_manager.h>
 #include <flowcoro/coro_task.h>
 
