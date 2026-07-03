@@ -232,19 +232,19 @@ printf("CPU使用率: %u%%\n", stats->cpu_usage);
 
 ```bash
 # 编译任务演示程序
-make task_demo
+make flow_task
 
 # 运行任务演示
-make run_task_demo
+make run_demo
 
 # 或直接运行
 cd build
-./task_demo
+./flow_task
 ```
 
 ## 演示程序命令
 
-运行task_demo后，可以使用以下交互命令：
+运行 flow_task 后，可以使用以下交互命令：
 
 - `start task1` - 启动任务1
 - `start task2` - 启动任务2  

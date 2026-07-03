@@ -55,13 +55,13 @@ FlowEngine/
 │   │   ├── fake_perception_task.c  # 假感知节点（LiDAR/GPS/障碍物仿真）
 │   │   └── fake_control_task.c     # 假控制节点（油门/制动/转向决策）
 │   ├── launcher.c               # 主启动器
-│   ├── task_demo.c              # 任务演示
-│   ├── bus_demo.c               # 消息总线演示
-│   ├── simple_cpp_demo.cpp      # C++ 任务演示
-│   ├── ipc_demo.c               # IPC 通道演示
-│   ├── bag_demo.c               # Bag 录制回放演示
-│   ├── coro_bus_demo.cpp        # 协程 + 总线综合演示
-│   └── adas_demo.c              # ADAS 完整链路演示（感知 → 总线 → 控制）
+│   ├── task_demo.c              # flow_task 源文件（任务系统）
+│   ├── bus_demo.c               # flow_bus 源文件（消息总线）
+│   ├── simple_cpp_demo.cpp      # flow_cpp 源文件（C++ 任务）
+│   ├── ipc_demo.c               # flow_ipc 源文件（IPC 通道）
+│   ├── bag_demo.c               # flow_bag 源文件（Bag 录制回放）
+│   ├── coro_bus_demo.cpp        # flow_coro 源文件（协程 + 总线）
+│   └── adas_demo.c              # flow_adas 源文件（ADAS 完整链路）
 ├── include/                     # 公共头文件
 │   ├── coroutine_task.h         # 协程任务基类（BusAwaitable / FlowCoroTask）
 │   ├── task_interface.h         # 任务接口定义
@@ -103,31 +103,31 @@ make -j$(nproc)
 
 编译完成后产物位于 `build/bin/`（可执行文件）和 `build/lib/`（动态库插件）。
 
-### 运行演示
+### 运行
 
 ```bash
-# C 任务演示（3 个并发任务，展示生命周期）
-./build/bin/task_demo
+# C 任务系统（3 个并发任务，展示生命周期）
+./build/bin/flow_task
 
-# 消息总线演示（发布/订阅）
-./build/bin/bus_demo
+# 消息总线（发布/订阅）
+./build/bin/flow_bus
 
-# C++ 任务演示
-./build/bin/simple_cpp_demo
+# C++ 任务
+./build/bin/flow_cpp
 
-# IPC 跨进程通道演示（需两个终端）
-./build/bin/ipc_demo pub   # 终端1：发布者
-./build/bin/ipc_demo sub   # 终端2：订阅者
+# IPC 跨进程通道（需两个终端）
+./build/bin/flow_ipc pub   # 终端1：发布者
+./build/bin/flow_ipc sub   # 终端2：订阅者
 
-# Bag 录制 & 回放演示（含统一时钟）
-./build/bin/bag_demo record
-./build/bin/bag_demo play
+# Bag 录制 & 回放（含统一时钟）
+./build/bin/flow_bag record
+./build/bin/flow_bag play
 
-# C++20 协程 + 消息总线综合演示
-./build/bin/coro_bus_demo
+# C++20 协程 + 消息总线
+./build/bin/flow_coro
 
-# ADAS 完整链路演示（假感知节点 + 假控制节点）
-./build/bin/adas_demo
+# ADAS 完整链路仿真（感知节点 + 控制节点）
+./build/bin/flow_adas
 ```
 
 ## 开发插件
