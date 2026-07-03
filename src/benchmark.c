@@ -48,6 +48,7 @@ typedef struct {
 static Stats calc_stats(uint64_t* samples, int n) {
     uint64_t* sorted = malloc((size_t)n * sizeof(uint64_t));
     if (!sorted) {
+        fprintf(stderr, "calc_stats: malloc failed, results will be zero\n");
         Stats empty = {0};
         return empty;
     }
@@ -200,6 +201,12 @@ static void bench_publish_latency(void) {
     uint8_t payload[64];
     memset(payload, 0, sizeof(payload));
     uint64_t* samples = malloc((size_t)N * sizeof(uint64_t));
+    if (!samples) {
+        fprintf(stderr, "bench_publish_latency: malloc failed\n");
+        sem_destroy(&g_lat_sem);
+        message_bus_destroy(bus);
+        return;
+    }
 
     /* 预热 */
     for (int i = 0; i < 100; i++) {
@@ -243,6 +250,10 @@ static void bench_zerocopy_vs_copy(void) {
     uint8_t payload[64];
     memset(payload, 0, sizeof(payload));
     uint64_t* samples = malloc((size_t)N * sizeof(uint64_t));
+    if (!samples) {
+        fprintf(stderr, "bench_zerocopy_vs_copy: malloc failed\n");
+        return;
+    }
 
     /* — 零拷贝路径：回调在发布线程内同步调用 — */
     {
@@ -316,6 +327,11 @@ static void bench_req_reply_latency(void) {
     uint8_t req_data[32];
     memset(req_data, 0x42, sizeof(req_data));
     uint64_t* samples = malloc((size_t)N * sizeof(uint64_t));
+    if (!samples) {
+        fprintf(stderr, "bench_req_reply_latency: malloc failed\n");
+        message_bus_destroy(bus);
+        return;
+    }
     Message   reply;
 
     /* 预热 */
