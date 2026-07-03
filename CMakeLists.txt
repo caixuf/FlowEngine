@@ -42,6 +42,7 @@ set(CORE_SOURCES
     src/core/process_manager.c
     src/core/task_interface.c
     src/core/task_manager.c
+    src/core/message_bus.c
 )
 
 set(PLUGIN_SOURCES
@@ -86,6 +87,10 @@ target_link_libraries(launcher starttool_core)
 add_executable(task_demo src/task_demo.c)
 target_link_libraries(task_demo starttool_core example_task)
 
+# 创建通信总线演示程序
+add_executable(bus_demo src/bus_demo.c)
+target_link_libraries(bus_demo starttool_core m)
+
 # C++任务演示程序 (有编译问题，暂时注释)
 #add_executable(cpp_task_demo src/cpp_task_demo.cpp)
 #target_link_libraries(cpp_task_demo starttool_core)
@@ -95,7 +100,7 @@ add_executable(simple_cpp_demo src/simple_cpp_demo.cpp)
 target_link_libraries(simple_cpp_demo starttool_core cpp_example_task)
 
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo
     RUNTIME DESTINATION bin
 )
 
@@ -159,7 +164,7 @@ message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher task_demo example_process example_task config)
+add_custom_target(dev DEPENDS launcher task_demo bus_demo example_process example_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "StartTool")

@@ -10,6 +10,11 @@ extern "C" {
 #endif
 
 /**
+ * 任务管理器回调函数类型
+ */
+typedef void (*TaskEventCallback)(const char* task_name, TaskState old_state, TaskState new_state, void* user_data);
+
+/**
  * 任务节点 - 链表节点
  */
 typedef struct TaskNode {
@@ -28,12 +33,9 @@ typedef struct TaskManager {
     bool is_running;                           // 管理器运行状态
     uint32_t task_count;                       // 任务计数
     uint32_t running_task_count;               // 运行中任务计数
+    TaskEventCallback event_callback;          // 任务状态变更回调
+    void* event_user_data;                     // 回调用户数据
 } TaskManager;
-
-/**
- * 任务管理器回调函数类型
- */
-typedef void (*TaskEventCallback)(const char* task_name, TaskState old_state, TaskState new_state, void* user_data);
 
 /**
  * 创建任务管理器
