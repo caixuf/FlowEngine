@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(StartTool VERSION 1.0.0 LANGUAGES C CXX)
+project(FlowEngine VERSION 1.0.0 LANGUAGES C CXX)
 
 # 设置C和C++标准
 set(CMAKE_C_STANDARD 11)
@@ -183,7 +183,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 add_custom_target(dev DEPENDS launcher task_demo bus_demo example_process example_task config)
 
 # CPack配置（用于创建安装包）
-set(CPACK_PACKAGE_NAME "StartTool")
+set(CPACK_PACKAGE_NAME "FlowEngine")
 set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
