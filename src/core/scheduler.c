@@ -197,13 +197,15 @@ int scheduler_start(Scheduler* sched) {
     if (!sched || sched->running) return -1;
     sched->running = true;
 
-    /* For now, the scheduler is a registry + parameter manager.
-     * Tasks are still started via task_start (thread-per-task).
-     * The M:N worker pool (CppScheduler) will be added in Phase 2D. */
-
-    printf("[scheduler] Started with %u tasks, %u worker threads\n",
-           sched->entry_count, sched->config.worker_thread_count);
+    printf("[scheduler] Started with %u tasks, %u worker threads (mode=%s)\n",
+           sched->entry_count, sched->config.worker_thread_count,
+           sched->config.mode == SCHEDULER_MODE_CHOREO ? "CHOREO" : "CLASSIC");
     return 0;
+}
+
+void scheduler_set_choreo_bus(Scheduler* sched, MessageBus* bus) {
+    if (!sched) return;
+    sched->choreo_bus = bus;
 }
 
 void scheduler_stop(Scheduler* sched) {

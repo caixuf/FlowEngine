@@ -194,6 +194,7 @@ EXPORT_COROUTINE_TASK(my_sensor, MySensorTask)
 
 ## 技术文档
 
+- [项目完善度评估](docs/PROJECT_REVIEW.md)
 - [快速入门](docs/QUICK_START.md)
 - [技术设计文档](docs/TECHNICAL_DESIGN.md)
 - [完整学习指南](docs/LEARNING_GUIDE.md)

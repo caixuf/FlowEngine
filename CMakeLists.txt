@@ -259,6 +259,11 @@ target_link_libraries(fake_control_task starttool_core m)
 add_executable(flow_adas src/adas_demo.c)
 target_link_libraries(flow_adas starttool_core fake_perception_task fake_control_task)
 
+# ── End-to-end demo (all components: serializer+scheduler+statem+discovery+fusion+transport) ──
+add_executable(flow_e2e src/e2e_demo.c)
+target_link_libraries(flow_e2e starttool_core scheduler_cpp)
+add_dependencies(flow_e2e msg_codegen)
+
 # ── Full-stack multi-process demo (Phase 3+4 integration) ──
 add_executable(flow_fullstack src/fullstack_demo.c)
 target_link_libraries(flow_fullstack starttool_core scheduler_cpp)
@@ -266,7 +271,7 @@ target_link_libraries(flow_fullstack starttool_core scheduler_cpp)
 add_dependencies(flow_fullstack msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_fullstack benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 

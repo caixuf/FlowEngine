@@ -15,6 +15,10 @@
 | **09** | **[服务发现](../skills/09_discovery.md)** 🆕 | UDP组播 + 拓扑追踪 + 自动IPC |
 | **10** | **[数据融合](../skills/10_fusion.md)** 🆕 | MessageBuffer + 时间对齐 + FusionNodeCpp |
 
+## 项目评估
+
+- [项目完善度评估](PROJECT_REVIEW.md) - 当前完成度、模块成熟度、短板与下一步路线
+
 ## 学习路径
 
 ### 初学者路径（1年经验左右）
@@ -48,6 +52,7 @@
 ```
 docs/
 ├── README.md              # 本文件，文档索引
+├── PROJECT_REVIEW.md      # 项目完善度评估
 ├── QUICK_START.md         # 30分钟快速入门
 ├── LEARNING_GUIDE.md      # 完整学习指南（2-4周）
 ├── PRACTICE_PROJECTS.md   # 实战练习项目)

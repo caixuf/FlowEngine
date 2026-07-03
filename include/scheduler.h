@@ -22,6 +22,7 @@
  */
 
 #include "task_interface.h"
+#include "message_bus.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -134,6 +135,9 @@ void scheduler_destroy(Scheduler* scheduler);
 
 /** Start the scheduler (creates worker threads). */
 int scheduler_start(Scheduler* sched);
+
+/** Set the message bus for choreo trigger routing. */
+void scheduler_set_choreo_bus(Scheduler* sched, MessageBus* bus);
 
 /** Stop the scheduler (joins worker threads). */
 void scheduler_stop(Scheduler* sched);
