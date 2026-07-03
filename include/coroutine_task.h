@@ -191,6 +191,8 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
+        /* 每次挂起前重置触发标志，允许下一次 co_await 正常工作 */
+        fired_.store(false, std::memory_order_release);
         message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
     }
 
@@ -202,6 +204,16 @@ public:
 private:
     static void on_message(const Message* msg, void* user_data) {
         auto* self = static_cast<BusAwaitable*>(user_data);
+        /* 原子 CAS：只允许第一条消息触发 resume。
+         * 在 FLOWCORO 模式下，resume 被投入线程池异步执行，
+         * 在 await_resume() 完成取消订阅之前可能有第二条消息到达，
+         * 若不加保护则会产生双重 resume（未定义行为）。
+         * 与 WhenAnyBusAwaitable 使用相同的防护模式。 */
+        bool expected = false;
+        if (!self->fired_.compare_exchange_strong(expected, true,
+                                                  std::memory_order_acq_rel)) {
+            return; /* 已被首条消息触发，忽略后续消息 */
+        }
         self->received_msg_ = *msg;
         auto h = self->handle_;
         if (!h || h.done()) return;
@@ -221,6 +233,7 @@ private:
     MessageBus*              bus_;
     std::string              topic_;
     std::coroutine_handle<>  handle_;
+    std::atomic<bool>        fired_{false};
     Message                  received_msg_{};
 };
 
@@ -284,7 +297,9 @@ private:
             waiter = self->waiter_;
             self->waiter_ = nullptr;
         }
-        if (!waiter || waiter.done()) return;
+        /* 只用 !waiter 判断：互斥锁已保证同一时刻最多一个调用者持有非空 waiter，
+         * 避免在锁外调用 waiter.done()（读非原子协程帧位）引入数据竞争。 */
+        if (!waiter) return;
 
 #ifdef FLOWCORO_INTEGRATION
         flowcoro_integration::get_thread_pool().enqueue_void(
