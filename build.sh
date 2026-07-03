@@ -103,6 +103,17 @@ run_tests() {
     cd ..
 }
 
+# 运行性能基准测试
+run_benchmark() {
+    if [ ! -d "$BUILD_DIR" ]; then
+        print_error "构建目录不存在，请先构建项目"
+        exit 1
+    fi
+
+    print_info "运行性能基准测试..."
+    ${BUILD_DIR}/bin/benchmark
+}
+
 # 运行演示程序
 run_demo() {
     if [ ! -d "$BUILD_DIR" ]; then
@@ -141,7 +152,8 @@ show_help() {
     echo "  release    - 构建Release版本 (默认)"
     echo "  install    - 安装到系统"
     echo "  test       - 运行测试"
-    echo "  demo       - 运行任务演示"
+    echo "  bench      - 运行性能基准测试"
+  echo "  demo       - 运行任务演示"
     echo "  launcher   - 运行启动器"
     echo "  help       - 显示此帮助信息"
     echo ""
@@ -201,6 +213,9 @@ main() {
             ;;
         test)
             run_tests
+            ;;
+        bench)
+            run_benchmark
             ;;
         demo)
             run_demo
