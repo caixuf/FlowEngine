@@ -175,8 +175,7 @@ protected:
         started_.store(true, std::memory_order_release);
         for (int i = 0; i < n_ && !should_stop(); ++i) {
             Message msg = co_await subscribe_once(bus(), "b2/once");
-            if (i >= 0)
-                samples_[i] = now_ns() - msg.timestamp_us * 1000ULL;
+            samples_[i] = now_ns() - msg.timestamp_us * 1000ULL;
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
@@ -208,8 +207,7 @@ protected:
         started_.store(true, std::memory_order_release);
         for (int i = 0; i < n_ && !should_stop(); ++i) {
             Message msg = co_await ch.recv();
-            if (i >= 0)
-                samples_[i] = now_ns() - msg.timestamp_us * 1000ULL;
+            samples_[i] = now_ns() - msg.timestamp_us * 1000ULL;
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
@@ -555,7 +553,7 @@ static void bench_concurrent_tasks() {
         }
         for (int i = 0; i < num_workers; ++i) {
             auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done_flags[i].load() && std::chrono::steady_clock::now() < dl)
+            while (!done_flags[i].load(std::memory_order_acquire) && std::chrono::steady_clock::now() < dl)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         for (auto& th : threads) th.join();
