@@ -3,7 +3,7 @@
 
 /**
  * @file msg_schema.h
- * @brief 轻量级消息类型注册（零开销，纯头文件）
+ * @brief 轻量级消息类型注册（零开销，声明 + core库实现）
  *
  * 给 topic 绑定 C 结构体类型信息（名称 + 大小），
  * 在 publish/subscribe 时通过 MSG_CHECK_SIZE 宏做大小校验，
@@ -19,78 +19,30 @@
  *
  *   // 订阅回调中校验
  *   MSG_CHECK_SIZE(msg->topic, msg->data_size);
+ *
+ * 注意：注册表存储在 starttool_core 库中（唯一实例），所有插件
+ *       共享同一注册表，跨 .so 注册互通。
  */
 
 #include <stddef.h>
-#include <string.h>
-#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ── Schema 表 ────────────────────────────────────────── */
-
-#define MSG_SCHEMA_MAX_ENTRIES 64
-#define MSG_SCHEMA_TOPIC_LEN   64
-
-typedef struct {
-    char   topic[MSG_SCHEMA_TOPIC_LEN];
-    size_t struct_size;
-    char   type_name[64];
-} MsgSchemaEntry;
+/* ── Public API (implemented in src/core/msg_schema.c) ── */
 
 /**
- * 注意：这是进程内全局静态表。每个包含此头文件的翻译单元共享同一进程地址空间，
- * 所以同一进程内各模块注册的 schema 互相可见。
- * 跨进程不共享（这与 ipc_channel 独立使用）。
+ * 注册 topic 对应的结构体类型信息
+ * @return 0 成功，-1 失败（表已满或参数非法）
  */
-static MsgSchemaEntry g_msg_schema[MSG_SCHEMA_MAX_ENTRIES];
-static int            g_msg_schema_count = 0;
+int msg_schema_register(const char* topic, size_t struct_size, const char* type_name);
 
-/* ── 注册函数 ─────────────────────────────────────────── */
-
-static inline int msg_schema_register(const char* topic,
-                                      size_t struct_size,
-                                      const char* type_name) {
-    if (!topic || g_msg_schema_count >= MSG_SCHEMA_MAX_ENTRIES) return -1;
-    /* Update if already registered */
-    for (int i = 0; i < g_msg_schema_count; i++) {
-        if (strcmp(g_msg_schema[i].topic, topic) == 0) {
-            g_msg_schema[i].struct_size = struct_size;
-            strncpy(g_msg_schema[i].type_name, type_name ? type_name : "",
-                    sizeof(g_msg_schema[i].type_name) - 1);
-            return 0;
-        }
-    }
-    MsgSchemaEntry* e = &g_msg_schema[g_msg_schema_count++];
-    strncpy(e->topic,     topic,               sizeof(e->topic)     - 1);
-    strncpy(e->type_name, type_name ? type_name : "", sizeof(e->type_name) - 1);
-    e->struct_size = struct_size;
-    return 0;
-}
-
-/* ── 校验函数 ─────────────────────────────────────────── */
-
-static inline int msg_schema_check(const char* topic, size_t actual_size,
-                                    const char* call_site) {
-    for (int i = 0; i < g_msg_schema_count; i++) {
-        if (strcmp(g_msg_schema[i].topic, topic) == 0) {
-            if (g_msg_schema[i].struct_size != actual_size) {
-                fprintf(stderr,
-                    "[MSG_SCHEMA WARN] %s: topic='%s' expected size=%zu "
-                    "(%s) but got %zu — type mismatch!\n",
-                    call_site ? call_site : "?",
-                    topic, g_msg_schema[i].struct_size,
-                    g_msg_schema[i].type_name, actual_size);
-                return -1;
-            }
-            return 0;   /* OK */
-        }
-    }
-    /* Topic not registered — no complaint, just skip */
-    return 0;
-}
+/**
+ * 检查 topic 与 size 是否符合注册的类型
+ * @return 0 匹配（或未注册），-1 大小不匹配
+ */
+int msg_schema_check(const char* topic, size_t actual_size, const char* call_site);
 
 /* ── 便利宏 ───────────────────────────────────────────── */
 

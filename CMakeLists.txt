@@ -3,7 +3,7 @@ project(StartTool VERSION 1.0.0 LANGUAGES C CXX)
 
 # 设置C和C++标准
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -46,6 +46,7 @@ set(CORE_SOURCES
     src/core/ipc_channel.c
     src/core/clock_service.c
     src/core/bag.c
+    src/core/msg_schema.c
 )
 
 set(PLUGIN_SOURCES
@@ -74,13 +75,13 @@ target_link_libraries(example_task starttool_core)
 add_library(cpp_example_task SHARED src/plugins/simple_cpp_task.cpp)
 target_link_libraries(cpp_example_task starttool_core)
 
-# 网络服务任务 (C++) - 暂时注释掉
-#add_library(network_service_task SHARED src/plugins/network_service_task.cpp)
-#target_link_libraries(network_service_task starttool_core)
+# 网络服务任务 (C++)
+add_library(network_service_task SHARED src/plugins/network_service_task.cpp)
+target_link_libraries(network_service_task starttool_core)
 
-# 数据处理任务 (C++) - 暂时注释掉
-#add_library(data_processor_task SHARED src/plugins/data_processor_task.cpp)
-#target_link_libraries(data_processor_task starttool_core)
+# 数据处理任务 (C++)
+add_library(data_processor_task SHARED src/plugins/data_processor_task.cpp)
+target_link_libraries(data_processor_task starttool_core)
 
 # 创建主启动器可执行文件
 add_executable(launcher src/launcher.c)
@@ -94,9 +95,9 @@ target_link_libraries(task_demo starttool_core example_task)
 add_executable(bus_demo src/bus_demo.c)
 target_link_libraries(bus_demo starttool_core m)
 
-# C++任务演示程序 (有编译问题，暂时注释)
-#add_executable(cpp_task_demo src/cpp_task_demo.cpp)
-#target_link_libraries(cpp_task_demo starttool_core)
+# C++任务演示程序
+add_executable(cpp_task_demo src/cpp_task_demo.cpp)
+target_link_libraries(cpp_task_demo starttool_core cpp_example_task)
 
 # 简化的C++任务演示程序
 add_executable(simple_cpp_demo src/simple_cpp_demo.cpp)
@@ -115,7 +116,7 @@ add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task starttool_core)
 
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo
     RUNTIME DESTINATION bin
 )
 
@@ -123,7 +124,7 @@ install(TARGETS starttool_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task
+install(TARGETS example_process example_task cpp_example_task reactive_task network_service_task data_processor_task
     LIBRARY DESTINATION lib/starttool/plugins
 )
 

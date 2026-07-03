@@ -1,4 +1,5 @@
 #include "task_interface.h"
+#include "process_interface.h"
 #include <iostream>
 #include <string>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <sstream>
 #include <algorithm>
 #include <random>
+#include <cstring>
 
 /**
  * 网络服务任务 - 模拟一个简单的网络服务

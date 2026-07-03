@@ -119,6 +119,14 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
  */
 int message_bus_unsubscribe(MessageBus* bus, const char* topic, MessageCallback callback);
 
+/**
+ * 取消订阅（同时匹配 callback 和 user_data）
+ * 用于多个订阅者使用相同回调函数但不同 user_data 的场景。
+ * @return 0 成功，-1 未找到
+ */
+int message_bus_unsubscribe_ex(MessageBus* bus, const char* topic,
+                               MessageCallback callback, void* user_data);
+
 /* ── Req/Reply ───────────────────────────────────────────── */
 
 /**

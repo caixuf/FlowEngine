@@ -1,4 +1,5 @@
 #include "task_interface.h"
+#include "process_interface.h"
 #include <iostream>
 #include <string>
 #include <memory>
@@ -21,6 +22,7 @@
 #include <random>
 #include <mutex>
 #include <shared_mutex>
+#include <cstring>
 
 /**
  * 数据处理任务 - 演示C++高级特性
@@ -415,14 +417,12 @@ private:
         stats.total_count = processed_data_.size();
         
         // 使用STL算法计算统计信息
-        auto values = processed_data_ | std::views::transform([](const DataRecord& r) { return r.value; });
-        
-        stats.sum = std::accumulate(values.begin(), values.end(), 0.0);
+        for (const auto& record : processed_data_) {
+            stats.sum += record.value;
+            if (record.value < stats.min_value) stats.min_value = record.value;
+            if (record.value > stats.max_value) stats.max_value = record.value;
+        }
         stats.mean = stats.sum / stats.total_count;
-        
-        auto [min_it, max_it] = std::minmax_element(values.begin(), values.end());
-        stats.min_value = *min_it;
-        stats.max_value = *max_it;
         
         // 计算分类统计
         for (const auto& record : processed_data_) {

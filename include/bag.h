@@ -72,6 +72,28 @@ BagReader* bag_reader_open(const char* path);
 int bag_reader_play(BagReader* r, MessageBus* bus, float speed);
 
 /**
+ * 带过滤器的回放
+ * @param bus          目标总线（若为 NULL 则仅打印消息）
+ * @param speed        回放速度倍数（1.0 = 实时，0 = 尽快回放）
+ * @param topic_filter 仅回放匹配的 topic（NULL 或 "*" 表示全部）
+ * @param start_us     起始时间戳（0 表示从头）
+ * @param end_us       结束时间戳（0 表示到末尾）
+ * @return 回放的消息条数，-1 失败
+ */
+int bag_reader_play_filtered(BagReader* r, MessageBus* bus, float speed,
+                             const char* topic_filter,
+                             uint64_t start_us, uint64_t end_us);
+
+/**
+ * 获取 bag 文件元数据（topic 列表、总时长、消息总数）
+ * @param r          Reader 指针
+ * @param msg_count  输出：消息总数（可为 NULL）
+ * @param duration_us 输出：总时长（微秒，可为 NULL）
+ * @return 0 成功，-1 失败
+ */
+int bag_reader_info(BagReader* r, uint64_t* msg_count, uint64_t* duration_us);
+
+/**
  * 关闭 bag 文件
  */
 void bag_reader_close(BagReader* r);

@@ -15,11 +15,20 @@ extern "C" {
 typedef void (*TaskEventCallback)(const char* task_name, TaskState old_state, TaskState new_state, void* user_data);
 
 /**
+ * 依赖项条目（单链表）
+ */
+typedef struct DepEntry {
+    char dep_name[64];
+    struct DepEntry* next;
+} DepEntry;
+
+/**
  * 任务节点 - 链表节点
  */
 typedef struct TaskNode {
     TaskBase* task;                    // 任务指针
     char name[64];                     // 任务名称(用于快速查找)
+    DepEntry* deps;                    // 依赖任务名链表
     TAILQ_ENTRY(TaskNode) entries;     // 队列链接
 } TaskNode;
 
@@ -173,6 +182,16 @@ int task_manager_health_check(TaskManager* manager);
  * @param error_tasks 错误任务数(输出)
  */
 void task_manager_get_stats(TaskManager* manager, uint32_t* total_tasks, uint32_t* running_tasks, uint32_t* error_tasks);
+
+/**
+ * 添加任务依赖关系（用于拓扑排序启动）
+ * task_name 的启动将在 dep_name 成功运行后进行。
+ * @param manager    任务管理器指针
+ * @param task_name  依赖其他任务的任务名
+ * @param dep_name   被依赖的任务名
+ * @return 0 成功，-1 失败（任务未找到或内存不足）
+ */
+int task_manager_add_dependency(TaskManager* manager, const char* task_name, const char* dep_name);
 
 #ifdef __cplusplus
 }
