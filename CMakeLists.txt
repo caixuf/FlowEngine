@@ -121,6 +121,10 @@ target_link_libraries(data_processor_task starttool_core)
 add_executable(launcher src/launcher.c)
 target_link_libraries(launcher starttool_core)
 
+# 性能基准测试程序
+add_executable(benchmark src/benchmark.c)
+target_link_libraries(benchmark starttool_core m)
+
 # 创建任务演示程序
 add_executable(task_demo src/task_demo.c)
 target_link_libraries(task_demo starttool_core example_task)
@@ -170,7 +174,7 @@ add_executable(adas_demo src/adas_demo.c)
 target_link_libraries(adas_demo starttool_core fake_perception_task fake_control_task)
 
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo adas_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo adas_demo benchmark
     RUNTIME DESTINATION bin
 )
 
@@ -250,7 +254,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo adas_demo example_process example_task flowcoro_task fake_perception_task fake_control_task config)
+add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo adas_demo benchmark example_process example_task flowcoro_task fake_perception_task fake_control_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")
