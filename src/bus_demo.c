@@ -60,12 +60,35 @@ static void signal_handler(int sig) {
  * 订阅者回调
  * ══════════════════════════════════════════════════════════ */
 
+/* ── 普通 copy-based 回调 ────────────────────────────────── */
+
 static void on_lidar(const Message* msg, void* user_data) {
     const char* module = (const char*)user_data;
     if (msg->data_size != sizeof(LidarFrame)) return;
 
     const LidarFrame* f = (const LidarFrame*)msg->data;
-    printf("[%s] 激光雷达帧 #%u: 点云=%u, 中心=(%.1f, %.1f, %.1f)\n",
+    printf("[%s][拷贝] 激光雷达帧 #%u: 点云=%u, 中心=(%.1f, %.1f, %.1f)\n",
+           module, f->frame_id, f->point_count, f->x, f->y, f->z);
+}
+
+/* ── 零拷贝回调 ──────────────────────────────────────────── */
+
+/**
+ * 零拷贝订阅回调：data 指针直接指向发布者的原始缓冲区，无任何内存拷贝。
+ * @warning data 仅在回调返回前有效，不可异步保存指针！
+ */
+static void on_lidar_zero_copy(const char* topic, const char* sender,
+                                uint32_t msg_id, uint64_t timestamp_us,
+                                const void* data, uint32_t data_size,
+                                void* user_data)
+{
+    (void)topic; (void)sender; (void)msg_id; (void)timestamp_us;
+    const char* module = (const char*)user_data;
+    if (data_size != sizeof(LidarFrame)) return;
+
+    /* 直接使用原始指针，零内存拷贝 */
+    const LidarFrame* f = (const LidarFrame*)data;
+    printf("[%s][零拷贝] 激光雷达帧 #%u: 点云=%u, 中心=(%.1f, %.1f, %.1f)\n",
            module, f->frame_id, f->point_count, f->x, f->y, f->z);
 }
 
@@ -117,7 +140,7 @@ static void* lidar_thread(void* arg) {
     MessageBus* bus = (MessageBus*)arg;
     uint32_t frame_id = 0;
 
-    printf("[激光雷达驱动] 启动，发布频率 10 Hz\n");
+    printf("[激光雷达驱动] 启动，发布频率 10 Hz（使用零拷贝路径）\n");
     while (g_running) {
         LidarFrame f = {
             .x           = (float)(frame_id % 100) * 0.1f,
@@ -127,7 +150,12 @@ static void* lidar_thread(void* arg) {
             .point_count = 64000 + frame_id % 1000,
             .frame_id    = frame_id
         };
-        message_bus_publish(bus, "sensor/lidar", "lidar_driver", &f, sizeof(f));
+        /*
+         * 使用零拷贝发布：零拷贝订阅者在本线程中同步收到 &f 的原始指针，
+         * 无任何 memcpy；普通订阅者经由异步队列收到一份拷贝。
+         */
+        message_bus_publish_zero_copy(bus, "sensor/lidar", "lidar_driver",
+                                      &f, sizeof(f));
         frame_id++;
         usleep(100000);   /* 10 Hz */
     }
@@ -173,10 +201,15 @@ int main(void) {
     printf("[总线] 创建成功: adas_bus\n\n");
 
     /* 2. 注册订阅者 */
-    message_bus_subscribe(g_bus, "sensor/lidar", on_lidar, (void*)"感知模块");
+    message_bus_subscribe(g_bus, "sensor/lidar", on_lidar, (void*)"感知模块[拷贝]");
     message_bus_subscribe(g_bus, "sensor/gps",   on_gps,   (void*)"定位模块");
     message_bus_subscribe(g_bus, "*",            on_all,   NULL);
-    printf("[总线] 已注册订阅者: sensor/lidar, sensor/gps, *(通配符)\n");
+    printf("[总线] 已注册普通订阅者: sensor/lidar, sensor/gps, *(通配符)\n");
+
+    /* 2b. 注册零拷贝订阅者（将在发布者线程中同步、无拷贝地被调用） */
+    message_bus_subscribe_zero_copy(g_bus, "sensor/lidar",
+                                    on_lidar_zero_copy, (void*)"感知模块[零拷贝]");
+    printf("[总线] 已注册零拷贝订阅者: sensor/lidar\n");
 
     /* 3. 注册服务 */
     message_bus_register_service(g_bus, "service/path_planning",
@@ -227,10 +260,14 @@ int main(void) {
     /* 6. 打印统计 */
     uint64_t pub, del, drop;
     message_bus_get_stats(g_bus, &pub, &del, &drop);
+    uint64_t zc_pub, zc_del;
+    message_bus_get_zc_stats(g_bus, &zc_pub, &zc_del);
     printf("\n════ 总线统计 ════\n");
-    printf("  发布消息: %lu\n", (unsigned long)pub);
-    printf("  投递次数: %lu\n", (unsigned long)del);
-    printf("  丢弃消息: %lu\n", (unsigned long)drop);
+    printf("  [普通路径] 发布消息: %lu\n",  (unsigned long)pub);
+    printf("  [普通路径] 投递次数: %lu\n",  (unsigned long)del);
+    printf("  [普通路径] 丢弃消息: %lu\n",  (unsigned long)drop);
+    printf("  [零拷贝]   发布次数: %lu\n",  (unsigned long)zc_pub);
+    printf("  [零拷贝]   投递次数: %lu（无内存拷贝）\n", (unsigned long)zc_del);
 
     /* 清理 */
     message_bus_destroy(g_bus);

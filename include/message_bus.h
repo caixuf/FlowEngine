@@ -148,6 +148,73 @@ int message_bus_register_service(MessageBus* bus, const char* topic,
  */
 int message_bus_unregister_service(MessageBus* bus, const char* topic);
 
+/* ── 零拷贝（Zero-Copy）────────────────────────────────── */
+
+/**
+ * 零拷贝订阅回调：直接接收原始数据指针，无内存拷贝开销
+ *
+ * @param topic        消息主题
+ * @param sender       发送者名称
+ * @param msg_id       消息唯一 ID
+ * @param timestamp_us 时间戳（微秒，CLOCK_MONOTONIC）
+ * @param data         指向发布者原始数据的指针（仅在回调执行期间有效！不可异步保存）
+ * @param data_size    数据字节数
+ * @param user_data    注册时传入的用户指针
+ *
+ * @warning data 指针的生命周期仅限于本次回调调用，严禁在回调返回后继续访问！
+ */
+typedef void (*ZeroCopyCallback)(const char*  topic,
+                                  const char*  sender,
+                                  uint32_t     msg_id,
+                                  uint64_t     timestamp_us,
+                                  const void*  data,
+                                  uint32_t     data_size,
+                                  void*        user_data);
+
+/**
+ * 注册零拷贝订阅者
+ *
+ * 当发布方调用 message_bus_publish_zero_copy() 时，匹配的零拷贝订阅者会在
+ * 发布者线程中被同步调用，原始数据指针直接传递，不发生任何内存拷贝。
+ *
+ * @param topic    主题名；传 "*" 可订阅所有主题
+ * @param callback 零拷贝消息到达时的回调
+ * @param user_data 透传给回调的用户指针
+ * @return 0 成功，-1 失败
+ */
+int message_bus_subscribe_zero_copy(MessageBus*      bus,
+                                     const char*      topic,
+                                     ZeroCopyCallback callback,
+                                     void*            user_data);
+
+/**
+ * 取消零拷贝订阅
+ * @return 0 成功，-1 未找到
+ */
+int message_bus_unsubscribe_zero_copy(MessageBus*      bus,
+                                       const char*      topic,
+                                       ZeroCopyCallback callback);
+
+/**
+ * 零拷贝发布（同步）
+ *
+ * 与 message_bus_publish() 的区别：
+ *  - 零拷贝订阅者（通过 subscribe_zero_copy 注册）在调用者线程中被同步调用，
+ *    data 指针直接传递，零内存拷贝，零队列延迟。
+ *  - 普通 copy-based 订阅者仍然通过异步队列收到通知（需一次拷贝）。
+ *
+ * 适用场景：大块数据（点云、图像帧等）对延迟敏感的场景。
+ *
+ * @param data      指向待发布数据的指针（函数返回前始终有效）
+ * @param data_size 数据字节数（<= MSG_BUS_MAX_DATA_SIZE）
+ * @return 成功通知的零拷贝订阅者数量，-1 表示参数非法
+ */
+int message_bus_publish_zero_copy(MessageBus*  bus,
+                                   const char*  topic,
+                                   const char*  sender,
+                                   const void*  data,
+                                   uint32_t     data_size);
+
 /* ── 统计 ────────────────────────────────────────────────── */
 
 /**
@@ -160,6 +227,15 @@ void message_bus_get_stats(MessageBus* bus,
                            uint64_t* published_count,
                            uint64_t* delivered_count,
                            uint64_t* dropped_count);
+
+/**
+ * 获取零拷贝专项统计
+ * @param zc_published  零拷贝发布调用次数（输出，可为 NULL）
+ * @param zc_delivered  零拷贝成功投递给订阅者的次数（输出，可为 NULL）
+ */
+void message_bus_get_zc_stats(MessageBus* bus,
+                               uint64_t*   zc_published,
+                               uint64_t*   zc_delivered);
 
 #ifdef __cplusplus
 }
