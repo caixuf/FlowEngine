@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlowEngine Topology Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f172a;color:#e2e8f0;height:100vh;display:flex}
+#sidebar{width:360px;background:#1e293b;padding:20px;overflow-y:auto;border-right:1px solid #334155;display:flex;flex-direction:column;gap:16px}
+#canvas{flex:1;position:relative;overflow:hidden}
+#graph{width:100%;height:100%}
+h1{font-size:18px;color:#38bdf8;margin-bottom:4px}
+h2{font-size:14px;color:#94a3b8;margin:12px 0 4px}
+.node{stroke-width:2;cursor:pointer;transition:opacity .15s}
+.node:hover{opacity:.85}
+.node-label{font-size:11px;fill:#cbd5e1;pointer-events:none;text-anchor:middle}
+.edge{stroke:#475569;stroke-width:1.5;fill:none;marker-end:url(#arrow)}
+.edge-label{font-size:9px;fill:#64748b}
+.pub{fill:#22c55e}.sub{fill:#3b82f6}.srv{fill:#f59e0b}.fusion{fill:#a855f7}
+.dead{opacity:.35} .alive{opacity:1}
+#input-box{width:100%;height:200px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:10px;font:12px monospace;resize:vertical}
+button{background:#2563eb;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px}
+button:hover{background:#1d4ed8}
+.stat{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid #1e293b}
+.stat-val{color:#38bdf8;font-weight:600}
+.legend{display:flex;gap:8px;flex-wrap:wrap;font-size:11px}
+.legend span{display:flex;align-items:center;gap:4px}
+.legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.info{font-size:11px;color:#64748b;margin-top:8px}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>🔗 FlowEngine Topology</h1>
+  <p style="font-size:11px;color:#64748b">Paste discovery JSON below or drag a .json file</p>
+  <textarea id="input-box" placeholder='{"nodes":[...]}'></textarea>
+  <button onclick="loadFromText()">🔄 Render</button>
+  <button onclick="loadSample()" style="background:#334155">📋 Load Sample</button>
+  <button onclick="clearGraph()" style="background:#ef4444">✕ Clear</button>
+  <input type="file" id="file-input" accept=".json" onchange="loadFile()" style="display:none">
+  <button onclick="document.getElementById('file-input').click()" style="background:#334155">📂 Open File</button>
+
+  <h2>Legend</h2>
+  <div class="legend">
+    <span><span class="dot pub"></span> Publisher</span>
+    <span><span class="dot sub"></span> Subscriber</span>
+    <span><span class="dot srv"></span> Service</span>
+    <span><span class="dot fusion"></span> Fusion</span>
+  </div>
+
+  <h2>Stats</h2>
+  <div id="stats"><span class="info">No data loaded</span></div>
+
+  <div class="info">Click a node to see details. Drag nodes to rearrange. Scroll to zoom.</div>
+</div>
+
+<div id="canvas">
+  <svg id="graph"></svg>
+</div>
+
+<script>
+const svg = document.getElementById('graph');
+let nodes = [], edges = [];
+let scale = 1, tx = 0, ty = 0, dragging = false, dragNode = null, dragX, dragY;
+
+function loadFromText() {
+  const text = document.getElementById('input-box').value.trim();
+  if (!text) return;
+  try { render(JSON.parse(text)); } catch(e) { alert('Invalid JSON: '+e.message); }
+}
+
+function loadFile() {
+  const f = document.getElementById('file-input').files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = e => { document.getElementById('input-box').value = e.target.result; loadFromText(); };
+  reader.readAsText(f);
+}
+
+function loadSample() {
+  document.getElementById('input-box').value = JSON.stringify({
+    nodes:[
+      {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",type_id:"0xd712aa51",freq:10.0},{topic:"sensor/gps",type_id:"0x0596b0b7",freq:5.0}]},
+      {name:"fusion",pid:1002,alive:true,caps:9,topics:[{topic:"sensor/lidar",type_id:"0xd712aa51",freq:0},{topic:"sensor/gps",type_id:"0x0596b0b7",freq:0},{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:10.0}]},
+      {name:"control",pid:1003,alive:true,caps:2,topics:[{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:0},{topic:"control/cmd",type_id:"0x2d95c6d2",freq:0}]},
+      {name:"planning",pid:1004,alive:false,caps:2,topics:[{topic:"fusion/localization",type_id:"0xf0ed10c0",freq:0}]}
+    ]
+  }, null, 2);
+  loadFromText();
+}
+
+function capsColor(caps) {
+  if (caps & 8) return 'fusion';
+  if (caps & 4) return 'srv';
+  if (caps & 1) return 'pub';
+  if (caps & 2) return 'sub';
+  return 'sub';
+}
+
+function render(data) {
+  nodes = []; edges = [];
+  const ns = data.nodes || [];
+
+  // Layout: grid
+  const cols = Math.ceil(Math.sqrt(ns.length));
+  const spacing = 200;
+
+  ns.forEach((n, i) => {
+    nodes.push({
+      id: i, name: n.name, pid: n.pid, alive: n.alive!==false,
+      caps: n.caps||0, topics: n.topics||[],
+      x: 100 + (i % cols) * spacing, y: 100 + Math.floor(i/cols) * spacing,
+      color: capsColor(n.caps||0)
+    });
+  });
+
+  // Build edges: same topic → connection
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i+1; j < nodes.length; j++) {
+      const ni = nodes[i], nj = nodes[j];
+      const shared = ni.topics.filter(ti => nj.topics.some(tj => tj.topic === ti.topic));
+      shared.forEach(t => {
+        edges.push({from:i, to:j, topic:t.topic});
+      });
+    }
+  }
+
+  // Stats
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><span>Nodes</span><span class="stat-val">${nodes.length}</span></div>
+    <div class="stat"><span>Alive</span><span class="stat-val">${nodes.filter(n=>n.alive).length}</span></div>
+    <div class="stat"><span>Connections</span><span class="stat-val">${edges.length}</span></div>
+    <div class="stat"><span>Topics</span><span class="stat-val">${[...new Set(edges.map(e=>e.topic))].length}</span></div>
+  `;
+
+  draw();
+}
+
+function draw() {
+  const W = svg.parentElement.clientWidth;
+  const H = svg.parentElement.clientHeight;
+  svg.setAttribute('viewBox', `${-tx/scale} ${-ty/scale} ${W/scale} ${H/scale}`);
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+
+  let html = `<defs><marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#475569"/></marker></defs>`;
+
+  // Edges
+  edges.forEach(e => {
+    const a = nodes[e.from], b = nodes[e.to];
+    const mx = (a.x+b.x)/2, my = (a.y+b.y)/2;
+    html += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" class="edge"/>`;
+    html += `<text x="${mx}" y="${my-6}" class="edge-label">${e.topic}</text>`;
+  });
+
+  // Nodes
+  nodes.forEach(n => {
+    const r = 28;
+    html += `<circle cx="${n.x}" cy="${n.y}" r="${r}" class="node ${n.color} ${n.alive?'alive':'dead'}" data-id="${n.id}"/>`;
+    html += `<text x="${n.x}" y="${n.y+4}" class="node-label">${n.name}</text>`;
+    html += `<text x="${n.x}" y="${n.y+18}" class="node-label" style="font-size:9px;fill:#64748b">PID ${n.pid}</text>`;
+
+    // Topics on hover area (shown as small badges)
+    n.topics.slice(0,3).forEach((t,ti) => {
+      html += `<text x="${n.x}" y="${n.y - r - 8 - ti*14}" class="edge-label" style="font-size:8px">${t.topic.split('/').pop()}</text>`;
+    });
+  });
+
+  html += `</svg>`;
+  svg.innerHTML = html;
+
+  // Click/drag handlers
+  svg.querySelectorAll('.node').forEach(circle => {
+    circle.addEventListener('mousedown', e => {
+      dragNode = parseInt(circle.dataset.id);
+      dragX = e.clientX - nodes[dragNode].x * scale;
+      dragY = e.clientY - nodes[dragNode].y * scale;
+      dragging = true;
+      e.stopPropagation();
+    });
+    circle.addEventListener('dblclick', e => {
+      const n = nodes[parseInt(circle.dataset.id)];
+      document.getElementById('input-box').value = JSON.stringify(n.topics, null, 2);
+    });
+  });
+
+  svg.addEventListener('mousemove', e => {
+    if (!dragging || dragNode===null) return;
+    nodes[dragNode].x = (e.clientX - dragX) / scale;
+    nodes[dragNode].y = (e.clientY - dragY) / scale;
+    draw();
+  });
+  svg.addEventListener('mouseup', () => { dragging = false; dragNode = null; });
+  svg.addEventListener('mouseleave', () => { dragging = false; dragNode = null; });
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const ds = e.deltaY > 0 ? 0.9 : 1.1;
+    scale *= ds;
+    draw();
+  });
+}
+
+function clearGraph() {
+  document.getElementById('input-box').value = '';
+  nodes = []; edges = [];
+  document.getElementById('stats').innerHTML = '<span class="info">Cleared</span>';
+  svg.innerHTML = '';
+}
+
+// Load sample on start
+loadSample();
+</script>
+</body>
+</html>
