@@ -43,6 +43,9 @@ set(CORE_SOURCES
     src/core/task_interface.c
     src/core/task_manager.c
     src/core/message_bus.c
+    src/core/ipc_channel.c
+    src/core/clock_service.c
+    src/core/bag.c
 )
 
 set(PLUGIN_SOURCES
@@ -99,8 +102,20 @@ target_link_libraries(bus_demo starttool_core m)
 add_executable(simple_cpp_demo src/simple_cpp_demo.cpp)
 target_link_libraries(simple_cpp_demo starttool_core cpp_example_task)
 
+# ── Step 1: IPC 跨进程通道演示 ───────────────────────────
+add_executable(ipc_demo src/ipc_demo.c)
+target_link_libraries(ipc_demo starttool_core rt)
+
+# ── Step 3: Bag 录制回放演示（含 Step 5 统一时钟）────────
+add_executable(bag_demo src/bag_demo.c)
+target_link_libraries(bag_demo starttool_core m)
+
+# ── Step 4: 消息驱动任务插件 ─────────────────────────────
+add_library(reactive_task SHARED src/plugins/reactive_task.c)
+target_link_libraries(reactive_task starttool_core)
+
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo
     RUNTIME DESTINATION bin
 )
 
@@ -108,7 +123,7 @@ install(TARGETS starttool_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task
+install(TARGETS example_process example_task cpp_example_task reactive_task
     LIBRARY DESTINATION lib/starttool/plugins
 )
 
