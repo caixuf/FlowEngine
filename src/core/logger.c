@@ -14,8 +14,14 @@ Logger* logger_create(const char* filename, LogLevel level) {
 
     logger->level = level;
 
+    if (pthread_mutex_init(&logger->mutex, NULL) != 0) {
+        free(logger);
+        return NULL;
+    }
+
     if (filename && filename[0] != '\0') {
         strncpy(logger->filename, filename, sizeof(logger->filename) - 1);
+        logger->filename[sizeof(logger->filename) - 1] = '\0';
         logger->file = fopen(filename, "a");
         if (!logger->file) {
             /* Fall back to stderr if file cannot be opened */
@@ -33,6 +39,7 @@ void logger_destroy(Logger* logger) {
     if (logger->file && logger->file != stderr && logger->file != stdout) {
         fclose(logger->file);
     }
+    pthread_mutex_destroy(&logger->mutex);
     free(logger);
 }
 
@@ -49,8 +56,23 @@ void logger_log(Logger* logger, LogLevel level, const char* message) {
     const char* lvl = (level >= 0 && level <= LOG_LEVEL_FATAL)
                       ? level_str[level] : "UNKNOWN";
 
+    pthread_mutex_lock(&logger->mutex);
     fprintf(logger->file, "[%s][%s] %s\n", timebuf, lvl, message);
     fflush(logger->file);
+    pthread_mutex_unlock(&logger->mutex);
+}
+
+void logger_logf(Logger* logger, LogLevel level, const char* fmt, ...) {
+    if (!logger || !fmt) return;
+    if (level < logger->level) return;
+
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    logger_log(logger, level, buf);
 }
 
 /* Global default logger for default_log_callback */
@@ -59,10 +81,14 @@ static Logger g_default_logger = {
     .level = LOG_LEVEL_DEBUG,
     .filename = ""
 };
+static pthread_once_t g_default_logger_once = PTHREAD_ONCE_INIT;
+
+static void init_default_logger_mutex(void) {
+    if (!g_default_logger.file) g_default_logger.file = stderr;
+    pthread_mutex_init(&g_default_logger.mutex, NULL);
+}
 
 void default_log_callback(LogLevel level, const char* message) {
-    if (!g_default_logger.file) {
-        g_default_logger.file = stderr;
-    }
+    pthread_once(&g_default_logger_once, init_default_logger_mutex);
     logger_log(&g_default_logger, level, message);
 }

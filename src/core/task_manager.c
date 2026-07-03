@@ -116,7 +116,7 @@ int task_manager_register(TaskManager* mgr, TaskBase* task, const char* name) {
     TaskNode* node = (TaskNode*)calloc(1, sizeof(TaskNode));
     if (!node) { pthread_mutex_unlock(&mgr->mutex); return -1; }
     node->task = task;
-    strncpy(node->name, name, sizeof(node->name) - 1);
+    snprintf(node->name, sizeof(node->name), "%s", name);
     TAILQ_INSERT_TAIL(&mgr->task_list, node, entries);
     mgr->task_count++;
     pthread_mutex_unlock(&mgr->mutex);
@@ -245,7 +245,7 @@ int task_manager_list_tasks(TaskManager* mgr, char names[][64], int max_count) {
     TaskNode* node;
     TAILQ_FOREACH(node, &mgr->task_list, entries) {
         if (count >= max_count) break;
-        strncpy(names[count], node->name, 63);
+        snprintf(names[count], 64, "%s", node->name);
         names[count][63] = '\0';
         count++;
     }
@@ -335,7 +335,7 @@ int task_manager_add_dependency(TaskManager* mgr,
 
     DepEntry* dep = (DepEntry*)calloc(1, sizeof(DepEntry));
     if (!dep) { pthread_mutex_unlock(&mgr->mutex); return -1; }
-    strncpy(dep->dep_name, dep_name, sizeof(dep->dep_name) - 1);
+    snprintf(dep->dep_name, sizeof(dep->dep_name), "%s", dep_name);
     dep->next  = node->deps;
     node->deps = dep;
     pthread_mutex_unlock(&mgr->mutex);

@@ -99,7 +99,7 @@ BagReader* bag_reader_open(const char* path) {
     BagReader* r = (BagReader*)calloc(1, sizeof(BagReader));
     if (!r) { fclose(fp); return NULL; }
     r->fp = fp;
-    strncpy(r->path, path, sizeof(r->path) - 1);
+    snprintf(r->path, sizeof(r->path), "%s", path);
     return r;
 }
 
@@ -133,8 +133,8 @@ static int read_record(FILE* fp, uint64_t* ts_out, Message* msg_out) {
     if (ts_out)  *ts_out = ts;
     if (msg_out) {
         memset(msg_out, 0, sizeof(*msg_out));
-        strncpy(msg_out->topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
-        strncpy(msg_out->sender, "bag_replay", MSG_BUS_MAX_SENDER_LEN - 1);
+        snprintf(msg_out->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+        snprintf(msg_out->sender, MSG_BUS_MAX_SENDER_LEN, "%s", "bag_replay");
         msg_out->timestamp_us = ts;
         msg_out->type         = MSG_TYPE_PUBLISH;
         msg_out->data_size    = dsize;

@@ -289,6 +289,7 @@ static int network_service_initialize(TaskBase* base_task) {
     
     // 设置日志回调
     LogCallback log_cb = [](LogLevel level, const char* message) {
+        (void)level;
         std::cout << "[NET_LOG] " << message << std::endl;
     };
     
@@ -347,7 +348,8 @@ static const TaskInterface network_service_vtable = {
     .resume = nullptr,
     .handle_signal = nullptr,
     .health_check = network_service_health_check,
-    .get_status = network_service_get_status
+    .get_status = network_service_get_status,
+    .on_message = nullptr
 };
 
 // ==============================================================================

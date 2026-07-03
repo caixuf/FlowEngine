@@ -2,7 +2,7 @@
  * @file coroutine_task.h
  * @brief C++20 协程任务基类 + MessageBus awaitable 适配器
  *
- * 提供两个核心组件：
+ * 提供三个核心组件：
  *
  * 1. BusAwaitable — 将 MessageBus 订阅包装成 C++20 awaitable，
  *    让协程可以 co_await 等待总线消息，而不占用调用线程。
@@ -10,26 +10,43 @@
  * 2. CoroutineTask — 继承自 TaskBase（C 接口），execute() 内部
  *    启动协程事件循环，子类只需实现 run() 协程即可。
  *
- * 设计原则：
- *   - 不依赖外部协程框架（纯 C++20 标准库协程）
- *   - 保持 C 插件接口不变，协程支持作为可选 C++ 层叠加
- *   - 零额外系统线程：协程在调用 execute() 的线程中运行
+ * 3. FlowCoroTask（需要 FLOWCORO_INTEGRATION）— CoroutineTask 的子类，
+ *    将协程的 resume 操作提交到 flowcoro 无锁线程池调度器，
+ *    实现真正的跨线程协程恢复，解除消息总线分发线程的阻塞。
  *
- * 使用示例：
+ * 设计原则：
+ *   - 默认不依赖外部协程框架（纯 C++20 标准库协程）
+ *   - 通过编译宏 FLOWCORO_INTEGRATION 可选接入 flowcoro 线程池
+ *   - 保持 C 插件接口不变，协程支持作为可选 C++ 层叠加
+ *   - FlowCoroTask：消息总线线程仅触发回调，不执行协程逻辑
+ *
+ * 使用示例（不依赖 flowcoro）：
  * @code
  *   class LidarTask : public CoroutineTask {
  *   protected:
  *       Task run() override {
  *           while (!should_stop()) {
- *               Message msg = co_await subscribe_once("sensor/lidar");
+ *               Message msg = co_await subscribe_once(bus(), "sensor/lidar");
  *               process(msg);
  *           }
  *       }
  *   };
  * @endcode
  *
- * 若项目集成了 flowcoro，可将 BusAwaitable 的 resume 机制
- * 挂接到 flowcoro 的线程池调度器，实现跨线程协程恢复。
+ * 使用示例（集成 flowcoro 线程池调度器）：
+ * @code
+ *   // 编译时需要 -DFLOWCORO_INTEGRATION
+ *   class LidarTask : public FlowCoroTask {
+ *   protected:
+ *       Task run() override {
+ *           while (!should_stop()) {
+ *               // resume 在 flowcoro 线程池中执行，不阻塞总线分发线程
+ *               Message msg = co_await subscribe_once(bus(), "sensor/lidar");
+ *               process(msg);
+ *           }
+ *       }
+ *   };
+ * @endcode
  */
 
 #ifndef COROUTINE_TASK_H
@@ -49,6 +66,31 @@
 #include <string>
 #include <stdexcept>
 #include <cstring>
+#include <atomic>
+#include <thread>
+#include <chrono>
+
+/* ─────────────────────────────────────────────────────────
+ * 可选：flowcoro 无锁线程池调度器
+ * 编译时加 -DFLOWCORO_INTEGRATION 启用
+ * ───────────────────────────────────────────────────────── */
+#ifdef FLOWCORO_INTEGRATION
+#include <flowcoro/thread_pool.h>
+
+namespace flowcoro_integration {
+
+/**
+ * 全局 flowcoro 线程池单例。
+ * 线程数默认为 hardware_concurrency()，可在 main() 前通过
+ * get_thread_pool() 的延迟初始化自动设置。
+ */
+inline lockfree::ThreadPool& get_thread_pool() {
+    static lockfree::ThreadPool pool{std::thread::hardware_concurrency()};
+    return pool;
+}
+
+} // namespace flowcoro_integration
+#endif // FLOWCORO_INTEGRATION
 
 /* ─────────────────────────────────────────────────────────
  * 1. 基础 Task 协程类型
@@ -101,10 +143,13 @@ struct Task {
  * ───────────────────────────────────────────────────────── */
 
 /**
- * co_await bus_awaitable("sensor/lidar") 会挂起当前协程，
- * 直到指定 topic 有消息到达后，由总线回调线程恢复协程。
+ * co_await subscribe_once(bus, "sensor/lidar") 会挂起当前协程，
+ * 直到指定 topic 有消息到达后恢复协程。
  *
- * 线程安全：回调可能在总线分发线程调用，使用 mutex 保护状态。
+ * 线程安全：
+ *   - 默认模式：回调在总线分发线程中直接 resume 协程（可能阻塞分发）。
+ *   - FLOWCORO_INTEGRATION 模式：回调将 handle.resume() 提交到
+ *     flowcoro 线程池，分发线程立即返回，协程在工作线程中运行。
  */
 class BusAwaitable {
 public:
@@ -116,7 +161,6 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
-        /* 订阅一次性回调 */
         message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
     }
 
@@ -129,21 +173,31 @@ private:
     static void on_message(const Message* msg, void* user_data) {
         auto* self = static_cast<BusAwaitable*>(user_data);
         self->received_msg_ = *msg;
-        /* 恢复协程（在回调线程中同步恢复） */
         auto h = self->handle_;
-        if (h && !h.done()) h.resume();
+        if (!h || h.done()) return;
+
+#ifdef FLOWCORO_INTEGRATION
+        /* ── flowcoro 模式：将协程 resume 提交到线程池 ───────
+         * 总线分发线程立刻返回，不被协程逻辑阻塞。
+         * 协程在 flowcoro 工作线程上继续执行。               */
+        flowcoro_integration::get_thread_pool().enqueue_void(
+            [h]() mutable { if (!h.done()) h.resume(); });
+#else
+        /* ── 标准模式：在分发线程上同步 resume ─────────────── */
+        h.resume();
+#endif
     }
 
-    MessageBus*                  bus_;
-    std::string                  topic_;
-    std::coroutine_handle<>      handle_;
-    Message                      received_msg_{};
+    MessageBus*              bus_;
+    std::string              topic_;
+    std::coroutine_handle<>  handle_;
+    Message                  received_msg_{};
 };
 
 /**
  * 工厂函数：创建等待指定 topic 一条消息的 awaitable
  *
- * 使用：
+ * 用法：
  *   Message msg = co_await subscribe_once(bus, "sensor/lidar");
  */
 inline BusAwaitable subscribe_once(MessageBus* bus, const char* topic) {
@@ -169,15 +223,15 @@ public:
      * 启动协程事件循环（阻塞直到协程完成或 stop() 被调用）
      *
      * 与 TaskBase::execute() 对应：在 task_execute() 线程中调用。
+     * 每 10ms 轮询一次，兼顾响应速度与 CPU 开销。
      */
-    void execute() {
+    virtual void execute() {
         stop_flag_ = false;
         task_ = std::make_unique<Task>(run());
 
-        /* 简单轮询：等待协程完成或收到停止信号 */
         while (!task_->done() && !stop_flag_) {
             std::unique_lock<std::mutex> lk(coro_mutex_);
-            coro_cv_.wait_for(lk, std::chrono::milliseconds(100));
+            coro_cv_.wait_for(lk, std::chrono::milliseconds(10));
         }
 
         task_->rethrow_if_exception();
@@ -193,7 +247,7 @@ public:
 
     MessageBus* bus() const { return bus_; }
 
-    /** 唤醒事件循环（协程内部 await 恢复后调用，可选） */
+    /** 唤醒事件循环（协程 resume 后调用，可加快响应） */
     void notify() { coro_cv_.notify_all(); }
 
 protected:
@@ -205,7 +259,46 @@ protected:
 };
 
 /* ─────────────────────────────────────────────────────────
- * 4. C 包装宏：将 CoroutineTask 子类导出为 TaskBase 插件
+ * 4. FlowCoroTask — 基于 flowcoro 线程池的协程任务基类
+ *    仅在 FLOWCORO_INTEGRATION 启用时可用
+ * ───────────────────────────────────────────────────────── */
+
+#ifdef FLOWCORO_INTEGRATION
+/**
+ * FlowCoroTask 在 CoroutineTask 基础上：
+ *   - BusAwaitable 将协程 resume 提交到 flowcoro 线程池，
+ *     消息总线分发线程不被阻塞。
+ *   - execute() 阻塞等待协程完成，使用更短的 5ms 轮询。
+ *
+ * 使用方式与 CoroutineTask 完全相同，只需改继承类即可。
+ *
+ * 注意：因为 BusAwaitable::on_message 已通过全局线程池进行跨线程
+ *       resume，FlowCoroTask 的 execute() 轮询期间 CPU 负载极低。
+ */
+class FlowCoroTask : public CoroutineTask {
+public:
+    explicit FlowCoroTask(MessageBus* bus = nullptr)
+        : CoroutineTask(bus) {
+        // 确保线程池在首次使用前已初始化
+        (void)flowcoro_integration::get_thread_pool();
+    }
+
+    void execute() override {
+        stop_flag_ = false;
+        task_ = std::make_unique<Task>(run());
+
+        while (!task_->done() && !stop_flag_) {
+            std::unique_lock<std::mutex> lk(coro_mutex_);
+            coro_cv_.wait_for(lk, std::chrono::milliseconds(5));
+        }
+
+        task_->rethrow_if_exception();
+    }
+};
+#endif // FLOWCORO_INTEGRATION
+
+/* ─────────────────────────────────────────────────────────
+ * 5. C 包装宏：将 CoroutineTask/FlowCoroTask 子类导出为 TaskBase 插件
  * ───────────────────────────────────────────────────────── */
 
 /**
@@ -230,7 +323,7 @@ static int prefix##_execute(TaskBase* b) {                                    \
     try { w->impl->execute(); return 0; }                                     \
     catch (...) { return -1; }                                                \
 }                                                                             \
-static void prefix##_cleanup(TaskBase* b) {                                   \
+static void prefix##_stop(TaskBase* b) {                                      \
     auto* w = reinterpret_cast<prefix##_Wrapper*>(b);                        \
     w->impl->stop();                                                          \
 }                                                                             \
@@ -239,17 +332,17 @@ static bool prefix##_health(TaskBase* b) {                                    \
     return !w->impl->should_stop();                                           \
 }                                                                             \
 static const TaskInterface prefix##_vtable = {                                \
-    nullptr, prefix##_execute, prefix##_cleanup,                              \
+    nullptr, prefix##_execute, prefix##_stop,                                 \
     nullptr, nullptr, nullptr, prefix##_health, nullptr                       \
 };                                                                            \
 extern "C" {                                                                  \
-prefix##_Wrapper* prefix##_create(const TaskConfig* cfg) {                    \
+prefix##_Wrapper* prefix##_create(const TaskConfig* cfg, MessageBus* bus) {   \
     auto* w = static_cast<prefix##_Wrapper*>(malloc(sizeof(prefix##_Wrapper))); \
     if (!w) return nullptr;                                                   \
     if (task_base_init(&w->base, &prefix##_vtable, cfg) != 0) {              \
         free(w); return nullptr;                                              \
     }                                                                         \
-    w->impl = new ClassName();                                                \
+    w->impl = new ClassName(bus);                                             \
     return w;                                                                 \
 }                                                                             \
 void prefix##_destroy(prefix##_Wrapper* w) {                                  \

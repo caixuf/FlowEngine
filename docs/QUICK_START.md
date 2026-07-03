@@ -1,263 +1,175 @@
-# StartTool 快速入门示例
+# FlowEngine 快速入门
 
-> **目标：** 30分钟内理解核心概念并运行第一个插件
+> **目标：** 30 分钟内理解核心概念并运行第一个插件
 
-## 快速体验
-
-### 步骤1：编译运行演示程序
+## 步骤 1：编译项目
 
 ```bash
-# 进入项目目录
-cd /home/caixuf/MyCode/startTool
+# 克隆仓库
+git clone https://github.com/caixuf/FlowEngine.git
+cd FlowEngine
 
-# 编译项目
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
+# 安装系统依赖（Ubuntu / Debian）
+sudo apt-get install -y build-essential cmake libcjson-dev
 
-# 运行C语言任务演示
-./task_demo
+# 使用一键脚本编译（推荐）
+bash build.sh release
 
-# 运行C++任务演示  
-./simple_cpp_demo
+# 可执行文件在 build/bin/，插件动态库在 build/lib/
 ```
 
-### 步骤2：理解核心概念
+> **GCC 11+ 是必要条件**，协程支持 (`-fcoroutines`) 从 GCC 11 开始提供。
+> flowcoro 依赖库由 CMake FetchContent 自动下载，无需手动安装。
 
-**最重要的3个概念：**
+## 步骤 2：运行演示程序
 
-1. **TaskBase (任务基类)** - 所有任务的公共部分
-2. **TaskInterface (任务接口)** - 定义任务必须实现的函数
-3. **虚函数表** - C语言实现面向对象的关键技术
+```bash
+# C 任务演示（3 个并发任务，展示生命周期）
+./build/bin/task_demo
 
-### 步骤3：查看一个最简单的插件
+# 消息总线演示（发布/订阅）
+./build/bin/bus_demo
 
-打开文件：`src/plugins/example_process.c`
+# C++ 任务演示
+./build/bin/simple_cpp_demo
 
-**核心结构：**
-```c
-// 1. 定义你的任务结构（继承TaskBase）
-typedef struct {
-    TaskBase base;  // 必须放第一位！
-    // 你的数据...
-} MyTask;
+# IPC 跨进程通道演示（需两个终端）
+./build/bin/ipc_demo pub   # 终端 1
+./build/bin/ipc_demo sub   # 终端 2
 
-// 2. 实现四个必需的函数
-static int my_initialize(TaskBase* task) { /*初始化*/ }
-static int my_execute(TaskBase* task) { /*主循环*/ }  
-static void my_cleanup(TaskBase* task) { /*清理*/ }
-static bool my_health_check(TaskBase* task) { /*健康检查*/ }
+# Bag 录制 & 回放演示
+./build/bin/bag_demo record
+./build/bin/bag_demo play
 
-// 3. 创建虚函数表
-static const TaskInterface my_vtable = {
-    .initialize = my_initialize,
-    .execute = my_execute,
-    .cleanup = my_cleanup,
-    .health_check = my_health_check
-};
-
-// 4. 导出创建函数
-extern "C" TaskBase* create_task(const TaskConfig* config) {
-    // 创建任务实例...
-}
+# C++20 协程 + 消息总线综合演示
+./build/bin/coro_bus_demo
 ```
 
-## 第一个练习：Hello World 任务
+## 步骤 3：理解核心概念
 
-### 创建新文件：`hello_task.c`
+| 概念 | 说明 |
+|------|------|
+| **TaskBase** | 所有任务的公共基类（C struct） |
+| **TaskInterface** | 函数指针表，定义任务必须实现的方法（C 的"虚函数表"） |
+| **MessageBus** | 发布 / 订阅消息总线，替代 sleep 轮询 |
+| **BusAwaitable** | C++20 awaitable，`co_await` 等待一条总线消息 |
+| **FlowCoroTask** | 协程任务基类，结合 flowcoro 无锁线程池运行 |
+
+## 步骤 4：查看最简单的 C 插件
+
+参考 `src/plugins/example_task.c`：
 
 ```c
 #include "task_interface.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
 
-// 步骤1：定义任务结构
 typedef struct {
-    TaskBase base;
+    TaskBase base;   /* 第一个成员必须是 TaskBase */
     int count;
-} HelloTask;
+} ExampleTask;
 
-// 步骤2：实现初始化
-static int hello_initialize(TaskBase* base) {
-    HelloTask* task = (HelloTask*)base;
-    task->count = 0;
-    printf("[HelloTask] 初始化完成!\n");
+static int my_init(TaskBase* base) {
+    ((ExampleTask*)base)->count = 0;
     return 0;
 }
 
-// 步骤3：实现主循环
-static int hello_execute(TaskBase* base) {
-    HelloTask* task = (HelloTask*)base;
-    
-    while (!base->should_stop && task->count < 10) {
-        printf("[HelloTask] Hello World! 第%d次\n", ++task->count);
-        sleep(2);  // 每2秒打印一次
+static int my_execute(TaskBase* base) {
+    ExampleTask* t = (ExampleTask*)base;
+    while (!base->should_stop) {
+        printf("Hello #%d\n", ++t->count);
+        sleep(1);
         base->stats.execution_count++;
     }
-    
-    printf("[HelloTask] 任务完成!\n");
     return 0;
 }
 
-// 步骤4：实现清理
-static void hello_cleanup(TaskBase* base) {
-    printf("[HelloTask] 清理资源\n");
-}
+static void my_cleanup(TaskBase* base) { (void)base; }
 
-// 步骤5：实现健康检查
-static bool hello_health_check(TaskBase* base) {
-    return base->state == TASK_STATE_RUNNING;
-}
-
-// 步骤6：创建虚函数表
-static const TaskInterface hello_vtable = {
-    .initialize = hello_initialize,
-    .execute = hello_execute,
-    .cleanup = hello_cleanup,
-    .health_check = hello_health_check
+static const TaskInterface my_vtable = {
+    .initialize = my_init,
+    .execute    = my_execute,
+    .cleanup    = my_cleanup,
+    .on_message = NULL,
 };
 
-// 步骤7：导出函数
-extern "C" TaskBase* create_task(const TaskConfig* config) {
-    HelloTask* task = malloc(sizeof(HelloTask));
-    if (!task) return NULL;
-    
-    if (task_base_init(&task->base, &hello_vtable, config) != 0) {
-        free(task);
-        return NULL;
-    }
-    
-    task->count = 0;
-    return &task->base;
+TaskBase* create_task(const TaskConfig* config) {
+    ExampleTask* t = calloc(1, sizeof(ExampleTask));
+    task_base_init(&t->base, &my_vtable, config);
+    return &t->base;
 }
 
-extern "C" void destroy_task(TaskBase* base) {
-    if (base) {
-        task_base_destroy(base);
-        free(base);
-    }
+void destroy_task(TaskBase* base) {
+    if (base) { task_base_destroy(base); free(base); }
 }
 ```
 
-### 编译你的插件
+在 `CMakeLists.txt` 中添加：
 
-在CMakeLists.txt中添加：
 ```cmake
-add_library(hello_task SHARED src/plugins/hello_task.c)
-target_link_libraries(hello_task starttool_core)
+add_library(my_plugin SHARED src/plugins/my_plugin.c)
+target_link_libraries(my_plugin flowengine_core)
 ```
 
-重新编译：
-```bash
-cd build
-make
-```
+## 步骤 5：C++20 协程任务（进阶）
 
-### 测试你的插件
+参考 `src/plugins/flowcoro_task.cpp` 和 `src/coro_bus_demo.cpp`：
 
-创建简单的测试程序：
-```c
-// test_hello.c
-#include "task_interface.h"
+```cpp
+#include "coroutine_task.h"
 
-int main() {
-    // 创建配置
-    TaskConfig config = {
-        .name = "HelloTask",
-        .priority = TASK_PRIORITY_NORMAL
-    };
-    
-    // 加载插件（简化版本，实际会用dlopen）
-    TaskBase* task = create_task(&config);
-    
-    // 启动任务
-    if (task_start(task) == 0) {
-        printf("任务启动成功!\n");
-        
-        // 等待任务完成
-        task_wait(task);
+class MySensorTask : public FlowCoroTask {
+public:
+    MySensorTask(const TaskConfig* cfg, MessageBus* bus)
+        : FlowCoroTask(cfg, bus) {}
+
+    Task<void> run() override {
+        while (true) {
+            // 挂起协程，等待总线消息，不占用线程
+            auto msg = co_await subscribe_once("sensor/lidar");
+            printf("[Coro] 收到 lidar 数据\n");
+        }
     }
-    
-    // 清理
-    destroy_task(task);
-    return 0;
-}
+};
+
+EXPORT_COROUTINE_TASK(my_sensor, MySensorTask)
 ```
 
-## 理解执行流程
+协程在消息到达时由 flowcoro 无锁线程池自动恢复，无需回调地狱。
 
-当你运行上面的HelloTask时，执行流程是：
+## 关键技术点
 
-```
-1. create_task() 创建任务实例
-   ↓
-2. task_start() 启动任务
-   ↓  
-3. 创建新线程调用 task_thread_entry()
-   ↓
-4. task_thread_entry() 调用 hello_execute()
-   ↓
-5. hello_execute() 运行主循环
-   ↓
-6. 循环结束后调用 hello_cleanup()
-   ↓
-7. 任务结束
-```
+### "继承"的实现
 
-## 关键技术点解析
-
-### 1. "继承"的实现
 ```c
 typedef struct {
-    TaskBase base;  // 第一个成员必须是基类
-    // 子类数据...
+    TaskBase base;   /* 第一个成员 = 基类 */
+    int my_field;
 } DerivedTask;
 
-// 类型转换实现"继承"
-DerivedTask* derived = (DerivedTask*)base_pointer;
+/* 安全地从基类指针还原派生类指针 */
+DerivedTask* d = (DerivedTask*)base_ptr;
 ```
 
-### 2. "多态"的实现
+### "多态"的实现
+
 ```c
-// 通过函数指针实现虚函数
-task->vtable->execute(task);  // 调用具体实现
-
-// 宏简化调用
-#define TASK_CALL(task, method) \
-    ((task)->vtable->method ? (task)->vtable->method(task) : -1)
+/* 函数指针表 = 虚函数表 */
+task->vtable->execute(task);   /* 调用具体实现 */
 ```
 
-### 3. 线程安全
-```c
-// 所有状态修改都要加锁
-pthread_mutex_lock(&task->mutex);
-task->state = TASK_STATE_RUNNING;
-pthread_mutex_unlock(&task->mutex);
-```
+### 线程安全
 
-## 下一步学习建议
+FlowEngine 核心模块（logger、message_bus、task_manager）均通过 pthread mutex 保护共享状态；协程恢复路径通过 flowcoro 无锁队列分发，避免在消息回调线程中长时间持锁。
 
-1. **修改HelloTask**：让它从配置文件读取打印次数
-2. **学习现有插件**：分析 `simple_cpp_task.cpp` 的C++实现
-3. **尝试通信**：让两个任务之间传递消息
-4. **添加配置**：学习JSON配置解析
-5. **深入源码**：理解 `task_manager.c` 的管理逻辑
+## 常见问题
 
-## 常见新手问题
+**Q: 编译报 "coroutines not supported"？**
+A: 升级到 GCC 11+，或安装 `g++-11`：`sudo apt install g++-11`
 
-**Q: 为什么TaskBase必须是第一个成员？**
-A: 这样可以安全地在基类指针和派生类指针之间转换，实现"继承"。
+**Q: FetchContent 拉取 flowcoro 失败？**
+A: 检查网络访问 GitHub 是否正常；或将 flowcoro 源码放入 `third_party/flowcoro/` 并在 CMakeLists.txt 中改用 `add_subdirectory`。
 
-**Q: 虚函数表是什么？**  
-A: 就是一个函数指针结构体，用来实现C语言的"多态"。
+**Q: TaskBase 必须是第一个成员吗？**
+A: 是的，这样才能在基类指针和派生类指针之间安全转换。
 
-**Q: 为什么要用线程？**
-A: 每个任务独立运行，不会相互阻塞。
-
-**Q: 如何调试我的插件？**
-A: 使用printf调试，或者用gdb：`gdb ./task_demo`
-
----
-
-恭喜！你已经理解了StartTool的核心概念。继续学习完整的学习指南，深入掌握更多高级特性！
+**Q: 如何调试插件？**
+A: `gdb ./build/bin/task_demo`，设置 `LD_LIBRARY_PATH=./build/lib`。

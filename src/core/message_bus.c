@@ -227,7 +227,7 @@ static void* dispatch_thread_fn(void* arg) {
             if (found) {
                 Message reply;
                 memset(&reply, 0, sizeof(reply));
-                strncpy(reply.topic, msg.topic, MSG_BUS_MAX_TOPIC_LEN - 1);
+                snprintf(reply.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", msg.topic);
                 reply.msg_id    = msg.msg_id;
                 reply.type      = MSG_TYPE_REPLY;
                 reply.timestamp_us = monotonic_us();
@@ -265,7 +265,7 @@ MessageBus* message_bus_create(const char* bus_name) {
     if (!bus) return NULL;
 
     if (bus_name)
-        strncpy(bus->name, bus_name, sizeof(bus->name) - 1);
+        snprintf(bus->name, sizeof(bus->name), "%s", bus_name);
 
     rb_init(&bus->queue);
     pthread_mutex_init(&bus->sub_mutex, NULL);
@@ -321,8 +321,8 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
 
     Message msg;
     memset(&msg, 0, sizeof(msg));
-    strncpy(msg.topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
-    if (sender) strncpy(msg.sender, sender, MSG_BUS_MAX_SENDER_LEN - 1);
+    snprintf(msg.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    if (sender) snprintf(msg.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     msg.msg_id       = atomic_fetch_add(&bus->msg_id_counter, 1);
     msg.type         = MSG_TYPE_PUBLISH;
     msg.timestamp_us = monotonic_us();
@@ -348,7 +348,7 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
         return -1;
     }
     SubEntry* e = &bus->subs[bus->sub_count++];
-    strncpy(e->topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
+    snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
     e->callback  = callback;
     e->user_data = user_data;
     e->active    = true;
@@ -420,8 +420,8 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
     /* Build and enqueue request */
     Message req;
     memset(&req, 0, sizeof(req));
-    strncpy(req.topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
-    if (sender) strncpy(req.sender, sender, MSG_BUS_MAX_SENDER_LEN - 1);
+    snprintf(req.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    if (sender) snprintf(req.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     req.msg_id       = req_id;
     req.type         = MSG_TYPE_REQUEST;
     req.timestamp_us = monotonic_us();
@@ -477,7 +477,7 @@ int message_bus_register_service(MessageBus* bus, const char* topic,
         return -1;
     }
     SvcEntry* e = &bus->svcs[bus->svc_count++];
-    strncpy(e->topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
+    snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
     e->handler   = handler;
     e->user_data = user_data;
     e->active    = true;
@@ -511,7 +511,7 @@ int message_bus_subscribe_zero_copy(MessageBus* bus, const char* topic,
         return -1;
     }
     ZcSubEntry* e = &bus->zc_subs[bus->zc_sub_count++];
-    strncpy(e->topic, topic, MSG_BUS_MAX_TOPIC_LEN - 1);
+    snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
     e->callback  = callback;
     e->user_data = user_data;
     e->active    = true;

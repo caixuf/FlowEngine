@@ -509,6 +509,7 @@ static int data_processor_initialize(TaskBase* base_task) {
     }
     
     LogCallback log_cb = [](LogLevel level, const char* message) {
+        (void)level;
         std::cout << "[DATA_LOG] " << message << std::endl;
     };
     
@@ -567,7 +568,8 @@ static const TaskInterface data_processor_vtable = {
     .resume = nullptr,
     .handle_signal = nullptr,
     .health_check = data_processor_health_check,
-    .get_status = data_processor_get_status
+    .get_status = data_processor_get_status,
+    .on_message = nullptr
 };
 
 // ==============================================================================

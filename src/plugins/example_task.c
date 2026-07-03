@@ -48,7 +48,7 @@ static int example_task_initialize(TaskBase* base_task) {
     if (config) {
         task->work_interval = config->work_interval;
         task->use_random_delay = config->use_random_delay;
-        strncpy(task->message, config->message, sizeof(task->message) - 1);
+        snprintf(task->message, sizeof(task->message), "%s", config->message);
     } else {
         // 使用默认配置
         task->work_interval = 5;

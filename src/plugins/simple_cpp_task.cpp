@@ -138,7 +138,8 @@ static const TaskInterface simple_cpp_task_vtable = {
     .resume = nullptr,
     .handle_signal = nullptr,
     .health_check = simple_cpp_task_health_check,
-    .get_status = simple_cpp_task_get_status
+    .get_status = simple_cpp_task_get_status,
+    .on_message = nullptr
 };
 
 // ==============================================================================
