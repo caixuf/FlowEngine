@@ -140,6 +140,15 @@ typedef struct TaskInterface {
      * @return 写入的字节数
      */
     int (*get_status)(TaskBase* task, char* buffer, size_t size);
+
+    /**
+     * 消息驱动回调 - 可选（Step 4：数据驱动调度）
+     * 当通过 task_subscribe() 注册的 topic 收到消息时被调用。
+     * 实现此函数的任务不需要在 execute() 里 sleep 轮询。
+     * @param task 任务基类指针
+     * @param msg  收到的消息指针（仅回调期间有效）
+     */
+    void (*on_message)(TaskBase* task, const void* msg);
 } TaskInterface;
 
 /**
@@ -233,6 +242,21 @@ void* task_get_custom_config(TaskBase* task);
 
 // 类型转换宏 - 用于"向下转型"
 #define TASK_CAST(type, task) ((type*)(task))
+
+/* ── Step 4: 消息驱动调度辅助 ─────────────────────────── */
+
+/**
+ * 在 MessageBus 上订阅 topic，消息到达时调用 task->vtable->on_message。
+ * 调用此函数后，任务的 execute() 可以用阻塞等待替代 sleep 轮询。
+ *
+ * @param task   任务基类指针（其 vtable 须实现 on_message）
+ * @param bus    MessageBus 指针
+ * @param topic  要订阅的主题
+ * @return 0 成功，-1 失败
+ */
+struct MessageBus;  /* 前向声明，避免循环依赖 */
+
+int task_subscribe(TaskBase* task, struct MessageBus* bus, const char* topic);
 
 #ifdef __cplusplus
 }
