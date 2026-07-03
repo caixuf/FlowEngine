@@ -65,6 +65,7 @@ public:
     }
     
     bool initialize(const std::string& config_data, LogCallback log_cb) {
+        (void)config_data;
         log_callback_ = log_cb;
         log("初始化数据处理任务");
         
@@ -509,6 +510,7 @@ static int data_processor_initialize(TaskBase* base_task) {
     }
     
     LogCallback log_cb = [](LogLevel level, const char* message) {
+        (void)level;
         std::cout << "[DATA_LOG] " << message << std::endl;
     };
     
@@ -567,7 +569,8 @@ static const TaskInterface data_processor_vtable = {
     .resume = nullptr,
     .handle_signal = nullptr,
     .health_check = data_processor_health_check,
-    .get_status = data_processor_get_status
+    .get_status = data_processor_get_status,
+    .on_message = nullptr
 };
 
 // ==============================================================================

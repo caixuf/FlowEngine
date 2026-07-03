@@ -68,6 +68,7 @@ TaskConfig create_task_config(const std::string& task_name, const std::string& c
 
 // 打印任务状态
 void print_task_status(TaskManager* manager) {
+    (void)manager;
     std::cout << "\n=== 任务管理器状态 ===\n";
     std::cout << "任务状态查询功能开发中...\n";
     std::cout << "========================\n";

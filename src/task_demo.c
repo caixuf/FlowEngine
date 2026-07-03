@@ -27,6 +27,7 @@ static void signal_handler(int sig) {
  * 任务事件回调函数
  */
 static void task_event_callback(const char* task_name, TaskState old_state, TaskState new_state, void* user_data) {
+    (void)user_data;
     const char* state_names[] = {
         "UNKNOWN", "INITIALIZED", "RUNNING", 
         "STOPPING", "STOPPED", "ERROR"

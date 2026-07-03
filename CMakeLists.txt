@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 project(FlowEngine VERSION 1.0.0 LANGUAGES C CXX)
 
 # 设置C和C++标准
@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 设置编译选项
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -fcoroutines")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
@@ -34,6 +34,40 @@ find_package(PkgConfig REQUIRED)
 
 # 查找cjson库
 pkg_check_modules(CJSON REQUIRED libcjson)
+
+# =============================================================================
+# flowcoro — C++20 高性能协程库 (https://github.com/caixuf/flowcoro)
+# =============================================================================
+include(FetchContent)
+
+# 关闭 flowcoro 自身的测试/示例/文档，只编译核心库
+set(FLOWCORO_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_DOCS      OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_ENABLE_DATABASE OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    flowcoro
+    GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(flowcoro)
+
+# 创建精简集成目标：只暴露头文件路径 + C++20协程支持
+# 避免继承 flowcoro INTERFACE 的激进编译参数影响整个项目
+add_library(flowcoro_headers INTERFACE)
+target_include_directories(flowcoro_headers INTERFACE
+    ${flowcoro_SOURCE_DIR}/include
+)
+target_compile_features(flowcoro_headers INTERFACE cxx_std_20)
+# GCC 需要显式 -fcoroutines（C++20 模式下通常已隐含，但显式更安全）
+target_compile_options(flowcoro_headers INTERFACE
+    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+)
+target_link_libraries(flowcoro_headers INTERFACE Threads::Threads)
 
 # 定义源文件
 set(CORE_SOURCES
@@ -115,8 +149,18 @@ target_link_libraries(bag_demo starttool_core m)
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task starttool_core)
 
+# ── Step 6: flowcoro 协程任务插件 ────────────────────────
+add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
+target_link_libraries(flowcoro_task starttool_core flowcoro_headers)
+target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
+
+# ── Step 6: flowcoro 协程 + 消息总线综合演示 ─────────────
+add_executable(coro_bus_demo src/coro_bus_demo.cpp)
+target_link_libraries(coro_bus_demo starttool_core flowcoro_headers)
+target_compile_definitions(coro_bus_demo PRIVATE FLOWCORO_INTEGRATION)
+
 # 安装规则
-install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo
+install(TARGETS launcher task_demo simple_cpp_demo bus_demo ipc_demo bag_demo cpp_task_demo coro_bus_demo
     RUNTIME DESTINATION bin
 )
 
@@ -124,7 +168,7 @@ install(TARGETS starttool_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task network_service_task data_processor_task
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task
     LIBRARY DESTINATION lib/starttool/plugins
 )
 
@@ -174,13 +218,24 @@ add_test(NAME task_demo_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+add_test(NAME bus_demo_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/bus_demo
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+add_test(NAME coro_bus_demo_test
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_bus_demo
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher task_demo bus_demo example_process example_task config)
+add_custom_target(dev DEPENDS launcher task_demo bus_demo coro_bus_demo example_process example_task flowcoro_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

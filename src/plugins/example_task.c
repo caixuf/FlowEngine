@@ -48,7 +48,7 @@ static int example_task_initialize(TaskBase* base_task) {
     if (config) {
         task->work_interval = config->work_interval;
         task->use_random_delay = config->use_random_delay;
-        strncpy(task->message, config->message, sizeof(task->message) - 1);
+        snprintf(task->message, sizeof(task->message), "%s", config->message);
     } else {
         // 使用默认配置
         task->work_interval = 5;
@@ -180,7 +180,7 @@ static bool example_task_health_check(TaskBase* base_task) {
     uint64_t current_time = time(NULL);
     if (task->base.state == TASK_STATE_RUNNING) {
         // 如果超过工作间隔的3倍时间没有心跳，认为不健康
-        if (current_time - task->base.stats.last_heartbeat > (task->work_interval * 3)) {
+        if (current_time - task->base.stats.last_heartbeat > (uint64_t)(task->work_interval * 3)) {
             healthy = false;
             printf("示例任务 %s 心跳超时，可能已卡死\n", task->base.config.name);
         }
