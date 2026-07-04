@@ -89,7 +89,7 @@ struct MessageBus {
 
     /* Dispatch thread */
     pthread_t  dispatch_thread;
-    bool       running;
+    atomic_bool running;
 
     /* Message ID counter */
     atomic_uint_fast32_t msg_id_counter;
@@ -249,8 +249,9 @@ static void* dispatch_thread_fn(void* arg) {
     MessageBus* bus = (MessageBus*)arg;
     Message msg;
 
-    while (bus->running) {
-        if (!rb_pop(&bus->queue, &msg, &bus->running)) continue;
+    while (atomic_load(&bus->running)) {
+        volatile bool keep_running = atomic_load(&bus->running);
+        if (!rb_pop(&bus->queue, &msg, &keep_running)) continue;
 
         if (msg.type == MSG_TYPE_REQUEST) {
             /* Dispatch to service handler */
@@ -325,9 +326,9 @@ MessageBus* message_bus_create(const char* bus_name) {
     atomic_init(&bus->stat_zc_delivered, 0);
     pthread_mutex_init(&bus->topic_mutex, NULL);
 
-    bus->running = true;
+    atomic_store(&bus->running, true);
     if (pthread_create(&bus->dispatch_thread, NULL, dispatch_thread_fn, bus) != 0) {
-        bus->running = false;
+        atomic_store(&bus->running, false);
         free(bus);
         return NULL;
     }
@@ -336,7 +337,7 @@ MessageBus* message_bus_create(const char* bus_name) {
 
 void message_bus_destroy(MessageBus* bus) {
     if (!bus) return;
-    bus->running = false;
+    atomic_store(&bus->running, false);
     pthread_join(bus->dispatch_thread, NULL);
 
     rb_destroy(&bus->queue);
