@@ -108,7 +108,13 @@ function doSimulate(){
       {name:"control",pid:1003,alive:true,caps:2,topics:[{topic:"fusion/objects",freq:0},{topic:"control/cmd",freq:0}]},
       {name:"planning",pid:1004,alive:Math.random()>0.3,caps:2,topics:[{topic:"fusion/objects",freq:0}]}
     ],
-    metrics:{bus:{published:1250,delivered:2480,dropped:0},transport:{local_pub:1250,remote_pub:0},scheduler:{tasks:5,mode:"CHOREO"},latency:{avg_us:145,p50_us:120,p99_us:450},driver_mode:"ACC"}
+    metrics:{bus:{published:1250,delivered:2480,dropped:0},transport:{local_pub:1250,remote_pub:0},scheduler:{tasks:5,mode:"CHOREO"},latency:{avg_us:145,p50_us:120,p99_us:450},driver_mode:"ACC",
+      topics:[
+        {topic:"sensor/lidar",pub:500,del:1000,drop:0,lat_us:145,freq:10.0,subs:2},
+        {topic:"sensor/gps",pub:250,del:250,drop:0,lat_us:168,freq:5.0,subs:1},
+        {topic:"sensor/radar",pub:1000,del:2000,drop:2,lat_us:95,freq:20.0,subs:2},
+        {topic:"fusion/objects",pub:500,del:1000,drop:0,lat_us:120,freq:10.0,subs:2}
+      ]}
   };
   updateAll();
   document.getElementById('conn-dot').className='live';document.getElementById('conn-dot').textContent='● demo';
