@@ -121,7 +121,10 @@ input:focus{border-color:#58a6ff}
   <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— hover for values</span></h2><span class="toggle">▼</span></div>
+  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— hover for values</span></h2>
+    <select id="chart-topic" onchange="onChartTopicChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 8px;border-radius:4px;font-size:10px;margin-left:8px">
+      <option value="">All Topics</option>
+    </select><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:8px 10px">
       <div id="charts" style="display:flex;gap:8px;min-height:200px">
         <div class="chart-box"><canvas id="ch-rate"></canvas><div class="chart-tooltip" id="tt-rate"></div></div>
@@ -552,18 +555,63 @@ function updateTopo(){
 
 // ── Charts (Canvas) ────────────────────────────────────────
 let chartPrevPub = -1, chartPrevDel = -1;
+let chartTopic = '';  // '' = all topics, or specific topic name
+
+function onChartTopicChange(){
+  chartTopic = document.getElementById('chart-topic').value;
+  // Reset history on topic switch
+  chartPrevPub = -1; chartPrevDel = -1;
+  chartHistory = {rate:[],latency:[],frames:[],maxLen:90};
+}
+
+function populateTopicSelector(){
+  var sel = document.getElementById('chart-topic');
+  if(!sel) return;
+  var current = sel.value;
+  var topics = (topoData.metrics||{}).topics || [];
+  var names = topics.map(function(t){return t.topic||t.name||'';}).filter(Boolean).sort();
+  // Only rebuild if list changed
+  var existing = [];
+  for(var i=1;i<sel.options.length;i++) existing.push(sel.options[i].value);
+  if(existing.join(',') === names.join(',')) return;
+  sel.innerHTML = '<option value="">All Topics</option>';
+  names.forEach(function(n){
+    var opt = document.createElement('option');
+    opt.value = n; opt.textContent = n.split('/').pop();
+    if(n === current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
 
 function updateCharts(){
-  const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
-  const nowPub = b.published||0, nowDel = b.delivered||0;
+  populateTopicSelector();
 
-  // Compute per-second delta from cumulative counters
-  // First sample: delta=0 (no baseline yet), subsequent: actual change
-  const deltaPub = chartPrevPub >= 0 ? Math.max(0, nowPub - chartPrevPub) : 0;
-  const deltaDel = chartPrevDel >= 0 ? Math.max(0, nowDel - chartPrevDel) : 0;
+  var m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
+  var nowPub, nowDel, nowLat, p99Lat;
+
+  if (chartTopic) {
+    // Per-topic stats
+    var ts = (m.topics||[]).filter(function(t){return (t.topic||t.name||'') === chartTopic;});
+    if (ts.length) {
+      var t = ts[0];
+      nowPub = t.pub||0;
+      nowDel = t.del||0;
+      nowLat = t.lat_us||0;
+      p99Lat = 0;  // per-topic p99 not available
+    } else { nowPub=0; nowDel=0; nowLat=0; p99Lat=0; }
+  } else {
+    // Global bus stats
+    nowPub = b.published||0;
+    nowDel = b.delivered||0;
+    nowLat = l.avg_us||0;
+    p99Lat = l.p99_us||0;
+  }
+
+  var deltaPub = chartPrevPub >= 0 ? Math.max(0, nowPub - chartPrevPub) : 0;
+  var deltaDel = chartPrevDel >= 0 ? Math.max(0, nowDel - chartPrevDel) : 0;
 
   chartHistory.rate.push({v: deltaPub, raw: nowPub});
-  chartHistory.latency.push({v: l.avg_us||0, p99: l.p99_us||0});
+  chartHistory.latency.push({v: nowLat, p99: p99Lat});
   chartHistory.frames.push({v: deltaDel, raw: nowDel});
 
   chartPrevPub = nowPub;
@@ -571,9 +619,11 @@ function updateCharts(){
 
   [chartHistory.rate,chartHistory.latency,chartHistory.frames].forEach(function(a){while(a.length>chartHistory.maxLen)a.shift();});
 
-  drawChart('ch-rate',  'tt-rate',  chartHistory.rate,   '#58a6ff', 'Pub Rate',  'msg/s');
-  drawChart('ch-lat',   'tt-lat',   chartHistory.latency,'#d29922', 'Latency',   'µs');
-  drawChart('ch-frames','tt-frames',chartHistory.frames, '#3fb950', 'Deliveries','msg/s');
+  var titleSuffix = chartTopic ? ' ('+chartTopic.split('/').pop()+')' : '';
+
+  drawChart('ch-rate',  'tt-rate',  chartHistory.rate,   '#58a6ff', 'Pub Rate'+titleSuffix,  'msg/s');
+  drawChart('ch-lat',   'tt-lat',   chartHistory.latency,'#d29922', 'Latency'+titleSuffix,   'µs');
+  drawChart('ch-frames','tt-frames',chartHistory.frames, '#3fb950', 'Deliveries'+titleSuffix,'msg/s');
 }
 
 function drawChart(canvasId,tooltipId,data,color,title,unit){
