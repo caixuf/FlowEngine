@@ -99,6 +99,15 @@ input:focus{border-color:#58a6ff}
     <div class="card-body"><div id="node-status"><span style="color:#484f58">No data</span></div></div>
   </div>
 
+  <div class="card" id="vehicle-card" style="display:none"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2>🚗 Vehicle</h2><span class="toggle">▼</span></div>
+    <div class="card-body"><div class="metric-grid">
+      <div class="mini-stat"><div class="val" id="v-speed" style="color:#3fb950">--</div><div class="lbl">Speed m/s</div></div>
+      <div class="mini-stat"><div class="val" id="v-target" style="color:#58a6ff">--</div><div class="lbl">Target m/s</div></div>
+      <div class="mini-stat"><div class="val" id="v-throttle" style="color:#d29922">--</div><div class="lbl">Throttle</div></div>
+      <div class="mini-stat"><div class="val" id="v-error" style="color:#f85149">--</div><div class="lbl">Error m/s</div></div>
+    </div></div>
+  </div>
+
   <div style="font-size:10px;color:#30363d;margin-top:auto">
     Nodes: <b id="node-n">0</b> · Frames: <b id="frame-n">0</b> · Rate: <b id="rate-n">0</b>/s
   </div>
@@ -192,36 +201,68 @@ function doSimulate(){
 }
 
 // ── Connection ─────────────────────────────────────────────
+let reconnectTimer = null;
+
+function setConnStatus(cls, text) {
+  document.getElementById('conn-dot').className = 'pill pill-'+cls;
+  document.getElementById('conn-dot').textContent = text;
+}
+
+function startSSE() {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  eventSource = new EventSource(serverUrl+'/api/stream');
+  eventSource.onmessage = function(e) {
+    if (paused) return;
+    try { topoData = JSON.parse(e.data); updateAll(); } catch(err) {}
+  };
+  eventSource.onerror = function() {
+    setConnStatus('warn', '● retry');
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    // Auto-reconnect after 2 seconds — keeps dashboard alive across server restarts
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(tryReconnect, 2000);
+  };
+  eventSource.onopen = function() {
+    setConnStatus('live', '● live');
+  };
+}
+
+function tryReconnect() {
+  if (paused) { reconnectTimer = setTimeout(tryReconnect, 2000); return; }
+  fetch(serverUrl+'/api/topology')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      topoData = d; updateAll();
+      setConnStatus('live', '● live');
+      startSSE();  // SSE back online
+    })
+    .catch(function() {
+      setConnStatus('warn', '● retry');
+      reconnectTimer = setTimeout(tryReconnect, 2000);
+    });
+}
+
 async function doConnect(){
   serverUrl = document.getElementById('url').value.trim();
-  if(eventSource){eventSource.close();eventSource=null;}
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
-  try{
+  try {
     const r = await fetch(serverUrl+'/api/topology');
     topoData = await r.json();
     updateAll();
-    document.getElementById('conn-dot').className='pill pill-live';document.getElementById('conn-dot').textContent='● live';
-
-    eventSource = new EventSource(serverUrl+'/api/stream');
-    eventSource.onmessage = e => {
-      if(paused) return;
-      try{topoData=JSON.parse(e.data);updateAll()}catch(err){}
-    };
-    eventSource.onerror = ()=>{
-      document.getElementById('conn-dot').className='pill pill-warn';document.getElementById('conn-dot').textContent='● retry';
-      if(eventSource){eventSource.close();eventSource=null;}
-      setTimeout(pollFallback,2000);
-    };
-  }catch(err){
-    document.getElementById('conn-dot').className='pill pill-dead';document.getElementById('conn-dot').textContent='● offline';
+    setConnStatus('live', '● live');
+    startSSE();
+  } catch(err) {
+    setConnStatus('dead', '● offline');
     doSimulate();
   }
 }
 
 function pollFallback(){
   if(eventSource||paused) return;
-  fetch(serverUrl+'/api/topology').then(r=>r.json()).then(d=>{topoData=d;updateAll()}).catch(()=>{});
-  setTimeout(pollFallback,2000);
+  fetch(serverUrl+'/api/topology').then(function(r){return r.json();}).then(function(d){topoData=d;updateAll();}).catch(function(){});
+  if (!eventSource) setTimeout(pollFallback, 2000);
 }
 
 function doPause(){paused=!paused;document.getElementById('pause-btn').textContent=paused?'▶ Resume':'⏯ Pause'}
@@ -256,6 +297,16 @@ function updateMetrics(){
   document.getElementById('m-drop').textContent = (b.dropped||0);
   document.getElementById('m-drop').style.color = (b.dropped||0) > 0 ? '#f85149' : '#3fb950';
   document.getElementById('m-lat').textContent = (l.avg_us||0);
+  // Vehicle telemetry
+  var v = (topoData.metrics||{}).vehicle;
+  if (v) {
+    document.getElementById('vehicle-card').style.display = '';
+    document.getElementById('v-speed').textContent = (v.speed||0).toFixed(1);
+    document.getElementById('v-target').textContent = (v.target_speed||0).toFixed(1);
+    document.getElementById('v-throttle').textContent = ((v.throttle||0)*100).toFixed(0)+'%';
+    document.getElementById('v-throttle').style.color = (v.throttle||0) > 0.5 ? '#d29922' : '#3fb950';
+    document.getElementById('v-error').textContent = (v.error||0).toFixed(1);
+  }
   const ns=topoData.nodes||[];
   document.getElementById('node-status').innerHTML=ns.map(n=>
     '<div class="stat-row"><span>'+(n.name||'?')+'</span><span style="color:'+(n.alive===false?'#f85149':'#3fb950')+'">'+(n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—'))+'</span></div>'

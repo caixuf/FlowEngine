@@ -643,6 +643,16 @@ static int monitor_execute(TaskBase* base) {
                 }
                 fprintf(jf, "]");
 
+                /* Vehicle state (PID closed-loop telemetry) */
+                fprintf(jf, ",\"vehicle\":{"
+                        "\"speed\":%.1f,\"target_speed\":%.1f,"
+                        "\"throttle\":%.3f,\"brake\":%.3f,"
+                        "\"x\":%.1f,\"error\":%.1f}",
+                        g_vehicle.speed, g_vehicle.target_speed,
+                        g_vehicle.throttle, g_vehicle.brake,
+                        g_vehicle.x,
+                        g_vehicle.target_speed - g_vehicle.speed);
+
                 /* FlowRegistry: tasks, topics, plugins */
                 char* reg_json = flow_registry_export_json();
                 if (reg_json) {
