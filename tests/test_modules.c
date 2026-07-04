@@ -564,11 +564,11 @@ static void test_bus_topic_stats(void) {
 static void test_bus_qos_config(void) {
     TEST("bus QoS set/get");
     MessageBus* bus = message_bus_create("test_qos_cfg");
-    TopicQos q = { .queue_depth = 8, .policy = QOS_DROP_LATEST };
+    TopicQos q = { .depth = 8, .policy = QOS_DROP_LATEST };
     ASSERT_EQ(message_bus_set_topic_qos(bus, "t/cfg", &q), 0, "set_qos failed");
     const TopicQos* got = message_bus_get_topic_qos(bus, "t/cfg");
     ASSERT(got != NULL, "get_qos returned NULL");
-    ASSERT_EQ((int)got->queue_depth, 8, "queue_depth wrong");
+    ASSERT_EQ((int)got->depth, 8, "depth wrong");
     ASSERT_EQ((int)got->policy, (int)QOS_DROP_LATEST, "policy wrong");
     message_bus_destroy(bus);
     PASS();
@@ -577,7 +577,7 @@ static void test_bus_qos_config(void) {
 static void test_bus_qos_drop_latest(void) {
     TEST("bus QoS DROP_LATEST enforces depth");
     MessageBus* bus = message_bus_create("test_drop_latest");
-    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_LATEST };
+    TopicQos q = { .depth = 2, .policy = QOS_DROP_LATEST };
     message_bus_set_topic_qos(bus, "t/dl", &q);
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
     message_bus_subscribe(bus, "t/dl", bus_counter_cb, &c);
@@ -601,7 +601,7 @@ static void test_bus_qos_drop_latest(void) {
 static void test_bus_qos_drop_oldest(void) {
     TEST("bus QoS DROP_OLDEST keeps newest");
     MessageBus* bus = message_bus_create("test_drop_oldest");
-    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_OLDEST };
+    TopicQos q = { .depth = 2, .policy = QOS_DROP_OLDEST };
     message_bus_set_topic_qos(bus, "t/do", &q);
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
     message_bus_subscribe(bus, "t/do", bus_counter_cb, &c);
