@@ -225,21 +225,9 @@ target_link_libraries(launcher flowengine_core)
 add_executable(benchmark src/benchmark.c)
 target_link_libraries(benchmark flowengine_core m)
 
-# 任务系统可执行程序
-add_executable(flow_task src/task_demo.c)
-target_link_libraries(flow_task flowengine_core example_task)
-
 # 消息总线可执行程序
 add_executable(flow_bus src/bus_demo.c)
 target_link_libraries(flow_bus flowengine_core m)
-
-# C++ 任务可执行程序
-add_executable(flow_cpp_task src/cpp_task_demo.cpp)
-target_link_libraries(flow_cpp_task flowengine_core cpp_example_task)
-
-# 简化 C++ 可执行程序
-add_executable(flow_cpp src/simple_cpp_demo.cpp)
-target_link_libraries(flow_cpp flowengine_core cpp_example_task)
 
 # ── Step 1: IPC 跨进程通道 ───────────────────────────────
 add_executable(flow_ipc src/ipc_demo.c)
@@ -288,29 +276,13 @@ add_executable(coro_correctness_test test/coro_correctness_test.cpp)
 target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers flowcoro_net)
 target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
-# ── ADAS: 感知节点 + 控制节点全链路仿真 ──────────────────
-add_library(fake_perception_task SHARED src/plugins/fake_perception_task.c)
-target_link_libraries(fake_perception_task flowengine_core)
-
-add_library(fake_control_task SHARED src/plugins/fake_control_task.c)
-target_link_libraries(fake_control_task flowengine_core m)
-
-add_executable(flow_adas src/adas_demo.c)
-target_link_libraries(flow_adas flowengine_core fake_perception_task fake_control_task)
-
 # ── End-to-end demo (all components: serializer+scheduler+statem+discovery+fusion+transport) ──
 add_executable(flow_e2e src/e2e_demo.c)
 target_link_libraries(flow_e2e flowengine_core scheduler_cpp)
 add_dependencies(flow_e2e msg_codegen)
 
-# ── Full-stack multi-process demo (Phase 3+4 integration) ──
-add_executable(flow_fullstack src/fullstack_demo.c)
-target_link_libraries(flow_fullstack flowengine_core scheduler_cpp)
-# Depends on codegen for ADAS type registration
-add_dependencies(flow_fullstack msg_codegen)
-
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag flow_coro flow_e2e benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -318,7 +290,7 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task fake_perception_task fake_control_task
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task
     LIBRARY DESTINATION lib/flowengine/plugins
 )
 
@@ -342,7 +314,6 @@ install(PROGRAMS
     scripts/demo.sh
     scripts/stress_test.sh
     scripts/view_topology.sh
-    scripts/fullstack_demo.sh
     tools/flowboard_server.py
     DESTINATION share/flowengine/scripts
 )
@@ -363,14 +334,6 @@ add_custom_target(config
     COMMENT "Creating configuration files"
 )
 
-# 自定义目标：运行演示
-add_custom_target(run_demo
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_task
-    DEPENDS flow_task config
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    COMMENT "Running flow_task"
-)
-
 # 自定义目标：运行启动器
 add_custom_target(run_launcher
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/launcher config/example.json
@@ -383,12 +346,6 @@ add_custom_target(run_launcher
 enable_testing()
 
 # 简单的测试
-add_test(NAME flow_task_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_task
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(flow_task_test PROPERTIES TIMEOUT 10)
-
 add_test(NAME flow_bus_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_bus
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -424,12 +381,6 @@ target_include_directories(test_modules PRIVATE ${GEN_DIR})
 add_test(NAME unit_tests COMMAND test_modules)
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 10)
 
-add_test(NAME flow_adas_test
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_adas
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(flow_adas_test PROPERTIES TIMEOUT 15)
-
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
@@ -437,7 +388,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher flow_task flow_bus flow_coro flow_adas benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task fake_perception_task fake_control_task config)
+add_custom_target(dev DEPENDS launcher flow_bus flow_coro flow_e2e benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

@@ -53,14 +53,15 @@
 ```
 docs/
 ├── README.md              # 本文件，文档索引
-├── PROJECT_REVIEW.md      # 项目完善度评估
-├── EVOLUTION_ROADMAP.md   # 项目进化路线图
 ├── QUICK_START.md         # 30分钟快速入门
 ├── LEARNING_GUIDE.md      # 完整学习指南（2-4周）
-├── PRACTICE_PROJECTS.md   # 实战练习项目)
-├── API_REFERENCE.md       # API参考文档（规划中）
-├── ARCHITECTURE.md        # 架构设计文档（规划中）
-└── TROUBLESHOOTING.md     # 故障排查指南（规划中）
+├── PRACTICE_PROJECTS.md   # 实战练习项目
+├── TECHNICAL_DESIGN.md    # 技术设计文档
+├── PROJECT_REVIEW.md      # 项目完善度评估
+├── EVOLUTION_ROADMAP.md   # 项目进化路线图
+├── ALGORITHM_INTEGRATION.md # 算法集成指南
+├── FLOW_REGISTRY_PLAN.md  # FlowRegistry 设计规划
+└── ...
 ```
 
 ### 阅读建议
@@ -111,4 +112,4 @@ docs/
 
 ---
 
-**开始你的StartTool学习之旅吧！**
+**开始你的 FlowEngine 学习之旅吧！**

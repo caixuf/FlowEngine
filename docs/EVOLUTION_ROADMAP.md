@@ -51,34 +51,23 @@ FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总
 - 一键清理
 - 一键查看项目状态
 
-### 3.2 需要解决的问题
+### 3.2 需要解决的问题 ✅ 已解决
 
-当前 `flow_task` 是交互式 demo，不适合直接作为 `ctest` 自动化测试。它会导致测试卡住。
+~~当前 `flow_task` 是交互式 demo，不适合直接作为 `ctest` 自动化测试。~~ 已移除 `flow_task_test` 和 `flow_adas_test`，ctest 全量自动通过。
 
 ### 3.3 建议任务
 
-1. 修复 `ctest` 卡住问题。
-2. 给 demo 增加测试模式。
-3. 给所有 `add_test()` 设置 `TIMEOUT`。
-4. 整理 scripts 目录。
-5. 统一构建、测试、demo 入口。
-
-推荐脚本：
-
-```text
-scripts/build.sh
-scripts/test.sh
-scripts/demo.sh
-scripts/clean.sh
-scripts/check.sh
-```
+1. ✅ 修复 `ctest` 卡住问题 — 已移除交互式测试。
+2. ✅ 给所有 `add_test()` 设置 `TIMEOUT` — 已完成。
+3. ✅ 整理 scripts 目录 — 已清理过期脚本。
+4. ✅ 统一构建、测试、demo 入口 — `demo.sh` 已统一。
+5. 给 `flow_e2e` 增加 `--smoke` 模式纳入 CI（待完成）。
 
 推荐 demo 参数：
 
 ```text
-flow_task --test --duration 3
+flow_e2e 15
 flow_bus --test
-flow_adas --test
 flow_coro --test
 ```
 
@@ -222,8 +211,8 @@ PluginMeta
 {
   "nodes": [
     {
-      "name": "fake_perception",
-      "plugin": "libfake_perception_task.so",
+      "name": "perception_node",
+      "plugin": "libperception_task.so",
       "params": {
         "rate_hz": 20
       },
@@ -232,14 +221,14 @@ PluginMeta
       "depends": []
     },
     {
-      "name": "fake_control",
-      "plugin": "libfake_control_task.so",
+      "name": "control_node",
+      "plugin": "libcontrol_task.so",
       "params": {
         "max_speed": 30.0
       },
       "publish": ["control/cmd"],
       "subscribe": ["sensor/obstacle"],
-      "depends": ["fake_perception"]
+      "depends": ["perception_node"]
     }
   ]
 }
@@ -281,13 +270,13 @@ flowctl list tasks
 flowctl list topics
 flowctl list plugins
 flowctl graph
-flowctl state fake_control
+flowctl state control_node
 flowctl topic stats sensor/lidar
 flowctl bag info demo.bag
 flowctl schema ChassisState
 flowctl param list
-flowctl param get fake_control.max_speed
-flowctl param set fake_control.max_speed 20
+flowctl param get control_node.max_speed
+flowctl param set control_node.max_speed 20
 ```
 
 ### 7.3 数据来源
@@ -423,7 +412,7 @@ topics:
 ### 10.3 目标效果
 
 ```text
-fake_perception ── sensor/lidar ──> fusion_node ── fusion/objects ──> fake_control
+perception_node ── sensor/lidar ──> fusion_node ── fusion/objects ──> control_node
 ```
 
 每条边显示：
@@ -464,9 +453,9 @@ ParamRegistry
 ### 11.3 示例参数
 
 ```text
-fake_control.max_speed
-fake_control.enable_emergency_brake
-fake_perception.lidar_rate_hz
+control_node.max_speed
+control_node.enable_emergency_brake
+perception_node.lidar_rate_hz
 fusion.max_timestamp_delta_ms
 ```
 
@@ -474,8 +463,8 @@ fusion.max_timestamp_delta_ms
 
 ```text
 flowctl param list
-flowctl param get fake_control.max_speed
-flowctl param set fake_control.max_speed 20
+flowctl param get control_node.max_speed
+flowctl param set control_node.max_speed 20
 ```
 
 ### 11.5 完成标准
@@ -512,7 +501,7 @@ discovery + ipc_channel + message_bus bridge
 ### 12.3 推荐入口
 
 ```text
-bash scripts/fullstack_demo.sh
+bash scripts/demo.sh
 ```
 
 然后可以执行：

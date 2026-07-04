@@ -24,14 +24,11 @@ bash build.sh release
 ## 步骤 2：运行演示程序
 
 ```bash
-# C 任务演示（3 个并发任务，展示生命周期）
-./build/bin/flow_task
+# 端到端全链路演示（感知→融合→控制，15秒）
+./build/bin/flow_e2e 15
 
 # 消息总线演示（发布/订阅）
 ./build/bin/flow_bus
-
-# C++ 任务演示
-./build/bin/flow_cpp
 
 # IPC 跨进程通道演示（需两个终端）
 ./build/bin/flow_ipc pub   # 终端 1
@@ -176,4 +173,4 @@ A: 检查网络访问 GitHub 是否正常；或将 flowcoro 源码放入 `third_
 A: 是的，这样才能在基类指针和派生类指针之间安全转换。
 
 **Q: 如何调试插件？**
-A: `gdb ./build/bin/flow_task`，设置 `LD_LIBRARY_PATH=./build/lib`。
+A: `gdb ./build/bin/flow_e2e`，设置 `LD_LIBRARY_PATH=./build/lib`。

@@ -102,8 +102,8 @@ cmake ..
 make -j$(nproc)
 
 # 3. 运行演示程序
-./flow_task        # C语言任务演示
-./flow_cpp  # C++任务演示
+./flow_e2e 15      # 端到端全链路演示
+./flow_bus         # 消息总线演示
 ```
 
 **期望输出：**

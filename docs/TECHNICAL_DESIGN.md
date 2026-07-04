@@ -154,11 +154,11 @@ CMakeLists.txt
 ├── 全局编译标志：-std=c11 / -std=c++20 / -fcoroutines / -Wall
 ├── FetchContent：flowcoro（仅头文件，接口目标 flowcoro_headers）
 ├── 静态库：flowengine_core（所有 src/core/*.c）
-├── 可执行文件：flow_task, flow_bus, flow_cpp, flow_ipc,
-│              flow_bag, flow_coro, launcher
-├── 共享库插件：example_task, simple_cpp_task, reactive_task,
-│              network_service_task, data_processor_task,
-│              flowcoro_task
+├── 可执行文件：flow_e2e, flow_bus, flow_coro, flow_ipc,
+│              flow_bag, flowmond, flowctl, launcher, benchmark
+├── 共享库插件：example_task, example_process, cpp_example_task,
+│              reactive_task, network_service_task,
+│              data_processor_task, flowcoro_task
 └── CTest 测试条目
 ```
 

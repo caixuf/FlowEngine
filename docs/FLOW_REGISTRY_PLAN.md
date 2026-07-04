@@ -243,7 +243,7 @@ char* flow_registry_dump_topology_json(FlowRegistry* reg);
 | 步骤 | 文件 | 内容 |
 |------|------|------|
 | 3.1 | `include/flow_registry.h` | 增加 `FLOW_REGISTRY_DECLARE_PLUGIN()` 宏 |
-| 3.2 | 插件示例改造 | 在 `fake_perception_task.c` 等插件中演示自声明 |
+| 3.2 | 插件示例改造 | 在 `example_task.c` 等插件中演示自声明 |
 
 ```c
 /* 插件 .so 加载后自动执行的声明宏 */

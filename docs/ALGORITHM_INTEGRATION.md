@@ -107,8 +107,8 @@ algorithm_activate_for_mode(&sm, SM_MODE_CP, plugins);
 ## 参考实现
 
 - `src/plugins/example_pid_controller.c` — PID 纵向控制器
-- `src/plugins/fake_perception_task.c` — 模拟感知（用真实模型替换）
-- `src/plugins/fake_control_task.c` — 模拟控制（用真实 PID 替换）
+- `src/plugins/example_process.c` — 示例进程插件
+- `src/plugins/example_task.c` — 示例任务插件
 
 ## 不推荐的做法
 
