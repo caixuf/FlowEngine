@@ -671,6 +671,11 @@ var carBody=null,carWheels=[],lidarCloud=null,gpsTrack=[],trajLine=null;
 var gridHelper=null,sceneReady=false,trafficLights=[],trafficState=0,pedestrians=[],cyclists=[];
 
 var scene3d=null,camera3d=null,renderer3d=null,sceneReady=false;
+// Called from updateAll() on every data tick. The 3D animation loop (anim3D)
+// reads topoData directly each frame and the 2D fallback is refreshed by the
+// draw2D() call in updateAll(), so no per-tick work is needed here. It must
+// exist to avoid breaking the whole update pipeline with a ReferenceError.
+function update3D(){}
 function init3DScene(){
   var el=document.getElementById("scene3d");if(!el||typeof THREE==="undefined")return;
   var w=el.clientWidth,h=el.clientHeight;
@@ -729,7 +734,7 @@ function init3DScene(){
 }
 function init3D(){
   if(typeof THREE==="undefined"){init2DFallback();return;}
-  init3DScene();
+  try{init3DScene();}catch(e){console.warn("3D init failed — using 2D fallback",e);init2DFallback();}
 }
 function animate3D(){
   requestAnimationFrame(animate3D);
@@ -855,8 +860,30 @@ function draw2D(){
   ctx2d.fillStyle="#3fb950";ctx2d.fillRect(310,h-10,80*(v.throttle||0),4);
 }
 
-// Activate 2D fallback if 3D fails to load in 4s
-init2DFallback();
+// ── Load Three.js dynamically — non-blocking (same pattern as D3). ──
+// Blocking <script src> tags hang the page when a CDN is unreachable, so we
+// inject the script and try several CDNs. On success we build the 3D scene;
+// if every CDN fails (or WebGL is unavailable / too slow) we drop to the
+// zero-dependency 2D canvas so the simulation is always visible.
+(function(){
+  var cdns=[
+    "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js",
+    "https://unpkg.com/three@0.128.0/build/three.min.js",
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"
+  ];
+  var i=0;
+  function tryLoad(){
+    if(i>=cdns.length){console.warn("All Three.js CDNs failed — using 2D fallback");init2DFallback();return;}
+    var s=document.createElement("script");
+    s.src=cdns[i++];
+    s.onload=function(){if(typeof THREE!=="undefined"){if(!fallbackActive)init3D();}else{tryLoad();}};
+    s.onerror=function(){tryLoad();};
+    document.head.appendChild(s);
+  }
+  tryLoad();
+})();
+// If the 3D scene isn't ready within 6s (slow/blocked CDN), show 2D fallback.
+setTimeout(function(){if(!sceneReady)init2DFallback();},6000);
 
 // Init
 // ════════════════════════════════════════════════════════════
