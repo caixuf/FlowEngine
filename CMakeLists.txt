@@ -382,16 +382,19 @@ add_test(NAME flow_task_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_task
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(flow_task_test PROPERTIES TIMEOUT 10)
 
 add_test(NAME flow_bus_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_bus
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(flow_bus_test PROPERTIES TIMEOUT 10)
 
 add_test(NAME flow_coro_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_coro
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(flow_coro_test PROPERTIES TIMEOUT 10)
 
 add_test(NAME flow_coro_bench
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/benchmark_coro
@@ -414,11 +417,13 @@ add_dependencies(test_modules msg_codegen)
 target_include_directories(test_modules PRIVATE ${GEN_DIR})
 
 add_test(NAME unit_tests COMMAND test_modules)
+set_tests_properties(unit_tests PROPERTIES TIMEOUT 10)
 
 add_test(NAME flow_adas_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_adas
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
+set_tests_properties(flow_adas_test PROPERTIES TIMEOUT 15)
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
@@ -434,8 +439,8 @@ set(CPACK_PACKAGE_NAME "FlowEngine")
 set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
 set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "进程启动器和任务管理系统")
-set(CPACK_PACKAGE_VENDOR "Your Company")
-set(CPACK_PACKAGE_CONTACT "your.email@company.com")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Lightweight middleware for autonomous driving & robotics — C kernel + C++20 coroutine shell")
+set(CPACK_PACKAGE_VENDOR "FlowEngine")
+set(CPACK_PACKAGE_CONTACT "https://github.com/caixuf/FlowEngine")
 
 include(CPack)
