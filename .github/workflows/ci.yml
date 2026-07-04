@@ -123,6 +123,6 @@ jobs:
         run: ctest --test-dir build --output-on-failure --timeout 60
       - name: Generate coverage
         run: |
-          lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused
+          lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused,negative
           lcov --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage.info --ignore-errors unused,empty
           lcov --list coverage.info --ignore-errors unused
