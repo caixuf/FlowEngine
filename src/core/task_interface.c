@@ -193,7 +193,7 @@ int task_stop(TaskBase* task) {
     TaskState s = task->state;
     pthread_mutex_unlock(&task->mutex);
 
-    if (s == TASK_STATE_STOPPED || s == TASK_STATE_UNKNOWN) return 0;
+    if (s == TASK_STATE_STOPPED || s == TASK_STATE_UNKNOWN || s == TASK_STATE_INITIALIZED) return 0;
 
     set_state(task, TASK_STATE_STOPPING);
 
