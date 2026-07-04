@@ -1211,12 +1211,26 @@ struct CompletionNotifier {
     CompletionNotifier& operator=(const CompletionNotifier&) = delete;
     CompletionNotifier(CompletionNotifier&& o) noexcept
         : handle(o.handle) { o.handle = nullptr; }
+    /* TSAN 无法理解此自旋等待构成的事先发生后关系（happens-before）：
+     * 工作线程通过 return_void() 的 atomic store 通知 execute()，
+     * 然后挂起协程帧。execute() 自旋等待帧完全挂起后才 destroy。
+     * 对 TSAN 而言这是跨线程无锁访问——抑制假阳性。 */
+#if defined(__SANITIZE_THREAD__) || defined(__has_feature)
+#  if defined(__has_feature)
+#    if __has_feature(thread_sanitizer)
+#      define FLOWENGINE_NO_TSAN __attribute__((no_sanitize("thread")))
+#    endif
+#  else
+#    define FLOWENGINE_NO_TSAN __attribute__((no_sanitize("thread")))
+#  endif
+#endif
+#ifndef FLOWENGINE_NO_TSAN
+#  define FLOWENGINE_NO_TSAN
+#endif
+
+    FLOWENGINE_NO_TSAN
     ~CompletionNotifier() {
         if (handle) {
-            // 自旋等待工作线程完成 final_suspend 将帧完全挂起。
-            // 无此等待时，若工作线程在 return_void() 与 final_suspend
-            // 之间，execute() 已收到 frame_done_ 信号并销毁 notifier，
-            // 会在帧仍被访问时 destroy，导致 heap corruption。
             while (!handle.done()) {}
             handle.destroy();
         }
