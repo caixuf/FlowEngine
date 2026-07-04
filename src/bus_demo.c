@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <math.h>
+#include <stdatomic.h>
 
 /* ── 业务数据结构 ────────────────────────────────────────── */
 
@@ -48,7 +49,7 @@ typedef struct {
 
 /* ── 全局状态 ─────────────────────────────────────────────── */
 
-static volatile int g_running = 1;
+static atomic_int g_running = 1;
 static MessageBus*  g_bus     = NULL;
 
 static void signal_handler(int sig) {

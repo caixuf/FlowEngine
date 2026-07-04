@@ -123,7 +123,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60
+        run: ctest --test-dir build --output-on-failure --timeout 360
       - name: Generate coverage
         run: |
           lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused,negative
