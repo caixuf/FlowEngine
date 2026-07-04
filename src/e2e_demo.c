@@ -317,7 +317,7 @@ typedef struct {
 } VehicleModel;
 
 static VehicleModel g_vehicle = {
-    .x = 0, .y = 0, .speed = 20.0, .target_speed = 33.0,
+    .x = 0, .y = 0, .speed = 5.0, .target_speed = 10.0,
     .throttle = 0.3, .brake = 0, .heading = 0,
     .mass = 1500.0, .drag_coeff = 0.3
 };
