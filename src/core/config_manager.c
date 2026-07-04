@@ -61,6 +61,19 @@ LauncherConfig* config_load(const char* config_file) {
         cfg->enable_monitor = cJSON_IsTrue(jenm);
     }
 
+    /* ── scheduler (global) ───────────────────────────── */
+    cJSON* jsch = cJSON_GetObjectItemCaseSensitive(root, "scheduler");
+    if (cJSON_IsObject(jsch)) {
+        cJSON* jmode = cJSON_GetObjectItemCaseSensitive(jsch, "mode");
+        if (cJSON_IsString(jmode)) {
+            cfg->scheduler.mode = (strcmp(jmode->valuestring, "choreo") == 0) ? 1 : 0;
+        }
+        cJSON* jwrk = cJSON_GetObjectItemCaseSensitive(jsch, "worker_threads");
+        if (cJSON_IsNumber(jwrk)) cfg->scheduler.worker_threads = (int)jwrk->valuedouble;
+        cJSON* jtick = cJSON_GetObjectItemCaseSensitive(jsch, "tick_us");
+        if (cJSON_IsNumber(jtick)) cfg->scheduler.tick_us = (int)jtick->valuedouble;
+    }
+
     /* processes */
     cJSON* jprocs = cJSON_GetObjectItemCaseSensitive(root, "processes");
     if (cJSON_IsArray(jprocs)) {
@@ -95,6 +108,51 @@ LauncherConfig* config_load(const char* config_file) {
             cJSON* jauto = cJSON_GetObjectItemCaseSensitive(item, "auto_start");
             if (cJSON_IsBool(jauto)) pc->auto_start = cJSON_IsTrue(jauto);
 
+            /* ── scheduling (per-process) ───────────────── */
+            cJSON* jsched = cJSON_GetObjectItemCaseSensitive(item, "scheduling");
+            if (cJSON_IsObject(jsched)) {
+                /* priority: "low"|"normal"|"high"|"critical" or number */
+                cJSON* jp = cJSON_GetObjectItemCaseSensitive(jsched, "priority");
+                if (cJSON_IsString(jp)) {
+                    if (strcmp(jp->valuestring, "critical") == 0) pc->scheduling.priority = 3;
+                    else if (strcmp(jp->valuestring, "high") == 0) pc->scheduling.priority = 2;
+                    else if (strcmp(jp->valuestring, "normal") == 0) pc->scheduling.priority = 1;
+                    else pc->scheduling.priority = 0;
+                } else if (cJSON_IsNumber(jp)) {
+                    pc->scheduling.priority = (int)jp->valuedouble;
+                }
+
+                /* max_frequency_hz */
+                cJSON* jfreq = cJSON_GetObjectItemCaseSensitive(jsched, "max_frequency_hz");
+                if (cJSON_IsNumber(jfreq)) pc->scheduling.max_frequency_hz = jfreq->valuedouble;
+
+                /* cpu_affinity: [0, 1, 2] or bitmask number */
+                cJSON* jaff = cJSON_GetObjectItemCaseSensitive(jsched, "cpu_affinity");
+                if (cJSON_IsArray(jaff)) {
+                    int n = cJSON_GetArraySize(jaff);
+                    for (int k = 0; k < n && k < 64; k++) {
+                        cJSON* ji = cJSON_GetArrayItem(jaff, k);
+                        if (cJSON_IsNumber(ji))
+                            pc->scheduling.cpu_affinity_mask |= (1ULL << (int)ji->valuedouble);
+                    }
+                } else if (cJSON_IsNumber(jaff)) {
+                    pc->scheduling.cpu_affinity_mask = (uint64_t)jaff->valuedouble;
+                }
+
+                /* cpuset: "0-3" or "0,2,4" */
+                cJSON* jset = cJSON_GetObjectItemCaseSensitive(jsched, "cpuset");
+                if (cJSON_IsString(jset) && jset->valuestring) {
+                    /* Parse "0-3" format */
+                    int start = -1, end = -1;
+                    if (sscanf(jset->valuestring, "%d-%d", &start, &end) == 2) {
+                        pc->scheduling.cpuset_start = start;
+                        pc->scheduling.cpuset_end   = end;
+                        for (int c = start; c <= end && c < 64; c++)
+                            pc->scheduling.cpu_affinity_mask |= (1ULL << c);
+                    }
+                }
+            }
+
             cfg->process_count++;
         }
     }
@@ -120,6 +178,13 @@ int config_save(const LauncherConfig* config, const char* config_file) {
     cJSON_AddNumberToObject(root, "monitor_interval", config->monitor_interval);
     cJSON_AddBoolToObject(root, "enable_monitor", config->enable_monitor);
 
+    /* scheduler global */
+    cJSON* jsch = cJSON_CreateObject();
+    cJSON_AddStringToObject(jsch, "mode", config->scheduler.mode == 1 ? "choreo" : "classic");
+    cJSON_AddNumberToObject(jsch, "worker_threads", config->scheduler.worker_threads);
+    cJSON_AddNumberToObject(jsch, "tick_us", config->scheduler.tick_us);
+    cJSON_AddItemToObject(root, "scheduler", jsch);
+
     cJSON* jprocs = cJSON_CreateArray();
     for (int i = 0; i < config->process_count; i++) {
         const ProcessConfig* pc = &config->processes[i];
@@ -129,6 +194,19 @@ int config_save(const LauncherConfig* config, const char* config_file) {
         cJSON_AddStringToObject(item, "config_data", pc->config_data);
         cJSON_AddNumberToObject(item, "priority", pc->priority);
         cJSON_AddBoolToObject(item, "auto_start", pc->auto_start);
+
+        /* scheduling */
+        cJSON* js = cJSON_CreateObject();
+        const char* pname = (pc->scheduling.priority == 3) ? "critical" :
+                            (pc->scheduling.priority == 2) ? "high" :
+                            (pc->scheduling.priority == 1) ? "normal" : "low";
+        cJSON_AddStringToObject(js, "priority", pname);
+        if (pc->scheduling.max_frequency_hz > 0)
+            cJSON_AddNumberToObject(js, "max_frequency_hz", pc->scheduling.max_frequency_hz);
+        if (pc->scheduling.cpu_affinity_mask != 0)
+            cJSON_AddNumberToObject(js, "cpu_affinity", (double)pc->scheduling.cpu_affinity_mask);
+        cJSON_AddItemToObject(item, "scheduling", js);
+
         cJSON_AddItemToArray(jprocs, item);
     }
     cJSON_AddItemToObject(root, "processes", jprocs);

@@ -5,12 +5,31 @@
 #include <stdio.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <sched.h>
+#include <errno.h>
 
 /* ── Thread entry: runs a loaded plugin ──────────────── */
 
 static void* process_thread_fn(void* arg) {
     ProcessNode* node = (ProcessNode*)arg;
     if (!node || !node->interface) return NULL;
+
+    /* ── 应用调度配置 ── */
+    if (node->sched_priority >= 2) {
+        struct sched_param sp;
+        sp.sched_priority = (node->sched_priority == 3) ? 80 : 60;
+        pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+        printf("[process:%s] SCHED_FIFO prio=%d\n", node->name, sp.sched_priority);
+    }
+    if (node->sched_cpu_mask != 0) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        for (int c = 0; c < CPU_SETSIZE && c < 64; c++)
+            if (node->sched_cpu_mask & (1ULL << c)) CPU_SET(c, &cpuset);
+        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        printf("[process:%s] CPU affinity mask=0x%lx\n",
+               node->name, (unsigned long)node->sched_cpu_mask);
+    }
 
     node->interface->start();
     return NULL;
@@ -166,6 +185,23 @@ static ProcessNode* find_node(ProcessManager* mgr, const char* name) {
         if (strcmp(node->name, name) == 0) return node;
     }
     return NULL;
+}
+
+int process_manager_set_scheduling(ProcessManager* mgr, const char* name,
+                                   int priority, uint64_t cpu_mask,
+                                   double max_freq_hz) {
+    if (!mgr || !name) return ERR_INVALID_PARAM;
+
+    pthread_mutex_lock(&mgr->mutex);
+    ProcessNode* node = find_node(mgr, name);
+    if (!node) { pthread_mutex_unlock(&mgr->mutex); return ERR_NOT_FOUND; }
+
+    node->sched_priority    = priority;
+    node->sched_cpu_mask    = cpu_mask;
+    node->sched_max_freq_hz = max_freq_hz;
+
+    pthread_mutex_unlock(&mgr->mutex);
+    return 0;
 }
 
 int process_manager_start_process(ProcessManager* mgr, const char* name) {

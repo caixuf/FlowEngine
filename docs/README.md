@@ -18,6 +18,7 @@
 ## 项目评估
 
 - [项目完善度评估](PROJECT_REVIEW.md) - 当前完成度、模块成熟度、短板与下一步路线
+- [项目进化路线图](EVOLUTION_ROADMAP.md) - 从中间件原型进化到可部署框架的阶段规划
 
 ## 学习路径
 
@@ -53,6 +54,7 @@
 docs/
 ├── README.md              # 本文件，文档索引
 ├── PROJECT_REVIEW.md      # 项目完善度评估
+├── EVOLUTION_ROADMAP.md   # 项目进化路线图
 ├── QUICK_START.md         # 30分钟快速入门
 ├── LEARNING_GUIDE.md      # 完整学习指南（2-4周）
 ├── PRACTICE_PROJECTS.md   # 实战练习项目)

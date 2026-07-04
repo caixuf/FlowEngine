@@ -151,6 +151,20 @@ int main(int argc, char* argv[]) {
                                              proc_config->config_data);
         if (ret == 0) {
             loaded_count++;
+
+            /* ── 应用调度配置 ── */
+            SchedulingConfig* sc = &proc_config->scheduling;
+            if (sc->priority > 0 || sc->cpu_affinity_mask != 0 || sc->max_frequency_hz > 0) {
+                LOG_INFO("launcher", "  scheduling[%s]: prio=%d cpu_mask=0x%lx freq=%.1fHz",
+                         proc_config->name, sc->priority,
+                         (unsigned long)sc->cpu_affinity_mask,
+                         sc->max_frequency_hz);
+                process_manager_set_scheduling(g_manager, proc_config->name,
+                                               sc->priority,
+                                               sc->cpu_affinity_mask,
+                                               sc->max_frequency_hz);
+            }
+
             if (proc_config->auto_start) {
                 process_manager_start_process(g_manager, proc_config->name);
             }
@@ -159,7 +173,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    LOG_INFO("launcher", "Loaded %d/%d plugins", loaded_count, config->process_count);
+    LOG_INFO("launcher", "Loaded %d/%d plugins (scheduler: %s mode)",
+             loaded_count, config->process_count,
+             config->scheduler.mode == 1 ? "choreo" : "classic");
 
     // 启动监控线程
     if (config->enable_monitor) {

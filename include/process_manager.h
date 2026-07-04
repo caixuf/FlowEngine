@@ -22,6 +22,12 @@ typedef struct ProcessNode {
     bool is_running;                  // 是否正在运行
     bool should_restart;              // 是否需要重启
     uint32_t restart_count;           // 当前重启次数
+
+    /* ── 调度配置 ─────────────────────────────────── */
+    int      sched_priority;          /**< 0=low 1=normal 2=high 3=critical */
+    uint64_t sched_cpu_mask;          /**< CPU 亲和性位掩码 */
+    double   sched_max_freq_hz;       /**< 最大执行频率 */
+
     TAILQ_ENTRY(ProcessNode) entries; // 队列链接
 } ProcessNode;
 
@@ -61,6 +67,21 @@ int process_manager_load_plugin(ProcessManager* manager,
                                const char* name,
                                const char* library_path,
                                const char* config_data);
+
+/**
+ * 设置进程的调度参数（优先级、CPU亲和性、频率限制）。
+ * 必须在进程启动前调用。
+ *
+ * @param manager     进程管理器
+ * @param name        进程名称
+ * @param priority    优先级 (0=low 1=normal 2=high 3=critical)
+ * @param cpu_mask    CPU 亲和性位掩码
+ * @param max_freq_hz 最大执行频率 (0=不限制)
+ * @return 0成功，非0失败
+ */
+int process_manager_set_scheduling(ProcessManager* manager, const char* name,
+                                   int priority, uint64_t cpu_mask,
+                                   double max_freq_hz);
 
 /**
  * 启动进程
