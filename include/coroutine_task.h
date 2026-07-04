@@ -1211,7 +1211,16 @@ struct CompletionNotifier {
     CompletionNotifier& operator=(const CompletionNotifier&) = delete;
     CompletionNotifier(CompletionNotifier&& o) noexcept
         : handle(o.handle) { o.handle = nullptr; }
-    ~CompletionNotifier() { if (handle) handle.destroy(); }
+    ~CompletionNotifier() {
+        if (handle) {
+            // 自旋等待工作线程完成 final_suspend 将帧完全挂起。
+            // 无此等待时，若工作线程在 return_void() 与 final_suspend
+            // 之间，execute() 已收到 frame_done_ 信号并销毁 notifier，
+            // 会在帧仍被访问时 destroy，导致 heap corruption。
+            while (!handle.done()) {}
+            handle.destroy();
+        }
+    }
 };
 
 /* 工厂函数：创建一个空体协程，挂起于 initial_suspend 等待被续体激活。
