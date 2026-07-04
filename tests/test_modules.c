@@ -15,6 +15,7 @@
 #include "scheduler.h"
 #include "fusion.h"
 #include "message_bus.h"
+#include "error_codes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +167,52 @@ static void test_sm_illegal_transition(void) {
     bool ok = statem_send_event(&sm, SM_EVENT_STOP, NULL);
     ASSERT(!ok, "illegal transition should be rejected");
     ASSERT(statem_current(&sm) == SM_STATE_INITIALIZED, "state should not change");
+
+    PASS();
+}
+
+static void test_sm_new_transitions(void) {
+    TEST("sm RUNNING + DONE -> STOPPED (自行结束)");
+    ReflectiveStateMachine sm;
+    statem_init(&sm, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT(statem_send_event(&sm, SM_EVENT_START, NULL), "START should succeed");
+    ASSERT(statem_send_event(&sm, SM_EVENT_DONE, NULL), "RUNNING + DONE should succeed");
+    ASSERT(statem_current(&sm) == SM_STATE_STOPPED, "should be STOPPED");
+
+    TEST("sm INITIALIZED + ERROR -> ERROR (init 失败)");
+    ReflectiveStateMachine sm2;
+    statem_init(&sm2, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT(statem_send_event(&sm2, SM_EVENT_ERROR, NULL), "INITIALIZED + ERROR should succeed");
+    ASSERT(statem_current(&sm2) == SM_STATE_ERROR, "should be ERROR");
+
+    PASS();
+}
+
+static void test_sm_illegal_policy(void) {
+    TEST("sm send_event_ex 统一错误码");
+    ReflectiveStateMachine sm;
+    statem_init(&sm, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT_EQ(statem_send_event_ex(&sm, SM_EVENT_START, NULL), ERR_OK,
+              "合法转移应返回 ERR_OK");
+    ASSERT_EQ(statem_send_event_ex(&sm, SM_EVENT_RESUME, NULL), ERR_ILLEGAL_TRANSITION,
+              "非法转移应返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm) == SM_STATE_RUNNING, "WARN 策略下状态不变");
+
+    TEST("sm illegal policy REJECT 保持状态不变");
+    ReflectiveStateMachine sm2;
+    statem_init(&sm2, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    statem_set_illegal_policy(&sm2, SM_ILLEGAL_REJECT);
+    ASSERT_EQ(statem_send_event_ex(&sm2, SM_EVENT_STOP, NULL), ERR_ILLEGAL_TRANSITION,
+              "REJECT 策略仍返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm2) == SM_STATE_INITIALIZED, "REJECT 策略下状态不变");
+
+    TEST("sm illegal policy GOTO_ERROR 进入 ERROR 态");
+    ReflectiveStateMachine sm3;
+    statem_init(&sm3, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    statem_set_illegal_policy(&sm3, SM_ILLEGAL_GOTO_ERROR);
+    ASSERT_EQ(statem_send_event_ex(&sm3, SM_EVENT_STOP, NULL), ERR_ILLEGAL_TRANSITION,
+              "GOTO_ERROR 策略返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm3) == SM_STATE_ERROR, "GOTO_ERROR 策略应进入 ERROR 态");
 
     PASS();
 }
@@ -519,6 +566,8 @@ int main(void) {
     printf("\n═══ State Machine ═══\n");
     test_sm_lifecycle();
     test_sm_illegal_transition();
+    test_sm_new_transitions();
+    test_sm_illegal_policy();
     test_sm_guard();
     test_sm_reflection();
     test_sm_dynamic_rules();

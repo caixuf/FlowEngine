@@ -62,9 +62,11 @@ const TransitionRule SM_TABLE_STANDARD[] = {
     { SM_STATE_INITIALIZED, SM_EVENT_START,   SM_STATE_RUNNING,  "INITIALIZED + START -> RUNNING",  false },
     { SM_STATE_RUNNING,     SM_EVENT_STOP,    SM_STATE_STOPPING, "RUNNING + STOP -> STOPPING",      false },
     { SM_STATE_STOPPING,    SM_EVENT_DONE,    SM_STATE_STOPPED,  "STOPPING + DONE -> STOPPED",      false },
+    { SM_STATE_RUNNING,     SM_EVENT_DONE,    SM_STATE_STOPPED,  "RUNNING + DONE -> STOPPED",       false },
     { SM_STATE_RUNNING,     SM_EVENT_PAUSE,   SM_STATE_PAUSED,   "RUNNING + PAUSE -> PAUSED",       false },
     { SM_STATE_PAUSED,      SM_EVENT_RESUME,  SM_STATE_RUNNING,  "PAUSED + RESUME -> RUNNING",      false },
     { SM_STATE_RUNNING,     SM_EVENT_ERROR,   SM_STATE_ERROR,    "RUNNING + ERROR -> ERROR",        false },
+    { SM_STATE_INITIALIZED, SM_EVENT_ERROR,   SM_STATE_ERROR,    "INITIALIZED + ERROR -> ERROR",    false },
     { SM_STATE_PAUSED,      SM_EVENT_ERROR,   SM_STATE_ERROR,    "PAUSED + ERROR -> ERROR",         false },
     { SM_STATE_ERROR,       SM_EVENT_RESTART, SM_STATE_INITIALIZED, "ERROR + RESTART -> INITIALIZED", false },
     { SM_STATE_STOPPED,     SM_EVENT_RESTART, SM_STATE_INITIALIZED, "STOPPED + RESTART -> INITIALIZED", false },
@@ -279,23 +281,61 @@ static const TransitionRule* find_transition(const ReflectiveStateMachine* sm,
 /* ══════════════════════════════════════════════════════════ */
 
 bool statem_send_event(ReflectiveStateMachine* sm, EventId event, void* task) {
-    if (!sm) return false;
+    return statem_send_event_ex(sm, event, task) == ERR_OK;
+}
+
+void statem_set_illegal_policy(ReflectiveStateMachine* sm, SmIllegalPolicy policy) {
+    if (sm) sm->illegal_policy = policy;
+}
+
+int statem_send_event_ex(ReflectiveStateMachine* sm, EventId event, void* task) {
+    if (!sm) return ERR_INVALID_PARAM;
 
     StateId from = sm->current;
     const TransitionRule* rule = find_transition(sm, from, event);
     const char* desc = rule ? (rule->description ? rule->description : "") : NULL;
 
     if (!rule) {
-        /* Illegal transition */
-        if (sm->trace_enabled) {
-            LOG_WARN("statem", "%s: ILLEGAL %s + %s -> ???",
-                     sm->task_name ? sm->task_name : "?",
-                     state_name_str(from), event_name_str(event));
+        /* 非法转移：按统一策略处理 */
+        switch (sm->illegal_policy) {
+            case SM_ILLEGAL_GOTO_ERROR:
+                /* 故障兜底：转入 ERROR 态（若当前不在 ERROR） */
+                if (sm->current != SM_STATE_ERROR) {
+                    if (sm->trace_enabled) {
+                        LOG_WARN("statem", "%s: ILLEGAL %s + %s -> ERROR (policy=GOTO_ERROR)",
+                                 sm->task_name ? sm->task_name : "?",
+                                 state_name_str(from), event_name_str(event));
+                    }
+                    if (sm->on_exit) sm->on_exit(task, from, event);
+                    sm->previous      = from;
+                    sm->current       = SM_STATE_ERROR;
+                    sm->last_event    = event;
+                    sm->entered_at_us = monotonic_us();
+                    if (sm->on_entry) sm->on_entry(task, SM_STATE_ERROR, event);
+                }
+                if (sm->debug_hook) {
+                    sm->debug_hook(task, from, event, SM_STATE_ERROR, "ILLEGAL->ERROR", false);
+                }
+                break;
+            case SM_ILLEGAL_REJECT:
+                /* 静默拒绝：不打印告警，仅回调 hook（避免刷屏） */
+                if (sm->debug_hook) {
+                    sm->debug_hook(task, from, event, SM_STATE_UNKNOWN, "ILLEGAL", false);
+                }
+                break;
+            case SM_ILLEGAL_WARN:
+            default:
+                if (sm->trace_enabled) {
+                    LOG_WARN("statem", "%s: ILLEGAL %s + %s -> ???",
+                             sm->task_name ? sm->task_name : "?",
+                             state_name_str(from), event_name_str(event));
+                }
+                if (sm->debug_hook) {
+                    sm->debug_hook(task, from, event, SM_STATE_UNKNOWN, "ILLEGAL", false);
+                }
+                break;
         }
-        if (sm->debug_hook) {
-            sm->debug_hook(task, from, event, SM_STATE_UNKNOWN, "ILLEGAL", false);
-        }
-        return false;
+        return ERR_ILLEGAL_TRANSITION;
     }
 
     /* Guard check */
@@ -309,7 +349,7 @@ bool statem_send_event(ReflectiveStateMachine* sm, EventId event, void* task) {
         if (sm->debug_hook) {
             sm->debug_hook(task, from, event, rule->to, desc, false);
         }
-        return false;
+        return ERR_GUARD_REJECTED;
     }
 
     /* Trace log */
@@ -346,7 +386,7 @@ bool statem_send_event(ReflectiveStateMachine* sm, EventId event, void* task) {
         sm->debug_hook(task, from, event, rule->to, desc, true);
     }
 
-    return true;
+    return ERR_OK;
 }
 
 bool statem_process_auto(ReflectiveStateMachine* sm, void* task) {
