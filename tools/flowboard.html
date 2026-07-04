@@ -551,19 +551,23 @@ function updateTopo(){
 }
 
 // ── Charts (Canvas) ────────────────────────────────────────
-let chartPrevPub = null, chartPrevDel = null;
+let chartPrevPub = -1, chartPrevDel = -1;
 
 function updateCharts(){
   const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
   const nowPub = b.published||0, nowDel = b.delivered||0;
 
-  // Seed first sample without a data point (avoids the initial 0 spike)
-  if (chartPrevPub === null) { chartPrevPub = nowPub; chartPrevDel = nowDel; return; }
+  // Compute per-second delta from cumulative counters
+  // First sample: delta=0 (no baseline yet), subsequent: actual change
+  const deltaPub = chartPrevPub >= 0 ? Math.max(0, nowPub - chartPrevPub) : 0;
+  const deltaDel = chartPrevDel >= 0 ? Math.max(0, nowDel - chartPrevDel) : 0;
 
-  chartHistory.rate.push({v:Math.max(0, nowPub - chartPrevPub), raw: nowPub});
-  chartHistory.latency.push({v:l.avg_us||0, p99:l.p99_us||0});
-  chartHistory.frames.push({v:Math.max(0, nowDel - chartPrevDel), raw: nowDel});
-  chartPrevPub = nowPub; chartPrevDel = nowDel;
+  chartHistory.rate.push({v: deltaPub, raw: nowPub});
+  chartHistory.latency.push({v: l.avg_us||0, p99: l.p99_us||0});
+  chartHistory.frames.push({v: deltaDel, raw: nowDel});
+
+  chartPrevPub = nowPub;
+  chartPrevDel = nowDel;
 
   [chartHistory.rate,chartHistory.latency,chartHistory.frames].forEach(function(a){while(a.length>chartHistory.maxLen)a.shift();});
 
