@@ -20,6 +20,7 @@
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <pthread.h>
 
 static int g_passed = 0;
 static int g_failed = 0;
@@ -386,6 +387,116 @@ static void test_fusion_node(void) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/* Message Bus — QoS & Per-Topic Statistics                   */
+/* ══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    pthread_mutex_t m;
+    int count;
+    int max_val;   /* max payload value observed */
+    int slow_us;   /* per-callback sleep to create backpressure */
+} BusCounter;
+
+static void bus_counter_cb(const Message* msg, void* ud) {
+    BusCounter* c = (BusCounter*)ud;
+    int val = 0;
+    if (msg->data_size >= sizeof(int)) memcpy(&val, msg->data, sizeof(int));
+    if (c->slow_us > 0) usleep(c->slow_us);
+    pthread_mutex_lock(&c->m);
+    c->count++;
+    if (val > c->max_val) c->max_val = val;
+    pthread_mutex_unlock(&c->m);
+}
+
+static void test_bus_topic_stats(void) {
+    TEST("bus per-topic stats accounting");
+    MessageBus* bus = message_bus_create("test_qos_bus");
+    ASSERT(bus != NULL, "bus create failed");
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 0 };
+    message_bus_subscribe(bus, "t/stats", bus_counter_cb, &c);
+
+    const int N = 10;
+    for (int i = 0; i < N; i++) {
+        message_bus_publish(bus, "t/stats", "tester", &i, sizeof(i));
+        usleep(3000); /* 3ms spacing → measurable frequency */
+    }
+    usleep(100000); /* let dispatch drain */
+
+    TopicStats st;
+    int rc = message_bus_get_topic_stats(bus, "t/stats", &st);
+    ASSERT_EQ(rc, 0, "get_topic_stats failed");
+    ASSERT_EQ((int)st.publish_count, N, "publish_count wrong");
+    ASSERT_EQ((int)st.deliver_count, N, "deliver_count wrong");
+    ASSERT_EQ((int)st.subscriber_count, 1, "subscriber_count wrong");
+    message_bus_destroy(bus);
+    PASS();
+
+    TEST("bus per-topic frequency estimate > 0");
+    /* frequency_hz must be non-zero (regression: was always 0) */
+    ASSERT(st.frequency_hz > 0.0, "frequency_hz not computed (%.1f)", st.frequency_hz);
+    PASS();
+}
+
+static void test_bus_qos_config(void) {
+    TEST("bus QoS set/get");
+    MessageBus* bus = message_bus_create("test_qos_cfg");
+    TopicQos q = { .queue_depth = 8, .policy = QOS_DROP_LATEST };
+    ASSERT_EQ(message_bus_set_topic_qos(bus, "t/cfg", &q), 0, "set_qos failed");
+    const TopicQos* got = message_bus_get_topic_qos(bus, "t/cfg");
+    ASSERT(got != NULL, "get_qos returned NULL");
+    ASSERT_EQ((int)got->queue_depth, 8, "queue_depth wrong");
+    ASSERT_EQ((int)got->policy, (int)QOS_DROP_LATEST, "policy wrong");
+    message_bus_destroy(bus);
+    PASS();
+}
+
+static void test_bus_qos_drop_latest(void) {
+    TEST("bus QoS DROP_LATEST enforces depth");
+    MessageBus* bus = message_bus_create("test_drop_latest");
+    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_LATEST };
+    message_bus_set_topic_qos(bus, "t/dl", &q);
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
+    message_bus_subscribe(bus, "t/dl", bus_counter_cb, &c);
+
+    const int N = 40;
+    for (int i = 0; i < N; i++)
+        message_bus_publish(bus, "t/dl", "tester", &i, sizeof(i)); /* burst */
+    usleep(400000); /* drain */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/dl", &st);
+    /* Some messages must have been dropped due to depth pressure */
+    ASSERT(st.drop_count > 0, "expected drops (got %d)", (int)st.drop_count);
+    /* All enqueued messages must eventually be delivered (1 subscriber) */
+    ASSERT_EQ((int)st.deliver_count, (int)st.publish_count,
+              "deliver != publish (%d vs %d)", (int)st.deliver_count, (int)st.publish_count);
+    message_bus_destroy(bus);
+    PASS();
+}
+
+static void test_bus_qos_drop_oldest(void) {
+    TEST("bus QoS DROP_OLDEST keeps newest");
+    MessageBus* bus = message_bus_create("test_drop_oldest");
+    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_OLDEST };
+    message_bus_set_topic_qos(bus, "t/do", &q);
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
+    message_bus_subscribe(bus, "t/do", bus_counter_cb, &c);
+
+    const int N = 40;
+    for (int i = 0; i < N; i++)
+        message_bus_publish(bus, "t/do", "tester", &i, sizeof(i)); /* burst 0..39 */
+    usleep(400000); /* drain */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/do", &st);
+    ASSERT(st.drop_count > 0, "expected evictions (got %d)", (int)st.drop_count);
+    message_bus_destroy(bus);
+    /* dispatch thread joined → safe to read counter without lock */
+    ASSERT_EQ(c.max_val, N - 1, "newest message must survive (saw max %d)", c.max_val);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════ */
 /* Main                                                       */
 /* ══════════════════════════════════════════════════════════ */
 
@@ -421,6 +532,13 @@ int main(void) {
     printf("\n═══ Fusion ═══\n");
     test_message_buffer();
     test_fusion_node();
+
+    /* ── Message Bus (QoS) ──────────────────── */
+    printf("\n═══ Message Bus / QoS ═══\n");
+    test_bus_topic_stats();
+    test_bus_qos_config();
+    test_bus_qos_drop_latest();
+    test_bus_qos_drop_oldest();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");
