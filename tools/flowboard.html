@@ -662,7 +662,7 @@ document.addEventListener('keydown',function(e){
 // ════════════════════════════════════════════════════════════
 var scene3d=null,camera3d=null,renderer3d=null,controls3d=null;
 var carBody=null,carWheels=[],lidarCloud=null,gpsTrack=[],trajLine=null;
-var gridHelper=null,sceneReady=false;
+var gridHelper=null,sceneReady=false,trafficLights=[],trafficState=0,pedestrians=[],cyclists=[];
 
 function init3D(){
   var el=document.getElementById("scene3d");if(!el)return;
@@ -670,84 +670,213 @@ function init3D(){
     import("three/addons/controls/OrbitControls.js").then(function(OC){
       var w=el.clientWidth,h=el.clientHeight;
       scene3d=new THREE.Scene();
-      scene3d.background=new THREE.Color(0x070a0f);
-      scene3d.fog=new THREE.Fog(0x070a0f,50,200);
+      scene3d.background=new THREE.Color(0x1a1a2e);
+      scene3d.fog=new THREE.Fog(0x1a1a2e,60,250);
 
       camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,500);
-      camera3d.position.set(30,20,30);
+      camera3d.position.set(40,30,50);
       camera3d.lookAt(0,0,0);
 
       renderer3d=new THREE.WebGLRenderer({antialias:true});
       renderer3d.setSize(w,h);
       renderer3d.setPixelRatio(Math.min(window.devicePixelRatio,2));
       renderer3d.shadowMap.enabled=true;
+      renderer3d.shadowMap.type=THREE.PCFSoftShadowMap;
       el.appendChild(renderer3d.domElement);
       document.getElementById("scene3d-msg").style.display="none";
 
       controls3d=new OC.OrbitControls(camera3d,renderer3d.domElement);
-      controls3d.target.set(0,0,0);
-      controls3d.enableDamping=true;controls3d.dampingFactor=0.1;
-      controls3d.maxPolarAngle=Math.PI/2.2;
+      controls3d.target.set(0,1.5,0);
+      controls3d.enableDamping=true;controls3d.dampingFactor=0.08;
+      controls3d.maxPolarAngle=Math.PI/2.3;controls3d.minDistance=8;controls3d.maxDistance=120;
       controls3d.update();
 
       // Lighting
-      scene3d.add(new THREE.AmbientLight(0x404060,2));
-      var sun=new THREE.DirectionalLight(0xffffff,3);
-      sun.position.set(50,80,30);sun.castShadow=true;
-      sun.shadow.mapSize.set(1024,1024);
+      scene3d.add(new THREE.AmbientLight(0x8899bb,1.2));
+      var sun=new THREE.DirectionalLight(0xffeedd,3.5);
+      sun.position.set(60,100,40);sun.castShadow=true;
+      sun.shadow.mapSize.set(2048,2048);sun.shadow.camera.near=1;sun.shadow.camera.far=300;
+      sun.shadow.camera.left=-80;sun.shadow.camera.right=80;sun.shadow.camera.top=80;sun.shadow.camera.bottom=-80;
       scene3d.add(sun);
 
-      // Ground
-      var groundGeo=new THREE.PlaneGeometry(200,200);
-      var groundMat=new THREE.MeshStandardMaterial({color:0x1a1a2e,roughness:0.9});
+      // ── Ground ──
+      var groundGeo=new THREE.PlaneGeometry(300,300);
+      var groundMat=new THREE.MeshStandardMaterial({color:0x2a2a3e,roughness:0.95});
       var ground=new THREE.Mesh(groundGeo,groundMat);
       ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;
       scene3d.add(ground);
-      gridHelper=new THREE.GridHelper(200,40,0x252d3a,0x111820);
-      scene3d.add(gridHelper);
 
-      // Car model
+      // ── Road intersection ──
+      function makeRoad(w,l,x,z,rot){
+        var g=new THREE.PlaneGeometry(w,l);
+        var m=new THREE.MeshStandardMaterial({color:0x333344,roughness:0.85});
+        var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;
+        r.position.set(x,0.02,z);r.receiveShadow=true;scene3d.add(r);
+        return r;
+      }
+      function makeLaneMark(w,l,x,z,rot){
+        var g=new THREE.PlaneGeometry(w,l);
+        var m=new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.5});
+        var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;
+        r.position.set(x,0.03,z);scene3d.add(r);
+      }
+      // Main roads
+      makeRoad(14,120,0,0,0);    // N-S road
+      makeRoad(14,120,0,0,Math.PI/2); // E-W road
+      // Lane markings
+      for(var i=-50;i<=50;i+=5){if(Math.abs(i)>7){makeLaneMark(0.3,2,0,0.04,i);makeLaneMark(0.3,2,i,0.04,0,Math.PI/2);}}
+      // Center dash
+      for(var i=-55;i<=55;i+=8){if(Math.abs(i)>7){makeLaneMark(0.3,3,0,0.04,i,0);makeLaneMark(0.3,3,i,0.04,0,Math.PI/2);}}
+      // Stop lines
+      function makeStopLine(x,z,rot){
+        var g=new THREE.PlaneGeometry(12,1);var m=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.3});
+        var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;r.position.set(x,0.03,z);scene3d.add(r);
+      }
+      makeStopLine(0,8.5,0);makeStopLine(0,-8.5,0);makeStopLine(8.5,0,Math.PI/2);makeStopLine(-8.5,0,Math.PI/2);
+      // Sidewalks
+      [[-9,0,14,120],[9,0,14,120],[0,-9,120,14,Math.PI/2],[0,9,120,14,Math.PI/2]].forEach(function(s){
+        var g=new THREE.BoxGeometry(s[2],0.3,s[3]);var m=new THREE.MeshStandardMaterial({color:0x555566,roughness:0.7});
+        var r=new THREE.Mesh(g,m);r.position.set(s[0],0.15,s[1]);r.receiveShadow=true;scene3d.add(r);
+      });
+
+      // ── Traffic lights (4 sets at each corner) ──
+      function makeTrafficLight(x,z,rot){
+        var group=new THREE.Group();
+        var poleGeo=new THREE.CylinderGeometry(0.15,0.2,6,8);
+        var pole=new THREE.Mesh(poleGeo,new THREE.MeshStandardMaterial({color:0x444444,roughness:0.5}));
+        pole.position.y=3;pole.castShadow=true;group.add(pole);
+        // Light box
+        var boxGeo=new THREE.BoxGeometry(0.8,2,0.5);
+        var box=new THREE.Mesh(boxGeo,new THREE.MeshStandardMaterial({color:0x222222,roughness:0.3}));
+        box.position.y=6.5;group.add(box);
+        // Red bulb
+        var bulbGeo=new THREE.SphereGeometry(0.25,8,8);
+        var redBulb=new THREE.Mesh(bulbGeo,new THREE.MeshStandardMaterial({color:0x330000,emissive:0x330000,roughness:0.2}));
+        redBulb.position.set(0,7.2,0.3);redBulb.name="red";group.add(redBulb);
+        var yellowBulb=new THREE.Mesh(bulbGeo,new THREE.MeshStandardMaterial({color:0x332200,emissive:0x221100,roughness:0.2}));
+        yellowBulb.position.set(0,6.5,0.3);yellowBulb.name="yellow";group.add(yellowBulb);
+        var greenBulb=new THREE.Mesh(bulbGeo,new THREE.MeshStandardMaterial({color:0x002200,emissive:0x001100,roughness:0.2}));
+        greenBulb.position.set(0,5.8,0.3);greenBulb.name="green";group.add(greenBulb);
+        group.position.set(x,0,z);group.rotation.y=rot||0;
+        scene3d.add(group);
+        trafficLights.push({group:group,red:redBulb,yellow:yellowBulb,green:greenBulb});
+      }
+      makeTrafficLight(10,10,-Math.PI/4);
+      makeTrafficLight(-10,10,Math.PI/4);
+      makeTrafficLight(10,-10,-3*Math.PI/4);
+      makeTrafficLight(-10,-10,3*Math.PI/4);
+
+      // ── Buildings ──
+      function makeBuilding(x,z,w,d,h,c){
+        var g=new THREE.BoxGeometry(w,h,d);var m=new THREE.MeshStandardMaterial({color:c,roughness:0.6});
+        var b=new THREE.Mesh(g,m);b.position.set(x,h/2,z);b.castShadow=true;b.receiveShadow=true;scene3d.add(b);
+        // Windows
+        var winMat=new THREE.MeshStandardMaterial({color:0xffff88,emissive:0x222200,roughness:0.2});
+        for(var wy=2;wy<h-2;wy+=3){for(var wx=-w/2+2;wx<w/2-1;wx+=3){
+          var win=new THREE.Mesh(new THREE.PlaneGeometry(1,1.5),winMat);
+          win.position.set(x+wx,wy,z+d/2+0.01);scene3d.add(win);
+        }}
+      }
+      makeBuilding(25,25,10,10,18,0x445566);
+      makeBuilding(-25,25,10,8,22,0x554455);
+      makeBuilding(25,-25,8,12,15,0x445555);
+      makeBuilding(-25,-25,12,8,25,0x555544);
+      makeBuilding(40,-15,8,8,12,0x554444);
+      makeBuilding(-40,15,8,10,20,0x445544);
+
+      // ── Trees ──
+      function makeTree(x,z){
+        var group=new THREE.Group();
+        var trunkGeo=new THREE.CylinderGeometry(0.2,0.3,3,8);
+        var trunk=new THREE.Mesh(trunkGeo,new THREE.MeshStandardMaterial({color:0x6b4423,roughness:0.8}));
+        trunk.position.y=1.5;trunk.castShadow=true;group.add(trunk);
+        var crownGeo=new THREE.SphereGeometry(1.8,8,6);var crownMat=new THREE.MeshStandardMaterial({color:0x2d5a27,roughness:0.7});
+        for(var i=0;i<3;i++){var crown=new THREE.Mesh(crownGeo,crownMat);crown.position.y=3+i*1.2;crown.scale.set(1-i*0.2,0.7,1-i*0.2);crown.castShadow=true;group.add(crown);}
+        group.position.set(x,0,z);scene3d.add(group);
+      }
+      [[18,22],[22,18],[-18,22],[-22,18],[18,-22],[22,-18],[-18,-22],[-22,-18],[35,10],[-35,10],[35,-10],[-35,-10],[10,35],[-10,35],[10,-35],[-10,-35]].forEach(function(p){makeTree(p[0],p[1]);});
+
+      // ── Pedestrians ──
+      function makePedestrian(x,z,color){
+        var group=new THREE.Group();
+        var bodyGeo=new THREE.CylinderGeometry(0.2,0.25,1.2,8);var body=new THREE.Mesh(bodyGeo,new THREE.MeshStandardMaterial({color:color,roughness:0.5}));
+        body.position.y=1.8;body.castShadow=true;group.add(body);
+        var headGeo=new THREE.SphereGeometry(0.2,8,6);var head=new THREE.Mesh(headGeo,new THREE.MeshStandardMaterial({color:0xffcc99,roughness:0.3}));
+        head.position.y=2.7;head.castShadow=true;group.add(head);
+        var legGeo=new THREE.CylinderGeometry(0.1,0.12,1,8);
+        [-0.15,0.15].forEach(function(lx){var leg=new THREE.Mesh(legGeo,new THREE.MeshStandardMaterial({color:0x334455,roughness:0.5}));leg.position.set(lx,0.5,0);group.add(leg);});
+        group.position.set(x,0,z);group.userData={walkDir:Math.random()>0.5?1:-1,walkSpeed:0.3+Math.random()*0.5,walkRange:4,baseX:x,baseZ:z};
+        scene3d.add(group);pedestrians.push(group);
+        return group;
+      }
+      // Crosswalk pedestrians
+      makePedestrian(3,12,0xe74c3c);makePedestrian(-4,12,0x3498db);makePedestrian(5,13,0x2ecc71);
+      makePedestrian(12,-3,0xf39c12);makePedestrian(13,4,0x9b59b6);makePedestrian(12,-5,0x1abc9c);
+      makePedestrian(-12,3,0xe67e22);makePedestrian(-13,-4,0x2980b9);
+
+      // ── Cyclists ──
+      function makeCyclist(x,z,color){
+        var group=new THREE.Group();
+        // Frame
+        var frameGeo=new THREE.TorusGeometry(0.5,0.05,8,8);var frame=new THREE.Mesh(frameGeo,new THREE.MeshStandardMaterial({color:color,roughness:0.4}));
+        frame.rotation.x=Math.PI/2;frame.position.y=0.8;group.add(frame);
+        // Wheels
+        var wheelGeo=new THREE.TorusGeometry(0.4,0.06,8,12);var wheelMat=new THREE.MeshStandardMaterial({color:0x111111,roughness:0.8});
+        [-0.7,0.7].forEach(function(wx){var w=new THREE.Mesh(wheelGeo,wheelMat);w.position.set(wx,0.4,0);w.rotation.y=Math.PI/2;group.add(w);});
+        // Rider
+        var bodyGeo=new THREE.CylinderGeometry(0.15,0.2,0.8,8);var body=new THREE.Mesh(bodyGeo,new THREE.MeshStandardMaterial({color:0xee7733,roughness:0.5}));
+        body.position.y=1.2;group.add(body);
+        var headGeo=new THREE.SphereGeometry(0.15,8,6);var head=new THREE.Mesh(headGeo,new THREE.MeshStandardMaterial({color:0xffcc99,roughness:0.3}));
+        head.position.y=1.8;group.add(head);
+        group.position.set(x,0,z);group.userData={dir:Math.random()>0.5?1:-1,speed:0.5+Math.random()*0.8,range:8,baseX:x,baseZ:z,axis:Math.random()>0.5?"x":"z"};
+        scene3d.add(group);cyclists.push(group);
+        return group;
+      }
+      makeCyclist(15,15,0xff4444);makeCyclist(-16,14,0x44ff44);makeCyclist(14,-16,0x4444ff);makeCyclist(-15,-15,0xffaa00);
+
+      // ── Our car (ego vehicle) ──
       var carGroup=new THREE.Group();
-      var bodyGeo=new THREE.BoxGeometry(4,1.2,2);
-      var bodyMat=new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.6,roughness:0.3});
+      var bodyGeo=new THREE.BoxGeometry(4.5,1.3,2.2);
+      var bodyMat=new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.65,roughness:0.25});
       carBody=new THREE.Mesh(bodyGeo,bodyMat);
-      carBody.position.y=1.5;carBody.castShadow=true;
-      carGroup.add(carBody);
-      var roofGeo=new THREE.BoxGeometry(2,0.6,1.8);
+      carBody.position.y=1.6;carBody.castShadow=true;carGroup.add(carBody);
+      var roofGeo=new THREE.BoxGeometry(2.2,0.65,2.0);
       var roof=new THREE.Mesh(roofGeo,bodyMat);
-      roof.position.set(0,1.0,0);roof.castShadow=true;
-      carBody.add(roof);
-      var wheelGeo=new THREE.CylinderGeometry(0.4,0.4,0.3,16);
+      roof.position.set(-0.2,1.05,0);roof.castShadow=true;carBody.add(roof);
+      // Windows
+      var winGeo=new THREE.PlaneGeometry(1.6,0.5);var winMat=new THREE.MeshStandardMaterial({color:0x88ccff,metalness:0.3,roughness:0.1,opacity:0.6,transparent:true});
+      [0,Math.PI].forEach(function(a){var win=new THREE.Mesh(winGeo,winMat);win.position.set(-0.2,1.05,1.01);win.rotation.y=a;roof.add(win);});
+      // Headlights
+      var lightGeo=new THREE.SphereGeometry(0.2,8,4);var lightMat=new THREE.MeshStandardMaterial({color:0xffffcc,emissive:0xffff88,roughness:0.1});
+      [-0.7,0.7].forEach(function(lz){var light=new THREE.Mesh(lightGeo,lightMat);light.position.set(2.3,1.2,lz);carBody.add(light);});
+      // Wheels
+      var wheelGeo=new THREE.CylinderGeometry(0.4,0.4,0.35,16);
       var wheelMat=new THREE.MeshStandardMaterial({color:0x111111,roughness:0.8});
-      [[1.2,-0.8,1.1],[1.2,-0.8,-1.1],[-1.2,-0.8,1.1],[-1.2,-0.8,-1.1]].forEach(function(wp){
+      [[1.3,-0.85,1.2],[1.3,-0.85,-1.2],[-1.3,-0.85,1.2],[-1.3,-0.85,-1.2]].forEach(function(wp){
         var wheel=new THREE.Mesh(wheelGeo,wheelMat);
-        wheel.rotation.z=Math.PI/2;wheel.position.set(wp[0],wp[1]+1.5,wp[2]);wheel.castShadow=true;
+        wheel.rotation.z=Math.PI/2;wheel.position.set(wp[0],wp[1]+1.6,wp[2]);wheel.castShadow=true;
         carGroup.add(wheel);carWheels.push(wheel);
       });
-      scene3d.add(carGroup);
-      carGroup.position.set(0,0.5,0);
+      scene3d.add(carGroup);carGroup.position.set(0,0.5,4);
 
-      // LiDAR point cloud
-      var lidarGeo=new THREE.BufferGeometry();
-      var lidarPts=new Float32Array(600);
-      for(var i=0;i<200;i++){lidarPts[i*3]=-20+Math.random()*40;lidarPts[i*3+1]=Math.random()*3;lidarPts[i*3+2]=-10+Math.random()*20;}
+      // ── LiDAR point cloud ──
+      var lidarGeo=new THREE.BufferGeometry();var lidarPts=new Float32Array(600);
+      for(var i=0;i<200;i++){lidarPts[i*3]=-20+Math.random()*40;lidarPts[i*3+1]=Math.random()*4;lidarPts[i*3+2]=-15+Math.random()*30;}
       lidarGeo.setAttribute("position",new THREE.BufferAttribute(lidarPts,3));
-      var lidarMat=new THREE.PointsMaterial({color:0xff4444,size:0.3});
-      lidarCloud=new THREE.Points(lidarGeo,lidarMat);
+      lidarCloud=new THREE.Points(lidarGeo,new THREE.PointsMaterial({color:0xff4444,size:0.3}));
       scene3d.add(lidarCloud);
 
-      // Trajectory line
-      var trajPts=[new THREE.Vector3(0,1.5,0),new THREE.Vector3(10,1.5,0.2),new THREE.Vector3(20,1.5,0.3),new THREE.Vector3(30,1.5,0.2),new THREE.Vector3(40,1.5,0)];
+      // ── Trajectory line ──
+      var trajPts=[];for(var i=0;i<40;i++){trajPts.push(new THREE.Vector3(i,1.5,Math.sin(i*0.15)*2));}
       trajLine=new THREE.Line(new THREE.BufferGeometry().setFromPoints(trajPts),new THREE.LineBasicMaterial({color:0x3fb950}));
       scene3d.add(trajLine);
 
-      // GPS track
-      var gpsGeo=new THREE.BufferGeometry();
-      var gpsArr=new Float32Array(300);for(var i=0;i<100;i++){gpsArr[i*3]=0;gpsArr[i*3+1]=0.05;gpsArr[i*3+2]=0;}
+      // ── GPS track ──
+      var gpsGeo=new THREE.BufferGeometry();var gpsArr=new Float32Array(300);
+      for(var i=0;i<100;i++){gpsArr[i*3]=0;gpsArr[i*3+1]=0.06;gpsArr[i*3+2]=0;}
       gpsGeo.setAttribute("position",new THREE.BufferAttribute(gpsArr,3));
       var gpsLine=new THREE.Line(gpsGeo,new THREE.LineBasicMaterial({color:0x4488ff}));
-      scene3d.add(gpsLine);
-      gpsTrack=[gpsLine,gpsArr];
+      scene3d.add(gpsLine);gpsTrack=[gpsLine,gpsArr];
 
       sceneReady=true;animate3D();
       window.addEventListener("resize",function(){if(!renderer3d)return;var w2=el.clientWidth,h2=el.clientHeight;camera3d.aspect=w2/h2;camera3d.updateProjectionMatrix();renderer3d.setSize(w2,h2);});
@@ -759,32 +888,55 @@ var gpsHistory=[];
 function update3D(){
   if(!sceneReady||!carBody)return;
   var v=(topoData.metrics||{}).vehicle;if(!v)return;
-  carBody.parent.position.x=v.x||0;
-  carBody.parent.position.z=(v.y||0)*5;
-  // Update LiDAR around car
+  var cx=v.x||0,cy=v.y||0;
+  // Move ego car
+  carBody.parent.position.x=cx;
+  carBody.parent.position.z=4+cy*5;
+  // Update LiDAR
   if(lidarCloud){
-    var pos=lidarCloud.geometry.attributes.position.array,cx=v.x||0,cy=v.y||0;
+    var pos=lidarCloud.geometry.attributes.position.array;
     for(var i=0;i<200&&i*3+2<pos.length;i++){
       var a=Math.random()*Math.PI*2,d=5+Math.random()*25;
-      pos[i*3]=cx+Math.cos(a)*d;pos[i*3+1]=Math.random()*3;pos[i*3+2]=cy*5+Math.sin(a)*d;
+      pos[i*3]=cx+Math.cos(a)*d;pos[i*3+1]=Math.random()*4;pos[i*3+2]=4+cy*5+Math.sin(a)*d;
     }
     lidarCloud.geometry.attributes.position.needsUpdate=true;
   }
   // GPS track
-  gpsHistory.push({x:v.x||0,z:(v.y||0)*5});
+  gpsHistory.push({x:cx,z:4+cy*5});
   if(gpsHistory.length>100)gpsHistory.shift();
-  if(gpsTrack.length){
-    var arr=gpsTrack[1];
+  if(gpsTrack.length){var arr=gpsTrack[1];
     for(var i=0;i<gpsHistory.length&&i*3+2<arr.length;i++){arr[i*3]=gpsHistory[i].x;arr[i*3+2]=gpsHistory[i].z;}
-    gpsTrack[0].geometry.attributes.position.needsUpdate=true;
-  }
+    gpsTrack[0].geometry.attributes.position.needsUpdate=true;}
   // Camera follow
-  if(controls3d){controls3d.target.set(v.x||0,1.5,(v.y||0)*5);controls3d.update();}
+  if(controls3d){controls3d.target.lerp(new THREE.Vector3(cx,1.5,4+cy*5),0.1);controls3d.update();}
 }
 
+// ── Animate traffic lights + pedestrians + cyclists ──
+var animTime=0;
 function animate3D(){
   requestAnimationFrame(animate3D);
   if(!sceneReady)return;
+  animTime+=0.016;
+  // Traffic light cycle: green(10s) → yellow(2s) → red(8s)
+  var cycle=(animTime%20);
+  // NS direction
+  var nsState=cycle<10?0:(cycle<12?1:2); // 0=green,1=yellow,2=red
+  var ewState=cycle<10?2:(cycle<12?2:(cycle<20?0:2)); // opposite
+  [nsState,ewState,nsState,ewState].forEach(function(s,i){
+    var tl=trafficLights[i];if(!tl)return;
+    tl.red.material.color.set(s===2?0xff0000:0x330000);tl.red.material.emissive.set(s===2?0x660000:0x110000);
+    tl.yellow.material.color.set(s===1?0xffaa00:0x332200);tl.yellow.material.emissive.set(s===1?0x442200:0x111100);
+    tl.green.material.color.set(s===0?0x00ff00:0x002200);tl.green.material.emissive.set(s===0?0x004400:0x001100);
+  });
+  // Pedestrians walk back and forth
+  pedestrians.forEach(function(p){
+    var ud=p.userData;var offset=Math.sin(animTime*ud.walkSpeed)*ud.walkRange;
+    p.position.x=ud.baseX+(ud.walkDir>0?offset:0);p.position.z=ud.baseZ+(ud.walkDir>0?0:offset);});
+  // Cyclists move
+  cyclists.forEach(function(c){
+    var ud=c.userData;var offset=Math.sin(animTime*ud.speed)*ud.range;
+    if(ud.axis==="x"){c.position.x=ud.baseX+offset*ud.dir;c.rotation.y=offset>0?0:Math.PI;}else{c.position.z=ud.baseZ+offset*ud.dir;c.rotation.y=offset>0?Math.PI/2:-Math.PI/2;}});
+
   controls3d.update();
   renderer3d.render(scene3d,camera3d);
 }
