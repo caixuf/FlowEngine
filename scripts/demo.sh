@@ -14,6 +14,7 @@ set -e
 # Kill any stale processes from previous runs
 pkill -9 -f flowboard_server 2>/dev/null || true
 pkill -9 -f flow_e2e 2>/dev/null || true
+pkill -9 -f foxglove_bridge 2>/dev/null || true
 sleep 0.5
 
 DURATION=30
@@ -94,6 +95,11 @@ python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 >
 SERVER_PID=$!
 sleep 1
 echo "  ✓ Dashboard at http://localhost:8800"
+
+# Start Foxglove WebSocket bridge for 3D live viz
+python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" > /dev/null 2>&1 &
+BRIDGE_PID=$!
+echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 
 # ── Open browser ────────────────────────────────────────────
 if $OPEN_BROWSER; then
