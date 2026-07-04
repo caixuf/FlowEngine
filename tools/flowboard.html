@@ -2,87 +2,121 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FlowBoard</title>
+<title>FlowBoard — Live Monitor</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font:13px system-ui,sans-serif;padding:16px;min-height:100vh}
-h1{color:#58a6ff;font-size:18px;margin-bottom:16px}
-h1 span{color:#8b949e;font-size:12px;font-weight:400}
-#status{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
-#status span{padding:3px 10px;border-radius:12px;font-size:11px}
-.live{background:#122d15;color:#3fb950}.dead{background:#2d1215;color:#f85149}.warn{background:#2d1a12;color:#d29922}
-.row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
-.card{background:#161b22;border:1px solid#21262d;border-radius:8px;padding:12px;min-width:300px}
-.card h2{font-size:12px;color:#8b949e;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
-#topo{width:100%;height:400px;background:#0d1117;border:1px solid#21262d;border-radius:8px;position:relative;overflow:hidden}
+body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;display:flex;height:100vh;overflow:hidden}
+#sidebar{width:280px;background:#0b0f16;border-right:1px solid#1a1f2b;display:flex;flex-direction:column;gap:10px;padding:16px 14px;overflow-y:auto;z-index:10;flex-shrink:0}
+#main{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+#header{background:linear-gradient(135deg,#0d1117 0%,#161b22 50%,#0d1117 100%);border-bottom:1px solid#1a1f2b;padding:10px 20px;display:flex;align-items:center;gap:16px;z-index:5}
+#header h1{font-size:16px;font-weight:700;background:linear-gradient(135deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:flex;align-items:center;gap:8px}
+#header h1 .icon{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#1f6feb,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:14px;-webkit-text-fill-color:white}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:.3px}
+.pill-live{background:linear-gradient(135deg,#0d3320,#1a4d30);color:#3fb950;border:1px solid#1a5c38}
+.pill-dead{background:linear-gradient(135deg,#330d0d,#4d1a1a);color:#f85149;border:1px solid#5c1a1a}
+.pill-warn{background:linear-gradient(135deg,#33220d,#4d351a);color:#d29922;border:1px solid#5c401a}
+.card{background:linear-gradient(180deg,#111820,#0d1117);border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;transition:border-color .2s}
+.card:hover{border-color:#252d3a}
+.card-header{padding:10px 14px;border-bottom:1px solid#1a1f2b;display:flex;align-items:center;justify-content:space-between;background:#0d1117}
+.card-header h2{font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:6px}
+.card-header h2 .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.card-body{padding:10px 14px}
+#topo{width:100%;height:420px;background:#090c10;position:relative}
 #topo svg{width:100%;height:100%}
-#frames{height:300px;overflow-y:auto;font:10px 'JetBrains Mono',monospace;background:#0d1117;border:1px solid#21262d;border-radius:8px;padding:6px}
-#process-topics{height:300px;overflow-y:auto;font:10px 'JetBrains Mono',monospace;background:#0d1117;border:1px solid#21262d;border-radius:8px;padding:6px}
-#charts{display:flex;gap:8px;flex-wrap:wrap}
-.chart-box{flex:1;min-width:280px;height:200px;background:#0d1117;border:1px solid#21262d;border-radius:8px;overflow:hidden}
+#frames,#process-topics{max-height:280px;overflow-y:auto;font:10px 'JetBrains Mono',monospace}
+#charts{display:flex;gap:8px}
+.chart-box{flex:1;min-width:250px;height:200px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative}
 .chart-box canvas{width:100%;height:100%;display:block}
-.stat{display:flex;justify-content:space-between;padding:2px 0;font-size:11px;border-bottom:1px solid#161b22}
-.stat .v{color:#58a6ff;font-weight:600}
-button,input{background:#21262d;color:#c9d1d9;border:1px solid#30363d;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}
-button:hover{background:#30363d}
-input{width:240px;font:11px monospace}
-#msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#484f58;font-size:14px;pointer-events:none}
-.link{stroke:#21262d;stroke-width:1.2;fill:none}
-.frame-line{display:flex;gap:6px;padding:1px 4px;border-bottom:1px solid#0d1117;white-space:nowrap}
-.frame-line:hover{background:#161b22}
-.role{display:inline-block;min-width:38px;text-align:center;border-radius:10px;padding:1px 6px;font-size:9px;font-weight:700}.role-pub{background:#12361f;color:#3fb950}.role-sub{background:#102744;color:#58a6ff}.role-pubsub{background:#2d2248;color:#bc8cff}.role-unknown{background:#21262d;color:#8b949e}
-.topic-full{color:#58a6ff}.muted{color:#484f58}.mono{font-family:'JetBrains Mono',monospace}
+.stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid#0d1117;font-size:12px}
+.stat-row .label{color:#8b949e;font-size:11px}
+.stat-row .value{font-weight:700;font-size:13px;color:#58a6ff}
+.stat-row .value.green{color:#3fb950}.stat-row .value.red{color:#f85149}.stat-row .value.yellow{color:#d29922}
+button,input{background:#161b22;color:#c9d1d9;border:1px solid#252d3a;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;transition:all .15s}
+button:hover{background:#1c2330;border-color:#303d54}
+button.primary{background:linear-gradient(135deg,#1f6feb,#388bfd);border-color:#1f6feb;color:white;font-weight:600}
+button.primary:hover{background:linear-gradient(135deg,#388bfd,#58a6ff)}
+input{width:100%;padding:7px 10px;font:11px 'JetBrains Mono',monospace;border-radius:6px;outline:none;transition:border-color .15s}
+input:focus{border-color:#58a6ff}
+#msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none}
+.link{stroke:#1a1f2b;stroke-width:1.5;fill:none}
+.frame-line{display:flex;gap:8px;padding:2px 10px;border-bottom:1px solid#0d1117;white-space:nowrap;font-size:10px;align-items:center}
+.frame-line:hover{background:#111820}
+.role{display:inline-block;min-width:42px;text-align:center;border-radius:12px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:.3px}
+.role-pub{background:#0d3320;color:#3fb950;border:1px solid#1a5c38}
+.role-sub{background:#0d2140;color:#58a6ff;border:1px solid#1a3a6e}
+.role-pubsub{background:#1f1440;color:#bc8cff;border:1px solid#3a1a6e}
+.role-unknown{background:#161b22;color:#484f58}
+.topic-full{color:#58a6ff;font-weight:500}.muted{color:#484f58}.mono{font-family:'JetBrains Mono',monospace}
+.metric-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.mini-stat{background:#0d1117;border-radius:6px;padding:8px 10px;text-align:center}
+.mini-stat .val{font-size:18px;font-weight:800;color:#58a6ff;line-height:1.2}
+.mini-stat .lbl{font-size:9px;color:#8b949e;margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#1a1f2b;border-radius:3px}
 </style>
 </head>
 <body>
-
-<h1>🔗 FlowBoard <span id="conn-label">| offline</span></h1>
-
-<div id="status">
-  <span id="conn-dot" class="dead">● offline</span>
-  <span>Nodes: <b id="node-n">0</b></span>
-  <span>Frames: <b id="frame-n">0</b></span>
-  <span>Rate: <b id="rate-n">0</b> fps</span>
-</div>
-
-<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
-  <input id="url" value="http://localhost:8800" placeholder="Server URL" style="width:200px">
-  <button onclick="doConnect()" style="background:#1f6feb;border-color:#1f6feb">🔗 Connect</button>
-  <input id="topic-filter" placeholder="Filter topics (e.g. sensor/lidar,control/cmd)" style="width:260px;font-size:11px" oninput="updateAll()">
-  <button onclick="doSimulate()">📋 Demo</button>
-  <button onclick="doPause()" id="pause-btn">⏯ Pause</button>
-</div>
-
-<div class="row">
-  <div style="flex:2;min-width:400px">
-    <div class="card" style="padding:0"><h2 style="padding:12px 12px 0">Topology</h2><div id="topo"><div id="msg">Press "Demo Data" or "Connect" to load</div></div></div>
+<div id="sidebar">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+    <div class="icon" style="width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#1f6feb,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:16px">⚡</div>
+    <div><div style="font-weight:700;font-size:15px;background:linear-gradient(135deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">FlowBoard</div>
+    <div style="font-size:9px;color:#484f58">Live Monitor</div></div>
   </div>
-  <div style="flex:1;min-width:280px">
-    <div class="card"><h2>Metrics</h2><div id="metrics"><span style="color:#484f58">No data</span></div></div>
-    <div class="card" style="margin-top:12px"><h2>Status</h2><div id="node-status"><span style="color:#484f58">No data</span></div></div>
-  </div>
-</div>
+  <span id="conn-dot" class="pill pill-dead" style="align-self:flex-start">● offline</span>
 
-<div class="row">
-  <div style="flex:2;min-width:400px">
-    <div class="card" style="padding:0"><h2 style="padding:12px 12px 0">Frame Monitor</h2><div id="frames"><span style="color:#484f58">No data</span></div></div>
+  <div style="margin-top:4px">
+    <input id="url" value="http://localhost:8800" placeholder="Monitor server URL">
+    <div style="display:flex;gap:4px;margin-top:4px">
+      <button onclick="doConnect()" class="primary" style="flex:1">🔗 Connect</button>
+      <button onclick="doSimulate()" style="flex:1">📋 Demo</button>
+    </div>
   </div>
-  <div style="flex:1;min-width:280px">
-    <div class="card"><h2>Topic Stats (QoS)</h2><div id="topic-stats"><span style="color:#484f58">No data</span></div></div>
-  </div>
-</div>
 
-<div class="row">
-  <div style="flex:1;min-width:600px">
-    <div class="card" style="padding:0"><h2 style="padding:12px 12px 0">Process / Topic Matrix</h2><div id="process-topics"><span style="color:#484f58">No data</span></div></div>
+  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="updateAll()">
+
+  <div style="display:flex;gap:4px">
+    <button onclick="doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
+    <button onclick="clearFrames()" style="flex:1">🗑 Clear</button>
+  </div>
+
+  <div class="card"><div class="card-header"><h2>📊 Bus Stats</h2></div>
+    <div class="card-body"><div class="metric-grid">
+      <div class="mini-stat"><div class="val" id="m-pub">0</div><div class="lbl">Published</div></div>
+      <div class="mini-stat"><div class="val" id="m-del">0</div><div class="lbl">Delivered</div></div>
+      <div class="mini-stat"><div class="val" id="m-drop">0</div><div class="lbl">Dropped</div></div>
+      <div class="mini-stat"><div class="val" id="m-lat">0</div><div class="lbl">Latency µs</div></div>
+    </div></div>
+  </div>
+
+  <div class="card"><div class="card-header"><h2>🟢 Nodes</h2></div>
+    <div class="card-body"><div id="node-status"><span style="color:#484f58">No data</span></div></div>
+  </div>
+
+  <div style="font-size:10px;color:#30363d;margin-top:auto">
+    Nodes: <b id="node-n">0</b> · Frames: <b id="frame-n">0</b> · Rate: <b id="rate-n">0</b>/s
   </div>
 </div>
 
-<div class="row" style="min-height:220px">
-  <div id="charts" style="display:flex;gap:8px;width:100%;min-height:200px">
-    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-rate"></canvas></div>
-    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-lat"></canvas></div>
-    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-frames"></canvas></div>
+<div id="main">
+  <div class="row" style="display:flex;gap:12px">
+    <div style="flex:3;min-width:500px">
+      <div class="card"><div class="card-header"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2></div>
+        <div id="topo"><div id="msg">Press Connect or Demo to load</div></div></div>
+    </div>
+    <div style="flex:2;min-width:350px;display:flex;flex-direction:column;gap:12px">
+      <div class="card"><div class="card-header"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2></div>
+        <div class="card-body" id="topic-stats" style="max-height:200px;overflow-y:auto"><span style="color:#484f58">No data</span></div></div>
+      <div class="card" style="flex:1"><div class="card-header"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2></div>
+        <div id="frames" style="max-height:180px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
+    </div>
+  </div>
+
+  <div class="card"><div class="card-header"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2></div>
+    <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
+
+  <div id="charts" style="display:flex;gap:8px;min-height:200px">
+    <div class="chart-box"><canvas id="ch-rate"></canvas></div>
+    <div class="chart-box"><canvas id="ch-lat"></canvas></div>
+    <div class="chart-box"><canvas id="ch-frames"></canvas></div>
   </div>
 </div>
 
@@ -195,16 +229,12 @@ function updateAll(){
 }
 
 function updateMetrics(){
-  const m=topoData.metrics||{},b=m.bus||{},t=m.transport||{},l=m.latency||{};
-  document.getElementById('metrics').innerHTML=`
-    <div class="stat"><span>Bus Published</span><span class="v">${b.published||0}</span></div>
-    <div class="stat"><span>Bus Delivered</span><span class="v">${b.delivered||0}</span></div>
-    <div class="stat"><span>Bus Dropped</span><span class="v" style="color:${b.dropped?'#f85149':'#3fb950'}">${b.dropped||0}</span></div>
-    <div class="stat"><span>Latency avg</span><span class="v">${l.avg_us||0} µs</span></div>
-    <div class="stat"><span>Latency p99</span><span class="v">${l.p99_us||0} µs</span></div>
-    <div class="stat"><span>Driver Mode</span><span class="v">${m.driver_mode||'NA'}</span></div>
-    <div class="stat"><span>Scheduler</span><span class="v">${(m.scheduler||{}).mode||'?'}</span></div>
-  `;
+  const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
+  document.getElementById('m-pub').textContent = (b.published||0).toLocaleString();
+  document.getElementById('m-del').textContent = (b.delivered||0).toLocaleString();
+  document.getElementById('m-drop').textContent = (b.dropped||0);
+  document.getElementById('m-drop').style.color = (b.dropped||0) > 0 ? '#f85149' : '#3fb950';
+  document.getElementById('m-lat').textContent = (l.avg_us||0);
   const ns=topoData.nodes||[];
   document.getElementById('node-status').innerHTML=ns.map(n=>
     `<div class="stat"><span title="${n.description||''}">${n.name}</span><span style="color:${n.alive===false?'#f85149':'#3fb950'}">${n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—')}</span></div>`
