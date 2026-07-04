@@ -21,6 +21,10 @@
  *
  *   Test 6: request 请求/应答 awaitable
  *           co_await ask(...) 收到服务端回复。
+ *
+ *   Test 7: 并发压力（ASAN/TSAN 关注）
+ *           多个 cycle 下高频消息 / 超时 / 取消三路竞争，协程在
+ *           stop() 后均能迅速干净退出，无泄漏 / 无数据竞争。
  */
 
 #include "coroutine_task.h"
@@ -506,7 +510,99 @@ static void test_request() {
     message_bus_destroy(bus);
 }
 
-/* ── 主程序 ─────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════
+ * Test 7: 并发压力（消息 / 超时 / 取消 竞争）
+ *
+ * 目的：在 ASAN/TSAN 下反复触发"消息到达、超时、取消"三条恢复路径
+ * 的竞争，验证共享 AwaitCtl 的 CAS 防双重恢复与 shared_ptr 生命周期
+ * 安全（无 use-after-free / data race）。
+ *
+ * 每个 cycle：
+ *   - 协程循环 co_await select_for({a,b}, 2ms)，混合命中消息与超时；
+ *   - 发布线程高频向两个 topic 灌消息；
+ *   - 主线程在随机时刻 stop()，要求协程迅速取消退出。
+ * ══════════════════════════════════════════════════════════ */
+
+class StressTask : public FlowCoroTask {
+public:
+    StressTask(MessageBus* bus, std::atomic<long>& iters,
+               std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
+        : FlowCoroTask(bus), iters_(iters), done_(done), mtx_(mtx), cv_(cv) {}
+
+protected:
+    Task run() override {
+        while (!should_stop()) {
+            /* 2ms 超时的竞争等待：消息 / 超时 / 取消 三路并发恢复 */
+            auto r = co_await select_for({"stress/a", "stress/b"}, 2000);
+            iters_.fetch_add(1, std::memory_order_relaxed);
+            if (r.cancelled()) break;
+        }
+        done_.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.notify_all();
+        }
+        stop();
+    }
+
+private:
+    std::atomic<long>&       iters_;
+    std::atomic<bool>&       done_;
+    std::mutex&              mtx_;
+    std::condition_variable& cv_;
+};
+
+static void test_stress_concurrency() {
+    printf("\n[Test 7] 并发压力（消息/超时/取消 竞争，ASAN/TSAN 关注）\n");
+
+    const int CYCLES = 8;
+    long total_iters = 0;
+    bool all_done = true;
+
+    for (int c = 0; c < CYCLES; ++c) {
+        std::atomic<long> iters{0};
+        std::atomic<bool> done{false};
+        std::atomic<bool> pub_stop{false};
+        std::mutex mtx;
+        std::condition_variable cv;
+
+        MessageBus* bus = message_bus_create("t7");
+        StressTask task(bus, iters, done, mtx, cv);
+        std::thread runner([&]{ task.execute(); });
+
+        /* 发布线程：高频灌两个 topic */
+        std::thread publisher([&]{
+            uint8_t payload[4]{};
+            while (!pub_stop.load(std::memory_order_acquire)) {
+                message_bus_publish(bus, "stress/a", "pub", payload, sizeof(payload));
+                message_bus_publish(bus, "stress/b", "pub", payload, sizeof(payload));
+                std::this_thread::sleep_for(std::chrono::microseconds(300));
+            }
+        });
+
+        /* 让它跑一小会，混合命中消息与超时 */
+        std::this_thread::sleep_for(std::chrono::milliseconds(15 + c * 3));
+
+        /* 取消：协程应迅速退出，无需外发特殊消息 */
+        task.stop();
+        {
+            std::unique_lock<std::mutex> lk(mtx);
+            if (!cv.wait_for(lk, std::chrono::seconds(3),
+                             [&]{ return done.load(std::memory_order_acquire); })) {
+                all_done = false;
+            }
+        }
+        pub_stop.store(true, std::memory_order_release);
+        publisher.join();
+        runner.join();
+        total_iters += iters.load();
+        message_bus_destroy(bus);
+    }
+
+    CHECK(all_done, "8 个 cycle 的协程在 stop() 后均迅速取消退出");
+    CHECK(total_iters > 0, "压力期间协程正常经历了多次恢复（消息+超时混合）");
+    printf("  [INFO] 累计恢复次数=%ld（%d cycles）\n", total_iters, CYCLES);
+}
 
 int main() {
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
@@ -519,6 +615,7 @@ int main() {
     test_recv_timeout();
     test_delay();
     test_request();
+    test_stress_concurrency();
 
     printf("\n─────────────────────────────────────────────────────────────────────\n");
     printf("  结果: %d 通过, %d 失败\n", g_pass, g_fail);

@@ -48,6 +48,25 @@
  *       }
  *   };
  * @endcode
+ *
+ * ─────────────────────────────────────────────────────────────────────
+ * 所有权与生命周期规则（C / C++ / 协程混用，务必遵守）
+ * ─────────────────────────────────────────────────────────────────────
+ *   1. MessageBus 由外部拥有，其生命周期必须严格长于所有引用它的
+ *      CoroutineTask 及其协程帧。销毁顺序：先确保协程结束/取消并
+ *      execute() 返回，再 message_bus_destroy(bus)，最后析构 Task。
+ *   2. 每个 awaitable 在 await_suspend 时向 bus 注册订阅（或向
+ *      CancelToken/TimerService 注册回调），并在 await_resume 或其
+ *      析构中反注册。协程帧销毁会依次析构挂起点的 awaitable，从而
+ *      在 bus 仍存活时完成反注册——因此 (1) 的销毁顺序是必要条件。
+ *   3. 一次挂起至多被恢复一次：消息 / 取消 / 超时三条路径共享同一个
+ *      AwaitCtl，通过 CAS(try_fire) 决出唯一赢家；共享 shared_ptr 保证
+ *      即便 awaitable 已析构，仍在途的定时器/取消回调也不会悬垂访问。
+ *   4. 阻塞型原语（RequestAwaitable/run_blocking）只捕获值拷贝与共享
+ *      控制块，绝不捕获 this；被取消的协程销毁 awaitable 后，迟到的
+ *      阻塞结果不会访问已释放对象。
+ *   5. stop() 通过 CancelToken 直接唤醒悬挂协程，无需外部再发消息；
+ *      取消回调在持锁外调用，避免同步恢复模式下的重入死锁。
  */
 
 #ifndef COROUTINE_TASK_H

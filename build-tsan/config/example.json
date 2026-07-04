@@ -1,0 +1,15 @@
+{
+  "log_file": "launcher.log",
+  "log_level": 1,
+  "monitor_interval": 5,
+  "enable_monitor": true,
+  "processes": [
+    {
+      "name": "example_process",
+      "library_path": "./lib/starttool/plugins/libexample_process.so",
+      "config_data": "{\"test\": \"value\", \"interval\": 3}",
+      "priority": 1,
+      "auto_start": true
+    }
+  ]
+}
