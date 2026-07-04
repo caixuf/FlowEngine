@@ -71,6 +71,9 @@
 #include <thread>
 #include <chrono>
 #include <queue>
+#include <map>
+#include <set>
+#include <algorithm>
 #include <vector>
 #include <initializer_list>
 #include <iostream>   /* required by flowcoro/thread_pool.h (std::cout/cerr) */
@@ -169,6 +172,255 @@ struct Task {
 #endif /* FLOWCORO_INTEGRATION */
 
 /* ─────────────────────────────────────────────────────────
+ * 1b. schedule_resume — 统一的协程恢复入口
+ *
+ * 将"在何处 resume 协程"的差异集中到一处：
+ *   - FLOWCORO_INTEGRATION：投入无锁线程池，调用方（总线分发线程 /
+ *     取消线程 / 定时器线程）立即返回，协程在工作线程上继续执行。
+ *   - 标准模式：在调用线程上同步 resume。
+ * 所有 awaitable 与 CancelToken 均复用此函数，避免复制粘贴分支。
+ * ───────────────────────────────────────────────────────── */
+inline void schedule_resume(std::coroutine_handle<> h) {
+    if (!h || h.done()) return;
+#ifdef FLOWCORO_INTEGRATION
+    flowcoro_integration::get_thread_pool().enqueue_void(
+        [h]() mutable { if (!h.done()) h.resume(); });
+#else
+    h.resume();
+#endif
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 1c. CancelToken — 协程取消令牌
+ *
+ * 解决"悬挂协程无法在不外发消息的情况下被 stop() 唤醒退出"的缺陷。
+ *
+ * 语义：
+ *   - CoroutineTask 持有一个 CancelToken。stop() 调用 request_cancel()。
+ *   - 每个可取消的 awaitable 在挂起时通过 add_waiter() 注册一个唤醒回调，
+ *     并在恢复时通过 remove_waiter() 注销（best-effort 清理，防止列表膨胀）。
+ *   - request_cancel() 会置位 cancelled_ 并唤醒所有已注册的 waiter，
+ *     使悬挂的协程立即恢复；协程通过 should_stop()/cancelled() 检查后干净退出。
+ *
+ * 双重恢复保护：
+ *   awaitable 的消息路径与取消路径共享同一个 std::shared_ptr<atomic<bool>>
+ *   "fired" 守卫（CAS），确保一次挂起最多恢复一次。守卫用 shared_ptr 持有，
+ *   即便 awaitable 已析构，取消 waiter 仍可安全访问守卫，不产生悬垂引用。
+ *
+ * 线程安全：request_cancel() 在锁外调用 waiter，避免与协程内的再次
+ * add_waiter()（同一线程同步 resume 场景）发生自死锁。
+ * ───────────────────────────────────────────────────────── */
+class CancelToken {
+public:
+    using WakeFn = std::function<void()>;
+
+    /** 请求取消：置位标志并唤醒所有已注册的挂起 awaitable。可从任意线程调用。 */
+    void request_cancel() {
+        std::vector<WakeFn> to_wake;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            cancelled_.store(true, std::memory_order_release);
+            to_wake.reserve(waiters_.size());
+            for (auto& kv : waiters_) to_wake.push_back(kv.second);
+            waiters_.clear();
+        }
+        /* 锁外唤醒，防止同步 resume 路径重入 add_waiter 造成死锁 */
+        for (auto& fn : to_wake) fn();
+    }
+
+    /** 复位为未取消状态（任务重启时使用）。 */
+    void reset() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        cancelled_.store(false, std::memory_order_release);
+        waiters_.clear();
+    }
+
+    bool cancelled() const { return cancelled_.load(std::memory_order_acquire); }
+
+    /**
+     * 注册唤醒回调。若已处于取消状态，立即在当前线程执行 wake 并返回 0
+     * （0 表示"未挂号"，调用方无需 remove）。否则返回 >0 的注册 id。
+     */
+    uint64_t add_waiter(WakeFn wake) {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (!cancelled_.load(std::memory_order_acquire)) {
+                uint64_t id = ++next_id_;
+                waiters_.emplace(id, std::move(wake));
+                return id;
+            }
+        }
+        /* 已取消：锁外立即唤醒 */
+        wake();
+        return 0;
+    }
+
+    /** 注销唤醒回调（best-effort，id==0 表示无需注销）。 */
+    void remove_waiter(uint64_t id) {
+        if (id == 0) return;
+        std::lock_guard<std::mutex> lk(mtx_);
+        waiters_.erase(id);
+    }
+
+private:
+    std::atomic<bool>                  cancelled_{false};
+    std::mutex                         mtx_;
+    std::map<uint64_t, WakeFn>         waiters_;
+    uint64_t                           next_id_{0};
+};
+
+/* ─────────────────────────────────────────────────────────
+ * 1d. AwaitResult — 带状态的 co_await 结果
+ *
+ * 用于超时/取消感知的 awaitable（recv_for / when_any_for / request）。
+ * 老式 awaitable 仍直接返回 Message，保持向后兼容。
+ * ───────────────────────────────────────────────────────── */
+enum class AwaitStatus {
+    Ready = 0,   /**< 正常收到消息 */
+    Cancelled,   /**< 被 CancelToken 取消 */
+    Timeout,     /**< 等待超时 */
+};
+
+struct AwaitResult {
+    AwaitStatus status{AwaitStatus::Ready};
+    Message     message{};
+
+    bool ok()        const { return status == AwaitStatus::Ready; }
+    bool cancelled() const { return status == AwaitStatus::Cancelled; }
+    bool timed_out() const { return status == AwaitStatus::Timeout; }
+
+    /** if (auto r = co_await ...) { use r.message; } */
+    explicit operator bool() const { return ok(); }
+    const Message& operator*()  const { return message; }
+    const Message* operator->() const { return &message; }
+};
+
+/* ─────────────────────────────────────────────────────────
+ * 1d'. AwaitCtl — awaitable 的共享恢复控制块
+ *
+ * 消息 / 取消 / 超时三条恢复路径共享同一个 AwaitCtl：
+ *   - fired  ：CAS 守卫，保证一次挂起最多恢复一次。
+ *   - status ：由 CAS 胜者写入，await_resume 读取（happens-after resume）。
+ * 用 shared_ptr 持有，即便 awaitable 已析构，仍在途的取消/超时回调
+ * 也能安全访问，杜绝悬垂引用。
+ * ───────────────────────────────────────────────────────── */
+struct AwaitCtl {
+    std::atomic<bool> fired{false};
+    AwaitStatus       status{AwaitStatus::Ready};
+
+    /** CAS 竞争恢复权；胜者写入状态并返回 true。 */
+    bool try_fire(AwaitStatus s) {
+        bool expected = false;
+        if (fired.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel)) {
+            status = s;
+            return true;
+        }
+        return false;
+    }
+};
+
+/* ─────────────────────────────────────────────────────────
+ * 1e. TimerService — 轻量定时服务（单后台线程 + 最小堆）
+ *
+ * 为协程层提供"不占线程的定时挂起"能力：
+ *   - recv_for / when_any_for 的超时
+ *   - delay(ms) 定时器 awaitable
+ *
+ * 单例，后台线程惰性启动，进程退出时静态析构停止线程。
+ * 回调在定时线程上执行且在锁外调用，回调内部通过 schedule_resume
+ * 将协程恢复投入线程池（FLOWCORO）或同步执行（标准模式）。
+ * ───────────────────────────────────────────────────────── */
+class TimerService {
+public:
+    static TimerService& instance() {
+        static TimerService svc;
+        return svc;
+    }
+
+    /**
+     * 注册一个在 delay_us 微秒后触发的回调，返回定时器 id（>0）。
+     * 回调若在触发前被 cancel() 注销则不会执行。
+     */
+    uint64_t add(uint64_t delay_us, std::function<void()> cb) {
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::microseconds(delay_us);
+        uint64_t id;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            id = ++next_id_;
+            heap_.push_back(Entry{deadline, id, std::move(cb)});
+            std::push_heap(heap_.begin(), heap_.end(), Cmp{});
+        }
+        cv_.notify_all();
+        return id;
+    }
+
+    /** 注销定时器（best-effort，触发前有效）。 */
+    void cancel(uint64_t id) {
+        if (id == 0) return;
+        std::lock_guard<std::mutex> lk(mtx_);
+        cancelled_.insert(id);
+    }
+
+private:
+    struct Entry {
+        std::chrono::steady_clock::time_point deadline;
+        uint64_t                              id;
+        std::function<void()>                 cb;
+    };
+    struct Cmp {
+        bool operator()(const Entry& a, const Entry& b) const {
+            return a.deadline > b.deadline; /* min-heap: 最早的在堆顶 */
+        }
+    };
+
+    TimerService() : thread_([this] { run(); }) {}
+
+    ~TimerService() {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void run() {
+        std::unique_lock<std::mutex> lk(mtx_);
+        while (!stop_) {
+            if (heap_.empty()) {
+                cv_.wait(lk);
+                continue;
+            }
+            auto next = heap_.front().deadline;
+            if (cv_.wait_until(lk, next) == std::cv_status::timeout ||
+                (!heap_.empty() && heap_.front().deadline <= std::chrono::steady_clock::now())) {
+                if (heap_.empty()) continue;
+                if (heap_.front().deadline > std::chrono::steady_clock::now()) continue;
+                std::pop_heap(heap_.begin(), heap_.end(), Cmp{});
+                Entry e = std::move(heap_.back());
+                heap_.pop_back();
+                bool skip = cancelled_.erase(e.id) > 0;
+                if (skip) continue;
+                /* 锁外执行回调，避免回调重入 add()/cancel() 造成死锁 */
+                lk.unlock();
+                e.cb();
+                lk.lock();
+            }
+        }
+    }
+
+    std::mutex                  mtx_;
+    std::condition_variable     cv_;
+    std::vector<Entry>          heap_;
+    std::set<uint64_t>          cancelled_;
+    uint64_t                    next_id_{0};
+    bool                        stop_{false};
+    std::thread                 thread_;
+};
+
+/* ─────────────────────────────────────────────────────────
  * 2. BusAwaitable — co_await 等待一条总线消息
  * ───────────────────────────────────────────────────────── */
 
@@ -176,69 +428,87 @@ struct Task {
  * co_await subscribe_once(bus, "sensor/lidar") 会挂起当前协程，
  * 直到指定 topic 有消息到达后恢复协程。
  *
+ * 取消与超时：
+ *   - 传入 CancelToken 后，stop() 可直接唤醒悬挂的协程，无需外发消息。
+ *   - timeout_us > 0 时，超过时限自动唤醒并返回 Timeout 状态。
+ *
  * 线程安全：
- *   - 默认模式：回调在总线分发线程中直接 resume 协程（可能阻塞分发）。
- *   - FLOWCORO_INTEGRATION 模式：回调将 handle.resume() 提交到
- *     flowcoro 线程池，分发线程立即返回，协程在工作线程中运行。
+ *   - 消息 / 取消 / 超时三条恢复路径共享同一个 fired 守卫（CAS），
+ *     确保一次挂起最多恢复一次。守卫用 shared_ptr 持有，
+ *     即便 awaitable 已析构，取消/超时回调仍可安全访问，无悬垂引用。
+ *   - FLOWCORO_INTEGRATION 模式：恢复经由线程池，分发线程不被协程阻塞。
+ *
+ * WithResult=false 时 await_resume 返回 Message（向后兼容 subscribe_once）；
+ * WithResult=true  时返回 AwaitResult（携带 Ready/Cancelled/Timeout 状态）。
  */
-class BusAwaitable {
+template <bool WithResult>
+class BusAwaitableT {
 public:
-    BusAwaitable(MessageBus* bus, const char* topic)
-        : bus_(bus), topic_(topic) {}
+    BusAwaitableT(MessageBus* bus, const char* topic,
+                  CancelToken* cancel = nullptr, uint64_t timeout_us = 0)
+        : bus_(bus), topic_(topic), cancel_(cancel), timeout_us_(timeout_us),
+          ctl_(std::make_shared<AwaitCtl>()) {}
 
     /* awaitable 协议 */
     bool await_ready() const noexcept { return false; /* 总是挂起 */ }
 
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
-        message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
+        message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
+
+        /* 注册取消唤醒：stop() → request_cancel() → 唤醒本协程 */
+        if (cancel_) {
+            auto ctl = ctl_;
+            cancel_id_ = cancel_->add_waiter([ctl, handle] {
+                if (ctl->try_fire(AwaitStatus::Cancelled)) schedule_resume(handle);
+            });
+        }
+        /* 注册超时唤醒 */
+        if (timeout_us_ > 0) {
+            auto ctl = ctl_;
+            timer_id_ = TimerService::instance().add(timeout_us_, [ctl, handle] {
+                if (ctl->try_fire(AwaitStatus::Timeout)) schedule_resume(handle);
+            });
+        }
     }
 
-    Message await_resume() {
+    auto await_resume() {
         /* message_bus_unsubscribe_ex 持有 sub_mutex 直到返回，而 dispatch_message
          * 在整个回调期间也持有 sub_mutex，因此 unsubscribe_ex 返回后保证没有
-         * 任何 on_message 调用仍在执行。在此处重置 fired_，
-         * 令下一次 co_await 可以正常触发。 */
-        message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitable::on_message, this);
-        fired_.store(false, std::memory_order_release);
-        return received_msg_;
+         * 任何 on_message 调用仍在执行。 */
+        message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
+        if (cancel_)   cancel_->remove_waiter(cancel_id_);
+        if (timer_id_) TimerService::instance().cancel(timer_id_);
+        if constexpr (WithResult) {
+            return AwaitResult{ctl_->status, received_msg_};
+        } else {
+            return received_msg_;
+        }
     }
 
 private:
     static void on_message(const Message* msg, void* user_data) {
-        auto* self = static_cast<BusAwaitable*>(user_data);
-        /* 原子 CAS：只允许第一条消息触发 resume。
-         * 在 FLOWCORO 模式下，resume 被投入线程池异步执行，
-         * 在 await_resume() 完成取消订阅之前可能有第二条消息到达，
-         * 若不加保护则会产生双重 resume（未定义行为）。
-         * 与 WhenAnyBusAwaitable 使用相同的防护模式。 */
-        bool expected = false;
-        if (!self->fired_.compare_exchange_strong(expected, true,
-                                                  std::memory_order_acq_rel)) {
-            return; /* 已被首条消息触发，忽略后续消息 */
+        auto* self = static_cast<BusAwaitableT*>(user_data);
+        /* 消息 / 取消 / 超时共享 ctl_->fired，避免双重 resume（未定义行为）。 */
+        if (!self->ctl_->try_fire(AwaitStatus::Ready)) {
+            return; /* 已被取消/超时率先触发 */
         }
         self->received_msg_ = *msg;
-        auto h = self->handle_;
-        if (!h || h.done()) return;
-
-#ifdef FLOWCORO_INTEGRATION
-        /* ── flowcoro 模式：将协程 resume 提交到线程池 ───────
-         * 总线分发线程立刻返回，不被协程逻辑阻塞。
-         * 协程在 flowcoro 工作线程上继续执行。               */
-        flowcoro_integration::get_thread_pool().enqueue_void(
-            [h]() mutable { if (!h.done()) h.resume(); });
-#else
-        /* ── 标准模式：在分发线程上同步 resume ─────────────── */
-        h.resume();
-#endif
+        schedule_resume(self->handle_);
     }
 
-    MessageBus*              bus_;
-    std::string              topic_;
-    std::coroutine_handle<>  handle_;
-    std::atomic<bool>        fired_{false};
-    Message                  received_msg_{};
+    MessageBus*                 bus_;
+    std::string                 topic_;
+    CancelToken*                cancel_;
+    uint64_t                    timeout_us_;
+    std::shared_ptr<AwaitCtl>   ctl_;
+    uint64_t                    cancel_id_{0};
+    uint64_t                    timer_id_{0};
+    std::coroutine_handle<>     handle_;
+    Message                     received_msg_{};
 };
+
+using BusAwaitable = BusAwaitableT<false>;
 
 /**
  * 工厂函数：创建等待指定 topic 一条消息的 awaitable
@@ -246,8 +516,23 @@ private:
  * 用法：
  *   Message msg = co_await subscribe_once(bus, "sensor/lidar");
  */
-inline BusAwaitable subscribe_once(MessageBus* bus, const char* topic) {
-    return BusAwaitable{bus, topic};
+inline BusAwaitableT<false> subscribe_once(MessageBus* bus, const char* topic,
+                                           CancelToken* cancel = nullptr) {
+    return BusAwaitableT<false>{bus, topic, cancel};
+}
+
+/**
+ * 带超时的一次性订阅：返回 AwaitResult，可区分 Ready/Cancelled/Timeout。
+ *
+ * 用法：
+ *   auto r = co_await subscribe_once_for(bus, "sensor/lidar", 50000, token);
+ *   if (r.ok())        process(r.message);
+ *   else if (r.timed_out()) handle_timeout();
+ */
+inline BusAwaitableT<true> subscribe_once_for(MessageBus* bus, const char* topic,
+                                              uint64_t timeout_us,
+                                              CancelToken* cancel = nullptr) {
+    return BusAwaitableT<true>{bus, topic, cancel, timeout_us};
 }
 
 /* ─────────────────────────────────────────────────────────
@@ -272,8 +557,9 @@ inline BusAwaitable subscribe_once(MessageBus* bus, const char* topic) {
  */
 class BusChannel {
 public:
-    BusChannel(MessageBus* bus, const char* topic, size_t capacity = 32)
-        : bus_(bus), topic_(topic), capacity_(capacity) {
+    BusChannel(MessageBus* bus, const char* topic, size_t capacity = 32,
+               CancelToken* cancel = nullptr)
+        : bus_(bus), topic_(topic), capacity_(capacity), cancel_(cancel) {
         message_bus_subscribe(bus_, topic_.c_str(), &BusChannel::on_message, this);
     }
 
@@ -285,35 +571,43 @@ public:
     BusChannel(const BusChannel&) = delete;
     BusChannel& operator=(const BusChannel&) = delete;
 
-    /** 返回等待下一条消息的 awaitable，供 co_await 使用 */
-    auto recv() { return RecvAwaitable{this}; }
+    /** 返回等待下一条消息的 awaitable（返回 Message，向后兼容）。 */
+    auto recv() { return RecvAwaitable<false>{this, 0}; }
+
+    /**
+     * 带超时的接收：返回 AwaitResult，可区分 Ready/Cancelled/Timeout。
+     *   auto r = co_await ch.recv_for(50000);
+     *   if (r.timed_out()) { ... }
+     */
+    auto recv_for(uint64_t timeout_us) { return RecvAwaitable<true>{this, timeout_us}; }
 
 private:
     static void on_message(const Message* msg, void* user_data) {
         auto* self = static_cast<BusChannel*>(user_data);
-        std::coroutine_handle<> waiter;
+        std::coroutine_handle<>   waiter;
+        std::shared_ptr<AwaitCtl> ctl;
         {
             std::lock_guard<std::mutex> lk(self->mutex_);
             if (self->buffer_.size() < self->capacity_) {
                 self->buffer_.push(*msg);
             }
             waiter = self->waiter_;
-            self->waiter_ = nullptr;
+            ctl    = self->waiter_ctl_;
+            self->waiter_     = nullptr;
+            self->waiter_ctl_ = nullptr;
         }
-        /* 只用 !waiter 判断：互斥锁已保证同一时刻最多一个调用者持有非空 waiter，
-         * 避免在锁外调用 waiter.done()（读非原子协程帧位）引入数据竞争。 */
-        if (!waiter) return;
-
-#ifdef FLOWCORO_INTEGRATION
-        flowcoro_integration::get_thread_pool().enqueue_void(
-            [waiter]() mutable { if (!waiter.done()) waiter.resume(); });
-#else
-        waiter.resume();
-#endif
+        if (!waiter || !ctl) return;
+        /* 与取消/超时共享 ctl：谁先 CAS 谁恢复协程 */
+        if (ctl->try_fire(AwaitStatus::Ready)) schedule_resume(waiter);
     }
 
+    template <bool WithResult>
     struct RecvAwaitable {
         BusChannel* ch;
+        uint64_t    timeout_us;
+        std::shared_ptr<AwaitCtl> ctl{std::make_shared<AwaitCtl>()};
+        uint64_t    cancel_id{0};
+        uint64_t    timer_id{0};
 
         bool await_ready() {
             std::lock_guard<std::mutex> lk(ch->mutex_);
@@ -328,33 +622,64 @@ private:
                 if (!ch->buffer_.empty()) {
                     should_resume = true;
                 } else {
-                    ch->waiter_ = h;
+                    ch->waiter_     = h;
+                    ch->waiter_ctl_ = ctl;
                 }
             }
             if (should_resume) {
-#ifdef FLOWCORO_INTEGRATION
-                flowcoro_integration::get_thread_pool().enqueue_void(
-                    [h]() mutable { if (!h.done()) h.resume(); });
-#else
-                h.resume();
-#endif
+                if (ctl->try_fire(AwaitStatus::Ready)) schedule_resume(h);
+                return;
+            }
+            /* 注册取消唤醒 */
+            if (ch->cancel_) {
+                auto c = ctl;
+                cancel_id = ch->cancel_->add_waiter([c, h] {
+                    if (c->try_fire(AwaitStatus::Cancelled)) schedule_resume(h);
+                });
+            }
+            /* 注册超时唤醒 */
+            if (timeout_us > 0) {
+                auto c = ctl;
+                timer_id = TimerService::instance().add(timeout_us, [c, h] {
+                    if (c->try_fire(AwaitStatus::Timeout)) schedule_resume(h);
+                });
             }
         }
 
-        Message await_resume() {
-            std::lock_guard<std::mutex> lk(ch->mutex_);
-            Message msg = ch->buffer_.front();
-            ch->buffer_.pop();
-            return msg;
+        auto await_resume() {
+            if (ch->cancel_) ch->cancel_->remove_waiter(cancel_id);
+            if (timer_id)    TimerService::instance().cancel(timer_id);
+            Message msg{};
+            AwaitStatus status = ctl->status;
+            {
+                std::lock_guard<std::mutex> lk(ch->mutex_);
+                /* 清理可能仍指向本 awaitable 的 waiter（取消/超时路径） */
+                if (ch->waiter_ctl_ == ctl) {
+                    ch->waiter_     = nullptr;
+                    ch->waiter_ctl_ = nullptr;
+                }
+                if (!ch->buffer_.empty()) {
+                    msg = ch->buffer_.front();
+                    ch->buffer_.pop();
+                    status = AwaitStatus::Ready;
+                }
+            }
+            if constexpr (WithResult) {
+                return AwaitResult{status, msg};
+            } else {
+                return msg;
+            }
         }
     };
 
-    MessageBus*              bus_;
-    std::string              topic_;
-    size_t                   capacity_;
-    std::queue<Message>      buffer_;
-    std::mutex               mutex_;
-    std::coroutine_handle<>  waiter_{};
+    MessageBus*               bus_;
+    std::string               topic_;
+    size_t                    capacity_;
+    CancelToken*              cancel_;
+    std::queue<Message>       buffer_;
+    std::mutex                mutex_;
+    std::coroutine_handle<>   waiter_{};
+    std::shared_ptr<AwaitCtl> waiter_ctl_{};
 };
 
 /* ─────────────────────────────────────────────────────────
@@ -371,56 +696,72 @@ private:
  *   Message msg = co_await when_any_bus(bus, {"sensor/lidar", "sensor/gps"});
  *   // msg.topic 中可查看是哪个 topic 触发的
  */
-class WhenAnyBusAwaitable {
+template <bool WithResult>
+class WhenAnyBusAwaitableT {
 public:
-    WhenAnyBusAwaitable(MessageBus* bus, std::vector<std::string> topics)
-        : bus_(bus), topics_(std::move(topics)) {}
+    WhenAnyBusAwaitableT(MessageBus* bus, std::vector<std::string> topics,
+                         CancelToken* cancel = nullptr, uint64_t timeout_us = 0)
+        : bus_(bus), topics_(std::move(topics)), cancel_(cancel),
+          timeout_us_(timeout_us), ctl_(std::make_shared<AwaitCtl>()) {}
 
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
         handle_ = h;
-        fired_.store(false, std::memory_order_release);
         for (const auto& t : topics_) {
-            message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitable::on_message, this);
+            message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
+        }
+        if (cancel_) {
+            auto ctl = ctl_;
+            cancel_id_ = cancel_->add_waiter([ctl, h] {
+                if (ctl->try_fire(AwaitStatus::Cancelled)) schedule_resume(h);
+            });
+        }
+        if (timeout_us_ > 0) {
+            auto ctl = ctl_;
+            timer_id_ = TimerService::instance().add(timeout_us_, [ctl, h] {
+                if (ctl->try_fire(AwaitStatus::Timeout)) schedule_resume(h);
+            });
         }
     }
 
-    Message await_resume() {
+    auto await_resume() {
         /* 注销所有剩余订阅 */
         for (const auto& t : topics_) {
-            message_bus_unsubscribe_ex(bus_, t.c_str(), &WhenAnyBusAwaitable::on_message, this);
+            message_bus_unsubscribe_ex(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
         }
-        return received_msg_;
+        if (cancel_)   cancel_->remove_waiter(cancel_id_);
+        if (timer_id_) TimerService::instance().cancel(timer_id_);
+        if constexpr (WithResult) {
+            return AwaitResult{ctl_->status, received_msg_};
+        } else {
+            return received_msg_;
+        }
     }
 
 private:
     static void on_message(const Message* msg, void* user_data) {
-        auto* self = static_cast<WhenAnyBusAwaitable*>(user_data);
-        /* 原子 CAS：只有第一个到达的 topic 能触发 resume */
-        bool expected = false;
-        if (!self->fired_.compare_exchange_strong(expected, true,
-                                                  std::memory_order_acq_rel)) {
-            return; /* 已被其他 topic 率先触发 */
+        auto* self = static_cast<WhenAnyBusAwaitableT*>(user_data);
+        /* 消息 / 取消 / 超时共享 ctl_->fired：只有第一个胜者触发 resume */
+        if (!self->ctl_->try_fire(AwaitStatus::Ready)) {
+            return; /* 已被其他 topic / 取消 / 超时率先触发 */
         }
         self->received_msg_ = *msg;
-        auto h = self->handle_;
-        if (!h || h.done()) return;
-
-#ifdef FLOWCORO_INTEGRATION
-        flowcoro_integration::get_thread_pool().enqueue_void(
-            [h]() mutable { if (!h.done()) h.resume(); });
-#else
-        h.resume();
-#endif
+        schedule_resume(self->handle_);
     }
 
-    MessageBus*              bus_;
-    std::vector<std::string> topics_;
-    std::coroutine_handle<>  handle_{};
-    std::atomic<bool>        fired_{false};
-    Message                  received_msg_{};
+    MessageBus*               bus_;
+    std::vector<std::string>  topics_;
+    CancelToken*              cancel_;
+    uint64_t                  timeout_us_;
+    std::shared_ptr<AwaitCtl> ctl_;
+    uint64_t                  cancel_id_{0};
+    uint64_t                  timer_id_{0};
+    std::coroutine_handle<>   handle_{};
+    Message                   received_msg_{};
 };
+
+using WhenAnyBusAwaitable = WhenAnyBusAwaitableT<false>;
 
 /**
  * 工厂函数：等待给定 topic 列表中最先到达的那条消息。
@@ -428,9 +769,177 @@ private:
  * 用法：
  *   Message msg = co_await when_any_bus(bus, {"sensor/lidar", "sensor/gps"});
  */
-inline WhenAnyBusAwaitable when_any_bus(MessageBus* bus,
-                                        std::initializer_list<const char*> topics) {
-    return WhenAnyBusAwaitable{bus, std::vector<std::string>(topics.begin(), topics.end())};
+inline WhenAnyBusAwaitableT<false> when_any_bus(MessageBus* bus,
+                                                std::initializer_list<const char*> topics,
+                                                CancelToken* cancel = nullptr) {
+    return WhenAnyBusAwaitableT<false>{
+        bus, std::vector<std::string>(topics.begin(), topics.end()), cancel};
+}
+
+/**
+ * 带超时的多 topic 竞争等待：返回 AwaitResult，可区分 Ready/Cancelled/Timeout。
+ *
+ * 用法：
+ *   auto r = co_await when_any_bus_for(bus, {"sensor/lidar","sensor/gps"}, 50000, token);
+ *   if (r.timed_out()) watchdog_fire();
+ */
+inline WhenAnyBusAwaitableT<true> when_any_bus_for(MessageBus* bus,
+                                                   std::initializer_list<const char*> topics,
+                                                   uint64_t timeout_us,
+                                                   CancelToken* cancel = nullptr) {
+    return WhenAnyBusAwaitableT<true>{
+        bus, std::vector<std::string>(topics.begin(), topics.end()), cancel, timeout_us};
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 2d. DelayAwaitable — co_await delay_ms(ms) 定时挂起
+ *
+ * 不占用线程地挂起指定时长后自动恢复。若传入 CancelToken，
+ * stop() 可提前唤醒；await_resume 返回 true 表示正常到时，
+ * false 表示被取消。
+ * ───────────────────────────────────────────────────────── */
+class DelayAwaitable {
+public:
+    explicit DelayAwaitable(uint64_t timeout_us, CancelToken* cancel = nullptr)
+        : timeout_us_(timeout_us), cancel_(cancel),
+          ctl_(std::make_shared<AwaitCtl>()) {}
+
+    bool await_ready() const noexcept { return timeout_us_ == 0; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        if (cancel_) {
+            auto ctl = ctl_;
+            cancel_id_ = cancel_->add_waiter([ctl, h] {
+                if (ctl->try_fire(AwaitStatus::Cancelled)) schedule_resume(h);
+            });
+        }
+        auto ctl = ctl_;
+        timer_id_ = TimerService::instance().add(timeout_us_, [ctl, h] {
+            if (ctl->try_fire(AwaitStatus::Ready)) schedule_resume(h);
+        });
+    }
+
+    /** @return true=正常到时，false=被取消 */
+    bool await_resume() {
+        if (cancel_)   cancel_->remove_waiter(cancel_id_);
+        if (timer_id_) TimerService::instance().cancel(timer_id_);
+        return ctl_->status == AwaitStatus::Ready;
+    }
+
+private:
+    uint64_t                  timeout_us_;
+    CancelToken*              cancel_;
+    std::shared_ptr<AwaitCtl> ctl_;
+    uint64_t                  cancel_id_{0};
+    uint64_t                  timer_id_{0};
+};
+
+/** co_await delay_us(500) — 挂起 500 微秒 */
+inline DelayAwaitable delay_us(uint64_t us, CancelToken* cancel = nullptr) {
+    return DelayAwaitable{us, cancel};
+}
+/** co_await delay_ms(10) — 挂起 10 毫秒 */
+inline DelayAwaitable delay_ms(uint64_t ms, CancelToken* cancel = nullptr) {
+    return DelayAwaitable{ms * 1000ULL, cancel};
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 2e. run_blocking — 在后台执行阻塞调用
+ *
+ * FLOWCORO：投入线程池；标准模式：分离线程。用于把同步阻塞的
+ * message_bus_request 转成 awaitable，而不阻塞协程所在线程。
+ * ───────────────────────────────────────────────────────── */
+inline void run_blocking(std::function<void()> fn) {
+#ifdef FLOWCORO_INTEGRATION
+    flowcoro_integration::get_thread_pool().enqueue_void(std::move(fn));
+#else
+    std::thread(std::move(fn)).detach();
+#endif
+}
+
+/* ─────────────────────────────────────────────────────────
+ * 2f. RequestAwaitable — co_await request(...) 请求/应答
+ *
+ * 把 MessageBus 同步 req/reply 包装成 awaitable：在后台线程发起
+ * 阻塞请求，收到回复（或超时）后恢复协程。返回 AwaitResult：
+ *   - ok()        → message 为回复内容
+ *   - timed_out() → 请求超时
+ *   - cancelled() → 被 stop() 取消（后台请求仍会自行超时结束）
+ *
+ * 生命周期安全：后台线程仅捕获值拷贝与共享控制块/回复缓冲，
+ * 不引用 awaitable 本身，即便协程已取消退出也无悬垂访问。
+ * ───────────────────────────────────────────────────────── */
+class RequestAwaitable {
+public:
+    RequestAwaitable(MessageBus* bus, const char* topic, const char* sender,
+                     const void* data, uint32_t size, uint32_t timeout_ms,
+                     CancelToken* cancel = nullptr)
+        : bus_(bus), topic_(topic), sender_(sender ? sender : "coro"),
+          timeout_ms_(timeout_ms), cancel_(cancel),
+          ctl_(std::make_shared<AwaitCtl>()),
+          reply_(std::make_shared<Message>()) {
+        if (data && size) {
+            data_.assign(static_cast<const uint8_t*>(data),
+                         static_cast<const uint8_t*>(data) + size);
+        }
+    }
+
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        if (cancel_) {
+            auto ctl = ctl_;
+            cancel_id_ = cancel_->add_waiter([ctl, h] {
+                if (ctl->try_fire(AwaitStatus::Cancelled)) schedule_resume(h);
+            });
+        }
+        /* 捕获值拷贝 + 共享块，绝不捕获 this */
+        auto ctl    = ctl_;
+        auto reply  = reply_;
+        auto bus    = bus_;
+        auto topic  = topic_;
+        auto sender = sender_;
+        auto data   = data_;
+        auto tmo    = timeout_ms_;
+        run_blocking([ctl, reply, bus, topic, sender, data, tmo, h] {
+            Message rep{};
+            int rc = message_bus_request(bus, topic.c_str(), sender.c_str(),
+                                         data.empty() ? nullptr : data.data(),
+                                         static_cast<uint32_t>(data.size()),
+                                         &rep, tmo);
+            if (ctl->try_fire(rc == 0 ? AwaitStatus::Ready : AwaitStatus::Timeout)) {
+                *reply = rep;
+                schedule_resume(h);
+            }
+        });
+    }
+
+    AwaitResult await_resume() {
+        if (cancel_) cancel_->remove_waiter(cancel_id_);
+        return AwaitResult{ctl_->status, *reply_};
+    }
+
+private:
+    MessageBus*               bus_;
+    std::string               topic_;
+    std::string               sender_;
+    std::vector<uint8_t>      data_;
+    uint32_t                  timeout_ms_;
+    CancelToken*              cancel_;
+    std::shared_ptr<AwaitCtl> ctl_;
+    std::shared_ptr<Message>  reply_;
+    uint64_t                  cancel_id_{0};
+};
+
+/**
+ * 工厂函数：发起请求/应答。
+ *   auto r = co_await request(bus, "service/plan", "ctrl", &req, sizeof(req), 2000, token);
+ *   if (r.ok()) use(r.message);
+ */
+inline RequestAwaitable request(MessageBus* bus, const char* topic, const char* sender,
+                                const void* data, uint32_t size, uint32_t timeout_ms,
+                                CancelToken* cancel = nullptr) {
+    return RequestAwaitable{bus, topic, sender, data, size, timeout_ms, cancel};
 }
 
 /* ─────────────────────────────────────────────────────────
@@ -461,6 +970,7 @@ public:
      */
     virtual void execute() {
         stop_flag_ = false;
+        cancel_token_.reset();
         task_ = std::make_unique<Task>(run());
 
 #ifdef FLOWCORO_INTEGRATION
@@ -471,9 +981,16 @@ public:
         }
 #endif
 
-        while (!task_->done() && !stop_flag_) {
+        /* 事件循环：优先由 stop()/notify() 精确唤醒，50ms 兜底轮询防止
+         * 协程自行完成（未调用 stop()）时长时间不被察觉。 */
+        {
             std::unique_lock<std::mutex> lk(coro_mutex_);
-            coro_cv_.wait_for(lk, std::chrono::milliseconds(10));
+            coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
+                              [this] { return task_->done() || stop_flag_.load(); });
+            while (!task_->done() && !stop_flag_.load()) {
+                coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
+                                  [this] { return task_->done() || stop_flag_.load(); });
+            }
         }
 
 #ifdef FLOWCORO_INTEGRATION
@@ -485,9 +1002,10 @@ public:
 #endif
     }
 
-    /** 请求停止（可从任意线程调用） */
+    /** 请求停止（可从任意线程调用）：唤醒悬挂协程并通知事件循环 */
     void stop() {
         stop_flag_ = true;
+        cancel_token_.request_cancel();
         coro_cv_.notify_all();
     }
 
@@ -495,12 +1013,49 @@ public:
 
     MessageBus* bus() const { return bus_; }
 
+    /** 供 awaitable 使用的取消令牌（stop() 时被触发）。 */
+    CancelToken* cancel_token() { return &cancel_token_; }
+
     /** 唤醒事件循环（协程 resume 后调用，可加快响应） */
     void notify() { coro_cv_.notify_all(); }
+
+    /* ── 便捷成员工厂：自动注入本任务的 CancelToken，使 stop() 可取消 ──
+     * 子类在 run() 中优先使用这些方法（而非全局工厂），即可获得
+     * "无需外发消息即可优雅停止"的能力。 */
+
+    /** 可取消的一次性订阅。 */
+    BusAwaitableT<false> next(const char* topic) {
+        return BusAwaitableT<false>{bus_, topic, &cancel_token_};
+    }
+    /** 可取消 + 超时的一次性订阅。 */
+    BusAwaitableT<true> next_for(const char* topic, uint64_t timeout_us) {
+        return BusAwaitableT<true>{bus_, topic, &cancel_token_, timeout_us};
+    }
+    /** 可取消的多 topic 竞争等待。 */
+    WhenAnyBusAwaitableT<false> select(std::initializer_list<const char*> topics) {
+        return WhenAnyBusAwaitableT<false>{
+            bus_, std::vector<std::string>(topics.begin(), topics.end()), &cancel_token_};
+    }
+    /** 可取消 + 超时的多 topic 竞争等待。 */
+    WhenAnyBusAwaitableT<true> select_for(std::initializer_list<const char*> topics,
+                                          uint64_t timeout_us) {
+        return WhenAnyBusAwaitableT<true>{
+            bus_, std::vector<std::string>(topics.begin(), topics.end()),
+            &cancel_token_, timeout_us};
+    }
+    /** 可取消的定时挂起。 */
+    DelayAwaitable sleep_us(uint64_t us) { return DelayAwaitable{us, &cancel_token_}; }
+    DelayAwaitable sleep_ms(uint64_t ms) { return DelayAwaitable{ms * 1000ULL, &cancel_token_}; }
+    /** 可取消的请求/应答。 */
+    RequestAwaitable ask(const char* topic, const char* sender,
+                         const void* data, uint32_t size, uint32_t timeout_ms) {
+        return RequestAwaitable{bus_, topic, sender, data, size, timeout_ms, &cancel_token_};
+    }
 
 protected:
     MessageBus*                  bus_;
     std::atomic<bool>            stop_flag_;
+    CancelToken                  cancel_token_;
     std::unique_ptr<Task>        task_;
     std::mutex                   coro_mutex_;
     std::condition_variable      coro_cv_;
@@ -533,6 +1088,7 @@ public:
 
     void execute() override {
         stop_flag_ = false;
+        cancel_token_.reset();
         task_ = std::make_unique<Task>(run());
 
         /* flowcoro::CoroTask 惰性启动（suspend_always）：
@@ -544,9 +1100,13 @@ public:
                 [h]() mutable { if (!h.done()) h.resume(); });
         }
 
-        while (!task_->done() && !stop_flag_) {
+        /* 事件循环：stop()/notify() 精确唤醒 + 50ms 兜底轮询。 */
+        {
             std::unique_lock<std::mutex> lk(coro_mutex_);
-            coro_cv_.wait_for(lk, std::chrono::milliseconds(5));
+            while (!task_->done() && !stop_flag_.load()) {
+                coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
+                                  [this] { return task_->done() || stop_flag_.load(); });
+            }
         }
 
         if (task_->handle && task_->handle.promise().exception_) {

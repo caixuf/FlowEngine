@@ -10,8 +10,17 @@
  *           同时在两个 topic 上各发一条消息，协程只被唤醒一次（原子 CAS 语义）。
  *
  *   Test 3: FlowCoroTask 优雅停止
- *           调用 stop() 后协程在下一个 should_stop() 检查时干净退出，
- *           execute() 正常返回，不发生悬挂或资源泄漏。
+ *           调用 stop() 后协程仅凭取消令牌即在下一个挂起点被唤醒并
+ *           干净退出，无需外发唤醒消息。
+ *
+ *   Test 4: recv_for 超时
+ *           无消息到达时 co_await ch.recv_for(timeout) 返回 Timeout。
+ *
+ *   Test 5: delay/sleep_ms 定时挂起
+ *           co_await sleep_ms(N) 挂起约 N 毫秒后恢复（不占线程）。
+ *
+ *   Test 6: request 请求/应答 awaitable
+ *           co_await ask(...) 收到服务端回复。
  */
 
 #include "coroutine_task.h"
@@ -233,9 +242,11 @@ public:
 
 protected:
     Task run() override {
-        BusChannel ch(bus(), "test3/msg", 32);
+        /* 传入 cancel_token()：stop() 可直接唤醒悬挂的 recv()，无需外发消息 */
+        BusChannel ch(bus(), "test3/msg", 32, cancel_token());
         while (!should_stop()) {
             co_await ch.recv();
+            if (should_stop()) break;
             ++loop_count_;
         }
         /* 到达此处说明协程干净退出（should_stop() 返回 true） */
@@ -255,7 +266,7 @@ private:
 };
 
 static void test_graceful_stop() {
-    printf("\n[Test 3] FlowCoroTask 优雅停止\n");
+    printf("\n[Test 3] FlowCoroTask 优雅停止（取消令牌，无需外发消息）\n");
 
     std::atomic<int>  loop_count{0};
     std::atomic<bool> exited_cleanly{false};
@@ -279,7 +290,8 @@ static void test_graceful_stop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    /* 请求停止：设置 stop_flag_，execute() 将退出其等待循环 */
+    /* 请求停止：cancel_token 直接唤醒悬挂在 co_await ch.recv() 的协程，
+     * 无需再发任何"唤醒消息"。 */
     task.stop();
 
     /* 等 execute() 返回（最长 3 秒）*/
@@ -290,11 +302,7 @@ static void test_graceful_stop() {
     }
     t.join();
 
-    /* execute() 已返回，但协程可能仍悬挂在 co_await ch.recv()。
-     * 发一条唤醒消息，让协程检查 should_stop() 并干净退出。 */
-    message_bus_publish(bus, "test3/msg", "test", payload, sizeof(payload));
-
-    /* 等待协程自身完成（最长 3 秒）*/
+    /* 等待协程自身完成（最长 3 秒），关键：期间不发送任何消息 */
     {
         std::unique_lock<std::mutex> lk(done_mtx);
         done_cv.wait_for(lk, std::chrono::seconds(3),
@@ -302,8 +310,198 @@ static void test_graceful_stop() {
     }
 
     CHECK(execute_returned.load(), "stop() 后 execute() 在 3 秒内正常返回");
-    CHECK(exited_cleanly.load(),   "协程通过 should_stop() 检查干净退出（无强制终止）");
+    CHECK(exited_cleanly.load(),   "协程仅凭 stop() 取消令牌即干净退出（无需外发唤醒消息）");
     CHECK(loop_count.load() > 0,   "停止前协程已处理至少 1 条消息（正常运行过）");
+
+    message_bus_destroy(bus);
+}
+
+/* ══════════════════════════════════════════════════════════
+ * Test 4: recv_for 超时
+ * 无消息到达时，co_await ch.recv_for(timeout) 应在超时后返回 Timeout。
+ * ══════════════════════════════════════════════════════════ */
+
+class TimeoutTask : public FlowCoroTask {
+public:
+    TimeoutTask(MessageBus* bus, std::atomic<bool>& timed_out,
+                std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
+        : FlowCoroTask(bus), timed_out_(timed_out), done_(done), mtx_(mtx), cv_(cv) {}
+
+protected:
+    Task run() override {
+        BusChannel ch(bus(), "test4/msg", 8, cancel_token());
+        /* 无人发布 test4/msg，应在 100ms 后超时 */
+        auto r = co_await ch.recv_for(100000 /* 100ms */);
+        timed_out_.store(r.timed_out(), std::memory_order_release);
+        done_.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.notify_all();
+        }
+        stop();
+    }
+
+private:
+    std::atomic<bool>&       timed_out_;
+    std::atomic<bool>&       done_;
+    std::mutex&              mtx_;
+    std::condition_variable& cv_;
+};
+
+static void test_recv_timeout() {
+    printf("\n[Test 4] recv_for 超时\n");
+
+    std::atomic<bool> timed_out{false};
+    std::atomic<bool> done{false};
+    std::mutex mtx;
+    std::condition_variable cv;
+
+    MessageBus* bus = message_bus_create("t4");
+    TimeoutTask task(bus, timed_out, done, mtx, cv);
+    std::thread t([&]{ task.execute(); });
+
+    {
+        std::unique_lock<std::mutex> lk(mtx);
+        cv.wait_for(lk, std::chrono::seconds(3),
+                    [&]{ return done.load(std::memory_order_acquire); });
+    }
+    task.stop();
+    t.join();
+
+    CHECK(timed_out.load(), "无消息时 recv_for 在超时后返回 Timeout 状态");
+
+    message_bus_destroy(bus);
+}
+
+/* ══════════════════════════════════════════════════════════
+ * Test 5: delay_ms 定时挂起
+ * co_await sleep_ms(N) 应挂起约 N 毫秒后恢复（不占线程）。
+ * ══════════════════════════════════════════════════════════ */
+
+class DelayTask : public FlowCoroTask {
+public:
+    DelayTask(MessageBus* bus, std::atomic<long>& elapsed_ms,
+              std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
+        : FlowCoroTask(bus), elapsed_ms_(elapsed_ms), done_(done), mtx_(mtx), cv_(cv) {}
+
+protected:
+    Task run() override {
+        auto t0 = std::chrono::steady_clock::now();
+        bool ok = co_await sleep_ms(120);
+        auto t1 = std::chrono::steady_clock::now();
+        if (ok) {
+            elapsed_ms_.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+                std::memory_order_release);
+        }
+        done_.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.notify_all();
+        }
+        stop();
+    }
+
+private:
+    std::atomic<long>&       elapsed_ms_;
+    std::atomic<bool>&       done_;
+    std::mutex&              mtx_;
+    std::condition_variable& cv_;
+};
+
+static void test_delay() {
+    printf("\n[Test 5] delay/sleep_ms 定时挂起\n");
+
+    std::atomic<long> elapsed_ms{0};
+    std::atomic<bool> done{false};
+    std::mutex mtx;
+    std::condition_variable cv;
+
+    MessageBus* bus = message_bus_create("t5");
+    DelayTask task(bus, elapsed_ms, done, mtx, cv);
+    std::thread t([&]{ task.execute(); });
+
+    {
+        std::unique_lock<std::mutex> lk(mtx);
+        cv.wait_for(lk, std::chrono::seconds(3),
+                    [&]{ return done.load(std::memory_order_acquire); });
+    }
+    task.stop();
+    t.join();
+
+    long e = elapsed_ms.load();
+    CHECK(e >= 100 && e < 1000, "sleep_ms(120) 挂起约 120ms 后恢复（100~1000ms 区间）");
+
+    message_bus_destroy(bus);
+}
+
+/* ══════════════════════════════════════════════════════════
+ * Test 6: request 请求/应答 awaitable
+ * 协程 co_await ask(...) 应收到服务端回复。
+ * ══════════════════════════════════════════════════════════ */
+
+static void echo_service(const Message* req, Message* reply, void* /*ud*/) {
+    reply->data_size = req->data_size;
+    if (req->data_size) memcpy(reply->data, req->data, req->data_size);
+}
+
+class RequestTask : public FlowCoroTask {
+public:
+    RequestTask(MessageBus* bus, std::atomic<bool>& ok, std::atomic<int>& value,
+                std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
+        : FlowCoroTask(bus), ok_(ok), value_(value), done_(done), mtx_(mtx), cv_(cv) {}
+
+protected:
+    Task run() override {
+        int payload = 42;
+        auto r = co_await ask("service/echo", "coro_client", &payload, sizeof(payload), 2000);
+        ok_.store(r.ok(), std::memory_order_release);
+        if (r.ok() && r.message.data_size == sizeof(int)) {
+            int v = 0;
+            memcpy(&v, r.message.data, sizeof(int));
+            value_.store(v, std::memory_order_release);
+        }
+        done_.store(true, std::memory_order_release);
+        {
+            std::unique_lock<std::mutex> lk(mtx_);
+            cv_.notify_all();
+        }
+        stop();
+    }
+
+private:
+    std::atomic<bool>&       ok_;
+    std::atomic<int>&        value_;
+    std::atomic<bool>&       done_;
+    std::mutex&              mtx_;
+    std::condition_variable& cv_;
+};
+
+static void test_request() {
+    printf("\n[Test 6] request 请求/应答 awaitable\n");
+
+    std::atomic<bool> ok{false};
+    std::atomic<int>  value{0};
+    std::atomic<bool> done{false};
+    std::mutex mtx;
+    std::condition_variable cv;
+
+    MessageBus* bus = message_bus_create("t6");
+    message_bus_register_service(bus, "service/echo", echo_service, nullptr);
+
+    RequestTask task(bus, ok, value, done, mtx, cv);
+    std::thread t([&]{ task.execute(); });
+
+    {
+        std::unique_lock<std::mutex> lk(mtx);
+        cv.wait_for(lk, std::chrono::seconds(5),
+                    [&]{ return done.load(std::memory_order_acquire); });
+    }
+    task.stop();
+    t.join();
+
+    CHECK(ok.load(),            "co_await ask() 成功收到回复");
+    CHECK(value.load() == 42,   "回复内容正确（echo 42）");
 
     message_bus_destroy(bus);
 }
@@ -318,6 +516,9 @@ int main() {
     test_buschannel_no_loss();
     test_when_any_fires_once();
     test_graceful_stop();
+    test_recv_timeout();
+    test_delay();
+    test_request();
 
     printf("\n─────────────────────────────────────────────────────────────────────\n");
     printf("  结果: %d 通过, %d 失败\n", g_pass, g_fail);
