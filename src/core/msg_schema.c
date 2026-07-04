@@ -1,4 +1,5 @@
 #include "msg_schema.h"
+#include "error_codes.h"
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -16,7 +17,7 @@ static int            g_schema_count = 0;
 static pthread_mutex_t g_schema_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int msg_schema_register(const char* topic, size_t struct_size, const char* type_name) {
-    if (!topic || !type_name || struct_size == 0) return -1;
+    if (!topic || !type_name || struct_size == 0) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&g_schema_mutex);
 
@@ -33,7 +34,7 @@ int msg_schema_register(const char* topic, size_t struct_size, const char* type_
 
     if (g_schema_count >= SCHEMA_MAX_ENTRIES) {
         pthread_mutex_unlock(&g_schema_mutex);
-        return -1;
+        return ERR_INVALID_PARAM;
     }
 
     SchemaEntry* e = &g_schema_table[g_schema_count++];
@@ -59,7 +60,7 @@ int msg_schema_check(const char* topic, size_t actual_size, const char* call_sit
                     topic, call_site ? call_site : "?",
                     expected, g_schema_table[i].type_name, actual_size);
                 pthread_mutex_unlock(&g_schema_mutex);
-                return -1;
+                return ERR_INVALID_PARAM;
             }
             pthread_mutex_unlock(&g_schema_mutex);
             return 0;

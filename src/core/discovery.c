@@ -4,6 +4,7 @@
 
 #include "discovery.h"
 #include "ipc_channel.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -79,7 +80,7 @@ struct DiscoveryManager {
 
 static int serialize_beacon(uint8_t* buf, size_t buf_size,
                             uint8_t msg_type, const DiscoveryManager* dm) {
-    if (buf_size < 128) return -1;
+    if (buf_size < 128) return ERR_INVALID_PARAM;
     size_t off = 0;
 
     uint32_t magic = DISC_MAGIC;
@@ -114,11 +115,11 @@ static int serialize_beacon(uint8_t* buf, size_t buf_size,
 
 static int deserialize_beacon(const uint8_t* buf, size_t len,
                               uint8_t* msg_type, NodeInfo* node) {
-    if (len < 128) return -1;
+    if (len < 128) return ERR_INVALID_PARAM;
 
     uint32_t magic;
     memcpy(&magic, buf, 4);
-    if (magic != DISC_MAGIC) return -1;
+    if (magic != DISC_MAGIC) return ERR_INVALID_PARAM;
 
     size_t off = 4;
     uint8_t ver = buf[off++];
@@ -393,7 +394,7 @@ void discovery_destroy(DiscoveryManager* dm) {
 }
 
 int discovery_start(DiscoveryManager* dm) {
-    if (!dm || dm->running) return -1;
+    if (!dm || dm->running) return ERR_INVALID_PARAM;
 
     dm->running = true;
     pthread_create(&dm->beacon_thread, NULL, beacon_thread_fn, dm);
@@ -416,7 +417,7 @@ void discovery_stop(DiscoveryManager* dm) {
 int discovery_advertise(DiscoveryManager* dm, const char* topic,
                         uint32_t type_id, uint8_t capabilities,
                         double freq_hz) {
-    if (!dm || !topic || dm->my_topic_count >= DISC_MAX_TOPICS_PER_NODE) return -1;
+    if (!dm || !topic || dm->my_topic_count >= DISC_MAX_TOPICS_PER_NODE) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&dm->topo_mutex);
     TopicAdvert* ta = &dm->my_topics[dm->my_topic_count++];
@@ -431,7 +432,7 @@ int discovery_advertise(DiscoveryManager* dm, const char* topic,
 }
 
 int discovery_unadvertise(DiscoveryManager* dm, const char* topic) {
-    if (!dm || !topic) return -1;
+    if (!dm || !topic) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&dm->topo_mutex);
     for (uint32_t i = 0; i < dm->my_topic_count; i++) {
@@ -568,11 +569,11 @@ int discovery_wait_for_deps(DiscoveryManager* dm, const char** deps,
 
     fprintf(stderr, "[discovery:%s] timeout waiting for %d dependencies\n",
             dm->my_name, dep_count);
-    return -1;
+    return ERR_INVALID_PARAM;
 }
 
 int discovery_create_ipc_channels(DiscoveryManager* dm, uint32_t max_depth) {
-    if (!dm) return -1;
+    if (!dm) return ERR_INVALID_PARAM;
     int created = 0;
 
     pthread_mutex_lock(&dm->topo_mutex);

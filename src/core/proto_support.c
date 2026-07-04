@@ -18,14 +18,14 @@
 int msg_init_from_pb(Message* msg, const char* topic, const char* sender,
                      const ProtobufCMessageDescriptor* descriptor,
                      const ProtobufCMessage* pb_msg) {
-    if (!msg || !descriptor || !pb_msg) return -1;
+    if (!msg || !descriptor || !pb_msg) return ERR_INVALID_PARAM;
 
     /* Pack protobuf to binary */
     size_t packed_size = protobuf_c_message_get_packed_size(pb_msg);
-    if (packed_size > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (packed_size > MSG_BUS_MAX_DATA_SIZE) return ERR_INVALID_PARAM;
 
     uint8_t* buf = (uint8_t*)malloc(packed_size);
-    if (!buf) return -1;
+    if (!buf) return ERR_INVALID_PARAM;
 
     protobuf_c_message_pack(pb_msg, buf);
     /* protobuf_c_message_pack returns the size, actually:

@@ -3,6 +3,7 @@
  */
 
 #include "fusion.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -40,7 +41,7 @@ MessageBuffer* message_buffer_create(const char* topic, uint32_t type_id,
 }
 
 int message_buffer_push(MessageBuffer* mb, const Message* msg) {
-    if (!mb || !msg) return -1;
+    if (!mb || !msg) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&mb->mutex);
 
@@ -154,14 +155,14 @@ FusionNode* fusion_node_create(const char* name, MessageBus* bus,
 
 int fusion_node_add_input(FusionNode* fn, const char* topic,
                           uint32_t type_id, uint32_t buffer_capacity) {
-    if (!fn || !topic || fn->buffer_count >= FUSION_MAX_INPUTS) return -1;
+    if (!fn || !topic || fn->buffer_count >= FUSION_MAX_INPUTS) return ERR_OVERFLOW;
 
     if (buffer_capacity == 0) buffer_capacity = 64;
 
     MessageBuffer* mb = message_buffer_create(topic, type_id,
                                               buffer_capacity,
                                               FUSION_DEFAULT_WINDOW_US);
-    if (!mb) return -1;
+    if (!mb) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&fn->mutex);
     fn->buffers[fn->buffer_count++] = mb;
@@ -171,7 +172,7 @@ int fusion_node_add_input(FusionNode* fn, const char* topic,
 }
 
 int fusion_node_set_output(FusionNode* fn, const char* topic, uint32_t type_id) {
-    if (!fn || !topic) return -1;
+    if (!fn || !topic) return ERR_INVALID_PARAM;
     snprintf(fn->output_topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
     fn->output_type_id = type_id;
     return 0;
@@ -287,7 +288,7 @@ static void* fusion_worker_fn(void* arg) {
 }
 
 int fusion_node_start(FusionNode* fn) {
-    if (!fn || fn->running) return -1;
+    if (!fn || fn->running) return ERR_INVALID_PARAM;
 
     fn->running = true;
     pthread_create(&fn->worker_thread, NULL, fusion_worker_fn, fn);

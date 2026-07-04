@@ -1,4 +1,5 @@
 #include "config_manager.h"
+#include "error_codes.h"
 #include <cjson/cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,10 +110,10 @@ void config_free(LauncherConfig* config) {
 }
 
 int config_save(const LauncherConfig* config, const char* config_file) {
-    if (!config || !config_file) return -1;
+    if (!config || !config_file) return ERR_INVALID_PARAM;
 
     cJSON* root = cJSON_CreateObject();
-    if (!root) return -1;
+    if (!root) return ERR_INVALID_PARAM;
 
     cJSON_AddStringToObject(root, "log_file", config->log_file);
     cJSON_AddNumberToObject(root, "log_level", config->log_level);
@@ -134,10 +135,10 @@ int config_save(const LauncherConfig* config, const char* config_file) {
 
     char* str = cJSON_Print(root);
     cJSON_Delete(root);
-    if (!str) return -1;
+    if (!str) return ERR_INVALID_PARAM;
 
     FILE* f = fopen(config_file, "w");
-    if (!f) { free(str); return -1; }
+    if (!f) { free(str); return ERR_INVALID_PARAM; }
     fputs(str, f);
     fclose(f);
     free(str);

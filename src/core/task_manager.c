@@ -1,4 +1,5 @@
 #include "task_manager.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -105,16 +106,16 @@ void task_manager_destroy(TaskManager* mgr) {
 /* ── Register / unregister ────────────────────────────── */
 
 int task_manager_register(TaskManager* mgr, TaskBase* task, const char* name) {
-    if (!mgr || !task || !name) return -1;
+    if (!mgr || !task || !name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     if (find_node(mgr, name)) {
         pthread_mutex_unlock(&mgr->mutex);
-        return -1; /* duplicate */
+        return ERR_NOT_FOUND; /* duplicate */
     }
 
     TaskNode* node = (TaskNode*)calloc(1, sizeof(TaskNode));
-    if (!node) { pthread_mutex_unlock(&mgr->mutex); return -1; }
+    if (!node) { pthread_mutex_unlock(&mgr->mutex); return ERR_NOT_FOUND; }
     node->task = task;
     snprintf(node->name, sizeof(node->name), "%s", name);
     TAILQ_INSERT_TAIL(&mgr->task_list, node, entries);
@@ -124,11 +125,11 @@ int task_manager_register(TaskManager* mgr, TaskBase* task, const char* name) {
 }
 
 int task_manager_unregister(TaskManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node = find_node(mgr, name);
-    if (!node) { pthread_mutex_unlock(&mgr->mutex); return -1; }
+    if (!node) { pthread_mutex_unlock(&mgr->mutex); return ERR_NOT_FOUND; }
 
     task_stop(node->task);
     TAILQ_REMOVE(&mgr->task_list, node, entries);
@@ -148,12 +149,12 @@ int task_manager_unregister(TaskManager* mgr, const char* name) {
 /* ── Start / Stop / Restart ───────────────────────────── */
 
 int task_manager_start_task(TaskManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node = find_node(mgr, name);
     pthread_mutex_unlock(&mgr->mutex);
-    if (!node) return -1;
+    if (!node) return ERR_NOT_FOUND;
 
     /* Reflective check: can this task accept START? */
     if (node->task->sm_enabled && !task_can_event(node->task, SM_EVENT_START)) {
@@ -165,7 +166,7 @@ int task_manager_start_task(TaskManager* mgr, const char* name) {
             fprintf(stderr, "%s%s", statem_event_name(&node->task->sm, allowed[i]),
                     (i < n - 1) ? "," : "");
         fprintf(stderr, "]\n");
-        return -1;
+        return ERR_NOT_FOUND;
     }
 
     TaskState old = task_get_state(node->task);
@@ -175,12 +176,12 @@ int task_manager_start_task(TaskManager* mgr, const char* name) {
 }
 
 int task_manager_stop_task(TaskManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node = find_node(mgr, name);
     pthread_mutex_unlock(&mgr->mutex);
-    if (!node) return -1;
+    if (!node) return ERR_NOT_FOUND;
 
     TaskState old = task_get_state(node->task);
     int ret = task_stop(node->task);
@@ -189,12 +190,12 @@ int task_manager_stop_task(TaskManager* mgr, const char* name) {
 }
 
 int task_manager_restart_task(TaskManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node = find_node(mgr, name);
     pthread_mutex_unlock(&mgr->mutex);
-    if (!node) return -1;
+    if (!node) return ERR_NOT_FOUND;
 
     TaskState old = task_get_state(node->task);
     int ret = task_restart(node->task);
@@ -203,7 +204,7 @@ int task_manager_restart_task(TaskManager* mgr, const char* name) {
 }
 
 int task_manager_start_all(TaskManager* mgr) {
-    if (!mgr) return -1;
+    if (!mgr) return ERR_NOT_FOUND;
     int failed = 0;
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node;
@@ -225,7 +226,7 @@ int task_manager_start_all(TaskManager* mgr) {
  * @return number of tasks that failed to start
  */
 int task_manager_start_all_deps(TaskManager* mgr) {
-    if (!mgr) return -1;
+    if (!mgr) return ERR_NOT_FOUND;
 
     /* Build name-to-index map */
     char  names[64][64];
@@ -318,7 +319,7 @@ int task_manager_start_all_deps(TaskManager* mgr) {
 }
 
 int task_manager_stop_all(TaskManager* mgr) {
-    if (!mgr) return -1;
+    if (!mgr) return ERR_NOT_FOUND;
     int failed = 0;
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node;
@@ -375,7 +376,7 @@ int task_manager_start_monitor(TaskManager* mgr) {
     int ret = pthread_create(&mgr->monitor_thread, NULL, monitor_thread_fn, mgr);
     if (ret != 0) {
         mgr->is_running = false;
-        return -1;
+        return ERR_NOT_FOUND;
     }
     return 0;
 }
@@ -441,14 +442,14 @@ void task_manager_get_stats(TaskManager* mgr, uint32_t* total_tasks,
 
 int task_manager_add_dependency(TaskManager* mgr,
                                 const char* task_name, const char* dep_name) {
-    if (!mgr || !task_name || !dep_name) return -1;
+    if (!mgr || !task_name || !dep_name) return ERR_NOT_FOUND;
 
     pthread_mutex_lock(&mgr->mutex);
     TaskNode* node = find_node(mgr, task_name);
-    if (!node) { pthread_mutex_unlock(&mgr->mutex); return -1; }
+    if (!node) { pthread_mutex_unlock(&mgr->mutex); return ERR_NOT_FOUND; }
 
     DepEntry* dep = (DepEntry*)calloc(1, sizeof(DepEntry));
-    if (!dep) { pthread_mutex_unlock(&mgr->mutex); return -1; }
+    if (!dep) { pthread_mutex_unlock(&mgr->mutex); return ERR_NOT_FOUND; }
     snprintf(dep->dep_name, sizeof(dep->dep_name), "%s", dep_name);
     dep->next  = node->deps;
     node->deps = dep;

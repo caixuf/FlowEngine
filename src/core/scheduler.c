@@ -10,6 +10,7 @@
 
 #include "scheduler.h"
 #include "message_bus.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -194,7 +195,7 @@ void scheduler_destroy(Scheduler* sched) {
 }
 
 int scheduler_start(Scheduler* sched) {
-    if (!sched || sched->running) return -1;
+    if (!sched || sched->running) return ERR_INVALID_PARAM;
     sched->running = true;
 
     printf("[scheduler] Started with %u tasks, %u worker threads (mode=%s)\n",
@@ -215,12 +216,12 @@ void scheduler_stop(Scheduler* sched) {
 }
 
 int scheduler_register_task(Scheduler* sched, TaskBase* task, const char* name) {
-    if (!sched || !task) return -1;
+    if (!sched || !task) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&sched->mutex);
     if (sched->entry_count >= SCHED_MAX_TASKS) {
         pthread_mutex_unlock(&sched->mutex);
-        return -1;
+        return ERR_INVALID_PARAM;
     }
 
     int id = sched->entry_count;
@@ -240,7 +241,7 @@ int scheduler_register_task(Scheduler* sched, TaskBase* task, const char* name) 
 }
 
 int scheduler_unregister_task(Scheduler* sched, int task_id) {
-    if (!sched || task_id < 0 || task_id >= sched->entry_count) return -1;
+    if (!sched || task_id < 0 || task_id >= sched->entry_count) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&sched->mutex);
     sched->entries[task_id].active = false;
@@ -251,7 +252,7 @@ int scheduler_unregister_task(Scheduler* sched, int task_id) {
 int scheduler_set_params(Scheduler* sched, int task_id,
                          TaskPriority prio, uint64_t cpu_mask,
                          double max_freq_hz) {
-    if (!sched || task_id < 0 || task_id >= sched->entry_count) return -1;
+    if (!sched || task_id < 0 || task_id >= sched->entry_count) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&sched->mutex);
     SchedTaskEntry* e = &sched->entries[task_id];
@@ -265,7 +266,7 @@ int scheduler_set_params(Scheduler* sched, int task_id,
 
 int scheduler_set_quota(Scheduler* sched, int task_id,
                         const ResourceQuota* quota) {
-    if (!sched || task_id < 0 || task_id >= sched->entry_count) return -1;
+    if (!sched || task_id < 0 || task_id >= sched->entry_count) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&sched->mutex);
     resource_usage_init(&sched->entries[task_id].resource, quota);
@@ -314,7 +315,7 @@ static void choreo_trigger_callback(const Message* msg, void* user_data) {
 }
 
 int scheduler_choreo_trigger_on(Scheduler* sched, int task_id, const char* topic) {
-    if (!sched || task_id < 0 || task_id >= sched->entry_count || !topic) return -1;
+    if (!sched || task_id < 0 || task_id >= sched->entry_count || !topic) return ERR_INVALID_PARAM;
 
     SchedTaskEntry* e = &sched->entries[task_id];
     snprintf(e->trigger_topic, sizeof(e->trigger_topic), "%s", topic);
@@ -364,7 +365,7 @@ int scheduler_choreo_wait(Scheduler* sched, int task_id, uint64_t timeout_us) {
         if (ret == ETIMEDOUT) {
             e->choreo_stats.wait_timeouts++;
             pthread_mutex_unlock(&e->trigger_mutex);
-            return -1;
+            return ERR_INVALID_PARAM;
         }
     }
 

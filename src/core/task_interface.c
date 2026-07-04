@@ -1,5 +1,6 @@
 #include "task_interface.h"
 #include "message_bus.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -98,7 +99,7 @@ static void* task_thread_fn(void* arg) {
 /* ── Public API ───────────────────────────────────────── */
 
 int task_base_init(TaskBase* task, const TaskInterface* vtable, const TaskConfig* config) {
-    if (!task || !vtable || !config) return -1;
+    if (!task || !vtable || !config) return ERR_INVALID_PARAM;
 
     memset(task, 0, sizeof(*task));
     task->vtable = vtable;
@@ -112,7 +113,7 @@ int task_base_init(TaskBase* task, const TaskInterface* vtable, const TaskConfig
     /* Enable trace by default for easy debugging */
     task->sm.trace_enabled = true;
 
-    if (pthread_mutex_init(&task->mutex, NULL) != 0) return -1;
+    if (pthread_mutex_init(&task->mutex, NULL) != 0) return ERR_INTERNAL;
     return 0;
 }
 
@@ -122,7 +123,7 @@ void task_base_destroy(TaskBase* task) {
 }
 
 int task_start(TaskBase* task) {
-    if (!task) return -1;
+    if (!task) return ERR_INTERNAL;
 
     pthread_mutex_lock(&task->mutex);
     TaskState s = task->state;
@@ -171,7 +172,7 @@ int task_start(TaskBase* task) {
         fprintf(stderr, "[task_start] pthread_create failed for '%s': %s\n",
                 task->config.name, strerror(ret));
         set_state(task, TASK_STATE_ERROR);
-        return -1;
+        return ERR_INTERNAL;
     }
 
     /* Log scheduling info for debug */
@@ -186,7 +187,7 @@ int task_start(TaskBase* task) {
 }
 
 int task_stop(TaskBase* task) {
-    if (!task) return -1;
+    if (!task) return ERR_INTERNAL;
 
     pthread_mutex_lock(&task->mutex);
     TaskState s = task->state;
@@ -205,7 +206,7 @@ int task_stop(TaskBase* task) {
 }
 
 int task_restart(TaskBase* task) {
-    if (!task) return -1;
+    if (!task) return ERR_INTERNAL;
     task_stop(task);
 
     pthread_mutex_lock(&task->mutex);
@@ -271,15 +272,15 @@ static void task_sub_callback(const Message* msg, void* user_data) {
 }
 
 int task_subscribe(TaskBase* task, struct MessageBus* bus, const char* topic) {
-    if (!task || !bus || !topic) return -1;
+    if (!task || !bus || !topic) return ERR_INTERNAL;
 
     TaskSubCtx* ctx = (TaskSubCtx*)malloc(sizeof(TaskSubCtx));
-    if (!ctx) return -1;
+    if (!ctx) return ERR_INTERNAL;
     ctx->task = task;
     ctx->bus  = bus;
     snprintf(ctx->topic, sizeof(ctx->topic), "%s", topic);
 
     int ret = message_bus_subscribe(bus, topic, task_sub_callback, ctx);
-    if (ret != 0) { free(ctx); return -1; }
+    if (ret != 0) { free(ctx); return ERR_INTERNAL; }
     return 0;
 }

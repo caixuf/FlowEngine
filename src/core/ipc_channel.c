@@ -9,6 +9,7 @@
  */
 
 #include "ipc_channel.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -205,8 +206,8 @@ void ipc_channel_close(IpcChannel* ch) {
 
 int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
                         const void* data, uint32_t size) {
-    if (!ch || ch->role != IPC_ROLE_PUBLISHER) return -1;
-    if (!topic || size > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (!ch || ch->role != IPC_ROLE_PUBLISHER) return ERR_IO;
+    if (!topic || size > MSG_BUS_MAX_DATA_SIZE) return ERR_IO;
 
     /* Try to acquire a free slot (non-blocking) */
     struct timespec ts;
@@ -214,7 +215,7 @@ int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
     ts.tv_nsec += 10000000LL; /* 10ms */
     if (ts.tv_nsec >= 1000000000LL) { ts.tv_sec++; ts.tv_nsec -= 1000000000LL; }
 
-    if (sem_timedwait(ch->sem_space, &ts) != 0) return -1; /* full */
+    if (sem_timedwait(ch->sem_space, &ts) != 0) return ERR_IO; /* full */
 
     sem_wait(ch->sem_mutex);
 
@@ -245,8 +246,8 @@ int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
 /* ── Subscribe ────────────────────────────────────────── */
 
 int ipc_channel_subscribe(IpcChannel* ch, MessageCallback callback, void* user_data) {
-    if (!ch || !callback) return -1;
-    if (ch->cb_count >= IPC_MAX_CALLBACKS) return -1;
+    if (!ch || !callback) return ERR_IO;
+    if (ch->cb_count >= IPC_MAX_CALLBACKS) return ERR_IO;
     ch->callbacks[ch->cb_count].cb        = callback;
     ch->callbacks[ch->cb_count].user_data = user_data;
     ch->cb_count++;
@@ -256,7 +257,7 @@ int ipc_channel_subscribe(IpcChannel* ch, MessageCallback callback, void* user_d
 /* ── Receive one message ──────────────────────────────── */
 
 int ipc_channel_recv_once(IpcChannel* ch, uint32_t timeout_ms) {
-    if (!ch || ch->role != IPC_ROLE_SUBSCRIBER) return -1;
+    if (!ch || ch->role != IPC_ROLE_SUBSCRIBER) return ERR_IO;
 
     int ret;
     if (timeout_ms == 0) {
@@ -269,7 +270,7 @@ int ipc_channel_recv_once(IpcChannel* ch, uint32_t timeout_ms) {
         if (ts.tv_nsec >= 1000000000LL) { ts.tv_sec++; ts.tv_nsec -= 1000000000LL; }
         ret = sem_timedwait(ch->sem_items, &ts);
     }
-    if (ret != 0) return -1;
+    if (ret != 0) return ERR_IO;
 
     sem_wait(ch->sem_mutex);
     ShmHeader* hdr = get_header(ch);
@@ -301,7 +302,7 @@ int ipc_channel_start(IpcChannel* ch) {
     if (!ch || ch->recv_running) return 0;
     ch->recv_running = true;
     int ret = pthread_create(&ch->recv_thread, NULL, recv_thread_fn, ch);
-    if (ret != 0) { ch->recv_running = false; return -1; }
+    if (ret != 0) { ch->recv_running = false; return ERR_IO; }
     return 0;
 }
 

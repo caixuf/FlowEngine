@@ -60,7 +60,7 @@ void serializer_ensure_endian(void* data, size_t size,
 int serializer_normalize_endian(Message* msg) {
     if (!msg || msg->type_id == 0) return 0;  /* raw 类型无需处理 */
     const TypeRegistryEntry* entry = serializer_lookup_type(msg->type_id);
-    if (!entry) return -1;
+    if (!entry) return ERR_INVALID_PARAM;
     serializer_ensure_endian(msg->data, msg->data_size,
                              msg->endian_marker, entry->endian_swap);
     msg->endian_marker = serializer_endian_marker();  /* 标记为已转换 */
@@ -74,7 +74,7 @@ static int                g_type_count = 0;
 static pthread_mutex_t    g_type_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int serializer_register_type(const TypeRegistryEntry* entry) {
-    if (!entry || entry->type_id == 0) return -1;
+    if (!entry || entry->type_id == 0) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&g_type_mutex);
 
@@ -92,7 +92,7 @@ int serializer_register_type(const TypeRegistryEntry* entry) {
         pthread_mutex_unlock(&g_type_mutex);
         fprintf(stderr, "[serializer] ERROR: type table full (%d entries), cannot register '%s'\n",
                 SERIALIZER_MAX_TYPE_ENTRIES, entry->type_name);
-        return -1;
+        return ERR_INVALID_PARAM;
     }
 
     g_type_table[g_type_count++] = *entry;

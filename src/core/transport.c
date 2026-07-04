@@ -11,6 +11,7 @@
  */
 
 #include "transport.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -154,7 +155,7 @@ void transport_destroy(Transport* t) {
 }
 
 int transport_start(Transport* t) {
-    if (!t || t->running) return -1;
+    if (!t || t->running) return ERR_INVALID_PARAM;
     t->running = true;
 
     /* 启动 TCP 传输层 */
@@ -183,11 +184,11 @@ void transport_stop(Transport* t) {
 }
 
 int transport_advertise(Transport* t, const char* topic, uint32_t type_id) {
-    if (!t || !topic) return -1;
+    if (!t || !topic) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&t->mutex);
     TopicRoute* r = find_or_create_route(t, topic);
-    if (!r) { pthread_mutex_unlock(&t->mutex); return -1; }
+    if (!r) { pthread_mutex_unlock(&t->mutex); return ERR_INVALID_PARAM; }
     r->is_publisher = true;
     r->route = determine_route(t, topic);
     pthread_mutex_unlock(&t->mutex);
@@ -204,7 +205,7 @@ int transport_advertise(Transport* t, const char* topic, uint32_t type_id) {
 
 int transport_publish(Transport* t, const char* topic,
                       const void* data, uint32_t size) {
-    if (!t || !topic) return -1;
+    if (!t || !topic) return ERR_INVALID_PARAM;
 
     /* Always publish to local bus first */
     int ret = message_bus_publish(t->bus, topic, "transport", data, size);
@@ -234,11 +235,11 @@ int transport_publish(Transport* t, const char* topic,
 
 int transport_subscribe(Transport* t, const char* topic,
                         MessageCallback callback, void* user_data) {
-    if (!t || !topic || !callback) return -1;
+    if (!t || !topic || !callback) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&t->mutex);
     TopicRoute* r = find_or_create_route(t, topic);
-    if (!r) { pthread_mutex_unlock(&t->mutex); return -1; }
+    if (!r) { pthread_mutex_unlock(&t->mutex); return ERR_INVALID_PARAM; }
     r->is_subscriber  = true;
     r->local_cb       = callback;
     r->local_user_data = user_data;
@@ -271,7 +272,7 @@ int transport_subscribe(Transport* t, const char* topic,
 
 int transport_unsubscribe(Transport* t, const char* topic,
                           MessageCallback callback) {
-    if (!t || !topic) return -1;
+    if (!t || !topic) return ERR_INVALID_PARAM;
 
     message_bus_unsubscribe(t->bus, topic, callback);
 

@@ -15,6 +15,7 @@
 #include "bag.h"
 #include "clock_service.h"
 #include "serializer.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -129,7 +130,7 @@ static BagIndexEntry* find_or_create_index(BagWriter* w, const char* topic) {
 }
 
 int bag_writer_write(BagWriter* w, const Message* msg) {
-    if (!w || !msg) return -1;
+    if (!w || !msg) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&w->mutex);
 
@@ -176,7 +177,7 @@ static void bag_record_callback(const Message* msg, void* user_data) {
 }
 
 int bag_writer_attach(BagWriter* w, MessageBus* bus) {
-    if (!w || !bus) return -1;
+    if (!w || !bus) return ERR_INVALID_PARAM;
     w->bus      = bus;
     w->attached = true;
     return message_bus_subscribe(bus, "*", bag_record_callback, w);
@@ -336,25 +337,25 @@ static int read_record_v2(FILE* fp, uint64_t* ts_out, Message* msg_out) {
     uint32_t type_id;
     uint8_t  schema_ver, endian;
     if (fread(&type_id, sizeof(type_id), 1, fp) != 1) return 0;
-    if (fread(&schema_ver, sizeof(schema_ver), 1, fp) != 1) return -1;
-    if (fread(&endian, sizeof(endian), 1, fp) != 1) return -1;
+    if (fread(&schema_ver, sizeof(schema_ver), 1, fp) != 1) return ERR_IO;
+    if (fread(&endian, sizeof(endian), 1, fp) != 1) return ERR_IO;
 
     uint64_t ts;
-    if (fread(&ts, sizeof(ts), 1, fp) != 1) return -1;
+    if (fread(&ts, sizeof(ts), 1, fp) != 1) return ERR_IO;
 
     uint8_t tlen;
-    if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return -1;
+    if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return ERR_IO;
 
     char topic[MSG_BUS_MAX_TOPIC_LEN];
     memset(topic, 0, sizeof(topic));
-    if (tlen > 0 && fread(topic, 1, tlen, fp) != tlen) return -1;
+    if (tlen > 0 && fread(topic, 1, tlen, fp) != tlen) return ERR_IO;
 
     uint32_t dsize;
-    if (fread(&dsize, sizeof(dsize), 1, fp) != 1) return -1;
-    if (dsize > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (fread(&dsize, sizeof(dsize), 1, fp) != 1) return ERR_IO;
+    if (dsize > MSG_BUS_MAX_DATA_SIZE) return ERR_IO;
 
     uint8_t data[MSG_BUS_MAX_DATA_SIZE];
-    if (dsize > 0 && fread(data, 1, dsize, fp) != dsize) return -1;
+    if (dsize > 0 && fread(data, 1, dsize, fp) != dsize) return ERR_IO;
 
     if (ts_out)  *ts_out = ts;
     if (msg_out) {
@@ -381,19 +382,19 @@ static int read_record_legacy(FILE* fp, uint64_t* ts_out, Message* msg_out) {
     if (fread(&ts, sizeof(ts), 1, fp) != 1) return 0;
 
     uint8_t tlen;
-    if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return -1;
+    if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return ERR_IO;
 
     char topic[MSG_BUS_MAX_TOPIC_LEN];
     memset(topic, 0, sizeof(topic));
-    if (tlen > 0 && fread(topic, 1, tlen, fp) != tlen) return -1;
+    if (tlen > 0 && fread(topic, 1, tlen, fp) != tlen) return ERR_IO;
 
     uint32_t dsize;
-    if (fread(&dsize, sizeof(dsize), 1, fp) != 1) return -1;
+    if (fread(&dsize, sizeof(dsize), 1, fp) != 1) return ERR_IO;
 
-    if (dsize > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (dsize > MSG_BUS_MAX_DATA_SIZE) return ERR_IO;
 
     uint8_t data[MSG_BUS_MAX_DATA_SIZE];
-    if (dsize > 0 && fread(data, 1, dsize, fp) != dsize) return -1;
+    if (dsize > 0 && fread(data, 1, dsize, fp) != dsize) return ERR_IO;
 
     if (ts_out)  *ts_out = ts;
     if (msg_out) {
@@ -428,7 +429,7 @@ static void sleep_us(uint64_t us) {
 int bag_reader_play_filtered(BagReader* r, MessageBus* bus, float speed,
                              const char* topic_filter,
                              uint64_t start_us, uint64_t end_us) {
-    if (!r || !r->fp) return -1;
+    if (!r || !r->fp) return ERR_INVALID_PARAM;
 
     /* Seek to data start */
     fseek(r->fp, (long)r->data_start, SEEK_SET);
@@ -488,7 +489,7 @@ int bag_reader_play(BagReader* r, MessageBus* bus, float speed) {
 /* ── Metadata ──────────────────────────────────────────────── */
 
 int bag_reader_info(BagReader* r, uint64_t* msg_count, uint64_t* duration_us) {
-    if (!r || !r->fp) return -1;
+    if (!r || !r->fp) return ERR_INVALID_PARAM;
 
     if (r->is_v2) {
         /* Use header data */
@@ -523,7 +524,7 @@ int bag_reader_info(BagReader* r, uint64_t* msg_count, uint64_t* duration_us) {
 
 int bag_reader_get_topics(BagReader* r, char topics[][64], int max_count,
                           uint64_t* counts) {
-    if (!r || !r->fp || !topics || max_count <= 0) return -1;
+    if (!r || !r->fp || !topics || max_count <= 0) return ERR_INVALID_PARAM;
 
     if (r->is_v2 && r->index_count > 0) {
         /* Use index (fast path) */
@@ -574,7 +575,7 @@ int bag_reader_get_topics(BagReader* r, char topics[][64], int max_count,
 
 int bag_reader_get_type_info(BagReader* r, const char* topic,
                              uint32_t* type_id, uint8_t* schema_ver) {
-    if (!r || !topic) return -1;
+    if (!r || !topic) return ERR_INVALID_PARAM;
 
     /* Check index first */
     for (int i = 0; i < r->index_count; i++) {
@@ -586,5 +587,5 @@ int bag_reader_get_type_info(BagReader* r, const char* topic,
     }
 
     /* Not in index — legacy or different topic */
-    return -1;
+    return ERR_IO;
 }

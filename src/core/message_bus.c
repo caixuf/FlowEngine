@@ -9,6 +9,7 @@
  */
 
 #include "message_bus.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -138,7 +139,7 @@ static int rb_push(RingBuffer* rb, const Message* msg) {
     pthread_mutex_lock(&rb->mutex);
     if (rb->count >= MSG_BUS_QUEUE_SIZE) {
         pthread_mutex_unlock(&rb->mutex);
-        return -1;
+        return ERR_OVERFLOW;
     }
     rb->msgs[rb->head] = *msg;
     rb->head = (rb->head + 1) % MSG_BUS_QUEUE_SIZE;
@@ -316,8 +317,8 @@ void message_bus_destroy(MessageBus* bus) {
 
 int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
                         const void* data, uint32_t size) {
-    if (!bus || !topic) return -1;
-    if (size > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (!bus || !topic) return ERR_INVALID_PARAM;
+    if (size > MSG_BUS_MAX_DATA_SIZE) return ERR_OVERFLOW;
 
     Message msg;
     memset(&msg, 0, sizeof(msg));
@@ -340,7 +341,7 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
 
 int message_bus_subscribe(MessageBus* bus, const char* topic,
                           MessageCallback callback, void* user_data) {
-    if (!bus || !topic || !callback) return -1;
+    if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
 
     pthread_mutex_lock(&bus->sub_mutex);
 
@@ -357,7 +358,7 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
     if (!e) {
         if (bus->sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
             pthread_mutex_unlock(&bus->sub_mutex);
-            return -1;
+            return ERR_OVERFLOW;
         }
         e = &bus->subs[bus->sub_count++];
     }
@@ -371,7 +372,7 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
 }
 
 int message_bus_unsubscribe(MessageBus* bus, const char* topic, MessageCallback callback) {
-    if (!bus || !topic || !callback) return -1;
+    if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
     int found = -1;
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
@@ -389,7 +390,7 @@ int message_bus_unsubscribe(MessageBus* bus, const char* topic, MessageCallback 
 
 int message_bus_unsubscribe_ex(MessageBus* bus, const char* topic,
                                MessageCallback callback, void* user_data) {
-    if (!bus || !topic || !callback) return -1;
+    if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
     int found = -1;
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
@@ -412,8 +413,8 @@ int message_bus_unsubscribe_ex(MessageBus* bus, const char* topic,
 int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
                         const void* data, uint32_t size,
                         Message* reply, uint32_t timeout_ms) {
-    if (!bus || !topic || !reply) return -1;
-    if (size > MSG_BUS_MAX_DATA_SIZE) return -1;
+    if (!bus || !topic || !reply) return ERR_OVERFLOW;
+    if (size > MSG_BUS_MAX_DATA_SIZE) return ERR_OVERFLOW;
 
     uint32_t req_id = atomic_fetch_add(&bus->msg_id_counter, 1);
 
@@ -429,7 +430,7 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
         }
     }
     pthread_mutex_unlock(&bus->reply_mutex);
-    if (!slot) return -1;
+    if (!slot) return ERR_OVERFLOW;
 
     /* Build and enqueue request */
     Message req;
@@ -446,7 +447,7 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
         pthread_mutex_lock(&bus->reply_mutex);
         slot->req_id = 0;
         pthread_mutex_unlock(&bus->reply_mutex);
-        return -1;
+        return ERR_OVERFLOW;
     }
 
     /* Wait for reply */
@@ -477,18 +478,18 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
 
 int message_bus_register_service(MessageBus* bus, const char* topic,
                                   ServiceHandler handler, void* user_data) {
-    if (!bus || !topic || !handler) return -1;
+    if (!bus || !topic || !handler) return ERR_OVERFLOW;
     pthread_mutex_lock(&bus->svc_mutex);
     /* Check for duplicate */
     for (int i = 0; i < bus->svc_count; i++) {
         if (bus->svcs[i].active && strcmp(bus->svcs[i].topic, topic) == 0) {
             pthread_mutex_unlock(&bus->svc_mutex);
-            return -1;
+            return ERR_OVERFLOW;
         }
     }
     if (bus->svc_count >= MSG_BUS_MAX_TOPICS) {
         pthread_mutex_unlock(&bus->svc_mutex);
-        return -1;
+        return ERR_OVERFLOW;
     }
     SvcEntry* e = &bus->svcs[bus->svc_count++];
     snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
@@ -500,7 +501,7 @@ int message_bus_register_service(MessageBus* bus, const char* topic,
 }
 
 int message_bus_unregister_service(MessageBus* bus, const char* topic) {
-    if (!bus || !topic) return -1;
+    if (!bus || !topic) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&bus->svc_mutex);
     int found = -1;
     for (int i = 0; i < bus->svc_count; i++) {
@@ -518,11 +519,11 @@ int message_bus_unregister_service(MessageBus* bus, const char* topic) {
 
 int message_bus_subscribe_zero_copy(MessageBus* bus, const char* topic,
                                      ZeroCopyCallback callback, void* user_data) {
-    if (!bus || !topic || !callback) return -1;
+    if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&bus->zc_mutex);
     if (bus->zc_sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
         pthread_mutex_unlock(&bus->zc_mutex);
-        return -1;
+        return ERR_OVERFLOW;
     }
     ZcSubEntry* e = &bus->zc_subs[bus->zc_sub_count++];
     snprintf(e->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
@@ -535,7 +536,7 @@ int message_bus_subscribe_zero_copy(MessageBus* bus, const char* topic,
 
 int message_bus_unsubscribe_zero_copy(MessageBus* bus, const char* topic,
                                        ZeroCopyCallback callback) {
-    if (!bus || !topic || !callback) return -1;
+    if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&bus->zc_mutex);
     int found = -1;
     for (int i = 0; i < bus->zc_sub_count; i++) {
@@ -554,7 +555,7 @@ int message_bus_unsubscribe_zero_copy(MessageBus* bus, const char* topic,
 int message_bus_publish_zero_copy(MessageBus* bus, const char* topic,
                                    const char* sender,
                                    const void* data, uint32_t data_size) {
-    if (!bus || !topic) return -1;
+    if (!bus || !topic) return ERR_INVALID_PARAM;
 
     uint32_t  msg_id = atomic_fetch_add(&bus->msg_id_counter, 1);
     uint64_t  ts     = monotonic_us();

@@ -1,4 +1,5 @@
 #include "process_manager.h"
+#include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -98,7 +99,7 @@ int process_manager_load_plugin(ProcessManager* mgr,
                                const char* name,
                                const char* library_path,
                                const char* config_data) {
-    if (!mgr || !name || !library_path) return -1;
+    if (!mgr || !name || !library_path) return ERR_INTERNAL;
 
     void* handle = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
@@ -107,7 +108,7 @@ int process_manager_load_plugin(ProcessManager* mgr,
             snprintf(msg, sizeof(msg), "dlopen failed for '%s': %s", library_path, dlerror());
             mgr->log_callback(LOG_LEVEL_ERROR, msg);
         }
-        return -1;
+        return ERR_INTERNAL;
     }
 
     /* Look up get_process_interface symbol */
@@ -117,7 +118,7 @@ int process_manager_load_plugin(ProcessManager* mgr,
         if (mgr->log_callback)
             mgr->log_callback(LOG_LEVEL_ERROR, "Symbol 'get_process_interface' not found");
         dlclose(handle);
-        return -1;
+        return ERR_INTERNAL;
     }
 
     ProcessInterface* iface = get_if();
@@ -125,7 +126,7 @@ int process_manager_load_plugin(ProcessManager* mgr,
         if (mgr->log_callback)
             mgr->log_callback(LOG_LEVEL_ERROR, "get_process_interface returned NULL");
         dlclose(handle);
-        return -1;
+        return ERR_INTERNAL;
     }
 
     /* Initialize plugin */
@@ -135,12 +136,12 @@ int process_manager_load_plugin(ProcessManager* mgr,
             if (mgr->log_callback)
                 mgr->log_callback(LOG_LEVEL_ERROR, "Plugin initialize() failed");
             dlclose(handle);
-            return -1;
+            return ERR_INTERNAL;
         }
     }
 
     ProcessNode* node = (ProcessNode*)calloc(1, sizeof(ProcessNode));
-    if (!node) { dlclose(handle); return -1; }
+    if (!node) { dlclose(handle); return ERR_INTERNAL; }
 
     snprintf(node->name, sizeof(node->name), "%s", name);
     snprintf(node->library_path, sizeof(node->library_path), "%s", library_path);
@@ -168,7 +169,7 @@ static ProcessNode* find_node(ProcessManager* mgr, const char* name) {
 }
 
 int process_manager_start_process(ProcessManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_INTERNAL;
 
     pthread_mutex_lock(&mgr->mutex);
     ProcessNode* node = find_node(mgr, name);
@@ -184,7 +185,7 @@ int process_manager_start_process(ProcessManager* mgr, const char* name) {
 }
 
 int process_manager_stop_process(ProcessManager* mgr, const char* name) {
-    if (!mgr || !name) return -1;
+    if (!mgr || !name) return ERR_INTERNAL;
 
     pthread_mutex_lock(&mgr->mutex);
     ProcessNode* node = find_node(mgr, name);
@@ -210,7 +211,7 @@ int process_manager_restart_process(ProcessManager* mgr, const char* name) {
 }
 
 int process_manager_start_all(ProcessManager* mgr) {
-    if (!mgr) return -1;
+    if (!mgr) return ERR_INTERNAL;
     int failed = 0;
     pthread_mutex_lock(&mgr->mutex);
     ProcessNode* node;
@@ -224,7 +225,7 @@ int process_manager_start_all(ProcessManager* mgr) {
 }
 
 int process_manager_stop_all(ProcessManager* mgr) {
-    if (!mgr) return -1;
+    if (!mgr) return ERR_INTERNAL;
     int failed = 0;
     pthread_mutex_lock(&mgr->mutex);
     ProcessNode* node;
@@ -267,7 +268,7 @@ int process_manager_start_monitor(ProcessManager* mgr) {
     if (!mgr || mgr->is_running) return 0;
     mgr->is_running = true;
     int ret = pthread_create(&mgr->monitor_thread, NULL, monitor_thread_fn, mgr);
-    if (ret != 0) { mgr->is_running = false; return -1; }
+    if (ret != 0) { mgr->is_running = false; return ERR_INTERNAL; }
     return 0;
 }
 

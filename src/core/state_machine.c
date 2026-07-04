@@ -4,6 +4,8 @@
 
 #include "state_machine.h"
 #include "logger.h"
+#include "error_codes.h"
+#include "logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -611,14 +613,14 @@ TransitionGuard statem_get_guard(const ReflectiveStateMachine* sm) {
 int statem_add_transition(ReflectiveStateMachine* sm,
                           StateId from, EventId event, StateId to,
                           const char* description) {
-    if (!sm) return -1;
+    if (!sm) return ERR_INVALID_PARAM;
 
     /* Grow dynamic array if needed */
     if (sm->dynamic_count >= sm->dynamic_cap) {
         int new_cap = sm->dynamic_cap + DYNAMIC_RULE_CHUNK;
         TransitionRule* new_rules = (TransitionRule*)realloc(
             sm->dynamic_rules, (size_t)new_cap * sizeof(TransitionRule));
-        if (!new_rules) return -1;
+        if (!new_rules) return ERR_INVALID_PARAM;
         sm->dynamic_rules = new_rules;
         sm->dynamic_cap   = new_cap;
     }
