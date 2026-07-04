@@ -68,8 +68,8 @@ echo "  ✓ Build complete"
 cleanup() {
   echo ""
   echo "───[Cleanup] Shutting down..."
-  kill $E2E_PID 2>/dev/null; wait $E2E_PID 2>/dev/null
-  kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null
+  kill $E2E_PID $SERVER_PID $BRIDGE_PID 2>/dev/null
+  wait 2>/dev/null
   rm -f "$JSON_FILE"
 
   echo ""
@@ -91,13 +91,18 @@ echo "  ✓ Pipeline running (PID $E2E_PID)"
 
 # ── Start dashboard server ──────────────────────────────────
 echo "───[3/5] Starting dashboard server..."
-python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 > /dev/null 2>&1 &
+python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 > /tmp/flowboard.log 2>&1 &
 SERVER_PID=$!
-sleep 1
-echo "  ✓ Dashboard at http://localhost:8800"
+sleep 2
+if kill -0 $SERVER_PID 2>/dev/null; then
+    echo "  ✓ Dashboard at http://localhost:8800"
+else
+    echo "  ✗ Server failed! Check /tmp/flowboard.log"
+    cat /tmp/flowboard.log
+fi
 
 # Start Foxglove WebSocket bridge for 3D live viz
-python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" > /dev/null 2>&1 &
+python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" > /tmp/foxglove_bridge.log 2>&1 &
 BRIDGE_PID=$!
 echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 
