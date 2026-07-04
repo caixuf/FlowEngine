@@ -15,11 +15,14 @@
 #include "scheduler.h"
 #include "fusion.h"
 #include "message_bus.h"
+#include "error_codes.h"
+#include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <pthread.h>
 
 static int g_passed = 0;
 static int g_failed = 0;
@@ -71,6 +74,80 @@ static void test_type_registry(void) {
     TEST("type registry lookup not found");
     found = serializer_lookup_type(0xCAFEBABE);
     ASSERT(found == NULL, "lookup should return NULL for unknown type");
+
+    PASS();
+}
+
+/* 字段级 schema：验证 codegen 生成的字段元信息与 schema hash */
+static void test_schema_metadata(void) {
+    LidarFrame_register_type();
+
+    TEST("schema hash generated (non-zero)");
+    ASSERT(LIDARFRAME_SCHEMA_HASH != 0, "schema hash should be non-zero");
+
+    TEST("registry carries field metadata");
+    const TypeRegistryEntry* e = serializer_lookup_by_name("LidarFrame");
+    ASSERT(e != NULL, "LidarFrame should be registered");
+    ASSERT(e->schema_hash == LIDARFRAME_SCHEMA_HASH, "schema_hash mismatch");
+    ASSERT_EQ(e->field_count, 6, "LidarFrame should have 6 fields");
+    ASSERT(e->fields != NULL, "fields table should be present");
+
+    TEST("field descriptor content");
+    ASSERT(strcmp(e->fields[0].name, "x") == 0, "field[0] name should be x");
+    ASSERT(e->fields[0].kind == FIELD_KIND_FLOAT, "field[0] should be float");
+    ASSERT(e->fields[4].kind == FIELD_KIND_UINT, "point_count should be uint");
+    ASSERT(e->fields[0].array_len == 1, "scalar field array_len should be 1");
+
+    TEST("nested/array field metadata (ObstacleList)");
+    ObstacleList_register_type();
+    const TypeRegistryEntry* ol = serializer_lookup_by_name("ObstacleList");
+    ASSERT(ol != NULL, "ObstacleList should be registered");
+    /* obstacles[8] is a nested array field */
+    bool found_nested_array = false;
+    for (uint16_t i = 0; i < ol->field_count; i++) {
+        if (ol->fields[i].kind == FIELD_KIND_NESTED && ol->fields[i].array_len == 8) {
+            found_nested_array = true;
+        }
+    }
+    ASSERT(found_nested_array, "should find nested array field obstacles[8]");
+
+    PASS();
+}
+
+/* 跨版本兼容性策略判定 */
+static void test_schema_compat(void) {
+    /* 注册一个已知 hash/version 的基准类型 */
+    static const FieldDesc dummy_fields[] = {
+        { "a", FIELD_KIND_UINT, 0, 4, 1 },
+    };
+    TypeRegistryEntry base = {
+        .type_id = 0x11112222, .schema_version = 2, .struct_size = 4,
+        .type_name = "CompatType", .schema_hash = 0xAABBCCDD,
+        .fields = dummy_fields, .field_count = 1,
+    };
+    ASSERT_EQ(serializer_register_type(&base), 0, "register base failed");
+
+    TEST("compat: unknown type");
+    ASSERT_EQ(serializer_check_compat("NoSuchType", 1, 0x1234), SCHEMA_UNKNOWN,
+              "unregistered type should be UNKNOWN");
+
+    TEST("compat: identical hash");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0xAABBCCDD), SCHEMA_IDENTICAL,
+              "same hash should be IDENTICAL");
+
+    TEST("compat: evolved (diff version + diff hash)");
+    ASSERT_EQ(serializer_check_compat("CompatType", 3, 0x99887766), SCHEMA_COMPATIBLE,
+              "diff version+hash should be COMPATIBLE");
+
+    TEST("compat: breaking (same version + diff hash)");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0x99887766), SCHEMA_INCOMPATIBLE,
+              "same version diff hash should be INCOMPATIBLE");
+
+    TEST("compat: missing hash falls back to version");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0), SCHEMA_IDENTICAL,
+              "no hash + same version should be IDENTICAL");
+    ASSERT_EQ(serializer_check_compat("CompatType", 5, 0), SCHEMA_COMPATIBLE,
+              "no hash + diff version should be COMPATIBLE");
 
     PASS();
 }
@@ -165,6 +242,52 @@ static void test_sm_illegal_transition(void) {
     bool ok = statem_send_event(&sm, SM_EVENT_STOP, NULL);
     ASSERT(!ok, "illegal transition should be rejected");
     ASSERT(statem_current(&sm) == SM_STATE_INITIALIZED, "state should not change");
+
+    PASS();
+}
+
+static void test_sm_new_transitions(void) {
+    TEST("sm RUNNING + DONE -> STOPPED (自行结束)");
+    ReflectiveStateMachine sm;
+    statem_init(&sm, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT(statem_send_event(&sm, SM_EVENT_START, NULL), "START should succeed");
+    ASSERT(statem_send_event(&sm, SM_EVENT_DONE, NULL), "RUNNING + DONE should succeed");
+    ASSERT(statem_current(&sm) == SM_STATE_STOPPED, "should be STOPPED");
+
+    TEST("sm INITIALIZED + ERROR -> ERROR (init 失败)");
+    ReflectiveStateMachine sm2;
+    statem_init(&sm2, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT(statem_send_event(&sm2, SM_EVENT_ERROR, NULL), "INITIALIZED + ERROR should succeed");
+    ASSERT(statem_current(&sm2) == SM_STATE_ERROR, "should be ERROR");
+
+    PASS();
+}
+
+static void test_sm_illegal_policy(void) {
+    TEST("sm send_event_ex 统一错误码");
+    ReflectiveStateMachine sm;
+    statem_init(&sm, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    ASSERT_EQ(statem_send_event_ex(&sm, SM_EVENT_START, NULL), ERR_OK,
+              "合法转移应返回 ERR_OK");
+    ASSERT_EQ(statem_send_event_ex(&sm, SM_EVENT_RESUME, NULL), ERR_ILLEGAL_TRANSITION,
+              "非法转移应返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm) == SM_STATE_RUNNING, "WARN 策略下状态不变");
+
+    TEST("sm illegal policy REJECT 保持状态不变");
+    ReflectiveStateMachine sm2;
+    statem_init(&sm2, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    statem_set_illegal_policy(&sm2, SM_ILLEGAL_REJECT);
+    ASSERT_EQ(statem_send_event_ex(&sm2, SM_EVENT_STOP, NULL), ERR_ILLEGAL_TRANSITION,
+              "REJECT 策略仍返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm2) == SM_STATE_INITIALIZED, "REJECT 策略下状态不变");
+
+    TEST("sm illegal policy GOTO_ERROR 进入 ERROR 态");
+    ReflectiveStateMachine sm3;
+    statem_init(&sm3, SM_TABLE_STANDARD, SM_STATE_INITIALIZED, "test");
+    statem_set_illegal_policy(&sm3, SM_ILLEGAL_GOTO_ERROR);
+    ASSERT_EQ(statem_send_event_ex(&sm3, SM_EVENT_STOP, NULL), ERR_ILLEGAL_TRANSITION,
+              "GOTO_ERROR 策略返回 ERR_ILLEGAL_TRANSITION");
+    ASSERT(statem_current(&sm3) == SM_STATE_ERROR, "GOTO_ERROR 策略应进入 ERROR 态");
 
     PASS();
 }
@@ -386,6 +509,118 @@ static void test_fusion_node(void) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/* Message Bus — QoS & Per-Topic Statistics                   */
+/* ══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    pthread_mutex_t m;
+    int count;
+    int max_val;   /* max payload value observed */
+    int slow_us;   /* per-callback sleep to create backpressure */
+} BusCounter;
+
+static void bus_counter_cb(const Message* msg, void* ud) {
+    BusCounter* c = (BusCounter*)ud;
+    int val = 0;
+    if (msg->data_size >= sizeof(int)) memcpy(&val, msg->data, sizeof(int));
+    if (c->slow_us > 0) usleep(c->slow_us);
+    pthread_mutex_lock(&c->m);
+    c->count++;
+    if (val > c->max_val) c->max_val = val;
+    pthread_mutex_unlock(&c->m);
+}
+
+static void test_bus_topic_stats(void) {
+    TEST("bus per-topic stats accounting");
+    MessageBus* bus = message_bus_create("test_qos_bus");
+    ASSERT(bus != NULL, "bus create failed");
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 0 };
+    message_bus_subscribe(bus, "t/stats", bus_counter_cb, &c);
+
+    const int N = 10;
+    for (int i = 0; i < N; i++) {
+        message_bus_publish(bus, "t/stats", "tester", &i, sizeof(i));
+        usleep(3000); /* 3ms spacing → measurable frequency */
+    }
+    usleep(100000); /* let dispatch drain */
+
+    TopicStats st;
+    int rc = message_bus_get_topic_stats(bus, "t/stats", &st);
+    ASSERT_EQ(rc, 0, "get_topic_stats failed");
+    ASSERT_EQ((int)st.publish_count, N, "publish_count wrong");
+    ASSERT_EQ((int)st.deliver_count, N, "deliver_count wrong");
+    ASSERT_EQ((int)st.subscriber_count, 1, "subscriber_count wrong");
+    message_bus_destroy(bus);
+    PASS();
+
+    TEST("bus per-topic frequency estimate in sane range");
+    /* frequency_hz must be non-zero (regression: was always 0) and derived
+     * from the real ~3ms inter-arrival gap, not a mis-scaled value. */
+    ASSERT(st.frequency_hz > 1.0 && st.frequency_hz < 100000.0,
+           "frequency_hz out of range (%.1f)", st.frequency_hz);
+    PASS();
+}
+
+static void test_bus_qos_config(void) {
+    TEST("bus QoS set/get");
+    MessageBus* bus = message_bus_create("test_qos_cfg");
+    TopicQos q = { .queue_depth = 8, .policy = QOS_DROP_LATEST };
+    ASSERT_EQ(message_bus_set_topic_qos(bus, "t/cfg", &q), 0, "set_qos failed");
+    const TopicQos* got = message_bus_get_topic_qos(bus, "t/cfg");
+    ASSERT(got != NULL, "get_qos returned NULL");
+    ASSERT_EQ((int)got->queue_depth, 8, "queue_depth wrong");
+    ASSERT_EQ((int)got->policy, (int)QOS_DROP_LATEST, "policy wrong");
+    message_bus_destroy(bus);
+    PASS();
+}
+
+static void test_bus_qos_drop_latest(void) {
+    TEST("bus QoS DROP_LATEST enforces depth");
+    MessageBus* bus = message_bus_create("test_drop_latest");
+    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_LATEST };
+    message_bus_set_topic_qos(bus, "t/dl", &q);
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
+    message_bus_subscribe(bus, "t/dl", bus_counter_cb, &c);
+
+    const int N = 40;
+    for (int i = 0; i < N; i++)
+        message_bus_publish(bus, "t/dl", "tester", &i, sizeof(i)); /* burst */
+    usleep(400000); /* drain */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/dl", &st);
+    /* Some messages must have been dropped due to depth pressure */
+    ASSERT(st.drop_count > 0, "expected drops (got %d)", (int)st.drop_count);
+    /* All enqueued messages must eventually be delivered (1 subscriber) */
+    ASSERT_EQ((int)st.deliver_count, (int)st.publish_count,
+              "deliver != publish (%d vs %d)", (int)st.deliver_count, (int)st.publish_count);
+    message_bus_destroy(bus);
+    PASS();
+}
+
+static void test_bus_qos_drop_oldest(void) {
+    TEST("bus QoS DROP_OLDEST keeps newest");
+    MessageBus* bus = message_bus_create("test_drop_oldest");
+    TopicQos q = { .queue_depth = 2, .policy = QOS_DROP_OLDEST };
+    message_bus_set_topic_qos(bus, "t/do", &q);
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
+    message_bus_subscribe(bus, "t/do", bus_counter_cb, &c);
+
+    const int N = 40;
+    for (int i = 0; i < N; i++)
+        message_bus_publish(bus, "t/do", "tester", &i, sizeof(i)); /* burst 0..39 */
+    usleep(400000); /* drain */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/do", &st);
+    ASSERT(st.drop_count > 0, "expected evictions (got %d)", (int)st.drop_count);
+    message_bus_destroy(bus);
+    /* dispatch thread joined → safe to read counter without lock */
+    ASSERT_EQ(c.max_val, N - 1, "newest message must survive (saw max %d)", c.max_val);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════ */
 /* Main                                                       */
 /* ══════════════════════════════════════════════════════════ */
 
@@ -398,6 +633,8 @@ int main(void) {
     printf("═══ Serializer ═══\n");
     test_fnv1a_hash();
     test_type_registry();
+    test_schema_metadata();
+    test_schema_compat();
     test_serialize_roundtrip();
     test_msg_cast();
     test_endian_detection();
@@ -406,6 +643,8 @@ int main(void) {
     printf("\n═══ State Machine ═══\n");
     test_sm_lifecycle();
     test_sm_illegal_transition();
+    test_sm_new_transitions();
+    test_sm_illegal_policy();
     test_sm_guard();
     test_sm_reflection();
     test_sm_dynamic_rules();
@@ -421,6 +660,13 @@ int main(void) {
     printf("\n═══ Fusion ═══\n");
     test_message_buffer();
     test_fusion_node();
+
+    /* ── Message Bus (QoS) ──────────────────── */
+    printf("\n═══ Message Bus / QoS ═══\n");
+    test_bus_topic_stats();
+    test_bus_qos_config();
+    test_bus_qos_drop_latest();
+    test_bus_qos_drop_oldest();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");

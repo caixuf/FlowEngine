@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdatomic.h>
+#include <unistd.h>
 
 /* ── Subscriber entry ─────────────────────────────────── */
 
@@ -111,6 +112,8 @@ struct MessageBus {
         char      topic[MSG_BUS_MAX_TOPIC_LEN];
         TopicQos  qos;
         TopicStats stats;
+        uint64_t  prev_publish_us;  /**< 上一次发布时间戳（用于频率估算） */
+        uint32_t  pending_count;    /**< 当前在途（已入队未分发）消息数 */
         bool      active;
     } topic_entries[BUS_MAX_TOPIC_ENTRIES];
     int        topic_count;
@@ -160,10 +163,38 @@ static int rb_push(RingBuffer* rb, const Message* msg) {
     return 0;
 }
 
-/* Blocks until a message is available or bus stops */
-static bool rb_pop(RingBuffer* rb, Message* out, volatile bool* running) {
+/* Evict the oldest queued message matching `topic`.
+ * Caller must NOT hold rb->mutex. Returns true if one was removed.
+ * O(queue length) in the worst case; acceptable for the bounded 256-slot queue. */
+static bool rb_evict_oldest_topic(RingBuffer* rb, const char* topic) {
+    bool evicted = false;
     pthread_mutex_lock(&rb->mutex);
-    while (rb->count == 0 && *running) {
+    /* Scan from oldest (tail) toward newest for the first topic match */
+    for (uint32_t i = 0; i < rb->count; i++) {
+        uint32_t idx = (rb->tail + i) % MSG_BUS_QUEUE_SIZE;
+        if (strcmp(rb->msgs[idx].topic, topic) == 0) {
+            /* Remove logical element i: shift older elements [0..i-1] up by
+             * one slot, then advance tail. Preserves FIFO order. */
+            for (uint32_t j = i; j > 0; j--) {
+                uint32_t dst = (rb->tail + j) % MSG_BUS_QUEUE_SIZE;
+                uint32_t src = (rb->tail + j - 1) % MSG_BUS_QUEUE_SIZE;
+                rb->msgs[dst] = rb->msgs[src];
+            }
+            rb->tail = (rb->tail + 1) % MSG_BUS_QUEUE_SIZE;
+            rb->count--;
+            pthread_cond_signal(&rb->not_full);
+            evicted = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&rb->mutex);
+    return evicted;
+}
+
+/* Blocks until a message is available or bus stops */
+static bool rb_pop(RingBuffer* rb, Message* out, atomic_bool* running) {
+    pthread_mutex_lock(&rb->mutex);
+    while (rb->count == 0 && atomic_load(running)) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += 100000000LL; /* 100ms */
@@ -200,25 +231,31 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
     }
     pthread_mutex_unlock(&bus->sub_mutex);
 
-    /* Per-topic delivery tracking */
-    if (delivered > 0) {
+    /* Per-topic tracking: decrement in-flight count + update delivery stats */
+    if (msg->type == MSG_TYPE_PUBLISH) {
         pthread_mutex_lock(&bus->topic_mutex);
         for (int i = 0; i < bus->topic_count; i++) {
             if (strcmp(bus->topic_entries[i].topic, msg->topic) == 0) {
-                TopicStats* s = &bus->topic_entries[i].stats;
-                s->deliver_count += (uint64_t)delivered;
-                uint64_t now = monotonic_us();
-                uint64_t lat = now - msg->timestamp_us;
-                s->total_latency_us += lat;
-                if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
-                if (lat > s->max_latency_us) s->max_latency_us = lat;
-                /* Update subscriber count */
-                int subc = 0;
-                pthread_mutex_lock(&bus->sub_mutex);
-                for (int j = 0; j < bus->sub_count; j++)
-                    if (bus->subs[j].active && topic_match(bus->subs[j].topic, msg->topic)) subc++;
-                pthread_mutex_unlock(&bus->sub_mutex);
-                s->subscriber_count = (uint32_t)subc;
+                /* Message left the queue — free one slot of in-flight budget */
+                if (bus->topic_entries[i].pending_count > 0)
+                    bus->topic_entries[i].pending_count--;
+
+                if (delivered > 0) {
+                    TopicStats* s = &bus->topic_entries[i].stats;
+                    s->deliver_count += (uint64_t)delivered;
+                    uint64_t now = monotonic_us();
+                    uint64_t lat = now - msg->timestamp_us;
+                    s->total_latency_us += lat;
+                    if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
+                    if (lat > s->max_latency_us) s->max_latency_us = lat;
+                    /* Update subscriber count */
+                    int subc = 0;
+                    pthread_mutex_lock(&bus->sub_mutex);
+                    for (int j = 0; j < bus->sub_count; j++)
+                        if (bus->subs[j].active && topic_match(bus->subs[j].topic, msg->topic)) subc++;
+                    pthread_mutex_unlock(&bus->sub_mutex);
+                    s->subscriber_count = (uint32_t)subc;
+                }
                 break;
             }
         }
@@ -250,8 +287,9 @@ static void* dispatch_thread_fn(void* arg) {
     Message msg;
 
     while (atomic_load(&bus->running)) {
-        volatile bool keep_running = atomic_load(&bus->running);
-        if (!rb_pop(&bus->queue, &msg, &keep_running)) continue;
+        /* Pass the live atomic flag (not a stale snapshot) so a shutdown
+         * request during the blocking wait is observed immediately. */
+        if (!rb_pop(&bus->queue, &msg, &bus->running)) continue;
 
         if (msg.type == MSG_TYPE_REQUEST) {
             /* Dispatch to service handler */
@@ -338,6 +376,11 @@ MessageBus* message_bus_create(const char* bus_name) {
 void message_bus_destroy(MessageBus* bus) {
     if (!bus) return;
     atomic_store(&bus->running, false);
+    /* Wake the dispatch thread if it is blocked waiting for messages so it
+     * observes the stop request promptly instead of after the wait timeout. */
+    pthread_mutex_lock(&bus->queue.mutex);
+    pthread_cond_broadcast(&bus->queue.not_empty);
+    pthread_mutex_unlock(&bus->queue.mutex);
     pthread_join(bus->dispatch_thread, NULL);
 
     rb_destroy(&bus->queue);
@@ -387,6 +430,7 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     }
 
     bool should_drop = false;
+    bool need_evict  = false;
     if (ti >= 0) {
         TopicStats* s = &bus->topic_entries[ti].stats;
         TopicQos*   q = &bus->topic_entries[ti].qos;
@@ -410,30 +454,28 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
             }
         }
 
-        /* Check if topic queue is full */
-        uint64_t pending = (s->publish_count > s->deliver_count)
-                           ? (s->publish_count - s->deliver_count) : 0;
-        if (pending >= depth) {
+        /* Enforce per-topic depth using accurate in-flight (pending) count */
+        if (bus->topic_entries[ti].pending_count >= depth) {
             switch (q->policy) {
                 case QOS_DROP_OLDEST:
-                    /* Allow push — ring buffer will drop oldest */
+                    /* Evict the oldest queued message of this topic (done below,
+                     * outside topic_mutex, to preserve lock ordering) */
+                    need_evict = true;
                     break;
                 case QOS_DROP_LATEST:
                     should_drop = true;  /* Drop this new message */
                     s->drop_count++;
                     break;
                 case QOS_BLOCK: {
-                    /* Block until queue has space (with timeout) */
+                    /* Block until the topic has drained below depth (bounded) */
                     int waits = 0;
-                    while (pending >= depth && waits < 1000) {
+                    while (bus->topic_entries[ti].pending_count >= depth && waits < 1000) {
                         pthread_mutex_unlock(&bus->topic_mutex);
                         usleep(1000);  /* 1ms */
                         pthread_mutex_lock(&bus->topic_mutex);
-                        pending = (s->publish_count > s->deliver_count)
-                                  ? (s->publish_count - s->deliver_count) : 0;
                         waits++;
                     }
-                    if (pending >= depth) {
+                    if (bus->topic_entries[ti].pending_count >= depth) {
                         should_drop = true;
                         s->drop_count++;
                     }
@@ -449,6 +491,18 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
         return 0;  /* dropped per QoS policy, not a hard error */
     }
 
+    /* DROP_OLDEST: make room by removing the oldest queued message of this topic */
+    if (need_evict && rb_evict_oldest_topic(&bus->queue, topic)) {
+        pthread_mutex_lock(&bus->topic_mutex);
+        if (ti >= 0) {
+            if (bus->topic_entries[ti].pending_count > 0)
+                bus->topic_entries[ti].pending_count--;
+            bus->topic_entries[ti].stats.drop_count++;
+        }
+        pthread_mutex_unlock(&bus->topic_mutex);
+        atomic_fetch_add(&bus->stat_dropped, 1);
+    }
+
     int ret = rb_push(&bus->queue, &msg);
     if (ret == 0) {
         atomic_fetch_add(&bus->stat_published, 1);
@@ -461,10 +515,14 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     if (ti >= 0) {
         TopicStats* s = &bus->topic_entries[ti].stats;
         if (ret == 0) {
+            bus->topic_entries[ti].pending_count++;
+            /* Frequency: derive from inter-arrival gap (prev -> current) */
+            uint64_t prev = bus->topic_entries[ti].prev_publish_us;
+            bus->topic_entries[ti].prev_publish_us = msg.timestamp_us;
             s->publish_count++;
             s->last_publish_us = msg.timestamp_us;
-            if (s->publish_count > 1) {
-                uint64_t elapsed = msg.timestamp_us - s->last_publish_us;
+            if (prev != 0) {
+                uint64_t elapsed = msg.timestamp_us - prev;
                 if (elapsed > 0) s->frequency_hz = 1000000.0 / (double)elapsed;
             }
         } else {

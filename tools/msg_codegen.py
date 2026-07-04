@@ -273,6 +273,33 @@ class CodeGenerator:
     def _type_id(self, s: StructDef) -> int:
         return fnv1a_hash(self._sig_string(s))
 
+    def _layout_string(self, s: StructDef) -> str:
+        """Field-level layout signature for schema_hash (name+type+array)."""
+        parts = []
+        for f in s.fields:
+            arr = f.array_size if f.array_size > 0 else 1
+            parts.append(f"{f.name}:{f.idl_type}:{arr}")
+        return f"{s.name}#" + ";".join(parts)
+
+    def _schema_hash(self, s: StructDef) -> int:
+        return fnv1a_hash(self._layout_string(s))
+
+    def _field_kind(self, f: Field) -> str:
+        """Map an IDL field to a FieldKind enum constant name."""
+        if f.is_nested:
+            return "FIELD_KIND_NESTED"
+        if f.is_enum:
+            return "FIELD_KIND_ENUM"
+        if f.idl_type == 'bool':
+            return "FIELD_KIND_BOOL"
+        if f.idl_type in ('float', 'float64'):
+            return "FIELD_KIND_FLOAT"
+        if f.idl_type in ('int8', 'int16', 'int32', 'int64'):
+            return "FIELD_KIND_INT"
+        if f.idl_type in ('uint8', 'uint16', 'uint32', 'uint64'):
+            return "FIELD_KIND_UINT"
+        return "FIELD_KIND_UNKNOWN"
+
     def _field_size(self, f: Field) -> int:
         """Get the serialized size of a single field element."""
         if f.idl_type in PRIMITIVE_SIZES:
@@ -306,6 +333,7 @@ class CodeGenerator:
         lines.append("#include <stdint.h>")
         lines.append("#include <stdbool.h>")
         lines.append("#include <string.h>")
+        lines.append("#include <stddef.h>")
         lines.append("#include \"serializer.h\"")
         lines.append("")
         lines.append("#ifdef __cplusplus")
@@ -358,6 +386,7 @@ class CodeGenerator:
         # Type ID and schema version
         lines.append(f"#define {s.name.upper()}_TYPE_ID         0x{type_id:08x}u")
         lines.append(f"#define {s.name.upper()}_SCHEMA_VERSION  1")
+        lines.append(f"#define {s.name.upper()}_SCHEMA_HASH     0x{self._schema_hash(s):08x}u")
         lines.append(f"#define {s.name.upper()}_TYPE_NAME        \"{s.name}\"")
         lines.append("")
 
@@ -372,12 +401,14 @@ class CodeGenerator:
 
         # C++ type traits
         lines.append("#ifdef __cplusplus")
+        lines.append("}  /* close extern \"C\" — template specialization needs C++ linkage */")
         lines.append(f"/* C++ type traits for msg_cast<{s.name}>(msg) */")
         lines.append(f"template<> struct msg_traits<{s.name}> {{")
         lines.append(f"    static constexpr uint32_t TYPE_ID = {s.name.upper()}_TYPE_ID;")
         lines.append(f"    static constexpr uint8_t  SCHEMA_VERSION = {s.name.upper()}_SCHEMA_VERSION;")
         lines.append(f"    static constexpr const char* TYPE_NAME = \"{s.name}\";")
         lines.append(f"}};")
+        lines.append("extern \"C\" {")
         lines.append("#endif")
         lines.append("")
 
@@ -393,9 +424,29 @@ class CodeGenerator:
         # Endian swap function
         lines.extend(self._gen_endian_swap(s))
 
+        # Field descriptor table (field-level schema)
+        lines.extend(self._gen_field_table(s))
+
         # Register function
         lines.extend(self._gen_register_func(s, type_id))
 
+        return lines
+
+    def _gen_field_table(self, s: StructDef) -> list[str]:
+        lines = []
+        lines.append(f"/** Field-level schema descriptor table for {s.name}. */")
+        lines.append(f"static const FieldDesc {s.name}_fields[] = {{")
+        for f in s.fields:
+            elem_size = self._field_size(f)
+            arr = f.array_size if f.array_size > 0 else 1
+            lines.append(
+                f"    {{ \"{f.name}\", {self._field_kind(f)}, "
+                f"(uint16_t)offsetof({s.name}, {f.name}), "
+                f"{elem_size}, {arr} }},")
+        lines.append(f"}};")
+        lines.append(f"#define {s.name.upper()}_FIELD_COUNT  "
+                     f"(sizeof({s.name}_fields)/sizeof({s.name}_fields[0]))")
+        lines.append("")
         return lines
 
     def _gen_serialize(self, s: StructDef, type_id: int) -> list[str]:
@@ -525,6 +576,9 @@ class CodeGenerator:
         lines.append(f"        .serialize      = (SerializeFunc){s.name}_serialize,")
         lines.append(f"        .deserialize    = (DeserializeFunc){s.name}_deserialize,")
         lines.append(f"        .endian_swap    = (EndianSwapFunc){s.name}_endian_swap,")
+        lines.append(f"        .schema_hash    = {s.name.upper()}_SCHEMA_HASH,")
+        lines.append(f"        .fields         = {s.name}_fields,")
+        lines.append(f"        .field_count    = (uint16_t){s.name.upper()}_FIELD_COUNT,")
         lines.append(f"    }};")
         lines.append(f"    serializer_register_type(&e);")
         lines.append(f"}}")

@@ -74,6 +74,7 @@ typedef struct {
 
 /* ── 转移历史 ─────────────────────────────────────────────── */
 
+/** 转移历史（环形缓冲）*/
 #define SM_HISTORY_DEPTH 8
 
 typedef struct {
@@ -102,6 +103,18 @@ typedef bool (*TransitionGuard)(void* task, StateId from, EventId event, StateId
  */
 typedef void (*StateDebugHook)(void* task, StateId from, EventId event,
                                StateId to, const char* rule_desc, bool accepted);
+
+/* ── 非法转移处理策略 ──────────────────────────────────────── */
+/**
+ * 统一的非法转移（当前状态无匹配规则）处理策略。
+ * 接入统一错误码体系（error_codes.h）：statem_send_event_ex 始终返回
+ * ERR_OK / ERR_ILLEGAL_TRANSITION / ERR_GUARD_REJECTED。
+ */
+typedef enum {
+    SM_ILLEGAL_WARN = 0,   /**< 记录告警并忽略，状态不变（默认，向后兼容） */
+    SM_ILLEGAL_REJECT,     /**< 静默拒绝（不刷屏日志），状态不变 */
+    SM_ILLEGAL_GOTO_ERROR, /**< 转入 ERROR 态（若存在），用于故障兜底 */
+} SmIllegalPolicy;
 
 /* ── 反射式状态机 ──────────────────────────────────────────── */
 
@@ -132,6 +145,7 @@ typedef struct {
     /* ── 调试支持 ───────────────────────────────────── */
     StateDebugHook        debug_hook;        /**< 每次转移时调用（NULL = 关闭） */
     bool                  trace_enabled;     /**< 是否打印转移日志到 stderr */
+    SmIllegalPolicy       illegal_policy;    /**< 非法转移处理策略（默认 WARN） */
 
     /* ── 所属任务名（用于日志）───────────────────────── */
     const char*           task_name;
@@ -174,6 +188,22 @@ void statem_init(ReflectiveStateMachine* sm, const TransitionRule* table,
  * @return true = 转移成功，false = 非法转移或被 guard 拒绝
  */
 bool statem_send_event(ReflectiveStateMachine* sm, EventId event, void* task);
+
+/**
+ * 向状态机发送事件（带统一错误码返回）。
+ *
+ * 与 statem_send_event 相同，但返回统一错误码而非 bool：
+ *   - ERR_OK                 转移成功
+ *   - ERR_ILLEGAL_TRANSITION 非法转移（按 illegal_policy 处理）
+ *   - ERR_GUARD_REJECTED     被 guard 拒绝
+ *   - ERR_INVALID_PARAM      sm 为 NULL
+ *
+ * 非法转移的行为由 statem_set_illegal_policy() 设定的策略决定。
+ */
+int statem_send_event_ex(ReflectiveStateMachine* sm, EventId event, void* task);
+
+/** 设定非法转移处理策略（默认 SM_ILLEGAL_WARN）。 */
+void statem_set_illegal_policy(ReflectiveStateMachine* sm, SmIllegalPolicy policy);
 
 /**
  * 处理自动转移（到达某状态后自动跳到下一状态）。
@@ -355,9 +385,11 @@ extern const TransitionRule SM_TABLE_STANDARD[];
  *   INITIALIZED + START   -> RUNNING
  *   RUNNING     + STOP    -> STOPPING
  *   STOPPING    + DONE    -> STOPPED
+ *   RUNNING     + DONE    -> STOPPED   (任务自行运行结束)
  *   RUNNING     + PAUSE   -> PAUSED
  *   PAUSED      + RESUME  -> RUNNING
  *   RUNNING     + ERROR   -> ERROR
+ *   INITIALIZED + ERROR   -> ERROR
  *   PAUSED      + ERROR   -> ERROR
  *   ERROR       + RESTART -> INITIALIZED
  *   STOPPED     + RESTART -> INITIALIZED

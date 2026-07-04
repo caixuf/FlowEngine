@@ -16,7 +16,7 @@ A from-scratch middleware framework providing the core abstractions of CyberRT i
 | Layer | Modules |
 |-------|---------|
 | **Communication** | Message Bus (pub/sub + req/reply + zero-copy), IPC (SHM), TCP Transport |
-| **Execution** | Coroutine Scheduler (FIFO + CPU affinity + rate limit), Choreo DAG mode |
+| **Execution** | Coroutine Scheduler (FIFO + CPU affinity + rate limit), Choreo DAG mode, Cancelable Coroutine Primitives (pub/sub · select · timer · req-reply, with timeout & graceful cancel) |
 | **Introspection** | Reflective State Machine, UDP Service Discovery, Topology Tracking |
 | **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion |
 | **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, CI/CD |
@@ -200,7 +200,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 | [Technical Design](docs/TECHNICAL_DESIGN.md) | Architecture |
 | [Learning Guide](docs/LEARNING_GUIDE.md) | 2-4 week path |
 | [Task System](docs/TASK_SYSTEM_GUIDE.md) | Plugin development |
-| [Skills](skills/) | Deep dives (serializer, statem, discovery, fusion, bus, IPC, bag, clock) |
+| [Skills](skills/) | Deep dives (serializer, statem, discovery, fusion, bus, IPC, bag, clock, coroutine) |
 
 ## License
 

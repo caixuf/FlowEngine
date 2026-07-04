@@ -89,9 +89,13 @@ static void* task_thread_fn(void* arg) {
     uint64_t end = now_us();
     if (task->stats.start_time > 0 && end > task->stats.start_time)
         task->stats.total_run_time += end - task->stats.start_time;
-    if (task->state != TASK_STATE_ERROR)
-        task->state = TASK_STATE_STOPPED;
+    TaskState cur = task->state;
     pthread_mutex_unlock(&task->mutex);
+
+    /* 统一经由 set_state 收口，使反射式状态机与 TaskState 保持同步：
+     * 正常结束 RUNNING/STOPPING + DONE -> STOPPED；ERROR 态保持不变。 */
+    if (cur != TASK_STATE_ERROR)
+        set_state(task, TASK_STATE_STOPPED);
 
     return NULL;
 }
@@ -195,7 +199,10 @@ int task_stop(TaskBase* task) {
 
     if (s == TASK_STATE_STOPPED || s == TASK_STATE_UNKNOWN || s == TASK_STATE_INITIALIZED) return 0;
 
-    set_state(task, TASK_STATE_STOPPING);
+    /* 仅在 RUNNING 时执行 RUNNING -> STOPPING 转移；ERROR/STOPPING 态下
+     * 工作线程已在收尾，直接 join 即可，避免触发非法转移告警。 */
+    if (s == TASK_STATE_RUNNING)
+        set_state(task, TASK_STATE_STOPPING);
 
     pthread_mutex_lock(&task->mutex);
     task->should_stop = true;
@@ -209,10 +216,12 @@ int task_restart(TaskBase* task) {
     if (!task) return ERR_INTERNAL;
     task_stop(task);
 
+    /* 经由 set_state 收口，触发 STOPPED/ERROR + RESTART -> INITIALIZED，
+     * 保持反射式状态机与 TaskState 同步。 */
     pthread_mutex_lock(&task->mutex);
-    task->state = TASK_STATE_INITIALIZED;
     task->restart_count++;
     pthread_mutex_unlock(&task->mutex);
+    set_state(task, TASK_STATE_INITIALIZED);
 
     return task_start(task);
 }

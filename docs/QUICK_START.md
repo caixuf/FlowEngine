@@ -111,21 +111,21 @@ target_link_libraries(my_plugin flowengine_core)
 
 ## 步骤 5：C++20 协程任务（进阶）
 
-参考 `src/plugins/flowcoro_task.cpp` 和 `src/flow_coro.cpp`：
+参考 `src/plugins/flowcoro_task.cpp`、`src/coro_bus_demo.cpp` 与
+深入讲解 [`skills/11_coroutine.md`](../skills/11_coroutine.md)：
 
 ```cpp
 #include "coroutine_task.h"
 
 class MySensorTask : public FlowCoroTask {
-public:
-    MySensorTask(const TaskConfig* cfg, MessageBus* bus)
-        : FlowCoroTask(cfg, bus) {}
-
-    Task<void> run() override {
-        while (true) {
-            // 挂起协程，等待总线消息，不占用线程
-            auto msg = co_await subscribe_once("sensor/lidar");
-            printf("[Coro] 收到 lidar 数据\n");
+protected:
+    Task run() override {
+        while (!should_stop()) {
+            // 50ms 内没数据即视为丢帧；stop() 也会立刻唤醒协程
+            auto r = co_await next_for("sensor/lidar", 50'000);
+            if (r.cancelled()) break;          // 优雅停机，无需外发消息
+            if (r.timed_out()) { watchdog(); continue; }
+            process(*r);                       // r.message 为收到的消息
         }
     }
 };
@@ -134,6 +134,10 @@ EXPORT_COROUTINE_TASK(my_sensor, MySensorTask)
 ```
 
 协程在消息到达时由 flowcoro 无锁线程池自动恢复，无需回调地狱。
+成员工厂 `next / next_for / select / select_for / sleep_ms / ask` 会自动注入
+本任务的 `CancelToken`，因此 `stop()` 能直接唤醒悬挂在 `co_await` 上的协程并
+以「已取消」语义返回，**无需再外发一条唤醒消息**。协程覆盖 pub/sub、select、
+timer、req/reply 四类原语，并内置 `resume_count()` / `coro_latency()` 可观测统计。
 
 ## 关键技术点
 
