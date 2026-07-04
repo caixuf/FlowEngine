@@ -370,6 +370,66 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     msg.data_size    = size;
     if (data && size > 0) memcpy(msg.data, data, size);
 
+    /* ── QoS: per-topic queue depth enforcement ── */
+    pthread_mutex_lock(&bus->topic_mutex);
+    int ti = -1;
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) { ti = i; break; }
+    }
+    /* Auto-register topic if new */
+    if (ti < 0 && bus->topic_count < BUS_MAX_TOPIC_ENTRIES) {
+        ti = bus->topic_count++;
+        memset(&bus->topic_entries[ti], 0, sizeof(bus->topic_entries[ti]));
+        snprintf(bus->topic_entries[ti].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+        bus->topic_entries[ti].active = true;
+        bus->topic_entries[ti].qos.policy = QOS_DROP_OLDEST;
+    }
+
+    bool should_drop = false;
+    if (ti >= 0) {
+        TopicStats* s = &bus->topic_entries[ti].stats;
+        TopicQos*   q = &bus->topic_entries[ti].qos;
+        uint32_t depth = q->queue_depth > 0 ? q->queue_depth : MSG_BUS_QUEUE_SIZE;
+
+        /* Check if topic queue is full */
+        uint64_t pending = (s->publish_count > s->deliver_count)
+                           ? (s->publish_count - s->deliver_count) : 0;
+        if (pending >= depth) {
+            switch (q->policy) {
+                case QOS_DROP_OLDEST:
+                    /* Allow push — ring buffer will drop oldest */
+                    break;
+                case QOS_DROP_LATEST:
+                    should_drop = true;  /* Drop this new message */
+                    s->drop_count++;
+                    break;
+                case QOS_BLOCK: {
+                    /* Block until queue has space (with timeout) */
+                    int waits = 0;
+                    while (pending >= depth && waits < 1000) {
+                        pthread_mutex_unlock(&bus->topic_mutex);
+                        usleep(1000);  /* 1ms */
+                        pthread_mutex_lock(&bus->topic_mutex);
+                        pending = (s->publish_count > s->deliver_count)
+                                  ? (s->publish_count - s->deliver_count) : 0;
+                        waits++;
+                    }
+                    if (pending >= depth) {
+                        should_drop = true;
+                        s->drop_count++;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+
+    if (should_drop) {
+        atomic_fetch_add(&bus->stat_dropped, 1);
+        return 0;  /* dropped per QoS policy, not a hard error */
+    }
+
     int ret = rb_push(&bus->queue, &msg);
     if (ret == 0) {
         atomic_fetch_add(&bus->stat_published, 1);
@@ -379,36 +439,17 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
 
     /* Per-topic tracking */
     pthread_mutex_lock(&bus->topic_mutex);
-    for (int i = 0; i < bus->topic_count; i++) {
-        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
-            TopicStats* s = &bus->topic_entries[i].stats;
-            if (ret == 0) {
-                s->publish_count++;
-                s->last_publish_us = msg.timestamp_us;
-                /* Estimate frequency */
-                if (s->publish_count > 1) {
-                    uint64_t elapsed = msg.timestamp_us - s->last_publish_us;
-                    if (elapsed > 0) s->frequency_hz = 1000000.0 / (double)elapsed;
-                }
-            } else {
-                s->drop_count++;
-            }
-            pthread_mutex_unlock(&bus->topic_mutex);
-            return ret;
-        }
-    }
-    /* New topic — auto-register */
-    if (bus->topic_count < BUS_MAX_TOPIC_ENTRIES) {
-        int idx = bus->topic_count++;
-        memset(&bus->topic_entries[idx], 0, sizeof(bus->topic_entries[idx]));
-        snprintf(bus->topic_entries[idx].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
-        bus->topic_entries[idx].active = true;
-        bus->topic_entries[idx].qos.policy = QOS_DROP_OLDEST;
+    if (ti >= 0) {
+        TopicStats* s = &bus->topic_entries[ti].stats;
         if (ret == 0) {
-            bus->topic_entries[idx].stats.publish_count = 1;
-            bus->topic_entries[idx].stats.last_publish_us = msg.timestamp_us;
+            s->publish_count++;
+            s->last_publish_us = msg.timestamp_us;
+            if (s->publish_count > 1) {
+                uint64_t elapsed = msg.timestamp_us - s->last_publish_us;
+                if (elapsed > 0) s->frequency_hz = 1000000.0 / (double)elapsed;
+            }
         } else {
-            bus->topic_entries[idx].stats.drop_count = 1;
+            s->drop_count++;
         }
     }
     pthread_mutex_unlock(&bus->topic_mutex);
