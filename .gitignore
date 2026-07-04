@@ -117,3 +117,4 @@ user_config.json
 
 # 锁文件
 *.lock
+__pycache__/

@@ -24,7 +24,6 @@
 #include "logger.h"
 #include "flow_registry.h"
 #include "param_registry.h"
-#include "monitor_server.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -584,12 +583,8 @@ int main(int argc, char** argv) {
     signal(SIGTERM, sig_handler);
 
     /* ── 运行 ── */
-    /* ── 内嵌监控服务器 (cyber_monitor 等价物) ── */
-    MonitorServer* ms = monitor_server_create(g_bus, g_discovery, 8800);
-    monitor_server_start(ms);
-    LOG_INFO("e2e", "monitor server: http://localhost:8800");
-
     LOG_INFO("e2e", "running for %d seconds... (Ctrl+C to stop)", duration);
+    LOG_INFO("e2e", "monitor: start 'flowmond --port 8800' in another terminal for live dashboard");
     sleep((unsigned)duration);
     g_running = false;
 
@@ -640,8 +635,6 @@ int main(int argc, char** argv) {
     printf("╚══════════════════════════════════════════╝\n\n");
 
     /* ── 清理 ── */
-    monitor_server_stop(ms);
-    monitor_server_destroy(ms);
     scheduler_stop(g_scheduler);
     scheduler_destroy(g_scheduler);
     transport_stop(g_transport);
