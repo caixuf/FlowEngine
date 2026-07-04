@@ -18,9 +18,8 @@ h1 span{color:#8b949e;font-size:12px;font-weight:400}
 #topo svg{width:100%;height:100%}
 #frames{height:300px;overflow-y:auto;font:10px 'JetBrains Mono',monospace;background:#0d1117;border:1px solid#21262d;border-radius:8px;padding:6px}
 #charts{display:flex;gap:8px;flex-wrap:wrap}
-.chart-box{flex:1;min-width:280px;height:200px;background:#0d1117;border:1px solid#21262d;border-radius:8px;position:relative}
-.chart-box canvas{width:100%;height:100%}
-.chart-box label{position:absolute;top:4px;left:8px;font-size:10px;color:#8b949e;z-index:1}
+.chart-box{flex:1;min-width:280px;height:200px;background:#0d1117;border:1px solid#21262d;border-radius:8px;overflow:hidden}
+.chart-box canvas{width:100%;height:100%;display:block}
 .stat{display:flex;justify-content:space-between;padding:2px 0;font-size:11px;border-bottom:1px solid#161b22}
 .stat .v{color:#58a6ff;font-weight:600}
 button,input{background:#21262d;color:#c9d1d9;border:1px solid#30363d;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}
@@ -68,9 +67,9 @@ input{width:240px;font:11px monospace}
 
 <div class="row" style="min-height:220px">
   <div id="charts" style="display:flex;gap:8px;width:100%;min-height:200px">
-    <div class="chart-box" style="flex:1;min-width:250px"><label>Message Rate (msg/s)</label><canvas id="ch-rate"></canvas></div>
-    <div class="chart-box" style="flex:1;min-width:250px"><label>E2E Latency (µs)</label><canvas id="ch-lat"></canvas></div>
-    <div class="chart-box" style="flex:1;min-width:250px"><label>Frame Throughput</label><canvas id="ch-frames"></canvas></div>
+    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-rate"></canvas></div>
+    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-lat"></canvas></div>
+    <div class="chart-box" style="flex:1;min-width:250px"><canvas id="ch-frames"></canvas></div>
   </div>
 </div>
 
@@ -250,9 +249,9 @@ function updateCharts(){
   chartHistory.frames.push(b.delivered||0);
   [chartHistory.rate,chartHistory.latency,chartHistory.frames].forEach(a=>{while(a.length>chartHistory.maxLen)a.shift()});
 
-  drawChart('ch-rate',chartHistory.rate,'#58a6ff','msg/s');
-  drawChart('ch-lat',chartHistory.latency,'#d29922','µs');
-  drawChart('ch-frames',chartHistory.frames,'#3fb950','frames');
+  drawChart('ch-rate',chartHistory.rate,'#58a6ff','Message Rate');
+  drawChart('ch-lat',chartHistory.latency,'#d29922','Latency (µs)');
+  drawChart('ch-frames',chartHistory.frames,'#3fb950','Throughput');
 }
 
 function drawChart(id,data,color,unit){
@@ -261,36 +260,54 @@ function drawChart(id,data,color,unit){
   if(W<10||H<10)return;
   c.width=W*2;c.height=H*2;c.style.width=W+'px';c.style.height=H+'px';
   const ctx=c.getContext('2d');ctx.scale(2,2);
-  const pad={t:24,r:8,b:20,l:40},w=W-pad.l-pad.r,h=H-pad.t-pad.b;
+  const pad={t:28,r:12,b:22,l:44},w=W-pad.l-pad.r,h=H-pad.t-pad.b;
   ctx.clearRect(0,0,W,H);
 
-  // Grid
+  // Background
+  ctx.fillStyle='#0d1117';ctx.fillRect(0,0,W,H);
+
+  // Grid lines
   ctx.strokeStyle='#161b22';ctx.lineWidth=0.5;
-  for(let i=0;i<=4;i++){const y=pad.t+h*i/4;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()}
+  const steps=4;
+  for(let i=0;i<=steps;i++){const y=pad.t+h*i/steps;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()}
 
   if(data.length<2){
     ctx.fillStyle='#484f58';ctx.font='12px system-ui';ctx.textAlign='center';
-    ctx.fillText('Waiting...',W/2,H/2);
+    ctx.fillText('Waiting for data...',W/2,H/2);
     return;
   }
 
   const max=Math.max(...data,1),min=Math.min(...data,0);
-  const xs=w/(data.length-1),ys=h/(max-min||1);
+  const range=max-min||1;
+  const xs=w/(data.length-1),ys=h/range;
+
+  // Area fill
+  ctx.fillStyle=color+'18';
+  ctx.beginPath();
+  data.forEach((v,i)=>{
+    const x=pad.l+i*xs,y=pad.t+(max-v)*ys;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.lineTo(pad.l+(data.length-1)*xs,pad.t+h);
+  ctx.lineTo(pad.l,pad.t+h);
+  ctx.closePath();ctx.fill();
 
   // Line
-  ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
+  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();
   data.forEach((v,i)=>{
     const x=pad.l+i*xs,y=pad.t+(max-v)*ys;
     i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
   });
   ctx.stroke();
 
-  // Labels
-  ctx.fillStyle='#8b949e';ctx.font='9px system-ui';ctx.textAlign='right';
-  ctx.fillText(max,pad.l-4,pad.t+10);
-  ctx.fillText(min,pad.l-4,H-pad.b);
+  // Y-axis labels (top and bottom only, no overlap)
+  ctx.fillStyle='#8b949e';ctx.font='10px system-ui';ctx.textAlign='right';
+  ctx.fillText(Math.round(max),pad.l-6,pad.t+12);
+  ctx.fillText(Math.round(min),pad.l-6,H-pad.b+4);
+
+  // Unit label (top-left inside chart)
   ctx.textAlign='left';
-  ctx.fillText(unit,pad.l,pad.t-6);
+  ctx.fillText(unit,pad.l+4,pad.t-6);
 }
 
 // ── Init ───────────────────────────────────────────────────
