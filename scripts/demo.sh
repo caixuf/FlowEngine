@@ -11,6 +11,11 @@
 # =============================================================================
 set -e
 
+# Kill any stale processes from previous runs
+pkill -f flowboard_server 2>/dev/null || true
+pkill -f flow_e2e 2>/dev/null || true
+sleep 0.5
+
 DURATION=15
 OPEN_BROWSER=true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

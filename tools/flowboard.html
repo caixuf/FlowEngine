@@ -176,6 +176,9 @@ input:focus,select:focus{border-color:#58a6ff}
   <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
+  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D Scene <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— drag orbit, scroll zoom</span></h2><span class="toggle">▼</span></div>
+    <div class="card-body" style="padding:0"><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">Loading 3D...</div></div></div></div>
+
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
     <div style="display:flex;align-items:center;gap:6px">
@@ -208,6 +211,7 @@ input:focus,select:focus{border-color:#58a6ff}
 <div id="toast">Copied!</div>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/"}}</script>
 <script>
 // ════════════════════════════════════════════════════════════
 // State
@@ -291,14 +295,30 @@ function startSSE() {
 }
 function tryReconnect(){
   if(paused){reconnectTimer=setTimeout(tryReconnect,2000);return;}
-  fetch(serverUrl+'/api/topology').then(function(r){return r.json()}).then(function(d){topoData=d;updateAll();setConnStatus('live','● live');startSSE()}).catch(function(){setConnStatus('warn','● retry');reconnectTimer=setTimeout(tryReconnect,2000);});
+  fetch(serverUrl+'/api/topology').then(function(r){return r.json()}).then(function(d){
+    topoData=d;updateAll();setConnStatus('live','● live');connectRetries=0;startSSE();
+  }).catch(function(){setConnStatus('warn','● retry');reconnectTimer=setTimeout(tryReconnect,2000);});
 }
+var connectRetries=0;
 async function doConnect(){
   serverUrl = document.getElementById('url').value.trim();
   saveState();
   if(eventSource){eventSource.close();eventSource=null;}
   if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}
-  try{var r=await fetch(serverUrl+'/api/topology');topoData=await r.json();updateAll();setConnStatus('live','● live');startSSE()}catch(err){setConnStatus('dead','● offline');doSimulate()}
+  try{
+    var r=await fetch(serverUrl+'/api/topology');
+    topoData=await r.json();updateAll();setConnStatus('live','● live');
+    connectRetries=0;startSSE();
+  }catch(err){
+    connectRetries++;
+    if(connectRetries<=3){
+      setConnStatus('warn','● retry ('+connectRetries+'/3)');
+      reconnectTimer=setTimeout(doConnect,1500);
+    }else{
+      setConnStatus('dead','● offline');
+      doSimulate();
+    }
+  }
 }
 function doPause(){paused=!paused;document.getElementById('pause-btn').textContent=paused?'▶ Resume':'⏯ Pause'}
 function clearFrames(){frames=[];frameCount=0;updateFrames()}
@@ -309,6 +329,7 @@ function clearFrames(){frames=[];frameCount=0;updateFrames()}
 var lastNodeNames = '';
 function updateAll(){
   updateMetrics();updateFrames();updateTopicStats();updateProcessTopics();
+  update3D();
   var nn = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
   if(nn!==lastNodeNames){lastNodeNames=nn;updateTopo();}
   updateCharts();
@@ -635,6 +656,140 @@ document.addEventListener('keydown',function(e){
 });
 
 // ════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════
+// 3D Scene (Three.js)
+// ════════════════════════════════════════════════════════════
+var scene3d=null,camera3d=null,renderer3d=null,controls3d=null;
+var carBody=null,carWheels=[],lidarCloud=null,gpsTrack=[],trajLine=null;
+var gridHelper=null,sceneReady=false;
+
+function init3D(){
+  var el=document.getElementById("scene3d");if(!el)return;
+  import("three").then(function(THREE){
+    import("three/addons/controls/OrbitControls.js").then(function(OC){
+      var w=el.clientWidth,h=el.clientHeight;
+      scene3d=new THREE.Scene();
+      scene3d.background=new THREE.Color(0x070a0f);
+      scene3d.fog=new THREE.Fog(0x070a0f,50,200);
+
+      camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,500);
+      camera3d.position.set(30,20,30);
+      camera3d.lookAt(0,0,0);
+
+      renderer3d=new THREE.WebGLRenderer({antialias:true});
+      renderer3d.setSize(w,h);
+      renderer3d.setPixelRatio(Math.min(window.devicePixelRatio,2));
+      renderer3d.shadowMap.enabled=true;
+      el.appendChild(renderer3d.domElement);
+      document.getElementById("scene3d-msg").style.display="none";
+
+      controls3d=new OC.OrbitControls(camera3d,renderer3d.domElement);
+      controls3d.target.set(0,0,0);
+      controls3d.enableDamping=true;controls3d.dampingFactor=0.1;
+      controls3d.maxPolarAngle=Math.PI/2.2;
+      controls3d.update();
+
+      // Lighting
+      scene3d.add(new THREE.AmbientLight(0x404060,2));
+      var sun=new THREE.DirectionalLight(0xffffff,3);
+      sun.position.set(50,80,30);sun.castShadow=true;
+      sun.shadow.mapSize.set(1024,1024);
+      scene3d.add(sun);
+
+      // Ground
+      var groundGeo=new THREE.PlaneGeometry(200,200);
+      var groundMat=new THREE.MeshStandardMaterial({color:0x1a1a2e,roughness:0.9});
+      var ground=new THREE.Mesh(groundGeo,groundMat);
+      ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;
+      scene3d.add(ground);
+      gridHelper=new THREE.GridHelper(200,40,0x252d3a,0x111820);
+      scene3d.add(gridHelper);
+
+      // Car model
+      var carGroup=new THREE.Group();
+      var bodyGeo=new THREE.BoxGeometry(4,1.2,2);
+      var bodyMat=new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.6,roughness:0.3});
+      carBody=new THREE.Mesh(bodyGeo,bodyMat);
+      carBody.position.y=1.5;carBody.castShadow=true;
+      carGroup.add(carBody);
+      var roofGeo=new THREE.BoxGeometry(2,0.6,1.8);
+      var roof=new THREE.Mesh(roofGeo,bodyMat);
+      roof.position.set(0,1.0,0);roof.castShadow=true;
+      carBody.add(roof);
+      var wheelGeo=new THREE.CylinderGeometry(0.4,0.4,0.3,16);
+      var wheelMat=new THREE.MeshStandardMaterial({color:0x111111,roughness:0.8});
+      [[1.2,-0.8,1.1],[1.2,-0.8,-1.1],[-1.2,-0.8,1.1],[-1.2,-0.8,-1.1]].forEach(function(wp){
+        var wheel=new THREE.Mesh(wheelGeo,wheelMat);
+        wheel.rotation.z=Math.PI/2;wheel.position.set(wp[0],wp[1]+1.5,wp[2]);wheel.castShadow=true;
+        carGroup.add(wheel);carWheels.push(wheel);
+      });
+      scene3d.add(carGroup);
+      carGroup.position.set(0,0.5,0);
+
+      // LiDAR point cloud
+      var lidarGeo=new THREE.BufferGeometry();
+      var lidarPts=new Float32Array(600);
+      for(var i=0;i<200;i++){lidarPts[i*3]=-20+Math.random()*40;lidarPts[i*3+1]=Math.random()*3;lidarPts[i*3+2]=-10+Math.random()*20;}
+      lidarGeo.setAttribute("position",new THREE.BufferAttribute(lidarPts,3));
+      var lidarMat=new THREE.PointsMaterial({color:0xff4444,size:0.3});
+      lidarCloud=new THREE.Points(lidarGeo,lidarMat);
+      scene3d.add(lidarCloud);
+
+      // Trajectory line
+      var trajPts=[new THREE.Vector3(0,1.5,0),new THREE.Vector3(10,1.5,0.2),new THREE.Vector3(20,1.5,0.3),new THREE.Vector3(30,1.5,0.2),new THREE.Vector3(40,1.5,0)];
+      trajLine=new THREE.Line(new THREE.BufferGeometry().setFromPoints(trajPts),new THREE.LineBasicMaterial({color:0x3fb950}));
+      scene3d.add(trajLine);
+
+      // GPS track
+      var gpsGeo=new THREE.BufferGeometry();
+      var gpsArr=new Float32Array(300);for(var i=0;i<100;i++){gpsArr[i*3]=0;gpsArr[i*3+1]=0.05;gpsArr[i*3+2]=0;}
+      gpsGeo.setAttribute("position",new THREE.BufferAttribute(gpsArr,3));
+      var gpsLine=new THREE.Line(gpsGeo,new THREE.LineBasicMaterial({color:0x4488ff}));
+      scene3d.add(gpsLine);
+      gpsTrack=[gpsLine,gpsArr];
+
+      sceneReady=true;animate3D();
+      window.addEventListener("resize",function(){if(!renderer3d)return;var w2=el.clientWidth,h2=el.clientHeight;camera3d.aspect=w2/h2;camera3d.updateProjectionMatrix();renderer3d.setSize(w2,h2);});
+    }).catch(function(){document.getElementById("scene3d-msg").textContent="3D load failed";});
+  }).catch(function(){document.getElementById("scene3d-msg").textContent="3D load failed";});
+}
+
+var gpsHistory=[];
+function update3D(){
+  if(!sceneReady||!carBody)return;
+  var v=(topoData.metrics||{}).vehicle;if(!v)return;
+  carBody.parent.position.x=v.x||0;
+  carBody.parent.position.z=(v.y||0)*5;
+  // Update LiDAR around car
+  if(lidarCloud){
+    var pos=lidarCloud.geometry.attributes.position.array,cx=v.x||0,cy=v.y||0;
+    for(var i=0;i<200&&i*3+2<pos.length;i++){
+      var a=Math.random()*Math.PI*2,d=5+Math.random()*25;
+      pos[i*3]=cx+Math.cos(a)*d;pos[i*3+1]=Math.random()*3;pos[i*3+2]=cy*5+Math.sin(a)*d;
+    }
+    lidarCloud.geometry.attributes.position.needsUpdate=true;
+  }
+  // GPS track
+  gpsHistory.push({x:v.x||0,z:(v.y||0)*5});
+  if(gpsHistory.length>100)gpsHistory.shift();
+  if(gpsTrack.length){
+    var arr=gpsTrack[1];
+    for(var i=0;i<gpsHistory.length&&i*3+2<arr.length;i++){arr[i*3]=gpsHistory[i].x;arr[i*3+2]=gpsHistory[i].z;}
+    gpsTrack[0].geometry.attributes.position.needsUpdate=true;
+  }
+  // Camera follow
+  if(controls3d){controls3d.target.set(v.x||0,1.5,(v.y||0)*5);controls3d.update();}
+}
+
+function animate3D(){
+  requestAnimationFrame(animate3D);
+  if(!sceneReady)return;
+  controls3d.update();
+  renderer3d.render(scene3d,camera3d);
+}
+setTimeout(init3D,500);
+
 // Init
 // ════════════════════════════════════════════════════════════
 document.getElementById('url').value = serverUrl;
