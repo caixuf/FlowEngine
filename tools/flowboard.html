@@ -66,11 +66,11 @@ input{width:240px;font:11px monospace}
   </div>
 </div>
 
-<div class="row">
-  <div id="charts" style="flex:1">
-    <div class="chart-box"><label>Message Rate (msg/s)</label><canvas id="ch-rate"></canvas></div>
-    <div class="chart-box"><label>E2E Latency (µs)</label><canvas id="ch-lat"></canvas></div>
-    <div class="chart-box"><label>Frame Throughput</label><canvas id="ch-frames"></canvas></div>
+<div class="row" style="min-height:220px">
+  <div id="charts" style="display:flex;gap:8px;width:100%;min-height:200px">
+    <div class="chart-box" style="flex:1;min-width:250px"><label>Message Rate (msg/s)</label><canvas id="ch-rate"></canvas></div>
+    <div class="chart-box" style="flex:1;min-width:250px"><label>E2E Latency (µs)</label><canvas id="ch-lat"></canvas></div>
+    <div class="chart-box" style="flex:1;min-width:250px"><label>Frame Throughput</label><canvas id="ch-frames"></canvas></div>
   </div>
 </div>
 
@@ -91,6 +91,13 @@ const COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 
 // ── Demo data ──────────────────────────────────────────────
 function doSimulate(){
+  // Pre-populate chart history so lines are visible immediately
+  chartHistory = {rate:[],latency:[],frames:[],maxLen:120};
+  for(let i=0;i<30;i++){
+    chartHistory.rate.push(800+Math.random()*400);
+    chartHistory.latency.push(100+Math.random()*200);
+    chartHistory.frames.push(700+Math.random()*600);
+  }
   topoData = {
     nodes:[
       {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",freq:10},{topic:"sensor/gps",freq:5}]},
@@ -288,6 +295,19 @@ function drawChart(id,data,color,unit){
 
 // ── Init ───────────────────────────────────────────────────
 doSimulate();  // Always start with demo data so page is never blank
+
+// Update simulation data periodically for live charts
+setInterval(()=>{
+  if(!eventSource && !paused){
+    const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
+    b.published = (b.published||1000) + Math.floor(Math.random()*50-25);
+    b.delivered = (b.delivered||2000) + Math.floor(Math.random()*100-50);
+    b.dropped   = Math.random()<0.05 ? b.dropped+1 : b.dropped;
+    l.avg_us    = Math.max(80, (l.avg_us||150) + Math.floor(Math.random()*20-10));
+    l.p99_us    = Math.max(200, (l.p99_us||400) + Math.floor(Math.random()*60-30));
+    updateAll();
+  }
+},1000);
 </script>
 </body>
 </html>
