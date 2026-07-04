@@ -12,9 +12,14 @@
 set -e
 
 # Kill any stale processes from previous runs
-pkill -9 -f flowboard_server 2>/dev/null || true
-pkill -9 -f flow_e2e 2>/dev/null || true
-pkill -9 -f foxglove_bridge 2>/dev/null || true
+# Aggressive cleanup
+{ pkill -9 -f flowboard; pkill -9 -f flow_e2e; pkill -9 -f foxglove; } 2>/dev/null || true
+sleep 1
+# Force-free ports
+for port in 8800 8765; do
+  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
+  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+done
 sleep 0.5
 
 DURATION=30
