@@ -242,6 +242,19 @@ target_link_libraries(flow_bag flowengine_core m)
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task flowengine_core)
 
+# ── Algorithm plugins (ADAS pipeline: perception→fusion→planning→control) ──
+add_library(perception_plugin SHARED src/plugins/perception_plugin.c)
+target_link_libraries(perception_plugin flowengine_core)
+
+add_library(fusion_plugin SHARED src/plugins/fusion_plugin.c)
+target_link_libraries(fusion_plugin flowengine_core)
+
+add_library(planning_plugin SHARED src/plugins/planning_plugin.c)
+target_link_libraries(planning_plugin flowengine_core)
+
+add_library(pid_controller SHARED src/plugins/pid_controller.c)
+target_link_libraries(pid_controller flowengine_core m)
+
 # =============================================================================
 # flowcoro 协程集成目标（统一管理）
 #
@@ -291,7 +304,7 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller
     LIBRARY DESTINATION lib/flowengine/plugins
 )
 

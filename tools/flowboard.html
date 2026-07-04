@@ -880,8 +880,8 @@ function init3D(){
 
       sceneReady=true;animate3D();
       window.addEventListener("resize",function(){if(!renderer3d)return;var w2=el.clientWidth,h2=el.clientHeight;camera3d.aspect=w2/h2;camera3d.updateProjectionMatrix();renderer3d.setSize(w2,h2);});
-    }).catch(function(){var msg=document.getElementById("scene3d-msg");msg.innerHTML="3D requires internet (CDN).<br><br>Offline? Drag <b>demo.mcap</b> into <a href=\"https://foxglove.dev/download\" style=\"color:#58a6ff\">Foxglove Studio</a> (free).";msg.style.color="#8b949e";msg.style.fontSize="12px";msg.style.textAlign="center";msg.style.lineHeight="1.8";msg.style.width="80%";});
-  }).catch(function(){var msg=document.getElementById("scene3d-msg");msg.innerHTML="3D requires internet (CDN).<br><br>Offline? Drag <b>demo.mcap</b> into <a href=\"https://foxglove.dev/download\" style=\"color:#58a6ff\">Foxglove Studio</a> (free).";msg.style.color="#8b949e";msg.style.fontSize="12px";msg.style.textAlign="center";msg.style.lineHeight="1.8";msg.style.width="80%";});
+    }).catch(function(){var msg=document.getElementById("scene3d-msg");msg.innerHTML="3D load failed.<br><br>Try <b>Ctrl+Shift+R</b> to hard refresh.<br>Or offline: drag <b>demo.mcap</b> into Foxglove Studio (free).";msg.style.color="#8b949e";msg.style.fontSize="12px";msg.style.textAlign="center";msg.style.lineHeight="1.8";msg.style.width="80%";});
+  }).catch(function(){var msg=document.getElementById("scene3d-msg");msg.innerHTML="3D load failed.<br><br>Try <b>Ctrl+Shift+R</b> to hard refresh.<br>Or offline: drag <b>demo.mcap</b> into Foxglove Studio (free).";msg.style.color="#8b949e";msg.style.fontSize="12px";msg.style.textAlign="center";msg.style.lineHeight="1.8";msg.style.width="80%";});
 }
 
 var gpsHistory=[],carTarget={x:0,z:4},carSmooth={x:0,z:4};

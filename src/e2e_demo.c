@@ -568,7 +568,7 @@ typedef struct {
 
 static int monitor_init(TaskBase* base) {
     statem_send_event(&base->sm, SM_EVENT_START, base);
-    LOG_INFO("monitor", "initialized (1Hz stats reporter)");
+    LOG_INFO("monitor", "initialized (10Hz stats reporter)");
     return 0;
 }
 
@@ -804,7 +804,7 @@ int main(int argc, char** argv) {
     if (ROLE_MATCH("monitor")) {
         mt = (MonitorTask*)calloc(1, sizeof(MonitorTask));
         TaskConfig cfg = { .name="monitor", .priority=TASK_PRIORITY_NORMAL,
-                           .max_frequency_hz=1.0, .auto_restart=false };
+                           .max_frequency_hz=10.0, .auto_restart=false };
         task_base_init(&mt->base, &g_monitor_vtable, &cfg);
         mt->tid = scheduler_register_task(g_scheduler, &mt->base, "monitor");
     }
@@ -868,7 +868,7 @@ int main(int argc, char** argv) {
     /* ── 启动任务（先启动消费者，再启动生产者，确保 trigger 就绪）── */
     task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)");
     task_start(&ct->base);  LOG_INFO("e2e", "control:    started (NORMAL, choreo)");
-    task_start(&mt->base);  LOG_INFO("e2e", "monitor:    started (1Hz)");
+    task_start(&mt->base);  LOG_INFO("e2e", "monitor:    started (10Hz)");
     usleep(200000);  /* wait 200ms for subscriptions to take effect */
     task_start(&pt->base);  LOG_INFO("e2e", "perception: started (CRITICAL, 10Hz)");
 
