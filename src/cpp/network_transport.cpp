@@ -172,8 +172,11 @@ static void recv_thread_fn(NetworkTransport* t) {
                 uint32_t payload = ntohl(net_len);
                 if (payload > sizeof(Message)) continue;
 
-                /* Read payload (fd is non-blocking, so read_full never blocks
-                 * the lock indefinitely — a short read simply drops the frame). */
+                /* Read payload. fd is non-blocking, so read_full does not block:
+                 * on a short read the underlying read() returns EAGAIN (n<=0) and
+                 * read_full returns early, so the frame is simply dropped (n !=
+                 * payload below). Payload is also bounded by sizeof(Message)
+                 * (checked above), so the lock is never held for long. */
                 n = read_full(peer->fd, buf, payload);
                 if (n != (ssize_t)payload) continue;
 

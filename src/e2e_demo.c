@@ -336,6 +336,7 @@ typedef struct {
 } SimObstacle;
 
 #define SIM_OBSTACLE_COUNT 3
+#define SAME_LANE_TOL_M    2.0   /* 横向容差: |Δy| 小于此值视为同车道 (半车道宽) */
 static SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
     { 0, "car",         35.0,  0.0,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 */
     { 1, "car",         95.0, -3.5, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 */
@@ -366,7 +367,7 @@ static double lead_gap(void) {
     for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
         SimObstacle* o = &g_obstacles[i];
         if (o->vx < 0) continue;                 /* 忽略对向车 */
-        if (fabs(o->y - g_vehicle.y) > 2.0) continue; /* 不在本车道 */
+        if (fabs(o->y - g_vehicle.y) > SAME_LANE_TOL_M) continue; /* 不在本车道 */
         double gap = o->x - g_vehicle.x;
         if (gap > 0 && gap < best) best = gap;
     }
@@ -776,7 +777,7 @@ static int monitor_execute(TaskBase* base) {
                     double ry = dx * sh + dy * ch;
                     if (rx < -20 || rx > 60) continue;   /* 视野外 */
                     for (int k = 0; k < 6; k++) {
-                        double a = (double)k / 6.0 * 6.2831853;
+                        double a = (double)k / 6.0 * (2.0 * M_PI);
                         double px = rx + cos(a) * o->wid * 0.5;
                         double py = ry + sin(a) * o->len * 0.5;
                         fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
@@ -784,7 +785,7 @@ static int monitor_execute(TaskBase* base) {
                     }
                 }
                 for (int k = 0; k < 24; k++) {           /* 地面环 */
-                    double a = (double)k / 24.0 * 6.2831853;
+                    double a = (double)k / 24.0 * (2.0 * M_PI);
                     double r = 12.0 + 6.0 * ((k % 3) - 1);
                     fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
                             cos(a) * r, sin(a) * r, 0.0);

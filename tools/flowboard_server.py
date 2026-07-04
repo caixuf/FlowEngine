@@ -38,7 +38,11 @@ DEFAULT_STATE_FILE = os.environ.get("FLOWENGINE_STATE_FILE", "/tmp/flow_topology
 
 
 def _is_stale():
-    """True when live data hasn't refreshed within STALE_AFTER_SEC."""
+    """True when live data hasn't refreshed within STALE_AFTER_SEC.
+
+    NOTE: callers must already hold g_lock (this reads g_simulate/g_last_update
+    without locking to avoid re-entrant deadlock on the non-reentrant g_lock).
+    """
     return (not g_simulate) and (time.time() - g_last_update > STALE_AFTER_SEC)
 
 
