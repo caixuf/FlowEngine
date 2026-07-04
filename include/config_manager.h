@@ -9,6 +9,29 @@ extern "C" {
 #endif
 
 /**
+ * Topic QoS (per-topic)
+ */
+typedef struct {
+    int      depth;              /**< 队列深度 */
+    char     policy[16];         /**< "drop_oldest"|"drop_latest"|"block" */
+} TopicQosConfig;
+
+/** Topic publish/subscribe declaration */
+typedef struct {
+    char     topic[64];          /**< Topic name */
+    char     type[64];           /**< Message type name */
+    char     remap[64];          /**< Remap target (empty = no remap) */
+    int      qos_depth;          /**< QoS queue depth (0=default) */
+    char     qos_policy[16];     /**< QoS policy */
+} TopicDecl;
+
+/** Resource limits */
+typedef struct {
+    int      max_memory_mb;      /**< Max memory in MB (0=unlimited) */
+    int      max_cpu_percent;    /**< Max CPU % (0=unlimited) */
+} ResourceLimits;
+
+/**
  * 调度配置 (per-process)
  */
 typedef struct {
@@ -22,6 +45,9 @@ typedef struct {
 /**
  * 进程配置项
  */
+#define PROC_MAX_TOPICS 16
+#define PROC_MAX_DEPS    8
+
 typedef struct {
     char name[64];           // 进程名称
     char library_path[256];  // 动态库路径
@@ -29,6 +55,20 @@ typedef struct {
     int priority;            // 优先级 (deprecated, use scheduling.priority)
     bool auto_start;         // 是否自动启动
     SchedulingConfig scheduling; /**< 调度参数 */
+    ResourceLimits    resources;  /**< 资源限制 */
+
+    /* Publish/Subscribe with remap */
+    TopicDecl publish[PROC_MAX_TOPICS];
+    int       publish_count;
+    TopicDecl subscribe[PROC_MAX_TOPICS];
+    int       subscribe_count;
+
+    /* Dependencies */
+    char depends[PROC_MAX_DEPS][64];
+    int  depends_count;
+
+    /* Per-node params (key=value strings from JSON) */
+    char params[256];
 } ProcessConfig;
 
 /**

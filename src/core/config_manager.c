@@ -108,6 +108,79 @@ LauncherConfig* config_load(const char* config_file) {
             cJSON* jauto = cJSON_GetObjectItemCaseSensitive(item, "auto_start");
             if (cJSON_IsBool(jauto)) pc->auto_start = cJSON_IsTrue(jauto);
 
+            /* ── publish ── */
+            cJSON* jpub = cJSON_GetObjectItemCaseSensitive(item, "publish");
+            if (cJSON_IsArray(jpub)) {
+                int n = cJSON_GetArraySize(jpub);
+                for (int k = 0; k < n && k < PROC_MAX_TOPICS; k++) {
+                    cJSON* jt = cJSON_GetArrayItem(jpub, k);
+                    if (!jt) continue;
+                    cJSON* jtn = cJSON_GetObjectItemCaseSensitive(jt, "topic");
+                    cJSON* jtp = cJSON_GetObjectItemCaseSensitive(jt, "type");
+                    cJSON* jqos = cJSON_GetObjectItemCaseSensitive(jt, "qos");
+                    if (jtn) snprintf(pc->publish[k].topic, 64, "%s", jtn->valuestring);
+                    if (jtp) snprintf(pc->publish[k].type,  64, "%s", jtp->valuestring);
+                    if (jqos) {
+                        cJSON* jd = cJSON_GetObjectItemCaseSensitive(jqos, "depth");
+                        cJSON* jp = cJSON_GetObjectItemCaseSensitive(jqos, "policy");
+                        pc->publish[k].qos_depth = jd ? (int)jd->valuedouble : 0;
+                        if (jp) snprintf(pc->publish[k].qos_policy, 16, "%s", jp->valuestring);
+                    }
+                    pc->publish_count++;
+                }
+            }
+
+            /* ── subscribe ── */
+            cJSON* jsub = cJSON_GetObjectItemCaseSensitive(item, "subscribe");
+            if (cJSON_IsArray(jsub)) {
+                int n = cJSON_GetArraySize(jsub);
+                for (int k = 0; k < n && k < PROC_MAX_TOPICS; k++) {
+                    cJSON* jt = cJSON_GetArrayItem(jsub, k);
+                    if (!jt) continue;
+                    if (cJSON_IsString(jt)) {
+                        /* Simple string: just topic name */
+                        snprintf(pc->subscribe[k].topic, 64, "%s", jt->valuestring);
+                    } else if (cJSON_IsObject(jt)) {
+                        cJSON* jtn = cJSON_GetObjectItemCaseSensitive(jt, "topic");
+                        cJSON* jrm = cJSON_GetObjectItemCaseSensitive(jt, "remap");
+                        if (jtn) snprintf(pc->subscribe[k].topic, 64, "%s", jtn->valuestring);
+                        if (jrm) snprintf(pc->subscribe[k].remap, 64, "%s", jrm->valuestring);
+                    }
+                    pc->subscribe_count++;
+                }
+            }
+
+            /* ── depends ── */
+            cJSON* jdep = cJSON_GetObjectItemCaseSensitive(item, "depends");
+            if (cJSON_IsArray(jdep)) {
+                int n = cJSON_GetArraySize(jdep);
+                for (int k = 0; k < n && k < PROC_MAX_DEPS; k++) {
+                    cJSON* jd = cJSON_GetArrayItem(jdep, k);
+                    if (cJSON_IsString(jd))
+                        snprintf(pc->depends[k], 64, "%s", jd->valuestring);
+                    pc->depends_count++;
+                }
+            }
+
+            /* ── resources ── */
+            cJSON* jres = cJSON_GetObjectItemCaseSensitive(item, "resources");
+            if (cJSON_IsObject(jres)) {
+                cJSON* jmm = cJSON_GetObjectItemCaseSensitive(jres, "max_memory_mb");
+                cJSON* jcp = cJSON_GetObjectItemCaseSensitive(jres, "max_cpu_percent");
+                if (jmm) pc->resources.max_memory_mb = (int)jmm->valuedouble;
+                if (jcp) pc->resources.max_cpu_percent = (int)jcp->valuedouble;
+            }
+
+            /* ── params (key=value) ── */
+            cJSON* jprm = cJSON_GetObjectItemCaseSensitive(item, "params");
+            if (cJSON_IsObject(jprm)) {
+                char* ps = cJSON_PrintUnformatted(jprm);
+                if (ps) {
+                    snprintf(pc->params, sizeof(pc->params), "%s", ps);
+                    free(ps);
+                }
+            }
+
             /* ── scheduling (per-process) ───────────────── */
             cJSON* jsched = cJSON_GetObjectItemCaseSensitive(item, "scheduling");
             if (cJSON_IsObject(jsched)) {
