@@ -795,69 +795,127 @@ function init2DFallback(){
 var anim2d=0;
 function draw2D(){
   if(!fallbackActive||!ctx2d)return;
-  var w=canvas2d.clientWidth,h=canvas2d.clientHeight,cx=w/2,cy=h/2;
-  ctx2d.clearRect(0,0,w,h);
-  // Ground
-  ctx2d.fillStyle="#1a1a2e";ctx2d.fillRect(0,0,w,h);
-  // Road cross (gray)
-  ctx2d.fillStyle="#3a3a4e";ctx2d.fillRect(cx-70,0,140,h);
-  ctx2d.fillStyle="#3a3a4e";ctx2d.fillRect(0,cy-70,w,140);
-  // Lane edges (white)
-  ctx2d.strokeStyle="#889";ctx2d.lineWidth=2;
-  ctx2d.strokeRect(cx-64,0,128,h);ctx2d.strokeRect(0,cy-64,w,128);
-  // Center dashes
-  ctx2d.strokeStyle="#ffff66";ctx2d.lineWidth=2;ctx2d.setLineDash([18,10]);
-  ctx2d.beginPath();ctx2d.moveTo(cx,0);ctx2d.lineTo(cx,h);ctx2d.stroke();
-  ctx2d.beginPath();ctx2d.moveTo(0,cy);ctx2d.lineTo(w,cy);ctx2d.stroke();
-  ctx2d.setLineDash([]);
-  // Stop lines (white thick)
-  ctx2d.strokeStyle="#fff";ctx2d.lineWidth=4;
-  [[cx-58,cy-58,cx+58,cy-58],[cx-58,cy+58,cx+58,cy+58],[cx-58,cy-58,cx-58,cy+58],[cx+58,cy-58,cx+58,cy+58]].forEach(function(p){ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
-  // Sidewalks
-  ctx2d.fillStyle="#445";ctx2d.fillRect(cx-74,0,6,h);ctx2d.fillRect(cx+68,0,6,h);
-  ctx2d.fillRect(0,cy-74,w,6);ctx2d.fillRect(0,cy+68,w,6);
-  // Buildings (simple blocks)
-  [[cx-100,cy-100,30,25,"#445566"],[cx+70,cy-100,25,30,"#554455"],[cx-100,cy+70,25,20,"#445555"],[cx+75,cy+75,20,35,"#555544"]].forEach(function(b){ctx2d.fillStyle=b[4];ctx2d.fillRect(b[0],b[1],b[2],b[3]);});
-  // Trees (green circles)
-  [[cx-90,cy-80],[cx+85,cy-80],[cx-90,cy+85],[cx+85,cy+85],[cx-110,cy-50],[cx+95,cy-50],[cx-50,cy-110],[cx+55,cy+110]].forEach(function(t){ctx2d.fillStyle="#2d5a27";ctx2d.beginPath();ctx2d.arc(t[0],t[1],8,0,Math.PI*2);ctx2d.fill();ctx2d.fillStyle="#6b4423";ctx2d.fillRect(t[0]-1.5,t[1],3,8);});
-  // Traffic lights
-  anim2d++;var phase=(anim2d/60)%20,color=phase<10?"#0f0":phase<12?"#fa0":"#f00";
-  [[cx-65,cy-65],[cx+60,cy-65],[cx-65,cy+60],[cx+60,cy+60]].forEach(function(p){ctx2d.fillStyle=color;ctx2d.beginPath();ctx2d.arc(p[0]-4,p[1]-4,4,0,Math.PI*2);ctx2d.fill();ctx2d.fillStyle="#222";ctx2d.fillRect(p[0]-6,p[1]-25,4,25);});
-  // Sidewalk pedestrians
-  [[cx-80,cy-30],[cx+80,cy+20],[cx-20,cy-80],[cx+30,cy+80]].forEach(function(p,i){var ox=Math.sin(anim2d/30+i)*15;ctx2d.fillStyle="#e74c3c";ctx2d.beginPath();ctx2d.arc(p[0]+ox,p[1],3,0,Math.PI*2);ctx2d.fill();});
+  var W=canvas2d.clientWidth,H=canvas2d.clientHeight;
+  ctx2d.clearRect(0,0,W,H);
+  // Dark BEV background
+  ctx2d.fillStyle="#0a0e14";ctx2d.fillRect(0,0,W,H);
 
-  // ── Car ──
+  var carX=W/2,carY=H*0.65; // car fixed at center-bottom area
+  var scale=8; // pixels per meter
+
+  // ── Road ──
+  // NS road (vertical strip)
+  ctx2d.fillStyle="#1c2130";ctx2d.fillRect(carX-100,0,200,H);
+  // EW road (horizontal strip)
+  ctx2d.fillStyle="#1c2130";ctx2d.fillRect(0,carY-100,W,200);
+  // Intersection highlight
+  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(carX-100,carY-100,200,200);
+
+  // Lane edge lines (solid white)
+  ctx2d.strokeStyle="#667";ctx2d.lineWidth=2;
+  // NS lanes
+  for(var lx=carX-80;lx<=carX+80;lx+=40){
+    if(Math.abs(lx-carX)>12){ctx2d.setLineDash([]);}
+    else{ctx2d.setLineDash([10,8]);ctx2d.strokeStyle="#889";}
+    ctx2d.beginPath();ctx2d.moveTo(lx,0);ctx2d.lineTo(lx,H);ctx2d.stroke();
+  }
+  // EW lanes
+  ctx2d.strokeStyle="#667";ctx2d.setLineDash([]);
+  for(var ly=carY-80;ly<=carY+80;ly+=40){
+    if(Math.abs(ly-carY)>12){ctx2d.setLineDash([]);}
+    else{ctx2d.setLineDash([10,8]);ctx2d.strokeStyle="#889";}
+    ctx2d.beginPath();ctx2d.moveTo(0,ly);ctx2d.lineTo(W,ly);ctx2d.stroke();
+  }
+  ctx2d.setLineDash([]);
+
+  // Stop lines at intersection
+  ctx2d.strokeStyle="#fff";ctx2d.lineWidth=3;
+  [[carX-80,carY-80,carX+80,carY-80],[carX-80,carY+80,carX+80,carY+80],
+   [carX-80,carY-80,carX-80,carY+80],[carX+80,carY-80,carX+80,carY+80]].forEach(function(p){
+    ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
+
+  // ── Distance markers (every 20m) ──
+  ctx2d.fillStyle="#333";ctx2d.font="9px monospace";
+  for(var d=20;d<=120;d+=20){ctx2d.fillText(d+"m",carX+2,carY-d*scale);}
+
+  // ── LiDAR points around car ──
+  ctx2d.fillStyle="#f442";
+  for(var i=0;i<80;i++){
+    var a=Math.random()*Math.PI*2, r=2+Math.random()*30;
+    ctx2d.beginPath();ctx2d.arc(carX+Math.cos(a)*r*scale,carY-Math.sin(a)*r*scale,1.5,0,Math.PI*2);ctx2d.fill();
+  }
+
+  // ── Surrounding vehicles (static props) ──
+  [[-30,-15],[25,-12],[-20,25],[28,20]].forEach(function(p){
+    var bx=carX+p[0]*scale,by=carY-p[1]*scale;
+    ctx2d.fillStyle="#334";ctx2d.fillRect(bx-6,by-3,12,6);
+    ctx2d.fillStyle="#225";ctx2d.fillRect(bx-3,by-1.5,6,3);
+  });
+
+  // ── Ego vehicle ──
   var v=(topoData.metrics||{}).vehicle;if(!v)return;
-  var posX=cx+(v.x||0)*3,posY=cy-(v.y||0)*15;
-  ctx2d.save();ctx2d.translate(posX,posY);
-  // Shadow
-  ctx2d.fillStyle="rgba(0,0,0,0.3)";ctx2d.fillRect(-14,-6,28,14);
+  // Heading from trajectory
+  var heading=0;
+  if(gpsHistory.length>1){var last=gpsHistory[gpsHistory.length-1],prev=gpsHistory[gpsHistory.length-2];heading=Math.atan2(last.x-prev.x,last.z-prev.z);}
+
+  ctx2d.save();ctx2d.translate(carX,carY);ctx2d.rotate(-heading);
+  // Glow
+  ctx2d.fillStyle="rgba(88,166,255,0.15)";ctx2d.fillRect(-22,-12,44,24);
   // Body
-  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-16,-9,32,18);
-  // Roof
-  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-9,-5,18,10);
-  // Windshield
-  ctx2d.fillStyle="#88ccff";ctx2d.fillRect(-8,-4,6,8);ctx2d.fillRect(2,-4,6,8);
-  // Headlights (yellow glow)
-  ctx2d.fillStyle="#ffff88";ctx2d.fillRect(12,-7,5,5);ctx2d.fillRect(12,2,5,5);
-  // Taillights
-  ctx2d.fillStyle="#ff4444";ctx2d.fillRect(-16,-7,4,5);ctx2d.fillRect(-16,2,4,5);
+  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-20,-10,40,20);
+  // Roof/windshield
+  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-8,-6,16,12);
+  ctx2d.fillStyle="#88ccff";ctx2d.fillRect(4,-5,8,10);
   // Wheels
-  ctx2d.fillStyle="#111";ctx2d.fillRect(-11,-11,6,4);ctx2d.fillRect(-11,7,6,4);ctx2d.fillRect(7,-11,6,4);ctx2d.fillRect(7,7,6,4);
+  ctx2d.fillStyle="#111";ctx2d.fillRect(-16,-12,7,4);ctx2d.fillRect(-16,8,7,4);ctx2d.fillRect(10,-12,7,4);ctx2d.fillRect(10,8,7,4);
+  // Front arrow
+  ctx2d.fillStyle="#fff";ctx2d.beginPath();ctx2d.moveTo(22,0);ctx2d.lineTo(16,-4);ctx2d.lineTo(16,4);ctx2d.fill();
   ctx2d.restore();
 
-  // HUD panel (bottom)
-  ctx2d.fillStyle="rgba(0,0,0,0.6)";ctx2d.fillRect(0,h-40,w,40);
-  ctx2d.fillStyle="#fff";ctx2d.font="bold 14px monospace";
-  ctx2d.fillText("speed "+(v.speed||0).toFixed(1)+" m/s",10,h-20);
-  ctx2d.fillText("target "+(v.target_speed||0).toFixed(1),160,h-20);
-  ctx2d.fillStyle=(v.throttle||0)>0.1?"#3fb950":"#f85149";
-  ctx2d.fillText("throttle "+((v.throttle||0)*100).toFixed(0)+"%",310,h-20);
-  ctx2d.fillStyle="#d29922";ctx2d.fillText("error "+(v.error||0).toFixed(1),460,h-20);
-  ctx2d.fillStyle="#8b949e";ctx2d.fillText("x="+(v.x||0).toFixed(1),610,h-20);
-  // Progress bar for throttle
-  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(310,h-10,80,4);
-  ctx2d.fillStyle="#3fb950";ctx2d.fillRect(310,h-10,80*(v.throttle||0),4);
+  // ── Trajectory projection ──
+  ctx2d.strokeStyle="rgba(63,185,80,0.5)";ctx2d.lineWidth=2;ctx2d.setLineDash([4,6]);
+  ctx2d.beginPath();ctx2d.moveTo(carX,carY);
+  for(var t=1;t<=30;t++){ctx2d.lineTo(carX+Math.sin(heading)*t*scale,carY-Math.cos(heading)*t*scale);}
+  ctx2d.stroke();ctx2d.setLineDash([]);
+
+  // ── Field of view cone ──
+  ctx2d.fillStyle="rgba(88,166,255,0.04)";
+  ctx2d.beginPath();ctx2d.moveTo(carX,carY);
+  ctx2d.lineTo(carX-Math.sin(heading-0.5)*60*scale,carY+Math.cos(heading-0.5)*60*scale);
+  ctx2d.lineTo(carX-Math.sin(heading+0.5)*60*scale,carY+Math.cos(heading+0.5)*60*scale);
+  ctx2d.fill();
+
+  // ── HUD (bottom bar) ──
+  var hudY=H-50;
+  ctx2d.fillStyle="rgba(0,0,0,0.7)";ctx2d.fillRect(0,hudY,W,50);
+  // Speed gauge
+  ctx2d.fillStyle="#58a6ff";ctx2d.font="bold 36px monospace";
+  ctx2d.fillText((v.speed||0).toFixed(1),20,hudY+32);
+  ctx2d.fillStyle="#8b949e";ctx2d.font="11px monospace";
+  ctx2d.fillText("m/s",85,hudY+32);
+  // Target
+  ctx2d.fillStyle="#8b949e";ctx2d.fillText("TARGET",140,hudY+12);
+  ctx2d.fillStyle="#fff";ctx2d.font="bold 18px monospace";
+  ctx2d.fillText((v.target_speed||0).toFixed(1),140,hudY+34);
+  // Throttle bar
+  ctx2d.fillStyle="#8b949e";ctx2d.fillText("THROTTLE",240,hudY+12);
+  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(240,hudY+20,100,12);
+  var thr=(v.throttle||0);ctx2d.fillStyle=thr>0.5?"#d29922":"#3fb950";
+  ctx2d.fillRect(240,hudY+20,100*thr,12);
+  ctx2d.fillStyle="#fff";ctx2d.font="bold 11px monospace";
+  ctx2d.fillText((thr*100).toFixed(0)+"%",248,hudY+30);
+  // Brake
+  ctx2d.fillStyle="#8b949e";ctx2d.fillText("BRAKE",360,hudY+12);
+  ctx2d.fillStyle=(v.brake||0)>0?"#f85149":"#252d3a";
+  ctx2d.fillRect(360,hudY+20,60,12);
+  ctx2d.fillText(((v.brake||0)*100).toFixed(0)+"%",362,hudY+30);
+  // Mode
+  var mode=(v.error||0)<0.5?"⏺ HOLD":(v.error||0)>0?"🟢 ACCEL":"🔴 BRAKE";
+  ctx2d.fillStyle="#fff";ctx2d.font="bold 16px monospace";
+  ctx2d.fillText(mode,460,hudY+34);
+  // Odometer
+  ctx2d.fillStyle="#484f58";ctx2d.font="11px monospace";ctx2d.textAlign="right";
+  ctx2d.fillText("odo "+(v.x||0).toFixed(1)+" m",W-20,hudY+34);
 }
 
 // ── Load Three.js dynamically — non-blocking (same pattern as D3). ──
