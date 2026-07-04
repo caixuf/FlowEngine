@@ -33,6 +33,9 @@
 #include <math.h>
 #include <inttypes.h>
 
+/* Camera frame reuses LidarFrame struct for demo simplicity */
+#define CAMERAFRAME_TYPE_ID  0x4A1B0C2Du
+
 /* ══════════════════════════════════════════════════════════ */
 /* 全局状态                                                    */
 /* ══════════════════════════════════════════════════════════ */
@@ -66,15 +69,18 @@ static int perception_init(TaskBase* base) {
 
     /* ── 发现: 广播 topic ── */
     discovery_advertise(g_discovery, "sensor/lidar", LIDARFRAME_TYPE_ID,
-                        CAP_PUBLISHER, 10.0);
+                        CAP_PUBLISHER, 20.0);
     discovery_advertise(g_discovery, "sensor/gps", GPSDATA_TYPE_ID,
-                        CAP_PUBLISHER, 5.0);
+                        CAP_PUBLISHER, 10.0);
+    discovery_advertise(g_discovery, "sensor/camera", LIDARFRAME_TYPE_ID,
+                        CAP_PUBLISHER, 20.0);
 
     /* ── 传输: 广告 topic ── */
     transport_advertise(g_transport, "sensor/lidar", LIDARFRAME_TYPE_ID);
     transport_advertise(g_transport, "sensor/gps", GPSDATA_TYPE_ID);
+    transport_advertise(g_transport, "sensor/camera", LIDARFRAME_TYPE_ID);
 
-    LOG_INFO("perception", "initialized (CRITICAL, 10Hz LiDAR + 5Hz GPS)");
+    LOG_INFO("perception", "initialized (CRITICAL, 20Hz LiDAR + 20Hz Camera + 10Hz GPS)");
     return 0;
 }
 
@@ -85,9 +91,9 @@ static int perception_execute(TaskBase* base) {
     while (g_running && !base->should_stop) {
         if (!rate_control_acquire(rc)) { usleep(1000); continue; }
 
-        /* ── LiDAR @10Hz ── */
+        /* ── LiDAR @20Hz ── */
         LidarFrame lidar = {
-            .x = 50.0f - (float)pt->frame_id * 0.1f,
+            .x = 50.0f - (float)pt->frame_id * 0.05f,
             .y = 0.0f, .z = 0.0f, .intensity = 0.85f,
             .point_count = 64000 + pt->frame_id,
             .frame_id = pt->frame_id
@@ -97,10 +103,21 @@ static int perception_execute(TaskBase* base) {
                        LIDARFRAME_TYPE_ID, LIDARFRAME_SCHEMA_VERSION,
                        &lidar, sizeof(lidar));
         transport_publish(g_transport, "sensor/lidar", lmsg.data, lmsg.data_size);
-        LOG_DEBUG("perception", "LiDAR #%u: center=(%.1f, %.1f)",
-                  pt->frame_id, lidar.x, lidar.y);
 
-        /* ── GPS @5Hz (every other cycle) ── */
+        /* ── Camera @20Hz ── */
+        LidarFrame cam = {  /* reuse LidarFrame for demo — simulates bounding boxes */
+            .x = 48.0f - (float)pt->frame_id * 0.05f,
+            .y = 12.0f, .z = 5.0f, .intensity = 0.72f,
+            .point_count = 1280 + pt->frame_id % 20,
+            .frame_id = pt->frame_id
+        };
+        Message cmsg;
+        msg_init_typed(&cmsg, "sensor/camera", "perception",
+                       CAMERAFRAME_TYPE_ID, 1,
+                       &cam, sizeof(cam));
+        transport_publish(g_transport, "sensor/camera", cmsg.data, cmsg.data_size);
+
+        /* ── GPS @10Hz (every other cycle) ── */
         if (pt->frame_id % 2 == 0) {
             GpsData gps = {
                 .latitude = 39.904 + (double)pt->frame_id * 0.00001,
@@ -626,7 +643,7 @@ int main(int argc, char** argv) {
     if (ROLE_MATCH("perception")) {
         pt = (PerceptionTask*)calloc(1, sizeof(PerceptionTask));
         TaskConfig cfg = { .name="perception", .priority=TASK_PRIORITY_CRITICAL,
-                           .max_frequency_hz=10.0, .auto_restart=false };
+                           .max_frequency_hz=20.0, .auto_restart=false };
         task_base_init(&pt->base, &g_perception_vtable, &cfg);
         pt->tid = scheduler_register_task(g_scheduler, &pt->base, "perception");
     }
@@ -666,10 +683,10 @@ int main(int argc, char** argv) {
 
     /* ── FlowRegistry: 注册所用组件 ── */
     if (ROLE_MATCH("perception"))
-        flow_registry_register_task("perception", "LiDAR+GPS sensor simulator",
+        flow_registry_register_task("perception", "LiDAR+Camera+GPS sensor simulator",
             "libfake_perception_task.so",
             (const char*[]){NULL},
-            (const char*[]){"sensor/lidar","sensor/gps",NULL}, NULL);
+            (const char*[]){"sensor/lidar","sensor/camera","sensor/gps",NULL}, NULL);
     if (ROLE_MATCH("fusion"))
         flow_registry_register_task("fusion", "Time-aligned sensor fusion",
             "libflowcoro_task.so",
@@ -692,6 +709,7 @@ int main(int argc, char** argv) {
     if (ROLE_MATCH("perception")) {
         flow_registry_register_topic("sensor/lidar", LIDARFRAME_TYPE_ID, NULL);
         flow_registry_register_topic("sensor/gps", GPSDATA_TYPE_ID, NULL);
+        flow_registry_register_topic("sensor/camera", CAMERAFRAME_TYPE_ID, NULL);
     }
     if (ROLE_MATCH("fusion") || ROLE_MATCH("control") || ROLE_MATCH("planning"))
         flow_registry_register_topic("fusion/localization", 0xF0ED10C0u, NULL);
