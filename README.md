@@ -97,7 +97,27 @@ flowctl dashboard               # Launch FlowBoard
 flowctl version                 # Build info
 ```
 
-## Build
+## Docker (easiest)
+
+```bash
+docker build -t flowengine .
+docker run --rm flowengine          # Run e2e demo
+docker run --rm flowengine demo 30  # 30-second demo
+```
+
+## Install
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+sudo cmake --install build
+
+# Verify
+pkg-config --cflags --libs flowengine
+flowctl version
+```
+
+## Build from Source
 
 | Requirement | Version |
 |-------------|---------|

@@ -322,6 +322,26 @@ install(DIRECTORY include/
     FILES_MATCHING PATTERN "*.h"
 )
 
+# ── pkg-config ──────────────────────────────────────────────
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/flowengine.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/flowengine.pc"
+    @ONLY
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/flowengine.pc"
+    DESTINATION lib/pkgconfig
+)
+
+# ── Scripts ─────────────────────────────────────────────────
+install(PROGRAMS
+    scripts/demo.sh
+    scripts/stress_test.sh
+    scripts/view_topology.sh
+    scripts/fullstack_demo.sh
+    tools/flowboard_server.py
+    DESTINATION share/flowengine/scripts
+)
+
 # 创建配置文件
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/config.json.in"
