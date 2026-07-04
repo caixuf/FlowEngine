@@ -305,22 +305,73 @@ static TaskInterface g_fusion_vtable = {
 /* ══════════════════════════════════════════════════════════ */
 
 typedef struct {
-    double  x;               /**< 纵向位置 (m) */
-    double  y;               /**< 横向位置 (m) */
+    double  x;               /**< 纵向位置 (m, 世界系) */
+    double  y;               /**< 横向位置 (m, 左正) */
     double  speed;           /**< 当前速度 (m/s) */
-    double  target_speed;    /**< 目标速度 (m/s), 来自规划 */
+    double  target_speed;    /**< 目标速度 (m/s), 来自规划/ACC */
     double  throttle;        /**< 油门 0..1 */
     double  brake;           /**< 刹车 0..1 */
+    double  steer;           /**< 前轮转向角 (rad) */
     double  heading;         /**< 航向角 (rad) */
+    double  lane_target;     /**< 目标横向位置 (m), 变道用 */
+    double  wheelbase;       /**< 轴距 (m) */
     double  mass;            /**< 质量 (kg) */
     double  drag_coeff;      /**< 空气阻力系数 */
 } VehicleModel;
 
 static VehicleModel g_vehicle = {
     .x = 0, .y = 0, .speed = 5.0, .target_speed = 10.0,
-    .throttle = 0.3, .brake = 0, .heading = 0,
+    .throttle = 0.3, .brake = 0, .steer = 0, .heading = 0,
+    .lane_target = 0, .wheelbase = 2.7,
     .mass = 1500.0, .drag_coeff = 0.3
 };
+
+/* ── 3D 场景: 障碍物 (真实运动学，供可视化与 ACC 使用) ── */
+typedef struct {
+    int         id;
+    const char* type;        /**< "car" | "pedestrian" */
+    double      x, y;        /**< 世界系位置 (m) */
+    double      vx, vy;      /**< 速度 (m/s) */
+    double      len, wid;    /**< 包围盒 (m) */
+} SimObstacle;
+
+#define SIM_OBSTACLE_COUNT 3
+static SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
+    { 0, "car",         35.0,  0.0,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 */
+    { 1, "car",         95.0, -3.5, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 */
+    { 2, "pedestrian",  55.0,  8.0,  0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
+};
+
+/* 障碍物运动学 + 循环边界，使场景持续有内容 */
+static void obstacles_tick(double dt) {
+    for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+        SimObstacle* o = &g_obstacles[i];
+        o->x += o->vx * dt;
+        o->y += o->vy * dt;
+        if (strcmp(o->type, "pedestrian") == 0) {
+            /* 行人在人行横道上来回走 (y ∈ [-8, 8]) */
+            if (o->y >  8.0) { o->y =  8.0; o->vy = -fabs(o->vy); }
+            if (o->y < -8.0) { o->y = -8.0; o->vy =  fabs(o->vy); }
+        }
+        /* 相对自车过远则回收到前方，保持画面始终有障碍物 */
+        double rel = o->x - g_vehicle.x;
+        if (rel < -30.0) o->x = g_vehicle.x + 80.0 + (double)i * 5.0;
+        if (rel >  140.0) o->x = g_vehicle.x + 30.0;
+    }
+}
+
+/* 与同车道前车的纵向间距 (m)，无则返回大值 */
+static double lead_gap(void) {
+    double best = 1e9;
+    for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+        SimObstacle* o = &g_obstacles[i];
+        if (o->vx < 0) continue;                 /* 忽略对向车 */
+        if (fabs(o->y - g_vehicle.y) > 2.0) continue; /* 不在本车道 */
+        double gap = o->x - g_vehicle.x;
+        if (gap > 0 && gap < best) best = gap;
+    }
+    return best;
+}
 
 static void vehicle_tick(double dt) {
     /* 驱动力 = 油门 × max_force - 刹车 × max_brake */
@@ -333,8 +384,22 @@ static void vehicle_tick(double dt) {
     g_vehicle.speed += accel * dt;
     if (g_vehicle.speed < 0) g_vehicle.speed = 0;
 
+    /* ── 横向: 简单车道保持/变道控制 → 转向角 ── */
+    double y_err   = g_vehicle.lane_target - g_vehicle.y;
+    double psi_des = 0.6 * y_err;                 /* 期望航向 (P 控制) */
+    double steer   = 1.2 * (psi_des - g_vehicle.heading);
+    if (steer >  0.5) steer =  0.5;               /* ±0.5 rad 限幅 */
+    if (steer < -0.5) steer = -0.5;
+    g_vehicle.steer = steer;
+
+    /* ── Bicycle 模型: 航向随转向角与速度演化 ── */
+    g_vehicle.heading += (g_vehicle.speed / g_vehicle.wheelbase)
+                         * tan(g_vehicle.steer) * dt;
+
     g_vehicle.x += g_vehicle.speed * dt * cos(g_vehicle.heading);
     g_vehicle.y += g_vehicle.speed * dt * sin(g_vehicle.heading);
+
+    obstacles_tick(dt);
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -412,8 +477,22 @@ static int control_execute(TaskBase* base) {
 
         ct->cycle++;
 
-        /* ── PID 计算 ── */
-        double error = ct->target_speed - ct->current_speed;
+        /* ── ACC: 依据与同车道前车的间距动态限制目标速度 ── */
+        double gap       = lead_gap();
+        double safe_gap  = 8.0 + ct->current_speed * 1.2;   /* 距离策略 */
+        double acc_target = ct->target_speed;
+        if (gap < safe_gap) {
+            double ratio = gap / safe_gap;
+            if (ratio < 0) ratio = 0;
+            acc_target = ct->target_speed * ratio;           /* 越近目标越低 */
+        }
+
+        /* ── 变道演示: 行驶一段距离后切到左车道再回正 ── */
+        g_vehicle.lane_target = (g_vehicle.x > 120.0 && g_vehicle.x < 180.0)
+                                ? 3.5 : 0.0;
+
+        /* ── PID 计算 (目标为 ACC 限速后的值) ── */
+        double error = acc_target - ct->current_speed;
         ct->integral += error * 0.05;  /* dt ≈ 50ms */
         if (ct->integral > 500)  ct->integral = 500;   /* 积分饱和 */
         if (ct->integral < -200) ct->integral = -200;
@@ -444,9 +523,10 @@ static int control_execute(TaskBase* base) {
         /* ── 发布控制指令 ── */
         char cmd[128];
         snprintf(cmd, sizeof(cmd),
-                 "throttle=%.2f brake=%.2f steer=0.00 "
+                 "throttle=%.2f brake=%.2f steer=%.2f "
                  "speed=%.1f target=%.1f error=%.1f mode=%s",
-                 throttle, brake, g_vehicle.speed, ct->target_speed, error, mode);
+                 throttle, brake, g_vehicle.steer,
+                 g_vehicle.speed, acc_target, error, mode);
         Message cmsg;
         msg_init_typed(&cmsg, "control/cmd", "control",
                        0x2D95C6D2u, 1, cmd, (uint32_t)(strlen(cmd) + 1));
@@ -662,6 +742,55 @@ static int monitor_execute(TaskBase* base) {
                         g_vehicle.throttle, g_vehicle.brake,
                         g_vehicle.x,
                         g_vehicle.target_speed - g_vehicle.speed);
+
+                /* ── 3D scene: ego pose + obstacles + LiDAR point cloud ──
+                 * 坐标系: 自车系, x 前为正, y 左为正 (米)。前端据此渲染真实
+                 * 障碍物包围盒与点云, 而非随机点。 */
+                fprintf(jf, ",\"scene\":{");
+                fprintf(jf, "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,"
+                        "\"speed\":%.2f,\"steer\":%.3f},",
+                        g_vehicle.x, g_vehicle.y, g_vehicle.heading,
+                        g_vehicle.speed, g_vehicle.steer);
+                fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
+                fprintf(jf, "\"obstacles\":[");
+                double ch = cos(-g_vehicle.heading), sh = sin(-g_vehicle.heading);
+                for (int oi = 0; oi < SIM_OBSTACLE_COUNT; oi++) {
+                    SimObstacle* o = &g_obstacles[oi];
+                    /* 转换到自车系 */
+                    double dx = o->x - g_vehicle.x, dy = o->y - g_vehicle.y;
+                    double rx = dx * ch - dy * sh;
+                    double ry = dx * sh + dy * ch;
+                    fprintf(jf, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
+                            "\"vx\":%.2f,\"len\":%.1f,\"wid\":%.1f}",
+                            oi > 0 ? "," : "", o->id, o->type, rx, ry,
+                            o->vx, o->len, o->wid);
+                }
+                fprintf(jf, "],");
+                /* LiDAR: 对障碍物表面 + 地面环带做光线投射 (下采样) */
+                fprintf(jf, "\"lidar\":[");
+                int lp = 0;
+                for (int oi = 0; oi < SIM_OBSTACLE_COUNT; oi++) {
+                    SimObstacle* o = &g_obstacles[oi];
+                    double dx = o->x - g_vehicle.x, dy = o->y - g_vehicle.y;
+                    double rx = dx * ch - dy * sh;
+                    double ry = dx * sh + dy * ch;
+                    if (rx < -20 || rx > 60) continue;   /* 视野外 */
+                    for (int k = 0; k < 6; k++) {
+                        double a = (double)k / 6.0 * 6.2831853;
+                        double px = rx + cos(a) * o->wid * 0.5;
+                        double py = ry + sin(a) * o->len * 0.5;
+                        fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
+                                px, py, 0.4);
+                    }
+                }
+                for (int k = 0; k < 24; k++) {           /* 地面环 */
+                    double a = (double)k / 24.0 * 6.2831853;
+                    double r = 12.0 + 6.0 * ((k % 3) - 1);
+                    fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
+                            cos(a) * r, sin(a) * r, 0.0);
+                }
+                fprintf(jf, "]}");
+
 
                 /* FlowRegistry: tasks, topics, plugins */
                 char* reg_json = flow_registry_export_json();

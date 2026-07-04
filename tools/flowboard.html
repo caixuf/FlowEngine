@@ -291,17 +291,31 @@ function setConnStatus(cls, text) {
   var el = document.getElementById('conn-dot');
   el.className = 'pill pill-'+cls; el.textContent = text;
 }
+// Reflect data freshness reported by the server: live (fresh), stale (server
+// reachable but data not updating — e.g. producer stopped), demo (simulated).
+// Crucially we keep showing the last *real* data when stale instead of silently
+// swapping in fake numbers.
+function applyLiveStatus(d){
+  if(!d||typeof d!=='object'){setConnStatus('live','● live');return;}
+  if(d.source==='demo'){setConnStatus('live','● demo');return;}
+  if(d.stale===true){
+    var age=(typeof d.age_sec==='number')?(' '+Math.round(d.age_sec)+'s'):'';
+    setConnStatus('warn','● stale'+age);
+  }else{
+    setConnStatus('live','● live');
+  }
+}
 function startSSE() {
   if(eventSource){eventSource.close();eventSource=null;}
   eventSource = new EventSource(serverUrl+'/api/stream');
-  eventSource.onmessage = function(e){if(paused)return;try{topoData=JSON.parse(e.data);updateAll()}catch(err){}}
+  eventSource.onmessage = function(e){if(paused)return;try{topoData=JSON.parse(e.data);updateAll();applyLiveStatus(topoData);}catch(err){}}
   eventSource.onerror = function(){setConnStatus('warn','● retry');if(eventSource){eventSource.close();eventSource=null;}if(reconnectTimer)clearTimeout(reconnectTimer);reconnectTimer=setTimeout(tryReconnect,2000);}
   eventSource.onopen = function(){setConnStatus('live','● live');}
 }
 function tryReconnect(){
   if(paused){reconnectTimer=setTimeout(tryReconnect,2000);return;}
   fetch(serverUrl+'/api/topology').then(function(r){return r.json()}).then(function(d){
-    topoData=d;updateAll();setConnStatus('live','● live');connectRetries=0;startSSE();
+    topoData=d;updateAll();applyLiveStatus(d);connectRetries=0;startSSE();
   }).catch(function(){setConnStatus('warn','● retry');reconnectTimer=setTimeout(tryReconnect,2000);});
 }
 var connectRetries=0;
@@ -312,7 +326,7 @@ async function doConnect(){
   if(reconnectTimer){clearTimeout(reconnectTimer);reconnectTimer=null;}
   try{
     var r=await fetch(serverUrl+'/api/topology');
-    topoData=await r.json();updateAll();setConnStatus('live','● live');
+    topoData=await r.json();updateAll();applyLiveStatus(topoData);
     connectRetries=0;startSSE();
   }catch(err){
     connectRetries++;
@@ -320,6 +334,7 @@ async function doConnect(){
       setConnStatus('warn','● retry ('+connectRetries+'/3)');
       reconnectTimer=setTimeout(doConnect,1500);
     }else{
+      // Server truly unreachable → fall back to clearly-labelled DEMO data.
       setConnStatus('dead','● offline');
       doSimulate();
     }
