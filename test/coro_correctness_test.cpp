@@ -557,7 +557,9 @@ static void test_stress_concurrency() {
 
     const int CYCLES = 8;
     long total_iters = 0;
+    long total_resumes = 0;
     bool all_done = true;
+    bool latency_observed = false;
 
     for (int c = 0; c < CYCLES; ++c) {
         std::atomic<long> iters{0};
@@ -595,13 +597,19 @@ static void test_stress_concurrency() {
         pub_stop.store(true, std::memory_order_release);
         publisher.join();
         runner.join();
+        /* runner.join() 后协程已结束，统计稳定，可安全读取 */
         total_iters += iters.load();
+        total_resumes += (long)task.resume_count();
+        if (task.coro_latency().sample_count > 0) latency_observed = true;
         message_bus_destroy(bus);
     }
 
     CHECK(all_done, "8 个 cycle 的协程在 stop() 后均迅速取消退出");
     CHECK(total_iters > 0, "压力期间协程正常经历了多次恢复（消息+超时混合）");
-    printf("  [INFO] 累计恢复次数=%ld（%d cycles）\n", total_iters, CYCLES);
+    CHECK(total_resumes > 0 && latency_observed,
+          "CoroStats 记录到 resume 次数与挂起时长（flowctl 可观测）");
+    printf("  [INFO] 累计恢复次数=%ld（迭代=%ld，%d cycles）\n",
+           total_resumes, total_iters, CYCLES);
 }
 
 int main() {

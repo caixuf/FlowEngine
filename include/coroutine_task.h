@@ -76,6 +76,7 @@
 
 #include "task_interface.h"
 #include "message_bus.h"
+#include "scheduler.h"   /* LatencyTracker / LatencyStats — 协程可观测性 */
 
 #include <coroutine>
 #include <memory>
@@ -210,6 +211,53 @@ inline void schedule_resume(std::coroutine_handle<> h) {
 }
 
 /* ─────────────────────────────────────────────────────────
+ * 1b'. 协程可观测性 —— CoroStats
+ *
+ * 记录协程行为供 flowctl / 宿主观测：
+ *   - resume_count：协程被恢复的累计次数。
+ *   - suspend_latency：每次挂起→恢复的时长分布（复用 scheduler.h 的
+ *     LatencyTracker，输出 avg/p50/p99）。
+ *
+ * 注意：latency_tracker_record 本身非线程安全，而 awaitable 可能从
+ * 定时线程 / 总线分发线程 / 线程池 worker 恢复，故此处用互斥量保护。
+ * ───────────────────────────────────────────────────────── */
+inline uint64_t coro_now_us() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+class CoroStats {
+public:
+    /** 记录一次恢复：suspend_us 为本次挂起持续的微秒数。线程安全。 */
+    void record_resume(uint64_t suspend_us) {
+        resume_count_.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(mtx_);
+        latency_tracker_record(&suspend_latency_, suspend_us);
+    }
+
+    uint64_t resume_count() const {
+        return resume_count_.load(std::memory_order_relaxed);
+    }
+
+    /** 挂起时长统计（avg/p50/p99/min/max）。线程安全。 */
+    LatencyStats suspend_latency() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return latency_tracker_stats(&suspend_latency_);
+    }
+
+    void reset() {
+        resume_count_.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(mtx_);
+        std::memset(&suspend_latency_, 0, sizeof(suspend_latency_));
+    }
+
+private:
+    std::atomic<uint64_t> resume_count_{0};
+    std::mutex            mtx_;
+    LatencyTracker        suspend_latency_{};
+};
+
+/* ─────────────────────────────────────────────────────────
  * 1c. CancelToken — 协程取消令牌
  *
  * 解决"悬挂协程无法在不外发消息的情况下被 stop() 唤醒退出"的缺陷。
@@ -281,11 +329,20 @@ public:
         waiters_.erase(id);
     }
 
+    /** 关联可观测统计（由持有本令牌的 CoroutineTask 设置）。 */
+    void set_stats(CoroStats* stats) { stats_ = stats; }
+
+    /** 转发一次恢复事件到统计（若未关联则忽略）。awaitable 在恢复时调用。 */
+    void record_resume(uint64_t suspend_us) {
+        if (stats_) stats_->record_resume(suspend_us);
+    }
+
 private:
     std::atomic<bool>                  cancelled_{false};
     std::mutex                         mtx_;
     std::map<uint64_t, WakeFn>         waiters_;
     uint64_t                           next_id_{0};
+    CoroStats*                         stats_{nullptr};
 };
 
 /* ─────────────────────────────────────────────────────────
@@ -473,6 +530,7 @@ public:
 
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
+        t_suspend_us_ = coro_now_us();
         message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
 
         /* 注册取消唤醒：stop() → request_cancel() → 唤醒本协程 */
@@ -496,7 +554,7 @@ public:
          * 在整个回调期间也持有 sub_mutex，因此 unsubscribe_ex 返回后保证没有
          * 任何 on_message 调用仍在执行。 */
         message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
-        if (cancel_)   cancel_->remove_waiter(cancel_id_);
+        if (cancel_) { cancel_->remove_waiter(cancel_id_); cancel_->record_resume(coro_now_us() - t_suspend_us_); }
         if (timer_id_) TimerService::instance().cancel(timer_id_);
         if constexpr (WithResult) {
             return AwaitResult{ctl_->status, received_msg_};
@@ -523,6 +581,7 @@ private:
     std::shared_ptr<AwaitCtl>   ctl_;
     uint64_t                    cancel_id_{0};
     uint64_t                    timer_id_{0};
+    uint64_t                    t_suspend_us_{0};
     std::coroutine_handle<>     handle_;
     Message                     received_msg_{};
 };
@@ -627,6 +686,7 @@ private:
         std::shared_ptr<AwaitCtl> ctl{std::make_shared<AwaitCtl>()};
         uint64_t    cancel_id{0};
         uint64_t    timer_id{0};
+        uint64_t    t_suspend_us{0};
 
         bool await_ready() {
             std::lock_guard<std::mutex> lk(ch->mutex_);
@@ -635,6 +695,7 @@ private:
 
         void await_suspend(std::coroutine_handle<> h) {
             bool should_resume = false;
+            t_suspend_us = coro_now_us();
             {
                 std::lock_guard<std::mutex> lk(ch->mutex_);
                 /* 检查在 await_ready 到 await_suspend 之间是否有消息到达 */
@@ -668,6 +729,7 @@ private:
         auto await_resume() {
             if (ch->cancel_) ch->cancel_->remove_waiter(cancel_id);
             if (timer_id)    TimerService::instance().cancel(timer_id);
+            if (ch->cancel_ && t_suspend_us) ch->cancel_->record_resume(coro_now_us() - t_suspend_us);
             Message msg{};
             AwaitStatus status = ctl->status;
             {
@@ -727,6 +789,7 @@ public:
 
     void await_suspend(std::coroutine_handle<> h) {
         handle_ = h;
+        t_suspend_us_ = coro_now_us();
         for (const auto& t : topics_) {
             message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
         }
@@ -751,6 +814,7 @@ public:
         }
         if (cancel_)   cancel_->remove_waiter(cancel_id_);
         if (timer_id_) TimerService::instance().cancel(timer_id_);
+        if (cancel_)   cancel_->record_resume(coro_now_us() - t_suspend_us_);
         if constexpr (WithResult) {
             return AwaitResult{ctl_->status, received_msg_};
         } else {
@@ -776,6 +840,7 @@ private:
     std::shared_ptr<AwaitCtl> ctl_;
     uint64_t                  cancel_id_{0};
     uint64_t                  timer_id_{0};
+    uint64_t                  t_suspend_us_{0};
     std::coroutine_handle<>   handle_{};
     Message                   received_msg_{};
 };
@@ -826,6 +891,7 @@ public:
     bool await_ready() const noexcept { return timeout_us_ == 0; }
 
     void await_suspend(std::coroutine_handle<> h) {
+        t_suspend_us_ = coro_now_us();
         if (cancel_) {
             auto ctl = ctl_;
             cancel_id_ = cancel_->add_waiter([ctl, h] {
@@ -842,6 +908,7 @@ public:
     bool await_resume() {
         if (cancel_)   cancel_->remove_waiter(cancel_id_);
         if (timer_id_) TimerService::instance().cancel(timer_id_);
+        if (cancel_)   cancel_->record_resume(coro_now_us() - t_suspend_us_);
         return ctl_->status == AwaitStatus::Ready;
     }
 
@@ -851,6 +918,7 @@ private:
     std::shared_ptr<AwaitCtl> ctl_;
     uint64_t                  cancel_id_{0};
     uint64_t                  timer_id_{0};
+    uint64_t                  t_suspend_us_{0};
 };
 
 /** co_await delay_us(500) — 挂起 500 微秒 */
@@ -906,6 +974,7 @@ public:
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
+        t_suspend_us_ = coro_now_us();
         if (cancel_) {
             auto ctl = ctl_;
             cancel_id_ = cancel_->add_waiter([ctl, h] {
@@ -935,6 +1004,7 @@ public:
 
     AwaitResult await_resume() {
         if (cancel_) cancel_->remove_waiter(cancel_id_);
+        if (cancel_) cancel_->record_resume(coro_now_us() - t_suspend_us_);
         return AwaitResult{ctl_->status, *reply_};
     }
 
@@ -948,6 +1018,7 @@ private:
     std::shared_ptr<AwaitCtl> ctl_;
     std::shared_ptr<Message>  reply_;
     uint64_t                  cancel_id_{0};
+    uint64_t                  t_suspend_us_{0};
 };
 
 /**
@@ -969,7 +1040,9 @@ inline RequestAwaitable request(MessageBus* bus, const char* topic, const char* 
 class CoroutineTask {
 public:
     explicit CoroutineTask(MessageBus* bus = nullptr)
-        : bus_(bus), stop_flag_(false) {}
+        : bus_(bus), stop_flag_(false) {
+        cancel_token_.set_stats(&coro_stats_);
+    }
 
     virtual ~CoroutineTask() = default;
 
@@ -990,6 +1063,7 @@ public:
     virtual void execute() {
         stop_flag_ = false;
         cancel_token_.reset();
+        coro_stats_.reset();
         task_ = std::make_unique<Task>(run());
 
 #ifdef FLOWCORO_INTEGRATION
@@ -1035,6 +1109,11 @@ public:
     /** 供 awaitable 使用的取消令牌（stop() 时被触发）。 */
     CancelToken* cancel_token() { return &cancel_token_; }
 
+    /** 协程可观测统计：resume 次数与挂起时长分布（供 flowctl / 宿主读取）。 */
+    CoroStats&   coro_stats() { return coro_stats_; }
+    uint64_t     resume_count() { return coro_stats_.resume_count(); }
+    LatencyStats coro_latency() { return coro_stats_.suspend_latency(); }
+
     /** 唤醒事件循环（协程 resume 后调用，可加快响应） */
     void notify() { coro_cv_.notify_all(); }
 
@@ -1075,6 +1154,7 @@ protected:
     MessageBus*                  bus_;
     std::atomic<bool>            stop_flag_;
     CancelToken                  cancel_token_;
+    CoroStats                    coro_stats_;
     std::unique_ptr<Task>        task_;
     std::mutex                   coro_mutex_;
     std::condition_variable      coro_cv_;
@@ -1108,6 +1188,7 @@ public:
     void execute() override {
         stop_flag_ = false;
         cancel_token_.reset();
+        coro_stats_.reset();
         task_ = std::make_unique<Task>(run());
 
         /* flowcoro::CoroTask 惰性启动（suspend_always）：
