@@ -413,6 +413,26 @@ static int monitor_execute(TaskBase* base) {
                 fprintf(jf, "\"latency\":{\"avg_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu}",
                         (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
                         (unsigned long)ls.p99_us);
+
+                /* ── Per-topic stats (QoS) ── */
+                TopicStats tstats[16];
+                int nt = message_bus_get_all_topic_stats(g_bus, tstats, 16);
+                fprintf(jf, ",\"topics\":[");
+                for (int ti = 0; ti < nt; ti++) {
+                    uint64_t avg_lat = tstats[ti].deliver_count > 0
+                        ? tstats[ti].total_latency_us / tstats[ti].deliver_count : 0;
+                    fprintf(jf, "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
+                            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                            ti > 0 ? "," : "",
+                            tstats[ti].topic,
+                            (unsigned long)tstats[ti].publish_count,
+                            (unsigned long)tstats[ti].deliver_count,
+                            (unsigned long)tstats[ti].drop_count,
+                            (unsigned long)avg_lat,
+                            tstats[ti].frequency_hz,
+                            tstats[ti].subscriber_count);
+                }
+                fprintf(jf, "]");
                 fprintf(jf, "}}\n");
                 fclose(jf);
             }
