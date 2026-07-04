@@ -941,7 +941,7 @@ function draw2D(){
   tryLoad();
 })();
 // If the 3D scene isn't ready within 6s (slow/blocked CDN), show 2D fallback.
-init2DFallback(); // BEV always on
+try{init2DFallback();}catch(e){}
 
 // Init
 // ════════════════════════════════════════════════════════════
@@ -954,7 +954,7 @@ setTimeout(function(){
   try{var s=JSON.parse(localStorage.getItem('flowboard')||'{}');(s.collapsed||[]).forEach(function(name){document.querySelectorAll('.card-header h2').forEach(function(h){if(h.textContent.trim().startsWith(name.substring(0,8)))h.parentElement.parentElement.classList.add('collapsed');});});}catch(e){}
 },100);
 
-doConnect().catch(function(){doSimulate();});
+setTimeout(function(){doConnect().catch(function(){doSimulate();});},100);
   
 setInterval(function(){
   if(!eventSource&&!paused){
