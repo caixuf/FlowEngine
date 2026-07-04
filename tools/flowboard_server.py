@@ -62,6 +62,15 @@ def generate_sample_data():
         "scheduler": {"tasks": 5, "mode": "CHOREO"},
         "latency": {"avg_us": 145, "p50_us": 120, "p99_us": 450 + int(50 * math.sin(t * 0.1))},
         "driver_mode": "ACC" if t % 30 < 20 else "CP",
+        "vehicle": {
+            "speed": 8.0 + 2 * math.sin(t * 0.3),
+            "target_speed": 10.0,
+            "throttle": 0.3 + 0.1 * math.sin(t * 0.5),
+            "brake": 0.0,
+            "x": t * 5 % 200,
+            "y": 2 * math.sin(t * 0.2),
+            "error": 1.0 + math.sin(t * 0.3)
+        },
     }
 
     return {"nodes": nodes, "metrics": metrics, "timestamp": t}

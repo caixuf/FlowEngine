@@ -853,7 +853,7 @@ function draw2D(){
   });
 
   // ── Ego vehicle ──
-  var v=(topoData.metrics||{}).vehicle;if(!v)return;
+  var v=(topoData.metrics||{}).vehicle||{speed:0,target_speed:0,throttle:0,brake:0,x:0,y:0,error:0};
   // Heading from trajectory
   var heading=0;
   if(gpsHistory.length>1){var last=gpsHistory[gpsHistory.length-1],prev=gpsHistory[gpsHistory.length-2];heading=Math.atan2(last.x-prev.x,last.z-prev.z);}
