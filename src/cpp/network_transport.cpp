@@ -133,49 +133,66 @@ static void recv_thread_fn(NetworkTransport* t) {
     uint8_t buf[sizeof(Message) + 4];
 
     while (t->running) {
-        /* Poll all peer connections */
-        std::lock_guard<std::mutex> lock(t->peers_mutex);
-        for (auto* peer : t->peers) {
-            if (!peer->active || peer->fd < 0) continue;
+        /* Messages received this cycle, published AFTER releasing peers_mutex.
+         * Publishing under the lock is unsafe: message_bus delivery can re-enter
+         * the transport (e.g. bridge_outbound_cb also locks peers_mutex), which
+         * would self-deadlock and permanently starve every other peers_mutex
+         * user (accept, outbound bridge, and connection_count used by the
+         * monitor/state-file writer). */
+        std::vector<Message> inbound;
 
-            /* Non-blocking read of length prefix */
-            uint32_t net_len = 0;
-            ssize_t n = recv(peer->fd, &net_len, 4, MSG_DONTWAIT);
-            if (n == 0) {
-                peer->active = false;
-                close(peer->fd);
-                peer->fd = -1;
-                t->stats.disconnects++;
-                printf("[net_transport] peer %s:%u disconnected\n",
-                       peer->host.c_str(), peer->port);
-                continue;
-            }
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                peer->active = false;
-                close(peer->fd);
-                peer->fd = -1;
-                t->stats.disconnects++;
-                continue;
-            }
+        {
+            /* Poll all peer connections — lock held only for the poll loop,
+             * never across usleep() or bus publish. */
+            std::lock_guard<std::mutex> lock(t->peers_mutex);
+            for (auto* peer : t->peers) {
+                if (!peer->active || peer->fd < 0) continue;
 
-            uint32_t payload = ntohl(net_len);
-            if (payload > sizeof(Message)) continue;
+                /* Non-blocking read of length prefix */
+                uint32_t net_len = 0;
+                ssize_t n = recv(peer->fd, &net_len, 4, MSG_DONTWAIT);
+                if (n == 0) {
+                    peer->active = false;
+                    close(peer->fd);
+                    peer->fd = -1;
+                    t->stats.disconnects++;
+                    printf("[net_transport] peer %s:%u disconnected\n",
+                           peer->host.c_str(), peer->port);
+                    continue;
+                }
+                if (n < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                    peer->active = false;
+                    close(peer->fd);
+                    peer->fd = -1;
+                    t->stats.disconnects++;
+                    continue;
+                }
 
-            /* Read payload */
-            n = read_full(peer->fd, buf, payload);
-            if (n != (ssize_t)payload) continue;
+                uint32_t payload = ntohl(net_len);
+                if (payload > sizeof(Message)) continue;
 
-            t->stats.bytes_received += 4 + payload;
-            t->stats.msgs_received++;
+                /* Read payload (fd is non-blocking, so read_full never blocks
+                 * the lock indefinitely — a short read simply drops the frame). */
+                n = read_full(peer->fd, buf, payload);
+                if (n != (ssize_t)payload) continue;
 
-            /* Publish to local bus */
-            Message msg;
-            if (deserialize_frame(buf, payload, &msg)) {
-                message_bus_publish(t->bus, msg.topic, msg.sender,
-                                    msg.data, msg.data_size);
+                t->stats.bytes_received += 4 + payload;
+                t->stats.msgs_received++;
+
+                Message msg;
+                if (deserialize_frame(buf, payload, &msg)) {
+                    inbound.push_back(msg);
+                }
             }
         }
+
+        /* Publish outside the lock. */
+        for (const auto& msg : inbound) {
+            message_bus_publish(t->bus, msg.topic, msg.sender,
+                                msg.data, msg.data_size);
+        }
+
         usleep(10000); /* 10ms poll interval */
     }
 }

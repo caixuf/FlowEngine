@@ -16,6 +16,7 @@ FlowEngine 侧:
 """
 
 import http.server
+import socketserver
 import json
 import os
 import sys
@@ -31,7 +32,27 @@ g_data = {"nodes": [], "metrics": {}, "timestamp": 0, "endpoints": []}
 g_lock = threading.Lock()
 g_json_file = None
 g_simulate = True
+g_last_update = 0.0          # wall-clock time the state file was last successfully read
+STALE_AFTER_SEC = 5.0        # data older than this is considered stale (e2e stopped/stuck)
 DEFAULT_STATE_FILE = os.environ.get("FLOWENGINE_STATE_FILE", "/tmp/flow_topology.json")
+
+
+def _is_stale():
+    """True when live data hasn't refreshed within STALE_AFTER_SEC."""
+    return (not g_simulate) and (time.time() - g_last_update > STALE_AFTER_SEC)
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """One worker thread per connection.
+
+    Without this, the single-threaded HTTPServer serves requests serially, so a
+    long-lived /api/stream SSE connection blocks every other request (topology
+    snapshot, reconnects, extra tabs) → the dashboard flips to '● offline' and
+    silently falls back to fake data. This is the root cause of the recurring
+    "visualization offline" problem.
+    """
+    daemon_threads = True   # don't block process exit on active SSE streams
+    allow_reuse_address = True
 
 # ── 模拟数据生成（无 FlowEngine 时演示用）─────────────────
 
@@ -235,7 +256,7 @@ def normalize_live_data(raw):
 # ── 文件监视线程 ──────────────────────────────────────────
 
 def file_watcher():
-    global g_data, g_simulate
+    global g_data, g_simulate, g_last_update
     last_mtime = 0
     while True:
         try:
@@ -248,6 +269,7 @@ def file_watcher():
                     with g_lock:
                         g_data = normalize_live_data(raw)
                         g_simulate = False
+                        g_last_update = time.time()
         except json.JSONDecodeError:
             pass  # file being written — try next cycle
         except Exception as e:
@@ -263,23 +285,45 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _snapshot(self):
+        """Return (data, source) under lock. source ∈ live|stale|demo."""
+        with g_lock:
+            if g_simulate:
+                return generate_sample_data(), "demo"
+            data = dict(g_data)
+            source = "stale" if _is_stale() else "live"
+            data["source"] = source
+            data["stale"] = (source == "stale")
+            data["age_sec"] = round(time.time() - g_last_update, 1)
+            return data, source
+
     def _handle(self):
-        if self.path == '/api/topology':
+        if self.path == '/api/health':
+            with g_lock:
+                source = "demo" if g_simulate else ("stale" if _is_stale() else "live")
+                age = None if g_simulate else round(time.time() - g_last_update, 1)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "source": source, "age_sec": age}).encode())
+
+        elif self.path == '/api/topology':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
 
-            with g_lock:
-                if g_simulate:
-                    data = generate_sample_data()
-                else:
-                    data = dict(g_data)
+            data, _ = self._snapshot()
             self.wfile.write(json.dumps(data).encode())
 
         elif self.path == '/api/stream':
-            # SSE (Server-Sent Events) for real-time updates
+            # SSE (Server-Sent Events) for real-time updates.
+            # NOTE: this handler blocks its worker thread for the whole stream;
+            # the server MUST be threaded (ThreadingHTTPServer) so that other
+            # requests (/api/topology, reconnects, extra tabs) are not starved.
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -288,13 +332,16 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
             try:
-                for _ in range(300):  # 5 minutes max
-                    with g_lock:
-                        if g_simulate or not g_data.get('nodes'):
-                            data = generate_sample_data()
-                        else:
-                            data = dict(g_data)
+                deadline = time.time() + 300  # wall-clock cap: 5 minutes
+                last_beat = 0.0
+                while time.time() < deadline:
+                    data, _ = self._snapshot()
                     self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
+                    # Periodic comment frame keeps proxies/clients from timing out.
+                    now = time.time()
+                    if now - last_beat > 15:
+                        self.wfile.write(b": keep-alive\n\n")
+                        last_beat = now
                     self.wfile.flush()
                     time.sleep(1)
             except (BrokenPipeError, ConnectionResetError):
@@ -326,7 +373,7 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
 # ── Main ──────────────────────────────────────────────────
 
 def main():
-    global g_json_file, g_simulate
+    global g_json_file, g_simulate, g_last_update
 
     parser = argparse.ArgumentParser(description='FlowBoard Server')
     parser.add_argument('--port', type=int, default=8800)
@@ -345,13 +392,16 @@ def main():
                     raw = json.load(f)
                 g_data = normalize_live_data(raw)
                 g_simulate = False
+                g_last_update = time.time()
             except Exception:
                 g_simulate = True  # fallback to simulation on parse error
         else:
             g_simulate = True
         threading.Thread(target=file_watcher, daemon=True).start()
 
-    server = http.server.HTTPServer(('0.0.0.0', args.port), FlowBoardHandler)
+    # Threaded server: one worker thread per connection so a long-lived SSE
+    # stream can never starve /api/topology, reconnects, or extra browser tabs.
+    server = ThreadingHTTPServer(('0.0.0.0', args.port), FlowBoardHandler)
 
     print(f"╔══════════════════════════════════════╗")
     print(f"║  FlowBoard Server                    ║")
