@@ -176,7 +176,7 @@ input:focus,select:focus{border-color:#58a6ff}
   <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D Scene <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— drag orbit, scroll zoom</span></h2><span class="toggle">▼</span></div>
+  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D Scene <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— 🖱 drag orbit · scroll zoom · right-drag pan</span></h2><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:0"><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">⏳ Loading 3D scene (needs internet for Three.js CDN)...</div></div></div></div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
@@ -674,8 +674,8 @@ function init3D(){
       scene3d.fog=new THREE.Fog(0x1a1a2e,60,250);
 
       camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,500);
-      camera3d.position.set(40,30,50);
-      camera3d.lookAt(0,0,0);
+      camera3d.position.set(12,8,16);
+      camera3d.lookAt(0,1.5,4);
 
       renderer3d=new THREE.WebGLRenderer({antialias:true});
       renderer3d.setSize(w,h);
@@ -686,9 +686,9 @@ function init3D(){
       document.getElementById("scene3d-msg").style.display="none";
 
       controls3d=new OC.OrbitControls(camera3d,renderer3d.domElement);
-      controls3d.target.set(0,1.5,0);
+      controls3d.target.set(0,1.5,4);
       controls3d.enableDamping=true;controls3d.dampingFactor=0.08;
-      controls3d.maxPolarAngle=Math.PI/2.3;controls3d.minDistance=8;controls3d.maxDistance=120;
+      controls3d.maxPolarAngle=Math.PI/2.3;controls3d.minDistance=3;controls3d.maxDistance=80;
       controls3d.update();
 
       // Lighting
@@ -821,7 +821,7 @@ function init3D(){
         var frameGeo=new THREE.TorusGeometry(0.5,0.05,8,8);var frame=new THREE.Mesh(frameGeo,new THREE.MeshStandardMaterial({color:color,roughness:0.4}));
         frame.rotation.x=Math.PI/2;frame.position.y=0.8;group.add(frame);
         // Wheels
-        var wheelGeo=new THREE.TorusGeometry(0.4,0.06,8,12);var wheelMat=new THREE.MeshStandardMaterial({color:0x111111,roughness:0.8});
+        var wheelGeo=new THREE.TorusGeometry(0.4,0.06,8,12);var wheelMat=new THREE.MeshStandardMaterial({color:0x222222,roughness:0.4,metalness:0.5});
         [-0.7,0.7].forEach(function(wx){var w=new THREE.Mesh(wheelGeo,wheelMat);w.position.set(wx,0.4,0);w.rotation.y=Math.PI/2;group.add(w);});
         // Rider
         var bodyGeo=new THREE.CylinderGeometry(0.15,0.2,0.8,8);var body=new THREE.Mesh(bodyGeo,new THREE.MeshStandardMaterial({color:0xee7733,roughness:0.5}));
@@ -836,25 +836,25 @@ function init3D(){
 
       // ── Our car (ego vehicle) ──
       var carGroup=new THREE.Group();
-      var bodyGeo=new THREE.BoxGeometry(4.5,1.3,2.2);
-      var bodyMat=new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.65,roughness:0.25});
+      var bodyGeo=new THREE.BoxGeometry(5,1.5,2.5);
+      var bodyMat=new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.5,roughness:0.2,emissive:0x001122});
       carBody=new THREE.Mesh(bodyGeo,bodyMat);
       carBody.position.y=1.6;carBody.castShadow=true;carGroup.add(carBody);
-      var roofGeo=new THREE.BoxGeometry(2.2,0.65,2.0);
+      var roofGeo=new THREE.BoxGeometry(2.5,0.7,2.2);
       var roof=new THREE.Mesh(roofGeo,bodyMat);
       roof.position.set(-0.2,1.05,0);roof.castShadow=true;carBody.add(roof);
       // Windows
       var winGeo=new THREE.PlaneGeometry(1.6,0.5);var winMat=new THREE.MeshStandardMaterial({color:0x88ccff,metalness:0.3,roughness:0.1,opacity:0.6,transparent:true});
       [0,Math.PI].forEach(function(a){var win=new THREE.Mesh(winGeo,winMat);win.position.set(-0.2,1.05,1.01);win.rotation.y=a;roof.add(win);});
       // Headlights
-      var lightGeo=new THREE.SphereGeometry(0.2,8,4);var lightMat=new THREE.MeshStandardMaterial({color:0xffffcc,emissive:0xffff88,roughness:0.1});
+      var lightGeo=new THREE.SphereGeometry(0.25,8,4);var lightMat=new THREE.MeshStandardMaterial({color:0xffffcc,emissive:0xffff88,roughness:0.1});
       [-0.7,0.7].forEach(function(lz){var light=new THREE.Mesh(lightGeo,lightMat);light.position.set(2.3,1.2,lz);carBody.add(light);});
       // Wheels
-      var wheelGeo=new THREE.CylinderGeometry(0.4,0.4,0.35,16);
-      var wheelMat=new THREE.MeshStandardMaterial({color:0x111111,roughness:0.8});
-      [[1.3,-0.85,1.2],[1.3,-0.85,-1.2],[-1.3,-0.85,1.2],[-1.3,-0.85,-1.2]].forEach(function(wp){
+      var wheelGeo=new THREE.CylinderGeometry(0.45,0.45,0.4,16);
+      var wheelMat=new THREE.MeshStandardMaterial({color:0x222222,roughness:0.4,metalness:0.5});
+      [[1.4,-0.9,1.3],[1.4,-0.9,-1.3],[-1.4,-0.9,1.3],[-1.4,-0.9,-1.3]].forEach(function(wp){
         var wheel=new THREE.Mesh(wheelGeo,wheelMat);
-        wheel.rotation.z=Math.PI/2;wheel.position.set(wp[0],wp[1]+1.6,wp[2]);wheel.castShadow=true;
+        wheel.rotation.z=Math.PI/2;wheel.position.set(wp[0],wp[1]+1.7,wp[2]);wheel.castShadow=true;
         carGroup.add(wheel);carWheels.push(wheel);
       });
       scene3d.add(carGroup);carGroup.position.set(0,0.5,4);
