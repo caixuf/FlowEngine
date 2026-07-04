@@ -177,7 +177,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
   <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D — Foxglove Studio <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">| 2D — live preview below</span></h2><span class="toggle">▼</span></div>
-    <div class="card-body" style="padding:0"><canvas id="scene2d" style="width:100%;height:400px;background:#0a0d14;display:none"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div>
+    <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="width:100%;height:400px;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
@@ -783,13 +783,13 @@ function animate3D(){
 // ── Canvas 2D fallback (zero-dependency, works offline) ──
 var canvas2d=null,ctx2d=null,fallbackActive=false;
 function init2DFallback(){
-  if(sceneReady||fallbackActive)return;
+  if(fallbackActive)return;
   var el=document.getElementById("scene2d");if(!el)return;
   fallbackActive=true;
-  el.style.display="block";
-  document.getElementById("scene3d").style.display="none";
   canvas2d=el;ctx2d=el.getContext("2d");
-  el.width=el.clientWidth*2;el.height=el.clientHeight*2;
+  // HiDPI sizing
+  var w=el.clientWidth||800,h=el.clientHeight||400;
+  el.width=w*2;el.height=h*2;el.style.width=w+"px";el.style.height=h+"px";
   ctx2d.scale(2,2);
 }
 var anim2d=0;
@@ -941,7 +941,7 @@ function draw2D(){
   tryLoad();
 })();
 // If the 3D scene isn't ready within 6s (slow/blocked CDN), show 2D fallback.
-setTimeout(function(){if(!sceneReady)init2DFallback();},6000);
+init2DFallback(); // BEV always on
 
 // Init
 // ════════════════════════════════════════════════════════════
