@@ -318,18 +318,28 @@ static void control_on_fusion(const Message* msg, void* user_data) {
     LOG_WARN("control", "#%d %s → %s", ct->decision_count, data, decision);
 }
 
+static void control_on_trajectory(const Message* msg, void* user_data) {
+    /* planning → control: 轨迹数据用于最终决策校验 */
+    (void)msg;
+    (void)user_data;
+    /* 实际系统中这里会结合轨迹做碰撞检测 / 速度平滑 */
+}
+
 static int control_init(TaskBase* base) {
     ControlTask* ct = (ControlTask*)base;
 
     transport_subscribe(g_transport, "fusion/localization", control_on_fusion, ct);
+    transport_subscribe(g_transport, "planning/trajectory", control_on_trajectory, ct);
 
     discovery_advertise(g_discovery, "fusion/localization", 0xF0ED10C0u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(g_discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
 
     /* ── Choreo: 被融合输出触发 ── */
     scheduler_choreo_trigger_on(g_scheduler, ct->tid, "fusion/localization");
 
-    LOG_INFO("control", "initialized (NORMAL, choreo)");
+    LOG_INFO("control", "initialized (NORMAL, choreo, subs: fusion+trajectory)");
     return 0;
 }
 
@@ -695,7 +705,7 @@ int main(int argc, char** argv) {
     if (ROLE_MATCH("control"))
         flow_registry_register_task("control", "Driving decision maker",
             "libfake_control_task.so",
-            (const char*[]){"fusion/localization",NULL},
+            (const char*[]){"fusion/localization","planning/trajectory",NULL},
             (const char*[]){"control/cmd",NULL}, NULL);
     if (ROLE_MATCH("planning"))
         flow_registry_register_task("planning", "Trajectory planner",
