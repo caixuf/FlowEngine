@@ -709,14 +709,14 @@ function init3D(){
       // ── Road intersection ──
       function makeRoad(w,l,x,z,rot){
         var g=new THREE.PlaneGeometry(w,l);
-        var m=new THREE.MeshStandardMaterial({color:0x333344,roughness:0.85});
+        var m=new THREE.MeshStandardMaterial({color:0x444455,roughness:0.8});
         var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;
         r.position.set(x,0.02,z);r.receiveShadow=true;scene3d.add(r);
         return r;
       }
       function makeLaneMark(w,l,x,z,rot){
         var g=new THREE.PlaneGeometry(w,l);
-        var m=new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.5});
+        var m=new THREE.MeshStandardMaterial({color:0xffff88,roughness:0.3,emissive:0x333300});
         var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;
         r.position.set(x,0.03,z);scene3d.add(r);
       }
@@ -724,12 +724,12 @@ function init3D(){
       makeRoad(14,120,0,0,0);    // N-S road
       makeRoad(14,120,0,0,Math.PI/2); // E-W road
       // Lane markings
-      for(var i=-50;i<=50;i+=5){if(Math.abs(i)>7){makeLaneMark(0.3,2,0,0.04,i);makeLaneMark(0.3,2,i,0.04,0,Math.PI/2);}}
+      for(var i=-50;i<=50;i+=5){if(Math.abs(i)>7){makeLaneMark(0.4,2.5,0,0.04,i);makeLaneMark(0.4,2.5,i,0.04,0,Math.PI/2);}}
       // Center dash
-      for(var i=-55;i<=55;i+=8){if(Math.abs(i)>7){makeLaneMark(0.3,3,0,0.04,i,0);makeLaneMark(0.3,3,i,0.04,0,Math.PI/2);}}
+      for(var i=-55;i<=55;i+=8){if(Math.abs(i)>7){makeLaneMark(0.4,4,0,0.04,i,0);makeLaneMark(0.4,4,i,0.04,0,Math.PI/2);}}
       // Stop lines
       function makeStopLine(x,z,rot){
-        var g=new THREE.PlaneGeometry(12,1);var m=new THREE.MeshStandardMaterial({color:0xffffff,roughness:0.3});
+        var g=new THREE.PlaneGeometry(12,1);var m=new THREE.MeshStandardMaterial({color:0xffffff,emissive:0x444444,roughness:0.2});
         var r=new THREE.Mesh(g,m);r.rotation.x=-Math.PI/2;r.rotation.z=rot||0;r.position.set(x,0.03,z);scene3d.add(r);
       }
       makeStopLine(0,8.5,0);makeStopLine(0,-8.5,0);makeStopLine(8.5,0,Math.PI/2);makeStopLine(-8.5,0,Math.PI/2);
@@ -884,14 +884,19 @@ function init3D(){
   }).catch(function(){var msg=document.getElementById("scene3d-msg");msg.innerHTML="3D requires internet (CDN).<br><br>Offline? Drag <b>demo.mcap</b> into <a href=\"https://foxglove.dev/download\" style=\"color:#58a6ff\">Foxglove Studio</a> (free).";msg.style.color="#8b949e";msg.style.fontSize="12px";msg.style.textAlign="center";msg.style.lineHeight="1.8";msg.style.width="80%";});
 }
 
-var gpsHistory=[];
+var gpsHistory=[],carTarget={x:0,z:4},carSmooth={x:0,z:4};
 function update3D(){
   if(!sceneReady||!carBody)return;
   var v=(topoData.metrics||{}).vehicle;if(!v)return;
   var cx=v.x||0,cy=v.y||0;
-  // Move ego car
-  carBody.parent.position.x=cx;
-  carBody.parent.position.z=4+cy*5;
+  // Wrap within intersection, set as smooth target
+  var wx=cx%80;if(wx>40)wx-=80;if(wx<-40)wx+=80;
+  carTarget.x=wx;carTarget.z=4+cy*5;
+  // Record GPS track
+  if(gpsHistory.length===0||Math.abs(wx-gpsHistory[gpsHistory.length-1].x)>0.2){
+    gpsHistory.push({x:wx,z:carTarget.z});
+    if(gpsHistory.length>100)gpsHistory.shift();
+  }
   // Update LiDAR
   if(lidarCloud){
     var pos=lidarCloud.geometry.attributes.position.array;
@@ -901,14 +906,6 @@ function update3D(){
     }
     lidarCloud.geometry.attributes.position.needsUpdate=true;
   }
-  // GPS track
-  gpsHistory.push({x:cx,z:4+cy*5});
-  if(gpsHistory.length>100)gpsHistory.shift();
-  if(gpsTrack.length){var arr=gpsTrack[1];
-    for(var i=0;i<gpsHistory.length&&i*3+2<arr.length;i++){arr[i*3]=gpsHistory[i].x;arr[i*3+2]=gpsHistory[i].z;}
-    gpsTrack[0].geometry.attributes.position.needsUpdate=true;}
-  // Camera follow
-  if(controls3d){controls3d.target.lerp(new THREE.Vector3(cx,1.5,4+cy*5),0.1);controls3d.update();}
 }
 
 // ── Animate traffic lights + pedestrians + cyclists ──
@@ -917,6 +914,22 @@ function animate3D(){
   requestAnimationFrame(animate3D);
   if(!sceneReady)return;
   animTime+=0.016;
+  // ── Smooth car movement (lerp toward target) ──
+  if(carBody){
+    carSmooth.x+=(carTarget.x-carSmooth.x)*0.15;
+    carSmooth.z+=(carTarget.z-carSmooth.z)*0.15;
+    carBody.parent.position.x=carSmooth.x;
+    carBody.parent.position.z=carSmooth.z;
+    // Rotation based on movement direction
+    var dx=carTarget.x-carSmooth.x,dz=carTarget.z-carSmooth.z;
+    if(Math.abs(dx)>0.01||Math.abs(dz)>0.01) carBody.parent.rotation.y=Math.atan2(dz,dx);
+    // Update GPS track line
+    if(gpsTrack.length){var arr=gpsTrack[1];
+      for(var i=0;i<gpsHistory.length&&i*3+2<arr.length;i++){arr[i*3]=gpsHistory[i].x;arr[i*3+2]=gpsHistory[i].z;}
+      gpsTrack[0].geometry.attributes.position.needsUpdate=true;}
+    // Camera smooth follow
+    if(controls3d){controls3d.target.lerp(new THREE.Vector3(carSmooth.x,1.5,carSmooth.z),0.2);}
+  }
   // Traffic light cycle: green(10s) → yellow(2s) → red(8s)
   var cycle=(animTime%20);
   // NS direction
