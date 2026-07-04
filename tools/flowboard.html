@@ -177,7 +177,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
   <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D Scene <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— 🖱 drag orbit · scroll zoom · right-drag pan</span></h2><span class="toggle">▼</span></div>
-    <div class="card-body" style="padding:0"><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden" onclick="if(!sceneReady)init3D()"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">⏳ Loading 3D scene...<br><small style="color:#484f58">(click to retry if stuck)</small></div></div></div></div>
+    <div class="card-body" style="padding:0"><canvas id="scene2d" style="width:100%;height:400px;background:#0a0d14;display:none"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden" onclick="if(!sceneReady)init3D()"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">⏳ Loading 3D scene...<br><small style="color:#484f58">(click to retry if stuck)</small></div></div></div></div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
@@ -211,7 +211,7 @@ input:focus,select:focus{border-color:#58a6ff}
 <div id="toast">Copied!</div>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
-<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160/examples/jsm/"}}</script>
+<script type="importmap">{"imports":{"three":"https://cdn.unpkg.com/npm/three@0.160/build/three.module.js","three/addons/":"https://cdn.unpkg.com/npm/three@0.160/examples/jsm/"}}</script>
 <script>
 // ════════════════════════════════════════════════════════════
 // State
@@ -330,6 +330,7 @@ var lastNodeNames = '';
 function updateAll(){
   updateMetrics();updateFrames();updateTopicStats();updateProcessTopics();
   update3D();
+  if(fallbackActive)draw2D();
   var nn = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
   if(nn!==lastNodeNames){lastNodeNames=nn;updateTopo();}
   updateCharts();
@@ -953,6 +954,57 @@ function animate3D(){
   controls3d.update();
   renderer3d.render(scene3d,camera3d);
 }
+
+// ── Canvas 2D fallback (zero-dependency, works offline) ──
+var canvas2d=null,ctx2d=null,fallbackActive=false;
+function init2DFallback(){
+  if(sceneReady||fallbackActive)return;
+  var el=document.getElementById("scene2d");if(!el)return;
+  fallbackActive=true;
+  el.style.display="block";
+  document.getElementById("scene3d").style.display="none";
+  canvas2d=el;ctx2d=el.getContext("2d");
+  el.width=el.clientWidth*2;el.height=el.clientHeight*2;
+  ctx2d.scale(2,2);
+}
+function draw2D(){
+  if(!fallbackActive||!ctx2d)return;
+  var w=canvas2d.clientWidth,h=canvas2d.clientHeight;
+  ctx2d.clearRect(0,0,w,h);
+  // Road cross
+  ctx2d.fillStyle="#333344";ctx2d.fillRect(w/2-60,0,120,h);
+  ctx2d.fillRect(0,h/2-60,w,120);
+  // Lane markings
+  ctx2d.strokeStyle="#ffff66";ctx2d.lineWidth=2;ctx2d.setLineDash([15,10]);
+  ctx2d.beginPath();ctx2d.moveTo(w/2,0);ctx2d.lineTo(w/2,h);ctx2d.stroke();
+  ctx2d.beginPath();ctx2d.moveTo(0,h/2);ctx2d.lineTo(w,h/2);ctx2d.stroke();
+  ctx2d.setLineDash([]);
+  // Stop lines
+  ctx2d.strokeStyle="#ffffff";ctx2d.lineWidth=3;
+  [[w/2-50,h/2-55,w/2+50,h/2-55],[w/2-50,h/2+55,w/2+50,h/2+55],[w/2-55,h/2-50,w/2-55,h/2+50],[w/2+55,h/2-50,w/2+55,h/2+50]].forEach(function(p){ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
+  // Car position (from vehicle telemetry)
+  var v=(topoData.metrics||{}).vehicle;if(!v)return;
+  var cx=w/2+(v.x||0)*2.5,cy=h/2-(v.y||0)*10;
+  // Car body
+  ctx2d.save();ctx2d.translate(cx,cy);
+  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-15,-8,30,16);
+  // Roof
+  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-8,-4,16,8);
+  // Headlights
+  ctx2d.fillStyle="#ffff88";ctx2d.fillRect(12,-6,4,4);ctx2d.fillRect(12,2,4,4);
+  // Wheels
+  ctx2d.fillStyle="#222";ctx2d.fillRect(-10,-10,5,4);ctx2d.fillRect(-10,6,5,4);ctx2d.fillRect(7,-10,5,4);ctx2d.fillRect(7,6,5,4);
+  ctx2d.restore();
+  // Speed text
+  ctx2d.fillStyle="#8b949e";ctx2d.font="10px monospace";
+  ctx2d.fillText("spd="+(v.speed||0).toFixed(1)+" m/s thr="+((v.throttle||0)*100).toFixed(0)+"%",10,h-10);
+  // Traffic lights
+  var phase=Math.floor(Date.now()/1000)%20,color=phase<10?"#00ff00":phase<12?"#ffaa00":"#ff0000";
+  [[w/2-60,h/2-60],[w/2+55,h/2-60],[w/2-60,h/2+55],[w/2+55,h/2+55]].forEach(function(p){ctx2d.fillStyle=color;ctx2d.beginPath();ctx2d.arc(p[0],p[1],5,0,Math.PI*2);ctx2d.fill();});
+}
+
+// Activate 2D fallback if 3D fails to load in 4s
+setTimeout(function(){if(!sceneReady)init2DFallback();},4000);
 setTimeout(init3D,500);
 
 // Init
