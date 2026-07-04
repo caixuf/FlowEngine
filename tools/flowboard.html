@@ -230,7 +230,13 @@ function drawTopo(){
   topoG.selectAll('*').remove();
 
   const ns=(topology.nodes||[]).map((n,i)=>({...n,id:i,x:0,y:0}));
-  if(!ns.length) return;
+  if(!ns.length){
+    topoG.selectAll('*').remove();
+    topoG.append('text').attr('x',200).attr('y',200)
+      .attr('fill','#484f58').attr('font-size','14px').attr('text-anchor','middle')
+      .text('No nodes discovered yet — start flow_e2e in another terminal');
+    return;
+  }
 
   // Edges
   const links=[];
@@ -295,7 +301,16 @@ function drawLineChart(canvasId,data,color,label){
   const w=W,h=H,pad={t:24,r:8,b:20,l:40};
 
   ctx.clearRect(0,0,w,h);
-  if(data.length<2) return;
+
+  // Always draw axes and label
+  ctx.fillStyle='#8b949e';ctx.font='9px Inter';ctx.textAlign='left';
+  ctx.fillText(label,pad.l,pad.t-6);
+
+  if(data.length<2){
+    ctx.fillStyle='#484f58';ctx.font='11px Inter';ctx.textAlign='center';
+    ctx.fillText('Waiting for data...',w/2,h/2);
+    return;
+  }
 
   const max=Math.max(...data,1),min=Math.min(...data,0);
   const xScale=(w-pad.l-pad.r)/(data.length-1);
@@ -321,6 +336,16 @@ function drawLineChart(canvasId,data,color,label){
 }
 
 // ── Init ───────────────────────────────────────────────────
+// Load sample data immediately so page isn't blank
+fetch('http://localhost:8800/api/topology').then(r=>r.json()).then(d=>{
+  topology=d;updateAll();
+  document.getElementById('conn-status').innerHTML='<span class="status live">live</span>';
+}).catch(()=>{
+  // Server not up yet — show placeholder
+  topology={nodes:[],metrics:{bus:{published:0,delivered:0,dropped:0}}};
+  updateAll();
+  document.getElementById('conn-status').innerHTML='<span class="status dead">waiting</span>';
+});
 connect();
 switchTab('topo');
 </script>

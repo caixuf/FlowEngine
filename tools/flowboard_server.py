@@ -179,7 +179,7 @@ def main():
 
     g_json_file = args.json_file
     if g_json_file:
-        g_simulate = False
+        g_simulate = not os.path.exists(g_json_file)  # simulate until file appears
         threading.Thread(target=file_watcher, daemon=True).start()
 
     server = http.server.HTTPServer(('0.0.0.0', args.port), FlowBoardHandler)
