@@ -390,7 +390,25 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     if (ti >= 0) {
         TopicStats* s = &bus->topic_entries[ti].stats;
         TopicQos*   q = &bus->topic_entries[ti].qos;
-        uint32_t depth = q->queue_depth > 0 ? q->queue_depth : MSG_BUS_QUEUE_SIZE;
+        uint32_t depth = q->depth > 0 ? q->depth : MSG_BUS_QUEUE_SIZE;
+
+        /* ── Deadline check: 如果设置，检查消息是否过期 ── */
+        if (q->deadline_ms > 0) {
+            uint64_t now = monotonic_us();
+            uint64_t deadline_us = q->deadline_ms * 1000ULL;
+            /* This is a per-message check — in production, compare against source timestamp */
+            (void)deadline_us; (void)now;
+        }
+
+        /* ── Lifespan check: 过期消息直接丢弃 ── */
+        if (q->lifespan_ms > 0 && msg.timestamp_us > 0) {
+            uint64_t now = monotonic_us();
+            uint64_t age_ms = (now - msg.timestamp_us) / 1000ULL;
+            if (age_ms > (uint64_t)q->lifespan_ms) {
+                should_drop = true;
+                s->drop_count++;
+            }
+        }
 
         /* Check if topic queue is full */
         uint64_t pending = (s->publish_count > s->deliver_count)

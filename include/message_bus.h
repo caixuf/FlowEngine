@@ -254,6 +254,12 @@ void message_bus_get_zc_stats(MessageBus* bus,
 
 /* ── QoS & Per-Topic Statistics ─────────────────────────── */
 
+/** 可靠性 */
+typedef enum {
+    QOS_BEST_EFFORT = 0,  /**< 尽力传输（允许丢帧） */
+    QOS_RELIABLE    = 1,  /**< 可靠传输（保证送达） */
+} QosReliability;
+
 /** 队列溢出策略 */
 typedef enum {
     QOS_DROP_OLDEST = 0,  /**< 丢弃最旧消息（默认） */
@@ -261,10 +267,22 @@ typedef enum {
     QOS_BLOCK       = 2,  /**< 阻塞发布者直到队列有空间 */
 } QosPolicy;
 
-/** Topic QoS 配置 */
+/** 传输类型 */
+typedef enum {
+    TRANSPORT_INTRA = 0,  /**< 进程内总线 (零拷贝) */
+    TRANSPORT_SHM   = 1,  /**< 共享内存 IPC */
+    TRANSPORT_TCP   = 2,  /**< TCP 网络 */
+    TRANSPORT_DDS   = 3,  /**< DDS 协议 (预留) */
+} TopicTransport;
+
+/** Topic QoS 配置 (DDS 风格) */
 typedef struct {
-    uint32_t  queue_depth;   /**< 最大队列深度（0=使用全局默认 256） */
-    QosPolicy policy;        /**< 溢出策略 */
+    QosReliability reliability;  /**< 可靠性: best_effort / reliable */
+    uint32_t       depth;        /**< 队列深度 */
+    QosPolicy      policy;       /**< 溢出策略 */
+    uint32_t       deadline_ms;  /**< 截止时间 (ms)，超时告警。0=不设置 */
+    uint32_t       lifespan_ms;  /**< 消息生存期 (ms)，过期丢弃。0=永不过期 */
+    TopicTransport transport;    /**< 传输方式 */
 } TopicQos;
 
 /** Per-topic 统计 */

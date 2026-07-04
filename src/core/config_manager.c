@@ -123,8 +123,25 @@ LauncherConfig* config_load(const char* config_file) {
                     if (jqos) {
                         cJSON* jd = cJSON_GetObjectItemCaseSensitive(jqos, "depth");
                         cJSON* jp = cJSON_GetObjectItemCaseSensitive(jqos, "policy");
+                        cJSON* jr = cJSON_GetObjectItemCaseSensitive(jqos, "reliability");
+                        cJSON* jdl = cJSON_GetObjectItemCaseSensitive(jqos, "deadline_ms");
+                        cJSON* jls = cJSON_GetObjectItemCaseSensitive(jqos, "lifespan_ms");
+                        cJSON* jtr = cJSON_GetObjectItemCaseSensitive(jqos, "transport");
+
                         pc->publish[k].qos_depth = jd ? (int)jd->valuedouble : 0;
                         if (jp) snprintf(pc->publish[k].qos_policy, 16, "%s", jp->valuestring);
+
+                        /* Store extra QoS fields in qos_policy string as JSON subset */
+                        if (jr || jdl || jtr) {
+                            char extra[128] = {0};
+                            snprintf(extra, sizeof(extra), "%s%s%s%s%s%s",
+                                jr ? (strcmp(jr->valuestring,"reliable")==0?"reliable ":"best_effort ") : "",
+                                jdl ? "deadline=" : "", jdl ? jdl->valuestring : "",
+                                jdl ? "ms " : "",
+                                jtr ? "transport=" : "", jtr ? jtr->valuestring : "");
+                            strncat(pc->publish[k].qos_policy, " ", 15);
+                            strncat(pc->publish[k].qos_policy, extra, 15);
+                        }
                     }
                     pc->publish_count++;
                 }
