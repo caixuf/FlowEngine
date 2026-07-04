@@ -155,6 +155,7 @@ set(CORE_SOURCES
     src/core/transport.c
     src/core/flow_registry.c
     src/core/param_registry.c
+    src/core/monitor_server.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
