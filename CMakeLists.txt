@@ -205,6 +205,11 @@ target_link_libraries(network_service_task starttool_core)
 add_library(data_processor_task SHARED src/plugins/data_processor_task.cpp)
 target_link_libraries(data_processor_task starttool_core)
 
+# 命令行工具
+add_executable(flowctl src/flowctl.c)
+target_link_libraries(flowctl starttool_core scheduler_cpp)
+add_dependencies(flowctl msg_codegen)
+
 # 创建主启动器可执行文件
 add_executable(launcher src/launcher.c)
 target_link_libraries(launcher starttool_core)
@@ -298,7 +303,7 @@ target_link_libraries(flow_fullstack starttool_core scheduler_cpp)
 add_dependencies(flow_fullstack msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowctl flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
