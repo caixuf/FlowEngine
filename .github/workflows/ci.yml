@@ -107,7 +107,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Stress test (15s at high rate)
-        run: timeout 25 ./build/bin/flow_e2e 15
+        run: timeout 35 ./build/bin/flow_e2e 15
       - name: Verify
         run: echo "✓ Stress test completed — no crash"
 

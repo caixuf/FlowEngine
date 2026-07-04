@@ -292,41 +292,88 @@ static TaskInterface g_fusion_vtable = {
 };
 
 /* ══════════════════════════════════════════════════════════ */
-/* 任务3: 控制 — 订阅融合结果做决策 (NORMAL, choreo)          */
+/* 车辆动力学模型 (简单质点)                                     */
+/* ══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    double  x;               /**< 纵向位置 (m) */
+    double  y;               /**< 横向位置 (m) */
+    double  speed;           /**< 当前速度 (m/s) */
+    double  target_speed;    /**< 目标速度 (m/s), 来自规划 */
+    double  throttle;        /**< 油门 0..1 */
+    double  brake;           /**< 刹车 0..1 */
+    double  heading;         /**< 航向角 (rad) */
+    double  mass;            /**< 质量 (kg) */
+    double  drag_coeff;      /**< 空气阻力系数 */
+} VehicleModel;
+
+static VehicleModel g_vehicle = {
+    .x = 0, .y = 0, .speed = 20.0, .target_speed = 33.0,
+    .throttle = 0.3, .brake = 0, .heading = 0,
+    .mass = 1500.0, .drag_coeff = 0.3
+};
+
+static void vehicle_tick(double dt) {
+    /* 驱动力 = 油门 × max_force - 刹车 × max_brake */
+    double drive_force  = g_vehicle.throttle * 5000.0;   /* N */
+    double brake_force  = g_vehicle.brake    * 8000.0;   /* N */
+    double drag_force   = g_vehicle.drag_coeff * g_vehicle.speed * g_vehicle.speed;
+    double net_force    = drive_force - brake_force - drag_force;
+    double accel        = net_force / g_vehicle.mass;
+
+    g_vehicle.speed += accel * dt;
+    if (g_vehicle.speed < 0) g_vehicle.speed = 0;
+
+    g_vehicle.x += g_vehicle.speed * dt * cos(g_vehicle.heading);
+    g_vehicle.y += g_vehicle.speed * dt * sin(g_vehicle.heading);
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* 任务3: PID 纵向控制 (NORMAL, choreo)                        */
+/*   输入: fusion/localization (当前速度)                       */
+/*   输入: planning/trajectory (目标速度)                        */
+/*   输出: control/cmd (油门/刹车/转向)                          */
+/*   反馈: control/cmd → vehicle_tick() → 闭环                  */
 /* ══════════════════════════════════════════════════════════ */
 
 typedef struct {
     TaskBase  base;
     int       tid;
-    int       decision_count;
+    int       cycle;
+    /* PID 状态 */
+    double    kp, ki, kd;
+    double    integral;
+    double    prev_error;
+    double    current_speed;
+    double    target_speed;
 } ControlTask;
 
 static void control_on_fusion(const Message* msg, void* user_data) {
     ControlTask* ct = (ControlTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
-
-    const char* decision = "CRUISE";
-    if (strstr(data, "pos=(")) {
-        float x = 0;
-        sscanf(data, "pos=(%f", &x);
-        if (x < 15.0f)       decision = "🛑 BRAKE";
-        else if (x < 35.0f)  decision = "🟡 SLOW";
-    }
-
-    ct->decision_count++;
-    LOG_WARN("control", "#%d %s → %s", ct->decision_count, data, decision);
+    /* 从 fusion 输出中提取当前速度 */
+    if (strstr(data, "speed="))
+        sscanf(data, "speed=%lf", &ct->current_speed);
 }
 
 static void control_on_trajectory(const Message* msg, void* user_data) {
-    /* planning → control: 轨迹数据用于最终决策校验 */
-    (void)msg;
-    (void)user_data;
-    /* 实际系统中这里会结合轨迹做碰撞检测 / 速度平滑 */
+    ControlTask* ct = (ControlTask*)user_data;
+    const char* data = (const char*)msg->data;
+    if (!data) return;
+    /* 从规划输出中提取目标速度 */
+    if (strstr(data, "speed="))
+        sscanf(data, "speed=%lf", &ct->target_speed);
 }
 
 static int control_init(TaskBase* base) {
     ControlTask* ct = (ControlTask*)base;
+
+    /* PID 参数: Kp=800, Ki=50, Kd=100 (速度控制器) */
+    ct->kp = 800.0; ct->ki = 50.0; ct->kd = 100.0;
+    ct->integral = 0; ct->prev_error = 0;
+    ct->current_speed = g_vehicle.speed;
+    ct->target_speed  = g_vehicle.target_speed;
 
     transport_subscribe(g_transport, "fusion/localization", control_on_fusion, ct);
     transport_subscribe(g_transport, "planning/trajectory", control_on_trajectory, ct);
@@ -335,11 +382,15 @@ static int control_init(TaskBase* base) {
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(g_discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
+    discovery_advertise(g_discovery, "control/cmd", 0x2D95C6D2u,
+                        CAP_PUBLISHER, 100.0);
 
-    /* ── Choreo: 被融合输出触发 ── */
+    transport_advertise(g_transport, "control/cmd", 0x2D95C6D2u);
+
     scheduler_choreo_trigger_on(g_scheduler, ct->tid, "fusion/localization");
 
-    LOG_INFO("control", "initialized (NORMAL, choreo, subs: fusion+trajectory)");
+    LOG_INFO("control", "initialized (NORMAL, choreo, PID: kp=%.0f ki=%.0f kd=%.0f)",
+             ct->kp, ct->ki, ct->kd);
     return 0;
 }
 
@@ -347,13 +398,64 @@ static int control_execute(TaskBase* base) {
     ControlTask* ct = (ControlTask*)base;
 
     while (g_running && !base->should_stop) {
-        int ret = scheduler_choreo_wait(g_scheduler, ct->tid, 1000000);
-        if (ret == -2) break;  /* stopped */
+        int ret = scheduler_choreo_wait(g_scheduler, ct->tid, 500000);
+        if (ret == -2) break;
+
+        ct->cycle++;
+
+        /* ── PID 计算 ── */
+        double error = ct->target_speed - ct->current_speed;
+        ct->integral += error * 0.05;  /* dt ≈ 50ms */
+        if (ct->integral > 500)  ct->integral = 500;   /* 积分饱和 */
+        if (ct->integral < -200) ct->integral = -200;
+
+        double derivative = (error - ct->prev_error) / 0.05;
+        double output = ct->kp * error + ct->ki * ct->integral + ct->kd * derivative;
+
+        /* 输出拆分: >0 → 油门, <0 → 刹车 */
+        double throttle = 0, brake = 0;
+        const char* mode;
+        if (output > 0) {
+            throttle = output / 5000.0;
+            if (throttle > 1.0) throttle = 1.0;
+            brake = 0;
+            mode = (error < 1.0) ? "⏺ HOLD" : "🟢 ACCEL";
+        } else {
+            throttle = 0;
+            brake = (-output) / 8000.0;
+            if (brake > 1.0) brake = 1.0;
+            mode = "🔴 BRAKE";
+        }
+
+        /* ── 更新车辆状态 ── */
+        g_vehicle.throttle = throttle;
+        g_vehicle.brake    = brake;
+        vehicle_tick(0.05);  /* 50ms 步长 */
+
+        /* ── 发布控制指令 ── */
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd),
+                 "throttle=%.2f brake=%.2f steer=0.00 "
+                 "speed=%.1f target=%.1f error=%.1f mode=%s",
+                 throttle, brake, g_vehicle.speed, ct->target_speed, error, mode);
+        Message cmsg;
+        msg_init_typed(&cmsg, "control/cmd", "control",
+                       0x2D95C6D2u, 1, cmd, (uint32_t)(strlen(cmd) + 1));
+        transport_publish(g_transport, "control/cmd", cmsg.data, cmsg.data_size);
+
+        /* ── 更新当前速度（闭环: 车辆状态 → 感知 → 融合 → 这里） ── */
+        ct->current_speed = g_vehicle.speed;
+        ct->prev_error    = error;
+
+        LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f %s",
+                 ct->cycle, ct->current_speed, ct->target_speed,
+                 error, throttle, brake, mode);
     }
 
     if (statem_current(&base->sm) == SM_STATE_RUNNING)
         statem_send_event(&base->sm, SM_EVENT_STOP, base);
-    LOG_INFO("control", "stopped (%d decisions)", ct->decision_count);
+    LOG_INFO("control", "stopped (%d cycles, final speed=%.1f m/s)",
+             ct->cycle, g_vehicle.speed);
     return 0;
 }
 
