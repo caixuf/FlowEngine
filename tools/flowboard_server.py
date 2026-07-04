@@ -239,8 +239,10 @@ def file_watcher():
                     with g_lock:
                         g_data = normalize_live_data(raw)
                         g_simulate = False
+        except json.JSONDecodeError:
+            pass  # file being written — try next cycle
         except Exception as e:
-            pass
+            print(f"[watcher] error: {e}", file=sys.stderr)
         time.sleep(1)
 
 # ── HTTP 请求处理器 ───────────────────────────────────────
@@ -326,7 +328,17 @@ def main():
     g_json_file = args.json_file
     g_simulate = bool(args.demo)
     if g_json_file and not args.demo:
-        g_simulate = not os.path.exists(g_json_file)  # simulate until file appears
+        # Load initial data if file already exists (avoids 1s cold-start gap)
+        if os.path.exists(g_json_file):
+            try:
+                with open(g_json_file) as f:
+                    raw = json.load(f)
+                g_data = normalize_live_data(raw)
+                g_simulate = False
+            except Exception:
+                g_simulate = True  # fallback to simulation on parse error
+        else:
+            g_simulate = True
         threading.Thread(target=file_watcher, daemon=True).start()
 
     server = http.server.HTTPServer(('0.0.0.0', args.port), FlowBoardHandler)

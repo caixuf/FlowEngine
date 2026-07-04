@@ -17,16 +17,22 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .pill-warn{background:linear-gradient(135deg,#33220d,#4d351a);color:#d29922;border:1px solid#5c401a}
 .card{background:linear-gradient(180deg,#111820,#0d1117);border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;transition:border-color .2s}
 .card:hover{border-color:#252d3a}
-.card-header{padding:10px 14px;border-bottom:1px solid#1a1f2b;display:flex;align-items:center;justify-content:space-between;background:#0d1117}
+.card-header{padding:10px 14px;border-bottom:1px solid#1a1f2b;display:flex;align-items:center;justify-content:space-between;background:#0d1117;cursor:pointer;user-select:none}
+.card-header:hover{background:#111820}
 .card-header h2{font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:6px}
 .card-header h2 .dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.card-header .toggle{font-size:10px;color:#484f58;transition:transform .2s}
+.card.collapsed .card-body{display:none}
+.card.collapsed .card-header{border-bottom:none}
+.card.collapsed .card-header .toggle{transform:rotate(-90deg)}
 .card-body{padding:10px 14px}
 #topo{width:100%;height:420px;background:#090c10;position:relative}
 #topo svg{width:100%;height:100%}
 #frames,#process-topics{max-height:280px;overflow-y:auto;font:10px 'JetBrains Mono',monospace}
 #charts{display:flex;gap:8px}
-.chart-box{flex:1;min-width:250px;height:200px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative}
+.chart-box{flex:1;min-width:280px;height:240px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative;cursor:crosshair}
 .chart-box canvas{width:100%;height:100%;display:block}
+.chart-tooltip{position:absolute;background:#1c2128cc;backdrop-filter:blur(4px);color:#c9d1d9;padding:3px 8px;border-radius:4px;font:10px 'JetBrains Mono',monospace;pointer-events:none;white-space:nowrap;border:1px solid#30363d;display:none}
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid#0d1117;font-size:12px}
 .stat-row .label{color:#8b949e;font-size:11px}
 .stat-row .value{font-weight:700;font-size:13px;color:#58a6ff}
@@ -38,7 +44,8 @@ button.primary:hover{background:linear-gradient(135deg,#388bfd,#58a6ff)}
 input{width:100%;padding:7px 10px;font:11px 'JetBrains Mono',monospace;border-radius:6px;outline:none;transition:border-color .15s}
 input:focus{border-color:#58a6ff}
 #msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none}
-.link{stroke-width:1.5;fill:none}
+.link{stroke-width:1.5;fill:none;transition:opacity .3s}
+.link-label{transition:opacity .3s}
 .frame-line{display:flex;gap:8px;padding:2px 10px;border-bottom:1px solid#0d1117;white-space:nowrap;font-size:10px;align-items:center}
 .frame-line:hover{background:#111820}
 .role{display:inline-block;min-width:42px;text-align:center;border-radius:12px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:.3px}
@@ -51,6 +58,7 @@ input:focus{border-color:#58a6ff}
 .mini-stat{background:#0d1117;border-radius:6px;padding:8px 10px;text-align:center}
 .mini-stat .val{font-size:18px;font-weight:800;color:#58a6ff;line-height:1.2}
 .mini-stat .lbl{font-size:9px;color:#8b949e;margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
+.node-selected{filter:brightness(1.3);stroke:#58a6ff!important;stroke-width:3!important}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#1a1f2b;border-radius:3px}
 </style>
 </head>
@@ -78,7 +86,7 @@ input:focus{border-color:#58a6ff}
     <button onclick="clearFrames()" style="flex:1">🗑 Clear</button>
   </div>
 
-  <div class="card"><div class="card-header"><h2>📊 Bus Stats</h2></div>
+  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2>📊 Bus Stats</h2><span class="toggle">▼</span></div>
     <div class="card-body"><div class="metric-grid">
       <div class="mini-stat"><div class="val" id="m-pub">0</div><div class="lbl">Published</div></div>
       <div class="mini-stat"><div class="val" id="m-del">0</div><div class="lbl">Delivered</div></div>
@@ -87,7 +95,7 @@ input:focus{border-color:#58a6ff}
     </div></div>
   </div>
 
-  <div class="card"><div class="card-header"><h2>🟢 Nodes</h2></div>
+  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2>🟢 Nodes</h2><span class="toggle">▼</span></div>
     <div class="card-body"><div id="node-status"><span style="color:#484f58">No data</span></div></div>
   </div>
 
@@ -99,24 +107,28 @@ input:focus{border-color:#58a6ff}
 <div id="main">
   <div class="row" style="display:flex;gap:12px">
     <div style="flex:3;min-width:500px">
-      <div class="card"><div class="card-header"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2></div>
+      <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2><span class="toggle">▼</span></div>
         <div id="topo"><div id="msg">Press Connect or Demo to load</div></div></div>
     </div>
     <div style="flex:2;min-width:350px;display:flex;flex-direction:column;gap:12px">
-      <div class="card"><div class="card-header"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2></div>
+      <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2><span class="toggle">▼</span></div>
         <div class="card-body" id="topic-stats" style="max-height:200px;overflow-y:auto"><span style="color:#484f58">No data</span></div></div>
-      <div class="card" style="flex:1"><div class="card-header"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2></div>
+      <div class="card" style="flex:1"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2><span class="toggle">▼</span></div>
         <div id="frames" style="max-height:180px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
     </div>
   </div>
 
-  <div class="card"><div class="card-header"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2></div>
+  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div id="charts" style="display:flex;gap:8px;min-height:200px">
-    <div class="chart-box"><canvas id="ch-rate"></canvas></div>
-    <div class="chart-box"><canvas id="ch-lat"></canvas></div>
-    <div class="chart-box"><canvas id="ch-frames"></canvas></div>
+  <div class="card"><div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')"><h2><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— hover for values</span></h2><span class="toggle">▼</span></div>
+    <div class="card-body" style="padding:8px 10px">
+      <div id="charts" style="display:flex;gap:8px;min-height:200px">
+        <div class="chart-box"><canvas id="ch-rate"></canvas><div class="chart-tooltip" id="tt-rate"></div></div>
+        <div class="chart-box"><canvas id="ch-lat"></canvas><div class="chart-tooltip" id="tt-lat"></div></div>
+        <div class="chart-box"><canvas id="ch-frames"></canvas><div class="chart-tooltip" id="tt-frames"></div></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -129,20 +141,20 @@ let topoData = {nodes:[],metrics:{}};
 let frames = [];
 let paused = false;
 let frameCount = 0;
-let chartHistory = {rate:[],latency:[],frames:[],maxLen:120};
+let chartHistory = {rate:[],latency:[],frames:[],maxLen:90};
 let serverUrl = 'http://localhost:8800';
 let eventSource = null;
+let selectedNode = null;  // clicked node → highlight its edges
 
 const COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 
 // ── Demo data ──────────────────────────────────────────────
 function doSimulate(){
-  // Pre-populate chart history so lines are visible immediately
-  chartHistory = {rate:[],latency:[],frames:[],maxLen:120};
+  chartHistory = {rate:[],latency:[],frames:[],maxLen:90};
   for(let i=0;i<30;i++){
-    chartHistory.rate.push(800+Math.random()*400);
-    chartHistory.latency.push(100+Math.random()*200);
-    chartHistory.frames.push(700+Math.random()*600);
+    chartHistory.rate.push({v:40+Math.random()*20, raw:1200+i*50});
+    chartHistory.latency.push({v:100+Math.random()*200, p99:300+Math.random()*500});
+    chartHistory.frames.push({v:80+Math.random()*40, raw:2400+i*100});
   }
   topoData = {
     nodes:[
@@ -173,8 +185,7 @@ function doSimulate(){
     ]
   };
   updateAll();
-  document.getElementById('conn-dot').className='live';document.getElementById('conn-dot').textContent='● demo';
-  document.getElementById('conn-label').textContent='| demo mode';
+  document.getElementById('conn-dot').className='pill pill-live';document.getElementById('conn-dot').textContent='● demo';
 }
 
 // ── Connection ─────────────────────────────────────────────
@@ -186,24 +197,20 @@ async function doConnect(){
     const r = await fetch(serverUrl+'/api/topology');
     topoData = await r.json();
     updateAll();
-    document.getElementById('conn-dot').className='live';document.getElementById('conn-dot').textContent='● live';
-    document.getElementById('conn-label').textContent='| '+serverUrl;
+    document.getElementById('conn-dot').className='pill pill-live';document.getElementById('conn-dot').textContent='● live';
 
-    // SSE stream
     eventSource = new EventSource(serverUrl+'/api/stream');
     eventSource.onmessage = e => {
       if(paused) return;
       try{topoData=JSON.parse(e.data);updateAll()}catch(err){}
     };
     eventSource.onerror = ()=>{
-      document.getElementById('conn-dot').className='warn';document.getElementById('conn-dot').textContent='● retry';
+      document.getElementById('conn-dot').className='pill pill-warn';document.getElementById('conn-dot').textContent='● retry';
       if(eventSource){eventSource.close();eventSource=null;}
-      // Poll fallback
       setTimeout(pollFallback,2000);
     };
   }catch(err){
-    document.getElementById('conn-dot').className='dead';document.getElementById('conn-dot').textContent='● offline';
-    console.log('Connection failed, using demo data');
+    document.getElementById('conn-dot').className='pill pill-dead';document.getElementById('conn-dot').textContent='● offline';
     doSimulate();
   }
 }
@@ -215,14 +222,25 @@ function pollFallback(){
 }
 
 function doPause(){paused=!paused;document.getElementById('pause-btn').textContent=paused?'▶ Resume':'⏯ Pause'}
+function clearFrames(){frames=[];frameCount=0;updateFrames()}
 
 // ── Update ─────────────────────────────────────────────────
+let lastNodeNames = '';
+
 function updateAll(){
   updateMetrics();
   updateFrames();
   updateTopicStats();
   updateProcessTopics();
-  updateTopo();
+
+  // Only rebuild topology SVG when the node SET changes (name list differs)
+  // Otherwise just refresh metrics/charts — preserves zoom/pan/positions
+  const nodeNames = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
+  if (nodeNames !== lastNodeNames) {
+    lastNodeNames = nodeNames;
+    updateTopo();
+  }
+
   updateCharts();
   document.getElementById('node-n').textContent=(topoData.nodes||[]).length;
   document.getElementById('frame-n').textContent=frameCount;
@@ -237,8 +255,10 @@ function updateMetrics(){
   document.getElementById('m-lat').textContent = (l.avg_us||0);
   const ns=topoData.nodes||[];
   document.getElementById('node-status').innerHTML=ns.map(n=>
-    `<div class="stat"><span title="${n.description||''}">${n.name}</span><span style="color:${n.alive===false?'#f85149':'#3fb950'}">${n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—')}</span></div>`
+    '<div class="stat-row"><span>'+(n.name||'?')+'</span><span style="color:'+(n.alive===false?'#f85149':'#3fb950')+'">'+(n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—'))+'</span></div>'
   ).join('')||'<span style="color:#484f58">No nodes</span>';
+  // Update rate display
+  document.getElementById('rate-n').textContent = ((topoData.metrics?.topics||[]).reduce((s,t)=>s+(t.freq||0),0)).toFixed(0);
 }
 
 function updateFrames(){
@@ -248,19 +268,18 @@ function updateFrames(){
   if(frames.length>200) frames.shift();
   frameCount++;
   document.getElementById('frames').innerHTML = frames.slice(-60).reverse().map(f=>
-    `<div class="frame-line">
-      <span style="color:#484f58;min-width:70px">${f.ts}</span>
-      <span style="color:#58a6ff;min-width:60px">pub:${f.pub}</span>
-      <span style="min-width:60px">del:${f.del}</span>
-      <span style="color:${f.drop?'#f85149':'#484f58'};min-width:50px">drop:${f.drop}</span>
-      <span style="color:#d29922;min-width:60px">lat:${f.lat}µs</span>
-      <span style="min-width:40px">${f.mode}</span>
-    </div>`
+    '<div class="frame-line">'+
+      '<span style="color:#484f58;min-width:72px">'+f.ts+'</span>'+
+      '<span style="color:#58a6ff;min-width:60px">pub:'+f.pub+'</span>'+
+      '<span style="min-width:60px">del:'+f.del+'</span>'+
+      '<span style="color:'+(f.drop?'#f85149':'#484f58')+';min-width:50px">drop:'+f.drop+'</span>'+
+      '<span style="color:#d29922;min-width:60px">lat:'+f.lat+'µs</span>'+
+      '<span style="min-width:40px">'+f.mode+'</span>'+
+    '</div>'
   ).join('')||'<span style="color:#484f58">Waiting...</span>';
 }
 
 // ── Topology (D3 force) ────────────────────────────────────
-let topoInit=false;
 function topicFilter(){
   const raw = document.getElementById('topic-filter')?.value?.trim() || '';
   return raw ? raw.split(',').map(s=>s.trim()).filter(Boolean) : [];
@@ -270,7 +289,7 @@ function topicMatches(topicName){
   return f.length === 0 || f.some(p => topicName.includes(p) || p.includes(topicName));
 }
 function updateTopicStats(){
-  const ts = (topoData.metrics?.topics || topoData.topics || []).filter(t => topicMatches(t.topic||t.name||''));
+  const ts = (topoData.metrics?.topics || []).filter(t => topicMatches(t.topic||t.name||''));
   if (!ts.length) {
     document.getElementById('topic-stats').innerHTML = '<span style="color:#484f58">Waiting for per-topic data...</span>';
     return;
@@ -279,31 +298,31 @@ function updateTopicStats(){
     '<table style="width:100%;font-size:10px;border-collapse:collapse">' +
     '<tr style="color:#8b949e;border-bottom:1px solid#21262d">' +
     '<th style="text-align:left;padding:2px 3px">Topic</th>' +
-    '<th style="text-align:center;padding:2px 3px">Reliability</th>' +
+    '<th style="text-align:center;padding:2px 3px">QoS</th>' +
     '<th style="text-align:right;padding:2px 3px">Pub</th>' +
     '<th style="text-align:right;padding:2px 3px">Del</th>' +
     '<th style="text-align:right;padding:2px 3px">Drop</th>' +
     '<th style="text-align:right;padding:2px 3px">Lat</th>' +
-    '<th style="text-align:right;padding:2px 3px">Freq</th>' +
-    '<th style="text-align:right;padding:2px 3px">Deadline</th>' +
+    '<th style="text-align:right;padding:2px 3px">Hz</th>' +
+    '<th style="text-align:right;padding:2px 3px">DL</th>' +
     '</tr>' +
     ts.map(t => {
       const short = (t.topic||t.name||'?').split('/').pop();
       const dropColor = (t.drop||0) > 0 ? 'color:#f85149' : 'color:#3fb950';
-      const reliability = t.reliability || t.qos_reliability || 'best_effort';
+      const reliability = t.reliability || 'best_effort';
       const relColor = reliability === 'reliable' ? 'color:#3fb950' : 'color:#8b949e';
-      const deadline = t.deadline_ms || t.qos_deadline_ms || 0;
+      const deadline = t.deadline_ms || 0;
       const dlColor = deadline > 0 ? 'color:#d29922' : 'color:#484f58';
-      return `<tr style="border-bottom:1px solid#161b22">
-        <td style="padding:2px 3px;color:#58a6ff" title="${t.topic||t.name}">${short}</td>
-        <td style="text-align:center;padding:2px 3px;font-size:9px;${relColor}">${reliability}</td>
-        <td style="text-align:right;padding:2px 3px">${t.pub||0}</td>
-        <td style="text-align:right;padding:2px 3px">${t.del||0}</td>
-        <td style="text-align:right;padding:2px 3px;${dropColor}">${t.drop||0}</td>
-        <td style="text-align:right;padding:2px 3px;color:#d29922">${(t.lat_us||0)}µs</td>
-        <td style="text-align:right;padding:2px 3px">${(t.freq||0).toFixed(1)}Hz</td>
-        <td style="text-align:right;padding:2px 3px;${dlColor}">${deadline>0?deadline+'ms':'—'}</td>
-      </tr>`;
+      return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="document.getElementById(\'topic-filter\').value=\''+(t.topic||t.name)+'\';updateAll()">'+
+        '<td style="padding:2px 3px;color:#58a6ff" title="'+(t.topic||t.name)+'">'+short+'</td>'+
+        '<td style="text-align:center;padding:2px 3px;font-size:9px;'+relColor+'">'+reliability+'</td>'+
+        '<td style="text-align:right;padding:2px 3px">'+(t.pub||0)+'</td>'+
+        '<td style="text-align:right;padding:2px 3px">'+(t.del||0)+'</td>'+
+        '<td style="text-align:right;padding:2px 3px;'+dropColor+'">'+(t.drop||0)+'</td>'+
+        '<td style="text-align:right;padding:2px 3px;color:#d29922">'+(t.lat_us||0)+'µs</td>'+
+        '<td style="text-align:right;padding:2px 3px">'+(t.freq||0).toFixed(1)+'</td>'+
+        '<td style="text-align:right;padding:2px 3px;'+dlColor+'">'+(deadline>0?deadline+'ms':'—')+'</td>'+
+      '</tr>';
     }).join('') + '</table>';
 }
 
@@ -334,26 +353,42 @@ function updateProcessTopics(){
     endpoints.sort((a,b)=>(a.node||'').localeCompare(b.node||'')||(a.topic||'').localeCompare(b.topic||'')).map(e=>{
       const role=e.role||'unknown';
       const drop=Number(e.drop||0);
-      return `<tr style="border-bottom:1px solid#161b22">
-        <td style="padding:3px 4px;color:#c9d1d9">${e.node||'?'}</td>
-        <td style="padding:3px 4px"><span class="${roleClass(role)}">${role}</span></td>
-        <td style="padding:3px 4px" class="topic-full">${e.topic||'?'}</td>
-        <td style="padding:3px 4px" class="muted mono">${e.type_id||'—'}</td>
-        <td style="text-align:right;padding:3px 4px">${Number(e.freq||0).toFixed(1)}Hz</td>
-        <td style="text-align:right;padding:3px 4px;color:${drop?'#f85149':'#3fb950'}">${drop}</td>
-        <td style="text-align:right;padding:3px 4px;color:#d29922">${Number(e.lat_us||0)}µs</td>
-      </tr>`;
+      return '<tr style="border-bottom:1px solid#161b22">'+
+        '<td style="padding:3px 4px;color:#c9d1d9">'+(e.node||'?')+'</td>'+
+        '<td style="padding:3px 4px"><span class="'+roleClass(role)+'">'+role+'</span></td>'+
+        '<td style="padding:3px 4px" class="topic-full">'+(e.topic||'?')+'</td>'+
+        '<td style="padding:3px 4px" class="muted mono">'+(e.type_id||'—')+'</td>'+
+        '<td style="text-align:right;padding:3px 4px">'+Number(e.freq||0).toFixed(1)+'Hz</td>'+
+        '<td style="text-align:right;padding:3px 4px;color:'+(drop?'#f85149':'#3fb950')+'">'+drop+'</td>'+
+        '<td style="text-align:right;padding:3px 4px;color:#d29922">'+Number(e.lat_us||0)+'µs</td>'+
+      '</tr>';
     }).join('')+'</table>';
 }
 
+// ── Topology graph ─────────────────────────────────────────
+let topoLinks = []; // stored links for click highlighting
+let nodePositions = {}; // preserve positions across updates (key = node name)
+
 function updateTopo(){
-  const ns=(topoData.nodes||[]).map((n,i)=>({...n,id:i,x:Math.random()*400+100,y:Math.random()*300+100}));
+  // Preserve previous positions for stable layout across updates
+  const prevPos = nodePositions;
+  nodePositions = {};
+  const ns=(topoData.nodes||[]).map((n,i)=>{
+    const name = n.name || ('_'+i);
+    const prev = prevPos[name];
+    const x = prev ? prev.x : 100 + Math.random()*600;
+    const y = prev ? prev.y : 80 + Math.random()*220;
+    nodePositions[name] = {x:x, y:y};
+    return {...n, id:i, x:x, y:y};
+  });
   const el=document.getElementById('topo');
   const msg=document.getElementById('msg');
   if(!ns.length){if(msg)msg.style.display='block';return}
   if(msg)msg.style.display='none';
 
   if(typeof d3==='undefined'){el.innerHTML='<div style="padding:20px;color:#f85149">D3.js not loaded (CDN unreachable). Try Demo Data for text view.</div>';return}
+
+  selectedNode = null; // reset selection on re-render
 
   const links=[];
   const topicToPub={}, topicToSub={};
@@ -373,11 +408,27 @@ function updateTopo(){
     }
   }
 
+  // ── Anchor orphans: nodes with no links get a weak spring to the most-connected node ──
+  const nodeDeg = new Array(ns.length).fill(0);
+  links.forEach(function(l){
+    var s=l.source.id!=null?l.source.id:l.source;
+    var t=l.target.id!=null?l.target.id:l.target;
+    nodeDeg[s]++;nodeDeg[t]++;
+  });
+  var hubNode = 0, hubDeg = 0;
+  nodeDeg.forEach(function(d,i){if(d>hubDeg){hubDeg=d;hubNode=i;}});
+  ns.forEach(function(n,i){
+    if(nodeDeg[i]===0 && ns.length>1){
+      links.push({source:i,target:hubNode,topic:'__orphan__',_total:1,_idx:0,_orphan:true});
+    }
+  });
+  topoLinks = links;
+
   el.innerHTML='';
   const svg=d3.select('#topo').append('svg').attr('width','100%').attr('height','100%');
   const g=svg.append('g');
 
-  // ── Arrowhead marker definitions ──────────────────────
+  // Arrowhead markers
   const defs=svg.append('defs');
   const ARROW_COLORS=['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#8b949e'];
   ARROW_COLORS.forEach((color,i)=>{
@@ -388,7 +439,7 @@ function updateTopo(){
       .append('path').attr('d','M 0 0 L 14 7 L 0 14 L 3 7 Z').attr('fill',color).attr('opacity',0.85);
   });
 
-  // ── Multi-edge arc offset accounting ──────────────────
+  // Multi-edge arc offsets
   const pairKey=(a,b)=>Math.min(a,b)+'--'+Math.max(a,b);
   const pairCount={},pairIdx={};
   links.forEach(l=>{
@@ -404,148 +455,264 @@ function updateTopo(){
 
   svg.call(d3.zoom().scaleExtent([0.15,4]).on('zoom',e=>g.attr('transform',e.transform)));
 
-  // ── Curved link paths with arrowheads ─────────────────
+  // Curved link paths (orphan anchors are invisible)
   const linkG=g.append('g').selectAll('path').data(links).join('path')
     .attr('class','link')
-    .attr('stroke',(d,i)=>ARROW_COLORS[i%ARROW_COLORS.length])
-    .attr('stroke-width',d=>/(cmd|plan|traj)/.test(d.topic)?2.0:1.5)
+    .attr('stroke',function(d,i){return d._orphan?'transparent':ARROW_COLORS[i%ARROW_COLORS.length];})
+    .attr('stroke-width',function(d){return d._orphan?0:(/(cmd|plan|traj)/.test(d.topic)?2.0:1.5);})
     .attr('fill','none')
-    .attr('stroke-dasharray',d=>/(cmd|plan|traj)/.test(d.topic)?'6,3':null)
-    .attr('marker-end',(d,i)=>'url(#arrow-'+(i%ARROW_COLORS.length)+')');
+    .attr('stroke-dasharray',function(d){return d._orphan?null:(/(cmd|plan|traj)/.test(d.topic)?'6,3':null);})
+    .attr('marker-end',function(d,i){return d._orphan?null:'url(#arrow-'+(i%ARROW_COLORS.length)+')';});
 
-  // ── Link labels pinned to curve midpoints ─────────────
+  // Link labels (orphan anchors show no label)
   const linkL=g.append('g').selectAll('text').data(links).join('text')
+    .attr('class','link-label')
     .attr('font-size','8px').attr('fill','#8b949e').attr('text-anchor','middle')
-    .text(d=>d.topic.split('/').pop());
+    .text(function(d){return d._orphan?'':d.topic.split('/').pop();});
 
+  // Nodes
   const nodeG=g.append('g').selectAll('g').data(ns).join('g').call(
     d3.drag().on('start',(e,d)=>{if(!e.sourceEvent.ctrlKey){sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y}})
       .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y}).on('end',(e,d)=>{if(!e.sourceEvent.ctrlKey){d.fx=null;d.fy=null}})
   );
   nodeG.append('circle').attr('r',20).attr('fill',d=>d.alive===false?'#484f58':COLORS[(d.caps||0)&8?8:(d.caps||0)&4?4:(d.caps||0)&2?2:1])
-    .attr('stroke','#21262d').attr('stroke-width',2).append('title').text(d=>d.name+' (PID '+(d.pid||'—')+')\n'+(d.description||'')+'\n'+(d.plugin||''));
-  nodeG.append('text').text(d=>d.name).attr('text-anchor','middle').attr('dy',30).attr('fill','#c9d1d9').attr('font-size','9px');
+    .attr('stroke','#21262d').attr('stroke-width',2)
+    .style('cursor','pointer')
+    .on('click',function(e,d){
+      e.stopPropagation();
+      if(selectedNode===d){selectedNode=null;nodeG.selectAll('circle').classed('node-selected',false);}
+      else{selectedNode=d;nodeG.selectAll('circle').classed('node-selected',false);d3.select(this).classed('node-selected',true);}
+      applyHighlight(nodeG,linkG,linkL);
+    })
+    .append('title').text(function(d){return d.name+' (PID '+(d.pid||'—')+')\n'+(d.description||'')+'\n'+(d.plugin||'');});
+  nodeG.append('text').text(function(d){return d.name;}).attr('text-anchor','middle').attr('dy',30).attr('fill','#c9d1d9').attr('font-size','9px');
 
-  // ── Force simulation with bezier-curve tick ───────────
-  const sim=d3.forceSimulation(ns).force('link',d3.forceLink(links).distance(180))
-    .force('charge',d3.forceManyBody().strength(-400)).force('center',d3.forceCenter(400,200)).force('collision',d3.forceCollide(45))
-    .on('tick',()=>{
-      linkG.attr('d',d=>{
-        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
-        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
-        const px=-dy/dist,py=dx/dist;
-        const total=d._total||1,idx=d._idx||0;
-        const arcOff=(idx-(total-1)/2)*28;
-        const cx=(sx+tx)/2+px*arcOff,cy=(sy+ty)/2+py*arcOff;
+  // Click background → deselect
+  svg.on('click',function(){selectedNode=null;nodeG.selectAll('circle').classed('node-selected',false);applyHighlight(nodeG,linkG,linkL);});
+
+  function applyHighlight(ng,lg,ll){
+    if(!selectedNode){
+      ng.selectAll('circle').attr('opacity',1);
+      lg.attr('opacity',1);ll.attr('opacity',1);
+      return;
+    }
+    const selId=selectedNode.id;
+    const connIds=new Set();const connEdges=new Set();
+    links.forEach(function(l,i){
+      var sid=l.source.id!=null?l.source.id:l.source;
+      var tid=l.target.id!=null?l.target.id:l.target;
+      if(sid===selId){connIds.add(tid);connEdges.add(i);}
+      if(tid===selId){connIds.add(sid);connEdges.add(i);}
+    });
+    ng.selectAll('circle').attr('opacity',function(d){return connIds.has(d.id)||d===selectedNode?1:0.25;});
+    lg.attr('opacity',function(d,i){return connEdges.has(i)?1:0.12;});
+    ll.attr('opacity',function(d,i){return connEdges.has(i)?1:0.12;});
+  }
+
+  // Force simulation
+  const sim=d3.forceSimulation(ns)
+    .force('link',d3.forceLink(links).distance(160))
+    .force('charge',d3.forceManyBody().strength(-200))
+    .force('center',d3.forceCenter(400,200).strength(0.15))
+    .force('x',d3.forceX(400).strength(0.03))
+    .force('y',d3.forceY(200).strength(0.03))
+    .force('collision',d3.forceCollide(50))
+    .on('tick',function(){
+      linkG.attr('d',function(d){
+        var sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        var dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        var px=-dy/dist,py=dx/dist;
+        var total=d._total||1,idx=d._idx||0;
+        var arcOff=(idx-(total-1)/2)*28;
+        var cx=(sx+tx)/2+px*arcOff,cy=(sy+ty)/2+py*arcOff;
         return 'M'+sx+','+sy+' Q'+cx+','+cy+' '+tx+','+ty;
       });
-      // Label at bezier t=0.5: 0.25*P0 + 0.5*P1 + 0.25*P2
-      linkL.attr('x',d=>{
-        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
-        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
-        const px=-dy/dist,py=dx/dist;
-        const total=d._total||1,idx=d._idx||0;
-        const arcOff=(idx-(total-1)/2)*28;
-        const cx=(sx+tx)/2+px*arcOff;
+      linkL.attr('x',function(d){
+        var sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        var dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        var px=-dy/dist,py=dx/dist;
+        var total=d._total||1,idx=d._idx||0;
+        var arcOff=(idx-(total-1)/2)*28;
+        var cx=(sx+tx)/2+px*arcOff;
         return 0.25*sx+0.5*cx+0.25*tx;
-      }).attr('y',d=>{
-        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
-        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
-        const px=-dy/dist,py=dx/dist;
-        const total=d._total||1,idx=d._idx||0;
-        const arcOff=(idx-(total-1)/2)*28;
-        const cy=(sy+ty)/2+py*arcOff;
+      }).attr('y',function(d){
+        var sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        var dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        var px=-dy/dist,py=dx/dist;
+        var total=d._total||1,idx=d._idx||0;
+        var arcOff=(idx-(total-1)/2)*28;
+        var cy=(sy+ty)/2+py*arcOff;
         return 0.25*sy+0.5*cy+0.25*ty-4;
       });
-      nodeG.attr('transform',d=>'translate('+d.x+','+d.y+')');
+      nodeG.attr('transform',function(d){return 'translate('+d.x+','+d.y+')';});
     });
   sim.alpha(1).restart();
-  setTimeout(()=>svg.transition().duration(500).call(d3.zoom().transform,d3.zoomIdentity),100);
+  setTimeout(function(){svg.transition().duration(500).call(d3.zoom().transform,d3.zoomIdentity);},100);
 }
 
 // ── Charts (Canvas) ────────────────────────────────────────
+let chartPrevPub = null, chartPrevDel = null;
+
 function updateCharts(){
   const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
-  chartHistory.rate.push(b.published||0);
-  chartHistory.latency.push(l.avg_us||0);
-  chartHistory.frames.push(b.delivered||0);
-  [chartHistory.rate,chartHistory.latency,chartHistory.frames].forEach(a=>{while(a.length>chartHistory.maxLen)a.shift()});
+  const nowPub = b.published||0, nowDel = b.delivered||0;
 
-  drawChart('ch-rate',chartHistory.rate,'#58a6ff','Message Rate');
-  drawChart('ch-lat',chartHistory.latency,'#d29922','Latency (µs)');
-  drawChart('ch-frames',chartHistory.frames,'#3fb950','Throughput');
+  // Seed first sample without a data point (avoids the initial 0 spike)
+  if (chartPrevPub === null) { chartPrevPub = nowPub; chartPrevDel = nowDel; return; }
+
+  chartHistory.rate.push({v:Math.max(0, nowPub - chartPrevPub), raw: nowPub});
+  chartHistory.latency.push({v:l.avg_us||0, p99:l.p99_us||0});
+  chartHistory.frames.push({v:Math.max(0, nowDel - chartPrevDel), raw: nowDel});
+  chartPrevPub = nowPub; chartPrevDel = nowDel;
+
+  [chartHistory.rate,chartHistory.latency,chartHistory.frames].forEach(function(a){while(a.length>chartHistory.maxLen)a.shift();});
+
+  drawChart('ch-rate',  'tt-rate',  chartHistory.rate,   '#58a6ff', 'Pub Rate',  'msg/s');
+  drawChart('ch-lat',   'tt-lat',   chartHistory.latency,'#d29922', 'Latency',   'µs');
+  drawChart('ch-frames','tt-frames',chartHistory.frames, '#3fb950', 'Deliveries','msg/s');
 }
 
-function drawChart(id,data,color,unit){
-  const c=document.getElementById(id);if(!c)return;
+function drawChart(canvasId,tooltipId,data,color,title,unit){
+  const c=document.getElementById(canvasId);if(!c)return;
   const box=c.parentElement,W=box.clientWidth,H=box.clientHeight;
   if(W<10||H<10)return;
   c.width=W*2;c.height=H*2;c.style.width=W+'px';c.style.height=H+'px';
   const ctx=c.getContext('2d');ctx.scale(2,2);
-  const pad={t:28,r:12,b:22,l:44},w=W-pad.l-pad.r,h=H-pad.t-pad.b;
+  // More bottom padding for axis labels
+  const pad={t:36,r:66,b:34,l:48},w=W-pad.l-pad.r,h=H-pad.t-pad.b;
   ctx.clearRect(0,0,W,H);
 
   // Background
-  ctx.fillStyle='#0d1117';ctx.fillRect(0,0,W,H);
+  const bg=ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#0d1117');bg.addColorStop(1,'#090c10');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
 
-  // Grid lines
-  ctx.strokeStyle='#161b22';ctx.lineWidth=0.5;
-  const steps=4;
-  for(let i=0;i<=steps;i++){const y=pad.t+h*i/steps;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()}
-
-  if(data.length<2){
-    ctx.fillStyle='#484f58';ctx.font='12px system-ui';ctx.textAlign='center';
+  if(!data||data.length<2){
+    ctx.fillStyle='#30363d';ctx.font='11px system-ui';ctx.textAlign='center';
     ctx.fillText('Waiting for data...',W/2,H/2);
+    ctx.fillStyle='#8b949e';ctx.font='bold 10px system-ui';ctx.textAlign='left';
+    ctx.fillText(title,pad.l,pad.t-10);
+    ctx.fillStyle='#484f58';ctx.font='9px system-ui';ctx.textAlign='right';
+    ctx.fillText(unit,W-pad.r,pad.t-10);
     return;
   }
 
-  const max=Math.max(...data,1),min=Math.min(...data,0);
-  const range=max-min||1;
-  const xs=w/(data.length-1),ys=h/range;
+  const vals = data.map(function(d){return d.v!=null?d.v:d;});
+  const maxV=Math.max(...vals,1),minV=Math.min(...vals,0);
+  const range=(maxV-minV)||1;
+  const latest=vals[vals.length-1];
+  const avg=vals.reduce(function(a,b){return a+b;},0)/vals.length;
+  const xs=w/Math.max(data.length-1,1),ys=h/range;
+
+  // Grid lines + Y ticks
+  const yTicks=4;
+  ctx.strokeStyle='#161b22';ctx.lineWidth=0.5;
+  for(let i=0;i<=yTicks;i++){
+    const y=pad.t+(h*i)/yTicks;
+    ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+    const val=Math.round(maxV-(range*i)/yTicks);
+    ctx.fillStyle='#484f58';ctx.font='9px system-ui';ctx.textAlign='right';
+    ctx.fillText(val.toLocaleString(),pad.l-8,y+3);
+  }
+
+  // Average reference line
+  const avgY=pad.t+(maxV-avg)*ys;
+  ctx.strokeStyle=color+'44';ctx.lineWidth=1;ctx.setLineDash([4,6]);
+  ctx.beginPath();ctx.moveTo(pad.l,avgY);ctx.lineTo(W-pad.r,avgY);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle=color+'88';ctx.font='9px system-ui';ctx.textAlign='right';
+  ctx.fillText('avg '+Math.round(avg).toLocaleString(),W-pad.r,avgY-3);
 
   // Area fill
-  ctx.fillStyle=color+'18';
+  ctx.fillStyle=color+'15';
   ctx.beginPath();
-  data.forEach((v,i)=>{
-    const x=pad.l+i*xs,y=pad.t+(max-v)*ys;
+  data.forEach(function(d,i){
+    const x=pad.l+i*xs,y=pad.t+(maxV-(d.v!=null?d.v:d))*ys;
     i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
   });
   ctx.lineTo(pad.l+(data.length-1)*xs,pad.t+h);
   ctx.lineTo(pad.l,pad.t+h);
   ctx.closePath();ctx.fill();
 
-  // Line
-  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.beginPath();
-  data.forEach((v,i)=>{
-    const x=pad.l+i*xs,y=pad.t+(max-v)*ys;
+  // Main line
+  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';
+  ctx.beginPath();
+  data.forEach(function(d,i){
+    const x=pad.l+i*xs,y=pad.t+(maxV-(d.v!=null?d.v:d))*ys;
     i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
   });
   ctx.stroke();
 
-  // Y-axis labels (top and bottom only, no overlap)
-  ctx.fillStyle='#8b949e';ctx.font='10px system-ui';ctx.textAlign='right';
-  ctx.fillText(Math.round(max),pad.l-6,pad.t+12);
-  ctx.fillText(Math.round(min),pad.l-6,H-pad.b+4);
+  // P99 line (latency only)
+  const hasP99 = data[0]&&data[0].p99!=null;
+  if(hasP99){
+    ctx.strokeStyle='#f85149';ctx.lineWidth=1.5;ctx.setLineDash([3,5]);
+    ctx.beginPath();
+    data.forEach(function(d,i){
+      const x=pad.l+i*xs,y=pad.t+(maxV-d.p99)*ys;
+      i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    });
+    ctx.stroke();ctx.setLineDash([]);
+    const lastP99=data[data.length-1].p99;
+    const p99Y=pad.t+(maxV-lastP99)*ys;
+    ctx.fillStyle='#f85149';ctx.font='bold 9px system-ui';ctx.textAlign='left';
+    ctx.fillText('p99 '+Math.round(lastP99),W-pad.r+4,p99Y+3);
+    // Legend
+    ctx.fillStyle=color;ctx.font='9px system-ui';ctx.textAlign='left';
+    ctx.fillText('─ avg',pad.l,pad.t+h+12);
+    ctx.fillStyle='#f85149';ctx.font='9px system-ui';ctx.textAlign='left';
+    ctx.fillText('── p99',pad.l+50,pad.t+h+12);
+  }
 
-  // Unit label (top-left inside chart)
+  // Time hints
+  ctx.fillStyle='#30363d';ctx.font='8px system-ui';ctx.textAlign='right';
+  ctx.fillText('now',W-pad.r,pad.t+h+12);
   ctx.textAlign='left';
-  ctx.fillText(unit,pad.l+4,pad.t-6);
+  ctx.fillText(data.length+'s ago',pad.l,pad.t+h+12);
+
+  // Big current value (top-right)
+  ctx.fillStyle=color;ctx.font='bold 22px system-ui';ctx.textAlign='right';
+  ctx.fillText(Math.round(latest).toLocaleString(),W-pad.r,pad.t+18);
+
+  // Title + unit (top-left)
+  ctx.fillStyle='#c9d1d9';ctx.font='bold 10px system-ui';ctx.textAlign='left';
+  ctx.fillText(title,pad.l,pad.t-10);
+  ctx.fillStyle='#484f58';ctx.font='9px system-ui';ctx.textAlign='right';
+  ctx.fillText(unit,W-pad.r-52,pad.t-10);
+
+  // ── Hover crosshair ──────────────────────────────────────
+  c.onmousemove = function(e){
+    const rect=c.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    if(mx<pad.l||mx>W-pad.r){document.getElementById(tooltipId).style.display='none';return;}
+    const idx=Math.round((mx-pad.l)/xs);
+    if(idx<0||idx>=data.length){document.getElementById(tooltipId).style.display='none';return;}
+    const d=data[idx],v=d.v!=null?d.v:d;
+    const cx=pad.l+idx*xs, cy=pad.t+(maxV-v)*ys;
+
+    // Redraw crosshair dot + vertical line on next frame via overlay? No, just tooltip.
+    const tt=document.getElementById(tooltipId);
+    let html='<b>'+title+'</b> '+Math.round(v).toLocaleString()+' '+unit;
+    if(d.p99!=null) html+='<br><span style="color:#f85149">p99 '+Math.round(d.p99)+' µs</span>';
+    html+='<br><span style="color:#484f58">'+(data.length-idx)+'s ago</span>';
+    tt.innerHTML=html;
+    tt.style.display='block';
+    tt.style.left=Math.min(cx+10,W-120)+'px';
+    tt.style.top=Math.max(cy-30,4)+'px';
+  };
+  c.onmouseleave = function(){document.getElementById(tooltipId).style.display='none';};
 }
 
 // ── Init ───────────────────────────────────────────────────
-// Auto-connect to monitor server (flowmond or flow_e2e embedded)
-doConnect().catch(() => {
-  // Fallback: demo data if no server running
-  doSimulate();
-});
+doConnect().catch(function(){doSimulate();});
 
-// Update simulation data periodically for live charts
-setInterval(()=>{
+// Periodic demo data update
+setInterval(function(){
   if(!eventSource && !paused){
     const m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
     b.published = (b.published||1000) + Math.floor(Math.random()*50-25);
     b.delivered = (b.delivered||2000) + Math.floor(Math.random()*100-50);
-    b.dropped   = Math.random()<0.05 ? b.dropped+1 : b.dropped;
+    b.dropped   = Math.random()<0.05 ? (b.dropped||0)+1 : (b.dropped||0);
     l.avg_us    = Math.max(80, (l.avg_us||150) + Math.floor(Math.random()*20-10));
     l.p99_us    = Math.max(200, (l.p99_us||400) + Math.floor(Math.random()*60-30));
     updateAll();

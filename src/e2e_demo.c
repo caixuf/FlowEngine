@@ -343,6 +343,82 @@ static TaskInterface g_control_vtable = {
 };
 
 /* ══════════════════════════════════════════════════════════ */
+/* PlanningTask: 轨迹规划 (NORMAL, choreo)                      */
+/*   订阅 fusion/localization → 发布 planning/trajectory        */
+/* ══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    TaskBase  base;
+    int       tid;
+    int       plan_count;
+} PlanningTask;
+
+static void planning_on_fusion(const Message* msg, void* user_data) {
+    PlanningTask* plt = (PlanningTask*)user_data;
+    const char* data = (const char*)msg->data;
+    if (!data) return;
+
+    /* Simple trajectory: pass-through with speed limit */
+    float x = 0, speed = 33.0f;
+    if (strstr(data, "pos=(")) sscanf(data, "pos=(%f", &x);
+    if (strstr(data, "speed=")) sscanf(data, "speed=%f", &speed);
+
+    char traj[256];
+    float target_speed = speed > 40.0f ? 40.0f : speed;
+    snprintf(traj, sizeof(traj), "traj=(%.1f,0.0) speed=%.1f lane=center",
+             x + 2.0f, target_speed);
+
+    Message pmsg;
+    msg_init_typed(&pmsg, "planning/trajectory", "planning",
+                   0x3A7B1C2Du, 1, traj, (uint32_t)(strlen(traj) + 1));
+    transport_publish(g_transport, "planning/trajectory", pmsg.data, pmsg.data_size);
+    plt->plan_count++;
+}
+
+static int planning_init(TaskBase* base) {
+    PlanningTask* pt = (PlanningTask*)base;
+
+    transport_subscribe(g_transport, "fusion/localization", planning_on_fusion, pt);
+    transport_advertise(g_transport, "planning/trajectory", 0x3A7B1C2Du);
+
+    discovery_advertise(g_discovery, "fusion/localization", 0xF0ED10C0u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(g_discovery, "planning/trajectory", 0x3A7B1C2Du,
+                        CAP_PUBLISHER, 10.0);
+
+    scheduler_choreo_trigger_on(g_scheduler, pt->tid, "fusion/localization");
+
+    LOG_INFO("planning", "initialized (NORMAL, choreo)");
+    return 0;
+}
+
+static int planning_execute(TaskBase* base) {
+    PlanningTask* pt = (PlanningTask*)base;
+    RateControl* rc = scheduler_get_rate_control(g_scheduler, pt->tid);
+
+    while (g_running && !base->should_stop) {
+        if (!rate_control_acquire(rc)) { usleep(5000); continue; }
+        /* planning_on_fusion callback does the actual work */
+        task_update_heartbeat(base);
+    }
+
+    LOG_INFO("planning", "stopped (%d trajectories)", pt->plan_count);
+    return 0;
+}
+
+static void planning_cleanup(TaskBase* base) {
+    (void)base;
+}
+
+static TaskInterface g_planning_vtable = {
+    .initialize = planning_init,
+    .execute    = planning_execute,
+    .cleanup    = planning_cleanup,
+    .health_check = NULL,
+    .on_message = NULL,
+};
+
+/* ══════════════════════════════════════════════════════════ */
 /* 任务4: 监控 — 定期打印统计 (NORMAL, 1Hz)                   */
 /* ══════════════════════════════════════════════════════════ */
 
@@ -391,18 +467,20 @@ static int monitor_execute(TaskBase* base) {
                transport_remote_peer_count(g_transport));
         printf("└───────────────────────────────────────────┘\n");
 
-        /* ── Export for FlowBoard dashboard ── */
+        /* ── Export for FlowBoard dashboard (atomic write) ── */
         char* topo_json = discovery_export_json(g_discovery);
         if (topo_json) {
-            FILE* jf = fopen(flowengine_state_file(), "w");
+            const char* state_path = flowengine_state_file();
+            char tmp_path[512];
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", state_path);
+            FILE* jf = fopen(tmp_path, "w");
             if (jf) {
-                /* Wrap: replace closing } with metrics */
-                /* Format: {"self":"...","nodes":[...]} */
-                /* We insert metrics before the final } */
+                /* Wrap discovery JSON with metrics + registry */
+                /* discovery_export_json → {"self":"...","nodes":[...]} */
+                /* Output: append ,"metrics":{...},"registry":{...}} */
                 size_t len = strlen(topo_json);
-                /* Write everything except the final } */
-                fwrite(topo_json, 1, len - 1, jf);
-                /* Add metrics */
+                fwrite(topo_json, 1, len - 1, jf); /* strip final } */
+
                 fprintf(jf, ",\"metrics\":{"
                         "\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
                         "\"transport\":{\"local_pub\":%lu,\"remote_pub\":%lu},"
@@ -416,7 +494,7 @@ static int monitor_execute(TaskBase* base) {
                         (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
                         (unsigned long)ls.p99_us);
 
-                /* ── Per-topic stats (QoS) ── */
+                /* Per-topic stats (QoS) */
                 TopicStats tstats[16];
                 int nt = message_bus_get_all_topic_stats(g_bus, tstats, 16);
                 fprintf(jf, ",\"topics\":[");
@@ -435,15 +513,18 @@ static int monitor_execute(TaskBase* base) {
                             tstats[ti].subscriber_count);
                 }
                 fprintf(jf, "]");
-                /* ── Include FlowRegistry data ── */
+
+                /* FlowRegistry: tasks, topics, plugins */
                 char* reg_json = flow_registry_export_json();
                 if (reg_json) {
-                    /* registry starts with {"tasks":...} — append without outer braces */
                     fprintf(jf, ",\"registry\":%s", reg_json);
                     free(reg_json);
                 }
                 fprintf(jf, "}}\n");
                 fclose(jf);
+
+                /* Atomic rename — readers never see partial content */
+                rename(tmp_path, state_path);
             }
             free(topo_json);
         }
@@ -470,14 +551,44 @@ static TaskInterface g_monitor_vtable = {
 /* ══════════════════════════════════════════════════════════ */
 
 int main(int argc, char** argv) {
-    int duration = (argc > 1) ? atoi(argv[1]) : 10;
+    int duration = 10;
+    const char* role = NULL;
+    const char* node_name = "e2e_node";
+
+    /* Parse args: flow_e2e [--role <name>] [duration_sec] */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
+            role = argv[++i];
+            /* Each role gets a unique node name for discovery */
+            char name_buf[64];
+            snprintf(name_buf, sizeof(name_buf), "e2e_%s", role);
+            node_name = strdup(name_buf);
+        } else {
+            duration = atoi(argv[i]);
+            if (duration <= 0) duration = 10;
+        }
+    }
 
     /* ── 日志: 全局初始化 ── */
     log_init(LOG_INFO, NULL);
-    LOG_INFO("e2e", "╔══════════════════════════════════════════╗");
-    LOG_INFO("e2e", "║  FlowEngine End-to-End Demo (%ds)        ║", duration);
-    LOG_INFO("e2e", "║  感知→融合→控制→监控  全组件串联         ║");
-    LOG_INFO("e2e", "╚══════════════════════════════════════════╝");
+    if (role) {
+        LOG_INFO("e2e", "╔══════════════════════════════════════════╗");
+        LOG_INFO("e2e", "║  FlowEngine Multi-Process Demo           ║");
+        LOG_INFO("e2e", "║  Role: %-32s ║", role);
+        LOG_INFO("e2e", "║  Node: %-32s ║", node_name);
+        LOG_INFO("e2e", "╚══════════════════════════════════════════╝");
+        LOG_INFO("e2e", "Start other roles in separate terminals:");
+        if (strcmp(role, "perception") != 0) LOG_INFO("e2e", "  ./build/bin/flow_e2e --role perception");
+        if (strcmp(role, "fusion") != 0)     LOG_INFO("e2e", "  ./build/bin/flow_e2e --role fusion");
+        if (strcmp(role, "control") != 0)    LOG_INFO("e2e", "  ./build/bin/flow_e2e --role control");
+        if (strcmp(role, "planning") != 0)   LOG_INFO("e2e", "  ./build/bin/flow_e2e --role planning");
+        if (strcmp(role, "monitor") != 0)    LOG_INFO("e2e", "  ./build/bin/flow_e2e --role monitor");
+    } else {
+        LOG_INFO("e2e", "╔══════════════════════════════════════════╗");
+        LOG_INFO("e2e", "║  FlowEngine End-to-End Demo (%ds)        ║", duration);
+        LOG_INFO("e2e", "║  感知→融合→控制→规划→监控  全组件串联    ║");
+        LOG_INFO("e2e", "╚══════════════════════════════════════════╝");
+    }
 
     /* ── 序列化: 注册 ADAS 类型 ── */
     adas_msgs_register_all();
@@ -488,7 +599,7 @@ int main(int argc, char** argv) {
     LOG_INFO("e2e", "message_bus: created");
 
     /* ── 发现 ── */
-    g_discovery = discovery_create("e2e_node",
+    g_discovery = discovery_create(node_name,
         CAP_PUBLISHER | CAP_SUBSCRIBER | CAP_FUSION);
     discovery_start(g_discovery);
     LOG_INFO("e2e", "discovery: started");
@@ -503,56 +614,89 @@ int main(int argc, char** argv) {
     scfg.mode = SCHEDULER_MODE_CHOREO;
     g_scheduler = scheduler_create(&scfg);
 
-    /* ── 创建任务 ── */
-    PerceptionTask* pt = (PerceptionTask*)calloc(1, sizeof(PerceptionTask));
-    FusionTask*     ft = (FusionTask*)calloc(1, sizeof(FusionTask));
-    ControlTask*    ct = (ControlTask*)calloc(1, sizeof(ControlTask));
-    MonitorTask*    mt = (MonitorTask*)calloc(1, sizeof(MonitorTask));
+    /* ── 创建任务 (all-in-one 或按 role 单节点) ── */
+    #define ROLE_MATCH(n) (!role || strcmp(role, n) == 0)
 
-    TaskConfig pcfg = { .name="perception", .priority=TASK_PRIORITY_CRITICAL,
-                        .max_frequency_hz=10.0, .auto_restart=false };
-    TaskConfig fcfg = { .name="fusion",     .priority=TASK_PRIORITY_HIGH,
-                        .max_frequency_hz=0, .auto_restart=false };
-    TaskConfig ccfg = { .name="control",    .priority=TASK_PRIORITY_NORMAL,
-                        .max_frequency_hz=100.0, .auto_restart=false };
-    TaskConfig mcfg = { .name="monitor",    .priority=TASK_PRIORITY_NORMAL,
-                        .max_frequency_hz=1.0, .auto_restart=false };
+    PerceptionTask* pt = NULL;
+    FusionTask*     ft = NULL;
+    ControlTask*    ct = NULL;
+    PlanningTask*   plt = NULL;
+    MonitorTask*    mt = NULL;
 
-    task_base_init(&pt->base, &g_perception_vtable, &pcfg);
-    task_base_init(&ft->base, &g_fusion_vtable,     &fcfg);
-    task_base_init(&ct->base, &g_control_vtable,     &ccfg);
-    task_base_init(&mt->base, &g_monitor_vtable,     &mcfg);
-
-    /* ── 注册到调度器 ── */
-    pt->tid = scheduler_register_task(g_scheduler, &pt->base, "perception");
-    ft->tid = scheduler_register_task(g_scheduler, &ft->base, "fusion");
-    g_fusion_tid = ft->tid;
-    ct->tid = scheduler_register_task(g_scheduler, &ct->base, "control");
-    mt->tid = scheduler_register_task(g_scheduler, &mt->base, "monitor");
+    if (ROLE_MATCH("perception")) {
+        pt = (PerceptionTask*)calloc(1, sizeof(PerceptionTask));
+        TaskConfig cfg = { .name="perception", .priority=TASK_PRIORITY_CRITICAL,
+                           .max_frequency_hz=10.0, .auto_restart=false };
+        task_base_init(&pt->base, &g_perception_vtable, &cfg);
+        pt->tid = scheduler_register_task(g_scheduler, &pt->base, "perception");
+    }
+    if (ROLE_MATCH("fusion")) {
+        ft = (FusionTask*)calloc(1, sizeof(FusionTask));
+        TaskConfig cfg = { .name="fusion", .priority=TASK_PRIORITY_HIGH,
+                           .max_frequency_hz=0, .auto_restart=false };
+        task_base_init(&ft->base, &g_fusion_vtable, &cfg);
+        ft->tid = scheduler_register_task(g_scheduler, &ft->base, "fusion");
+        g_fusion_tid = ft->tid;
+    }
+    if (ROLE_MATCH("control")) {
+        ct = (ControlTask*)calloc(1, sizeof(ControlTask));
+        TaskConfig cfg = { .name="control", .priority=TASK_PRIORITY_NORMAL,
+                           .max_frequency_hz=100.0, .auto_restart=false };
+        task_base_init(&ct->base, &g_control_vtable, &cfg);
+        ct->tid = scheduler_register_task(g_scheduler, &ct->base, "control");
+    }
+    if (ROLE_MATCH("planning")) {
+        plt = (PlanningTask*)calloc(1, sizeof(PlanningTask));
+        TaskConfig cfg = { .name="planning", .priority=TASK_PRIORITY_NORMAL,
+                           .max_frequency_hz=10.0, .auto_restart=false };
+        task_base_init(&plt->base, &g_planning_vtable, &cfg);
+        plt->tid = scheduler_register_task(g_scheduler, &plt->base, "planning");
+    }
+    if (ROLE_MATCH("monitor")) {
+        mt = (MonitorTask*)calloc(1, sizeof(MonitorTask));
+        TaskConfig cfg = { .name="monitor", .priority=TASK_PRIORITY_NORMAL,
+                           .max_frequency_hz=1.0, .auto_restart=false };
+        task_base_init(&mt->base, &g_monitor_vtable, &cfg);
+        mt->tid = scheduler_register_task(g_scheduler, &mt->base, "monitor");
+    }
 
     scheduler_set_choreo_bus(g_scheduler, g_bus);
     scheduler_start(g_scheduler);
     LOG_INFO("e2e", "scheduler: %d tasks in CHOREO mode", scheduler_task_count(g_scheduler));
 
-    /* ── FlowRegistry: 注册所有组件 ── */
-    flow_registry_register_task("perception", "LiDAR+GPS sensor simulator",
-        "libfake_perception_task.so",
-        (const char*[]){NULL},
-        (const char*[]){"sensor/lidar","sensor/gps",NULL}, NULL);
-    flow_registry_register_task("fusion", "Time-aligned sensor fusion",
-        "libflowcoro_task.so",
-        (const char*[]){"sensor/lidar","sensor/gps",NULL},
-        (const char*[]){"fusion/localization",NULL}, NULL);
-    flow_registry_register_task("control", "Driving decision maker",
-        "libfake_control_task.so",
-        (const char*[]){"fusion/localization",NULL},
-        (const char*[]){"control/cmd",NULL}, NULL);
-    flow_registry_register_task("monitor", "System stats reporter",
-        "libexample_task.so", NULL, NULL, NULL);
+    /* ── FlowRegistry: 注册所用组件 ── */
+    if (ROLE_MATCH("perception"))
+        flow_registry_register_task("perception", "LiDAR+GPS sensor simulator",
+            "libfake_perception_task.so",
+            (const char*[]){NULL},
+            (const char*[]){"sensor/lidar","sensor/gps",NULL}, NULL);
+    if (ROLE_MATCH("fusion"))
+        flow_registry_register_task("fusion", "Time-aligned sensor fusion",
+            "libflowcoro_task.so",
+            (const char*[]){"sensor/lidar","sensor/gps",NULL},
+            (const char*[]){"fusion/localization",NULL}, NULL);
+    if (ROLE_MATCH("control"))
+        flow_registry_register_task("control", "Driving decision maker",
+            "libfake_control_task.so",
+            (const char*[]){"fusion/localization",NULL},
+            (const char*[]){"control/cmd",NULL}, NULL);
+    if (ROLE_MATCH("planning"))
+        flow_registry_register_task("planning", "Trajectory planner",
+            "libplanning_task.so",
+            (const char*[]){"fusion/localization",NULL},
+            (const char*[]){"planning/trajectory",NULL}, NULL);
+    if (ROLE_MATCH("monitor"))
+        flow_registry_register_task("monitor", "System stats reporter",
+            "libexample_task.so", NULL, NULL, NULL);
 
-    flow_registry_register_topic("sensor/lidar", LIDARFRAME_TYPE_ID, NULL);
-    flow_registry_register_topic("sensor/gps", GPSDATA_TYPE_ID, NULL);
-    flow_registry_register_topic("fusion/localization", 0xF0ED10C0u, NULL);
+    if (ROLE_MATCH("perception")) {
+        flow_registry_register_topic("sensor/lidar", LIDARFRAME_TYPE_ID, NULL);
+        flow_registry_register_topic("sensor/gps", GPSDATA_TYPE_ID, NULL);
+    }
+    if (ROLE_MATCH("fusion") || ROLE_MATCH("control") || ROLE_MATCH("planning"))
+        flow_registry_register_topic("fusion/localization", 0xF0ED10C0u, NULL);
+    if (ROLE_MATCH("planning"))
+        flow_registry_register_topic("planning/trajectory", 0x3A7B1C2Du, NULL);
 
     flow_registry_register_plugin("fake_perception", "libfake_perception_task.so",
         (const char*[]){"perception",NULL}, (const char*[]){"LidarFrame","GpsData",NULL});
