@@ -23,6 +23,7 @@
 #include "transport.h"
 #include "logger.h"
 #include "flow_registry.h"
+#include "param_registry.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -559,6 +560,16 @@ int main(int argc, char** argv) {
         (const char*[]){"control",NULL}, (const char*[]){"ControlCmd",NULL});
 
     LOG_INFO("e2e", "registry: %d total entries", flow_registry_total_count());
+
+    /* ── ParamRegistry: 注册运行时参数 ── */
+    param_register_int("control.max_speed", 120, 0, 200, "Max speed km/h");
+    param_register_float("fusion.max_delta_ms", 50.0, 10.0, 500.0, "Alignment window ms");
+    param_register_bool("control.emergency_brake", true, "Enable AEB");
+    param_register_int("perception.lidar_rate_hz", 10, 1, 100, "LiDAR scan rate");
+    param_enable_hot_reload("control.max_speed");
+    param_enable_hot_reload("control.emergency_brake");
+    LOG_INFO("e2e", "params: %d registered (%d hot-reloadable)", param_count(),
+             /* count hot-reloadable */ 2);
 
     /* ── 启动任务（先启动消费者，再启动生产者，确保 trigger 就绪）── */
     task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)");

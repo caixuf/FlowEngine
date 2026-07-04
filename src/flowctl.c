@@ -22,6 +22,8 @@
 #include "logger.h"
 #include "scheduler.h"
 #include "flow_registry.h"
+#include "param_registry.h"
+#include "error_codes.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -395,6 +397,12 @@ int main(int argc, char** argv) {
     const char* arg1 = argc > 2 ? argv[2] : NULL;
     const char* arg2 = argc > 3 ? argv[3] : NULL;
 
+    /* Init demo params for standalone usage */
+    param_register_int("control.max_speed", 120, 0, 200, "Max speed km/h");
+    param_register_float("fusion.max_delta_ms", 50.0, 10.0, 500.0, "Alignment window ms");
+    param_register_bool("control.emergency_brake", true, "Enable AEB");
+    param_register_int("perception.lidar_rate_hz", 10, 1, 100, "LiDAR scan rate");
+
     /* ── list ── */
     if (strcmp(cmd, "list") == 0) {
         if (!arg1) { print_usage(); return 1; }
@@ -442,6 +450,67 @@ int main(int argc, char** argv) {
 
     /* ── schema ── */
     if (strcmp(cmd, "schema") == 0) return cmd_schema(arg1);
+
+    /* ── param ── */
+    if (strcmp(cmd, "param") == 0) {
+        if (!arg1) { fprintf(stderr, "Usage: flowctl param list|get|set [name] [value]\n"); return 1; }
+        if (strcmp(arg1, "list") == 0) {
+            ParamEntry params[64];
+            int n = param_list_all(params, 64);
+            printf("%-30s %-8s %-12s %s\n", "NAME", "TYPE", "VALUE", "DESC");
+            for (int i = 0; i < n; i++) {
+                char val[64];
+                switch (params[i].type) {
+                    case PARAM_INT: snprintf(val, 64, "%ld", (long)params[i].current_value.int_val); break;
+                    case PARAM_FLOAT: snprintf(val, 64, "%.1f", params[i].current_value.float_val); break;
+                    case PARAM_BOOL: snprintf(val, 64, "%s", params[i].current_value.bool_val ? "true" : "false"); break;
+                    case PARAM_STRING: snprintf(val, 64, "%s", params[i].current_value.str_val); break;
+                    default: snprintf(val, 64, "?"); break;
+                }
+                printf("  %-28s %-8s %-12s %s%s\n", params[i].name,
+                    params[i].type == PARAM_INT ? "int" : params[i].type == PARAM_FLOAT ? "float" : params[i].type == PARAM_BOOL ? "bool" : "str",
+                    val, params[i].description, params[i].hot_reload ? " 🔥" : "");
+            }
+            printf("  Total: %d params\n", n);
+            return 0;
+        }
+        if (strcmp(arg1, "get") == 0) {
+            if (!arg2) { fprintf(stderr, "Usage: flowctl param get <name>\n"); return 1; }
+            const ParamEntry* e = param_get_entry(arg2);
+            if (!e) { printf("Param '%s' not found\n", arg2); return 1; }
+            printf("%s = ", e->name);
+            switch (e->type) {
+                case PARAM_INT: printf("%ld\n", (long)e->current_value.int_val); break;
+                case PARAM_FLOAT: printf("%.1f\n", e->current_value.float_val); break;
+                case PARAM_BOOL: printf("%s\n", e->current_value.bool_val ? "true" : "false"); break;
+                case PARAM_STRING: printf("%s\n", e->current_value.str_val); break;
+                default: printf("?\n"); break;
+            }
+            printf("  type: %s  range: [", e->type == PARAM_INT ? "int" : e->type == PARAM_FLOAT ? "float" : e->type == PARAM_BOOL ? "bool" : "str");
+            if (e->type == PARAM_INT) printf("%ld,%ld", (long)e->min_value.int_val, (long)e->max_value.int_val);
+            else if (e->type == PARAM_FLOAT) printf("%.1f,%.1f", e->min_value.float_val, e->max_value.float_val);
+            printf("]  hot_reload: %s\n  %s\n", e->hot_reload ? "yes" : "no", e->description);
+            return 0;
+        }
+        if (strcmp(arg1, "set") == 0) {
+            if (!arg2 || !argv[4]) { fprintf(stderr, "Usage: flowctl param set <name> <value>\n"); return 1; }
+            const ParamEntry* e = param_get_entry(arg2);
+            if (!e) { printf("Param '%s' not found\n", arg2); return 1; }
+            int ret;
+            switch (e->type) {
+                case PARAM_INT: ret = param_set_int(arg2, atol(argv[4])); break;
+                case PARAM_FLOAT: ret = param_set_float(arg2, atof(argv[4])); break;
+                case PARAM_BOOL: ret = param_set_bool(arg2, strcmp(argv[4],"true")==0||strcmp(argv[4],"1")==0); break;
+                case PARAM_STRING: ret = param_set_string(arg2, argv[4]); break;
+                default: ret = -1; break;
+            }
+            if (ret == 0) printf("✓ %s updated\n", arg2);
+            else printf("✗ failed (%s)\n", err_str(ret));
+            return ret;
+        }
+        fprintf(stderr, "Usage: flowctl param list|get|set [name] [value]\n");
+        return 1;
+    }
 
     /* ── registry ── */
     if (strcmp(cmd, "registry") == 0) {
