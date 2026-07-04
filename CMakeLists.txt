@@ -153,6 +153,7 @@ set(CORE_SOURCES
     src/core/fusion.c
     src/core/proto_support.c
     src/core/transport.c
+    src/core/flow_registry.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────

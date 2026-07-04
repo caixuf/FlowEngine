@@ -22,6 +22,7 @@
 #include "fusion.h"
 #include "transport.h"
 #include "logger.h"
+#include "flow_registry.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -433,6 +434,13 @@ static int monitor_execute(TaskBase* base) {
                             tstats[ti].subscriber_count);
                 }
                 fprintf(jf, "]");
+                /* ── Include FlowRegistry data ── */
+                char* reg_json = flow_registry_export_json();
+                if (reg_json) {
+                    /* registry starts with {"tasks":...} — append without outer braces */
+                    fprintf(jf, ",\"registry\":%s", reg_json);
+                    free(reg_json);
+                }
                 fprintf(jf, "}}\n");
                 fclose(jf);
             }
@@ -524,6 +532,33 @@ int main(int argc, char** argv) {
     scheduler_set_choreo_bus(g_scheduler, g_bus);
     scheduler_start(g_scheduler);
     LOG_INFO("e2e", "scheduler: %d tasks in CHOREO mode", scheduler_task_count(g_scheduler));
+
+    /* ── FlowRegistry: 注册所有组件 ── */
+    flow_registry_register_task("perception", "LiDAR+GPS sensor simulator",
+        "libfake_perception_task.so",
+        (const char*[]){NULL},
+        (const char*[]){"sensor/lidar","sensor/gps",NULL}, NULL);
+    flow_registry_register_task("fusion", "Time-aligned sensor fusion",
+        "libflowcoro_task.so",
+        (const char*[]){"sensor/lidar","sensor/gps",NULL},
+        (const char*[]){"fusion/localization",NULL}, NULL);
+    flow_registry_register_task("control", "Driving decision maker",
+        "libfake_control_task.so",
+        (const char*[]){"fusion/localization",NULL},
+        (const char*[]){"control/cmd",NULL}, NULL);
+    flow_registry_register_task("monitor", "System stats reporter",
+        "libexample_task.so", NULL, NULL, NULL);
+
+    flow_registry_register_topic("sensor/lidar", LIDARFRAME_TYPE_ID, NULL);
+    flow_registry_register_topic("sensor/gps", GPSDATA_TYPE_ID, NULL);
+    flow_registry_register_topic("fusion/localization", 0xF0ED10C0u, NULL);
+
+    flow_registry_register_plugin("fake_perception", "libfake_perception_task.so",
+        (const char*[]){"perception",NULL}, (const char*[]){"LidarFrame","GpsData",NULL});
+    flow_registry_register_plugin("fake_control", "libfake_control_task.so",
+        (const char*[]){"control",NULL}, (const char*[]){"ControlCmd",NULL});
+
+    LOG_INFO("e2e", "registry: %d total entries", flow_registry_total_count());
 
     /* ── 启动任务（先启动消费者，再启动生产者，确保 trigger 就绪）── */
     task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)");

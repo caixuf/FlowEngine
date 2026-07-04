@@ -21,6 +21,7 @@
 #include "bag.h"
 #include "logger.h"
 #include "scheduler.h"
+#include "flow_registry.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,37 +58,50 @@ static void print_version(void) {
 /* ── list tasks ──────────────────────────────────────────── */
 
 static int cmd_list_tasks(void) {
-    printf("Tasks: (connect to running FlowEngine for live data)\n");
-    printf("  %-20s %-12s %-8s %s\n", "NAME", "STATE", "PRIO", "TOPICS");
-    printf("  %-20s %-12s %-8s %s\n", "────", "─────", "────", "──────");
+    printf("Tasks:\n");
+    printf("  %-20s %-30s %s\n", "NAME", "DESCRIPTION", "I/O");
+    printf("  %-20s %-30s %s\n", "────", "───────────", "───");
 
-    /* Try to read from discovery JSON */
+    /* Try JSON file first */
     FILE* f = fopen("/tmp/flow_topology.json", "r");
-    if (!f) {
-        printf("  (no running FlowEngine found — start flow_e2e first)\n");
-        return 0;
-    }
-
-    /* Simple parse: extract node names */
-    char buf[8192];
-    size_t n = fread(buf, 1, sizeof(buf)-1, f);
-    fclose(f);
-    buf[n] = '\0';
-
-    /* Extract "name" fields */
-    const char* p = buf;
-    int count = 0;
-    while ((p = strstr(p, "\"name\":\"")) && count < 20) {
-        p += 8;
-        char name[64] = {0};
-        int i = 0;
-        while (*p && *p != '"' && i < 63) name[i++] = *p++;
-        if (name[0]) {
-            printf("  %-20s %-12s %-8s %s\n", name, "RUNNING", "—", "—");
-            count++;
+    if (f) {
+        char buf[32768];
+        size_t n = fread(buf, 1, sizeof(buf)-1, f);
+        fclose(f);
+        buf[n] = '\0';
+        /* Parse registry tasks */
+        const char* r = strstr(buf, "\"registry\":");
+        if (r) {
+            const char* tp = strstr(r, "\"tasks\":[");
+            if (tp) {
+                const char* p = tp + 9;
+                int count = 0;
+                while (*p && *p != ']' && count < 20) {
+                    const char* nm = strstr(p, "\"name\":\"");
+                    if (!nm || nm > strstr(p, "}]")) break;
+                    nm += 8;
+                    char name[64] = {0}, desc[256] = {0};
+                    int i = 0; while (*nm && *nm != '"' && i < 63) name[i++] = *nm++;
+                    const char* ds = strstr(nm, "\"desc\":\"");
+                    if (ds) { ds += 8; i = 0; while (*ds && *ds != '"' && i < 255) desc[i++] = *ds++; }
+                    printf("  %-20s %-30s %s\n", name, desc, "—");
+                    p = strstr(nm, "},{");
+                    if (!p) break;
+                    p += 3;
+                    count++;
+                }
+                printf("\n  Total: %d tasks (from registry)\n", count);
+                return 0;
+            }
         }
     }
-    printf("\n  Total: %d tasks\n", count);
+
+    /* Fallback: local registry */
+    TaskMeta tasks[64];
+    int n = flow_registry_list_tasks(tasks, 64);
+    for (int i = 0; i < n; i++)
+        printf("  %-20s %-30s in:%d out:%d\n", tasks[i].name, tasks[i].description, tasks[i].input_count, tasks[i].output_count);
+    printf("\n  Total: %d tasks\n", n);
     return 0;
 }
 
@@ -387,10 +401,18 @@ int main(int argc, char** argv) {
         if (strcmp(arg1, "tasks") == 0)   return cmd_list_tasks();
         if (strcmp(arg1, "topics") == 0)  return cmd_list_topics();
         if (strcmp(arg1, "plugins") == 0) {
-            printf("Plugins: (connect to running launcher)\n");
-            printf("  example_task, reactive_task, flowcoro_task,\n");
-            printf("  fake_perception_task, fake_control_task,\n");
-            printf("  network_service_task, data_processor_task\n");
+            PluginMeta plugins[32];
+            int n = flow_registry_list_plugins(plugins, 32);
+            if (n == 0) {
+                printf("Plugins: (connect to running launcher for live data)\n");
+                printf("  example_task, reactive_task, flowcoro_task,\n");
+                printf("  fake_perception_task, fake_control_task\n");
+            } else {
+                printf("%-20s %-40s %s\n", "NAME", "PATH", "TASKS");
+                for (int i = 0; i < n; i++)
+                    printf("  %-18s %-40s %d tasks\n", plugins[i].name, plugins[i].path, plugins[i].task_count);
+                printf("  Total: %d plugins\n", n);
+            }
             return 0;
         }
         print_usage(); return 1;
@@ -420,6 +442,38 @@ int main(int argc, char** argv) {
 
     /* ── schema ── */
     if (strcmp(cmd, "schema") == 0) return cmd_schema(arg1);
+
+    /* ── registry ── */
+    if (strcmp(cmd, "registry") == 0) {
+        /* Try JSON file first (live data from e2e) */
+        FILE* f = fopen("/tmp/flow_topology.json", "r");
+        if (f) {
+            char buf[32768];
+            size_t n = fread(buf, 1, sizeof(buf)-1, f);
+            fclose(f);
+            buf[n] = '\0';
+            const char* r = strstr(buf, "\"registry\":");
+            if (r) {
+                /* extract just the registry JSON object */
+                const char* start = strchr(r, '{');
+                if (start) {
+                    int depth = 1;
+                    const char* end = start + 1;
+                    while (*end && depth > 0) {
+                        if (*end == '{') depth++;
+                        else if (*end == '}') depth--;
+                        end++;
+                    }
+                    printf("%.*s\n", (int)(end - start), start);
+                    return 0;
+                }
+            }
+        }
+        /* Fallback: local registry */
+        char* json = flow_registry_export_json();
+        if (json) { printf("%s\n", json); free(json); }
+        return 0;
+    }
 
     /* ── dashboard ── */
     if (strcmp(cmd, "dashboard") == 0) return cmd_dashboard();
