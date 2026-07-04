@@ -708,10 +708,12 @@ function init3DScene(){
   var gnd=new THREE.Mesh(new THREE.PlaneGeometry(160,160),new THREE.MeshStandardMaterial({color:0x2a2a3e}));
   gnd.rotation.x=-Math.PI/2;scene3d.add(gnd);
   // Grid
-  scene3d.add(new THREE.GridHelper(160,32,0x334,0x223));
+  var grid=new THREE.GridHelper(160,32,0x334,0x223);scene3d.add(grid);
   // Roads
-  function road(w,l,x,z,r){var m=new THREE.Mesh(new THREE.PlaneGeometry(w,l),new THREE.MeshStandardMaterial({color:0x445}));m.rotation.x=-Math.PI/2;if(r)m.rotation.z=r;m.position.set(x,0.02,z);scene3d.add(m);}
-  road(14,120,0,0,0);road(14,120,0,0,Math.PI/2);
+  var roads=[];
+  function road(w,l,x,z,r){var m=new THREE.Mesh(new THREE.PlaneGeometry(w,l),new THREE.MeshStandardMaterial({color:0x445}));m.rotation.x=-Math.PI/2;if(r)m.rotation.z=r;m.position.set(x,0.02,z);scene3d.add(m);roads.push(m);}
+  road(160,14,0,0,Math.PI/2);
+  window._followGround=[gnd,grid].concat(roads);
   // Car
   var cg=new THREE.Group();
   var body=new THREE.Mesh(new THREE.BoxGeometry(5,1.3,2.3),new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.5,roughness:0.2,emissive:0x001122}));
@@ -727,20 +729,61 @@ function init3DScene(){
   lgeo.setAttribute("position",new THREE.BufferAttribute(lpts,3));
   var lcloud=new THREE.Points(lgeo,new THREE.PointsMaterial({color:0xf44,size:0.3}));
   scene3d.add(lcloud);window._lidarCloud=lcloud;
+  // Obstacle box pool (reused; filled from scene.obstacles each frame)
+  window._obsPool=[];
+  var obsColors={car:0xffaa33,truck:0xff5533,pedestrian:0x33ff88,cyclist:0x33ddff};
+  for(var oi=0;oi<8;oi++){
+    var om=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),
+      new THREE.MeshStandardMaterial({color:0xffaa33,metalness:0.3,roughness:0.5,emissive:0x110800}));
+    om.visible=false;scene3d.add(om);window._obsPool.push(om);
+  }
+  window._obsColors=obsColors;
   // Animate
   var an3d=0;
   function anim3D(){
     requestAnimationFrame(anim3D);if(!sceneReady)return;an3d++;
-    // Camera orbit
+    // Camera orbit (follows ego along the road)
+    var followX=(window._carGroup?window._carGroup.position.x:0);
     var a=an3d*0.003,r=22+Math.sin(an3d*0.01)*8;
-    camera3d.position.x=Math.cos(a)*r;camera3d.position.z=Math.sin(a)*r+4;
-    camera3d.position.y=15+Math.sin(an3d*0.015)*5;camera3d.lookAt(0,1.5,4);
+    camera3d.position.x=followX+Math.cos(a)*r;camera3d.position.z=Math.sin(a)*r+4;
+    camera3d.position.y=15+Math.sin(an3d*0.015)*5;camera3d.lookAt(followX,1.5,4);
+    // Ground/grid/road follow ego so the world looks continuous
+    if(window._followGround){var gx=Math.round(followX/10)*10;
+      for(var gi=0;gi<window._followGround.length;gi++)window._followGround[gi].position.x=gx;}
     // Update car position
-    var v=(topoData.metrics||{}).vehicle;if(v&&window._carGroup){
-      var cx=v.x||0;window._carGroup.position.x=cx;window._carGroup.position.z=4+(v.y||0)*5;
+    var m=(topoData.metrics||{});var scn=m.scene;var v=m.vehicle;
+    var egoX=0,egoZ=4;
+    if(scn&&scn.ego){
+      egoX=scn.ego.x||0;egoZ=4;
+      if(window._carGroup){window._carGroup.position.x=egoX;window._carGroup.position.z=egoZ;
+        window._carGroup.rotation.y=-(scn.ego.heading||0);}
+    }else if(v&&window._carGroup){
+      egoX=v.x||0;window._carGroup.position.x=egoX;window._carGroup.position.z=egoZ=4+(v.y||0)*5;
+    }
+    // Update obstacles from real scene data (ego-relative: x fwd, y left)
+    if(window._obsPool){
+      var obs=(scn&&scn.obstacles)?scn.obstacles:[];
+      for(var oi=0;oi<window._obsPool.length;oi++){
+        var om=window._obsPool[oi];
+        if(oi<obs.length){var o=obs[oi];
+          var L=o.len||4,W=o.wid||2,H=(o.type==="pedestrian"||o.type==="cyclist")?1.7:1.4;
+          om.scale.set(L,H,W);
+          om.position.set(egoX+(o.x||0),H/2+0.2,egoZ-(o.y||0));
+          var c=(window._obsColors&&window._obsColors[o.type])||0xffaa33;
+          om.material.color.setHex(c);om.visible=true;
+        }else om.visible=false;
+      }
     }
     // Update LiDAR
-    if(window._lidarCloud&&v){var pos=window._lidarCloud.geometry.attributes.position.array;var cx2=v.x||0,cy2=v.y||0;
+    if(window._lidarCloud&&scn&&scn.lidar&&scn.lidar.length){
+      var pos=window._lidarCloud.geometry.attributes.position.array;var n=scn.lidar.length;
+      for(var i=0;i<200&&i*3<pos.length;i++){
+        if(i<n){var pt=scn.lidar[i];
+          pos[i*3]=egoX+(pt[0]||0);pos[i*3+1]=(pt[2]||0)+0.1;pos[i*3+2]=egoZ-(pt[1]||0);
+        }else{pos[i*3]=egoX;pos[i*3+1]=-5;pos[i*3+2]=egoZ;}
+      }
+      window._lidarCloud.geometry.attributes.position.needsUpdate=true;
+    }else if(window._lidarCloud&&v){var pos=window._lidarCloud.geometry.attributes.position.array;var cx2=v.x||0,cy2=v.y||0;
       for(var i=0;i<200&&i*3<pos.length;i++){var aa=Math.random()*Math.PI*2,dd=5+Math.random()*25;pos[i*3]=cx2+Math.cos(aa)*dd;pos[i*3+1]=Math.random()*4;pos[i*3+2]=4+cy2*5+Math.sin(aa)*dd;}
       window._lidarCloud.geometry.attributes.position.needsUpdate=true;}
     renderer3d.render(scene3d,camera3d);
@@ -853,19 +896,36 @@ function draw2D(){
   ctx2d.fillStyle="#333";ctx2d.font="9px monospace";
   for(var d=20;d<=120;d+=20){ctx2d.fillText(d+"m",carX+2,carY-d*scale);}
 
-  // ── LiDAR points around car ──
+  // ── LiDAR points around car (real scene data if present) ──
+  var scn2=(topoData.metrics||{}).scene;
   ctx2d.fillStyle="#f442";
-  for(var i=0;i<80;i++){
-    var a=Math.random()*Math.PI*2, r=2+Math.random()*30;
-    ctx2d.beginPath();ctx2d.arc(carX+Math.cos(a)*r*scale,carY-Math.sin(a)*r*scale,1.5,0,Math.PI*2);ctx2d.fill();
+  if(scn2&&scn2.lidar&&scn2.lidar.length){
+    scn2.lidar.forEach(function(pt){
+      var px=carX-(pt[1]||0)*scale, py=carY-(pt[0]||0)*scale;
+      ctx2d.beginPath();ctx2d.arc(px,py,1.5,0,Math.PI*2);ctx2d.fill();
+    });
+  }else{
+    for(var i=0;i<80;i++){
+      var a=Math.random()*Math.PI*2, r=2+Math.random()*30;
+      ctx2d.beginPath();ctx2d.arc(carX+Math.cos(a)*r*scale,carY-Math.sin(a)*r*scale,1.5,0,Math.PI*2);ctx2d.fill();
+    }
   }
 
-  // ── Surrounding vehicles (static props) ──
-  [[-30,-15],[25,-12],[-20,25],[28,20]].forEach(function(p){
-    var bx=carX+p[0]*scale,by=carY-p[1]*scale;
-    ctx2d.fillStyle="#334";ctx2d.fillRect(bx-6,by-3,12,6);
-    ctx2d.fillStyle="#225";ctx2d.fillRect(bx-3,by-1.5,6,3);
-  });
+  // ── Surrounding vehicles/obstacles (real scene data if present) ──
+  if(scn2&&scn2.obstacles&&scn2.obstacles.length){
+    scn2.obstacles.forEach(function(o){
+      var bx=carX-(o.y||0)*scale, by=carY-(o.x||0)*scale;
+      var Wd=(o.wid||2)*scale, L=(o.len||4)*scale;
+      ctx2d.fillStyle=(o.type==="pedestrian")?"#3f8":"#c83";
+      ctx2d.fillRect(bx-Wd/2,by-L/2,Wd,L);
+    });
+  }else{
+    [[-30,-15],[25,-12],[-20,25],[28,20]].forEach(function(p){
+      var bx=carX+p[0]*scale,by=carY-p[1]*scale;
+      ctx2d.fillStyle="#334";ctx2d.fillRect(bx-6,by-3,12,6);
+      ctx2d.fillStyle="#225";ctx2d.fillRect(bx-3,by-1.5,6,3);
+    });
+  }
 
   // ── Ego vehicle ──
   var v=(topoData.metrics||{}).vehicle||{speed:0,target_speed:0,throttle:0,brake:0,x:0,y:0,error:0};
