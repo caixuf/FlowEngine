@@ -16,6 +16,7 @@
 #include "fusion.h"
 #include "message_bus.h"
 #include "error_codes.h"
+#include "adas_msgs_gen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,80 @@ static void test_type_registry(void) {
     TEST("type registry lookup not found");
     found = serializer_lookup_type(0xCAFEBABE);
     ASSERT(found == NULL, "lookup should return NULL for unknown type");
+
+    PASS();
+}
+
+/* 字段级 schema：验证 codegen 生成的字段元信息与 schema hash */
+static void test_schema_metadata(void) {
+    LidarFrame_register_type();
+
+    TEST("schema hash generated (non-zero)");
+    ASSERT(LIDARFRAME_SCHEMA_HASH != 0, "schema hash should be non-zero");
+
+    TEST("registry carries field metadata");
+    const TypeRegistryEntry* e = serializer_lookup_by_name("LidarFrame");
+    ASSERT(e != NULL, "LidarFrame should be registered");
+    ASSERT(e->schema_hash == LIDARFRAME_SCHEMA_HASH, "schema_hash mismatch");
+    ASSERT_EQ(e->field_count, 6, "LidarFrame should have 6 fields");
+    ASSERT(e->fields != NULL, "fields table should be present");
+
+    TEST("field descriptor content");
+    ASSERT(strcmp(e->fields[0].name, "x") == 0, "field[0] name should be x");
+    ASSERT(e->fields[0].kind == FIELD_KIND_FLOAT, "field[0] should be float");
+    ASSERT(e->fields[4].kind == FIELD_KIND_UINT, "point_count should be uint");
+    ASSERT(e->fields[0].array_len == 1, "scalar field array_len should be 1");
+
+    TEST("nested/array field metadata (ObstacleList)");
+    ObstacleList_register_type();
+    const TypeRegistryEntry* ol = serializer_lookup_by_name("ObstacleList");
+    ASSERT(ol != NULL, "ObstacleList should be registered");
+    /* obstacles[8] is a nested array field */
+    bool found_nested_array = false;
+    for (uint16_t i = 0; i < ol->field_count; i++) {
+        if (ol->fields[i].kind == FIELD_KIND_NESTED && ol->fields[i].array_len == 8) {
+            found_nested_array = true;
+        }
+    }
+    ASSERT(found_nested_array, "should find nested array field obstacles[8]");
+
+    PASS();
+}
+
+/* 跨版本兼容性策略判定 */
+static void test_schema_compat(void) {
+    /* 注册一个已知 hash/version 的基准类型 */
+    static const FieldDesc dummy_fields[] = {
+        { "a", FIELD_KIND_UINT, 0, 4, 1 },
+    };
+    TypeRegistryEntry base = {
+        .type_id = 0x11112222, .schema_version = 2, .struct_size = 4,
+        .type_name = "CompatType", .schema_hash = 0xAABBCCDD,
+        .fields = dummy_fields, .field_count = 1,
+    };
+    ASSERT_EQ(serializer_register_type(&base), 0, "register base failed");
+
+    TEST("compat: unknown type");
+    ASSERT_EQ(serializer_check_compat("NoSuchType", 1, 0x1234), SCHEMA_UNKNOWN,
+              "unregistered type should be UNKNOWN");
+
+    TEST("compat: identical hash");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0xAABBCCDD), SCHEMA_IDENTICAL,
+              "same hash should be IDENTICAL");
+
+    TEST("compat: evolved (diff version + diff hash)");
+    ASSERT_EQ(serializer_check_compat("CompatType", 3, 0x99887766), SCHEMA_COMPATIBLE,
+              "diff version+hash should be COMPATIBLE");
+
+    TEST("compat: breaking (same version + diff hash)");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0x99887766), SCHEMA_INCOMPATIBLE,
+              "same version diff hash should be INCOMPATIBLE");
+
+    TEST("compat: missing hash falls back to version");
+    ASSERT_EQ(serializer_check_compat("CompatType", 2, 0), SCHEMA_IDENTICAL,
+              "no hash + same version should be IDENTICAL");
+    ASSERT_EQ(serializer_check_compat("CompatType", 5, 0), SCHEMA_COMPATIBLE,
+              "no hash + diff version should be COMPATIBLE");
 
     PASS();
 }
@@ -558,6 +633,8 @@ int main(void) {
     printf("═══ Serializer ═══\n");
     test_fnv1a_hash();
     test_type_registry();
+    test_schema_metadata();
+    test_schema_compat();
     test_serialize_roundtrip();
     test_msg_cast();
     test_endian_detection();

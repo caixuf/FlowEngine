@@ -319,13 +319,16 @@ static int cmd_bag_info(const char* path) {
         printf("    %-30s %" PRIu64 " msgs\n", topics[i], counts[i]);
     }
 
-    /* Type info for first topic */
-    if (n > 0) {
+    /* Type info per topic (v2 format) */
+    printf("\n  Type info:\n");
+    for (int i = 0; i < n && i < 10; i++) {
         uint32_t type_id;
         uint8_t schema_ver;
-        if (bag_reader_get_type_info(r, topics[0], &type_id, &schema_ver) == 0) {
-            printf("  Type:       %s (id=0x%08x, schema v%u)\n",
-                   topics[0], type_id, schema_ver);
+        if (bag_reader_get_type_info(r, topics[i], &type_id, &schema_ver) == 0) {
+            printf("    %-30s id=0x%08x  schema v%u\n",
+                   topics[i], type_id, schema_ver);
+        } else {
+            printf("    %-30s (no type info)\n", topics[i]);
         }
     }
 
@@ -363,10 +366,22 @@ static int cmd_schema(const char* type_name) {
     printf("Type: %s\n\n", e->type_name);
     printf("  Type ID:        0x%08x\n", e->type_id);
     printf("  Schema Version: %u\n", e->schema_version);
+    printf("  Schema Hash:    0x%08x\n", e->schema_hash);
     printf("  Struct Size:    %zu bytes\n", e->struct_size);
     printf("  Serializer:     %s\n", e->serialize ? "yes" : "no");
     printf("  Deserializer:   %s\n", e->deserialize ? "yes" : "no");
     printf("  Endian Swap:    %s\n", e->endian_swap ? "yes" : "no");
+    if (e->fields && e->field_count > 0) {
+        printf("\n  Fields (%u):\n", e->field_count);
+        printf("    %-20s %-8s %-8s %-8s %s\n",
+               "name", "kind", "offset", "elem_sz", "array");
+        for (uint16_t i = 0; i < e->field_count; i++) {
+            const FieldDesc* f = &e->fields[i];
+            printf("    %-20s %-8s %-8u %-8u %u\n",
+                   f->name, field_kind_str(f->kind),
+                   f->offset, f->elem_size, f->array_len);
+        }
+    }
     return 0;
 }
 

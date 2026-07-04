@@ -133,6 +133,52 @@ int serializer_type_count(void) {
     return c;
 }
 
+/* ── 跨版本 schema 兼容性 ───────────────────────────────── */
+
+SchemaCompat serializer_check_compat(const char* type_name,
+                                     uint8_t their_version,
+                                     uint32_t their_hash) {
+    const TypeRegistryEntry* e = serializer_lookup_by_name(type_name);
+    if (!e) return SCHEMA_UNKNOWN;
+
+    /* 若双方都提供了 schema_hash 且一致 → 完全相同 */
+    if (their_hash != 0 && e->schema_hash != 0 && their_hash == e->schema_hash) {
+        return SCHEMA_IDENTICAL;
+    }
+
+    /* hash 缺失时退化为按版本判定 */
+    if (their_hash == 0 || e->schema_hash == 0) {
+        return (their_version == e->schema_version) ? SCHEMA_IDENTICAL
+                                                    : SCHEMA_COMPATIBLE;
+    }
+
+    /* hash 不同：版本不同 = 演进（尽力兼容）；版本相同 = 破坏性变更 */
+    if (their_version != e->schema_version) return SCHEMA_COMPATIBLE;
+    return SCHEMA_INCOMPATIBLE;
+}
+
+const char* schema_compat_str(SchemaCompat c) {
+    switch (c) {
+        case SCHEMA_UNKNOWN:      return "unknown";
+        case SCHEMA_IDENTICAL:    return "identical";
+        case SCHEMA_COMPATIBLE:   return "compatible";
+        case SCHEMA_INCOMPATIBLE: return "incompatible";
+        default:                  return "?";
+    }
+}
+
+const char* field_kind_str(uint8_t kind) {
+    switch (kind) {
+        case FIELD_KIND_BOOL:   return "bool";
+        case FIELD_KIND_INT:    return "int";
+        case FIELD_KIND_UINT:   return "uint";
+        case FIELD_KIND_FLOAT:  return "float";
+        case FIELD_KIND_ENUM:   return "enum";
+        case FIELD_KIND_NESTED: return "nested";
+        default:                return "unknown";
+    }
+}
+
 /* ── 类型安全访问 ────────────────────────────────────────── */
 
 const void* _msg_cast_impl(const Message* msg, uint32_t expected_type_id,

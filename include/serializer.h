@@ -85,6 +85,31 @@ typedef int (*DeserializeFunc)(void* dst, const uint8_t* buf, size_t size);
  */
 typedef void (*EndianSwapFunc)(void* data);
 
+/* ── 字段级 schema 描述 ─────────────────────────────────── */
+
+/** 字段基础种类（用于自描述展示，与序列化无关） */
+typedef enum {
+    FIELD_KIND_UNKNOWN = 0,
+    FIELD_KIND_BOOL,
+    FIELD_KIND_INT,      /**< 有符号整型 */
+    FIELD_KIND_UINT,     /**< 无符号整型 */
+    FIELD_KIND_FLOAT,    /**< 浮点（float/double） */
+    FIELD_KIND_ENUM,     /**< 枚举（序列化为 int8） */
+    FIELD_KIND_NESTED,   /**< 嵌套结构体 */
+} FieldKind;
+
+/**
+ * 字段描述（由 codegen 生成的静态表），实现字段级 schema。
+ * 用于自描述、schema 展示与跨版本兼容诊断。
+ */
+typedef struct {
+    const char* name;       /**< 字段名 */
+    uint8_t     kind;       /**< FieldKind */
+    uint16_t    offset;     /**< 在 struct 中的字节偏移（offsetof） */
+    uint16_t    elem_size;  /**< 单元素序列化字节数 */
+    uint16_t    array_len;  /**< 数组长度（标量为 1） */
+} FieldDesc;
+
 /** 类型注册条目 */
 typedef struct {
     uint32_t        type_id;           /**< FNV-1a hash */
@@ -94,6 +119,9 @@ typedef struct {
     SerializeFunc   serialize;         /**< NULL = raw memcpy（旧类型） */
     DeserializeFunc deserialize;       /**< NULL = raw memcpy（旧类型） */
     EndianSwapFunc  endian_swap;       /**< NULL = 无需交换 */
+    uint32_t        schema_hash;       /**< 字段级布局哈希（0 = 未提供） */
+    const FieldDesc* fields;           /**< 字段描述表（NULL = 未提供） */
+    uint16_t        field_count;       /**< fields 表元素数 */
 } TypeRegistryEntry;
 
 /**
@@ -119,6 +147,44 @@ const TypeRegistryEntry* serializer_lookup_by_name(const char* type_name);
  * 获取已注册类型数量。
  */
 int serializer_type_count(void);
+
+/* ── 跨版本 schema 兼容性 ───────────────────────────────── */
+
+/**
+ * schema 兼容性判定结果。
+ */
+typedef enum {
+    SCHEMA_UNKNOWN = 0,     /**< 本地未注册该类型，无法判定 */
+    SCHEMA_IDENTICAL,       /**< schema_hash 完全一致 */
+    SCHEMA_COMPATIBLE,      /**< 布局不同但版本演进，可尽力兼容（补零/截断） */
+    SCHEMA_INCOMPATIBLE,    /**< 同版本布局却不同 = 破坏性变更，不可兼容 */
+} SchemaCompat;
+
+/**
+ * 判断对端（例如 bag 记录或远端节点）的 schema 是否与本地注册的类型兼容。
+ *
+ * 兼容性策略：
+ *   - 本地未注册该类型名          → SCHEMA_UNKNOWN
+ *   - schema_hash 相同            → SCHEMA_IDENTICAL（完全一致）
+ *   - hash 不同且版本号不同        → SCHEMA_COMPATIBLE
+ *       （视为字段在尾部增删的版本演进，反序列化端补零/截断尽力兼容）
+ *   - hash 不同但版本号相同        → SCHEMA_INCOMPATIBLE
+ *       （同一版本却有不同布局，属未升版的破坏性变更，拒绝）
+ *
+ * @param type_name     类型名（稳定标识，跨版本不变）
+ * @param their_version 对端 schema 版本号
+ * @param their_hash    对端 schema_hash（0 = 未知，退化为按版本判定）
+ * @return SchemaCompat 判定结果
+ */
+SchemaCompat serializer_check_compat(const char* type_name,
+                                     uint8_t their_version,
+                                     uint32_t their_hash);
+
+/** SchemaCompat 的可读字符串 */
+const char* schema_compat_str(SchemaCompat c);
+
+/** FieldKind 的可读字符串 */
+const char* field_kind_str(uint8_t kind);
 
 /* ── 类型安全的 Message 访问 ────────────────────────────── */
 
@@ -208,6 +274,11 @@ void msg_init_typed(Message* msg, const char* topic, const char* sender,
 #ifdef __cplusplus
 
 #include <type_traits>
+
+/* 主模板声明：generated 头文件会为每个消息类型做特化
+ * (template<> struct msg_traits<T> { ... })。这里声明主模板，
+ * 使 generated 头文件可安全地被 C++ TU 包含。 */
+template<typename T> struct msg_traits;
 
 /* ── Compile-time FNV-1a (C++ only) ─────────────────────── */
 namespace ser {
