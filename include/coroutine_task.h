@@ -1089,7 +1089,6 @@ public:
                                   [this] { return task_->done() || stop_flag_.load(); });
             }
         }
-
 #ifdef FLOWCORO_INTEGRATION
         if (task_->handle && task_->handle.promise().exception_) {
             std::rethrow_exception(task_->handle.promise().exception_);
