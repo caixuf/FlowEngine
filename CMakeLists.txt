@@ -108,6 +108,9 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
     GIT_TAG        9f05443
     GIT_SHALLOW    TRUE
+    PATCH_COMMAND  ${CMAKE_COMMAND} -E copy
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/flowcoro/memory_pool.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/_deps/flowcoro-src/include/flowcoro/memory_pool.h"
 )
 FetchContent_MakeAvailable(flowcoro)
 
