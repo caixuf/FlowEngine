@@ -431,9 +431,11 @@ static void test_bus_topic_stats(void) {
     message_bus_destroy(bus);
     PASS();
 
-    TEST("bus per-topic frequency estimate > 0");
-    /* frequency_hz must be non-zero (regression: was always 0) */
-    ASSERT(st.frequency_hz > 0.0, "frequency_hz not computed (%.1f)", st.frequency_hz);
+    TEST("bus per-topic frequency estimate in sane range");
+    /* frequency_hz must be non-zero (regression: was always 0) and derived
+     * from the real ~3ms inter-arrival gap, not a mis-scaled value. */
+    ASSERT(st.frequency_hz > 1.0 && st.frequency_hz < 100000.0,
+           "frequency_hz out of range (%.1f)", st.frequency_hz);
     PASS();
 }
 
