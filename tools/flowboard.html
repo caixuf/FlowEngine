@@ -45,10 +45,11 @@ input{width:240px;font:11px monospace}
   <span>Rate: <b id="rate-n">0</b> fps</span>
 </div>
 
-<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-  <input id="url" value="http://localhost:8800" placeholder="Server URL">
+<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap">
+  <input id="url" value="http://localhost:8800" placeholder="Server URL" style="width:200px">
   <button onclick="doConnect()" style="background:#1f6feb;border-color:#1f6feb">🔗 Connect</button>
-  <button onclick="doSimulate()">📋 Demo Data</button>
+  <input id="topic-filter" placeholder="Filter topics (e.g. sensor/lidar,control/cmd)" style="width:260px;font-size:11px" oninput="updateAll()">
+  <button onclick="doSimulate()">📋 Demo</button>
   <button onclick="doPause()" id="pause-btn">⏯ Pause</button>
 </div>
 
@@ -230,8 +231,16 @@ function updateFrames(){
 
 // ── Topology (D3 force) ────────────────────────────────────
 let topoInit=false;
+function topicFilter(){
+  const raw = document.getElementById('topic-filter')?.value?.trim() || '';
+  return raw ? raw.split(',').map(s=>s.trim()).filter(Boolean) : [];
+}
+function topicMatches(topicName){
+  const f = topicFilter();
+  return f.length === 0 || f.some(p => topicName.includes(p) || p.includes(topicName));
+}
 function updateTopicStats(){
-  const ts = topoData.metrics?.topics || topoData.topics || [];
+  const ts = (topoData.metrics?.topics || topoData.topics || []).filter(t => topicMatches(t.topic||t.name||''));
   if (!ts.length) {
     document.getElementById('topic-stats').innerHTML = '<span style="color:#484f58">Waiting for per-topic data...</span>';
     return;
@@ -279,7 +288,7 @@ function endpointRoleFromCaps(t){
   return 'unknown';
 }
 function updateProcessTopics(){
-  let endpoints = topoData.endpoints || [];
+  let endpoints = (topoData.endpoints || []).filter(e => topicMatches(e.topic||''));
   if(!endpoints.length){
     (topoData.nodes||[]).forEach(n=>{
       (n.topics||[]).forEach(t=>endpoints.push({node:n.name,topic:t.topic||t.name,role:endpointRoleFromCaps(t),type_id:t.type_id||'0x00000000',freq:Number(t.freq||0)}));
@@ -432,7 +441,11 @@ function drawChart(id,data,color,unit){
 }
 
 // ── Init ───────────────────────────────────────────────────
-doSimulate();  // Always start with demo data so page is never blank
+// Auto-connect to monitor server (flowmond or flow_e2e embedded)
+doConnect().catch(() => {
+  // Fallback: demo data if no server running
+  doSimulate();
+});
 
 // Update simulation data periodically for live charts
 setInterval(()=>{

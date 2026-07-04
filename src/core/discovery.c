@@ -486,10 +486,17 @@ char* discovery_export_json(DiscoveryManager* dm) {
 
         for (uint32_t j = 0; j < n->topic_count; j++) {
             if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+            const char* role = "unknown";
+            bool is_pub = (n->topics[j].capabilities & CAP_PUBLISHER) != 0;
+            bool is_sub = (n->topics[j].capabilities & CAP_SUBSCRIBER) != 0;
+            if (is_pub && is_sub) role = "pubsub";
+            else if (is_pub) role = "pub";
+            else if (is_sub) role = "sub";
             off += snprintf(buf + off, sz - off,
-                "%s{\"topic\":\"%s\",\"type_id\":\"0x%08x\",\"freq\":%.1f}",
+                "%s{\"topic\":\"%s\",\"type_id\":\"0x%08x\",\"freq\":%.1f,\"caps\":%u,\"role\":\"%s\"}",
                 j > 0 ? "," : "",
-                n->topics[j].topic, n->topics[j].type_id, n->topics[j].frequency_hz);
+                n->topics[j].topic, n->topics[j].type_id, n->topics[j].frequency_hz,
+                n->topics[j].capabilities, role);
         }
         off += snprintf(buf + off, sz - off, "]}");
     }

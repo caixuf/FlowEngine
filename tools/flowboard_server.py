@@ -27,10 +27,11 @@ import argparse
 from pathlib import Path
 
 # ── 全局状态 ──────────────────────────────────────────────
-g_data = {"nodes": [], "metrics": {}, "timestamp": 0}
+g_data = {"nodes": [], "metrics": {}, "timestamp": 0, "endpoints": []}
 g_lock = threading.Lock()
 g_json_file = None
 g_simulate = True
+DEFAULT_STATE_FILE = os.environ.get("FLOWENGINE_STATE_FILE", "/tmp/flow_topology.json")
 
 # ── 模拟数据生成（无 FlowEngine 时演示用）─────────────────
 
@@ -65,10 +66,167 @@ def generate_sample_data():
 
     return {"nodes": nodes, "metrics": metrics, "timestamp": t}
 
+# ── 真实数据归一化 ────────────────────────────────────────
+
+def _cap_role(caps):
+    try:
+        caps = int(caps)
+    except Exception:
+        caps = 0
+    is_pub = bool(caps & 1)
+    is_sub = bool(caps & 2)
+    if is_pub and is_sub:
+        return "pubsub"
+    if is_pub:
+        return "pub"
+    if is_sub:
+        return "sub"
+    return "unknown"
+
+def _topic_type_map(registry):
+    out = {}
+    for t in (registry or {}).get("topics", []) or []:
+        name = t.get("name") or t.get("topic")
+        if name:
+            out[name] = t.get("type_id", "0x00000000")
+    return out
+
+def _stats_map(raw):
+    stats = {}
+    metric_topics = []
+    if isinstance(raw.get("metrics"), dict):
+        metric_topics.extend(raw["metrics"].get("topics", []) or [])
+    metric_topics.extend(raw.get("topics", []) or [])
+    for t in metric_topics:
+        name = t.get("topic") or t.get("name")
+        if name:
+            stats[name] = t
+    return stats
+
+def _synth_nodes_from_registry(registry, stats_by_topic):
+    nodes = []
+    type_map = _topic_type_map(registry)
+    for i, task in enumerate((registry or {}).get("tasks", []) or []):
+        name = task.get("name") or f"task_{i}"
+        topics = []
+        for topic in task.get("inputs", []) or []:
+            s = stats_by_topic.get(topic, {})
+            topics.append({
+                "topic": topic,
+                "role": "sub",
+                "caps": 2,
+                "type_id": type_map.get(topic, s.get("type_id", "0x00000000")),
+                "freq": float(s.get("freq", 0) or 0),
+            })
+        for topic in task.get("outputs", []) or []:
+            s = stats_by_topic.get(topic, {})
+            topics.append({
+                "topic": topic,
+                "role": "pub",
+                "caps": 1,
+                "type_id": type_map.get(topic, s.get("type_id", "0x00000000")),
+                "freq": float(s.get("freq", 0) or 0),
+            })
+        nodes.append({
+            "name": name,
+            "pid": task.get("pid", 0),
+            "alive": task.get("alive", True),
+            "caps": task.get("caps", 0),
+            "kind": "task",
+            "description": task.get("desc", ""),
+            "plugin": task.get("plugin", ""),
+            "topics": topics,
+        })
+    return nodes
+
+def normalize_live_data(raw):
+    """把 flow_e2e 状态文件、monitor_server JSON、discovery JSON 统一成 FlowBoard 模型。"""
+    if not isinstance(raw, dict):
+        return {"nodes": [], "metrics": {}, "timestamp": time.time(), "endpoints": []}
+
+    data = dict(raw)
+
+    # monitor_server.c 输出: {bus, topology:{nodes}, topics}
+    if "topology" in data and isinstance(data.get("topology"), dict):
+        topo = data.get("topology") or {}
+        metrics = data.get("metrics") or {}
+        metrics.setdefault("bus", data.get("bus", {}))
+        metrics.setdefault("topics", data.get("topics", []))
+        data = {
+            "self": topo.get("self", data.get("self", "flowengine")),
+            "nodes": topo.get("nodes", []),
+            "metrics": metrics,
+            "registry": data.get("registry", {}),
+            "timestamp": data.get("timestamp", time.time()),
+        }
+
+    registry = data.get("registry") or (data.get("metrics") or {}).get("registry") or {}
+    if registry and "registry" not in data:
+        data["registry"] = registry
+    stats_by_topic = _stats_map(data)
+
+    nodes = data.get("nodes") or []
+    if (not nodes) and registry.get("tasks"):
+        nodes = _synth_nodes_from_registry(registry, stats_by_topic)
+    else:
+        # 补齐 discovery topic 的 role/caps/type/freq 字段。
+        type_map = _topic_type_map(registry)
+        for n in nodes:
+            for t in n.get("topics", []) or []:
+                topic = t.get("topic") or t.get("name", "")
+                caps = t.get("caps", t.get("capabilities", 0))
+                role = t.get("role") or _cap_role(caps)
+                if role == "unknown" and float(t.get("freq", 0) or 0) > 0:
+                    role = "pub"
+                t["role"] = role
+                t["caps"] = caps
+                if topic and not t.get("type_id"):
+                    t["type_id"] = type_map.get(topic, "0x00000000")
+
+    topic_roles = {}
+    endpoints = []
+    for n in nodes:
+        node_name = n.get("name", "unknown")
+        for t in n.get("topics", []) or []:
+            topic = t.get("topic") or t.get("name")
+            if not topic:
+                continue
+            role = t.get("role") or _cap_role(t.get("caps", 0))
+            s = stats_by_topic.get(topic, {})
+            topic_roles.setdefault(topic, {"topic": topic, "publishers": [], "subscribers": []})
+            if role in ("pub", "pubsub"):
+                topic_roles[topic]["publishers"].append(node_name)
+            if role in ("sub", "pubsub"):
+                topic_roles[topic]["subscribers"].append(node_name)
+            endpoints.append({
+                "node": node_name,
+                "topic": topic,
+                "role": role,
+                "type_id": t.get("type_id", s.get("type_id", "0x00000000")),
+                "freq": float(t.get("freq", s.get("freq", 0)) or 0),
+                "pub": s.get("pub", s.get("publish_count", 0)),
+                "del": s.get("del", s.get("deliver_count", 0)),
+                "drop": s.get("drop", s.get("drop_count", 0)),
+                "lat_us": s.get("lat_us", 0),
+                "subs": s.get("subs", s.get("subscriber_count", 0)),
+            })
+
+    metrics = data.get("metrics") or {}
+    if "topics" not in metrics:
+        metrics["topics"] = data.get("topics", []) or []
+
+    data["nodes"] = nodes
+    data["metrics"] = metrics
+    data["topic_roles"] = list(topic_roles.values())
+    data["endpoints"] = endpoints
+    data["timestamp"] = time.time()
+    data["source"] = "live"
+    return data
+
 # ── 文件监视线程 ──────────────────────────────────────────
 
 def file_watcher():
-    global g_data
+    global g_data, g_simulate
     last_mtime = 0
     while True:
         try:
@@ -79,13 +237,7 @@ def file_watcher():
                     with open(g_json_file) as f:
                         raw = json.load(f)
                     with g_lock:
-                        # If it has 'nodes', use as-is; otherwise wrap
-                        if isinstance(raw, dict) and 'nodes' in raw:
-                            g_data = raw
-                        else:
-                            g_data = {"nodes": raw if isinstance(raw, list) else [],
-                                      "metrics": {}, "timestamp": time.time()}
-                        g_data["timestamp"] = time.time()
+                        g_data = normalize_live_data(raw)
                         g_simulate = False
         except Exception as e:
             pass
@@ -113,14 +265,6 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                     data = generate_sample_data()
                 else:
                     data = dict(g_data)
-                    if not data.get('nodes') and data.get('self'):
-                        data['nodes'] = [{
-                            "name": data['self'], "pid": 0, "alive": True,
-                            "caps": 11,
-                            "topics": [{"topic": "sensor/lidar", "freq": 10.0},
-                                       {"topic": "sensor/gps", "freq": 5.0},
-                                       {"topic": "fusion/localization", "freq": 10.0}]
-                        }]
             self.wfile.write(json.dumps(data).encode())
 
         elif self.path == '/api/stream':
@@ -174,11 +318,14 @@ def main():
 
     parser = argparse.ArgumentParser(description='FlowBoard Server')
     parser.add_argument('--port', type=int, default=8800)
-    parser.add_argument('--json-file', type=str, help='Path to discovery JSON file (polled)')
+    parser.add_argument('--json-file', type=str, default=DEFAULT_STATE_FILE,
+                        help=f'Path to live state JSON file (default: {DEFAULT_STATE_FILE})')
+    parser.add_argument('--demo', action='store_true', help='Force built-in demo data instead of live state file')
     args = parser.parse_args()
 
     g_json_file = args.json_file
-    if g_json_file:
+    g_simulate = bool(args.demo)
+    if g_json_file and not args.demo:
         g_simulate = not os.path.exists(g_json_file)  # simulate until file appears
         threading.Thread(target=file_watcher, daemon=True).start()
 
@@ -188,7 +335,7 @@ def main():
     print(f"║  FlowBoard Server                    ║")
     print(f"║  http://localhost:{args.port}           ║")
     print(f"║  API: /api/topology  /api/stream    ║")
-    if g_json_file:
+    if g_json_file and not args.demo:
         print(f"║  Watching: {g_json_file}")
     else:
         print(f"║  Mode: simulation (demo data)")
