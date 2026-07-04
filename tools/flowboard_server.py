@@ -95,6 +95,12 @@ def file_watcher():
 
 class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        try:
+            self._handle()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _handle(self):
         if self.path == '/api/topology':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -107,11 +113,10 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                     data = generate_sample_data()
                 else:
                     data = dict(g_data)
-                    # If topology has self but empty nodes, add self as a node
                     if not data.get('nodes') and data.get('self'):
                         data['nodes'] = [{
                             "name": data['self'], "pid": 0, "alive": True,
-                            "caps": 11,  # pub+sub+fusion
+                            "caps": 11,
                             "topics": [{"topic": "sensor/lidar", "freq": 10.0},
                                        {"topic": "sensor/gps", "freq": 5.0},
                                        {"topic": "fusion/localization", "freq": 10.0}]
@@ -127,15 +132,18 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
 
-            for _ in range(300):  # 5 minutes max
-                with g_lock:
-                    if g_simulate:
-                        data = generate_sample_data()
-                    else:
-                        data = dict(g_data)
-                self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
-                self.wfile.flush()
-                time.sleep(1)
+            try:
+                for _ in range(300):  # 5 minutes max
+                    with g_lock:
+                        if g_simulate or not g_data.get('nodes'):
+                            data = generate_sample_data()
+                        else:
+                            data = dict(g_data)
+                    self.wfile.write(f"data: {json.dumps(data)}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(1)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client disconnected
 
         elif self.path == '/' or self.path == '/index.html':
             # Serve the dashboard HTML
