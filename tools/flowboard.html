@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FlowBoard — Live Monitor</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#0a0e17;color:#c9d1d9;height:100vh;display:flex;overflow:hidden}
+#sidebar{width:300px;background:#0d1117;display:flex;flex-direction:column;gap:10px;padding:14px;border-right:1px solid#21262d;overflow-y:auto;font-size:12px}
+h1{font-size:15px;color:#58a6ff;display:flex;align-items:center;gap:8px}
+h1 .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+h2{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin:4px 0 2px}
+.tabs{display:flex;gap:2px}
+.tab{flex:1;padding:6px;text-align:center;cursor:pointer;background:#161b22;border:1px solid#21262d;border-radius:4px 4px 0 0;font-size:11px;color:#8b949e;transition:.15s}
+.tab.active{background:#1c2128;color:#58a6ff;border-bottom-color:#1c2128}
+#main{flex:1;display:flex;flex-direction:column;position:relative}
+.panel{flex:1;display:none;position:relative;overflow:hidden}
+.panel.active{display:flex}
+#topo{flex:1}
+#frames{flex:1;overflow-y:auto;font:11px 'JetBrains Mono',monospace;padding:8px}
+#charts{flex:1;display:flex;flex-direction:column;gap:4px;padding:8px}
+.chart-row{flex:1;display:flex;gap:4px}
+.chart-box{flex:1;background:#0d1117;border:1px solid#21262d;border-radius:6px;position:relative;overflow:hidden}
+.chart-box canvas{width:100%;height:100%}
+.chart-title{position:absolute;top:4px;left:8px;font-size:10px;color:#8b949e;z-index:1}
+.line{fill:none;stroke-width:1.5}
+.axis{font-size:9px;color:#484f58}
+.stat{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid#161b22}
+.stat .v{color:#58a6ff;font-weight:600}
+.frame-row{display:flex;gap:8px;padding:2px 6px;border-bottom:1px solid#161b22;font-size:10px;align-items:center}
+.frame-row:hover{background:#161b22}
+.frame-ts{color:#484f58;min-width:70px}
+.frame-mod{color:#58a6ff;min-width:70px;font-weight:600}
+.frame-data{color:#c9d1d9;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frame-decision{min-width:60px;text-align:right;font-weight:600}
+.status{display:inline-flex;align-items:center;gap:4px;padding:2px 6px;border-radius:10px;font-size:10px}
+.status.live{background:#122d15;color:#3fb950}
+.status.warn{background:#2d1a12;color:#d29922}
+.status.dead{background:#2d1215;color:#f85149}
+button{background:#21262d;color:#c9d1d9;border:1px solid#30363d;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:11px;transition:.15s}
+button:hover{background:#30363d}
+input{background:#0d1117;color:#c9d1d9;border:1px solid#30363d;border-radius:4px;padding:4px 8px;font-size:11px;width:100%}
+.link{stroke:#21262d;stroke-width:1.2;fill:none}
+.tooltip{position:absolute;background:#1c2128;border:1px solid#30363d;border-radius:6px;padding:8px 12px;font-size:11px;pointer-events:none;opacity:0;z-index:10;max-width:240px}
+.tooltip .name{color:#58a6ff;font-weight:600}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1><span class="dot"></span>FlowBoard <span style="font-size:10px;color:#8b949e;font-weight:400" id="conn-status">sim</span></h1>
+  <input id="server-url" value="http://localhost:8800" placeholder="Server URL" onchange="connect()">
+  <div style="display:flex;gap:4px">
+    <button onclick="connect()" style="flex:1;background:#1f6feb;border-color:#1f6feb">🔗 Connect</button>
+    <button onclick="togglePause()" id="pause-btn">⏯</button>
+    <button onclick="clearFrames()">🗑</button>
+  </div>
+  <h2>Metrics</h2>
+  <div id="metrics"></div>
+  <h2>Status</h2>
+  <div id="status-panel"></div>
+  <div style="font-size:10px;color:#484f58;margin-top:auto">
+    <div>Nodes: <span id="node-count">-</span></div>
+    <div>Frames: <span id="frame-count">0</span></div>
+    <div>Rate: <span id="frame-rate">0</span> fps</div>
+  </div>
+</div>
+
+<div id="main">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('topo')">🔗 Topology</div>
+    <div class="tab" onclick="switchTab('frames')">📡 Frames</div>
+    <div class="tab" onclick="switchTab('charts')">📈 Charts</div>
+  </div>
+
+  <div class="panel active" id="panel-topo"><div id="topo"></div></div>
+  <div class="panel" id="panel-frames"><div id="frames"></div></div>
+  <div class="panel" id="panel-charts"><div id="charts">
+    <div class="chart-row"><div class="chart-box"><div class="chart-title">Message Rate (msg/s)</div><canvas id="chart-rate"></canvas></div></div>
+    <div class="chart-row">
+      <div class="chart-box"><div class="chart-title">E2E Latency (µs)</div><canvas id="chart-latency"></canvas></div>
+      <div class="chart-box"><div class="chart-title">Frame Throughput</div><canvas id="chart-frames"></canvas></div>
+    </div>
+  </div></div>
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+let topology = {nodes:[],metrics:{}};
+let frameLog = [];
+let paused = false;
+let serverUrl = 'http://localhost:8800';
+let frameCount = 0, lastFrameTime = Date.now();
+let chartData = {rate:[], latency:[], frames:[], time:[]};
+const MAX_CHART_POINTS = 120;
+const COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
+
+// ── Tabs ───────────────────────────────────────────────────
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelector(`.tab:nth-${name==='topo'?'1':name==='frames'?'2':'3'}`).classList.add('active');
+  document.getElementById('panel-'+name).classList.add('active');
+  if(name==='topo') setTimeout(drawTopo,100);
+  if(name==='charts') drawCharts();
+}
+
+// ── Connection ─────────────────────────────────────────────
+let eventSource = null;
+
+async function connect(){
+  serverUrl = document.getElementById('server-url').value.trim();
+  if(eventSource) eventSource.close();
+
+  try{
+    // Initial fetch
+    const r = await fetch(serverUrl+'/api/topology');
+    topology = await r.json();
+    updateAll();
+    document.getElementById('conn-status').innerHTML='<span class="status live">live</span>';
+
+    // SSE stream
+    eventSource = new EventSource(serverUrl+'/api/stream');
+    eventSource.onmessage = e => {
+      if(paused) return;
+      try{ topology = JSON.parse(e.data); updateAll(); }catch(err){}
+    };
+    eventSource.onerror = () => {
+      document.getElementById('conn-status').innerHTML='<span class="status warn">poll</span>';
+      if(eventSource) eventSource.close();
+      startPolling();
+    };
+  }catch(err){
+    document.getElementById('conn-status').innerHTML='<span class="status dead">offline</span>';
+    startPolling();
+  }
+}
+
+function startPolling(){
+  setInterval(async ()=>{
+    if(paused || eventSource) return;
+    try{
+      const r=await fetch(serverUrl+'/api/topology');
+      topology=await r.json();
+      updateAll();
+      document.getElementById('conn-status').innerHTML='<span class="status live">poll</span>';
+    }catch(e){}
+  },2000);
+}
+
+function togglePause(){paused=!paused;document.getElementById('pause-btn').textContent=paused?'▶':'⏯'}
+function clearFrames(){frameLog=[];document.getElementById('frames').innerHTML='';frameCount=0}
+
+// ── Update ─────────────────────────────────────────────────
+function updateAll(){
+  updateMetrics();
+  updateStatus();
+  updateFrameLog();
+  drawTopo();
+  drawCharts();
+  document.getElementById('node-count').textContent=(topology.nodes||[]).length;
+  document.getElementById('frame-count').textContent=frameCount;
+  document.getElementById('frame-rate').textContent=Math.round(frameCount/((Date.now()-lastFrameTime+1)/1000));
+}
+
+function updateMetrics(){
+  const m=topology.metrics||{};
+  document.getElementById('metrics').innerHTML=`
+    <div class="stat"><span>Bus Pub</span><span class="v">${(m.bus||{}).published||0}</span></div>
+    <div class="stat"><span>Bus Del</span><span class="v">${(m.bus||{}).delivered||0}</span></div>
+    <div class="stat"><span>Bus Drop</span><span class="v" style="color:${(m.bus||{}).dropped>0?'#f85149':'#3fb950'}">${(m.bus||{}).dropped||0}</span></div>
+    <div class="stat"><span>Local Msg</span><span class="v">${(m.transport||{}).local_pub||0}</span></div>
+    <div class="stat"><span>Remote Msg</span><span class="v">${(m.transport||{}).remote_pub||0}</span></div>
+    <div class="stat"><span>Latency avg</span><span class="v">${(m.latency||{}).avg_us||0}µs</span></div>
+    <div class="stat"><span>Latency p99</span><span class="v">${(m.latency||{}).p99_us||0}µs</span></div>
+    <div class="stat"><span>Mode</span><span class="v">${(m.scheduler||{}).mode||'?'}</span></div>
+    <div class="stat"><span>Driver</span><span class="v">${(m.driver_mode||'NA')}</span></div>
+  `;
+}
+
+function updateStatus(){
+  const ns=topology.nodes||[];
+  document.getElementById('status-panel').innerHTML=ns.map(n=>
+    `<div class="stat"><span>${n.name}</span><span class="status ${n.alive===false?'dead':'live'}">${n.alive===false?'💀':'🟢'} PID ${n.pid}</span></div>`
+  ).join('');
+}
+
+function updateFrameLog(){
+  const m=topology.metrics||{};
+  if(!m.bus) return;
+
+  const now=new Date().toISOString().slice(11,23);
+  const pub=m.bus.published||0, del=m.bus.delivered||0, drop=m.bus.dropped||0;
+  const mode=m.driver_mode||'NA';
+  const lat=(m.latency||{}).avg_us||0;
+
+  frameLog.push({ts:now, pub, del, drop, mode, lat});
+  if(frameLog.length>500) frameLog.shift();
+  frameCount++;
+
+  // Render last 50 frames
+  const container=document.getElementById('frames');
+  const recent=frameLog.slice(-50).reverse();
+  container.innerHTML=recent.map((f,i)=>{
+    const color=frameCount-i<5?'#58a6ff':'#c9d1d9';
+    const decision=f.drop>0?'🛑':f.mode==='CP'?'🚗':'🟢';
+    return `<div class="frame-row" style="opacity:${1-i/recent.length}">
+      <span class="frame-ts">${f.ts}</span>
+      <span class="frame-mod">pub:${f.pub} del:${f.del}</span>
+      <span class="frame-data" style="color:${color}">drop:${f.drop} lat:${f.lat}µs mode:${f.mode}</span>
+      <span class="frame-decision">${decision}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Topology Graph (D3 force) ──────────────────────────────
+let topoSvg, topoG, simTopo;
+let topoDrawn=false;
+
+function drawTopo(){
+  const el=document.getElementById('topo');
+  if(!topoDrawn){
+    topoSvg=d3.select('#topo').append('svg').attr('width','100%').attr('height','100%');
+    topoG=topoSvg.append('g');
+    topoSvg.call(d3.zoom().scaleExtent([0.15,4]).on('zoom',e=>topoG.attr('transform',e.transform)));
+    topoDrawn=true;
+  }
+  topoG.selectAll('*').remove();
+
+  const ns=(topology.nodes||[]).map((n,i)=>({...n,id:i,x:0,y:0}));
+  if(!ns.length) return;
+
+  // Edges
+  const links=[];
+  for(let i=0;i<ns.length;i++)for(let j=i+1;j<ns.length;j++){
+    const shared=ns[i].topics.filter(ti=>ns[j].topics.some(tj=>tj.topic===ti.topic));
+    shared.forEach(t=>links.push({source:i,target:j,topic:t.topic}));
+  }
+
+  const linkG=topoG.append('g').selectAll('line').data(links).join('line').attr('class','link');
+  const linkLabel=topoG.append('g').selectAll('text').data(links).join('text')
+    .attr('font-size','8px').attr('fill','#484f58').text(d=>d.topic.split('/').pop());
+
+  const nodeG=topoG.append('g').selectAll('g').data(ns).join('g').call(
+    d3.drag().on('start',(e,d)=>{if(!e.sourceEvent.ctrlKey){simTopo.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y}})
+      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y}).on('end',(e,d)=>{if(!e.sourceEvent.ctrlKey){d.fx=null;d.fy=null}})
+  );
+
+  const tip=d3.select('#tooltip');
+  nodeG.append('circle').attr('r',20).attr('fill',d=>d.alive===false?'#484f58':(COLORS[(d.caps||0)&8?8:(d.caps||0)&4?4:(d.caps||0)&2?2:(d.caps||0)&1?1:0]))
+    .attr('stroke','#21262d').attr('stroke-width',2)
+    .on('mouseover',(e,d)=>{
+      tip.html(`<div class="name">${d.name}</div>PID ${d.pid}<br>${(d.topics||[]).map(t=>'<br>'+t.topic).join('')}`)
+        .style('left',(e.pageX+12)+'px').style('top',(e.pageY-10)+'px').style('opacity',1);
+    }).on('mouseout',()=>tip.style('opacity',0));
+  nodeG.append('text').text(d=>d.name).attr('text-anchor','middle').attr('dy',30).attr('fill','#c9d1d9').attr('font-size','9px');
+
+  simTopo=d3.forceSimulation(ns).force('link',d3.forceLink(links).distance(160))
+    .force('charge',d3.forceManyBody().strength(-350)).force('center',d3.forceCenter(0,0)).force('collision',d3.forceCollide(40))
+    .on('tick',()=>{
+      linkG.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+      linkLabel.attr('x',d=>(d.source.x+d.target.x)/2).attr('y',d=>(d.source.y+d.target.y)/2-5);
+      nodeG.attr('transform',d=>`translate(${d.x},${d.y})`);
+    });
+  simTopo.alpha(1).restart();
+  setTimeout(()=>topoSvg.transition().duration(500).call(d3.zoom().transform,d3.zoomIdentity.translate(350,250)),100);
+}
+
+// ── Charts (Canvas) ────────────────────────────────────────
+function drawCharts(){
+  const m=topology.metrics||{};
+  const t=Date.now()/1000;
+  chartData.time.push(t);
+  chartData.rate.push((m.bus||{}).published||0);
+  chartData.latency.push((m.latency||{}).avg_us||0);
+  chartData.frames.push((m.bus||{}).delivered||0);
+  if(chartData.time.length>MAX_CHART_POINTS){
+    chartData.time.shift();chartData.rate.shift();chartData.latency.shift();chartData.frames.shift();
+  }
+
+  drawLineChart('chart-rate',chartData.rate,'#58a6ff','Rate');
+  drawLineChart('chart-latency',chartData.latency,'#d29922','µs');
+  drawLineChart('chart-frames',chartData.frames,'#3fb950','Frames');
+}
+
+function drawLineChart(canvasId,data,color,label){
+  const c=document.getElementById(canvasId);
+  if(!c) return;
+  const W=c.parentElement.clientWidth,H=c.parentElement.clientHeight;
+  c.width=W*2;c.height=H*2;
+  const ctx=c.getContext('2d');
+  ctx.scale(2,2);c.style.width=W+'px';c.style.height=H+'px';
+  const w=W,h=H,pad={t:24,r:8,b:20,l:40};
+
+  ctx.clearRect(0,0,w,h);
+  if(data.length<2) return;
+
+  const max=Math.max(...data,1),min=Math.min(...data,0);
+  const xScale=(w-pad.l-pad.r)/(data.length-1);
+  const yScale=(h-pad.t-pad.b)/(max-min||1);
+
+  // Grid
+  ctx.strokeStyle='#161b22';ctx.lineWidth=0.5;
+  for(let i=0;i<=5;i++){const y=pad.t+(h-pad.t-pad.b)*i/5;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke()}
+
+  // Line
+  ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
+  data.forEach((v,i)=>{
+    const x=pad.l+i*xScale,y=pad.t+(max-v)*yScale;
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle='#8b949e';ctx.font='9px Inter';ctx.textAlign='right';
+  ctx.fillText(Math.round(max),pad.l-4,pad.t+10);
+  ctx.fillText(Math.round(min),pad.l-4,h-pad.b);
+  ctx.textAlign='left';ctx.fillText(label,pad.l,pad.t-6);
+}
+
+// ── Init ───────────────────────────────────────────────────
+connect();
+switchTab('topo');
+</script>
+</body>
+</html>
