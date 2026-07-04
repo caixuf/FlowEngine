@@ -286,14 +286,15 @@ bool statem_send_event(ReflectiveStateMachine* sm, EventId event, void* task) {
     const char* desc = rule ? (rule->description ? rule->description : "") : NULL;
 
     if (!rule) {
-        /* Illegal transition */
+        /* Illegal transition: only log if trace enabled */
         if (sm->trace_enabled) {
-            LOG_WARN("statem", "%s: ILLEGAL %s + %s -> ???",
+            LOG_DEBUG("statem", "%s: no transition for %s + %s (current=%s)",
                      sm->task_name ? sm->task_name : "?",
-                     state_name_str(from), event_name_str(event));
+                     state_name_str(from), event_name_str(event),
+                     state_name_str(sm->current));
         }
         if (sm->debug_hook) {
-            sm->debug_hook(task, from, event, SM_STATE_UNKNOWN, "ILLEGAL", false);
+            sm->debug_hook(task, from, event, SM_STATE_UNKNOWN, "NO_RULE", false);
         }
         return false;
     }
