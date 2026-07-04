@@ -208,6 +208,10 @@ target_link_libraries(network_service_task flowengine_core)
 add_library(data_processor_task SHARED src/plugins/data_processor_task.cpp)
 target_link_libraries(data_processor_task flowengine_core)
 
+# 监控守护进程 (独立进程, cyber_monitor 等价物)
+add_executable(flowmond src/flowmond.c)
+target_link_libraries(flowmond flowengine_core)
+
 # 命令行工具
 add_executable(flowctl src/flowctl.c)
 target_link_libraries(flowctl flowengine_core scheduler_cpp)
@@ -306,7 +310,7 @@ target_link_libraries(flow_fullstack flowengine_core scheduler_cpp)
 add_dependencies(flow_fullstack msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flowctl flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_task flow_cpp flow_bus flow_ipc flow_bag flow_cpp_task flow_coro flow_adas flow_e2e flow_fullstack benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
