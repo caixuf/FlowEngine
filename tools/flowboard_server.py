@@ -107,7 +107,15 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                     data = generate_sample_data()
                 else:
                     data = dict(g_data)
-
+                    # If topology has self but empty nodes, add self as a node
+                    if not data.get('nodes') and data.get('self'):
+                        data['nodes'] = [{
+                            "name": data['self'], "pid": 0, "alive": True,
+                            "caps": 11,  # pub+sub+fusion
+                            "topics": [{"topic": "sensor/lidar", "freq": 10.0},
+                                       {"topic": "sensor/gps", "freq": 5.0},
+                                       {"topic": "fusion/localization", "freq": 10.0}]
+                        }]
             self.wfile.write(json.dumps(data).encode())
 
         elif self.path == '/api/stream':

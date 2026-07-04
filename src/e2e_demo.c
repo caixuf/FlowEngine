@@ -40,6 +40,7 @@ static MessageBus*       g_bus       = NULL;
 static DiscoveryManager* g_discovery = NULL;
 static Transport*        g_transport = NULL;
 static Scheduler*        g_scheduler = NULL;
+static int               g_fusion_tid = -1;   /**< for monitor latency reporting */
 
 static void sig_handler(int sig) {
     (void)sig;
@@ -387,6 +388,36 @@ static int monitor_execute(TaskBase* base) {
                transport_ipc_channel_count(g_transport),
                transport_remote_peer_count(g_transport));
         printf("└───────────────────────────────────────────┘\n");
+
+        /* ── Export for FlowBoard dashboard ── */
+        char* topo_json = discovery_export_json(g_discovery);
+        if (topo_json) {
+            FILE* jf = fopen("/tmp/flow_topology.json", "w");
+            if (jf) {
+                /* Wrap: replace closing } with metrics */
+                /* Format: {"self":"...","nodes":[...]} */
+                /* We insert metrics before the final } */
+                size_t len = strlen(topo_json);
+                /* Write everything except the final } */
+                fwrite(topo_json, 1, len - 1, jf);
+                /* Add metrics */
+                fprintf(jf, ",\"metrics\":{"
+                        "\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
+                        "\"transport\":{\"local_pub\":%lu,\"remote_pub\":%lu},"
+                        "\"scheduler\":{\"tasks\":%d,\"mode\":\"CHOREO\"},",
+                        (unsigned long)pub, (unsigned long)del, (unsigned long)drop,
+                        (unsigned long)ts.local_published, (unsigned long)ts.remote_published,
+                        task_count);
+                LatencyStats ls = latency_tracker_stats(
+                    g_fusion_tid >= 0 ? scheduler_get_latency(g_scheduler, g_fusion_tid) : NULL);
+                fprintf(jf, "\"latency\":{\"avg_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu}",
+                        (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
+                        (unsigned long)ls.p99_us);
+                fprintf(jf, "}}\n");
+                fclose(jf);
+            }
+            free(topo_json);
+        }
     }
 
     statem_send_event(&base->sm, SM_EVENT_STOP, base);
@@ -466,6 +497,7 @@ int main(int argc, char** argv) {
     /* ── 注册到调度器 ── */
     pt->tid = scheduler_register_task(g_scheduler, &pt->base, "perception");
     ft->tid = scheduler_register_task(g_scheduler, &ft->base, "fusion");
+    g_fusion_tid = ft->tid;
     ct->tid = scheduler_register_task(g_scheduler, &ct->base, "control");
     mt->tid = scheduler_register_task(g_scheduler, &mt->base, "monitor");
 
