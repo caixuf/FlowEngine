@@ -14,6 +14,11 @@
 # =============================================================================
 set -e
 
+# Force-kill stale processes from previous runs
+pkill -9 -f flowboard_server 2>/dev/null || true
+pkill -9 -f flow_e2e 2>/dev/null || true
+sleep 0.5
+
 DURATION=${1:-15}
 BIN="$(cd "$(dirname "$0")/.." && pwd)/build/bin/flow_e2e"
 JSON_FILE="/tmp/flow_topology.json"

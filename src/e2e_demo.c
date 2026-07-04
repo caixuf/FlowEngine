@@ -32,6 +32,15 @@
 #include <signal.h>
 #include <math.h>
 #include <inttypes.h>
+#include "mcap_writer.h"
+
+/* MCAP channel IDs (set after registration) */
+static uint16_t mcap_ch_lidar   = 0;
+static uint16_t mcap_ch_camera  = 0;
+static uint16_t mcap_ch_gps     = 0;
+static uint16_t mcap_ch_fusion  = 0;
+static uint16_t mcap_ch_control = 0;
+static uint16_t mcap_ch_vehicle = 0;
 
 /* Camera frame reuses LidarFrame struct for demo simplicity */
 #define CAMERAFRAME_TYPE_ID  0x4A1B0C2Du
@@ -442,6 +451,7 @@ static int control_execute(TaskBase* base) {
         msg_init_typed(&cmsg, "control/cmd", "control",
                        0x2D95C6D2u, 1, cmd, (uint32_t)(strlen(cmd) + 1));
         transport_publish(g_transport, "control/cmd", cmsg.data, cmsg.data_size);
+        if (mcap_ch_vehicle) mcap_writer_write_json(mcap_writer_global(), mcap_ch_vehicle, 0, "{\"speed\":%.1f,\"target_speed\":%.1f,\"throttle\":%.3f,\"brake\":%.3f,\"x\":%.1f,\"y\":%.1f,\"error\":%.1f}", g_vehicle.speed, g_vehicle.target_speed, g_vehicle.throttle, g_vehicle.brake, g_vehicle.x, g_vehicle.y, g_vehicle.target_speed - g_vehicle.speed);
 
         /* ── 更新当前速度（闭环: 车辆状态 → 感知 → 融合 → 这里） ── */
         ct->current_speed = g_vehicle.speed;
@@ -865,6 +875,23 @@ int main(int argc, char** argv) {
     /* ── 信号处理 ── */
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+
+    /* ── MCAP 录制 (Foxglove 兼容) ── */
+    McapWriter* mcap = mcap_writer_open("demo.mcap", "x-json");
+    if (mcap) {
+        mcap_ch_lidar = mcap_writer_register_channel(mcap, "sensor/lidar", "LidarFrame",
+            "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"z\":{\"type\":\"number\"},\"intensity\":{\"type\":\"number\"},\"point_count\":{\"type\":\"integer\"},\"frame_id\":{\"type\":\"integer\"}}}");
+        mcap_ch_camera = mcap_writer_register_channel(mcap, "sensor/camera", "CameraFrame",
+            "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"z\":{\"type\":\"number\"},\"point_count\":{\"type\":\"integer\"},\"frame_id\":{\"type\":\"integer\"}}}");
+        mcap_ch_gps = mcap_writer_register_channel(mcap, "sensor/gps", "GpsData",
+            "{\"type\":\"object\",\"properties\":{\"latitude\":{\"type\":\"number\"},\"longitude\":{\"type\":\"number\"},\"speed_mps\":{\"type\":\"number\"},\"heading_deg\":{\"type\":\"number\"}}}");
+        mcap_ch_fusion = mcap_writer_register_channel(mcap, "fusion/localization", "Localization",
+            "{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"speed\":{\"type\":\"number\"}}}");
+        mcap_ch_vehicle = mcap_writer_register_channel(mcap, "vehicle/state", "VehicleState",
+            "{\"type\":\"object\",\"properties\":{\"speed\":{\"type\":\"number\"},\"target_speed\":{\"type\":\"number\"},\"throttle\":{\"type\":\"number\"},\"brake\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"error\":{\"type\":\"number\"}}}");
+        mcap_writer_set_global(mcap);
+        LOG_INFO("e2e", "MCAP: recording to demo.mcap (%u channels)", mcap_ch_vehicle);
+    }
 
     /* ── 运行 ── */
     LOG_INFO("e2e", "running for %d seconds... (Ctrl+C to stop)", duration);

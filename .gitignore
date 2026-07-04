@@ -118,3 +118,4 @@ user_config.json
 # 锁文件
 *.lock
 __pycache__/
+demo.mcap

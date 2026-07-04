@@ -156,6 +156,7 @@ set(CORE_SOURCES
     src/core/flow_registry.c
     src/core/param_registry.c
     src/core/monitor_server.c
+    src/core/mcap_writer.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
