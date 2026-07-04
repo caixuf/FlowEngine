@@ -1,30 +1,27 @@
 #!/bin/bash
 # FlowEngine Topology Viewer
-# Generates discovery JSON and opens in browser
+# Starts the FlowBoard dashboard server and opens in browser
 # Usage: bash scripts/view_topology.sh [port=8800]
 
 PORT=${1:-8800}
-VIEWER="$(cd "$(dirname "$0")/.." && pwd)/tools/topology_viewer.html"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FLOWBOARD="$ROOT/tools/flowboard.html"
+SERVER="$ROOT/tools/flowboard_server.py"
 
 echo "╔══════════════════════════════════════╗"
-echo "║  FlowEngine Topology Viewer          ║"
-echo "║  Open http://localhost:$PORT          ║"
+echo "║  FlowBoard Dashboard                 ║"
+echo "║  http://localhost:$PORT               ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
-echo "Paste discovery JSON from your running nodes, or:"
-echo "  - Run 'flow_e2e 15 &' to start the end-to-end pipeline"
-echo "  - The discovery_export_json() output can be pasted directly"
+echo "Run flow_e2e in another terminal first:"
+echo "  ./build/bin/flow_e2e 30"
 echo ""
-echo "Starting HTTP server on port $PORT..."
 
-# Check if python3 is available
-if command -v python3 &> /dev/null; then
-    cd "$(dirname "$VIEWER")"
-    python3 -m http.server "$PORT"
-elif command -v python &> /dev/null; then
-    cd "$(dirname "$VIEWER")"
-    python -m SimpleHTTPServer "$PORT"
+if [ -f "$SERVER" ]; then
+    python3 "$SERVER" --port "$PORT"
 else
-    echo "Error: Python not found. Just open tools/topology_viewer.html in your browser."
-    exit 1
+    echo "Error: flowboard_server.py not found."
+    echo "Serving static flowboard.html instead..."
+    cd "$(dirname "$FLOWBOARD")"
+    python3 -m http.server "$PORT"
 fi

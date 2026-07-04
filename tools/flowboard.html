@@ -38,7 +38,7 @@ button.primary:hover{background:linear-gradient(135deg,#388bfd,#58a6ff)}
 input{width:100%;padding:7px 10px;font:11px 'JetBrains Mono',monospace;border-radius:6px;outline:none;transition:border-color .15s}
 input:focus{border-color:#58a6ff}
 #msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none}
-.link{stroke:#1a1f2b;stroke-width:1.5;fill:none}
+.link{stroke-width:1.5;fill:none}
 .frame-line{display:flex;gap:8px;padding:2px 10px;border-bottom:1px solid#0d1117;white-space:nowrap;font-size:10px;align-items:center}
 .frame-line:hover{background:#111820}
 .role{display:inline-block;min-width:42px;text-align:center;border-radius:12px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:.3px}
@@ -376,11 +376,47 @@ function updateTopo(){
   el.innerHTML='';
   const svg=d3.select('#topo').append('svg').attr('width','100%').attr('height','100%');
   const g=svg.append('g');
+
+  // ── Arrowhead marker definitions ──────────────────────
+  const defs=svg.append('defs');
+  const ARROW_COLORS=['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#8b949e'];
+  ARROW_COLORS.forEach((color,i)=>{
+    defs.append('marker').attr('id','arrow-'+i)
+      .attr('viewBox','0 0 14 14').attr('refX',28).attr('refY',7)
+      .attr('markerWidth',7).attr('markerHeight',7)
+      .attr('orient','auto')
+      .append('path').attr('d','M 0 0 L 14 7 L 0 14 L 3 7 Z').attr('fill',color).attr('opacity',0.85);
+  });
+
+  // ── Multi-edge arc offset accounting ──────────────────
+  const pairKey=(a,b)=>Math.min(a,b)+'--'+Math.max(a,b);
+  const pairCount={},pairIdx={};
+  links.forEach(l=>{
+    const srcId=l.source.id!=null?l.source.id:l.source;
+    const tgtId=l.target.id!=null?l.target.id:l.target;
+    const k=pairKey(srcId,tgtId);pairCount[k]=(pairCount[k]||0)+1;
+  });
+  links.forEach(l=>{
+    const srcId=l.source.id!=null?l.source.id:l.source;
+    const tgtId=l.target.id!=null?l.target.id:l.target;
+    const k=pairKey(srcId,tgtId);l._total=pairCount[k];l._idx=pairIdx[k]||0;pairIdx[k]=l._idx+1;
+  });
+
   svg.call(d3.zoom().scaleExtent([0.15,4]).on('zoom',e=>g.attr('transform',e.transform)));
 
-  const linkG=g.append('g').selectAll('line').data(links).join('line').attr('class','link');
+  // ── Curved link paths with arrowheads ─────────────────
+  const linkG=g.append('g').selectAll('path').data(links).join('path')
+    .attr('class','link')
+    .attr('stroke',(d,i)=>ARROW_COLORS[i%ARROW_COLORS.length])
+    .attr('stroke-width',d=>/(cmd|plan|traj)/.test(d.topic)?2.0:1.5)
+    .attr('fill','none')
+    .attr('stroke-dasharray',d=>/(cmd|plan|traj)/.test(d.topic)?'6,3':null)
+    .attr('marker-end',(d,i)=>'url(#arrow-'+(i%ARROW_COLORS.length)+')');
+
+  // ── Link labels pinned to curve midpoints ─────────────
   const linkL=g.append('g').selectAll('text').data(links).join('text')
-    .attr('font-size','8px').attr('fill','#484f58').text(d=>d.topic.split('/').pop());
+    .attr('font-size','8px').attr('fill','#8b949e').attr('text-anchor','middle')
+    .text(d=>d.topic.split('/').pop());
 
   const nodeG=g.append('g').selectAll('g').data(ns).join('g').call(
     d3.drag().on('start',(e,d)=>{if(!e.sourceEvent.ctrlKey){sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y}})
@@ -390,12 +426,38 @@ function updateTopo(){
     .attr('stroke','#21262d').attr('stroke-width',2).append('title').text(d=>d.name+' (PID '+(d.pid||'—')+')\n'+(d.description||'')+'\n'+(d.plugin||''));
   nodeG.append('text').text(d=>d.name).attr('text-anchor','middle').attr('dy',30).attr('fill','#c9d1d9').attr('font-size','9px');
 
-  const sim=d3.forceSimulation(ns).force('link',d3.forceLink(links).distance(160))
-    .force('charge',d3.forceManyBody().strength(-350)).force('center',d3.forceCenter(400,200)).force('collision',d3.forceCollide(40))
+  // ── Force simulation with bezier-curve tick ───────────
+  const sim=d3.forceSimulation(ns).force('link',d3.forceLink(links).distance(180))
+    .force('charge',d3.forceManyBody().strength(-400)).force('center',d3.forceCenter(400,200)).force('collision',d3.forceCollide(45))
     .on('tick',()=>{
-      linkG.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-      linkL.attr('x',d=>(d.source.x+d.target.x)/2).attr('y',d=>(d.source.y+d.target.y)/2-5);
-      nodeG.attr('transform',d=>`translate(${d.x},${d.y})`);
+      linkG.attr('d',d=>{
+        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        const px=-dy/dist,py=dx/dist;
+        const total=d._total||1,idx=d._idx||0;
+        const arcOff=(idx-(total-1)/2)*28;
+        const cx=(sx+tx)/2+px*arcOff,cy=(sy+ty)/2+py*arcOff;
+        return 'M'+sx+','+sy+' Q'+cx+','+cy+' '+tx+','+ty;
+      });
+      // Label at bezier t=0.5: 0.25*P0 + 0.5*P1 + 0.25*P2
+      linkL.attr('x',d=>{
+        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        const px=-dy/dist,py=dx/dist;
+        const total=d._total||1,idx=d._idx||0;
+        const arcOff=(idx-(total-1)/2)*28;
+        const cx=(sx+tx)/2+px*arcOff;
+        return 0.25*sx+0.5*cx+0.25*tx;
+      }).attr('y',d=>{
+        const sx=d.source.x,sy=d.source.y,tx=d.target.x,ty=d.target.y;
+        const dx=tx-sx,dy=ty-sy,dist=Math.sqrt(dx*dx+dy*dy)||1;
+        const px=-dy/dist,py=dx/dist;
+        const total=d._total||1,idx=d._idx||0;
+        const arcOff=(idx-(total-1)/2)*28;
+        const cy=(sy+ty)/2+py*arcOff;
+        return 0.25*sy+0.5*cy+0.25*ty-4;
+      });
+      nodeG.attr('transform',d=>'translate('+d.x+','+d.y+')');
     });
   sim.alpha(1).restart();
   setTimeout(()=>svg.transition().duration(500).call(d3.zoom().transform,d3.zoomIdentity),100);
