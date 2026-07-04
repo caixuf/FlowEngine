@@ -442,10 +442,21 @@ int main(int argc, char** argv) {
 
     /* ── bag ── */
     if (strcmp(cmd, "bag") == 0) {
-        if (!arg1 || strcmp(arg1, "info") != 0 || !arg2) {
-            print_usage(); return 1;
+        if (!arg1) { print_usage(); return 1; }
+        if (strcmp(arg1, "info") == 0 && arg2) return cmd_bag_info(arg2);
+        if (strcmp(arg1, "check") == 0 && arg2) {
+            BagReader* r = bag_reader_open(arg2);
+            if (!r) { printf("✗ Cannot open '%s'\n", arg2); return 1; }
+            uint64_t count, dur;
+            bag_reader_info(r, &count, &dur);
+            printf("✓ Bag file valid: %" PRIu64 " msgs, %.1fs\n", count, (double)dur/1000000.0);
+            char topics[64][64];
+            int n = bag_reader_get_topics(r, topics, 64, NULL);
+            printf("  Topics: %d\n", n);
+            bag_reader_close(r);
+            return 0;
         }
-        return cmd_bag_info(arg2);
+        print_usage(); return 1;
     }
 
     /* ── schema ── */
