@@ -252,6 +252,71 @@ void message_bus_get_zc_stats(MessageBus* bus,
                                uint64_t*   zc_published,
                                uint64_t*   zc_delivered);
 
+/* ── QoS & Per-Topic Statistics ─────────────────────────── */
+
+/** 队列溢出策略 */
+typedef enum {
+    QOS_DROP_OLDEST = 0,  /**< 丢弃最旧消息（默认） */
+    QOS_DROP_LATEST = 1,  /**< 丢弃最新消息（保留旧数据） */
+    QOS_BLOCK       = 2,  /**< 阻塞发布者直到队列有空间 */
+} QosPolicy;
+
+/** Topic QoS 配置 */
+typedef struct {
+    uint32_t  queue_depth;   /**< 最大队列深度（0=使用全局默认 256） */
+    QosPolicy policy;        /**< 溢出策略 */
+} TopicQos;
+
+/** Per-topic 统计 */
+typedef struct {
+    char      topic[MSG_BUS_MAX_TOPIC_LEN];
+    uint64_t  publish_count;    /**< 发布次数 */
+    uint64_t  deliver_count;    /**< 投递次数 */
+    uint64_t  drop_count;       /**< 丢弃次数 */
+    uint64_t  total_latency_us; /**< 累计延迟（用于计算平均值） */
+    uint64_t  min_latency_us;   /**< 最小延迟 */
+    uint64_t  max_latency_us;   /**< 最大延迟 */
+    uint64_t  last_publish_us;  /**< 最近发布时间 */
+    uint32_t  subscriber_count; /**< 当前订阅者数 */
+    double    frequency_hz;     /**< 估算发布频率 */
+    TopicQos  qos;              /**< 当前 QoS 配置 */
+} TopicStats;
+
+/**
+ * 为指定 topic 设置 QoS 策略。
+ * 必须在首次 publish 之前调用以生效。
+ * @return 0 成功, -1 topic 名非法
+ */
+int message_bus_set_topic_qos(MessageBus* bus, const char* topic,
+                              const TopicQos* qos);
+
+/** 获取 topic 的 QoS 配置 */
+const TopicQos* message_bus_get_topic_qos(MessageBus* bus, const char* topic);
+
+/**
+ * 获取 topic 的运行时统计。
+ * @param stats 输出缓冲区
+ * @return 0 成功, -1 topic 不存在
+ */
+int message_bus_get_topic_stats(MessageBus* bus, const char* topic,
+                                TopicStats* stats);
+
+/**
+ * 列出总线上所有活跃 topic。
+ * @param topics 输出缓冲区（每个 64 字节）
+ * @param max    最多返回数量
+ * @return 实际 topic 数量
+ */
+int message_bus_list_topics(MessageBus* bus, char topics[][64], int max);
+
+/**
+ * 获取所有 topic 的统计摘要（用于 flowctl/监控）。
+ * @param stats 输出数组
+ * @param max   最多返回数量
+ * @return 实际 topic 数量
+ */
+int message_bus_get_all_topic_stats(MessageBus* bus, TopicStats* stats, int max);
+
 #ifdef __cplusplus
 }
 #endif

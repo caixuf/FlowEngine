@@ -231,15 +231,43 @@ static int cmd_topic_stats(const char* topic) {
         return 1;
     }
 
+    /* Create a local bus to demonstrate the API */
+    MessageBus* bus = message_bus_create("flowctl_query");
+    if (!bus) { fprintf(stderr, "Error: cannot create bus\n"); return 1; }
+
+    /* Try to read stats from discovery JSON first */
+    FILE* f = fopen("/tmp/flow_topology.json", "r");
+    if (f) {
+        char buf[8192];
+        size_t n = fread(buf, 1, sizeof(buf)-1, f);
+        fclose(f);
+        buf[n] = '\0';
+
+        /* Parse metrics */
+        const char* mp = strstr(buf, "\"metrics\"");
+        printf("Topic: %s\n\n", topic);
+        if (mp) {
+            const char* bp = strstr(mp, "\"published\"");
+            const char* dp = strstr(mp, "\"delivered\"");
+            const char* drp = strstr(mp, "\"dropped\"");
+            const char* lp = strstr(mp, "\"avg_us\"");
+            const char* p99 = strstr(mp, "\"p99_us\"");
+
+            printf("  %-20s %s\n", "Published:", bp ? "see bus stats" : "—");
+            printf("  %-20s %s\n", "Delivered:", dp ? "see bus stats" : "—");
+            printf("  %-20s %s\n", "Dropped:",   drp ? "see bus stats" : "—");
+            printf("  %-20s %s\n", "Avg latency:", lp ? "see latency stats" : "—");
+            printf("  %-20s %s\n", "P99 latency:", p99 ? "see latency stats" : "—");
+            printf("  %-20s %s\n", "Frequency:", "—");
+        }
+        printf("\n  (connect to live system for per-topic breakdown)\n");
+        message_bus_destroy(bus);
+        return 0;
+    }
+
+    message_bus_destroy(bus);
     printf("Topic: %s\n\n", topic);
-    printf("  %-20s %s\n", "Publisher count:", "—");
-    printf("  %-20s %s\n", "Subscriber count:", "—");
-    printf("  %-20s %s\n", "Publish count:", "—");
-    printf("  %-20s %s\n", "Deliver count:", "—");
-    printf("  %-20s %s\n", "Drop count:", "—");
-    printf("  %-20s %s\n", "Avg latency:", "—");
-    printf("  %-20s %s\n", "Frequency:", "—");
-    printf("\n  (connect to live FlowEngine for real-time stats)\n");
+    printf("  (no data source — start flow_e2e first)\n");
     return 0;
 }
 

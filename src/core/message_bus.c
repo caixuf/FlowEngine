@@ -104,6 +104,17 @@ struct MessageBus {
     atomic_uint_fast64_t stat_dropped;
     atomic_uint_fast64_t stat_zc_published;
     atomic_uint_fast64_t stat_zc_delivered;
+
+    /* ── Per-topic tracking (QoS) ──────────────────────── */
+    #define BUS_MAX_TOPIC_ENTRIES 128
+    struct {
+        char      topic[MSG_BUS_MAX_TOPIC_LEN];
+        TopicQos  qos;
+        TopicStats stats;
+        bool      active;
+    } topic_entries[BUS_MAX_TOPIC_ENTRIES];
+    int        topic_count;
+    pthread_mutex_t topic_mutex;
 };
 
 /* ── Helpers ──────────────────────────────────────────── */
@@ -176,6 +187,7 @@ static bool rb_pop(RingBuffer* rb, Message* out, volatile bool* running) {
 /* ── Dispatch message to subscribers ─────────────────── */
 
 static void dispatch_message(MessageBus* bus, const Message* msg) {
+    int delivered = 0;
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
         SubEntry* s = &bus->subs[i];
@@ -183,9 +195,35 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
         if (topic_match(s->topic, msg->topic)) {
             s->callback(msg, s->user_data);
             atomic_fetch_add(&bus->stat_delivered, 1);
+            delivered++;
         }
     }
     pthread_mutex_unlock(&bus->sub_mutex);
+
+    /* Per-topic delivery tracking */
+    if (delivered > 0) {
+        pthread_mutex_lock(&bus->topic_mutex);
+        for (int i = 0; i < bus->topic_count; i++) {
+            if (strcmp(bus->topic_entries[i].topic, msg->topic) == 0) {
+                TopicStats* s = &bus->topic_entries[i].stats;
+                s->deliver_count += (uint64_t)delivered;
+                uint64_t now = monotonic_us();
+                uint64_t lat = now - msg->timestamp_us;
+                s->total_latency_us += lat;
+                if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
+                if (lat > s->max_latency_us) s->max_latency_us = lat;
+                /* Update subscriber count */
+                int subc = 0;
+                pthread_mutex_lock(&bus->sub_mutex);
+                for (int j = 0; j < bus->sub_count; j++)
+                    if (bus->subs[j].active && topic_match(bus->subs[j].topic, msg->topic)) subc++;
+                pthread_mutex_unlock(&bus->sub_mutex);
+                s->subscriber_count = (uint32_t)subc;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&bus->topic_mutex);
+    }
 
     /* Handle reply if this is a REPLY message */
     if (msg->type == MSG_TYPE_REPLY) {
@@ -285,6 +323,7 @@ MessageBus* message_bus_create(const char* bus_name) {
     atomic_init(&bus->stat_dropped, 0);
     atomic_init(&bus->stat_zc_published, 0);
     atomic_init(&bus->stat_zc_delivered, 0);
+    pthread_mutex_init(&bus->topic_mutex, NULL);
 
     bus->running = true;
     if (pthread_create(&bus->dispatch_thread, NULL, dispatch_thread_fn, bus) != 0) {
@@ -305,6 +344,7 @@ void message_bus_destroy(MessageBus* bus) {
     pthread_mutex_destroy(&bus->zc_mutex);
     pthread_mutex_destroy(&bus->svc_mutex);
     pthread_mutex_destroy(&bus->reply_mutex);
+    pthread_mutex_destroy(&bus->topic_mutex);
 
     for (int i = 0; i < MAX_PENDING_REPLIES; i++) {
         pthread_mutex_destroy(&bus->reply_slots[i].mutex);
@@ -336,6 +376,43 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     } else {
         atomic_fetch_add(&bus->stat_dropped, 1);
     }
+
+    /* Per-topic tracking */
+    pthread_mutex_lock(&bus->topic_mutex);
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            TopicStats* s = &bus->topic_entries[i].stats;
+            if (ret == 0) {
+                s->publish_count++;
+                s->last_publish_us = msg.timestamp_us;
+                /* Estimate frequency */
+                if (s->publish_count > 1) {
+                    uint64_t elapsed = msg.timestamp_us - s->last_publish_us;
+                    if (elapsed > 0) s->frequency_hz = 1000000.0 / (double)elapsed;
+                }
+            } else {
+                s->drop_count++;
+            }
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return ret;
+        }
+    }
+    /* New topic — auto-register */
+    if (bus->topic_count < BUS_MAX_TOPIC_ENTRIES) {
+        int idx = bus->topic_count++;
+        memset(&bus->topic_entries[idx], 0, sizeof(bus->topic_entries[idx]));
+        snprintf(bus->topic_entries[idx].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+        bus->topic_entries[idx].active = true;
+        bus->topic_entries[idx].qos.policy = QOS_DROP_OLDEST;
+        if (ret == 0) {
+            bus->topic_entries[idx].stats.publish_count = 1;
+            bus->topic_entries[idx].stats.last_publish_us = msg.timestamp_us;
+        } else {
+            bus->topic_entries[idx].stats.drop_count = 1;
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+
     return ret;
 }
 
@@ -597,4 +674,89 @@ void message_bus_get_zc_stats(MessageBus* bus,
     if (!bus) return;
     if (zc_published) *zc_published = atomic_load(&bus->stat_zc_published);
     if (zc_delivered) *zc_delivered = atomic_load(&bus->stat_zc_delivered);
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* QoS & Per-Topic Statistics                                */
+/* ══════════════════════════════════════════════════════════ */
+
+int message_bus_set_topic_qos(MessageBus* bus, const char* topic,
+                              const TopicQos* qos) {
+    if (!bus || !topic || !qos) return ERR_INVALID_PARAM;
+
+    pthread_mutex_lock(&bus->topic_mutex);
+    /* Find or create topic entry */
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            bus->topic_entries[i].qos = *qos;
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return 0;
+        }
+    }
+    /* New topic */
+    if (bus->topic_count < BUS_MAX_TOPIC_ENTRIES) {
+        int idx = bus->topic_count++;
+        memset(&bus->topic_entries[idx], 0, sizeof(bus->topic_entries[idx]));
+        snprintf(bus->topic_entries[idx].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+        bus->topic_entries[idx].active = true;
+        bus->topic_entries[idx].qos = *qos;
+        pthread_mutex_unlock(&bus->topic_mutex);
+        return 0;
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return ERR_OVERFLOW;
+}
+
+const TopicQos* message_bus_get_topic_qos(MessageBus* bus, const char* topic) {
+    if (!bus || !topic) return NULL;
+    pthread_mutex_lock(&bus->topic_mutex);
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            const TopicQos* q = &bus->topic_entries[i].qos;
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return q;
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return NULL;
+}
+
+int message_bus_get_topic_stats(MessageBus* bus, const char* topic,
+                                TopicStats* stats) {
+    if (!bus || !topic || !stats) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->topic_mutex);
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            *stats = bus->topic_entries[i].stats;
+            stats->qos = bus->topic_entries[i].qos;
+            snprintf(stats->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return ERR_NOT_FOUND;
+}
+
+int message_bus_list_topics(MessageBus* bus, char topics[][64], int max) {
+    if (!bus || !topics || max <= 0) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->topic_mutex);
+    int n = (bus->topic_count < max) ? bus->topic_count : max;
+    for (int i = 0; i < n; i++)
+        snprintf(topics[i], 64, "%s", bus->topic_entries[i].topic);
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return n;
+}
+
+int message_bus_get_all_topic_stats(MessageBus* bus, TopicStats* stats, int max) {
+    if (!bus || !stats || max <= 0) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->topic_mutex);
+    int n = (bus->topic_count < max) ? bus->topic_count : max;
+    for (int i = 0; i < n; i++) {
+        stats[i] = bus->topic_entries[i].stats;
+        stats[i].qos = bus->topic_entries[i].qos;
+        snprintf(stats[i].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", bus->topic_entries[i].topic);
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return n;
 }
