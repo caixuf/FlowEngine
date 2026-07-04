@@ -16,7 +16,7 @@ pkill -9 -f flowboard_server 2>/dev/null || true
 pkill -9 -f flow_e2e 2>/dev/null || true
 sleep 0.5
 
-DURATION=15
+DURATION=30
 OPEN_BROWSER=true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
