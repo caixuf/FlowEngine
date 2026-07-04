@@ -21,6 +21,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
@@ -140,6 +141,16 @@ void log_write(const char* module, LogLevel level,
 
 /** Legacy callback for process_manager */
 void default_log_callback(LogLevel level, const char* message);
+
+/* ── State file path (shared by e2e, flowctl, dashboard) ── */
+
+#define FLOWENGINE_DEFAULT_STATE_FILE "/tmp/flow_topology.json"
+
+/** Get the state file path from FLOWENGINE_STATE_FILE env, or default */
+static inline const char* flowengine_state_file(void) {
+    const char* env = getenv("FLOWENGINE_STATE_FILE");
+    return env ? env : FLOWENGINE_DEFAULT_STATE_FILE;
+}
 
 #ifdef __cplusplus
 }

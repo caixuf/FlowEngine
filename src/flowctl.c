@@ -65,7 +65,7 @@ static int cmd_list_tasks(void) {
     printf("  %-20s %-30s %s\n", "────", "───────────", "───");
 
     /* Try JSON file first */
-    FILE* f = fopen("/tmp/flow_topology.json", "r");
+    FILE* f = fopen(flowengine_state_file(), "r");
     if (f) {
         char buf[32768];
         size_t n = fread(buf, 1, sizeof(buf)-1, f);
@@ -114,7 +114,7 @@ static int cmd_list_topics(void) {
     printf("  %-30s %-8s %-8s %s\n", "TOPIC", "PUB", "SUB", "FREQ");
     printf("  %-30s %-8s %-8s %s\n", "─────", "───", "───", "────");
 
-    FILE* f = fopen("/tmp/flow_topology.json", "r");
+    FILE* f = fopen(flowengine_state_file(), "r");
     if (!f) {
         printf("  (no data — start flow_e2e first)\n");
         return 0;
@@ -168,7 +168,7 @@ static int cmd_list_topics(void) {
 static int cmd_graph(void) {
     printf("Topology:\n\n");
 
-    FILE* f = fopen("/tmp/flow_topology.json", "r");
+    FILE* f = fopen(flowengine_state_file(), "r");
     if (!f) {
         printf("  (no data)\n");
         return 0;
@@ -252,7 +252,7 @@ static int cmd_topic_stats(const char* topic) {
     if (!bus) { fprintf(stderr, "Error: cannot create bus\n"); return 1; }
 
     /* Try to read stats from discovery JSON first */
-    FILE* f = fopen("/tmp/flow_topology.json", "r");
+    FILE* f = fopen(flowengine_state_file(), "r");
     if (f) {
         char buf[8192];
         size_t n = fread(buf, 1, sizeof(buf)-1, f);
@@ -378,7 +378,8 @@ static int cmd_dashboard(void) {
     printf("  API:    /api/topology  /api/stream\n\n");
     printf("Run in another terminal:\n");
     printf("  ./build/bin/flow_e2e 30 &\n");
-    printf("  python3 tools/flowboard_server.py --json-file /tmp/flow_topology.json\n");
+    printf("  python3 tools/flowboard_server.py --json-file $FLOWENGINE_STATE_FILE\n");
+    printf("  (default: %s)\n", FLOWENGINE_DEFAULT_STATE_FILE);
     printf("\nThen open http://localhost:8800 in browser.\n");
     return 0;
 }
@@ -526,7 +527,7 @@ int main(int argc, char** argv) {
     /* ── registry ── */
     if (strcmp(cmd, "registry") == 0) {
         /* Try JSON file first (live data from e2e) */
-        FILE* f = fopen("/tmp/flow_topology.json", "r");
+        FILE* f = fopen(flowengine_state_file(), "r");
         if (f) {
             char buf[32768];
             size_t n = fread(buf, 1, sizeof(buf)-1, f);

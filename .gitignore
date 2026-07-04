@@ -77,8 +77,8 @@ lcov.info
 vgcore.*
 
 # 核心转储文件
-**/core
 core.*
+core.[0-9]*
 
 # 性能分析文件
 *.prof

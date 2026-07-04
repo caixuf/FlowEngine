@@ -394,7 +394,7 @@ static int monitor_execute(TaskBase* base) {
         /* ── Export for FlowBoard dashboard ── */
         char* topo_json = discovery_export_json(g_discovery);
         if (topo_json) {
-            FILE* jf = fopen("/tmp/flow_topology.json", "w");
+            FILE* jf = fopen(flowengine_state_file(), "w");
             if (jf) {
                 /* Wrap: replace closing } with metrics */
                 /* Format: {"self":"...","nodes":[...]} */
