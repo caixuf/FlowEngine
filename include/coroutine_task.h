@@ -531,7 +531,6 @@ public:
     void await_suspend(std::coroutine_handle<> handle) {
         handle_ = handle;
         t_suspend_us_ = coro_now_us();
-        message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
 
         /* 注册取消唤醒：stop() → request_cancel() → 唤醒本协程 */
         if (cancel_) {
@@ -547,6 +546,9 @@ public:
                 if (ctl->try_fire(AwaitStatus::Timeout)) schedule_resume(handle);
             });
         }
+        /* 订阅放在取消/超时注册之后，保证 on_message 触发 await_resume
+         * 时 cancel_id_ 和 timer_id_ 已写入，不存在数据竞争。 */
+        message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
     }
 
     auto await_resume() {
@@ -790,9 +792,6 @@ public:
     void await_suspend(std::coroutine_handle<> h) {
         handle_ = h;
         t_suspend_us_ = coro_now_us();
-        for (const auto& t : topics_) {
-            message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
-        }
         if (cancel_) {
             auto ctl = ctl_;
             cancel_id_ = cancel_->add_waiter([ctl, h] {
@@ -804,6 +803,11 @@ public:
             timer_id_ = TimerService::instance().add(timeout_us_, [ctl, h] {
                 if (ctl->try_fire(AwaitStatus::Timeout)) schedule_resume(h);
             });
+        }
+        /* 订阅放在取消/超时注册之后，保证 on_message 触发 await_resume
+         * 时 cancel_id_ 和 timer_id_ 已写入，不存在数据竞争。 */
+        for (const auto& t : topics_) {
+            message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
         }
     }
 
@@ -1166,6 +1170,62 @@ protected:
  * ───────────────────────────────────────────────────────── */
 
 #ifdef FLOWCORO_INTEGRATION
+
+/* CompletionNotifier — 用于安全等待协程真正结束的辅助协程。
+ *
+ * 问题：flowcoro::CoroTask 的 FinalAwaiter 在对称转移（symmetric transfer）
+ * 前先将帧的 resume 指针清零（done() = true），再调用 await_suspend 返回续体。
+ * 若 execute() 线程此时读取 task_->done() 发现为 true 并继续销毁任务，
+ * 而线程池工作线程仍在 await_suspend 内部执行续体返回流程，就会出现数据竞争。
+ *
+ * 解决方案：在 execute() 调用前将 CompletionNotifier 句柄设为 task_ 的
+ * continuation。协程完成时，FinalAwaiter 通过对称转移将控制权交给 notifier，
+ * notifier 的 return_void() 在工作线程上原子地设置 frame_done_ 并唤醒 cv。
+ * execute() 等待 frame_done_（而非 task_->done()），保证工作线程已彻底退出
+ * 协程帧，不再访问任何协程相关内存，然后才销毁 task_。
+ */
+struct CompletionNotifier {
+    struct promise_type {
+        std::atomic<bool>*       done_flag{nullptr};
+        std::condition_variable* cv{nullptr};
+
+        CompletionNotifier get_return_object() noexcept {
+            return CompletionNotifier{
+                std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        void return_void() noexcept {
+            if (done_flag) {
+                done_flag->store(true, std::memory_order_release);
+                cv->notify_all();
+            }
+        }
+        void unhandled_exception() noexcept {}
+    };
+
+    std::coroutine_handle<promise_type> handle;
+
+    explicit CompletionNotifier(std::coroutine_handle<promise_type> h) noexcept
+        : handle(h) {}
+    CompletionNotifier(const CompletionNotifier&)            = delete;
+    CompletionNotifier& operator=(const CompletionNotifier&) = delete;
+    CompletionNotifier(CompletionNotifier&& o) noexcept
+        : handle(o.handle) { o.handle = nullptr; }
+    ~CompletionNotifier() { if (handle) handle.destroy(); }
+};
+
+/* 工厂函数：创建一个空体协程，挂起于 initial_suspend 等待被续体激活。
+ * 激活后执行空 co_return，触发 promise_type::return_void() 发出完成信号。 */
+inline CompletionNotifier make_completion_notifier(
+    std::atomic<bool>* flag, std::condition_variable* cv)
+{
+    // 这里必须是协程（含 co_return），由编译器生成帧并挂起于 initial_suspend
+    co_return;  // 空体：唯一目的是触发 return_void()
+    // cppcheck-suppress unreachableCode
+    (void)flag; (void)cv;  // 参数通过 promise 传递，此处仅用于满足语法
+}
+
 /**
  * FlowCoroTask 在 CoroutineTask 基础上：
  *   - Task 类型为 flowcoro::CoroTask（惰性启动，支持 continuation 链）。
@@ -1173,7 +1233,7 @@ protected:
  *     协程体从一开始就在工作线程上执行，不阻塞调用线程。
  *   - BusAwaitable 将后续每次 resume 也提交到线程池，
  *     消息总线分发线程永不被协程逻辑阻塞。
- *   - execute() 以 5ms 轮询等待协程完成，CPU 负载极低。
+ *   - execute() 通过 CompletionNotifier 无竞争地等待协程完成。
  *
  * 使用方式与 CoroutineTask 完全相同，只需改继承类即可。
  */
@@ -1186,10 +1246,20 @@ public:
     }
 
     void execute() override {
-        stop_flag_ = false;
+        stop_flag_   = false;
+        frame_done_.store(false, std::memory_order_relaxed);
         cancel_token_.reset();
         coro_stats_.reset();
         task_ = std::make_unique<Task>(run());
+
+        /* 将 CompletionNotifier 设为 task_ 的 continuation。
+         * 协程完成时 FinalAwaiter 对称转移到 notifier，
+         * notifier.return_void() 在工作线程上设置 frame_done_ 并唤醒 cv。
+         * 这样 execute() 无需轮询 task_->done()（避免与帧写操作的竞争）。 */
+        auto notifier = make_completion_notifier(&frame_done_, &coro_cv_);
+        notifier.handle.promise().done_flag = &frame_done_;
+        notifier.handle.promise().cv        = &coro_cv_;
+        task_->handle.promise().continuation = notifier.handle;
 
         /* flowcoro::CoroTask 惰性启动（suspend_always）：
          * 将首次 resume 提交到线程池，协程体立即在工作线程上开始执行，
@@ -1200,12 +1270,32 @@ public:
                 [h]() mutable { if (!h.done()) h.resume(); });
         }
 
-        /* 事件循环：stop()/notify() 精确唤醒 + 50ms 兜底轮询。 */
+        /* 事件循环：stop()/notify() 精确唤醒 + 50ms 兜底轮询。
+         * 使用 frame_done_（而非 task_->done()）等待协程完成，
+         * 避免在工作线程仍执行 FinalAwaiter 时读取协程帧状态。 */
         {
             std::unique_lock<std::mutex> lk(coro_mutex_);
-            while (!task_->done() && !stop_flag_.load()) {
+            coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
+                              [this] {
+                                  return frame_done_.load(std::memory_order_acquire)
+                                      || stop_flag_.load(std::memory_order_relaxed);
+                              });
+            while (!frame_done_.load(std::memory_order_acquire)
+                   && !stop_flag_.load(std::memory_order_relaxed)) {
                 coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
-                                  [this] { return task_->done() || stop_flag_.load(); });
+                                  [this] {
+                                      return frame_done_.load(std::memory_order_acquire)
+                                          || stop_flag_.load(std::memory_order_relaxed);
+                                  });
+            }
+            /* 二次等待：stop_flag_ 触发退出后，协程仍在工作线程上运行，
+             * 必须等到 frame_done_ 为真（notifier 已被工作线程激活并完成），
+             * 才能安全销毁 task_ 及其他共享状态。 */
+            while (!frame_done_.load(std::memory_order_acquire)) {
+                coro_cv_.wait_for(lk, std::chrono::milliseconds(50),
+                                  [this] {
+                                      return frame_done_.load(std::memory_order_acquire);
+                                  });
             }
         }
 
@@ -1213,6 +1303,9 @@ public:
             std::rethrow_exception(task_->handle.promise().exception_);
         }
     }
+
+private:
+    std::atomic<bool> frame_done_{false};
 };
 #endif // FLOWCORO_INTEGRATION
 
