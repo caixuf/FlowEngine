@@ -106,7 +106,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div><div style="font-weight:700;font-size:15px;background:linear-gradient(135deg,#58a6ff,#bc8cff);-webkit-background-clip:text;-webkit-text-fill-color:transparent">FlowBoard</div>
     <div style="font-size:9px;color:#484f58">Live Monitor</div></div>
   </div>
-  <span id="conn-dot" class="pill pill-dead" style="align-self:flex-start">● offline</span>
+  <span id="conn-dot" class="pill pill-dead" style="align-self:flex-start">● loading...</span>
 
   <div style="margin-top:4px">
     <input id="url" value="http://localhost:8800" placeholder="Monitor server URL">
@@ -208,7 +208,15 @@ input:focus,select:focus{border-color:#58a6ff}
   <div id="det-body" style="color:#484f58;font-size:11px">Select a node in the topology graph</div>
 </div>
 
-<div id="toast">Copied!</div><script src="https://d3js.org/d3.v7.min.js"></script>
+<div id="toast">Copied!</div><script>
+// Load D3 dynamically — non-blocking. If CDN fails, topology falls back to text.
+(function(){
+  var s=document.createElement("script");
+  s.src="https://d3js.org/d3.v7.min.js";
+  s.onerror=function(){console.warn("D3 CDN failed — topology will show text view");};
+  document.head.appendChild(s);
+})();
+</script>
 <script>
 // ════════════════════════════════════════════════════════════
 // State
@@ -861,8 +869,8 @@ setTimeout(function(){
   try{var s=JSON.parse(localStorage.getItem('flowboard')||'{}');(s.collapsed||[]).forEach(function(name){document.querySelectorAll('.card-header h2').forEach(function(h){if(h.textContent.trim().startsWith(name.substring(0,8)))h.parentElement.parentElement.classList.add('collapsed');});});}catch(e){}
 },100);
 
-doConnect().catch(function(){doSimulate();});
-
+// Run immediately — don't wait for D3
+  
 setInterval(function(){
   if(!eventSource&&!paused){
     var m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
