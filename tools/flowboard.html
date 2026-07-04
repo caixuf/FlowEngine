@@ -177,7 +177,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
   <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D Scene <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">— 🖱 drag orbit · scroll zoom · right-drag pan</span></h2><span class="toggle">▼</span></div>
-    <div class="card-body" style="padding:0"><canvas id="scene2d" style="width:100%;height:400px;background:#0a0d14;display:none"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden" onclick="if(!sceneReady)init3D()"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">⏳ Loading 3D scene...<br><small style="color:#484f58">(click to retry if stuck)</small></div></div></div></div>
+    <div class="card-body" style="padding:0"><canvas id="scene2d" style="width:100%;height:400px;background:#0a0d14;display:none"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#30363d;font-size:13px;pointer-events:none">⏳ Loading 3D scene...<br><small style="color:#484f58">(click to retry if stuck)</small></div></div></div></div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
@@ -210,6 +210,28 @@ input:focus,select:focus{border-color:#58a6ff}
 
 <div id="toast">Copied!</div>
 
+<script>
+// Multi-CDN Three.js loader — tries CDNs until one works
+(function(){
+  var CDNS=[
+    "https://unpkg.com/three@0.160/build/three.min.js",
+    "https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js",
+    "https://registry.npmmirror.com/three/0.160.0/files/build/three.min.js"
+  ];
+  var orbitCDNS=[
+    "https://unpkg.com/three@0.160/examples/js/controls/OrbitControls.js",
+    "https://cdn.jsdelivr.net/npm/three@0.160/examples/js/controls/OrbitControls.js",
+    "https://registry.npmmirror.com/three/0.160.0/files/examples/js/controls/OrbitControls.js"
+  ];
+  function tryLoad(urls,idx,cb){
+    if(idx>=urls.length){console.warn("All CDNs failed");return;}
+    var s=document.createElement("script");
+    s.src=urls[idx];s.onload=cb;s.onerror=function(){tryLoad(urls,idx+1,cb);};
+    document.head.appendChild(s);
+  }
+  tryLoad(CDNS,0,function(){console.log("Three.js loaded");tryLoad(orbitCDNS,0,function(){console.log("OrbitControls loaded");});});
+})();
+</script>
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script type="importmap">{"imports":{"three":"https://cdn.unpkg.com/npm/three@0.160/build/three.module.js","three/addons/":"https://cdn.unpkg.com/npm/three@0.160/examples/jsm/"}}</script>
 <script>
@@ -296,7 +318,7 @@ function startSSE() {
 function tryReconnect(){
   if(paused){reconnectTimer=setTimeout(tryReconnect,2000);return;}
   fetch(serverUrl+'/api/topology').then(function(r){return r.json()}).then(function(d){
-    topoData=d;updateAll();setConnStatus('live','● live');connectRetries=0;if(!sceneReady)init3D();startSSE();
+    topoData=d;updateAll();setConnStatus('live','● live');connectRetries=0;startSSE();
   }).catch(function(){setConnStatus('warn','● retry');reconnectTimer=setTimeout(tryReconnect,2000);});
 }
 var connectRetries=0;
@@ -667,8 +689,9 @@ var gridHelper=null,sceneReady=false,trafficLights=[],trafficState=0,pedestrians
 
 function init3D(){
   var el=document.getElementById("scene3d");if(!el)return;
-  import("three").then(function(THREE){
-    import("three/addons/controls/OrbitControls.js").then(function(OC){
+  if(typeof THREE==="undefined"){document.getElementById("scene3d-msg").textContent="3D lib loading...";setTimeout(init3D,1000);return;}
+  (function init3DScene(){
+    var THREE=window.THREE;
       var w=el.clientWidth,h=el.clientHeight;
       scene3d=new THREE.Scene();
       scene3d.background=new THREE.Color(0x1a1a2e);
@@ -686,7 +709,7 @@ function init3D(){
       el.appendChild(renderer3d.domElement);
       document.getElementById("scene3d-msg").style.display="none";
 
-      controls3d=new OC.OrbitControls(camera3d,renderer3d.domElement);
+      controls3d=new THREE.OrbitControls(camera3d,renderer3d.domElement);
       controls3d.target.set(0,1.5,4);
       controls3d.enableDamping=true;controls3d.dampingFactor=0.08;
       controls3d.maxPolarAngle=Math.PI/2.3;controls3d.minDistance=3;controls3d.maxDistance=80;
@@ -967,45 +990,76 @@ function init2DFallback(){
   el.width=el.clientWidth*2;el.height=el.clientHeight*2;
   ctx2d.scale(2,2);
 }
+var anim2d=0;
 function draw2D(){
   if(!fallbackActive||!ctx2d)return;
-  var w=canvas2d.clientWidth,h=canvas2d.clientHeight;
+  var w=canvas2d.clientWidth,h=canvas2d.clientHeight,cx=w/2,cy=h/2;
   ctx2d.clearRect(0,0,w,h);
-  // Road cross
-  ctx2d.fillStyle="#333344";ctx2d.fillRect(w/2-60,0,120,h);
-  ctx2d.fillRect(0,h/2-60,w,120);
-  // Lane markings
-  ctx2d.strokeStyle="#ffff66";ctx2d.lineWidth=2;ctx2d.setLineDash([15,10]);
-  ctx2d.beginPath();ctx2d.moveTo(w/2,0);ctx2d.lineTo(w/2,h);ctx2d.stroke();
-  ctx2d.beginPath();ctx2d.moveTo(0,h/2);ctx2d.lineTo(w,h/2);ctx2d.stroke();
+  // Ground
+  ctx2d.fillStyle="#1a1a2e";ctx2d.fillRect(0,0,w,h);
+  // Road cross (gray)
+  ctx2d.fillStyle="#3a3a4e";ctx2d.fillRect(cx-70,0,140,h);
+  ctx2d.fillStyle="#3a3a4e";ctx2d.fillRect(0,cy-70,w,140);
+  // Lane edges (white)
+  ctx2d.strokeStyle="#889";ctx2d.lineWidth=2;
+  ctx2d.strokeRect(cx-64,0,128,h);ctx2d.strokeRect(0,cy-64,w,128);
+  // Center dashes
+  ctx2d.strokeStyle="#ffff66";ctx2d.lineWidth=2;ctx2d.setLineDash([18,10]);
+  ctx2d.beginPath();ctx2d.moveTo(cx,0);ctx2d.lineTo(cx,h);ctx2d.stroke();
+  ctx2d.beginPath();ctx2d.moveTo(0,cy);ctx2d.lineTo(w,cy);ctx2d.stroke();
   ctx2d.setLineDash([]);
-  // Stop lines
-  ctx2d.strokeStyle="#ffffff";ctx2d.lineWidth=3;
-  [[w/2-50,h/2-55,w/2+50,h/2-55],[w/2-50,h/2+55,w/2+50,h/2+55],[w/2-55,h/2-50,w/2-55,h/2+50],[w/2+55,h/2-50,w/2+55,h/2+50]].forEach(function(p){ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
-  // Car position (from vehicle telemetry)
-  var v=(topoData.metrics||{}).vehicle;if(!v)return;
-  var cx=w/2+(v.x||0)*2.5,cy=h/2-(v.y||0)*10;
-  // Car body
-  ctx2d.save();ctx2d.translate(cx,cy);
-  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-15,-8,30,16);
-  // Roof
-  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-8,-4,16,8);
-  // Headlights
-  ctx2d.fillStyle="#ffff88";ctx2d.fillRect(12,-6,4,4);ctx2d.fillRect(12,2,4,4);
-  // Wheels
-  ctx2d.fillStyle="#222";ctx2d.fillRect(-10,-10,5,4);ctx2d.fillRect(-10,6,5,4);ctx2d.fillRect(7,-10,5,4);ctx2d.fillRect(7,6,5,4);
-  ctx2d.restore();
-  // Speed text
-  ctx2d.fillStyle="#8b949e";ctx2d.font="10px monospace";
-  ctx2d.fillText("spd="+(v.speed||0).toFixed(1)+" m/s thr="+((v.throttle||0)*100).toFixed(0)+"%",10,h-10);
+  // Stop lines (white thick)
+  ctx2d.strokeStyle="#fff";ctx2d.lineWidth=4;
+  [[cx-58,cy-58,cx+58,cy-58],[cx-58,cy+58,cx+58,cy+58],[cx-58,cy-58,cx-58,cy+58],[cx+58,cy-58,cx+58,cy+58]].forEach(function(p){ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
+  // Sidewalks
+  ctx2d.fillStyle="#445";ctx2d.fillRect(cx-74,0,6,h);ctx2d.fillRect(cx+68,0,6,h);
+  ctx2d.fillRect(0,cy-74,w,6);ctx2d.fillRect(0,cy+68,w,6);
+  // Buildings (simple blocks)
+  [[cx-100,cy-100,30,25,"#445566"],[cx+70,cy-100,25,30,"#554455"],[cx-100,cy+70,25,20,"#445555"],[cx+75,cy+75,20,35,"#555544"]].forEach(function(b){ctx2d.fillStyle=b[4];ctx2d.fillRect(b[0],b[1],b[2],b[3]);});
+  // Trees (green circles)
+  [[cx-90,cy-80],[cx+85,cy-80],[cx-90,cy+85],[cx+85,cy+85],[cx-110,cy-50],[cx+95,cy-50],[cx-50,cy-110],[cx+55,cy+110]].forEach(function(t){ctx2d.fillStyle="#2d5a27";ctx2d.beginPath();ctx2d.arc(t[0],t[1],8,0,Math.PI*2);ctx2d.fill();ctx2d.fillStyle="#6b4423";ctx2d.fillRect(t[0]-1.5,t[1],3,8);});
   // Traffic lights
-  var phase=Math.floor(Date.now()/1000)%20,color=phase<10?"#00ff00":phase<12?"#ffaa00":"#ff0000";
-  [[w/2-60,h/2-60],[w/2+55,h/2-60],[w/2-60,h/2+55],[w/2+55,h/2+55]].forEach(function(p){ctx2d.fillStyle=color;ctx2d.beginPath();ctx2d.arc(p[0],p[1],5,0,Math.PI*2);ctx2d.fill();});
+  anim2d++;var phase=(anim2d/60)%20,color=phase<10?"#0f0":phase<12?"#fa0":"#f00";
+  [[cx-65,cy-65],[cx+60,cy-65],[cx-65,cy+60],[cx+60,cy+60]].forEach(function(p){ctx2d.fillStyle=color;ctx2d.beginPath();ctx2d.arc(p[0]-4,p[1]-4,4,0,Math.PI*2);ctx2d.fill();ctx2d.fillStyle="#222";ctx2d.fillRect(p[0]-6,p[1]-25,4,25);});
+  // Sidewalk pedestrians
+  [[cx-80,cy-30],[cx+80,cy+20],[cx-20,cy-80],[cx+30,cy+80]].forEach(function(p,i){var ox=Math.sin(anim2d/30+i)*15;ctx2d.fillStyle="#e74c3c";ctx2d.beginPath();ctx2d.arc(p[0]+ox,p[1],3,0,Math.PI*2);ctx2d.fill();});
+
+  // ── Car ──
+  var v=(topoData.metrics||{}).vehicle;if(!v)return;
+  var posX=cx+(v.x||0)*3,posY=cy-(v.y||0)*15;
+  ctx2d.save();ctx2d.translate(posX,posY);
+  // Shadow
+  ctx2d.fillStyle="rgba(0,0,0,0.3)";ctx2d.fillRect(-14,-6,28,14);
+  // Body
+  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-16,-9,32,18);
+  // Roof
+  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-9,-5,18,10);
+  // Windshield
+  ctx2d.fillStyle="#88ccff";ctx2d.fillRect(-8,-4,6,8);ctx2d.fillRect(2,-4,6,8);
+  // Headlights (yellow glow)
+  ctx2d.fillStyle="#ffff88";ctx2d.fillRect(12,-7,5,5);ctx2d.fillRect(12,2,5,5);
+  // Taillights
+  ctx2d.fillStyle="#ff4444";ctx2d.fillRect(-16,-7,4,5);ctx2d.fillRect(-16,2,4,5);
+  // Wheels
+  ctx2d.fillStyle="#111";ctx2d.fillRect(-11,-11,6,4);ctx2d.fillRect(-11,7,6,4);ctx2d.fillRect(7,-11,6,4);ctx2d.fillRect(7,7,6,4);
+  ctx2d.restore();
+
+  // HUD panel (bottom)
+  ctx2d.fillStyle="rgba(0,0,0,0.6)";ctx2d.fillRect(0,h-40,w,40);
+  ctx2d.fillStyle="#fff";ctx2d.font="bold 14px monospace";
+  ctx2d.fillText("speed "+(v.speed||0).toFixed(1)+" m/s",10,h-20);
+  ctx2d.fillText("target "+(v.target_speed||0).toFixed(1),160,h-20);
+  ctx2d.fillStyle=(v.throttle||0)>0.1?"#3fb950":"#f85149";
+  ctx2d.fillText("throttle "+((v.throttle||0)*100).toFixed(0)+"%",310,h-20);
+  ctx2d.fillStyle="#d29922";ctx2d.fillText("error "+(v.error||0).toFixed(1),460,h-20);
+  ctx2d.fillStyle="#8b949e";ctx2d.fillText("x="+(v.x||0).toFixed(1),610,h-20);
+  // Progress bar for throttle
+  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(310,h-10,80,4);
+  ctx2d.fillStyle="#3fb950";ctx2d.fillRect(310,h-10,80*(v.throttle||0),4);
 }
 
 // Activate 2D fallback if 3D fails to load in 4s
-setTimeout(function(){if(!sceneReady)init2DFallback();},4000);
-setTimeout(init3D,500);
+init3D();setTimeout(function(){if(!sceneReady)init2DFallback();},5000);
 
 // Init
 // ════════════════════════════════════════════════════════════
