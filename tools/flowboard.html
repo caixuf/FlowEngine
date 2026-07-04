@@ -17,6 +17,7 @@ h1 span{color:#8b949e;font-size:12px;font-weight:400}
 #topo{width:100%;height:400px;background:#0d1117;border:1px solid#21262d;border-radius:8px;position:relative;overflow:hidden}
 #topo svg{width:100%;height:100%}
 #frames{height:300px;overflow-y:auto;font:10px 'JetBrains Mono',monospace;background:#0d1117;border:1px solid#21262d;border-radius:8px;padding:6px}
+#process-topics{height:300px;overflow-y:auto;font:10px 'JetBrains Mono',monospace;background:#0d1117;border:1px solid#21262d;border-radius:8px;padding:6px}
 #charts{display:flex;gap:8px;flex-wrap:wrap}
 .chart-box{flex:1;min-width:280px;height:200px;background:#0d1117;border:1px solid#21262d;border-radius:8px;overflow:hidden}
 .chart-box canvas{width:100%;height:100%;display:block}
@@ -29,6 +30,8 @@ input{width:240px;font:11px monospace}
 .link{stroke:#21262d;stroke-width:1.2;fill:none}
 .frame-line{display:flex;gap:6px;padding:1px 4px;border-bottom:1px solid#0d1117;white-space:nowrap}
 .frame-line:hover{background:#161b22}
+.role{display:inline-block;min-width:38px;text-align:center;border-radius:10px;padding:1px 6px;font-size:9px;font-weight:700}.role-pub{background:#12361f;color:#3fb950}.role-sub{background:#102744;color:#58a6ff}.role-pubsub{background:#2d2248;color:#bc8cff}.role-unknown{background:#21262d;color:#8b949e}
+.topic-full{color:#58a6ff}.muted{color:#484f58}.mono{font-family:'JetBrains Mono',monospace}
 </style>
 </head>
 <body>
@@ -65,6 +68,12 @@ input{width:240px;font:11px monospace}
   </div>
   <div style="flex:1;min-width:280px">
     <div class="card"><h2>Topic Stats (QoS)</h2><div id="topic-stats"><span style="color:#484f58">No data</span></div></div>
+  </div>
+</div>
+
+<div class="row">
+  <div style="flex:1;min-width:600px">
+    <div class="card" style="padding:0"><h2 style="padding:12px 12px 0">Process / Topic Matrix</h2><div id="process-topics"><span style="color:#484f58">No data</span></div></div>
   </div>
 </div>
 
@@ -110,11 +119,23 @@ function doSimulate(){
     ],
     metrics:{bus:{published:1250,delivered:2480,dropped:0},transport:{local_pub:1250,remote_pub:0},scheduler:{tasks:5,mode:"CHOREO"},latency:{avg_us:145,p50_us:120,p99_us:450},driver_mode:"ACC",
       topics:[
-        {topic:"sensor/lidar",pub:500,del:1000,drop:0,lat_us:145,freq:10.0,subs:2},
-        {topic:"sensor/gps",pub:250,del:250,drop:0,lat_us:168,freq:5.0,subs:1},
-        {topic:"sensor/radar",pub:1000,del:2000,drop:2,lat_us:95,freq:20.0,subs:2},
-        {topic:"fusion/objects",pub:500,del:1000,drop:0,lat_us:120,freq:10.0,subs:2}
-      ]}
+        {topic:"sensor/lidar",pub:500,del:1000,drop:0,lat_us:145,freq:10.0,subs:2,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"sensor/gps",pub:250,del:250,drop:0,lat_us:168,freq:5.0,subs:1,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"sensor/radar",pub:1000,del:2000,drop:2,lat_us:95,freq:20.0,subs:2,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"fusion/objects",pub:500,del:1000,drop:0,lat_us:120,freq:10.0,subs:2,reliability:"reliable",deadline_ms:100,transport:"shm"},
+        {topic:"control/cmd",pub:200,del:200,drop:0,lat_us:85,freq:100.0,subs:1,reliability:"reliable",deadline_ms:20,transport:"dds"}
+      ]},
+    endpoints:[
+      {node:"perception",topic:"sensor/lidar",role:"pub",type_id:"0xd712aa51",freq:10.0},
+      {node:"perception",topic:"sensor/gps",role:"pub",type_id:"0x0596b0b7",freq:5.0},
+      {node:"radar",topic:"sensor/radar",role:"pub",type_id:"0xaabbccdd",freq:20.0},
+      {node:"fusion",topic:"sensor/lidar",role:"sub",type_id:"0xd712aa51",freq:0},
+      {node:"fusion",topic:"sensor/gps",role:"sub",type_id:"0x0596b0b7",freq:0},
+      {node:"fusion",topic:"sensor/radar",role:"sub",type_id:"0xaabbccdd",freq:0},
+      {node:"fusion",topic:"fusion/objects",role:"pub",type_id:"0xf0ed10c0",freq:10.0},
+      {node:"control",topic:"fusion/objects",role:"sub",type_id:"0xf0ed10c0",freq:0},
+      {node:"control",topic:"control/cmd",role:"pub",type_id:"0x2d95c6d2",freq:100.0,reliability:"reliable",deadline_ms:20}
+    ]
   };
   updateAll();
   document.getElementById('conn-dot').className='live';document.getElementById('conn-dot').textContent='● demo';
@@ -165,6 +186,7 @@ function updateAll(){
   updateMetrics();
   updateFrames();
   updateTopicStats();
+  updateProcessTopics();
   updateTopo();
   updateCharts();
   document.getElementById('node-n').textContent=(topoData.nodes||[]).length;
@@ -184,7 +206,7 @@ function updateMetrics(){
   `;
   const ns=topoData.nodes||[];
   document.getElementById('node-status').innerHTML=ns.map(n=>
-    `<div class="stat"><span>${n.name}</span><span style="color:${n.alive===false?'#f85149':'#3fb950'}">${n.alive===false?'💀 Dead':'🟢 PID '+n.pid}</span></div>`
+    `<div class="stat"><span title="${n.description||''}">${n.name}</span><span style="color:${n.alive===false?'#f85149':'#3fb950'}">${n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—')}</span></div>`
   ).join('')||'<span style="color:#484f58">No nodes</span>';
 }
 
@@ -217,25 +239,72 @@ function updateTopicStats(){
   document.getElementById('topic-stats').innerHTML =
     '<table style="width:100%;font-size:10px;border-collapse:collapse">' +
     '<tr style="color:#8b949e;border-bottom:1px solid#21262d">' +
-    '<th style="text-align:left;padding:2px 4px">Topic</th>' +
-    '<th style="text-align:right;padding:2px 4px">Pub</th>' +
-    '<th style="text-align:right;padding:2px 4px">Del</th>' +
-    '<th style="text-align:right;padding:2px 4px">Drop</th>' +
-    '<th style="text-align:right;padding:2px 4px">Lat</th>' +
-    '<th style="text-align:right;padding:2px 4px">Freq</th>' +
+    '<th style="text-align:left;padding:2px 3px">Topic</th>' +
+    '<th style="text-align:center;padding:2px 3px">Reliability</th>' +
+    '<th style="text-align:right;padding:2px 3px">Pub</th>' +
+    '<th style="text-align:right;padding:2px 3px">Del</th>' +
+    '<th style="text-align:right;padding:2px 3px">Drop</th>' +
+    '<th style="text-align:right;padding:2px 3px">Lat</th>' +
+    '<th style="text-align:right;padding:2px 3px">Freq</th>' +
+    '<th style="text-align:right;padding:2px 3px">Deadline</th>' +
     '</tr>' +
     ts.map(t => {
-      const short = t.topic.split('/').pop();
-      const dropColor = t.drop > 0 ? 'color:#f85149' : 'color:#3fb950';
+      const short = (t.topic||t.name||'?').split('/').pop();
+      const dropColor = (t.drop||0) > 0 ? 'color:#f85149' : 'color:#3fb950';
+      const reliability = t.reliability || t.qos_reliability || 'best_effort';
+      const relColor = reliability === 'reliable' ? 'color:#3fb950' : 'color:#8b949e';
+      const deadline = t.deadline_ms || t.qos_deadline_ms || 0;
+      const dlColor = deadline > 0 ? 'color:#d29922' : 'color:#484f58';
       return `<tr style="border-bottom:1px solid#161b22">
-        <td style="padding:2px 4px;color:#58a6ff" title="${t.topic}">${short}</td>
-        <td style="text-align:right;padding:2px 4px">${t.pub||0}</td>
-        <td style="text-align:right;padding:2px 4px">${t.del||0}</td>
-        <td style="text-align:right;padding:2px 4px;${dropColor}">${t.drop||0}</td>
-        <td style="text-align:right;padding:2px 4px;color:#d29922">${(t.lat_us||0)}µs</td>
-        <td style="text-align:right;padding:2px 4px">${(t.freq||0).toFixed(1)}Hz</td>
+        <td style="padding:2px 3px;color:#58a6ff" title="${t.topic||t.name}">${short}</td>
+        <td style="text-align:center;padding:2px 3px;font-size:9px;${relColor}">${reliability}</td>
+        <td style="text-align:right;padding:2px 3px">${t.pub||0}</td>
+        <td style="text-align:right;padding:2px 3px">${t.del||0}</td>
+        <td style="text-align:right;padding:2px 3px;${dropColor}">${t.drop||0}</td>
+        <td style="text-align:right;padding:2px 3px;color:#d29922">${(t.lat_us||0)}µs</td>
+        <td style="text-align:right;padding:2px 3px">${(t.freq||0).toFixed(1)}Hz</td>
+        <td style="text-align:right;padding:2px 3px;${dlColor}">${deadline>0?deadline+'ms':'—'}</td>
       </tr>`;
     }).join('') + '</table>';
+}
+
+function roleClass(role){return 'role role-'+(role||'unknown')}
+function endpointRoleFromCaps(t){
+  if(t.role) return t.role;
+  const c=Number(t.caps||t.capabilities||0);
+  if((c&1)&&(c&2)) return 'pubsub';
+  if(c&1) return 'pub';
+  if(c&2) return 'sub';
+  if(Number(t.freq||0)>0) return 'pub';
+  return 'unknown';
+}
+function updateProcessTopics(){
+  let endpoints = topoData.endpoints || [];
+  if(!endpoints.length){
+    (topoData.nodes||[]).forEach(n=>{
+      (n.topics||[]).forEach(t=>endpoints.push({node:n.name,topic:t.topic||t.name,role:endpointRoleFromCaps(t),type_id:t.type_id||'0x00000000',freq:Number(t.freq||0)}));
+    });
+  }
+  if(!endpoints.length){
+    document.getElementById('process-topics').innerHTML='<span class="muted">Waiting for registry/discovery endpoints...</span>';
+    return;
+  }
+  document.getElementById('process-topics').innerHTML =
+    '<table style="width:100%;font-size:10px;border-collapse:collapse">'+
+    '<tr style="color:#8b949e;border-bottom:1px solid#21262d"><th style="text-align:left;padding:3px 4px">Process</th><th style="text-align:left;padding:3px 4px">Role</th><th style="text-align:left;padding:3px 4px">Topic</th><th style="text-align:left;padding:3px 4px">Type</th><th style="text-align:right;padding:3px 4px">Freq</th><th style="text-align:right;padding:3px 4px">Drop</th><th style="text-align:right;padding:3px 4px">Lat</th></tr>'+
+    endpoints.sort((a,b)=>(a.node||'').localeCompare(b.node||'')||(a.topic||'').localeCompare(b.topic||'')).map(e=>{
+      const role=e.role||'unknown';
+      const drop=Number(e.drop||0);
+      return `<tr style="border-bottom:1px solid#161b22">
+        <td style="padding:3px 4px;color:#c9d1d9">${e.node||'?'}</td>
+        <td style="padding:3px 4px"><span class="${roleClass(role)}">${role}</span></td>
+        <td style="padding:3px 4px" class="topic-full">${e.topic||'?'}</td>
+        <td style="padding:3px 4px" class="muted mono">${e.type_id||'—'}</td>
+        <td style="text-align:right;padding:3px 4px">${Number(e.freq||0).toFixed(1)}Hz</td>
+        <td style="text-align:right;padding:3px 4px;color:${drop?'#f85149':'#3fb950'}">${drop}</td>
+        <td style="text-align:right;padding:3px 4px;color:#d29922">${Number(e.lat_us||0)}µs</td>
+      </tr>`;
+    }).join('')+'</table>';
 }
 
 function updateTopo(){
@@ -248,9 +317,21 @@ function updateTopo(){
   if(typeof d3==='undefined'){el.innerHTML='<div style="padding:20px;color:#f85149">D3.js not loaded (CDN unreachable). Try Demo Data for text view.</div>';return}
 
   const links=[];
-  for(let i=0;i<ns.length;i++)for(let j=i+1;j<ns.length;j++){
-    const shared=ns[i].topics.filter(ti=>ns[j].topics.some(tj=>tj.topic===ti.topic));
-    shared.forEach(t=>links.push({source:i,target:j,topic:t.topic}));
+  const topicToPub={}, topicToSub={};
+  ns.forEach((n,i)=>(n.topics||[]).forEach(t=>{
+    const topic=t.topic||t.name; if(!topic) return;
+    const role=endpointRoleFromCaps(t);
+    if(role==='pub'||role==='pubsub') (topicToPub[topic] ||= []).push(i);
+    if(role==='sub'||role==='pubsub') (topicToSub[topic] ||= []).push(i);
+  }));
+  Object.keys(topicToPub).forEach(topic=>{
+    (topicToPub[topic]||[]).forEach(p=>(topicToSub[topic]||[]).forEach(s=>{if(p!==s)links.push({source:p,target:s,topic})}));
+  });
+  if(!links.length){
+    for(let i=0;i<ns.length;i++)for(let j=i+1;j<ns.length;j++){
+      const shared=(ns[i].topics||[]).filter(ti=>(ns[j].topics||[]).some(tj=>(tj.topic||tj.name)===(ti.topic||ti.name)));
+      shared.forEach(t=>links.push({source:i,target:j,topic:t.topic||t.name}));
+    }
   }
 
   el.innerHTML='';
@@ -267,7 +348,7 @@ function updateTopo(){
       .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y}).on('end',(e,d)=>{if(!e.sourceEvent.ctrlKey){d.fx=null;d.fy=null}})
   );
   nodeG.append('circle').attr('r',20).attr('fill',d=>d.alive===false?'#484f58':COLORS[(d.caps||0)&8?8:(d.caps||0)&4?4:(d.caps||0)&2?2:1])
-    .attr('stroke','#21262d').attr('stroke-width',2).append('title').text(d=>d.name+' (PID '+d.pid+')');
+    .attr('stroke','#21262d').attr('stroke-width',2).append('title').text(d=>d.name+' (PID '+(d.pid||'—')+')\n'+(d.description||'')+'\n'+(d.plugin||''));
   nodeG.append('text').text(d=>d.name).attr('text-anchor','middle').attr('dy',30).attr('fill','#c9d1d9').attr('font-size','9px');
 
   const sim=d3.forceSimulation(ns).force('link',d3.forceLink(links).distance(160))
