@@ -159,11 +159,13 @@ echo ""
 echo "═══ Pipeline Summary ═══"
 
 # Extract stats from e2e stderr
-FUSED=$(grep -c "fusion #" /tmp/flow_e2e_stderr.txt 2>/dev/null || echo 0)
-CTRL=$(grep -c "control #" /tmp/flow_e2e_stderr.txt 2>/dev/null || echo 0)
-PERCEPT=$(grep "stopped.*frames" /tmp/flow_e2e_stderr.txt 2>/dev/null | grep -o "[0-9]* frames" || echo "0 frames")
-LATENCY=$(grep "Fusion Lat" /tmp/flow_e2e_stderr.txt -A2 2>/dev/null | tail -1 | xargs || echo "N/A")
-MODE=$(grep "driving mode" /tmp/flow_e2e_stderr.txt 2>/dev/null | tail -1 | grep -o "ACC\|CP\|NP\|NOA\|NA" || echo "N/A")
+# The e2e logger writes with NEL line terminators that break plain sed/grep.
+# Use grep -a (force binary/text mode) with a pipe to wc for robust counting.
+FUSED=$(grep -a "fusion.*#" /tmp/flow_e2e_stderr.txt 2>/dev/null | wc -l)
+CTRL=$(grep -a "control.*#" /tmp/flow_e2e_stderr.txt 2>/dev/null | wc -l)
+PERCEPT=$(grep -a "stopped.*frames" /tmp/flow_e2e_stderr.txt 2>/dev/null | grep -oa "[0-9]* frames" || echo "0 frames")
+LATENCY=$(grep -a "Fusion Lat" /tmp/flow_e2e_stderr.txt -A2 2>/dev/null | tail -1 | xargs || echo "N/A")
+MODE=$(grep -a "driving mode" /tmp/flow_e2e_stderr.txt 2>/dev/null | tail -1 | grep -oa "ACC\|CP\|NP\|NOA\|NA" || echo "N/A")
 
 echo "  Perception : $PERCEPT"
 echo "  Fusion     : $FUSED aligned frames"

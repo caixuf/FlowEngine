@@ -320,9 +320,9 @@ typedef struct {
 } VehicleModel;
 
 static VehicleModel g_vehicle = {
-    .x = 0, .y = 0, .speed = 5.0, .target_speed = 10.0,
+    .x = 0, .y = -1.75, .speed = 5.0, .target_speed = 10.0,
     .throttle = 0.3, .brake = 0, .steer = 0, .heading = 0,
-    .lane_target = 0, .wheelbase = 2.7,
+    .lane_target = -1.75, .wheelbase = 2.7,
     .mass = 1500.0, .drag_coeff = 0.3
 };
 
@@ -338,9 +338,9 @@ typedef struct {
 #define SIM_OBSTACLE_COUNT 3
 #define SAME_LANE_TOL_M    2.0   /* 横向容差: |Δy| 小于此值视为同车道 (半车道宽) */
 static SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
-    { 0, "car",         35.0,  0.0,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 */
-    { 1, "car",         95.0, -3.5, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 */
-    { 2, "pedestrian",  55.0,  8.0,  0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
+    { 0, "car",         35.0, -1.75,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 (右车道) */
+    { 1, "car",         95.0,  1.75, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 (左车道) */
+    { 2, "pedestrian",  55.0,  8.0,   0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
 };
 
 /* 障碍物运动学 + 循环边界，使场景持续有内容 */
@@ -354,10 +354,14 @@ static void obstacles_tick(double dt) {
             if (o->y >  8.0) { o->y =  8.0; o->vy = -fabs(o->vy); }
             if (o->y < -8.0) { o->y = -8.0; o->vy =  fabs(o->vy); }
         }
-        /* 相对自车过远则回收到前方，保持画面始终有障碍物 */
+        /* 回收远处的障碍物到前方 (对向车除外) */
         double rel = o->x - g_vehicle.x;
-        if (rel < -30.0) o->x = g_vehicle.x + 80.0 + (double)i * 5.0;
-        if (rel >  140.0) o->x = g_vehicle.x + 30.0;
+        if (o->vx >= 0) {  /* 同向车: 正常回收 */
+            if (rel < -30.0) o->x = g_vehicle.x + 80.0 + (double)i * 5.0;
+            if (rel >  140.0) o->x = g_vehicle.x + 30.0;
+        } else {            /* 对向车: 驶过后 500m 外重新生成 */
+            if (rel < -50.0) o->x = g_vehicle.x + 500.0;
+        }
     }
 }
 
@@ -385,12 +389,45 @@ static void vehicle_tick(double dt) {
     g_vehicle.speed += accel * dt;
     if (g_vehicle.speed < 0) g_vehicle.speed = 0;
 
-    /* ── 横向: 简单车道保持/变道控制 → 转向角 ── */
-    double y_err   = g_vehicle.lane_target - g_vehicle.y;
-    double psi_des = 0.6 * y_err;                 /* 期望航向 (P 控制) */
-    double steer   = 1.2 * (psi_des - g_vehicle.heading);
-    if (steer >  0.5) steer =  0.5;               /* ±0.5 rad 限幅 */
-    if (steer < -0.5) steer = -0.5;
+    /* ── 横向: 平滑变道轨迹 + 车道保持 ── */
+    static double lc_start_y   = 0;     /* 变道起点 y */
+    static double lc_target_y  = 0;     /* 变道终点 y */
+    static double lc_start_t   = 0;     /* 变道开始时刻 (s) */
+    static double lc_duration  = 3.5;   /* 变道时长 (s) — 缓打方向 */
+    static double lc_elapsed   = 0;     /* 变道累计时间 */
+    static int    lc_active    = 0;     /* 变道进行中? */
+
+    /* 检测 lane_target 变化 → 启动变道轨迹 */
+    if (fabs(g_vehicle.lane_target - lc_target_y) > 0.1 && !lc_active) {
+        lc_start_y  = g_vehicle.y;
+        lc_target_y = g_vehicle.lane_target;
+        lc_elapsed  = 0;
+        lc_active   = 1;
+    }
+    /* 变道完成检测 */
+    if (lc_active && lc_elapsed >= lc_duration) {
+        g_vehicle.y = lc_target_y;   /* 微调确保精确到达 */
+        lc_active   = 0;
+    }
+
+    double y_desired;
+    if (lc_active) {
+        lc_elapsed += dt;
+        double t = lc_elapsed / lc_duration;
+        if (t > 1.0) t = 1.0;
+        /* sin² 曲线: 起点平缓、中间快、终点平缓 → 类人驾驶 */
+        double s = sin(t * M_PI / 2.0);
+        y_desired = lc_start_y + (lc_target_y - lc_start_y) * s * s;
+    } else {
+        y_desired = g_vehicle.lane_target;
+    }
+
+    /* 横向 P 控制器 (追踪平滑轨迹) */
+    double y_err   = y_desired - g_vehicle.y;
+    double psi_des = 0.5 * y_err;                 /* 期望航向 (比之前柔和) */
+    psi_des = fmax(-0.3, fmin(0.3, psi_des));     /* 限制航向角 */
+    double steer   = 2.0 * (psi_des - g_vehicle.heading);
+    steer = fmax(-0.25, fmin(0.25, steer));       /* ±0.25 rad ≈ 14° 柔和转向 */
     g_vehicle.steer = steer;
 
     /* ── Bicycle 模型: 航向随转向角与速度演化 ── */
@@ -478,19 +515,114 @@ static int control_execute(TaskBase* base) {
 
         ct->cycle++;
 
-        /* ── ACC: 依据与同车道前车的间距动态限制目标速度 ── */
-        double gap       = lead_gap();
-        double safe_gap  = 8.0 + ct->current_speed * 1.2;   /* 距离策略 */
-        double acc_target = ct->target_speed;
-        if (gap < safe_gap) {
-            double ratio = gap / safe_gap;
-            if (ratio < 0) ratio = 0;
-            acc_target = ct->target_speed * ratio;           /* 越近目标越低 */
+        /* ── 变道状态 (声明前置，供 ACC/变道逻辑共用) ── */
+        static int    lc_state = 0;    /* 0=正常 1=左变道中 2=左车道巡航 3=右回正 */
+        static double lc_timer = 0;    /* 阻塞累计时间 (s) */
+        static double lc_wait  = 0;    /* 变道后稳定等待 (s) */
+
+        /* ── 变道中: 临时提高目标速度，加速完成变道 ── */
+        double boost_target = ct->target_speed;
+        if (lc_state == 1) {
+            boost_target = ct->target_speed * 1.15;  /* +15% 加速变道 */
         }
 
-        /* ── 变道演示: 行驶一段距离后切到左车道再回正 ── */
-        g_vehicle.lane_target = (g_vehicle.x > 120.0 && g_vehicle.x < 180.0)
-                                ? 3.5 : 0.0;
+        /* ── ACC: 依据与同车道前车的间距动态限制目标速度 ── */
+        double gap       = lead_gap();
+        double time_hw   = 2.0;                               /* 时距 (s) */
+        double min_gap   = 6.0;                               /* 最小间距 (m) */
+        double safe_gap  = min_gap + ct->current_speed * time_hw;
+        double acc_target = boost_target;
+        bool   blocked   = false;
+        if (gap < safe_gap && gap < 80.0) {
+            double ratio = gap / safe_gap;
+            if (ratio < 0.2) ratio = 0.2;                    /* 不低于 20%，避免完全停止 */
+            acc_target = boost_target * ratio;
+            /* 受阻: ACC 将目标速度压到期望的 70% 以下 → 前车明显慢于期望 */
+            if (acc_target < ct->target_speed * 0.7) blocked = true;
+        }
+
+        /* ── 自适应变道: 被阻塞时检查邻车道并变道 ── */
+
+        if (blocked && lc_state == 0) {
+            lc_timer += 0.05;          /* 50ms per tick */
+            if (lc_timer > 2.0) {      /* 阻塞超过 2 秒 → 尝试变道 */
+                /* 检查左车道是否通畅: 前方 80m 有车 或 后方 20m 有追车 */
+                bool left_clear = true;
+                for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+                    SimObstacle* o = &g_obstacles[i];
+                    if (strcmp(o->type, "pedestrian") == 0) continue;  /* 忽略行人 */
+                    double dy = fabs(o->y - (g_vehicle.y + 3.5));
+                    if (dy < SAME_LANE_TOL_M) {
+                        double dx = o->x - g_vehicle.x;
+                        double rel_spd = g_vehicle.speed - o->vx;
+                        /* 前方: 80m 内且非快速远离. 后方: 20m 内且追及中 */
+                        if ((dx > -20.0 && dx < 80.0 && rel_spd > -3.0) ||
+                            (dx < 0 && dx > -20.0 && rel_spd > 2.0)) {
+                            left_clear = false; break;
+                        }
+                    }
+                }
+                if (left_clear) {
+                    g_vehicle.lane_target = g_vehicle.y + 3.5;
+                    lc_state = 1; lc_timer = 0;
+                    LOG_INFO("control", ">>> LANE CHANGE LEFT (gap=%.1fm, ego@(%.1f,%.1f))",
+                             gap, g_vehicle.x, g_vehicle.y);
+                } else {
+                    /* Debug: print closest obstacle in target lane */
+                    for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+                        SimObstacle* o = &g_obstacles[i];
+                        double dy2 = fabs(o->y - (g_vehicle.y + 3.5));
+                        if (dy2 < SAME_LANE_TOL_M) {
+                            LOG_INFO("control", ">>> BLOCKED by obs[%d] %s@(%.1f,%.1f) dx=%.1f spd=%.1f",
+                                     i, o->type, o->x, o->y, o->x-g_vehicle.x, o->vx);
+                        }
+                    }
+                    LOG_INFO("control", ">>> LANE CHANGE BLOCKED (ego@(%.1f,%.1f))",
+                             g_vehicle.x, g_vehicle.y);
+                    lc_timer = 2.0;
+                }
+            }
+        } else if (!blocked && lc_state == 0) {
+            lc_timer = 0;              /* 没被堵，重置计时 */
+        }
+
+        /* 变道回正：左车道巡航一段时间后回到原车道 */
+        if (lc_state == 2) {
+            lc_wait += 0.05;
+            if (lc_wait > 8.0) {       /* 左车道巡航 8 秒 */
+                /* 检查原车道: 前方 80m 有车 或 后方 20m 有追车 */
+                bool right_clear = true;
+                double orig_y = g_vehicle.y - 3.5;
+                for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+                    SimObstacle* o = &g_obstacles[i];
+                    if (strcmp(o->type, "pedestrian") == 0) continue;
+                    double dy = fabs(o->y - orig_y);
+                    if (dy < SAME_LANE_TOL_M) {
+                        double dx = o->x - g_vehicle.x;
+                        double rel_spd = g_vehicle.speed - o->vx;
+                        if ((dx > -20.0 && dx < 80.0 && rel_spd > -3.0) ||
+                            (dx < 0 && dx > -20.0 && rel_spd > 2.0)) {
+                            right_clear = false; break;
+                        }
+                    }
+                }
+                if (right_clear) {
+                    g_vehicle.lane_target = orig_y;
+                    lc_state = 3;
+                    LOG_INFO("control", ">>> LANE CHANGE RIGHT (return)");
+                }
+            }
+        }
+
+        /* 检测变道完成 (横向偏差 < 0.3m) */
+        if (lc_state == 1 && fabs(g_vehicle.y - g_vehicle.lane_target) < 0.3) {
+            lc_state = 2;  lc_wait = 0;
+            LOG_INFO("control", ">>> lane change complete, cruising left");
+        }
+        if (lc_state == 3 && fabs(g_vehicle.y - g_vehicle.lane_target) < 0.3) {
+            lc_state = 0;
+            LOG_INFO("control", ">>> returned to right lane");
+        }
 
         /* ── PID 计算 (目标为 ACC 限速后的值) ── */
         double error = acc_target - ct->current_speed;

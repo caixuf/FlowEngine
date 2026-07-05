@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FlowBoard — Live Monitor</title>
+<title>FlowBoard — Live Monitor v2</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;display:flex;height:100vh;overflow:hidden}
@@ -25,7 +25,7 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .card.collapsed .card-header{border-bottom:none}
 .card.collapsed .card-header .toggle{transform:rotate(-90deg)}
 .card.alert{border-color:#f85149;box-shadow:0 0 8px #f8514933}
-.card-body{padding:10px 14px}
+.card-body{padding:10px 14px;display:block}
 #topo{width:100%;height:420px;background:#090c10;position:relative}
 #topo svg{width:100%;height:100%}
 #frames,#process-topics{max-height:280px;overflow-y:auto;font:10px 'JetBrains Mono',monospace}
@@ -177,7 +177,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
   <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D — Foxglove Studio <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">| 2D — live preview below</span></h2><span class="toggle">▼</span></div>
-    <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="width:100%;height:400px;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div>
+    <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="width:100%;height:400px;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div></div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
@@ -188,12 +188,10 @@ input:focus,select:focus{border-color:#58a6ff}
       </select>
       <span class="toggle">▼</span>
     </div></div>
-    <div class="card-body" style="padding:8px 10px">
-      <div id="charts" style="display:flex;gap:8px;min-height:200px">
-        <div class="chart-box"><canvas id="ch-rate"></canvas><div class="chart-tooltip" id="tt-rate"></div></div>
-        <div class="chart-box"><canvas id="ch-lat"></canvas><div class="chart-tooltip" id="tt-lat"></div></div>
-        <div class="chart-box"><canvas id="ch-frames"></canvas><div class="chart-tooltip" id="tt-frames"></div></div>
-      </div>
+    <div id="charts" style="display:flex;gap:8px;min-height:200px;padding:8px 10px">
+      <div class="chart-box"><canvas id="ch-rate"></canvas><div class="chart-tooltip" id="tt-rate"></div></div>
+      <div class="chart-box"><canvas id="ch-lat"></canvas><div class="chart-tooltip" id="tt-lat"></div></div>
+      <div class="chart-box"><canvas id="ch-frames"></canvas><div class="chart-tooltip" id="tt-frames"></div></div>
     </div>
   </div>
 </div>
@@ -209,12 +207,18 @@ input:focus,select:focus{border-color:#58a6ff}
 </div>
 
 <div id="toast">Copied!</div><script>
-// Load D3 dynamically — non-blocking. If CDN fails, topology falls back to text.
+// Load D3 — local copy first (bundled), CDN as fallback.
 (function(){
-  var s=document.createElement("script");
-  s.src="https://d3js.org/d3.v7.min.js";
-  s.onerror=function(){console.warn("D3 CDN failed — topology will show text view");};
-  document.head.appendChild(s);
+  var cdns=["/tools/d3.v7.min.js","https://d3js.org/d3.v7.min.js"];
+  var i=0;
+  function tryD3(){
+    if(i>=cdns.length){console.warn("D3 failed — topology will show text view");return;}
+    var s=document.createElement("script");
+    s.src=cdns[i++];
+    s.onerror=function(){tryD3();};
+    document.head.appendChild(s);
+  }
+  tryD3();
 })();
 </script>
 <script>
@@ -350,7 +354,7 @@ var lastNodeNames = '';
 function updateAll(){
   updateMetrics();updateFrames();updateTopicStats();updateProcessTopics();
   update3D();
-  if(fallbackActive)draw2D();
+  // 2D draws at 60fps via requestAnimationFrame — no need to redraw here
   var nn = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
   if(nn!==lastNodeNames){lastNodeNames=nn;updateTopo();}
   updateCharts();
@@ -596,6 +600,9 @@ function updateCharts(){
 function drawChart(canvasId,tooltipId,data,color,title,unit){
   var c=document.getElementById(canvasId);if(!c)return;
   var box=c.parentElement,W=box.clientWidth,H=box.clientHeight;
+  // Fallback to CSS dimensions if client rect is zero (e.g. element hidden)
+  if(W<10)W=parseInt(box.style.width)||280;
+  if(H<10)H=parseInt(box.style.height)||240;
   if(W<10||H<10)return;
   c.width=W*2;c.height=H*2;c.style.width=W+'px';c.style.height=H+'px';
   var ctx=c.getContext('2d');ctx.scale(2,2);
@@ -681,342 +688,825 @@ document.addEventListener('keydown',function(e){
 // ════════════════════════════════════════════════════════════
 // 3D Scene (Three.js)
 // ════════════════════════════════════════════════════════════
-var scene3d=null,camera3d=null,renderer3d=null,controls3d=null;
-var carBody=null,carWheels=[],lidarCloud=null,gpsTrack=[],trajLine=null;
-var gridHelper=null,sceneReady=false,trafficLights=[],trafficState=0,pedestrians=[],cyclists=[];
-
 var scene3d=null,camera3d=null,renderer3d=null,sceneReady=false;
-// Called from updateAll() on every data tick. The 3D animation loop (anim3D)
-// reads topoData directly each frame and the 2D fallback is refreshed by the
-// draw2D() call in updateAll(), so no per-tick work is needed here. It must
-// exist to avoid breaking the whole update pipeline with a ReferenceError.
-function update3D(){}
+
+// ════════════════════════════════════════════════════════════
+// 3D ADAS scene builder — road, cars, environment
+// Coordinate system: X=forward, Y=up, Z=right
+// ============================================================
+
+function _makeBox(w,h,d,color,metal,rough){
+  return new THREE.Mesh(
+    new THREE.BoxGeometry(w,h,d),
+    new THREE.MeshStandardMaterial({color:color,metalness:metal||0,roughness:rough||0.5})
+  );
+}
+function _makeCyl(rTop,rBot,h,segs,color){
+  return new THREE.Mesh(
+    new THREE.CylinderGeometry(rTop,rBot,h,segs||16),
+    new THREE.MeshStandardMaterial({color:color,metalness:0.3,roughness:0.6})
+  );
+}
+
+// ── Road builder (4 lanes, 3.5m each) ──
+function _buildRoad(scene){
+  var roadGroup = new THREE.Group();
+  var ROAD_LEN = 3000;     // total road length along X (3000m covers full demo)
+  var ROAD_HALF = 7.5;     // half-width (4 lanes × 3.5m + shoulders)
+  var ASPHALT = 0x333844;
+  var MARKING = 0xddeeff;
+  var YELLOW = 0xddbb55;
+
+  // Asphalt base
+  var asphalt = _makeBox(ROAD_LEN, 0.08, ROAD_HALF*2, ASPHALT, 0, 0.9);
+  asphalt.position.set(0, 0.01, 0);
+  asphalt.receiveShadow = true;
+  roadGroup.add(asphalt);
+
+  // Shoulders (slightly lighter)
+  var shld = _makeBox(ROAD_LEN, 0.04, 1.5, 0x556655, 0, 1);
+  shld.position.set(0, 0.02, ROAD_HALF+0.75);
+  shld.receiveShadow = true;
+  roadGroup.add(shld);
+  var shld2 = shld.clone();
+  shld2.position.z = -(ROAD_HALF+0.75);
+  roadGroup.add(shld2);
+
+  // Lane edge lines (solid white, Z = ±7.0)
+  for(var side = -1; side <= 1; side += 2){
+    var edge = _makeBox(ROAD_LEN, 0.01, 0.15, MARKING, 0, 0.3);
+    edge.position.set(0, 0.07, side * 7.0);
+    roadGroup.add(edge);
+  }
+
+  // Dashed lane dividers at Z = -3.5, 0 (yellow), 3.5
+  var dashLen = 4.0, gap = 6.0, segLen = dashLen + gap;   // fewer segments for perf
+  var nSeg = Math.floor(ROAD_LEN / segLen);
+  for(var zi = 0; zi < 3; zi++){
+    var zPos = -3.5 + zi * 3.5;
+    var isCenter = (zi === 1);
+    for(var s = -Math.floor(nSeg/2); s < Math.floor(nSeg/2); s++){
+      var dash = _makeBox(dashLen, 0.01, 0.12, isCenter ? YELLOW : MARKING, 0, 0.3);
+      dash.position.set(s * segLen + dashLen/2, 0.07, zPos);
+      roadGroup.add(dash);
+    }
+    if(isCenter){
+      for(var s2 = -Math.floor(nSeg/2); s2 < Math.floor(nSeg/2); s2++){
+        var d2 = _makeBox(dashLen, 0.01, 0.12, YELLOW, 0, 0.3);
+        d2.position.set(s2 * segLen + dashLen/2, 0.07, zPos + 0.22);
+        roadGroup.add(d2);
+      }
+    }
+  }
+
+  scene.add(roadGroup);
+  window._roadGroup = roadGroup;
+}
+
+// ── Environment: buildings + trees ──
+function _buildEnvironment(scene){
+  var env = new THREE.Group();
+  // Buildings (reduced for performance)
+  var bldColors = [0x445566, 0x556677, 0x4a5a6a, 0x3d4d5d, 0x5a6a7a];
+  for(var b = 0; b < 12; b++){
+    var side = (b % 2 === 0) ? 1 : -1;
+    var bx = (b - 6) * 200 + Math.random() * 80;
+    var bz = side * (12 + Math.random() * 25);
+    var bw = 4 + Math.random() * 6;
+    var bh = 10 + Math.random() * 35;
+    var bld = _makeBox(bw, bh, bw, bldColors[b % bldColors.length], 0.1, 0.85);
+    bld.position.set(bx, bh/2, bz);
+    bld.castShadow = true; bld.receiveShadow = true;
+    env.add(bld);
+  }
+  // Trees (reduced)
+  for(var t = 0; t < 20; t++){
+    var tx = (t - 10) * 140 + Math.random() * 60;
+    var tz = (t % 2 === 0 ? 1 : -1) * (9 + Math.random() * 35);
+    // Trunk
+    var trunk = _makeCyl(0.2, 0.3, 2 + Math.random() * 3, 8, 0x6b4423);
+    trunk.position.set(tx, 1, tz);
+    trunk.castShadow = true;
+    env.add(trunk);
+    // Canopy layers
+    for(var cl = 0; cl < 3; cl++){
+      var cr = 1.5 + Math.random() * 2;
+      var canopy = _makeCyl(0, cr, 2 + Math.random() * 2, 8, 0x2d5a27 + cl * 0x101010);
+      canopy.position.set(tx, 2.5 + cl * 1.5, tz);
+      canopy.castShadow = true;
+      env.add(canopy);
+    }
+  }
+  scene.add(env);
+  window._envGroup = env;
+}
+
+// ── Build a sedan-style car (for ego and obstacles) ──
+function _buildSedan(bodyColor, roofColor){
+  var g = new THREE.Group();
+
+  // Lower body
+  var body = _makeBox(4.2, 0.85, 1.85, bodyColor, 0.4, 0.25);
+  body.position.y = 0.85;
+  body.castShadow = true;
+  g.add(body);
+
+  // Cabin/roof — slightly forward, narrower
+  var cabin = _makeBox(2.2, 0.55, 1.7, roofColor, 0.3, 0.35);
+  cabin.position.set(0.5, 1.45, 0);
+  cabin.castShadow = true;
+  g.add(cabin);
+
+  // Windshield (dark, tilted — approximated as a thin box)
+  var ws = _makeBox(0.15, 0.45, 1.6, 0x334455, 0.6, 0.1);
+  ws.position.set(1.45, 1.3, 0);
+  ws.rotation.z = -0.45;
+  g.add(ws);
+
+  // Rear window
+  var rw = _makeBox(0.12, 0.35, 1.5, 0x334455, 0.6, 0.1);
+  rw.position.set(-0.55, 1.25, 0);
+  rw.rotation.z = 0.45;
+  g.add(rw);
+
+  // Front bumper
+  var fb = _makeBox(0.3, 0.35, 1.75, 0xcccccc, 0.3, 0.4);
+  fb.position.set(2.25, 0.55, 0);
+  g.add(fb);
+
+  // Rear bumper
+  var rb = _makeBox(0.25, 0.35, 1.75, 0xcccccc, 0.3, 0.4);
+  rb.position.set(-2.25, 0.55, 0);
+  g.add(rb);
+
+  // Wheels (4)
+  var wheelPos = [[1.3, -0.7, 1.0], [1.3, -0.7, -1.0], [-1.3, -0.7, 1.0], [-1.3, -0.7, -1.0]];
+  for(var wi = 0; wi < 4; wi++){
+    var wh = _makeCyl(0.32, 0.32, 0.28, 16, 0x111111);
+    wh.rotation.z = Math.PI/2;
+    wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
+    wh.castShadow = true;
+    g.add(wh);
+  }
+
+  // Headlights
+  var hl = _makeBox(0.2, 0.15, 0.3, 0xffffcc, 0, 0.2);
+  hl.position.set(2.25, 0.65, 0.5);
+  g.add(hl);
+  var hl2 = hl.clone();
+  hl2.position.z = -0.5;
+  g.add(hl2);
+
+  // Taillights
+  var tl = _makeBox(0.15, 0.15, 0.3, 0xff2222, 0, 0.2);
+  tl.position.set(-2.25, 0.65, 0.5);
+  g.add(tl);
+  var tl2 = tl.clone(); tl2.position.z = -0.5; g.add(tl2);
+
+  return g;
+}
+
+// ── Obstacle car (simple 2-box model for performance) ──
+function _buildObstacle(typeColor){
+  var g = new THREE.Group();
+  var body = _makeBox(3.8, 0.75, 1.75, typeColor, 0.35, 0.3);
+  body.position.y = 0.75;
+  g.add(body);
+  var cabin = _makeBox(2.0, 0.5, 1.6, 0x222222, 0.3, 0.4);
+  cabin.position.set(0.4, 1.3, 0);
+  g.add(cabin);
+  return g;
+}
+
+// ════════════════════════════════════════════════════════════
+// init3DScene — create the full ADAS visualization
+// ════════════════════════════════════════════════════════════
 function init3DScene(){
   var el=document.getElementById("scene3d");if(!el||typeof THREE==="undefined")return;
   var w=el.clientWidth,h=el.clientHeight;
-  scene3d=new THREE.Scene();scene3d.background=new THREE.Color(0x1a1a2e);
-  camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,200);
-  camera3d.position.set(12,15,25);camera3d.lookAt(0,1.5,4);
-  renderer3d=new THREE.WebGLRenderer({antialias:true});renderer3d.setSize(w,h);
+
+  // Scene
+  scene3d=new THREE.Scene();
+  scene3d.background=new THREE.Color(0x334466);
+  scene3d.fog=new THREE.Fog(0x334466, 80, 350);
+
+  // Camera — chase cam
+  camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,300);
+
+  // Renderer
+  renderer3d=new THREE.WebGLRenderer({antialias:true,alpha:false});
+  renderer3d.setSize(w,h);
   renderer3d.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer3d.toneMapping=THREE.ACESFilmicToneMapping;
+  renderer3d.toneMappingExposure=1.1;
   el.appendChild(renderer3d.domElement);
   document.getElementById("scene3d-msg").style.display="none";
-  // Lights
-  scene3d.add(new THREE.AmbientLight(0x8899bb,1.5));
-  var sun=new THREE.DirectionalLight(0xffeedd,3);sun.position.set(40,60,30);scene3d.add(sun);
-  // Ground
-  var gnd=new THREE.Mesh(new THREE.PlaneGeometry(160,160),new THREE.MeshStandardMaterial({color:0x2a2a3e}));
-  gnd.rotation.x=-Math.PI/2;scene3d.add(gnd);
-  // Grid
-  var grid=new THREE.GridHelper(160,32,0x334,0x223);scene3d.add(grid);
-  // Roads
-  var roads=[];
-  function road(w,l,x,z,r){var m=new THREE.Mesh(new THREE.PlaneGeometry(w,l),new THREE.MeshStandardMaterial({color:0x445}));m.rotation.x=-Math.PI/2;if(r)m.rotation.z=r;m.position.set(x,0.02,z);scene3d.add(m);roads.push(m);}
-  road(160,14,0,0,Math.PI/2);
-  window._followGround=[gnd,grid].concat(roads);
-  // Car
-  var cg=new THREE.Group();
-  var body=new THREE.Mesh(new THREE.BoxGeometry(5,1.3,2.3),new THREE.MeshStandardMaterial({color:0x58a6ff,metalness:0.5,roughness:0.2,emissive:0x001122}));
-  body.position.y=1.6;cg.add(body);
-  var roof=new THREE.Mesh(new THREE.BoxGeometry(2.5,0.6,2.1),new THREE.MeshStandardMaterial({color:0x4488dd,metalness:0.5}));
-  roof.position.set(0,1,0);body.add(roof);
-  [[1.3,-0.85,1.2],[1.3,-0.85,-1.2],[-1.3,-0.85,1.2],[-1.3,-0.85,-1.2]].forEach(function(wp){var wh=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.4,0.3,16),new THREE.MeshStandardMaterial({color:0x222}));wh.rotation.z=Math.PI/2;wh.position.set(wp[0],wp[1]+1.6,wp[2]);cg.add(wh);});
-  scene3d.add(cg);cg.position.set(0,0.5,4);
-  window._carGroup=cg;
-  // LiDAR points
-  var lgeo=new THREE.BufferGeometry();var lpts=new Float32Array(600);
-  for(var i=0;i<200;i++){lpts[i*3]=-20+Math.random()*40;lpts[i*3+1]=Math.random()*4;lpts[i*3+2]=-10+Math.random()*20;}
-  lgeo.setAttribute("position",new THREE.BufferAttribute(lpts,3));
-  var lcloud=new THREE.Points(lgeo,new THREE.PointsMaterial({color:0xf44,size:0.3}));
-  scene3d.add(lcloud);window._lidarCloud=lcloud;
-  // Obstacle box pool (reused; filled from scene.obstacles each frame)
-  window._obsPool=[];
-  var obsColors={car:0xffaa33,truck:0xff5533,pedestrian:0x33ff88,cyclist:0x33ddff};
-  for(var oi=0;oi<8;oi++){
-    var om=new THREE.Mesh(new THREE.BoxGeometry(1,1,1),
-      new THREE.MeshStandardMaterial({color:0xffaa33,metalness:0.3,roughness:0.5,emissive:0x110800}));
-    om.visible=false;scene3d.add(om);window._obsPool.push(om);
-  }
-  window._obsColors=obsColors;
-  // Animate
-  var an3d=0;
-  function anim3D(){
-    requestAnimationFrame(anim3D);if(!sceneReady)return;an3d++;
-    // Camera orbit (follows ego along the road)
-    var followX=(window._carGroup?window._carGroup.position.x:0);
-    var a=an3d*0.003,r=22+Math.sin(an3d*0.01)*8;
-    camera3d.position.x=followX+Math.cos(a)*r;camera3d.position.z=Math.sin(a)*r+4;
-    camera3d.position.y=15+Math.sin(an3d*0.015)*5;camera3d.lookAt(followX,1.5,4);
-    // Ground/grid/road follow ego so the world looks continuous
-    if(window._followGround){var gx=Math.round(followX/10)*10;
-      for(var gi=0;gi<window._followGround.length;gi++)window._followGround[gi].position.x=gx;}
-    // Update car position
-    var m=(topoData.metrics||{});var scn=m.scene;var v=m.vehicle;
-    var egoX=0,egoZ=4;
-    if(scn&&scn.ego){
-      egoX=scn.ego.x||0;egoZ=4;
-      if(window._carGroup){window._carGroup.position.x=egoX;window._carGroup.position.z=egoZ;
-        window._carGroup.rotation.y=-(scn.ego.heading||0);}
-    }else if(v&&window._carGroup){
-      egoX=v.x||0;window._carGroup.position.x=egoX;window._carGroup.position.z=egoZ=4+(v.y||0)*5;
-    }
-    // Update obstacles from real scene data (ego-relative: x fwd, y left)
-    if(window._obsPool){
-      var obs=(scn&&scn.obstacles)?scn.obstacles:[];
-      for(var oi=0;oi<window._obsPool.length;oi++){
-        var om=window._obsPool[oi];
-        if(oi<obs.length){var o=obs[oi];
-          var L=o.len||4,W=o.wid||2,H=(o.type==="pedestrian"||o.type==="cyclist")?1.7:1.4;
-          om.scale.set(L,H,W);
-          om.position.set(egoX+(o.x||0),H/2+0.2,egoZ-(o.y||0));
-          var c=(window._obsColors&&window._obsColors[o.type])||0xffaa33;
-          om.material.color.setHex(c);om.visible=true;
-        }else om.visible=false;
-      }
-    }
-    // Update LiDAR
-    if(window._lidarCloud&&scn&&scn.lidar&&scn.lidar.length){
-      var pos=window._lidarCloud.geometry.attributes.position.array;var n=scn.lidar.length;
-      for(var i=0;i<200&&i*3<pos.length;i++){
-        if(i<n){var pt=scn.lidar[i];
-          pos[i*3]=egoX+(pt[0]||0);pos[i*3+1]=(pt[2]||0)+0.1;pos[i*3+2]=egoZ-(pt[1]||0);
-        }else{pos[i*3]=egoX;pos[i*3+1]=-5;pos[i*3+2]=egoZ;}
-      }
-      window._lidarCloud.geometry.attributes.position.needsUpdate=true;
-    }else if(window._lidarCloud&&v){var pos=window._lidarCloud.geometry.attributes.position.array;var cx2=v.x||0,cy2=v.y||0;
-      for(var i=0;i<200&&i*3<pos.length;i++){var aa=Math.random()*Math.PI*2,dd=5+Math.random()*25;pos[i*3]=cx2+Math.cos(aa)*dd;pos[i*3+1]=Math.random()*4;pos[i*3+2]=4+cy2*5+Math.sin(aa)*dd;}
-      window._lidarCloud.geometry.attributes.position.needsUpdate=true;}
-    renderer3d.render(scene3d,camera3d);
-  }
-  anim3D();sceneReady=true;
-}
-function init3D(){
-  if(typeof THREE==="undefined"){init2DFallback();return;}
-  try{init3DScene();}catch(e){console.warn("3D init failed — using 2D fallback",e);init2DFallback();}
-}
-function animate3D(){
-  requestAnimationFrame(animate3D);
-  if(!sceneReady)return;
-  animTime+=0.016;
-  // ── Smooth car movement (lerp toward target) ──
-  if(carBody){
-    carSmooth.x+=(carTarget.x-carSmooth.x)*0.15;
-    carSmooth.z+=(carTarget.z-carSmooth.z)*0.15;
-    carBody.parent.position.x=carSmooth.x;
-    carBody.parent.position.z=carSmooth.z;
-    // Rotation based on movement direction
-    var dx=carTarget.x-carSmooth.x,dz=carTarget.z-carSmooth.z;
-    if(Math.abs(dx)>0.01||Math.abs(dz)>0.01) carBody.parent.rotation.y=Math.atan2(dz,dx);
-    // Update GPS track line
-    if(gpsTrack.length){var arr=gpsTrack[1];
-      for(var i=0;i<gpsHistory.length&&i*3+2<arr.length;i++){arr[i*3]=gpsHistory[i].x;arr[i*3+2]=gpsHistory[i].z;}
-      gpsTrack[0].geometry.attributes.position.needsUpdate=true;}
-    // Camera smooth follow
-    if(controls3d){controls3d.target.lerp(new THREE.Vector3(carSmooth.x,1.5,carSmooth.z),0.2);}
-  }
-  // Traffic light cycle: green(10s) → yellow(2s) → red(8s)
-  var cycle=(animTime%20);
-  // NS direction
-  var nsState=cycle<10?0:(cycle<12?1:2); // 0=green,1=yellow,2=red
-  var ewState=cycle<10?2:(cycle<12?2:(cycle<20?0:2)); // opposite
-  [nsState,ewState,nsState,ewState].forEach(function(s,i){
-    var tl=trafficLights[i];if(!tl)return;
-    tl.red.material.color.set(s===2?0xff0000:0x330000);tl.red.material.emissive.set(s===2?0x660000:0x110000);
-    tl.yellow.material.color.set(s===1?0xffaa00:0x332200);tl.yellow.material.emissive.set(s===1?0x442200:0x111100);
-    tl.green.material.color.set(s===0?0x00ff00:0x002200);tl.green.material.emissive.set(s===0?0x004400:0x001100);
-  });
-  // Pedestrians walk back and forth
-  pedestrians.forEach(function(p){
-    var ud=p.userData;var offset=Math.sin(animTime*ud.walkSpeed)*ud.walkRange;
-    p.position.x=ud.baseX+(ud.walkDir>0?offset:0);p.position.z=ud.baseZ+(ud.walkDir>0?0:offset);});
-  // Cyclists move
-  cyclists.forEach(function(c){
-    var ud=c.userData;var offset=Math.sin(animTime*ud.speed)*ud.range;
-    if(ud.axis==="x"){c.position.x=ud.baseX+offset*ud.dir;c.rotation.y=offset>0?0:Math.PI;}else{c.position.z=ud.baseZ+offset*ud.dir;c.rotation.y=offset>0?Math.PI/2:-Math.PI/2;}});
 
-  controls3d.update();
-  renderer3d.render(scene3d,camera3d);
-}
+  // Lighting
+  scene3d.add(new THREE.AmbientLight(0x8899cc, 0.7));
+  var sun=new THREE.DirectionalLight(0xfff8ee, 2.0);
+  sun.position.set(30,40,15);
+  scene3d.add(sun);
+  // Hemisphere (sky/ground ambient)
+  scene3d.add(new THREE.HemisphereLight(0x8899cc,0x443322,0.4));
 
-// ── Canvas 2D fallback (zero-dependency, works offline) ──
-var canvas2d=null,ctx2d=null,fallbackActive=false;
-function init2DFallback(){
-  if(fallbackActive)return;
-  var el=document.getElementById("scene2d");if(!el)return;
-  fallbackActive=true;
-  canvas2d=el;ctx2d=el.getContext("2d");
-  // HiDPI sizing
-  var w=el.clientWidth||800,h=el.clientHeight||400;
-  el.width=w*2;el.height=h*2;el.style.width=w+"px";el.style.height=h+"px";
-  ctx2d.scale(2,2);
-}
-var anim2d=0;
-function draw2D(){
-  if(!fallbackActive||!ctx2d)return;
-  var W=canvas2d.clientWidth,H=canvas2d.clientHeight;
-  ctx2d.clearRect(0,0,W,H);
-  // Dark BEV background
-  ctx2d.fillStyle="#0a0e14";ctx2d.fillRect(0,0,W,H);
-
-  var carX=W/2,carY=H*0.65; // car fixed at center-bottom area
-  var scale=8; // pixels per meter
+  // ── Ground (large flat plane) ──
+  var gndGeo=new THREE.PlaneGeometry(400,400);
+  var gndMat=new THREE.MeshStandardMaterial({color:0x3a5a30,roughness:0.95});
+  var gnd=new THREE.Mesh(gndGeo,gndMat);
+  gnd.rotation.x=-Math.PI/2; gnd.position.y=-0.05;
+  gnd.receiveShadow=true;
+  scene3d.add(gnd);
 
   // ── Road ──
-  // NS road (vertical strip)
-  ctx2d.fillStyle="#1c2130";ctx2d.fillRect(carX-100,0,200,H);
-  // EW road (horizontal strip)
-  ctx2d.fillStyle="#1c2130";ctx2d.fillRect(0,carY-100,W,200);
-  // Intersection highlight
-  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(carX-100,carY-100,200,200);
+  _buildRoad(scene3d);
 
-  // Lane edge lines (solid white)
-  ctx2d.strokeStyle="#667";ctx2d.lineWidth=2;
-  // NS lanes
-  for(var lx=carX-80;lx<=carX+80;lx+=40){
-    if(Math.abs(lx-carX)>12){ctx2d.setLineDash([]);}
-    else{ctx2d.setLineDash([10,8]);ctx2d.strokeStyle="#889";}
-    ctx2d.beginPath();ctx2d.moveTo(lx,0);ctx2d.lineTo(lx,H);ctx2d.stroke();
+  // ── Environment ──
+  _buildEnvironment(scene3d);
+
+  // ── Ego vehicle ──
+  var egoCar=_buildSedan(0x4488dd,0x3377bb);
+  egoCar.position.set(0,0,0);
+  egoCar.castShadow=true;
+  scene3d.add(egoCar);
+  window._carGroup=egoCar;
+
+  // ── Obstacle pool ──
+  window._obsPool=[];
+  window._obsColors={car:0xff9944,truck:0xff4422,pedestrian:0x33ff88,cyclist:0x33ddff};
+  for(var oi=0;oi<8;oi++){
+    var obs=_buildObstacle(0xff9944);
+    obs.visible=false;
+    scene3d.add(obs);
+    window._obsPool.push(obs);
   }
-  // EW lanes
-  ctx2d.strokeStyle="#667";ctx2d.setLineDash([]);
-  for(var ly=carY-80;ly<=carY+80;ly+=40){
-    if(Math.abs(ly-carY)>12){ctx2d.setLineDash([]);}
-    else{ctx2d.setLineDash([10,8]);ctx2d.strokeStyle="#889";}
-    ctx2d.beginPath();ctx2d.moveTo(0,ly);ctx2d.lineTo(W,ly);ctx2d.stroke();
+
+  // ── LiDAR point cloud ──
+  var lgeo=new THREE.BufferGeometry();
+  var lpts=new Float32Array(900);
+  for(var i=0;i<300;i++){
+    lpts[i*3]=Math.random()*80-10; lpts[i*3+1]=Math.random()*3;
+    lpts[i*3+2]=Math.random()*30-15;
   }
-  ctx2d.setLineDash([]);
+  lgeo.setAttribute("position",new THREE.BufferAttribute(lpts,3));
+  var lmat=new THREE.PointsMaterial({color:0x44ff44,size:0.22,transparent:true,opacity:0.7});
+  var lcloud=new THREE.Points(lgeo,lmat);
+  scene3d.add(lcloud);
+  window._lidarCloud=lcloud;
 
-  // Stop lines at intersection
-  ctx2d.strokeStyle="#fff";ctx2d.lineWidth=3;
-  [[carX-80,carY-80,carX+80,carY-80],[carX-80,carY+80,carX+80,carY+80],
-   [carX-80,carY-80,carX-80,carY+80],[carX+80,carY-80,carX+80,carY+80]].forEach(function(p){
-    ctx2d.beginPath();ctx2d.moveTo(p[0],p[1]);ctx2d.lineTo(p[2],p[3]);ctx2d.stroke();});
+  // ── Camera state for smooth follow ──
+  window._cam=new THREE.Vector3(-14,8,3);
+  window._camLook=new THREE.Vector3(12,1.0,-1.75);
+  window._camTarget=new THREE.Vector3(-14,8,3);
+  window._camLookTarget=new THREE.Vector3(12,1.0,-1.75);
 
-  // ── Distance markers (every 20m) ──
-  ctx2d.fillStyle="#333";ctx2d.font="9px monospace";
-  for(var d=20;d<=120;d+=20){ctx2d.fillText(d+"m",carX+2,carY-d*scale);}
+  // ── Animation loop ──
+  function anim3D(){
+    requestAnimationFrame(anim3D);
+    if(!sceneReady)return;
+    _renderFrame();
+    renderer3d.render(scene3d,camera3d);
+  }
+  anim3D();
+  sceneReady=true;
+}
 
-  // ── LiDAR points around car (real scene data if present) ──
-  var scn2=(topoData.metrics||{}).scene;
-  ctx2d.fillStyle="#f442";
-  if(scn2&&scn2.lidar&&scn2.lidar.length){
-    scn2.lidar.forEach(function(pt){
-      var px=carX-(pt[1]||0)*scale, py=carY-(pt[0]||0)*scale;
-      ctx2d.beginPath();ctx2d.arc(px,py,1.5,0,Math.PI*2);ctx2d.fill();
-    });
-  }else{
-    for(var i=0;i<80;i++){
-      var a=Math.random()*Math.PI*2, r=2+Math.random()*30;
-      ctx2d.beginPath();ctx2d.arc(carX+Math.cos(a)*r*scale,carY-Math.sin(a)*r*scale,1.5,0,Math.PI*2);ctx2d.fill();
+// ── Dead-reckoning state: predicts position between sparse data updates ──
+// Data arrives at ~1Hz (SSE); we extrapolate at 60fps using last-known speed
+// so the car moves smoothly instead of freezing between data ticks.
+var _dr={
+  // Latest ground-truth from topoData (set by update3D)
+  lastX:0, lastZ:0, lastSpeed:0, lastHeading:0, lastTime:0,
+  // Target for smooth interpolation (extrapolated each frame)
+  targetX:0, targetZ:0,
+  // Smoothed (lerp toward target each frame — feeds the renderer)
+  smoothX:0, smoothZ:0, smoothHeading:0,
+  // Whether we have received any data yet
+  init:false
+};
+
+// ── Per-frame render: world-space scene, chase camera ──
+// Road is STATIC at world origin. Ego moves through the world.
+// Camera follows ego. Other vehicles move independently.
+var _animT=0;
+function _renderFrame(){
+  _animT+=0.016;
+  var ego=window._carGroup; if(!ego)return;
+  var now=performance.now()/1000;
+
+  // ── Dead reckoning ──
+  if(_dr.init && _dr.lastTime > 0){
+    var dt = Math.min(now - _dr.lastTime, 2.0);
+    _dr.targetX = _dr.lastX + _dr.lastSpeed * dt;
+    _dr.targetZ = _dr.lastZ;
+  }
+  var lerpF = 0.15;
+  _dr.smoothX += (_dr.targetX - _dr.smoothX) * lerpF;
+  _dr.smoothZ += (_dr.targetZ - _dr.smoothZ) * lerpF;
+  _dr.smoothHeading += (_dr.lastHeading - _dr.smoothHeading) * lerpF;
+
+  var sx=_dr.smoothX, sz=_dr.smoothZ;
+
+  // ── Ego car: world-space position (road is STATIC at origin) ──
+  if(ego){ego.position.set(sx, ego.position.y, sz); ego.rotation.y=-_dr.smoothHeading;}
+
+  // ── Chase camera: behind+above ego in world space ──
+  window._camTarget.set(sx-14, 8, sz+4);
+  window._camLookTarget.set(sx+12, 1.0, sz);
+  window._cam.lerp(window._camTarget, 0.08);
+  window._camLook.lerp(window._camLookTarget, 0.08);
+  camera3d.position.copy(window._cam);
+  camera3d.lookAt(window._camLook);
+
+  // Road + environment are STATIC — no scrolling.  The camera follows
+  // the ego through the world so the road appears to flow past naturally.
+
+  // ── Obstacles: use stored WORLD positions (not ego-relative) ──
+  // World positions are set by update3D() when fresh data arrives.
+  // Here we just smooth-lerp toward those fixed world targets so
+  // obstacles stay anchored in their real lanes regardless of ego motion.
+  if(window._obsPool&&window._obsWorld){
+    for(var oi=0;oi<window._obsPool.length;oi++){
+      var om=window._obsPool[oi];
+      var ow=window._obsWorld[oi];
+      if(ow){
+        var L=ow.len||4,W=ow.wid||2,H=1.2;
+        var distToEgo=Math.sqrt((ow.x-sx)*(ow.x-sx)+(ow.z-sz)*(ow.z-sz));
+        if(distToEgo<4){om.visible=false;continue;}
+        om.position.lerp(new THREE.Vector3(ow.x,H/2+0.2,ow.z),0.25);
+        om.scale.set(L,H,W);
+        var c=(window._obsColors&&window._obsColors[ow.type])||0xff9944;
+        if(om.children.length>0&&om.children[0].material&&om.children[0].material.color){
+          om.children[0].material.color.setHex(c);
+        }
+        om.visible=true;
+      }else{om.visible=false;}
     }
   }
 
-  // ── Surrounding vehicles/obstacles (real scene data if present) ──
-  if(scn2&&scn2.obstacles&&scn2.obstacles.length){
-    scn2.obstacles.forEach(function(o){
-      var bx=carX-(o.y||0)*scale, by=carY-(o.x||0)*scale;
-      var Wd=(o.wid||2)*scale, L=(o.len||4)*scale;
-      ctx2d.fillStyle=(o.type==="pedestrian")?"#3f8":"#c83";
-      ctx2d.fillRect(bx-Wd/2,by-L/2,Wd,L);
+  // ── LiDAR: use stored world points ──
+  if(window._lidarCloud&&window._lidarWorld&&window._lidarWorld.length){
+    var wl=window._lidarWorld, pos=window._lidarCloud.geometry.attributes.position.array;
+    for(var i=0;i<300&&i*3<pos.length&&i<wl.length;i++){
+      pos[i*3]=wl[i].x; pos[i*3+1]=wl[i].y; pos[i*3+2]=wl[i].z;
+    }
+    window._lidarCloud.geometry.attributes.position.needsUpdate=true;
+  }
+
+  // ── Car bounce ──
+  var v=(topoData.metrics||{}).vehicle||{};
+  if(ego&&v.speed>0.5){
+    ego.position.y=Math.sin(_animT*14)*0.05*Math.min(1,v.speed*0.12);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// update3D — called from updateAll() on every SSE data tick.
+// Feeds fresh ground-truth into the dead-reckoning state.
+// ════════════════════════════════════════════════════════════
+function update3D(){
+  if(!sceneReady)return;
+  var m=topoData.metrics||{},scn=m.scene,v=m.vehicle||{};
+  var now=performance.now()/1000;
+
+  // Ego position from scene data
+  if(scn&&scn.ego){
+    var newX=scn.ego.x||0;
+    var newZ=-(scn.ego.y||0); // ego.y in meters, negate for 3D right-hand Z
+    var newSpeed=scn.ego.speed||v.speed||0;
+    var newHeading=scn.ego.heading||0;
+    if(!_dr.init || Math.abs(newX - _dr.lastX) > 0.01 || Math.abs(newZ - _dr.lastZ) > 0.01 || Math.abs(newSpeed - _dr.lastSpeed) > 0.1){
+      _dr.lastX = newX;
+      _dr.lastZ = newZ;
+      _dr.lastSpeed = newSpeed;
+      _dr.lastHeading = newHeading;
+      _dr.lastTime = now;
+      _dr.init = true;
+    }
+  }else if(v){
+    var nx=v.x||0, ns=v.speed||0, nz=-(v.y||0); // v.y is meters, map to 3D Z
+    if(!_dr.init || Math.abs(nx - _dr.lastX) > 0.01 || Math.abs(nz - _dr.lastZ) > 0.01){
+      _dr.lastX = nx;
+      _dr.lastZ = nz;
+      _dr.lastSpeed = ns;
+      _dr.lastTime = now;
+      _dr.init = true;
+    }
+  }
+
+  // Obstacles: convert ego-relative → WORLD coords once, store as targets.
+  // This prevents obstacles from drifting when ego moves laterally between
+  // data ticks — they stay anchored in their real-world lanes.
+  window._obsWorld = window._obsWorld || [];
+  if(window._obsPool&&scn&&scn.obstacles){
+    var obs=scn.obstacles;
+    for(var oi=0;oi<window._obsPool.length;oi++){
+      var om=window._obsPool[oi];
+      if(oi<obs.length){
+        var o=obs[oi];
+        var wx=_dr.lastX+(o.x||0), wz=_dr.lastZ-(o.y||0);
+        window._obsWorld[oi]={x:wx, z:wz, len:o.len||4, wid:o.wid||2, type:o.type};
+        om.position.set(wx, 0.6, wz);
+        om.visible=true;
+      }else{om.visible=false; window._obsWorld[oi]=null;}
+    }
+  }
+  // LiDAR: convert ego-relative → world once
+  window._lidarWorld = window._lidarWorld || [];
+  if(window._lidarCloud&&scn&&scn.lidar&&scn.lidar.length){
+    var pos=window._lidarCloud.geometry.attributes.position.array;
+    var n=scn.lidar.length;
+    for(var i=0;i<300&&i*3<pos.length;i++){
+      if(i<n){
+        var pt=scn.lidar[i];
+        var lx=_dr.lastX+(pt[0]||0), ly=(pt[2]||0)+0.15, lz=_dr.lastZ-(pt[1]||0);
+        pos[i*3]=lx; pos[i*3+1]=ly; pos[i*3+2]=lz;
+        if(i<window._lidarWorld.length){window._lidarWorld[i]={x:lx,y:ly,z:lz};}
+        else{window._lidarWorld.push({x:lx,y:ly,z:lz});}
+      }else{pos[i*3]=_dr.lastX; pos[i*3+1]=-2; pos[i*3+2]=_dr.lastZ;}
+    }
+    window._lidarCloud.geometry.attributes.position.needsUpdate=true;
+  }
+}
+
+function init3D(){
+  if(typeof THREE==="undefined"){init2DFallback();return;}
+  try{
+    init3DScene();
+    if(_2d.active){
+      if(_2d.animId)cancelAnimationFrame(_2d.animId);
+      _2d.active=false;
+    }
+    var c2d=document.getElementById("scene2d");
+    if(c2d)c2d.style.display="none";
+  }catch(e){console.warn("3D init failed — using 2D fallback",e);init2DFallback();}
+}
+// ── Canvas 2D fallback (zero-dependency, 60fps, smooth) ──
+var _2d={
+  canvas:null, ctx:null, active:false, animId:0, frame:0, w:0, h:0,
+  ego:{x:0,y:0,heading:0,speed:0},                       // smoothed (lerp)
+  egoT:{x:0,y:0,heading:0,speed:0},                      // target (from data)
+  trail:[],                                               // last N positions
+  scale:8                                                 // px per meter
+};
+var gpsHistory=[];  // track ego positions for heading estimation
+
+function init2DFallback(){
+  // If 3D scene is already ready, don't override it with 2D
+  if(_2d.active || sceneReady) return;
+  var el=document.getElementById("scene2d");if(!el)return;
+  _2d.active=true; _2d.canvas=el; _2d.ctx=el.getContext("2d");
+  // HiDPI
+  _2d.w=el.clientWidth||800; _2d.h=el.clientHeight||400;
+  el.width=_2d.w*2; el.height=_2d.h*2; el.style.width=_2d.w+"px"; el.style.height=_2d.h+"px";
+  _2d.ctx.scale(2,2);
+  el.style.display="";
+  var msg=document.getElementById("scene3d-msg"); if(msg)msg.style.display="none";
+  // Start smooth animation loop (independent of data update rate)
+  _2dAnimLoop();
+}
+function _2dAnimLoop(){
+  if(!_2d.active)return;
+  _2d.animId=requestAnimationFrame(_2dAnimLoop);
+  _2d.frame++;
+  // Lerp ego toward target for buttery-smooth movement between data ticks
+  var e=_2d.ego, t=_2d.egoT, f=0.18;
+  e.x += (t.x - e.x) * f;
+  e.y += (t.y - e.y) * f;
+  e.speed += (t.speed - e.speed) * f;
+  // Heading: shortest-path angular lerp
+  var dh = t.heading - e.heading;
+  while (dh > Math.PI) dh -= 2*Math.PI;
+  while (dh < -Math.PI) dh += 2*Math.PI;
+  e.heading += dh * f;
+  draw2D();
+}
+
+function draw2D(){
+  if(!_2d.active||!_2d.ctx)return;
+  var ctx=_2d.ctx, W=_2d.w, H=_2d.h;
+  var carX=W/2, carY=H*0.62, s=_2d.scale, e=_2d.ego;
+
+  // ── Sky / ground gradient ──
+  var grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,"#070b12"); grad.addColorStop(0.5,"#0f1520"); grad.addColorStop(1,"#0a0f18");
+  ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+
+  // ── Asphalt road surface ──
+  // NS road
+  var rw=3.5*s; // single lane width
+  var rdH=W; // total road width (2 lanes each direction) = 4 * 3.5 * 8 = 112px
+  var rdW=4*rw; // 4 lanes
+  ctx.fillStyle="#1a1e28"; ctx.fillRect(carX-rdW,0,rdW*2,H);
+  // EW road
+  ctx.fillStyle="#1a1e28"; ctx.fillRect(0,carY-rdW,W,rdW*2);
+  // Intersection — slightly lighter
+  ctx.fillStyle="#1f2430"; ctx.fillRect(carX-rdW,carY-rdW,rdW*2,rdW*2);
+
+  // ── Road edge curbs ──
+  ctx.strokeStyle="#334"; ctx.lineWidth=3;
+  ctx.strokeRect(carX-rdW,0,rdW*2,H);
+  ctx.strokeRect(0,carY-rdW,W,rdW*2);
+
+  // ── Lane markings (scroll with ego movement for speed feel) ──
+  var scrollOff = (_2d.ego.x * s) % (s*3); // road scrolls as car moves
+  ctx.lineWidth=2;
+  for(var li=-1;li<=1;li+=2){
+    var lx=carX+li*rw/2;
+    // Solid boundary
+    ctx.strokeStyle="#556"; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(carX+li*rdW,0); ctx.lineTo(carX+li*rdW,H); ctx.stroke();
+    // Dashed lane lines — offset by scrollOff so they flow past
+    ctx.strokeStyle="#556"; ctx.setLineDash([s*1.5,s*1.2]);
+    ctx.lineDashOffset = -scrollOff;
+    ctx.beginPath(); ctx.moveTo(lx,0); ctx.lineTo(lx,carY-rdW); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx,carY+rdW); ctx.lineTo(lx,H); ctx.stroke();
+  }
+  // EW dashed lanes
+  for(var li=-1;li<=1;li+=2){
+    var ly=carY+li*rw/2;
+    ctx.beginPath(); ctx.moveTo(0,ly); ctx.lineTo(carX-rdW,ly); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(carX+rdW,ly); ctx.lineTo(W,ly); ctx.stroke();
+  }
+  // Center line (solid yellow, scrolls too)
+  ctx.strokeStyle="#887744"; ctx.lineWidth=2; ctx.setLineDash([s*4,s*1.5]);
+  ctx.lineDashOffset = -scrollOff;
+  ctx.beginPath(); ctx.moveTo(carX,0); ctx.lineTo(carX,carY-rdW); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(carX,carY+rdW); ctx.lineTo(carX,H); ctx.stroke();
+  ctx.setLineDash([]); ctx.lineDashOffset = 0;
+
+  // ── Stop lines ──
+  ctx.strokeStyle="#fff"; ctx.lineWidth=3;
+  var sl=[[carX-rdW+4,carY-rdW+4,carX+rdW-4,carY-rdW+4],
+          [carX-rdW+4,carY+rdW-4,carX+rdW-4,carY+rdW-4],
+          [carX-rdW+4,carY-rdW+4,carX-rdW+4,carY+rdW-4],
+          [carX+rdW-4,carY-rdW+4,carX+rdW-4,carY+rdW-4]];
+  sl.forEach(function(p){ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.stroke();});
+
+  // ── Distance grid ──
+  ctx.fillStyle="#222"; ctx.font="9px 'JetBrains Mono',monospace"; ctx.textAlign="left";
+  for(var d=20;d<=200;d+=20){
+    var dy=carY-d*s;
+    if(dy>0){ctx.beginPath();ctx.moveTo(carX-rdW,dy);ctx.lineTo(carX+rdW,dy);ctx.strokeStyle="#1a1e28";ctx.lineWidth=0.5;ctx.stroke();}
+    ctx.fillText(d+"m",carX+rdW+6,dy+3);
+  }
+
+  // ── Ego trail ──
+  if(_2d.trail.length>1){
+    ctx.strokeStyle="rgba(88,166,255,0.25)"; ctx.lineWidth=1.5; ctx.setLineDash([3,4]);
+    ctx.beginPath();
+    for(var ti=0;ti<_2d.trail.length;ti++){
+      var tp=_2d.trail[ti], tx=carX-(tp.y-e.y)*s, ty=carY-(tp.x-e.x)*s;
+      if(ti===0)ctx.moveTo(tx,ty); else ctx.lineTo(tx,ty);
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  // ── LiDAR point cloud ──
+  var scn=(topoData.metrics||{}).scene;
+  if(scn&&scn.lidar&&scn.lidar.length){
+    scn.lidar.forEach(function(pt){
+      var rx=pt[0]||0, ry=pt[1]||0;
+      var px=carX-ry*s, py=carY-rx*s;
+      var dist=Math.sqrt(rx*rx+ry*ry);
+      // Color by range: near→red, mid→yellow, far→blue
+      var t=Math.min(1,dist/60);
+      var r=Math.floor(255*(1-t) + 40*t), g=Math.floor(100*(1-t) + 150*t), b=Math.floor(40*(1-t) + 255*t);
+      ctx.fillStyle="rgba("+r+","+g+","+b+",0.8)";
+      ctx.beginPath(); ctx.arc(px,py,1.6,0,Math.PI*2); ctx.fill();
     });
   }else{
-    [[-30,-15],[25,-12],[-20,25],[28,20]].forEach(function(p){
-      var bx=carX+p[0]*scale,by=carY-p[1]*scale;
-      ctx2d.fillStyle="#334";ctx2d.fillRect(bx-6,by-3,12,6);
-      ctx2d.fillStyle="#225";ctx2d.fillRect(bx-3,by-1.5,6,3);
+    // Random demo LiDAR ring
+    for(var i=0;i<60;i++){
+      var a=Math.random()*Math.PI*2, r=3+Math.random()*35;
+      var px=carX+Math.cos(a)*r*s*0.7, py=carY-Math.sin(a)*r*s*0.7;
+      ctx.fillStyle="rgba(255,60,40,0.5)"; ctx.beginPath(); ctx.arc(px,py,1.2,0,Math.PI*2); ctx.fill();
+    }
+  }
+
+  // ── Obstacles (color-coded by type, with smooth motion) ──
+  var obsColors={car:"#ff9944", truck:"#ff4422", pedestrian:"#44ee88", cyclist:"#44ccff"};
+  window._obsTargets2d = window._obsTargets2d || [];
+  if(scn&&scn.obstacles&&scn.obstacles.length){
+    scn.obstacles.forEach(function(o,i){
+      // Smooth obstacle positions (lerp toward target)
+      var tx=carX-(o.y||0)*s, ty=carY-(o.x||0)*s; // target screen position
+      var cur = window._obsTargets2d[i];
+      if(!cur){cur={x:tx,y:ty}; window._obsTargets2d[i]=cur;}
+      cur.x += (tx - cur.x) * 0.25;
+      cur.y += (ty - cur.y) * 0.25;
+      var Wd=(o.wid||2)*s, L=(o.len||4)*s;
+      ctx.save(); ctx.translate(cur.x,cur.y);
+      // Shadow
+      ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.fillRect(-Wd/2+2,-L/2+2,Wd,L);
+      // Body
+      ctx.fillStyle=obsColors[o.type]||"#ff9944";
+      ctx.fillRect(-Wd/2,-L/2,Wd,L);
+      // Windshield (darker front)
+      if(o.type==="car"||o.type==="truck"){
+        ctx.fillStyle="rgba(0,0,0,0.25)"; ctx.fillRect(-Wd/3,-L/2+1,Wd*0.65,3);
+      }
+      // Outline
+      ctx.strokeStyle="rgba(255,255,255,0.2)"; ctx.lineWidth=1; ctx.strokeRect(-Wd/2,-L/2,Wd,L);
+      // Front direction marker
+      ctx.fillStyle="#fff"; ctx.fillRect(-Wd/5,-L/2+1,Wd*0.4,2);
+      ctx.restore();
+    });
+  }else{
+    // Demo obstacles
+    [[-8,-5],[7,-8],[-5,14]].forEach(function(p){
+      var bx=carX+p[0]*s,by=carY-p[1]*s;
+      ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.fillRect(bx-14+2,by-8+2,28,16);
+      ctx.fillStyle="#556"; ctx.fillRect(bx-14,by-8,28,16);
+      ctx.strokeStyle="#8893"; ctx.lineWidth=1; ctx.strokeRect(bx-14,by-8,28,16);
     });
   }
 
-  // ── Ego vehicle ──
-  var v=(topoData.metrics||{}).vehicle||{speed:0,target_speed:0,throttle:0,brake:0,x:0,y:0,error:0};
-  // Heading from trajectory
-  var heading=0;
-  if(gpsHistory.length>1){var last=gpsHistory[gpsHistory.length-1],prev=gpsHistory[gpsHistory.length-2];heading=Math.atan2(last.x-prev.x,last.z-prev.z);}
-
-  ctx2d.save();ctx2d.translate(carX,carY);ctx2d.rotate(-heading);
-  // Glow
-  ctx2d.fillStyle="rgba(88,166,255,0.15)";ctx2d.fillRect(-22,-12,44,24);
+  // ── Ego vehicle (detailed top-down view, with subtle speed animation) ──
+  ctx.save(); ctx.translate(carX,carY); ctx.rotate(-e.heading);
+  // Speed-based bounce (subtle vertical oscillation)
+  var bounce = Math.sin(_2d.frame * 0.15) * Math.min(1, e.speed * 0.15);
+  ctx.translate(0, bounce);
+  // Speed-based forward tilt (visual acceleration cue)
+  if(e.speed > 0.5) ctx.translate(Math.min(3, e.speed * 0.3), 0);
+  // Glow (pulses with speed)
+  var glowPulse = 0.15 + Math.sin(_2d.frame * 0.1) * 0.05 + e.speed * 0.01;
+  var glow=ctx.createRadialGradient(0,0,4,0,0,22);
+  glow.addColorStop(0,"rgba(88,166,255,"+glowPulse+")"); glow.addColorStop(1,"rgba(88,166,255,0)");
+  ctx.fillStyle=glow; ctx.beginPath(); ctx.arc(0,0,22,0,Math.PI*2); ctx.fill();
+  // Shadow
+  ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(-21,2,42,12);
   // Body
-  ctx2d.fillStyle="#58a6ff";ctx2d.fillRect(-20,-10,40,20);
-  // Roof/windshield
-  ctx2d.fillStyle="#4488dd";ctx2d.fillRect(-8,-6,16,12);
-  ctx2d.fillStyle="#88ccff";ctx2d.fillRect(4,-5,8,10);
+  var bodyGrad=ctx.createLinearGradient(0,-11,0,11);
+  bodyGrad.addColorStop(0,"#6ab4ff"); bodyGrad.addColorStop(0.5,"#4488dd"); bodyGrad.addColorStop(1,"#3377cc");
+  ctx.fillStyle=bodyGrad;
+  ctx.beginPath();
+  // Rounded car body
+  var bw=20, bh=9; // half-width, half-height
+  ctx.moveTo(-bw,-bh+4); ctx.quadraticCurveTo(-bw,-bh,-bw+4,-bh);
+  ctx.lineTo(bw-4,-bh); ctx.quadraticCurveTo(bw,-bh,bw,-bh+4);
+  ctx.lineTo(bw,bh-4); ctx.quadraticCurveTo(bw,bh,bw-4,bh);
+  ctx.lineTo(-bw+8,bh); ctx.lineTo(-bw+6,bh+3); // rear bumper
+  ctx.lineTo(bw-6,bh+3); ctx.lineTo(bw-8,bh);
+  ctx.quadraticCurveTo(-bw,bh,-bw,bh-4);
+  ctx.closePath(); ctx.fill();
+  // Roof/windshield (darker)
+  ctx.fillStyle="#5599cc"; ctx.fillRect(-7,-5,14,10);
+  // Windshield (front, lighter)
+  ctx.fillStyle="#99ccff"; ctx.fillRect(3,-3,6,7);
+  // Rear window
+  ctx.fillStyle="#4480b0"; ctx.fillRect(-8,-3,5,7);
+  // Front bumper accent
+  ctx.fillStyle="#c9d1d9"; ctx.fillRect(bw-3,-3,2,6);
   // Wheels
-  ctx2d.fillStyle="#111";ctx2d.fillRect(-16,-12,7,4);ctx2d.fillRect(-16,8,7,4);ctx2d.fillRect(10,-12,7,4);ctx2d.fillRect(10,8,7,4);
-  // Front arrow
-  ctx2d.fillStyle="#fff";ctx2d.beginPath();ctx2d.moveTo(22,0);ctx2d.lineTo(16,-4);ctx2d.lineTo(16,4);ctx2d.fill();
-  ctx2d.restore();
+  ctx.fillStyle="#111";
+  ctx.fillRect(-17,-10,8,3.5); ctx.fillRect(-17,6,8,3.5);
+  ctx.fillRect(10,-10,8,3.5); ctx.fillRect(10,6,8,3.5);
+  // Front direction arrow
+  ctx.fillStyle="#fff"; ctx.beginPath(); ctx.moveTo(bw+2,0); ctx.lineTo(bw-5,-4); ctx.lineTo(bw-5,4); ctx.fill();
+  ctx.restore();
 
-  // ── Trajectory projection ──
-  ctx2d.strokeStyle="rgba(63,185,80,0.5)";ctx2d.lineWidth=2;ctx2d.setLineDash([4,6]);
-  ctx2d.beginPath();ctx2d.moveTo(carX,carY);
-  for(var t=1;t<=30;t++){ctx2d.lineTo(carX+Math.sin(heading)*t*scale,carY-Math.cos(heading)*t*scale);}
-  ctx2d.stroke();ctx2d.setLineDash([]);
-
-  // ── Field of view cone ──
-  ctx2d.fillStyle="rgba(88,166,255,0.04)";
-  ctx2d.beginPath();ctx2d.moveTo(carX,carY);
-  ctx2d.lineTo(carX-Math.sin(heading-0.5)*60*scale,carY+Math.cos(heading-0.5)*60*scale);
-  ctx2d.lineTo(carX-Math.sin(heading+0.5)*60*scale,carY+Math.cos(heading+0.5)*60*scale);
-  ctx2d.fill();
+  // ── Speed indicator bar (top center) ──
+  var barW=120, barH=6, barX=W/2-barW/2, barY=carY-rdW-16;
+  ctx.fillStyle="#1a1e28"; ctx.fillRect(barX,barY,barW,barH);
+  var spdFrac=Math.min(1,e.speed/20);
+  var spdGrad=ctx.createLinearGradient(barX,0,barX+barW,0);
+  spdGrad.addColorStop(0,"#3fb950"); spdGrad.addColorStop(0.5,"#d29922"); spdGrad.addColorStop(1,"#f85149");
+  ctx.fillStyle=spdGrad; ctx.fillRect(barX,barY,barW*spdFrac,barH);
 
   // ── HUD (bottom bar) ──
-  var hudY=H-50;
-  ctx2d.fillStyle="rgba(0,0,0,0.7)";ctx2d.fillRect(0,hudY,W,50);
-  // Speed gauge
-  ctx2d.fillStyle="#58a6ff";ctx2d.font="bold 36px monospace";
-  ctx2d.fillText((v.speed||0).toFixed(1),20,hudY+32);
-  ctx2d.fillStyle="#8b949e";ctx2d.font="11px monospace";
-  ctx2d.fillText("m/s",85,hudY+32);
-  // Target
-  ctx2d.fillStyle="#8b949e";ctx2d.fillText("TARGET",140,hudY+12);
-  ctx2d.fillStyle="#fff";ctx2d.font="bold 18px monospace";
-  ctx2d.fillText((v.target_speed||0).toFixed(1),140,hudY+34);
-  // Throttle bar
-  ctx2d.fillStyle="#8b949e";ctx2d.fillText("THROTTLE",240,hudY+12);
-  ctx2d.fillStyle="#252d3a";ctx2d.fillRect(240,hudY+20,100,12);
-  var thr=(v.throttle||0);ctx2d.fillStyle=thr>0.5?"#d29922":"#3fb950";
-  ctx2d.fillRect(240,hudY+20,100*thr,12);
-  ctx2d.fillStyle="#fff";ctx2d.font="bold 11px monospace";
-  ctx2d.fillText((thr*100).toFixed(0)+"%",248,hudY+30);
-  // Brake
-  ctx2d.fillStyle="#8b949e";ctx2d.fillText("BRAKE",360,hudY+12);
-  ctx2d.fillStyle=(v.brake||0)>0?"#f85149":"#252d3a";
-  ctx2d.fillRect(360,hudY+20,60,12);
-  ctx2d.fillText(((v.brake||0)*100).toFixed(0)+"%",362,hudY+30);
-  // Mode
-  var mode=(v.error||0)<0.5?"⏺ HOLD":(v.error||0)>0?"🟢 ACCEL":"🔴 BRAKE";
-  ctx2d.fillStyle="#fff";ctx2d.font="bold 16px monospace";
-  ctx2d.fillText(mode,460,hudY+34);
-  // Odometer
-  ctx2d.fillStyle="#484f58";ctx2d.font="11px monospace";ctx2d.textAlign="right";
-  ctx2d.fillText("odo "+(v.x||0).toFixed(1)+" m",W-20,hudY+34);
+  var hudY=H-52, hudH=52;
+  // Background
+  var hudGrad=ctx.createLinearGradient(0,hudY,0,H);
+  hudGrad.addColorStop(0,"rgba(0,0,0,0.75)"); hudGrad.addColorStop(1,"rgba(0,0,0,0.9)");
+  ctx.fillStyle=hudGrad; ctx.fillRect(0,hudY,W,hudH);
+  ctx.strokeStyle="#1a1f2b"; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(0,hudY); ctx.lineTo(W,hudY); ctx.stroke();
+
+  // ── HUD content ──
+  ctx.textBaseline="middle";
+
+  // SPEED — large
+  ctx.fillStyle="#58a6ff"; ctx.font="bold 42px 'JetBrains Mono',monospace";
+  ctx.textAlign="left"; ctx.fillText((e.speed||0).toFixed(1),18,hudY+hudH/2-3);
+  ctx.fillStyle="#8b949e"; ctx.font="12px 'Inter',system-ui,sans-serif";
+  ctx.fillText("m/s",86,hudY+hudH/2-3);
+  ctx.fillText((e.speed*3.6||0).toFixed(0)+" km/h",86,hudY+hudH/2+12);
+
+  // TARGET
+  var v=(topoData.metrics||{}).vehicle||{};
+  ctx.fillStyle="#8b949e"; ctx.font="10px 'Inter',system-ui,sans-serif"; ctx.textAlign="left";
+  ctx.fillText("TARGET",150,hudY+11);
+  ctx.fillStyle="#fff"; ctx.font="bold 20px 'JetBrains Mono',monospace";
+  ctx.fillText((v.target_speed||0).toFixed(1),150,hudY+30);
+
+  // THROTTLE gauge
+  ctx.fillStyle="#8b949e"; ctx.font="10px 'Inter',system-ui,sans-serif";
+  ctx.fillText("THR",240,hudY+11);
+  ctx.fillStyle="#1a1e28"; ctx.fillRect(240,hudY+20,80,10);
+  var thr=v.throttle||0;
+  ctx.fillStyle=thr>0.6?"#d29922":thr>0.3?"#58a6ff":"#3fb950";
+  ctx.fillRect(240,hudY+20,80*thr,10);
+  ctx.strokeStyle="#2a2f3a"; ctx.lineWidth=1; ctx.strokeRect(240,hudY+20,80,10);
+  ctx.fillStyle="#fff"; ctx.font="bold 10px 'JetBrains Mono',monospace"; ctx.textAlign="left";
+  ctx.fillText((thr*100).toFixed(0)+"%",248,hudY+31);
+
+  // BRAKE gauge
+  ctx.fillStyle="#8b949e"; ctx.font="10px 'Inter',system-ui,sans-serif";
+  ctx.fillText("BRK",340,hudY+11);
+  ctx.fillStyle="#1a1e28"; ctx.fillRect(340,hudY+20,60,10);
+  var brk=v.brake||0;
+  ctx.fillStyle=brk>0?"#f85149":"#252d3a";
+  ctx.fillRect(340,hudY+20,60*Math.min(1,brk*3),10);
+  ctx.strokeStyle="#2a2f3a"; ctx.lineWidth=1; ctx.strokeRect(340,hudY+20,60,10);
+  ctx.fillStyle="#fff"; ctx.font="bold 10px 'JetBrains Mono',monospace";
+  ctx.fillText((brk*100).toFixed(0)+"%",345,hudY+31);
+
+  // MODE
+  var err=v.error||0;
+  var mode=err<-0.3?"BRAKE":err>0.3?"ACCEL":"⏺ HOLD";
+  var modeColor=err<-0.3?"#f85149":err>0.3?"#3fb950":"#8b949e";
+  ctx.fillStyle=modeColor; ctx.font="bold 14px 'Inter',system-ui,sans-serif";
+  ctx.textAlign="left"; ctx.fillText(mode,430,hudY+20);
+
+  // ERROR
+  ctx.fillStyle="#8b949e"; ctx.font="10px 'JetBrains Mono',monospace";
+  ctx.fillText("err "+err.toFixed(1)+" m/s",430,hudY+36);
+
+  // ODO
+  ctx.fillStyle="#484f58"; ctx.font="11px 'JetBrains Mono',monospace"; ctx.textAlign="right";
+  ctx.fillText("odo "+(v.x||0).toFixed(1)+" m",W-20,hudY+hudH/2);
 }
 
-// ── Load Three.js dynamically — non-blocking (same pattern as D3). ──
-// Blocking <script src> tags hang the page when a CDN is unreachable, so we
-// inject the script and try several CDNs. On success we build the 3D scene;
-// if every CDN fails (or WebGL is unavailable / too slow) we drop to the
-// zero-dependency 2D canvas so the simulation is always visible.
+// ── Hook into updateAll to sync 2D target state from live data ──
+// Called *before* draw2D (which runs at 60fps via rAF) so the lerp has a fresh target.
+var _origUpdateAll2d = null;
+(function patchUpdateAll(){
+  // We inject a small data→target sync into updateAll without changing its source.
+  // The _2dSyncTarget function reads topoData and updates _2d.egoT + trail.
+  var ua = updateAll;
+  updateAll = function(){
+    ua();
+    if(_2d.active)_2dSyncTarget();
+  };
+})();
+function _2dSyncTarget(){
+  var m=(topoData.metrics||{}), scn=m.scene, v=m.vehicle||{};
+  // Update target from scene.ego or vehicle telemetry
+  if(scn&&scn.ego){
+    _2d.egoT.x = scn.ego.x||0;
+    _2d.egoT.heading = scn.ego.heading||0;
+    _2d.egoT.speed = scn.ego.speed||0;
+  }else if(v){
+    _2d.egoT.x = v.x||0;
+    _2d.egoT.speed = v.speed||0;
+    // Derive heading from GPS history
+    gpsHistory.push({x:v.x||0, z:(v.y||0)*5});
+    if(gpsHistory.length>60)gpsHistory.shift();
+    if(gpsHistory.length>1){
+      var l=gpsHistory[gpsHistory.length-1], p=gpsHistory[gpsHistory.length-2];
+      _2d.egoT.heading = Math.atan2(l.x-p.x, l.z-p.z);
+    }
+  }
+  // Trail (world-frame → relative in draw2D)
+  _2d.trail.push({x:_2d.egoT.x, y:_2d.egoT.y});
+  if(_2d.trail.length>120)_2d.trail.shift();
+}
+
+// ── Load Three.js: local copy first (bundled, works offline), then CDN
+// mirrors as fallback.  The local copy is served by flowboard_server.py
+// alongside the dashboard HTML so it is always available when the server
+// runs — no internet required for 3D.
+//
+// Startup sequence:
+//   1. Try loading Three.js (local → CDN mirrors)
+//   2. When Three.js loads successfully → init3D() creates the WebGL scene
+//      and disables any 2D fallback that may have started
+//   3. If 3 seconds pass and 3D still isn't ready → start 2D fallback
+//      (the 2D canvas renders at 60fps until/unless 3D takes over)
 (function(){
   var cdns=[
+    "/tools/three.min.js",                                  // local (always available)
     "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js",
     "https://unpkg.com/three@0.128.0/build/three.min.js",
     "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"
   ];
   var i=0;
   function tryLoad(){
-    if(i>=cdns.length){console.warn("All Three.js CDNs failed — using 2D fallback");init2DFallback();return;}
+    if(i>=cdns.length){console.warn("All Three.js sources failed — sticking with 2D fallback");return;}
     var s=document.createElement("script");
     s.src=cdns[i++];
-    s.onload=function(){if(typeof THREE!=="undefined"){if(!fallbackActive)init3D();}else{tryLoad();}};
+    // When Three.js loads: init the 3D scene.  init3D() will disable the 2D
+    // animation loop and hide the 2D canvas automatically if it succeeds.
+    s.onload=function(){if(typeof THREE!=="undefined"){init3D();}else{tryLoad();}};
     s.onerror=function(){tryLoad();};
     document.head.appendChild(s);
   }
   tryLoad();
 })();
-// If the 3D scene isn't ready within 6s (slow/blocked CDN), show 2D fallback.
-try{init2DFallback();}catch(e){}
+// If 3D still isn't ready after 3s (slow CDN), show the 2D fallback so the
+// user sees something immediately.  If Three.js loads later, init3D() will
+// seamlessly swap to 3D.
+setTimeout(function(){ init2DFallback(); }, 3000);
 
 // Init
 // ════════════════════════════════════════════════════════════

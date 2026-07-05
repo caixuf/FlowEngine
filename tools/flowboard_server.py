@@ -278,7 +278,7 @@ def file_watcher():
             pass  # file being written — try next cycle
         except Exception as e:
             print(f"[watcher] error: {e}", file=sys.stderr)
-        time.sleep(1)
+        time.sleep(0.1)  # 10 Hz — matches monitor task write rate
 
 # ── HTTP 请求处理器 ───────────────────────────────────────
 
@@ -347,7 +347,7 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                         self.wfile.write(b": keep-alive\n\n")
                         last_beat = now
                     self.wfile.flush()
-                    time.sleep(1)
+                    time.sleep(0.1)  # 10 Hz — matches monitor task write rate
             except (BrokenPipeError, ConnectionResetError):
                 pass  # client disconnected
 
@@ -366,6 +366,44 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
                 self.wfile.write(b"flowboard.html not found")
+
+        elif self.path.startswith('/tools/') or self.path.startswith('/static/'):
+            # Serve static assets (Three.js, CSS, etc.) from the tools/ directory.
+            # Strip leading /tools/ or /static/ to get the relative filename.
+            rel = self.path.lstrip('/')
+            # /tools/three.min.js → tools/three.min.js
+            # /static/foo.js       → tools/foo.js (mapped to tools/ for simplicity)
+            if rel.startswith('static/'):
+                rel = 'tools/' + rel[len('static/'):]
+            fpath = os.path.join(os.path.dirname(__file__), '..', rel)
+            fpath = os.path.normpath(fpath)
+            # Security: only serve files directly inside tools/
+            tools_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'tools'))
+            if not fpath.startswith(tools_dir):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"Forbidden")
+                return
+            if not os.path.isfile(fpath):
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Not found")
+                return
+            # Guess MIME type
+            ct = "application/octet-stream"
+            if fpath.endswith('.js'):   ct = 'application/javascript'
+            elif fpath.endswith('.css'): ct = 'text/css'
+            elif fpath.endswith('.html'): ct = 'text/html'
+            elif fpath.endswith('.svg'): ct = 'image/svg+xml'
+            with open(fpath, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ct)
+            self.send_header('Content-Length', str(len(data)))
+            # Cache static assets for 1 hour (they don't change at runtime)
+            self.send_header('Cache-Control', 'public, max-age=3600')
+            self.end_headers()
+            self.wfile.write(data)
 
         else:
             self.send_response(404)
