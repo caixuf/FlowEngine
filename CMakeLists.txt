@@ -111,6 +111,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flowcoro)
 
+# ── Eigen3 (header-only linear algebra, for Frenet planner) ──
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    Eigen
+    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+    GIT_TAG        3.4.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(Eigen)
+
 # =============================================================================
 # flowcoro_headers — 全局 INTERFACE 目标
 #
@@ -276,7 +288,7 @@ target_link_libraries(dbscan_perception_plugin flowengine_core m)
 
 # ── Frenet Optimal Trajectory Planner (from open-source, Apache-2.0) ──
 # Source: https://github.com/fangedward/frenet-optimal-trajectory-planner
-# Eigen is bundled via third_party/tinympc/include/Eigen/
+# Eigen is fetched via CMake FetchContent (no local dependency)
 set(FRENET_PLANNER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src")
 set(FRENET_PLANNER_SOURCES
     ${FRENET_PLANNER_DIR}/CubicSpline/CubicSpline1D.cpp
@@ -298,16 +310,14 @@ target_include_directories(frenet_planner PUBLIC
     ${FRENET_PLANNER_DIR}/Polynomials
     ${FRENET_PLANNER_DIR}/Obstacle
     ${FRENET_PLANNER_DIR}/Car
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinympc/include/Eigen
 )
 target_compile_options(frenet_planner PRIVATE -Wno-unused-variable -Wno-sign-compare)
-target_link_libraries(frenet_planner m)
+target_link_libraries(frenet_planner PUBLIC Eigen3::Eigen m)
 
 # ── Frenet C Bridge (C++ → C wrapper for e2e demo) ──
 add_library(frenet_bridge STATIC src/algorithms/frenet_bridge.cpp)
 target_include_directories(frenet_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinympc/include/Eigen
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/FrenetOptimalTrajectory
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/CubicSpline
@@ -315,7 +325,7 @@ target_include_directories(frenet_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Obstacle
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Car
 )
-target_link_libraries(frenet_bridge frenet_planner m)
+target_link_libraries(frenet_bridge PUBLIC frenet_planner Eigen3::Eigen m)
 target_compile_options(frenet_bridge PRIVATE -Wno-unused-variable -Wno-sign-compare)
 
 # ── Frenet Planning Plugin (C++ wrapper) ──
