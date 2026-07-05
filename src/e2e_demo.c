@@ -76,10 +76,6 @@ static int scan_lidar_dir(const char* dir) {
     return count;
 }
 
-/* DBSCAN detection results (shared with monitor for dashboard) */
-static ObstacleList g_dbscan_obstacles;
-static bool         g_dbscan_has_data = false;
-
 /* MCAP channel IDs (set after registration) */
 static uint16_t mcap_ch_lidar   = 0;
 static uint16_t mcap_ch_camera  = 0;
@@ -368,10 +364,6 @@ static int perception_execute(TaskBase* base) {
                 }
                 obs_list.count++;
             }
-
-            /* Save for dashboard (8800) */
-            memcpy(&g_dbscan_obstacles, &obs_list, sizeof(obs_list));
-            g_dbscan_has_data = true;
 
             Message omsg;
             msg_init_typed(&omsg, "perception/obstacles", "perception",
@@ -1097,16 +1089,32 @@ static TaskInterface g_planning_vtable = {
 typedef struct {
     TaskBase  base;
     int       tid;
+    ObstacleList latest_obstacles;   /**< 从 perception/obstacles 订阅 */
+    bool         has_obstacles;
 } MonitorTask;
 
+static void monitor_on_obstacles(const Message* msg, void* user_data) {
+    MonitorTask* mt = (MonitorTask*)user_data;
+    if (msg->data_size == sizeof(ObstacleList)) {
+        memcpy(&mt->latest_obstacles, msg->data, sizeof(ObstacleList));
+        mt->has_obstacles = true;
+    }
+}
+
 static int monitor_init(TaskBase* base) {
+    MonitorTask* mt = (MonitorTask*)base;
+    /* 订阅感知输出 — 任何发布 perception/obstacles 的源都能被监控到 */
+    transport_subscribe(g_transport, "perception/obstacles", monitor_on_obstacles, mt);
+    discovery_advertise(g_discovery, "perception/obstacles", 0x0B5A010Eu,
+                        CAP_SUBSCRIBER, 0);
     statem_send_event(&base->sm, SM_EVENT_START, base);
-    LOG_INFO("monitor", "initialized (10Hz stats reporter)");
+    LOG_INFO("monitor", "initialized (10Hz stats reporter, subscribed to perception/obstacles)");
     return 0;
 }
 
 static int monitor_execute(TaskBase* base) {
-    RateControl* rc = scheduler_get_rate_control(g_scheduler, ((MonitorTask*)base)->tid);
+    MonitorTask* mt = (MonitorTask*)base;
+    RateControl* rc = scheduler_get_rate_control(g_scheduler, mt->tid);
 
     while (g_running && !base->should_stop) {
         if (!rate_control_acquire(rc)) { usleep(100000); continue; }
@@ -1219,11 +1227,11 @@ static int monitor_execute(TaskBase* base) {
                             o->vx, o->len, o->wid);
                 }
                 fprintf(jf, "],");
-                /* DBSCAN 检出障碍物 (真实感知结果) */
+                /* 感知检出障碍物 (通过 transport 订阅, 解耦) */
                 fprintf(jf, "\"dbscan_obstacles\":[");
-                if (g_dbscan_has_data) {
-                    for (uint32_t di = 0; di < g_dbscan_obstacles.count; di++) {
-                        Obstacle* ob = &g_dbscan_obstacles.obstacles[di];
+                if (mt->has_obstacles) {
+                    for (uint32_t di = 0; di < mt->latest_obstacles.count; di++) {
+                        Obstacle* ob = &mt->latest_obstacles.obstacles[di];
                         double dx2 = (double)ob->x, dy2 = (double)ob->y;
                         double rx2 = dx2 * ch - dy2 * sh;
                         double ry2 = dx2 * sh + dy2 * ch;
