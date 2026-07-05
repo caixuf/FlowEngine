@@ -114,3 +114,35 @@ grep "timeout\|miss" scenario.log   # 超时/丢帧
 # 3. 接入算法测试
 ./build/bin/scenario_runner scenario.bag --plugin lib/libmy_algo.so
 ```
+
+## e2e 内置 3D 场景仿真
+
+`flow_e2e` 的 monitor 任务会导出真实 3D 场景到 `/tmp/flow_topology.json`
+的 `metrics.scene` 字段，FlowBoard 仪表盘据此渲染真实三维场景（自车、
+障碍物包围盒、LiDAR 点云），而非随机占位点。
+
+包含的真实仿真要素：
+
+- **横向自行车模型**：自车具备 `heading` / `steer`，转向为向目标车道的
+  P 控制，可演示**变道**（行驶到一定里程自动切到左车道再回正）。
+- **ACC 纵向控制**：依据与同车道前车的间距动态限制目标速度，间距越近
+  目标速度越低，触发真实的减速/刹车行为。
+- **动态障碍物**：前车、对向来车、过街行人，具备运动学与循环边界，
+  使场景持续有内容。
+- **LiDAR 点云**：对障碍物表面 + 地面环带做光线投射后下采样，坐标位于
+  自车系。
+
+一键运行（业务节点 + HTTP 桥接 + 浏览器）：
+
+```bash
+./scripts/demo_sim.sh
+# 或手动:
+./build/bin/flow_e2e 3600 &
+python3 tools/flowboard_server.py &
+open http://localhost:8800
+```
+
+`scene` 数据结构与坐标系约定详见
+[VISUALIZATION_ARCHITECTURE.md](VISUALIZATION_ARCHITECTURE.md#scene-数据结构真实-3d-仿真)。
+完整的离线问题根因分析与鲁棒性设计详见
+[E2E_SIMULATION_DESIGN.md](E2E_SIMULATION_DESIGN.md)。
