@@ -157,6 +157,15 @@ set(CORE_SOURCES
     src/core/param_registry.c
     src/core/monitor_server.c
     src/core/mcap_writer.c
+    src/core/mcap_reader.c
+)
+
+# ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
+set(ALGORITHM_SOURCES
+    src/algorithms/ekf_fusion.c
+    src/algorithms/dbscan_cluster.c
+    src/algorithms/kalman_tracker.c
+    src/algorithms/nuscenes_loader.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
@@ -175,8 +184,11 @@ set(PLUGIN_SOURCES
     src/plugins/example_task.c
 )
 
-# 创建核心静态库
-add_library(flowengine_core STATIC ${CORE_SOURCES})
+# 创建核心静态库 (核心 + 算法)
+add_library(flowengine_core STATIC ${CORE_SOURCES} ${ALGORITHM_SOURCES})
+target_include_directories(flowengine_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms
+)
 # 依赖代码生成（msg_codegen 先完成再编译 core）
 add_dependencies(flowengine_core msg_codegen)
 target_link_libraries(flowengine_core
@@ -255,6 +267,61 @@ target_link_libraries(planning_plugin flowengine_core)
 add_library(pid_controller SHARED src/plugins/pid_controller.c)
 target_link_libraries(pid_controller flowengine_core m)
 
+# ── Algorithm plugins (real implementations) ──
+add_library(ekf_fusion_plugin SHARED src/plugins/ekf_fusion_plugin.c)
+target_link_libraries(ekf_fusion_plugin flowengine_core m)
+
+add_library(dbscan_perception_plugin SHARED src/plugins/dbscan_perception_plugin.c)
+target_link_libraries(dbscan_perception_plugin flowengine_core m)
+
+# ── Frenet Optimal Trajectory Planner (from open-source, Apache-2.0) ──
+# Source: https://github.com/fangedward/frenet-optimal-trajectory-planner
+# Eigen is bundled via third_party/tinympc/include/Eigen/
+set(FRENET_PLANNER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src")
+set(FRENET_PLANNER_SOURCES
+    ${FRENET_PLANNER_DIR}/CubicSpline/CubicSpline1D.cpp
+    ${FRENET_PLANNER_DIR}/CubicSpline/CubicSpline2D.cpp
+    ${FRENET_PLANNER_DIR}/FrenetOptimalTrajectory/FrenetPath.cpp
+    ${FRENET_PLANNER_DIR}/FrenetOptimalTrajectory/FrenetOptimalTrajectory.cpp
+    ${FRENET_PLANNER_DIR}/FrenetOptimalTrajectory/fot_wrapper.cpp
+    ${FRENET_PLANNER_DIR}/Polynomials/QuinticPolynomial.cpp
+    ${FRENET_PLANNER_DIR}/Polynomials/QuarticPolynomial.cpp
+    ${FRENET_PLANNER_DIR}/Obstacle/Obstacle.cpp
+    ${FRENET_PLANNER_DIR}/Car/Car.cpp
+)
+
+add_library(frenet_planner STATIC ${FRENET_PLANNER_SOURCES})
+target_include_directories(frenet_planner PUBLIC
+    ${FRENET_PLANNER_DIR}
+    ${FRENET_PLANNER_DIR}/CubicSpline
+    ${FRENET_PLANNER_DIR}/FrenetOptimalTrajectory
+    ${FRENET_PLANNER_DIR}/Polynomials
+    ${FRENET_PLANNER_DIR}/Obstacle
+    ${FRENET_PLANNER_DIR}/Car
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinympc/include/Eigen
+)
+target_compile_options(frenet_planner PRIVATE -Wno-unused-variable -Wno-sign-compare)
+target_link_libraries(frenet_planner m)
+
+# ── Frenet C Bridge (C++ → C wrapper for e2e demo) ──
+add_library(frenet_bridge STATIC src/algorithms/frenet_bridge.cpp)
+target_include_directories(frenet_bridge PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/algorithms
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinympc/include/Eigen
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/FrenetOptimalTrajectory
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/CubicSpline
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Polynomials
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Obstacle
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Car
+)
+target_link_libraries(frenet_bridge frenet_planner m)
+target_compile_options(frenet_bridge PRIVATE -Wno-unused-variable -Wno-sign-compare)
+
+# ── Frenet Planning Plugin (C++ wrapper) ──
+add_library(frenet_planning_plugin SHARED src/plugins/frenet_planning_plugin.cpp)
+target_link_libraries(frenet_planning_plugin flowengine_core frenet_planner m)
+
 # =============================================================================
 # flowcoro 协程集成目标（统一管理）
 #
@@ -292,11 +359,22 @@ target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
 # ── End-to-end demo (all components: serializer+scheduler+statem+discovery+fusion+transport) ──
 add_executable(flow_e2e src/e2e_demo.c)
-target_link_libraries(flow_e2e flowengine_core scheduler_cpp)
+target_link_libraries(flow_e2e flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
+# e2e_demo is C but links C++ Frenet libraries — ensure C++ runtime is linked
+set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
+
+# ── MCAP Replay Tool ──
+add_executable(flow_mcap_replay src/mcap_replay.c)
+target_link_libraries(flow_mcap_replay flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
+set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
+
+# ── nuScenes Demo ──
+add_executable(flow_nuscenes_demo src/nuscenes_demo.c)
+target_link_libraries(flow_nuscenes_demo flowengine_core m)
 add_dependencies(flow_e2e msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag flow_coro flow_e2e benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -304,7 +382,7 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller ekf_fusion_plugin dbscan_perception_plugin frenet_planning_plugin
     LIBRARY DESTINATION lib/flowengine/plugins
 )
 

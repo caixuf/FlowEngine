@@ -33,6 +33,48 @@
 #include <math.h>
 #include <inttypes.h>
 #include "mcap_writer.h"
+#include "ekf_fusion.h"
+#include "dbscan_cluster.h"
+#include "frenet_bridge.h"
+#include "nuscenes_loader.h"
+#include <dirent.h>
+
+/* ── LiDAR 回放数据 ─────────────────────────────────────────── */
+static const char* g_lidar_dir = NULL;
+static char**     g_lidar_files = NULL;
+static int        g_lidar_file_count = 0;
+static int        g_lidar_file_index = 0;
+
+/* scan directory for .bin files, return sorted list */
+static int scan_lidar_dir(const char* dir) {
+    DIR* d = opendir(dir);
+    if (!d) return -1;
+    int count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        size_t len = strlen(ent->d_name);
+        if (len > 4 && strcmp(ent->d_name + len - 4, ".bin") == 0) count++;
+    }
+    rewinddir(d);
+    g_lidar_files = (char**)calloc((size_t)count, sizeof(char*));
+    count = 0;
+    while ((ent = readdir(d)) != NULL) {
+        size_t len = strlen(ent->d_name);
+        if (len > 4 && strcmp(ent->d_name + len - 4, ".bin") == 0)
+            g_lidar_files[count++] = strdup(ent->d_name);
+    }
+    closedir(d);
+    /* bubble sort by name */
+    for (int i = 0; i < count-1; i++)
+        for (int j = i+1; j < count; j++)
+            if (strcmp(g_lidar_files[i], g_lidar_files[j]) > 0) {
+                char* t = g_lidar_files[i];
+                g_lidar_files[i] = g_lidar_files[j];
+                g_lidar_files[j] = t;
+            }
+    g_lidar_file_count = count;
+    return count;
+}
 
 /* MCAP channel IDs (set after registration) */
 static uint16_t mcap_ch_lidar   = 0;
@@ -48,6 +90,27 @@ static uint16_t mcap_ch_vehicle = 0;
 /* ══════════════════════════════════════════════════════════ */
 /* 全局状态                                                    */
 /* ══════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════ */
+/* 车辆/障碍物类型定义 (供 perception/fusion/control 共用)    */
+/* ══════════════════════════════════════════════════════════ */
+typedef struct {
+    double  x, y, speed, target_speed;
+    double  throttle, brake, steer, heading;
+    double  lane_target, wheelbase, mass, drag_coeff;
+} VehicleModel;
+
+#define SIM_OBSTACLE_COUNT 3
+#define SAME_LANE_TOL_M    2.0
+typedef struct {
+    int         id;
+    const char* type;
+    double      x, y, vx, vy;
+    double      len, wid;
+} SimObstacle;
+
+extern VehicleModel g_vehicle;
+extern SimObstacle g_obstacles[SIM_OBSTACLE_COUNT];
 
 static volatile bool g_running = true;
 static MessageBus*       g_bus       = NULL;
@@ -70,6 +133,7 @@ typedef struct {
     TaskBase    base;
     int         tid;
     uint32_t    frame_id;
+    DbscanCluster db;          /**< DBSCAN 聚类器 */
 } PerceptionTask;
 
 static int perception_init(TaskBase* base) {
@@ -89,7 +153,16 @@ static int perception_init(TaskBase* base) {
     transport_advertise(g_transport, "sensor/gps", GPSDATA_TYPE_ID);
     transport_advertise(g_transport, "sensor/camera", LIDARFRAME_TYPE_ID);
 
-    LOG_INFO("perception", "initialized (CRITICAL, 20Hz LiDAR + 20Hz Camera + 10Hz GPS)");
+    /* Advertise perception output */
+    discovery_advertise(g_discovery, "perception/obstacles", 0x0B5A010Eu,
+                        CAP_PUBLISHER, 20.0);
+    transport_advertise(g_transport, "perception/obstacles", 0x0B5A010Eu);
+
+    /* DBSCAN: eps=2.0m, min_pts=4, RANSAC ground removal */
+    dbscan_init(&pt->db, 2.0f, 4);
+    dbscan_set_ransac(&pt->db, 100, 0.2f, 0.3f);
+
+    LOG_INFO("perception", "initialized (CRITICAL, 20Hz LiDAR + DBSCAN eps=2.0m + 10Hz GPS)");
     return 0;
 }
 
@@ -101,22 +174,79 @@ static int perception_execute(TaskBase* base) {
         if (!rate_control_acquire(rc)) { usleep(1000); continue; }
 
         /* ── LiDAR @20Hz ── */
-        LidarFrame lidar = {
-            .x = 50.0f - (float)pt->frame_id * 0.05f,
-            .y = 0.0f, .z = 0.0f, .intensity = 0.85f,
-            .point_count = 64000 + pt->frame_id,
-            .frame_id = pt->frame_id
-        };
+        LidarFrame lidar;
+        NuScenesScan real_scan;
+        bool using_real_lidar = false;
+        double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
+        double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
+
+        if (g_lidar_files && g_lidar_file_index < g_lidar_file_count) {
+            /* ── 从 KITTI/nuScenes 文件读真实 LiDAR ── */
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s",
+                     g_lidar_dir, g_lidar_files[g_lidar_file_index]);
+            if (nuscenes_load_lidar(path, &real_scan) == 0 && real_scan.count > 0) {
+                /* 用点云中心作为 LiDAR frame 位置 */
+                double sum_x = 0, sum_y = 0, sum_z = 0;
+                for (int i = 0; i < real_scan.count; i++) {
+                    sum_x += real_scan.points[i].x;
+                    sum_y += real_scan.points[i].y;
+                    sum_z += real_scan.points[i].z;
+                }
+                lidar.x = (float)(sum_x / real_scan.count);
+                lidar.y = (float)(sum_y / real_scan.count);
+                lidar.z = (float)(sum_z / real_scan.count);
+                lidar.intensity = 0.85f;
+                lidar.point_count = (uint32_t)real_scan.count;
+                lidar.frame_id = pt->frame_id;
+                using_real_lidar = true;
+                g_lidar_file_index++;
+            } else {
+                /* 文件读失败 → 回退到模拟数据 */
+                double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
+                double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
+                lidar.x = (float)(g_vehicle.x + noise_x);
+                lidar.y = (float)(g_vehicle.y + noise_y);
+                lidar.z = 0.0f;
+                lidar.intensity = 0.85f;
+                lidar.point_count = 64000 + pt->frame_id;
+                lidar.frame_id = pt->frame_id;
+            }
+        } else if (g_lidar_files && g_lidar_file_index >= g_lidar_file_count) {
+            /* 文件播完 → 回退到模拟并停止 */
+            LOG_INFO("perception", "LiDAR replay done (%d frames) — switching to sim",
+                     g_lidar_file_count);
+            free(g_lidar_files); g_lidar_files = NULL;
+            double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
+            double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
+            lidar.x = (float)(g_vehicle.x + noise_x);
+            lidar.y = (float)(g_vehicle.y + noise_y);
+            lidar.z = 0.0f;
+            lidar.intensity = 0.85f;
+            lidar.point_count = 64000 + pt->frame_id;
+            lidar.frame_id = pt->frame_id;
+        } else {
+            /* ── 正常模式: 从车辆模型生成 ── */
+            double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
+            double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
+            lidar.x = (float)(g_vehicle.x + noise_x);
+            lidar.y = (float)(g_vehicle.y + noise_y);
+            lidar.z = 0.0f;
+            lidar.intensity = 0.85f;
+            lidar.point_count = 64000 + pt->frame_id;
+            lidar.frame_id = pt->frame_id;
+        }
         Message lmsg;
         msg_init_typed(&lmsg, "sensor/lidar", "perception",
                        LIDARFRAME_TYPE_ID, LIDARFRAME_SCHEMA_VERSION,
                        &lidar, sizeof(lidar));
         transport_publish(g_transport, "sensor/lidar", lmsg.data, lmsg.data_size);
 
-        /* ── Camera @20Hz ── */
-        LidarFrame cam = {  /* reuse LidarFrame for demo — simulates bounding boxes */
-            .x = 48.0f - (float)pt->frame_id * 0.05f,
-            .y = 12.0f, .z = 5.0f, .intensity = 0.72f,
+        /* ── Camera @20Hz: 模拟前视摄像头检测框 ── */
+        LidarFrame cam = {
+            .x = (float)(g_vehicle.x + 35.0 + noise_x),  /* 前方 35m 的障碍物 */
+            .y = (float)(g_vehicle.y + noise_y),
+            .z = 5.0f, .intensity = 0.72f,
             .point_count = 1280 + pt->frame_id % 20,
             .frame_id = pt->frame_id
         };
@@ -126,12 +256,16 @@ static int perception_execute(TaskBase* base) {
                        &cam, sizeof(cam));
         transport_publish(g_transport, "sensor/camera", cmsg.data, cmsg.data_size);
 
-        /* ── GPS @10Hz (every other cycle) ── */
+        /* ── GPS @10Hz (every other cycle): 观测车辆速度/航向 + 噪声 ── */
         if (pt->frame_id % 2 == 0) {
+            double noise_speed = ((double)(rand() % 500) - 250.0) / 1000.0;  /* ±0.25 m/s */
+            double noise_head = ((double)(rand() % 500) - 250.0) / 1000.0;   /* ±0.25° */
             GpsData gps = {
-                .latitude = 39.904 + (double)pt->frame_id * 0.00001,
-                .longitude = 116.407 + (double)pt->frame_id * 0.00001,
-                .speed_mps = 33.0f, .heading_deg = 0.0f, .accuracy_m = 0.5f
+                .latitude  = 39.904 + g_vehicle.x * 0.00001,          /* 从位置推导 */
+                .longitude = 116.407 + g_vehicle.y * 0.00001,
+                .speed_mps = (float)(g_vehicle.speed + noise_speed),
+                .heading_deg = (float)(g_vehicle.heading * 180.0 / M_PI + noise_head),
+                .accuracy_m = 0.5f
             };
             Message gmsg;
             msg_init_typed(&gmsg, "sensor/gps", "perception",
@@ -140,6 +274,101 @@ static int perception_execute(TaskBase* base) {
             transport_publish(g_transport, "sensor/gps", gmsg.data, gmsg.data_size);
             LOG_DEBUG("perception", "GPS: lat=%.6f lon=%.6f",
                       gps.latitude, gps.longitude);
+        }
+
+        /* ── DBSCAN: 障碍物检测 ── */
+        {
+            Point3D points[DBSCAN_MAX_POINTS];
+            int np = 0;
+            double ego_x = g_vehicle.x, ego_y = g_vehicle.y;
+            double ego_heading = g_vehicle.heading;
+            double ch2 = cos(-ego_heading), sh2 = sin(-ego_heading);
+
+            if (using_real_lidar) {
+                /* ── 用真实 LiDAR 点云 ── */
+                for (int i = 0; i < real_scan.count && np < DBSCAN_MAX_POINTS; i++) {
+                    points[np].x = real_scan.points[i].x;
+                    points[np].y = real_scan.points[i].y;
+                    points[np].z = real_scan.points[i].z;
+                    points[np].intensity = real_scan.points[i].intensity;
+                    np++;
+                }
+                nuscenes_free_scan(&real_scan);
+            } else {
+
+            /* 地面环 (2圈, 每圈12点) */
+            for (int ring = 0; ring < 2 && np < 256; ring++) {
+                float r = 6.0f + (float)ring * 4.0f;
+                for (int k = 0; k < 12 && np < 256; k++) {
+                    float a = (float)k / 12.0f * 2.0f * (float)M_PI;
+                    points[np].x = cosf(a) * r;
+                    points[np].y = sinf(a) * r;
+                    points[np].z = 0.05f;
+                    points[np].intensity = 0.3f;
+                    np++;
+                }
+            }
+
+            /* 障碍物表面点: 从 g_obstacles 世界坐标转换到自车系 */
+            for (int oi = 0; oi < SIM_OBSTACLE_COUNT && np < 256; oi++) {
+                SimObstacle* o = &g_obstacles[oi];
+                double dx = o->x - ego_x, dy = o->y - ego_y;
+                double rx = dx * ch2 - dy * sh2;
+                double ry = dx * sh2 + dy * ch2;
+                if (rx < -10 || rx > 50) continue;
+                int pts_per_obj = (o->type[0] == 'p') ? 6 : 12;
+                float hw = (float)o->wid * 0.4f;
+                float hl = (float)o->len * 0.4f;
+                for (int k = 0; k < pts_per_obj && np < 256; k++) {
+                    points[np].x = (float)rx + ((float)(k % 3) - 1.0f) * hw;
+                    points[np].y = (float)ry + ((float)(k / 3) - 1.0f) * hl;
+                    points[np].z = 0.6f + (float)(k % 4) * 0.4f;
+                    points[np].intensity = 0.7f;
+                    np++;
+                }
+            }
+
+            } /* end synthetic point cloud generation */
+
+            /* 运行 DBSCAN */
+            int n_clusters = dbscan_run(&pt->db, points, np);
+
+            /* 构建 ObstacleList */
+            ObstacleList obs_list;
+            memset(&obs_list, 0, sizeof(obs_list));
+            obs_list.frame_id = pt->frame_id;
+            obs_list.count = 0;
+
+            for (int ci = 0; ci < n_clusters && obs_list.count < 8; ci++) {
+                const ClusterBounds* cb = dbscan_get_cluster(&pt->db, ci);
+                if (!cb || cb->point_count < 3) continue;
+                Obstacle* obs = &obs_list.obstacles[obs_list.count];
+                obs->id    = (uint32_t)(pt->frame_id * 100 + (uint32_t)ci);
+                obs->x     = cb->cx;
+                obs->y     = cb->cy;
+                obs->vx    = 0.0f;
+                obs->vy    = 0.0f;
+                obs->width = cb->width;
+                obs->length = cb->length;
+                obs->confidence = cb->confidence;
+                switch (cb->cls) {
+                    case CLS_VEHICLE:    obs->type = OBJ_TYPE_VEHICLE;    break;
+                    case CLS_PEDESTRIAN: obs->type = OBJ_TYPE_PEDESTRIAN; break;
+                    case CLS_CYCLIST:    obs->type = OBJ_TYPE_CYCLIST;    break;
+                    default:             obs->type = OBJ_TYPE_UNKNOWN;    break;
+                }
+                obs_list.count++;
+            }
+
+            Message omsg;
+            msg_init_typed(&omsg, "perception/obstacles", "perception",
+                           0x0B5A010Eu, 1, &obs_list, sizeof(obs_list));
+            transport_publish(g_transport, "perception/obstacles", omsg.data, omsg.data_size);
+
+            if (pt->frame_id % 50 == 0) {
+                LOG_INFO("perception", "#%u DBSCAN: %d pts → %d clusters",
+                         pt->frame_id, np, n_clusters);
+            }
         }
 
         pt->frame_id++;
@@ -173,6 +402,11 @@ typedef struct {
     MessageBuffer* lidar_buf;
     MessageBuffer* gps_buf;
     uint32_t      fused_count;
+    EkfFusion     ekf;              /**< EKF 融合器 */
+    double        fused_x, fused_y; /**< 最新融合位置 */
+    double        fused_v;          /**< 最新融合速度 */
+    double        fused_heading;    /**< 最新融合航向 */
+    double        fused_yaw_rate;   /**< 最新融合偏航角速度 */
 } FusionTask;
 
 static void fusion_on_lidar(const Message* msg, void* user_data) {
@@ -209,10 +443,14 @@ static int fusion_init(TaskBase* base) {
              statem_mode_name(statem_current(&mode_sm)),
              statem_sub_state_name(SM_SUB_READY));
 
+    /* ── EKF 初始化: dt=0.05s, 初始状态 [0,0,5,0,0] ── */
+    double x0[5] = {0.0, 0.0, 5.0, 0.0, 0.0};
+    ekf_fusion_init(&ft->ekf, 0.05, x0);
+
     /* ── Choreo: 被 LiDAR 消息触发 ── */
     scheduler_choreo_trigger_on(g_scheduler, ft->tid, "sensor/lidar");
 
-    LOG_INFO("fusion", "initialized (HIGH, choreo, TIME_ALIGNED 50ms)");
+    LOG_INFO("fusion", "initialized (HIGH, choreo, EKF 5D state)");
     return 0;
 }
 
@@ -241,31 +479,58 @@ static int fusion_execute(TaskBase* base) {
 
         if (!lidar) continue;
 
-        /* ── 输出融合结果 ── */
-        char fused[256];
-        int off = 0;
-        off += snprintf(fused + off, sizeof(fused) - (size_t)off,
-                        "pos=(%.1f,%.1f)", lidar->x, lidar->y);
+        /* ── EKF 预测步 ── */
+        ekf_fusion_predict(&ft->ekf);
+
+        /* ── LiDAR 位置更新 ── */
+        ekf_fusion_update_lidar(&ft->ekf, (double)lidar->x, (double)lidar->y, NULL);
+
+        /* ── GPS 更新 (如果有) ── */
         if (gps) {
-            off += snprintf(fused + off, sizeof(fused) - (size_t)off,
-                            " gps=(%.6f,%.6f) speed=%.1f dt=%" PRIu64 "us",
-                            gps->latitude, gps->longitude, gps->speed_mps,
-                            gps_msg ? (gps_msg->timestamp_us > ref_ts ?
-                             gps_msg->timestamp_us - ref_ts :
-                             ref_ts - gps_msg->timestamp_us) : 0ULL);
+            double heading_rad = (double)gps->heading_deg * M_PI / 180.0;
+            ekf_fusion_update_gps(&ft->ekf, (double)gps->speed_mps, heading_rad, NULL);
         }
+
+        /* ── 读取融合状态 ── */
+        ekf_fusion_get_state(&ft->ekf, &ft->fused_x, &ft->fused_y,
+                             &ft->fused_v, &ft->fused_heading, &ft->fused_yaw_rate);
+        double diag[5];
+        ekf_fusion_get_covariance_diag(&ft->ekf, diag);
+
+        /* ── 输出融合结果: JSON + backward-compatible speed= ── */
+        char fused[512];
+        int off = snprintf(fused, sizeof(fused),
+            "{\"x\":%.2f,\"y\":%.2f,\"v\":%.2f,\"heading\":%.3f,"
+            "\"yaw_rate\":%.3f,\"cov\":[%.2f,%.2f,%.2f,%.3f,%.4f],"
+            "\"innovation\":%.3f,\"diverged\":%d"
+            ",\"raw\":\"pos=(%.1f,%.1f) speed=%.1f\"}",
+            ft->fused_x, ft->fused_y, ft->fused_v, ft->fused_heading,
+            ft->fused_yaw_rate,
+            diag[0], diag[1], diag[2], diag[3], diag[4],
+            ft->ekf.last_innovation, ft->ekf.diverged,
+            lidar->x, lidar->y,
+            gps ? (double)gps->speed_mps : ft->fused_v);
 
         ft->fused_count++;
 
         /* ── 发布融合结果 ── */
         Message out_msg;
         msg_init_typed(&out_msg, "fusion/localization", "fusion",
-                       0xF0ED10C0u, 1, fused, (uint32_t)strlen(fused) + 1);
+                       0xF0ED10C0u, 2, fused, (uint32_t)strlen(fused) + 1);
         out_msg.timestamp_us = ref_ts;
         transport_publish(g_transport, "fusion/localization",
                           out_msg.data, out_msg.data_size);
 
-        LOG_INFO("fusion", "#%u %s", ft->fused_count, fused);
+        /* EKF 发散恢复 */
+        if (ft->ekf.diverged && ft->fused_count % 10 == 0) {
+            LOG_WARN("fusion", "EKF diverged (trace=%.0f) — resetting", diag[0]+diag[1]);
+            ekf_fusion_reset(&ft->ekf);
+        }
+
+        LOG_INFO("fusion", "#%u EKF:(%.1f,%.1f) v=%.1f ψ=%.1f° innov=%.2f",
+                 ft->fused_count, ft->fused_x, ft->fused_y,
+                 ft->fused_v, ft->fused_heading * 180.0 / M_PI,
+                 ft->ekf.last_innovation);
 
         /* ── Latency tracking ── */
         LatencyTracker* lt = scheduler_get_latency(g_scheduler, ft->tid);
@@ -304,22 +569,7 @@ static TaskInterface g_fusion_vtable = {
 /* 车辆动力学模型 (简单质点)                                     */
 /* ══════════════════════════════════════════════════════════ */
 
-typedef struct {
-    double  x;               /**< 纵向位置 (m, 世界系) */
-    double  y;               /**< 横向位置 (m, 左正) */
-    double  speed;           /**< 当前速度 (m/s) */
-    double  target_speed;    /**< 目标速度 (m/s), 来自规划/ACC */
-    double  throttle;        /**< 油门 0..1 */
-    double  brake;           /**< 刹车 0..1 */
-    double  steer;           /**< 前轮转向角 (rad) */
-    double  heading;         /**< 航向角 (rad) */
-    double  lane_target;     /**< 目标横向位置 (m), 变道用 */
-    double  wheelbase;       /**< 轴距 (m) */
-    double  mass;            /**< 质量 (kg) */
-    double  drag_coeff;      /**< 空气阻力系数 */
-} VehicleModel;
-
-static VehicleModel g_vehicle = {
+VehicleModel g_vehicle = {
     .x = 0, .y = -1.75, .speed = 5.0, .target_speed = 10.0,
     .throttle = 0.3, .brake = 0, .steer = 0, .heading = 0,
     .lane_target = -1.75, .wheelbase = 2.7,
@@ -327,17 +577,7 @@ static VehicleModel g_vehicle = {
 };
 
 /* ── 3D 场景: 障碍物 (真实运动学，供可视化与 ACC 使用) ── */
-typedef struct {
-    int         id;
-    const char* type;        /**< "car" | "pedestrian" */
-    double      x, y;        /**< 世界系位置 (m) */
-    double      vx, vy;      /**< 速度 (m/s) */
-    double      len, wid;    /**< 包围盒 (m) */
-} SimObstacle;
-
-#define SIM_OBSTACLE_COUNT 3
-#define SAME_LANE_TOL_M    2.0   /* 横向容差: |Δy| 小于此值视为同车道 (半车道宽) */
-static SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
+SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
     { 0, "car",         35.0, -1.75,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 (右车道) */
     { 1, "car",         95.0,  1.75, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 (左车道) */
     { 2, "pedestrian",  55.0,  8.0,   0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
@@ -464,9 +704,11 @@ static void control_on_fusion(const Message* msg, void* user_data) {
     ControlTask* ct = (ControlTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
-    /* 从 fusion 输出中提取当前速度 */
-    if (strstr(data, "speed="))
-        sscanf(data, "speed=%lf", &ct->current_speed);
+    /* 从 EKF 融合输出中提取速度: 优先 JSON \"v\":, 回退到 speed= */
+    if (strstr(data, "\"v\":"))
+        sscanf(strstr(data, "\"v\":") + 4, "%lf", &ct->current_speed);
+    else if (strstr(data, "speed="))
+        sscanf(strstr(data, "speed=") + 6, "%lf", &ct->current_speed);
 }
 
 static void control_on_trajectory(const Message* msg, void* user_data) {
@@ -475,7 +717,7 @@ static void control_on_trajectory(const Message* msg, void* user_data) {
     if (!data) return;
     /* 从规划输出中提取目标速度 */
     if (strstr(data, "speed="))
-        sscanf(data, "speed=%lf", &ct->target_speed);
+        sscanf(strstr(data, "speed=") + 6, "%lf", &ct->target_speed);
 }
 
 static int control_init(TaskBase* base) {
@@ -700,9 +942,12 @@ static TaskInterface g_control_vtable = {
 /* ══════════════════════════════════════════════════════════ */
 
 typedef struct {
-    TaskBase  base;
-    int       tid;
-    int       plan_count;
+    TaskBase     base;
+    int          tid;
+    int          plan_count;
+    FrenetHandle* frenet;          /**< Frenet 规划器句柄 */
+    double       target_speed;     /**< 目标巡航速度 (m/s) */
+    double       lane_target_d;    /**< 目标横向偏移 (m) */
 } PlanningTask;
 
 static void planning_on_fusion(const Message* msg, void* user_data) {
@@ -710,25 +955,85 @@ static void planning_on_fusion(const Message* msg, void* user_data) {
     const char* data = (const char*)msg->data;
     if (!data) return;
 
-    /* Simple trajectory: pass-through with speed limit */
-    float x = 0, speed = 33.0f;
-    if (strstr(data, "pos=(")) sscanf(data, "pos=(%f", &x);
-    if (strstr(data, "speed=")) sscanf(data, "speed=%f", &speed);
+    /* Parse EKF fusion output for ego state */
+    double ego_x = 0, ego_y = 0, ego_v = 5.0, ego_heading = 0;
+    if (strstr(data, "\"x\":"))
+        sscanf(strstr(data, "\"x\":") + 4, "%lf", &ego_x);
+    if (strstr(data, "\"y\":"))
+        sscanf(strstr(data, "\"y\":") + 4, "%lf", &ego_y);
+    if (strstr(data, "\"v\":"))
+        sscanf(strstr(data, "\"v\":") + 4, "%lf", &ego_v);
+    if (strstr(data, "\"heading\":"))
+        sscanf(strstr(data, "\"heading\":") + 10, "%lf", &ego_heading);
 
-    char traj[256];
-    float target_speed = speed > 40.0f ? 40.0f : speed;
-    snprintf(traj, sizeof(traj), "traj=(%.1f,0.0) speed=%.1f lane=center",
-             x + 2.0f, target_speed);
+    /* Frenet 规划: 用全局 x 作为参考路径的 s (直线道路) */
+    double s_out[50], d_out[50], spd_out[50];
+    int n_wp = frenet_plan(plt->frenet,
+        ego_x, ego_y, ego_v,       /* ego s, d, speed */
+        plt->target_speed,          /* target: 15 m/s (~54 km/h) */
+        s_out, d_out, spd_out, 50);
+
+    /* Build trajectory output */
+    char traj[1024];
+    int off;
+    if (n_wp > 0) {
+        off = snprintf(traj, sizeof(traj),
+            "{\"type\":\"frenet\",\"plan\":%d,\"wp\":%d,",
+            plt->plan_count, n_wp);
+        /* First waypoint's speed = immediate target for PID */
+        off += snprintf(traj + off, sizeof(traj) - (size_t)off,
+            "\"target_speed\":%.1f,", spd_out[0]);
+        /* Downsampled waypoints */
+        off += snprintf(traj + off, sizeof(traj) - (size_t)off, "\"path\":[");
+        for (int i = 0; i < n_wp && off < (int)sizeof(traj) - 50; i++) {
+            if (i % 3 != 0 && i > 0 && i < n_wp - 1) continue;
+            off += snprintf(traj + off, sizeof(traj) - (size_t)off,
+                "%s[%.1f,%.1f,%.1f]",
+                i > 0 ? "," : "", s_out[i], d_out[i], spd_out[i]);
+        }
+        off += snprintf(traj + off, sizeof(traj) - (size_t)off, "]}");
+    } else {
+        /* Frenet fails → failsafe: maintain current speed + 2 m/s */
+        double failsafe_speed = ego_v + 2.0;
+        if (failsafe_speed > 20.0) failsafe_speed = 20.0;
+        off = snprintf(traj, sizeof(traj),
+            "{\"type\":\"failsafe\",\"target_speed\":%.1f,\"plan\":%d}",
+            failsafe_speed, plt->plan_count);
+    }
+
+    /* Backward compat: PID reads speed= as the LONG-TERM target (not first waypoint) */
+    double target_spd = plt->target_speed;  /* 15 m/s cruise target */
+    char traj_final[1100];
+    snprintf(traj_final, sizeof(traj_final), "%s speed=%.1f", traj, target_spd);
 
     Message pmsg;
     msg_init_typed(&pmsg, "planning/trajectory", "planning",
-                   0x3A7B1C2Du, 1, traj, (uint32_t)(strlen(traj) + 1));
+                   0x3A7B1C2Du, 2, traj_final, (uint32_t)(strlen(traj_final) + 1));
     transport_publish(g_transport, "planning/trajectory", pmsg.data, pmsg.data_size);
     plt->plan_count++;
+
+    if (plt->plan_count % 25 == 1) {
+        LOG_INFO("planning", "#%d ego@(%.0f,%.1f) v=%.1f → target=%.1f wp=%d %s",
+                 plt->plan_count, ego_x, ego_y, ego_v,
+                 plt->target_speed, n_wp,
+                 n_wp > 0 ? "frenet" : "FAILSAFE");
+    }
 }
 
 static int planning_init(TaskBase* base) {
     PlanningTask* pt = (PlanningTask*)base;
+
+    /* ── Frenet 规划器: max 20 m/s, max accel 4 m/s² ── */
+    pt->frenet = frenet_create(20.0, 4.0);
+    pt->target_speed = 15.0;   /* 目标巡航速度 15 m/s (~54 km/h) */
+
+    /* ── 参考路径: 200m 直线（后续替换为 Lanelet2 地图数据）── */
+    double wx[101], wy[101];
+    for (int i = 0; i <= 100; i++) {
+        wx[i] = (double)i * 2.0;  /* 0..200m */
+        wy[i] = 0.0;              /* 中心线 y=0 */
+    }
+    frenet_set_reference_path(pt->frenet, wx, wy, 101);
 
     transport_subscribe(g_transport, "fusion/localization", planning_on_fusion, pt);
     transport_advertise(g_transport, "planning/trajectory", 0x3A7B1C2Du);
@@ -740,7 +1045,8 @@ static int planning_init(TaskBase* base) {
 
     scheduler_choreo_trigger_on(g_scheduler, pt->tid, "fusion/localization");
 
-    LOG_INFO("planning", "initialized (NORMAL, choreo)");
+    LOG_INFO("planning", "initialized (NORMAL, choreo, Frenet Optimal Trajectory target=%.0f m/s)",
+             pt->target_speed);
     return 0;
 }
 
@@ -759,7 +1065,8 @@ static int planning_execute(TaskBase* base) {
 }
 
 static void planning_cleanup(TaskBase* base) {
-    (void)base;
+    PlanningTask* pt = (PlanningTask*)base;
+    if (pt->frenet) frenet_destroy(pt->frenet);
 }
 
 static TaskInterface g_planning_vtable = {
@@ -966,14 +1273,22 @@ int main(int argc, char** argv) {
     const char* role = NULL;
     const char* node_name = "e2e_node";
 
-    /* Parse args: flow_e2e [--role <name>] [duration_sec] */
+    /* Parse args: flow_e2e [--role <name>] [--lidar <dir>] [duration_sec] */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
             role = argv[++i];
-            /* Each role gets a unique node name for discovery */
             char name_buf[64];
             snprintf(name_buf, sizeof(name_buf), "e2e_%s", role);
             node_name = strdup(name_buf);
+        } else if (strcmp(argv[i], "--lidar") == 0 && i + 1 < argc) {
+            g_lidar_dir = argv[++i];
+            int n = scan_lidar_dir(g_lidar_dir);
+            if (n > 0) {
+                LOG_INFO("e2e", "LiDAR replay mode: %s (%d frames)", g_lidar_dir, n);
+            } else {
+                LOG_WARN("e2e", "LiDAR dir %s: no .bin files found", g_lidar_dir);
+                g_lidar_dir = NULL;
+            }
         } else {
             duration = atoi(argv[i]);
             if (duration <= 0) duration = 10;
@@ -981,6 +1296,7 @@ int main(int argc, char** argv) {
     }
 
     /* ── 日志: 全局初始化 ── */
+    srand((unsigned)time(NULL));
     log_init(LOG_INFO, NULL);
     if (role) {
         LOG_INFO("e2e", "╔══════════════════════════════════════════╗");
@@ -1129,6 +1445,7 @@ int main(int argc, char** argv) {
 
     /* ── 启动任务（先启动消费者，再启动生产者，确保 trigger 就绪）── */
     task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)");
+    task_start(&plt->base); LOG_INFO("e2e", "planning:   started (NORMAL, choreo)");
     task_start(&ct->base);  LOG_INFO("e2e", "control:    started (NORMAL, choreo)");
     task_start(&mt->base);  LOG_INFO("e2e", "monitor:    started (10Hz)");
     usleep(200000);  /* wait 200ms for subscriptions to take effect */
@@ -1165,6 +1482,7 @@ int main(int argc, char** argv) {
     LOG_INFO("e2e", "stopping tasks...");
     task_stop(&pt->base);
     task_stop(&ft->base);
+    task_stop(&plt->base);
     task_stop(&ct->base);
     task_stop(&mt->base);
 
@@ -1216,7 +1534,7 @@ int main(int argc, char** argv) {
     discovery_destroy(g_discovery);
     message_bus_destroy(g_bus);
 
-    free(pt); free(ft); free(ct); free(mt);
+    free(pt); free(ft); free(plt); free(ct); free(mt);
     log_shutdown();
     return 0;
 }

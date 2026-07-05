@@ -119,3 +119,8 @@ user_config.json
 *.lock
 __pycache__/
 demo.mcap
+build-algo/
+data/
+2011_09_26_drive_0001_sync.zip
+third_party/frenet-optimal-trajectory-planner/
+third_party/tinympc/
