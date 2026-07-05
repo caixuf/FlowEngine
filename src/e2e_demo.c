@@ -1095,8 +1095,11 @@ typedef struct {
 
 static void monitor_on_obstacles(const Message* msg, void* user_data) {
     MonitorTask* mt = (MonitorTask*)user_data;
-    if (msg->data_size == sizeof(ObstacleList)) {
-        memcpy(&mt->latest_obstacles, msg->data, sizeof(ObstacleList));
+    LOG_INFO("monitor", "on_obstacles: topic=%s size=%u (expected=%zu)",
+             msg->topic, msg->data_size, sizeof(ObstacleList));
+    if (msg->data_size > 0) {
+        size_t copy = msg->data_size < sizeof(ObstacleList) ? msg->data_size : sizeof(ObstacleList);
+        memcpy(&mt->latest_obstacles, msg->data, copy);
         mt->has_obstacles = true;
     }
 }
