@@ -25,7 +25,7 @@ sleep 0.5
 DURATION=30
 OPEN_BROWSER=true
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$ROOT/build"
+BUILD_DIR="$ROOT/build-algo"
 E2E_BIN="$BUILD_DIR/bin/flow_e2e"
 JSON_FILE="/tmp/flow_topology.json"
 
