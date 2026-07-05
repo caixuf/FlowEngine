@@ -76,6 +76,10 @@ static int scan_lidar_dir(const char* dir) {
     return count;
 }
 
+/* DBSCAN detection results (shared with monitor for dashboard) */
+static ObstacleList g_dbscan_obstacles;
+static bool         g_dbscan_has_data = false;
+
 /* MCAP channel IDs (set after registration) */
 static uint16_t mcap_ch_lidar   = 0;
 static uint16_t mcap_ch_camera  = 0;
@@ -364,6 +368,10 @@ static int perception_execute(TaskBase* base) {
                 }
                 obs_list.count++;
             }
+
+            /* Save for dashboard (8800) */
+            memcpy(&g_dbscan_obstacles, &obs_list, sizeof(obs_list));
+            g_dbscan_has_data = true;
 
             Message omsg;
             msg_init_typed(&omsg, "perception/obstacles", "perception",
@@ -1209,6 +1217,28 @@ static int monitor_execute(TaskBase* base) {
                             "\"vx\":%.2f,\"len\":%.1f,\"wid\":%.1f}",
                             oi > 0 ? "," : "", o->id, o->type, rx, ry,
                             o->vx, o->len, o->wid);
+                }
+                fprintf(jf, "],");
+                /* DBSCAN 检出障碍物 (真实感知结果) */
+                fprintf(jf, "\"dbscan_obstacles\":[");
+                if (g_dbscan_has_data) {
+                    for (uint32_t di = 0; di < g_dbscan_obstacles.count; di++) {
+                        Obstacle* ob = &g_dbscan_obstacles.obstacles[di];
+                        double dx2 = (double)ob->x, dy2 = (double)ob->y;
+                        double rx2 = dx2 * ch - dy2 * sh;
+                        double ry2 = dx2 * sh + dy2 * ch;
+                        const char* tname = "unknown";
+                        switch (ob->type) {
+                            case OBJ_TYPE_VEHICLE:    tname = "vehicle";    break;
+                            case OBJ_TYPE_PEDESTRIAN: tname = "pedestrian"; break;
+                            case OBJ_TYPE_CYCLIST:    tname = "cyclist";    break;
+                            default: break;
+                        }
+                        fprintf(jf, "%s{\"id\":%u,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
+                                "\"len\":%.1f,\"wid\":%.1f,\"conf\":%.2f}",
+                                di > 0 ? "," : "", ob->id, tname, rx2, ry2,
+                                ob->length, ob->width, (double)ob->confidence);
+                    }
                 }
                 fprintf(jf, "],");
                 /* LiDAR: 对障碍物表面 + 地面环带做光线投射 (下采样) */

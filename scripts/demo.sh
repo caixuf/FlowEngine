@@ -28,13 +28,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build-algo"
 E2E_BIN="$BUILD_DIR/bin/flow_e2e"
 JSON_FILE="/tmp/flow_topology.json"
+LIDAR_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
     --no-browser) OPEN_BROWSER=false ;;
+    --lidar) LIDAR_DIR="$2"; shift ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$arg" ;;
   esac
+  shift 2>/dev/null || true
 done
 
 # ── Banner ──────────────────────────────────────────────────
@@ -89,7 +92,12 @@ trap cleanup EXIT INT TERM
 # ── Start e2e pipeline ──────────────────────────────────────
 echo "───[2/5] Starting E2E pipeline (perception→fusion→control)..."
 rm -f "$JSON_FILE"
-"$E2E_BIN" "$DURATION" > /tmp/flow_e2e_stdout.txt 2>/tmp/flow_e2e_stderr.txt &
+if [ -n "$LIDAR_DIR" ]; then
+  echo "  Using real LiDAR data: $LIDAR_DIR"
+  "$E2E_BIN" --lidar "$LIDAR_DIR" "$DURATION" > /tmp/flow_e2e_stdout.txt 2>/tmp/flow_e2e_stderr.txt &
+else
+  "$E2E_BIN" "$DURATION" > /tmp/flow_e2e_stdout.txt 2>/tmp/flow_e2e_stderr.txt &
+fi
 E2E_PID=$!
 sleep 1
 echo "  ✓ Pipeline running (PID $E2E_PID)"
