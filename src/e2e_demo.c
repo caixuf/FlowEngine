@@ -175,7 +175,7 @@ static int perception_execute(TaskBase* base) {
 
         /* ── LiDAR @20Hz ── */
         LidarFrame lidar;
-        NuScenesScan real_scan;
+        NuScenesScan* real_scan_ptr = NULL;  /* heap — 5MB too large for stack */
         bool using_real_lidar = false;
         double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
         double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
@@ -185,23 +185,26 @@ static int perception_execute(TaskBase* base) {
             char path[512];
             snprintf(path, sizeof(path), "%s/%s",
                      g_lidar_dir, g_lidar_files[g_lidar_file_index]);
-            if (nuscenes_load_lidar(path, &real_scan) == 0 && real_scan.count > 0) {
+            real_scan_ptr = (NuScenesScan*)calloc(1, sizeof(NuScenesScan));
+            if (real_scan_ptr && nuscenes_load_lidar(path, real_scan_ptr) == 0 && real_scan_ptr->count > 0) {
                 /* 用点云中心作为 LiDAR frame 位置 */
                 double sum_x = 0, sum_y = 0, sum_z = 0;
-                for (int i = 0; i < real_scan.count; i++) {
-                    sum_x += real_scan.points[i].x;
-                    sum_y += real_scan.points[i].y;
-                    sum_z += real_scan.points[i].z;
+                for (int i = 0; i < real_scan_ptr->count; i++) {
+                    sum_x += real_scan_ptr->points[i].x;
+                    sum_y += real_scan_ptr->points[i].y;
+                    sum_z += real_scan_ptr->points[i].z;
                 }
-                lidar.x = (float)(sum_x / real_scan.count);
-                lidar.y = (float)(sum_y / real_scan.count);
-                lidar.z = (float)(sum_z / real_scan.count);
+                lidar.x = (float)(sum_x / real_scan_ptr->count);
+                lidar.y = (float)(sum_y / real_scan_ptr->count);
+                lidar.z = (float)(sum_z / real_scan_ptr->count);
                 lidar.intensity = 0.85f;
-                lidar.point_count = (uint32_t)real_scan.count;
+                lidar.point_count = (uint32_t)real_scan_ptr->count;
                 lidar.frame_id = pt->frame_id;
                 using_real_lidar = true;
                 g_lidar_file_index++;
             } else {
+                /* 分配失败或读取失败 → 清理并回退 */
+                if (real_scan_ptr) { free(real_scan_ptr); real_scan_ptr = NULL; }
                 /* 文件读失败 → 回退到模拟数据 */
                 double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
                 double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
@@ -284,16 +287,18 @@ static int perception_execute(TaskBase* base) {
             double ego_heading = g_vehicle.heading;
             double ch2 = cos(-ego_heading), sh2 = sin(-ego_heading);
 
-            if (using_real_lidar) {
+            if (using_real_lidar && real_scan_ptr) {
                 /* ── 用真实 LiDAR 点云 ── */
-                for (int i = 0; i < real_scan.count && np < DBSCAN_MAX_POINTS; i++) {
-                    points[np].x = real_scan.points[i].x;
-                    points[np].y = real_scan.points[i].y;
-                    points[np].z = real_scan.points[i].z;
-                    points[np].intensity = real_scan.points[i].intensity;
+                for (int i = 0; i < real_scan_ptr->count && np < DBSCAN_MAX_POINTS; i++) {
+                    points[np].x = real_scan_ptr->points[i].x;
+                    points[np].y = real_scan_ptr->points[i].y;
+                    points[np].z = real_scan_ptr->points[i].z;
+                    points[np].intensity = real_scan_ptr->points[i].intensity;
                     np++;
                 }
-                nuscenes_free_scan(&real_scan);
+                nuscenes_free_scan(real_scan_ptr);
+                free(real_scan_ptr);
+                real_scan_ptr = NULL;
             } else {
 
             /* 地面环 (2圈, 每圈12点) */
