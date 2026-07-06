@@ -23,6 +23,11 @@
 
 #define MAX_OBS 3
 
+/* 横向级联 PD 常量 */
+#define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
+#define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
+#define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
+
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
@@ -36,8 +41,10 @@ static struct {
     double kp, ki, kd;
     double integral;
     double prev_error;
-    /* 横向 PID 状态 */
-    double lat_kp;
+    /* 横向级联 PD 状态 */
+    double lat_kp;          /* lateral error → desired heading (rad/m) */
+    double lat_kd_heading;  /* heading error → steer (阻尼) */
+    double ego_heading;     /* 从 fusion 获取的航向角 (rad) */
     double prev_steer;
 
     /* 从 topic 解析的值 */
@@ -79,8 +86,9 @@ static void on_fusion(const Message* msg, void* user_data) {
     else if ((p = strstr(d, "speed=")))
         sscanf(p + 6, "%lf", &g.current_speed);
 
-    if ((p = strstr(d, "\"x\":")))  sscanf(p + 4, "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":")))  sscanf(p + 4, "%lf", &g.ego_y);
+    if ((p = strstr(d, "\"x\":")))       sscanf(p + 4,  "%lf", &g.ego_x);
+    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
+    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
 
     g.has_fusion = 1;
 }
@@ -275,14 +283,19 @@ static void* control_thread(void* arg) {
             mode = "BRAKE";
         }
 
-        /* ── 横向 P 控制：从 effective_lane_d 计算 steer ── */
+        /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
         double steer = 0.0;
         double lat_error = effective_lane_d - g.ego_y;
-        steer = g.lat_kp * lat_error;
-        if (steer > 0.25)  steer = 0.25;
+        /* P 层: 横向偏差 → 期望航向 */
+        double psi_des = g.lat_kp * lat_error;
+        if (psi_des >  MAX_PSI_DES_RAD) psi_des =  MAX_PSI_DES_RAD;
+        if (psi_des < -MAX_PSI_DES_RAD) psi_des = -MAX_PSI_DES_RAD;
+        /* D 层: 航向误差 → 转向（阻尼项，防止欠阻尼振荡） */
+        steer = g.lat_kd_heading * (psi_des - g.ego_heading);
+        if (steer >  0.25) steer =  0.25;
         if (steer < -0.25) steer = -0.25;
         /* 一阶低通滤波，防止跳变 */
-        steer = 0.6 * steer + 0.4 * g.prev_steer;
+        steer = STEER_FILTER_NEW * steer + STEER_FILTER_PREV * g.prev_steer;
         g.prev_steer = steer;
 
         /* ── 发布控制指令 ── */
@@ -329,7 +342,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     /* 默认 PID 参数 */
     g.cfg_kp = 800.0; g.cfg_ki = 50.0; g.cfg_kd = 100.0;
     g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
-    g.lat_kp = 1.5;
+    g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
+    g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
     g.lane_width = 3.5;
     g.blocked_timeout_s = 2.0;
 
@@ -343,6 +357,10 @@ static int control_init(MessageBus* bus, Transport* transport,
             sscanf(p + 9, "%lf", &g.cfg_kd);
         if ((p = strstr(params_json, "\"acc_time_headway\":")))
             sscanf(p + 19, "%lf", &g.lane_width);  /* 暂不独立使用 */
+        if ((p = strstr(params_json, "\"lat_kp\":")))
+            sscanf(p + 9, "%lf", &g.lat_kp);
+        if ((p = strstr(params_json, "\"lat_kd_heading\":")))
+            sscanf(p + 17, "%lf", &g.lat_kd_heading);
         if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":")))
             sscanf(p + 32, "%lf", &g.blocked_timeout_s);
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;

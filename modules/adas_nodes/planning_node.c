@@ -38,6 +38,10 @@ static struct {
     double ego_x, ego_y, ego_v, ego_heading;
     volatile int has_fusion;
 
+    /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
+    double obs_x[3], obs_y[3], obs_vx[3];
+    volatile int has_vstate;
+
     /* 配置参数 */
     double cfg_target_speed;
     double cfg_max_speed;
@@ -47,7 +51,12 @@ static struct {
     int tid;  /* scheduler task id */
 } g;
 
-/* ── fusion/localization 订阅 ────────────────────────────────── */
+/* 障碍物过滤与传递给 Frenet 规划器的空间范围 */
+#define OBS_MIN_DX_M      -10.0   /* 忽略已经落后 ego 超过此距离的障碍物 */
+#define OBS_MAX_DX_M      120.0   /* 忽略前方超过此距离的障碍物 */
+#define OBS_MAX_ABS_Y_M     6.0   /* 忽略横向距离超出道路范围的障碍物 */
+#define OBSTACLE_WIDTH_M    2.0   /* 默认障碍物宽度 (m) */
+#define OBSTACLE_LENGTH_M   4.6   /* 默认障碍物长度 (m) */
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
@@ -59,6 +68,26 @@ static void on_fusion(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"v\":")))       sscanf(p + 4, "%lf", &g.ego_v);
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
     g.has_fusion = 1;
+}
+
+/* ── vehicle/state 订阅 — 解析障碍物位置（世界坐标） ─────────── */
+
+static void on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    for (int i = 0; i < 3; i++) {
+        char key[16];
+        int klen;
+        klen = snprintf(key, sizeof(key), "\"ox%d\":", i);
+        const char* p = strstr(d, key);
+        if (p) sscanf(p + klen, "%lf", &g.obs_x[i]);
+        klen = snprintf(key, sizeof(key), "\"oy%d\":", i);
+        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_y[i]);
+        klen = snprintf(key, sizeof(key), "\"ov%d\":", i);
+        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vx[i]);
+    }
+    g.has_vstate = 1;
 }
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
@@ -79,6 +108,24 @@ static void* planning_thread(void* arg) {
     while (!g.should_stop) {
         usleep(50000);  /* 20Hz 检查 */
         if (g.should_stop || !g.has_fusion) continue;
+
+        /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
+        if (g.has_vstate) {
+            double ox[3], oy[3], ow[3], ol[3];
+            int n_obs = 0;
+            for (int i = 0; i < 3; i++) {
+                /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
+                double dx = g.obs_x[i] - g.ego_x;
+                if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
+                if (fabs(g.obs_y[i]) > OBS_MAX_ABS_Y_M) continue;
+                ox[n_obs] = g.obs_x[i];
+                oy[n_obs] = g.obs_y[i];
+                ow[n_obs] = OBSTACLE_WIDTH_M;
+                ol[n_obs] = OBSTACLE_LENGTH_M;
+                n_obs++;
+            }
+            frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
+        }
 
         /* Frenet 规划（参考路径在 y=-1.75, ego_d 是相对参考线的横向偏移） */
         double s_out[50], d_out[50], spd_out[50];
@@ -136,7 +183,7 @@ static void* planning_thread(void* arg) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", NULL };
 static const char* s_outputs[] = { "planning/trajectory", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
@@ -180,9 +227,12 @@ static int planning_init(MessageBus* bus, Transport* transport,
     }
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
+    transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
     transport_advertise(transport, "planning/trajectory", 0x3A7B1C2Du);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);

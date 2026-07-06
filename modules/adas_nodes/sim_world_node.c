@@ -23,6 +23,9 @@
 
 #define SAME_LANE_TOL_M    2.0
 #define EGO_LEN_M          4.6
+#define EGO_WID_M          2.0    /* 车宽（用于 AABB 碰撞检测） */
+#define AEB_GAP_RATIO      0.5    /* AEB 触发阈值：实际间距 < 安全间距 × 此比例 */
+#define AEB_MAX_GAP_M      40.0   /* AEB 仅在前车 < 此距离时激活 */
 #define SIM_OBSTACLE_COUNT 3
 #define MAX_SPEED          20.0
 #define FREQUENCY_HZ       20.0
@@ -84,6 +87,9 @@ static struct {
     double target_speed;
     double lane_width;
     int    obstacle_count;
+
+    /* 碰撞冷却（防止每帧重复报错） */
+    int    collision_cooldown[SIM_OBSTACLE_COUNT];
 } g;
 
 /* ── 障碍物初始化 ─────────────────────────────────────────────── */
@@ -243,6 +249,44 @@ static void* sim_thread(void* arg) {
 
         vehicle_tick();
 
+        /* ── AEB 兜底：外部接管时仍强制紧急制动 ── */
+        if (g.has_control_input) {
+            double gap = lead_gap();
+            double safe_gap = 6.0 + g.vehicle.speed * 2.0;
+            if (gap < AEB_GAP_RATIO * safe_gap && gap < AEB_MAX_GAP_M) {
+                g.vehicle.throttle = 0;
+                g.vehicle.brake    = 1.0;
+            }
+        }
+
+        /* ── AABB 碰撞检测 ── */
+        const double ego_half_len = EGO_LEN_M * 0.5;
+        const double ego_half_wid = EGO_WID_M * 0.5;
+        for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+            SimObstacle* o = &g.obstacles[i];
+            double overlap_x = (ego_half_len + o->len * 0.5) - fabs(g.vehicle.x - o->x);
+            double overlap_y = (ego_half_wid + o->wid * 0.5) - fabs(g.vehicle.y - o->y);
+            if (overlap_x > 0.0 && overlap_y > 0.0) {
+                if (g.collision_cooldown[i] <= 0) {
+                    LOG_ERROR("sim_world", "COLLISION ego(%.1f,%.1f) ↔ obs%d(%.1f,%.1f) ovlp(%.2f,%.2f)",
+                              g.vehicle.x, g.vehicle.y, i, o->x, o->y, overlap_x, overlap_y);
+                    char col[128];
+                    snprintf(col, sizeof(col),
+                             "{\"ego_x\":%.1f,\"ego_y\":%.1f,\"obs_id\":%d,\"overlap_x\":%.2f,\"overlap_y\":%.2f}",
+                             g.vehicle.x, g.vehicle.y, i, overlap_x, overlap_y);
+                    transport_publish(g.transport, "sim/collision",
+                                      (const uint8_t*)col, (uint32_t)strlen(col) + 1);
+                    g.collision_cooldown[i] = (int)FREQUENCY_HZ;  /* 1 秒冷却 */
+                }
+                /* 停车（撞了要有后果） */
+                g.vehicle.speed    = 0.0;
+                g.vehicle.throttle = 0.0;
+                g.vehicle.brake    = 1.0;
+            } else {
+                if (g.collision_cooldown[i] > 0) g.collision_cooldown[i]--;
+            }
+        }
+
         /* ── 发布 vehicle/state ── */
         char vstate[512];
         snprintf(vstate, sizeof(vstate),
@@ -270,7 +314,7 @@ static void* sim_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
-static const char* s_outputs[] = { "vehicle/state", "sim/world_state", NULL };
+static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
@@ -331,6 +375,10 @@ static int sim_init(MessageBus* bus, Transport* transport,
     /* 发布 vehicle/state */
     transport_advertise(transport, "vehicle/state", 0x1C0E5A7Eu);
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu, CAP_PUBLISHER, 20.0);
+
+    /* 发布 sim/collision（碰撞事件） */
+    transport_advertise(transport, "sim/collision", 0xC0115101u);
+    discovery_advertise(discovery, "sim/collision", 0xC0115101u, CAP_PUBLISHER, 0);
 
     LOG_INFO("sim_world", "initialized (init=%.1f m/s, target=%.1f m/s, %.0f Hz)",
              g.init_speed, g.target_speed, FREQUENCY_HZ);
