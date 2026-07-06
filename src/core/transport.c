@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -73,6 +74,14 @@ static TopicRoute* find_or_create_route(Transport* t, const char* topic) {
 /**
  * 根据 discovery 拓扑判断发布者在哪，选择最优路由。
  */
+/* ── IPC 通道名称（topic 中 '/' 替换为 '_'）─────────────── */
+static void topic_to_ipc_name(const char* topic, char* out, size_t out_sz) {
+    snprintf(out, out_sz, "flow_%s", topic);
+    for (char* p = out; *p; p++) {
+        if (*p == '/' || *p == ' ') *p = '_';
+    }
+}
+
 static RouteType determine_route(Transport* t, const char* topic) {
     if (t->policy == TRANSPORT_LOCAL)  return ROUTE_LOCAL;
     if (t->policy == TRANSPORT_IPC)    return ROUTE_IPC;
@@ -191,6 +200,14 @@ int transport_advertise(Transport* t, const char* topic, uint32_t type_id) {
     if (!r) { pthread_mutex_unlock(&t->mutex); return ERR_INVALID_PARAM; }
     r->is_publisher = true;
     r->route = determine_route(t, topic);
+
+    /* IPC policy: create publisher channel so cross-process subscribers can read */
+    if (t->policy == TRANSPORT_IPC && !r->ipc_channel) {
+        char ch_name[256];
+        topic_to_ipc_name(topic, ch_name, sizeof(ch_name));
+        r->ipc_channel = ipc_channel_open(ch_name, IPC_ROLE_PUBLISHER, 32);
+        if (r->ipc_channel) r->route = ROUTE_IPC;
+    }
     pthread_mutex_unlock(&t->mutex);
 
     /* Advertise via discovery */
@@ -210,27 +227,32 @@ int transport_publish(Transport* t, const char* topic,
     /* Always publish to local bus first */
     int ret = message_bus_publish(t->bus, topic, "transport", data, size);
 
+    /* If we have an IPC publisher channel, also push to shared memory */
     pthread_mutex_lock(&t->mutex);
-    TopicRoute* r = find_or_create_route(t, topic);
-    if (r) {
-        switch (r->route) {
-            case ROUTE_LOCAL:
-                /* Already handled by bus publish */
-                break;
-            case ROUTE_IPC:
-                if (r->ipc_channel) {
-                    ipc_channel_publish(r->ipc_channel, topic, "transport",
-                                        data, size);
-                }
-                break;
-            case ROUTE_REMOTE:
-                /* TCP bridging is handled by network_transport's bridge_topic */
-                break;
+    for (int i = 0; i < t->route_count; i++) {
+        if (strcmp(t->routes[i].topic, topic) == 0) {
+            if (t->routes[i].ipc_channel && t->routes[i].is_publisher) {
+                ipc_channel_publish(t->routes[i].ipc_channel, topic, "transport",
+                                    data, size);
+            }
+            break;
         }
     }
     pthread_mutex_unlock(&t->mutex);
 
     return ret;
+}
+
+/* ── IPC → 本地 bus 中继（relay）──────────────────────── */
+/* IPC 订阅者方收到消息后，重新发布到本地 bus，这样:
+ * 1) choreo 调度触发器正常运作（它监听的是本地 bus）
+ * 2) 所有已经通过 message_bus_subscribe 注册的回调自动被调用
+ * 因此在 ipc_channel_subscribe 中不需要直接传入用户回调 */
+typedef struct { MessageBus* bus; } IpcRelayCtx;
+
+static void ipc_to_bus_relay(const Message* msg, void* user_data) {
+    IpcRelayCtx* ctx = (IpcRelayCtx*)user_data;
+    message_bus_publish(ctx->bus, msg->topic, msg->sender, msg->data, msg->data_size);
 }
 
 int transport_subscribe(Transport* t, const char* topic,
@@ -255,14 +277,28 @@ int transport_subscribe(Transport* t, const char* topic,
         r->remote_bridged = true;
     }
 
-    /* For IPC routes, set up IPC subscriber */
-    if (r->route == ROUTE_IPC && !r->ipc_channel) {
+    /* For IPC policy/routes, set up IPC subscriber */
+    if ((t->policy == TRANSPORT_IPC || r->route == ROUTE_IPC) && !r->ipc_channel) {
         char ch_name[256];
-        snprintf(ch_name, sizeof(ch_name), "transport_%s", topic);
-        r->ipc_channel = ipc_channel_open(ch_name, IPC_ROLE_SUBSCRIBER, 32);
+        topic_to_ipc_name(topic, ch_name, sizeof(ch_name));
+        /* Retry up to 20 times (2s) waiting for publisher to create the channel */
+        for (int attempt = 0; attempt < 20; attempt++) {
+            r->ipc_channel = ipc_channel_open(ch_name, IPC_ROLE_SUBSCRIBER, 32);
+            if (r->ipc_channel) break;
+            usleep(100000); /* 100ms */
+        }
         if (r->ipc_channel) {
-            ipc_channel_subscribe(r->ipc_channel, callback, user_data);
+            /* 使用 relay 而不是用户回调: IPC 消息转御到本地 bus,
+             * 这样 choreo trigger 和所有本地订阅者自动被调用 */
+            IpcRelayCtx* ctx = (IpcRelayCtx*)malloc(sizeof(IpcRelayCtx));
+            if (ctx) {
+                ctx->bus = t->bus;
+                ipc_channel_subscribe(r->ipc_channel, ipc_to_bus_relay, ctx);
+            }
             ipc_channel_start(r->ipc_channel);
+        } else {
+            printf("[transport] WARNING: IPC channel '%s' not available, falling back to bus\n",
+                   ch_name);
         }
     }
 

@@ -57,7 +57,8 @@ build_project() {
     cmake .. \
         -DCMAKE_BUILD_TYPE=$build_type \
         -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_C_COMPILER=gcc
     
     if [ $? -ne 0 ]; then
         print_error "CMake配置失败"

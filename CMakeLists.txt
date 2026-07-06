@@ -442,6 +442,20 @@ endif()
 # e2e_demo is C but links C++ Frenet libraries — ensure C++ runtime is linked
 set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
 
+# ── Config-driven Launcher ──
+# 读 config/pipeline.json → 按顺序 fork+exec 各节点进程
+# 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
+add_executable(flow_launcher src/flow_launcher.c)
+target_link_libraries(flow_launcher flowengine_core m dl)
+# net_transport_* 是 flowengine_core 的可选 TCP 组件，launcher 使用 TRANSPORT_LOCAL 不触发它。
+# 允许链接时存在未使用的未定义符号，运行时不会实际调用。
+target_link_options(flow_launcher PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+
+# ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
+# 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。
+# 构建方式: cmake -B build/modules/adas_nodes -S modules/adas_nodes && cmake --build build/modules/adas_nodes
+# 参见 modules/adas_nodes/CMakeLists.txt
+
 # ── MCAP Replay Tool ──
 add_executable(flow_mcap_replay src/mcap_replay.c)
 if(FLOWENGINE_HAVE_EIGEN)

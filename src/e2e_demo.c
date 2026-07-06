@@ -1,5 +1,17 @@
 /**
- * e2e_demo.c — FlowEngine 全组件端到端演示
+ * e2e_demo.c — FlowEngine 全组件端到端演示（单体模式）
+ *
+ * @deprecated
+ *   此文件是 "all-in-one" 历史演示入口，将所有节点内联在同一个文件里。
+ *   新架构已迁移到配置驱动的插件化模式：
+ *
+ *     推荐入口: flow_launcher + config/pipeline.json
+ *     节点实现: modules/adas_nodes/*.c (各自编译为 .so)
+ *
+ *   此文件继续保留用于：
+ *     - 快速单进程调试 (无需 .so 就能跑)
+ *     - 新功能原型验证（先写在这里，再迁移到对应节点模块）
+ *     - ./build/bin/flow_e2e --smoke 冒烟测试
  *
  * 串联所有组件:
  *   序列化 → 调度器 → 状态机 → 发现 → 融合 → 传输 → 日志
@@ -30,6 +42,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
 #include <math.h>
 #include <inttypes.h>
 #include "mcap_writer.h"
@@ -132,6 +146,23 @@ static Transport*        g_transport = NULL;
 static Scheduler*        g_scheduler = NULL;
 static int               g_fusion_tid = -1;   /**< for monitor latency reporting */
 
+/* 多进程: fusion 进程通过 fusion/latency topic 上报延迟统计,
+ * monitor 进程订阅后填入导出 JSON (monitor 进程拿不到 fusion 的本地 tracker)。 */
+static bool     g_fusion_lat_ext_valid = false;
+static uint64_t g_fusion_lat_avg_us = 0, g_fusion_lat_p50_us = 0, g_fusion_lat_p99_us = 0;
+
+static void monitor_on_fusion_latency(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    const char* p;
+    unsigned long v;
+    if ((p = strstr(d, "\"avg_us\":"))) { sscanf(p + 9, "%lu", &v); g_fusion_lat_avg_us = v; }
+    if ((p = strstr(d, "\"p50_us\":"))) { sscanf(p + 9, "%lu", &v); g_fusion_lat_p50_us = v; }
+    if ((p = strstr(d, "\"p99_us\":"))) { sscanf(p + 9, "%lu", &v); g_fusion_lat_p99_us = v; }
+    g_fusion_lat_ext_valid = true;
+}
+
 static void sig_handler(int sig) {
     (void)sig;
     LOG_INFO("e2e", "signal %d received, shutting down...", sig);
@@ -139,6 +170,52 @@ static void sig_handler(int sig) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/* ── 多进程模式: 解析 vehicle/state JSON 并同步到本地 g_vehicle/g_obstacles ── */
+static void parse_vehicle_state_json(const char* json) {
+    if (!json) return;
+    const char* p;
+    /* 帧间低通(EMA): vehicle/state 以离散帧到达, 直接赋值会让可视化"一顿一顿"。
+     * 对位置做指数平滑, 渲染更连续。alpha 越大越跟手、越小越平滑。 */
+    static bool  ema_init = false;
+    static double ema_x = 0.0, ema_y = 0.0;
+    const double  EMA_ALPHA = 0.35;
+    double raw_x = g_vehicle.x, raw_y = g_vehicle.y;
+    bool  got_x = false, got_y = false;
+    if ((p = strstr(json, "\"x\":")))   { sscanf(p + 4, "%lf", &raw_x); got_x = true; }
+    if ((p = strstr(json, "\"y\":")))   { sscanf(p + 4, "%lf", &raw_y); got_y = true; }
+    if (!ema_init) { ema_x = raw_x; ema_y = raw_y; ema_init = true; }
+    if (got_x) ema_x = EMA_ALPHA * raw_x + (1.0 - EMA_ALPHA) * ema_x;
+    if (got_y) ema_y = EMA_ALPHA * raw_y + (1.0 - EMA_ALPHA) * ema_y;
+    g_vehicle.x = ema_x;
+    g_vehicle.y = ema_y;
+    if ((p = strstr(json, "\"spd\":"))) sscanf(p + 6, "%lf", &g_vehicle.speed);
+    if ((p = strstr(json, "\"hdg\":"))) sscanf(p + 6, "%lf", &g_vehicle.heading);
+    if ((p = strstr(json, "\"thr\":"))) sscanf(p + 6, "%lf", &g_vehicle.throttle);
+    if ((p = strstr(json, "\"brk\":"))) sscanf(p + 6, "%lf", &g_vehicle.brake);
+    if ((p = strstr(json, "\"tgt\":"))) sscanf(p + 6, "%lf", &g_vehicle.target_speed);
+    if ((p = strstr(json, "\"st\":")))  sscanf(p + 5, "%lf", &g_vehicle.steer);
+    /* 障碍物属性: obs0..obs2 */
+    for (int oi = 0; oi < SIM_OBSTACLE_COUNT; oi++) {
+        char key_x[16], key_y[16], key_vx[16];
+        snprintf(key_x,  sizeof(key_x),  "\"ox%d\":", oi);
+        snprintf(key_y,  sizeof(key_y),  "\"oy%d\":", oi);
+        snprintf(key_vx, sizeof(key_vx), "\"ov%d\":", oi);
+        if ((p = strstr(json, key_x)))  sscanf(p + strlen(key_x),  "%lf", &g_obstacles[oi].x);
+        if ((p = strstr(json, key_y)))  sscanf(p + strlen(key_y),  "%lf", &g_obstacles[oi].y);
+        if ((p = strstr(json, key_vx))) sscanf(p + strlen(key_vx), "%lf", &g_obstacles[oi].vx);
+    }
+}
+
+static void perception_on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (msg && msg->data) parse_vehicle_state_json((const char*)msg->data);
+}
+
+static void monitor_on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (msg && msg->data) parse_vehicle_state_json((const char*)msg->data);
+}
+
 /* 任务1: 感知 — 发布传感器数据 (CRITICAL, 10Hz)              */
 /* ══════════════════════════════════════════════════════════ */
 
@@ -170,6 +247,11 @@ static int perception_init(TaskBase* base) {
     discovery_advertise(g_discovery, "perception/obstacles", 0x0B5A010Eu,
                         CAP_PUBLISHER, 20.0);
     transport_advertise(g_transport, "perception/obstacles", 0x0B5A010Eu);
+
+    /* 多进程: 订阅 vehicle/state 以同步车辆位姿到本进程的 g_vehicle */
+    transport_subscribe(g_transport, "vehicle/state", perception_on_vehicle_state, pt);
+    discovery_advertise(g_discovery, "vehicle/state", 0x1C0E5A7Eu,
+                        CAP_SUBSCRIBER, 0);
 
     /* DBSCAN: eps=2.0m, min_pts=4, RANSAC ground removal */
     dbscan_init(&pt->db, 2.0f, 4);
@@ -458,6 +540,11 @@ static int fusion_init(TaskBase* base) {
                         CAP_FUSION | CAP_PUBLISHER, 10.0);
     transport_advertise(g_transport, "fusion/localization", 0xF0ED10C0u);
 
+    /* ── 广告延迟统计 topic (供多进程下 monitor 汇总) ── */
+    discovery_advertise(g_discovery, "fusion/latency", 0x1A7E9C01u,
+                        CAP_PUBLISHER, 2.0);
+    transport_advertise(g_transport, "fusion/latency", 0x1A7E9C01u);
+
     /* ── 状态机: 驾驶模式 NA→ACC (条件满足) ── */
     ReflectiveStateMachine mode_sm;
     statem_init(&mode_sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "driving_mode");
@@ -566,6 +653,16 @@ static int fusion_execute(TaskBase* base) {
                 uint64_t wall = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
                 latency_tracker_record(lt, wall - now_us);
             }
+            /* 每 20 帧上报一次延迟统计 → monitor 进程可汇总 (多进程) */
+            if (ft->fused_count % 20 == 0) {
+                LatencyStats ls = latency_tracker_stats(lt);
+                char lat[128];
+                int n = snprintf(lat, sizeof(lat),
+                                 "{\"avg_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu}",
+                                 (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
+                                 (unsigned long)ls.p99_us);
+                transport_publish(g_transport, "fusion/latency", lat, (uint32_t)n + 1);
+            }
         }
     }
 
@@ -618,26 +715,33 @@ static void obstacles_tick(double dt) {
             if (o->y >  8.0) { o->y =  8.0; o->vy = -fabs(o->vy); }
             if (o->y < -8.0) { o->y = -8.0; o->vy =  fabs(o->vy); }
         }
-        /* 回收远处的障碍物到前方 (对向车除外) */
+        /* 回收远处的障碍物到前方 (对向车除外)
+         * 加大回收距离: 重新出现的车必须远在 ACC 安全间距之外
+         * (safe_gap = 6 + speed*2 ≈ 30m @ 12m/s)，否则等价于"贴脸切入"，
+         * ACC 来不及减速 → 追尾。这里回收到 ≥100m 前方。 */
         double rel = o->x - g_vehicle.x;
         if (o->vx >= 0) {  /* 同向车: 正常回收 */
-            if (rel < -30.0) o->x = g_vehicle.x + 80.0 + (double)i * 5.0;
-            if (rel >  140.0) o->x = g_vehicle.x + 30.0;
+            if (rel < -40.0)  o->x = g_vehicle.x + 120.0 + (double)i * 5.0;
+            if (rel >  220.0) o->x = g_vehicle.x + 100.0;
         } else {            /* 对向车: 驶过后 500m 外重新生成 */
             if (rel < -50.0) o->x = g_vehicle.x + 500.0;
         }
     }
 }
 
-/* 与同车道前车的纵向间距 (m)，无则返回大值 */
+/* 与同车道前车的纵向间距 (m)，无则返回大值。
+ * 返回"车头到车尾"的净间距 (减去两车半长)，避免 ACC 只按中心距保 6m
+ * 而车身(≈4.6m)相互重叠、视觉上"贴上/撞上"。 */
+#define EGO_LEN_M 4.6
 static double lead_gap(void) {
     double best = 1e9;
     for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
         SimObstacle* o = &g_obstacles[i];
         if (o->vx < 0) continue;                 /* 忽略对向车 */
         if (fabs(o->y - g_vehicle.y) > SAME_LANE_TOL_M) continue; /* 不在本车道 */
-        double gap = o->x - g_vehicle.x;
-        if (gap > 0 && gap < best) best = gap;
+        double center = o->x - g_vehicle.x;
+        double gap = center - (o->len * 0.5 + EGO_LEN_M * 0.5); /* 车尾到车头净距 */
+        if (center > 0 && gap < best) best = gap;
     }
     return best;
 }
@@ -764,6 +868,9 @@ static int control_init(TaskBase* base) {
                         CAP_PUBLISHER, 100.0);
 
     transport_advertise(g_transport, "control/cmd", 0x2D95C6D2u);
+    transport_advertise(g_transport, "vehicle/state", 0x1C0E5A7Eu);
+    discovery_advertise(g_discovery, "vehicle/state", 0x1C0E5A7Eu,
+                        CAP_PUBLISHER, 20.0);
 
     scheduler_choreo_trigger_on(g_scheduler, ct->tid, "fusion/localization");
 
@@ -796,7 +903,7 @@ static int control_execute(TaskBase* base) {
         double gap       = lead_gap();
         double time_hw   = 2.0;                               /* 时距 (s) */
         double min_gap   = 6.0;                               /* 最小间距 (m) */
-        double safe_gap  = min_gap + ct->current_speed * time_hw;
+        double safe_gap  = min_gap + g_vehicle.speed * time_hw;
         double acc_target = boost_target;
         bool   blocked   = false;
         if (gap < safe_gap && gap < 80.0) {
@@ -891,7 +998,7 @@ static int control_execute(TaskBase* base) {
         }
 
         /* ── PID 计算 (目标为 ACC 限速后的值) ── */
-        double error = acc_target - ct->current_speed;
+        double error = acc_target - g_vehicle.speed;
         ct->integral += error * 0.05;  /* dt ≈ 50ms */
         if (ct->integral > 500)  ct->integral = 500;   /* 积分饱和 */
         if (ct->integral < -200) ct->integral = -200;
@@ -918,6 +1025,21 @@ static int control_execute(TaskBase* base) {
         g_vehicle.throttle = throttle;
         g_vehicle.brake    = brake;
         vehicle_tick(0.05);  /* 50ms 步长 */
+
+        /* ── 发布车辆状态 (vehicle/state): 为多进程模式同步 g_vehicle ── */
+        char vstate[512];
+        snprintf(vstate, sizeof(vstate),
+                 "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
+                 "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
+                 "\"ox0\":%.2f,\"oy0\":%.2f,\"ov0\":%.3f,"
+                 "\"ox1\":%.2f,\"oy1\":%.2f,\"ov1\":%.3f,"
+                 "\"ox2\":%.2f,\"oy2\":%.2f,\"ov2\":%.3f}",
+                 g_vehicle.x, g_vehicle.y, g_vehicle.speed, g_vehicle.heading,
+                 g_vehicle.throttle, g_vehicle.brake, g_vehicle.target_speed, g_vehicle.steer,
+                 g_obstacles[0].x, g_obstacles[0].y, g_obstacles[0].vx,
+                 g_obstacles[1].x, g_obstacles[1].y, g_obstacles[1].vx,
+                 g_obstacles[2].x, g_obstacles[2].y, g_obstacles[2].vx);
+        transport_publish(g_transport, "vehicle/state", vstate, (uint32_t)strlen(vstate) + 1);
 
         /* ── 发布控制指令 ── */
         char cmd[128];
@@ -1130,6 +1252,14 @@ static int monitor_init(TaskBase* base) {
     transport_subscribe(g_transport, "perception/obstacles", monitor_on_obstacles, mt);
     discovery_advertise(g_discovery, "perception/obstacles", 0x0B5A010Eu,
                         CAP_SUBSCRIBER, 0);
+    /* 订阅车辆状态：多进程模式下同步 g_vehicle / g_obstacles 到 monitor 进程 */
+    transport_subscribe(g_transport, "vehicle/state", monitor_on_vehicle_state, mt);
+    discovery_advertise(g_discovery, "vehicle/state", 0x1C0E5A7Eu,
+                        CAP_SUBSCRIBER, 0);
+    /* 订阅 fusion 延迟统计：多进程下 monitor 拿不到 fusion 本地 tracker */
+    transport_subscribe(g_transport, "fusion/latency", monitor_on_fusion_latency, mt);
+    discovery_advertise(g_discovery, "fusion/latency", 0x1A7E9C01u,
+                        CAP_SUBSCRIBER, 0);
     mt->sysmon = sysmonitor_create();
     statem_send_event(&base->sm, SM_EVENT_START, base);
     LOG_INFO("monitor", "initialized (10Hz stats reporter, subscribed to perception/obstacles)");
@@ -1223,9 +1353,15 @@ static int monitor_execute(TaskBase* base) {
                         task_count);
                 LatencyStats ls = latency_tracker_stats(
                     g_fusion_tid >= 0 ? scheduler_get_latency(g_scheduler, g_fusion_tid) : NULL);
+                /* 多进程: 本地无 fusion tracker → 用 fusion/latency topic 上报的值 */
+                unsigned long lat_avg = ls.avg_us, lat_p50 = ls.p50_us, lat_p99 = ls.p99_us;
+                if (g_fusion_lat_ext_valid && lat_avg == 0) {
+                    lat_avg = (unsigned long)g_fusion_lat_avg_us;
+                    lat_p50 = (unsigned long)g_fusion_lat_p50_us;
+                    lat_p99 = (unsigned long)g_fusion_lat_p99_us;
+                }
                 fprintf(jf, "\"latency\":{\"avg_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu}",
-                        (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
-                        (unsigned long)ls.p99_us);
+                        lat_avg, lat_p50, lat_p99);
 
                 /* Per-topic stats (QoS) */
                 TopicStats tstats[16];
@@ -1257,9 +1393,13 @@ static int monitor_execute(TaskBase* base) {
                         g_vehicle.x,
                         g_vehicle.target_speed - g_vehicle.speed);
 
+                /* System resource snapshot (CPU/mem/load) for dashboard */
+
                 /* ── 3D scene: ego pose + obstacles + LiDAR point cloud ──
-                 * 坐标系: 自车系, x 前为正, y 左为正 (米)。前端据此渲染真实
-                 * 障碍物包围盒与点云, 而非随机点。 */
+                 * 坐标系: 世界系相对自车的平移 (x 前为正, y 左为正, 米)。
+                 * 不再按 heading 旋转 —— 前端 3D 用 (ego + rel) 还原世界坐标,
+                 * 若这里旋转到自车系, 前端只做平移还原就会错位, 变道时整条路
+                 * 会"跟着转"。保持纯平移, 障碍物就稳稳锚定在真实车道上。 */
                 fprintf(jf, ",\"scene\":{");
                 fprintf(jf, "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,"
                         "\"speed\":%.2f,\"steer\":%.3f},",
@@ -1267,17 +1407,15 @@ static int monitor_execute(TaskBase* base) {
                         g_vehicle.speed, g_vehicle.steer);
                 fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
                 fprintf(jf, "\"obstacles\":[");
-                double ch = cos(-g_vehicle.heading), sh = sin(-g_vehicle.heading);
                 for (int oi = 0; oi < SIM_OBSTACLE_COUNT; oi++) {
                     SimObstacle* o = &g_obstacles[oi];
-                    /* 转换到自车系 */
-                    double dx = o->x - g_vehicle.x, dy = o->y - g_vehicle.y;
-                    double rx = dx * ch - dy * sh;
-                    double ry = dx * sh + dy * ch;
+                    /* 纯平移到自车相对系 (不旋转) */
+                    double rx = o->x - g_vehicle.x;
+                    double ry = o->y - g_vehicle.y;
                     fprintf(jf, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
-                            "\"vx\":%.2f,\"len\":%.1f,\"wid\":%.1f}",
+                            "\"vx\":%.2f,\"vy\":%.2f,\"len\":%.1f,\"wid\":%.1f}",
                             oi > 0 ? "," : "", o->id, o->type, rx, ry,
-                            o->vx, o->len, o->wid);
+                            o->vx, o->vy, o->len, o->wid);
                 }
                 fprintf(jf, "],");
                 /* 感知检出障碍物 (通过 transport 订阅, 解耦) */
@@ -1285,9 +1423,8 @@ static int monitor_execute(TaskBase* base) {
                 if (mt->has_obstacles) {
                     for (uint32_t di = 0; di < mt->latest_obstacles.count; di++) {
                         Obstacle* ob = &mt->latest_obstacles.obstacles[di];
-                        double dx2 = (double)ob->x, dy2 = (double)ob->y;
-                        double rx2 = dx2 * ch - dy2 * sh;
-                        double ry2 = dx2 * sh + dy2 * ch;
+                        double rx2 = (double)ob->x;
+                        double ry2 = (double)ob->y;
                         const char* tname = "unknown";
                         switch (ob->type) {
                             case OBJ_TYPE_VEHICLE:    tname = "vehicle";    break;
@@ -1307,9 +1444,8 @@ static int monitor_execute(TaskBase* base) {
                 int lp = 0;
                 for (int oi = 0; oi < SIM_OBSTACLE_COUNT; oi++) {
                     SimObstacle* o = &g_obstacles[oi];
-                    double dx = o->x - g_vehicle.x, dy = o->y - g_vehicle.y;
-                    double rx = dx * ch - dy * sh;
-                    double ry = dx * sh + dy * ch;
+                    double rx = o->x - g_vehicle.x;
+                    double ry = o->y - g_vehicle.y;
                     if (rx < -20 || rx > 60) continue;   /* 视野外 */
                     for (int k = 0; k < 6; k++) {
                         double a = (double)k / 6.0 * (2.0 * M_PI);
@@ -1470,13 +1606,55 @@ int main(int argc, char** argv) {
         LOG_INFO("e2e", "╚══════════════════════════════════════════╝");
     }
 
-    /* ── 多进程模式入口 (--multi: fork+exec 各 role) ── */
+    /* ── 多进程模式入口 (--multi: fork+exec 各 role 为独立子进程) ── */
     if (!role && multi_mode) {
-        /* TODO: fork+exec each role in a separate process, e.g.:
-         *   char* args[] = { argv[0], "--role", "perception", NULL };
-         *   execv(argv[0], args);
-         * For now, fall through to single-process mode with a warning. */
-        LOG_WARN("e2e", "--multi: auto-fork not yet implemented; running single-process");
+        /* 按依赖顺序启动: 先启 publisher，再启 subscriber，最后启 monitor */
+        const char* roles[] = { "perception", "fusion", "planning", "control", "monitor", NULL };
+        pid_t child_pids[5] = {0};
+        char dur_str[16];
+        snprintf(dur_str, sizeof(dur_str), "%d", duration);
+
+        signal(SIGINT,  sig_handler);
+        signal(SIGTERM, sig_handler);
+
+        for (int i = 0; roles[i]; i++) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                /* 子进程: exec 同一可执行文件但带 --role 参数 */
+                char* args[] = { argv[0], "--role", (char*)roles[i], dur_str, NULL };
+                execv(argv[0], args);
+                perror("execv");
+                _exit(1);
+            } else if (pid > 0) {
+                child_pids[i] = pid;
+                LOG_INFO("e2e", "已启动 %s (pid=%d)", roles[i], (int)pid);
+                /* 错开启动时间: 确保 publisher 先创建 IPC 通道 */
+                usleep(300000);  /* 300ms */
+            } else {
+                LOG_WARN("e2e", "fork %s 失败: %s", roles[i], strerror(errno));
+            }
+        }
+
+        LOG_INFO("e2e", "所有角色已启动，等待中... (Ctrl+C 停止)");
+        LOG_INFO("e2e", "仪表盘: http://localhost:8800");
+        while (g_running) {
+            int status;
+            pid_t done = waitpid(-1, &status, WNOHANG);
+            if (done < 0 && errno == ECHILD) break;  /* 所有子进程已退出 */
+            usleep(200000);
+        }
+
+        /* 向所有子进程发 SIGTERM */
+        for (int i = 0; roles[i]; i++) {
+            if (child_pids[i] > 0) kill(child_pids[i], SIGTERM);
+        }
+        /* 等待子进程退出 */
+        for (int i = 0; roles[i]; i++) {
+            if (child_pids[i] > 0) waitpid(child_pids[i], NULL, 0);
+        }
+
+        log_shutdown();
+        return 0;
     }
 
     /* ── 序列化: 注册 ADAS 类型 ── */
@@ -1494,9 +1672,11 @@ int main(int argc, char** argv) {
     LOG_INFO("e2e", "discovery: started");
 
     /* ── 传输 ── */
-    g_transport = transport_create(g_bus, g_discovery, TRANSPORT_AUTO);
+    /* 单角色模式下需要 IPC 以便跨进程通信；单进程模式用 AUTO */
+    TransportPolicy tp = role ? TRANSPORT_IPC : TRANSPORT_AUTO;
+    g_transport = transport_create(g_bus, g_discovery, tp);
     transport_start(g_transport);
-    LOG_INFO("e2e", "transport: started (AUTO mode)");
+    LOG_INFO("e2e", "transport: started (%s mode)", role ? "IPC" : "AUTO");
 
     /* ── 调度器 ── */
     SchedulerConfig scfg = SCHEDULER_CONFIG_DEFAULT;

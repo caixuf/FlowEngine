@@ -1,39 +1,40 @@
 #!/bin/bash
 # =============================================================================
-# FlowEngine Demo — 一键演示脚本
+# FlowEngine Demo — 一键演示脚本 (v2 — 配置驱动插件架构)
 #
-# 从零到全链路运行，自动打开可视化仪表盘。
+# 使用 flow_launcher + pipeline.json 启动全链路节点插件。
+# 自动打开可视化仪表盘。
 #
 # 用法:
-#   bash scripts/demo.sh              # 默认 15 秒演示
+#   bash scripts/demo.sh              # 默认 15 秒，dlopen 单进程模式
 #   bash scripts/demo.sh 30           # 30 秒演示
+#   bash scripts/demo.sh --multi      # fork+exec 多进程模式（各节点独立 PID）
 #   bash scripts/demo.sh --no-browser # 不打开浏览器
 # =============================================================================
 set -e
 
 # Kill any stale processes from previous runs
-# Aggressive cleanup
-{ pkill -9 -f flowboard; pkill -9 -f flow_e2e; pkill -9 -f foxglove; } 2>/dev/null || true
+{ pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f foxglove; } 2>/dev/null || true
 sleep 1
-# Force-free ports
 for port in 8800 8765; do
   pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
   [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
 done
 sleep 0.5
 
-DURATION=30
+DURATION=15
 OPEN_BROWSER=true
+MULTI_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$ROOT/build-algo"
-E2E_BIN="$BUILD_DIR/bin/flow_e2e"
+BUILD_DIR="$ROOT/build"
+LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
+PIPELINE="$ROOT/config/pipeline.json"
 JSON_FILE="/tmp/flow_topology.json"
-LIDAR_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
     --no-browser) OPEN_BROWSER=false ;;
-    --lidar) LIDAR_DIR="$2"; shift ;;
+    --multi) MULTI_MODE=true ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$arg" ;;
   esac
@@ -60,51 +61,63 @@ cat << 'BANNER'
 
 BANNER
 
-echo "   Demo Duration: ${DURATION}s"
+   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")"
 echo ""
 
 # ── Build ───────────────────────────────────────────────────
 echo "───[1/5] Building..."
-if [ ! -f "$E2E_BIN" ]; then
+if [ ! -f "$LAUNCHER_BIN" ]; then
   echo "  First build, this may take a moment..."
-  cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
+  cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc > /dev/null 2>&1
 fi
-cmake --build "$BUILD_DIR" --target flow_e2e -j$(nproc) 2>/dev/null | tail -1
+cmake --build "$BUILD_DIR" --target flow_launcher -j$(nproc) 2>/dev/null | tail -1
+# Also build the node plugins if not present
+if [ ! -f "$BUILD_DIR/lib/libsim_world.so" ]; then
+  echo "  Building node plugins..."
+  cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
+        -DFLOWENGINE_BUILD="$BUILD_DIR" > /dev/null 2>&1
+  cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
+fi
 echo "  ✓ Build complete"
 
 # ── Cleanup handler ─────────────────────────────────────────
 cleanup() {
   echo ""
   echo "───[Cleanup] Shutting down..."
-  kill $E2E_PID $SERVER_PID $BRIDGE_PID 2>/dev/null
+  kill $LAUNCHER_PID $SERVER_PID $BRIDGE_PID 2>/dev/null
   wait 2>/dev/null
   rm -f "$JSON_FILE"
 
   echo ""
   echo "  ╔══════════════════════════════════════╗"
-  echo "  ║  Demo Complete — FlowEngine v1.0     ║"
+  echo "  ║  Demo Complete — FlowEngine v2.0     ║"
+  echo "  ║  Plugin Architecture                 ║"
   echo "  ║  github.com/caixuf/FlowEngine        ║"
   echo "  ╚══════════════════════════════════════╝"
   exit 0
 }
 trap cleanup EXIT INT TERM
 
-# ── Start e2e pipeline ──────────────────────────────────────
-echo "───[2/5] Starting E2E pipeline (perception→fusion→control)..."
+# ── Start flow_launcher with pipeline ───────────────────────
+echo "───[2/5] Starting pipeline (sim_world→perception→fusion→planning→control→monitor)..."
 rm -f "$JSON_FILE"
-if [ -n "$LIDAR_DIR" ]; then
-  echo "  Using real LiDAR data: $LIDAR_DIR"
-  "$E2E_BIN" --lidar "$LIDAR_DIR" "$DURATION" > /tmp/flow_e2e_stdout.txt 2>/tmp/flow_e2e_stderr.txt &
+cd "$ROOT"  # run from root so build/lib/ paths resolve
+if [ "$MULTI_MODE" = true ]; then
+  echo "  Multi-process mode: each node runs as a separate process"
+  "$LAUNCHER_BIN" "$PIPELINE" --multi --duration "$DURATION" \
+    > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
 else
-  "$E2E_BIN" "$DURATION" > /tmp/flow_e2e_stdout.txt 2>/tmp/flow_e2e_stderr.txt &
+  "$LAUNCHER_BIN" "$PIPELINE" --duration "$DURATION" \
+    > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
 fi
-E2E_PID=$!
+LAUNCHER_PID=$!
 sleep 1
-echo "  ✓ Pipeline running (PID $E2E_PID)"
+echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
 # ── Start dashboard server ──────────────────────────────────
 echo "───[3/5] Starting dashboard server..."
-python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 > /tmp/flowboard.log 2>&1 &
+python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 \
+  > /tmp/flowboard.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 if kill -0 $SERVER_PID 2>/dev/null; then
@@ -114,8 +127,8 @@ else
     cat /tmp/flowboard.log
 fi
 
-# Start Foxglove WebSocket bridge for 3D live viz
-python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" > /tmp/foxglove_bridge.log 2>&1 &
+python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \
+  > /tmp/foxglove_bridge.log 2>&1 &
 BRIDGE_PID=$!
 echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 
@@ -135,10 +148,9 @@ fi
 # ── Live monitor ────────────────────────────────────────────
 echo "───[5/5] Live monitor (${DURATION}s)..."
 echo ""
-echo "  ┌─ Perception ──→  Fusion  ──→  Control  ──→  Monitor ─┐"
-echo "  │  10Hz LiDAR      time-align    decisions     stats     │"
-echo "  │  5Hz GPS         50ms window   CRUISE/BRAKE  1Hz      │"
-echo "  └───────────────────────────────────────────────────────┘"
+echo "  ┌─ SimWorld ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
+echo "  │  dynamics      DBSCAN          EKF          Frenet       PID      │"
+echo "  └───────────────────────────────────────────────────────────────────┘"
 echo ""
 
 ELAPSED=0
@@ -151,7 +163,8 @@ with open('$JSON_FILE') as f:
 m=d.get('metrics',{})
 b=m.get('bus',{})
 l=m.get('latency',{})
-print(f\"pub={b.get('published',0)} del={b.get('delivered',0)} lat={l.get('avg_us',0)}us p99={l.get('p99_us',0)}us\")
+v=m.get('vehicle',{})
+print(f\"pub={b.get('published',0)} del={b.get('delivered',0)} lat={l.get('avg_us',0)}us speed={v.get('speed',0):.1f}m/s\")
 " 2>/dev/null)
     printf "\r  ⏱ %3ds  |  %s  " "$ELAPSED" "$STATS"
   else
@@ -166,23 +179,17 @@ echo ""
 # ── Print summary ───────────────────────────────────────────
 echo "═══ Pipeline Summary ═══"
 
-# Extract stats from e2e stderr
-# The e2e logger writes with NEL line terminators that break plain sed/grep.
-# Use grep -a (force binary/text mode) with a pipe to wc for robust counting.
-FUSED=$(grep -a "fusion.*#" /tmp/flow_e2e_stderr.txt 2>/dev/null | wc -l)
-CTRL=$(grep -a "control.*#" /tmp/flow_e2e_stderr.txt 2>/dev/null | wc -l)
-PERCEPT=$(grep -a "stopped.*frames" /tmp/flow_e2e_stderr.txt 2>/dev/null | grep -oa "[0-9]* frames" || echo "0 frames")
-LATENCY=$(grep -a "Fusion Lat" /tmp/flow_e2e_stderr.txt -A2 2>/dev/null | tail -1 | xargs || echo "N/A")
-MODE=$(grep -a "driving mode" /tmp/flow_e2e_stderr.txt 2>/dev/null | tail -1 | grep -oa "ACC\|CP\|NP\|NOA\|NA" || echo "N/A")
+# Extract stats from launcher stderr
+# Build node plugins if stderr log is available
+FUSED=$(grep -a "EKF" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
+CTRL=$(grep -a "control.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
+PLAN=$(grep -a "planning.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
+SPEED=$(grep -a "sim_world.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oP "speed=\K[0-9.]+" || echo "?")
 
-echo "  Perception : $PERCEPT"
-echo "  Fusion     : $FUSED aligned frames"
-echo "  Control    : $CTRL decisions"
-echo "  Drive Mode : $MODE"
-echo "  Latency    : $LATENCY"
-
-TESTS=$(ctest --test-dir "$BUILD_DIR" 2>/dev/null | tail -1 || echo "N/A")
-echo "  Tests      : $TESTS"
+echo "  Simulation : $SPEED m/s final speed"
+echo "  Fusion     : $FUSED EKF frames"
+echo "  Planning   : $PLAN trajectories"
+echo "  Control    : $CTRL control cycles"
 
 echo ""
 echo "  Dashboard  : http://localhost:8800"
