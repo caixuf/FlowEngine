@@ -65,8 +65,22 @@ static void* monitor_thread_fn(void* arg) {
                 node->is_running = false;
                 node->restart_count++;
 
-                /* Restart */
+                /* Restart with exponential backoff: min(2^restart_count, 60) seconds.
+                 * Cap the shift operand at 5 to avoid UB when restart_count > 31. */
                 if (node->should_restart) {
+                    uint32_t shift = node->restart_count < 6 ? node->restart_count : 6;
+                    uint32_t backoff_s = 1u << shift;  /* 1, 2, 4, 8, 16, 32, 64→60, ... */
+                    if (backoff_s > 60) backoff_s = 60;
+                    pthread_mutex_unlock(&mgr->mutex);
+                    if (mgr->log_callback) {
+                        char bmsg[128];
+                        snprintf(bmsg, sizeof(bmsg),
+                                 "[ProcessManager] Restarting '%s' in %us (attempt #%u)...",
+                                 node->name, backoff_s, node->restart_count);
+                        mgr->log_callback(LOG_LEVEL_WARN, bmsg);
+                    }
+                    sleep(backoff_s);
+                    pthread_mutex_lock(&mgr->mutex);
                     node->interface->start();
                     pthread_create(&node->thread, NULL, process_thread_fn, node);
                     node->is_running = true;
