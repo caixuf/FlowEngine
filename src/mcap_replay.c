@@ -20,7 +20,19 @@
 #include "mcap_reader.h"
 #include "ekf_fusion.h"
 #include "dbscan_cluster.h"
+#ifndef NO_FRENET
 #include "frenet_bridge.h"
+#else
+/* Minimal stubs so mcap_replay compiles without the Frenet planner */
+typedef void FrenetHandle;
+static inline FrenetHandle* frenet_create(double a, double b) { (void)a; (void)b; return NULL; }
+static inline void frenet_destroy(FrenetHandle* h) { (void)h; }
+static inline void frenet_set_reference_path(FrenetHandle* h, double* wx, double* wy, int n)
+    { (void)h; (void)wx; (void)wy; (void)n; }
+static inline int frenet_plan(FrenetHandle* h, double sx, double sy, double sv,
+    double tv, double* s, double* d, double* spd, int max_wp)
+    { (void)h; (void)sx; (void)sy; (void)sv; (void)tv; (void)s; (void)d; (void)spd; (void)max_wp; return 0; }
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
