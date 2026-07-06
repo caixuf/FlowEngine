@@ -620,6 +620,58 @@ static void test_bus_qos_drop_oldest(void) {
     PASS();
 }
 
+static void test_bus_qos_lifespan(void) {
+    TEST("bus QoS lifespan_ms drops stale messages");
+    MessageBus* bus = message_bus_create("test_lifespan");
+    /* 5ms lifespan: messages waiting in queue longer than 5ms must be dropped */
+    TopicQos q = { .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_LATEST, .lifespan_ms = 5 };
+    message_bus_set_topic_qos(bus, "t/ls", &q);
+    /* Slow subscriber: 20ms per callback — causes later messages to wait > 5ms lifespan */
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 20000 };
+    message_bus_subscribe(bus, "t/ls", bus_counter_cb, &c);
+
+    /* Burst of 5 messages. After msg1 starts being dispatched (20ms),
+     * msgs 2-5 have been waiting >5ms and should be dropped by lifespan check. */
+    const int N = 5;
+    for (int i = 0; i < N; i++)
+        message_bus_publish(bus, "t/ls", "tester", &i, sizeof(i));
+    usleep(300000); /* drain (N * 20ms + margin) */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/ls", &st);
+    /* At least one message must have been dropped due to lifespan */
+    ASSERT(st.drop_count > 0, "expected lifespan drops (got %d, published=%d)",
+           (int)st.drop_count, (int)st.publish_count);
+    message_bus_destroy(bus);
+    PASS();
+}
+
+static void test_bus_qos_deadline_violations(void) {
+    TEST("bus QoS deadline_ms detects slow dispatch");
+    MessageBus* bus = message_bus_create("test_deadline");
+    /* Very tight deadline: 1ms. With a slow subscriber the dispatch will exceed it. */
+    TopicQos q = { .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_OLDEST, .deadline_ms = 1 };
+    message_bus_set_topic_qos(bus, "t/dl2", &q);
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 5000 }; /* 5ms per callback, much greater than 1ms deadline */
+    message_bus_subscribe(bus, "t/dl2", bus_counter_cb, &c);
+
+    const int N = 5;
+    for (int i = 0; i < N; i++) {
+        message_bus_publish(bus, "t/dl2", "tester", &i, sizeof(i));
+        usleep(2000); /* 2ms between publishes — enough to age messages in queue */
+    }
+    usleep(200000); /* drain */
+
+    TopicStats st;
+    message_bus_get_topic_stats(bus, "t/dl2", &st);
+    /* With 5ms callback and 1ms deadline, at least some dispatches must have violated */
+    ASSERT(st.deadline_violations > 0,
+           "expected deadline violations (got %d published %d)",
+           (int)st.deadline_violations, (int)st.publish_count);
+    message_bus_destroy(bus);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════ */
 /* Main                                                       */
 /* ══════════════════════════════════════════════════════════ */
@@ -667,6 +719,8 @@ int main(void) {
     test_bus_qos_config();
     test_bus_qos_drop_latest();
     test_bus_qos_drop_oldest();
+    test_bus_qos_lifespan();
+    test_bus_qos_deadline_violations();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");

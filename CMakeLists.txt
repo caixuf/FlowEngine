@@ -60,9 +60,6 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-# 查找cjson库
-pkg_check_modules(CJSON REQUIRED libcjson)
-
 # =============================================================================
 # Phase 1: IDL 代码生成 (msg/*.msg -> 序列化头文件)
 # =============================================================================
@@ -95,6 +92,31 @@ add_custom_target(msg_codegen DEPENDS ${GEN_HEADERS})
 # =============================================================================
 include(FetchContent)
 
+# 查找cjson库 — 优先使用系统版本，否则从源码构建
+pkg_check_modules(CJSON libcjson)
+if(NOT CJSON_FOUND)
+    message(STATUS "libcjson not found via pkg-config — building from source via FetchContent")
+    FetchContent_Declare(
+        cjson
+        GIT_REPOSITORY https://github.com/DaveGamble/cJSON.git
+        GIT_TAG        v1.7.17
+        GIT_SHALLOW    TRUE
+    )
+    set(ENABLE_CJSON_TEST   OFF CACHE BOOL "" FORCE)
+    set(ENABLE_CJSON_UTILS  OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(cjson)
+    # config_manager.c uses <cjson/cJSON.h> (the system install layout).
+    # When bundling, create a cjson/ subdirectory so the same include path works.
+    set(_CJSON_WRAPPER_DIR "${CMAKE_BINARY_DIR}/_cjson_include/cjson")
+    file(MAKE_DIRECTORY "${_CJSON_WRAPPER_DIR}")
+    configure_file("${cjson_SOURCE_DIR}/cJSON.h" "${_CJSON_WRAPPER_DIR}/cJSON.h" COPYONLY)
+    # Map FetchContent target to the variables used below
+    set(CJSON_LIBRARIES    cjson)
+    set(CJSON_INCLUDE_DIRS "${CMAKE_BINARY_DIR}/_cjson_include")
+    set(CJSON_CFLAGS_OTHER "")
+endif()
+
 # 关闭 flowcoro 自身的测试/示例/文档，只编译核心库
 set(FLOWCORO_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
@@ -114,21 +136,51 @@ FetchContent_MakeAvailable(flowcoro)
 # ── Eigen3 (header-only linear algebra, for Frenet planner) ──
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
-# Eigen uses BUILD_TESTING (not EIGEN_BUILD_TESTING) to gate its test suite.
-# Disable it before FetchContent_MakeAvailable so Eigen's BLAS/unit tests are
-# never registered with CTest.  We restore it immediately after so that
-# FlowEngine's own enable_testing() / add_test() calls work normally.
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-# Use system-installed Eigen if available (avoids network fetch)
-find_package(Eigen3 3.3 QUIET NO_MODULE)
-if(NOT Eigen3_FOUND)
-    FetchContent_Declare(
-        Eigen
-        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-        GIT_TAG        3.4.0
-        GIT_SHALLOW    TRUE
+# Try to get Eigen 3.4.0; degrade gracefully if network is unavailable.
+# Eigen is header-only so we only need the source tree, not a full CMake build.
+set(_EIGEN_SRC_DIR "${CMAKE_BINARY_DIR}/_deps/eigen-src")
+if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
+    message(STATUS "Attempting to download Eigen 3.4.0 (non-interactive)...")
+    find_package(Git QUIET)
+    if(Git_FOUND OR GIT_FOUND)
+        set(_GIT_EXE "${GIT_EXECUTABLE}")
+    else()
+        find_program(_GIT_EXE git)
+    endif()
+    execute_process(
+        COMMAND ${_GIT_EXE} clone
+            --depth 1 --branch 3.4.0 --quiet
+            -c credential.helper=   # disable interactive credential prompts so the clone fails fast if auth is needed
+            https://github.com/libeigen/eigen.git
+            "${_EIGEN_SRC_DIR}"
+        TIMEOUT 60
+        RESULT_VARIABLE _eigen_clone_result
+        OUTPUT_QUIET
+        ERROR_QUIET
     )
-    FetchContent_MakeAvailable(Eigen)
+    if(_eigen_clone_result EQUAL 0)
+        message(STATUS "Eigen 3.4.0 downloaded to ${_EIGEN_SRC_DIR}")
+    else()
+        message(STATUS "Eigen download failed (network unavailable) — frenet planner will be skipped")
+    endif()
+endif()
+
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+# Use system-installed Eigen if available (fastest path, no network/download needed)
+find_package(Eigen3 3.3 QUIET NO_MODULE)
+if(Eigen3_FOUND)
+    set(FLOWENGINE_HAVE_EIGEN TRUE)
+    message(STATUS "Eigen found (system) — frenet planner will be built")
+elseif(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
+    # Add Eigen as interface library without building its tests/docs
+    if(NOT TARGET Eigen3::Eigen)
+        add_subdirectory("${_EIGEN_SRC_DIR}" "${CMAKE_BINARY_DIR}/_deps/eigen-build" EXCLUDE_FROM_ALL)
+    endif()
+    set(FLOWENGINE_HAVE_EIGEN TRUE)
+    message(STATUS "Eigen found (downloaded) — frenet planner will be built")
+else()
+    set(FLOWENGINE_HAVE_EIGEN FALSE)
+    message(STATUS "Eigen not available — building without frenet planner (core + unit tests unaffected)")
 endif()
 set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 
@@ -299,6 +351,7 @@ target_link_libraries(dbscan_perception_plugin flowengine_core m)
 # ── Frenet Optimal Trajectory Planner (from open-source, Apache-2.0) ──
 # Source: https://github.com/fangedward/frenet-optimal-trajectory-planner
 # Eigen is fetched via CMake FetchContent (no local dependency)
+if(FLOWENGINE_HAVE_EIGEN)
 set(FRENET_PLANNER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src")
 set(FRENET_PLANNER_SOURCES
     ${FRENET_PLANNER_DIR}/CubicSpline/CubicSpline1D.cpp
@@ -341,6 +394,7 @@ target_compile_options(frenet_bridge PRIVATE -Wno-unused-variable -Wno-sign-comp
 # ── Frenet Planning Plugin (C++ wrapper) ──
 add_library(frenet_planning_plugin SHARED src/plugins/frenet_planning_plugin.cpp)
 target_link_libraries(frenet_planning_plugin flowengine_core frenet_planner m)
+endif() # FLOWENGINE_HAVE_EIGEN
 
 # =============================================================================
 # flowcoro 协程集成目标（统一管理）
@@ -379,13 +433,22 @@ target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
 # ── End-to-end demo (all components: serializer+scheduler+statem+discovery+fusion+transport) ──
 add_executable(flow_e2e src/e2e_demo.c)
+if(FLOWENGINE_HAVE_EIGEN)
 target_link_libraries(flow_e2e flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
+else()
+target_link_libraries(flow_e2e flowengine_core scheduler_cpp m)
+target_compile_definitions(flow_e2e PRIVATE NO_FRENET)
+endif()
 # e2e_demo is C but links C++ Frenet libraries — ensure C++ runtime is linked
 set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
 
 # ── MCAP Replay Tool ──
 add_executable(flow_mcap_replay src/mcap_replay.c)
+if(FLOWENGINE_HAVE_EIGEN)
 target_link_libraries(flow_mcap_replay flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
+else()
+target_link_libraries(flow_mcap_replay flowengine_core scheduler_cpp m)
+endif()
 set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
 
 # ── nuScenes Demo ──
@@ -402,9 +465,14 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller ekf_fusion_plugin dbscan_perception_plugin frenet_planning_plugin
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller ekf_fusion_plugin dbscan_perception_plugin
     LIBRARY DESTINATION lib/flowengine/plugins
 )
+if(FLOWENGINE_HAVE_EIGEN)
+install(TARGETS frenet_planning_plugin
+    LIBRARY DESTINATION lib/flowengine/plugins
+)
+endif()
 
 install(DIRECTORY include/
     DESTINATION include/flowengine
@@ -492,6 +560,13 @@ target_include_directories(test_modules PRIVATE ${GEN_DIR})
 
 add_test(NAME unit_tests COMMAND test_modules)
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 10)
+
+# ── Smoke test: end-to-end pipeline validates key metrics ──
+add_test(NAME e2e_smoke
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 30)
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

@@ -150,6 +150,27 @@ int process_manager_start_monitor(ProcessManager* manager);
  */
 void process_manager_stop_monitor(ProcessManager* manager);
 
+/* ── Process enumeration ─────────────────────────────── */
+
+/** 进程快照（用于 `list` 命令）*/
+typedef struct {
+    char name[64];
+    char library_path[256];
+    bool is_running;
+    uint32_t restart_count;
+    int sched_priority;
+} ProcessSnapshot;
+
+/**
+ * 列出所有已加载的进程
+ * @param manager 进程管理器
+ * @param buf     输出缓冲区
+ * @param max     缓冲区最多可容纳的条目数
+ * @return 实际进程数（<= max）
+ */
+int process_manager_list_processes(ProcessManager* manager,
+                                   ProcessSnapshot* buf, int max);
+
 #ifdef __cplusplus
 }
 #endif

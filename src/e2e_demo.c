@@ -35,7 +35,19 @@
 #include "mcap_writer.h"
 #include "ekf_fusion.h"
 #include "dbscan_cluster.h"
+#ifndef NO_FRENET
 #include "frenet_bridge.h"
+#else
+/* Minimal stubs so e2e_demo compiles without the Frenet planner */
+typedef void FrenetHandle;
+static inline FrenetHandle* frenet_create(double a, double b) { (void)a; (void)b; return NULL; }
+static inline void frenet_destroy(FrenetHandle* h) { (void)h; }
+static inline void frenet_set_reference_path(FrenetHandle* h, double* wx, double* wy, int n)
+    { (void)h; (void)wx; (void)wy; (void)n; }
+static inline int frenet_plan(FrenetHandle* h, double sx, double sy, double sv,
+    double tv, double* s, double* d, double* spd, int max_wp)
+    { (void)h; (void)sx; (void)sy; (void)sv; (void)tv; (void)s; (void)d; (void)spd; (void)max_wp; return 0; }
+#endif
 #include "nuscenes_loader.h"
 #include "sysmonitor.h"
 #include <dirent.h>
@@ -1398,12 +1410,16 @@ static TaskInterface g_monitor_vtable = {
 
 int main(int argc, char** argv) {
     int duration = 10;
+    bool smoke_mode = false;
     const char* role = NULL;
     const char* node_name = "e2e_node";
 
-    /* Parse args: flow_e2e [--role <name>] [--lidar <dir>] [duration_sec] */
+    /* Parse args: flow_e2e [--smoke] [--role <name>] [--lidar <dir>] [duration_sec] */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--smoke") == 0) {
+            smoke_mode = true;
+            duration   = 5;  /* smoke: short run */
+        } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
             role = argv[++i];
             char name_buf[64];
             snprintf(name_buf, sizeof(name_buf), "e2e_%s", role);
@@ -1653,6 +1669,39 @@ int main(int argc, char** argv) {
 
     printf("╚══════════════════════════════════════════╝\n\n");
 
+    /* ── Smoke-mode assertions ── */
+    int smoke_result = 0;
+    if (smoke_mode) {
+        printf("Smoke test assertions:\n");
+
+        /* 1. Messages must have been published */
+        int ok1 = ts.local_published > 0;
+        printf("  [%s] local_published > 0  (got %lu)\n",
+               ok1 ? "PASS" : "FAIL", (unsigned long)ts.local_published);
+        if (!ok1) smoke_result = 1;
+
+        /* 2. Messages must have been delivered */
+        int ok2 = ts.local_delivered > 0;
+        printf("  [%s] local_delivered > 0  (got %lu)\n",
+               ok2 ? "PASS" : "FAIL", (unsigned long)ts.local_delivered);
+        if (!ok2) smoke_result = 1;
+
+        /* 3. Fusion average latency < 200ms */
+        int ok3 = (ls.avg_us > 0 && ls.avg_us < 200000ULL);
+        printf("  [%s] fusion avg_latency < 200ms  (got %lu us)\n",
+               ok3 ? "PASS" : "FAIL", (unsigned long)ls.avg_us);
+        if (!ok3) smoke_result = 1;
+
+        /* 4. No tasks ended in ERROR state */
+        int ok4 = (statem_current(&pt->base.sm) != TASK_STATE_ERROR &&
+                   statem_current(&ft->base.sm) != TASK_STATE_ERROR &&
+                   statem_current(&ct->base.sm) != TASK_STATE_ERROR);
+        printf("  [%s] no task in ERROR state\n", ok4 ? "PASS" : "FAIL");
+        if (!ok4) smoke_result = 1;
+
+        printf("\nSmoke result: %s\n\n", smoke_result == 0 ? "PASSED ✅" : "FAILED ❌");
+    }
+
     /* ── 清理 ── */
     scheduler_stop(g_scheduler);
     scheduler_destroy(g_scheduler);
@@ -1664,5 +1713,5 @@ int main(int argc, char** argv) {
 
     free(pt); free(ft); free(plt); free(ct); free(mt);
     log_shutdown();
-    return 0;
+    return smoke_result;
 }
