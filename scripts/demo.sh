@@ -71,13 +71,12 @@ if [ ! -f "$LAUNCHER_BIN" ]; then
   cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc > /dev/null 2>&1
 fi
 cmake --build "$BUILD_DIR" --target flow_launcher -j$(nproc) 2>/dev/null | tail -1
-# Also build the node plugins if not present
-if [ ! -f "$BUILD_DIR/lib/libsim_world.so" ]; then
-  echo "  Building node plugins..."
-  cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
-        -DFLOWENGINE_BUILD="$BUILD_DIR" > /dev/null 2>&1
-  cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
-fi
+# Also build node plugins. They live in a separate CMake project, so the main
+# flow_launcher target does not automatically rebuild them after node source edits.
+echo "  Building node plugins..."
+cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
+  -DFLOWENGINE_BUILD="$BUILD_DIR" > /dev/null 2>&1
+cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
 echo "  ✓ Build complete"
 
 # ── Cleanup handler ─────────────────────────────────────────
@@ -122,6 +121,11 @@ else
 fi
 LAUNCHER_PID=$!
 sleep 1
+if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
+  echo "  ✗ Pipeline failed! Check /tmp/flow_launcher_stderr.txt"
+  cat /tmp/flow_launcher_stderr.txt 2>/dev/null || true
+  exit 1
+fi
 echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
 # ── Start dashboard server ──────────────────────────────────

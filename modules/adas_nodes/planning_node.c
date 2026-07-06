@@ -47,6 +47,7 @@ static struct {
     double cfg_max_speed;
     double cfg_max_accel;
     double cfg_ref_path_length;
+    double ref_path_start_x;
 
     int tid;  /* scheduler task id */
 } g;
@@ -57,6 +58,17 @@ static struct {
 #define OBS_MAX_ABS_Y_M     6.0   /* 忽略横向距离超出道路范围的障碍物 */
 #define OBSTACLE_WIDTH_M    2.0   /* 默认障碍物宽度 (m) */
 #define OBSTACLE_LENGTH_M   4.6   /* 默认障碍物长度 (m) */
+
+static void update_reference_path(double start_x) {
+    double wx[101], wy[101];
+    const int ref_n = 101;
+    for (int i = 0; i < ref_n; i++) {
+        wx[i] = start_x + (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
+        wy[i] = -1.75;
+    }
+    frenet_set_reference_path(g.frenet, wx, wy, ref_n);
+    g.ref_path_start_x = start_x;
+}
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
@@ -96,18 +108,24 @@ static void* planning_thread(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "planning");
 
-    /* 参考路径: 200m 直线（左车道中心 y=-1.75）*/
-    double wx[101], wy[101];
-    int ref_n = 101;
-    for (int i = 0; i < ref_n; i++) {
-        wx[i] = (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
-        wy[i] = -1.75;
-    }
-    frenet_set_reference_path(g.frenet, wx, wy, ref_n);
+    /* 参考路径: 长直线（左车道中心 y=-1.75）。运行时间较长时，ego 会开出
+     * 初始路径范围；接近末端时向前滑动 reference path，避免 Frenet 插值越界
+     * 导致 planning 线程挂掉。 */
+    update_reference_path(0.0);
 
     while (!g.should_stop) {
         usleep(50000);  /* 20Hz 检查 */
         if (g.should_stop || !g.has_fusion) continue;
+
+        if (g.ego_x > g.ref_path_start_x + g.cfg_ref_path_length * 0.8) {
+            double new_start = g.ego_x - 50.0;
+            if (new_start < 0.0) new_start = 0.0;
+            update_reference_path(new_start);
+            LOG_INFO("planning", "reference path shifted to x=%.0f..%.0f",
+                     g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
+        }
+
+        double command_speed = g.target_speed;
 
         /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
         if (g.has_vstate) {
@@ -123,6 +141,16 @@ static void* planning_thread(void* arg) {
                 ow[n_obs] = OBSTACLE_WIDTH_M;
                 ol[n_obs] = OBSTACLE_LENGTH_M;
                 n_obs++;
+
+                if (fabs(g.obs_y[i] - g.ego_y) < 2.0 && dx > 0.0 && dx < 45.0) {
+                    double safe_gap = 6.0 + g.ego_v * 2.0;
+                    double ratio = dx / safe_gap;
+                    if (ratio < 0.2) ratio = 0.2;
+                    if (ratio < 1.0) {
+                        double acc_speed = g.target_speed * ratio;
+                        if (acc_speed < command_speed) command_speed = acc_speed;
+                    }
+                }
             }
             frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
         }
@@ -132,17 +160,18 @@ static void* planning_thread(void* arg) {
         double ego_d = g.ego_y + 1.75;  /* 相对 y=-1.75 的偏移 */
         int n_wp = frenet_plan(g.frenet,
             g.ego_x, ego_d, g.ego_v,
-            g.target_speed,
+            command_speed,
             s_out, d_out, spd_out, 50);
 
         char traj[1024];
         int off;
         if (n_wp > 0) {
+            command_speed = spd_out[0];
             off = snprintf(traj, sizeof(traj),
                 "{\"type\":\"frenet\",\"plan\":%d,\"wp\":%d,",
                 g.plan_count, n_wp);
             off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                "\"target_speed\":%.1f,", spd_out[0]);
+                "\"target_speed\":%.1f,", command_speed);
             off += snprintf(traj + off, sizeof(traj) - (size_t)off, "\"path\":[");
             for (int i = 0; i < n_wp && off < (int)sizeof(traj) - 50; i++) {
                 if (i % 3 != 0 && i > 0 && i < n_wp - 1) continue;
@@ -152,7 +181,8 @@ static void* planning_thread(void* arg) {
             }
             off += snprintf(traj + off, sizeof(traj) - (size_t)off, "]}");
         } else {
-            double failsafe = g.ego_v + 2.0;
+            double failsafe = command_speed;
+            if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
             if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
             off = snprintf(traj, sizeof(traj),
                 "{\"type\":\"failsafe\",\"target_speed\":%.1f,\"plan\":%d,"
@@ -163,7 +193,7 @@ static void* planning_thread(void* arg) {
         /* 后向兼容: PID 也读取 speed= 字段 */
         char traj_final[1100];
         snprintf(traj_final, sizeof(traj_final), "%s speed=%.1f",
-                 traj, g.target_speed);
+                 traj, command_speed);
 
         transport_publish(g.transport, "planning/trajectory",
                           (const uint8_t*)traj_final,
@@ -173,7 +203,7 @@ static void* planning_thread(void* arg) {
         if (g.plan_count % 25 == 1) {
             LOG_INFO("planning", "#%d ego@(%.0f,%.1f) v=%.1f → target=%.1f wp=%d",
                      g.plan_count, g.ego_x, g.ego_y, g.ego_v,
-                     g.target_speed, n_wp);
+                     command_speed, n_wp);
         }
     }
 
@@ -203,7 +233,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.cfg_target_speed     = 15.0;
     g.cfg_max_speed        = 20.0;
     g.cfg_max_accel        = 4.0;
-    g.cfg_ref_path_length  = 200.0;
+    g.cfg_ref_path_length  = 5000.0;
 
     if (params_json) {
         const char* p;

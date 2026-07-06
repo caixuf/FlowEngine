@@ -212,6 +212,7 @@ input:focus,select:focus{border-color:#58a6ff}
 
   <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D — Foxglove Studio <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">| 2D — live preview below</span></h2><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="width:100%;height:400px;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div></div>
+  </div>
 
   <div class="card"><div class="card-header" onclick="toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
@@ -967,8 +968,8 @@ function _buildSedan(bodyColor, roofColor){
   rb.position.set(-2.25, 0.55, 0);
   g.add(rb);
 
-  // Wheels (4)
-  var wheelPos = [[1.3, -0.7, 1.0], [1.3, -0.7, -1.0], [-1.3, -0.7, 1.0], [-1.3, -0.7, -1.0]];
+  // Wheels (4) — keep wheel centers above ground so the full car is visible.
+  var wheelPos = [[1.3, 0.35, 1.0], [1.3, 0.35, -1.0], [-1.3, 0.35, 1.0], [-1.3, 0.35, -1.0]];
   for(var wi = 0; wi < 4; wi++){
     var wh = _makeCyl(0.32, 0.32, 0.28, 16, 0x111111);
     wh.rotation.z = Math.PI/2;
@@ -1030,8 +1031,8 @@ function init3DScene(){
   scene3d.background=new THREE.Color(0x334466);
   scene3d.fog=new THREE.Fog(0x334466, 80, 350);
 
-  // Camera — chase cam
-  camera3d=new THREE.PerspectiveCamera(50,w/h,0.5,300);
+  // Camera — chase cam. Wider FOV keeps the whole car visible on small screens.
+  camera3d=new THREE.PerspectiveCamera(60,w/h,0.2,500);
 
   // Renderer
   renderer3d=new THREE.WebGLRenderer({antialias:true,alpha:false});
@@ -1057,6 +1058,7 @@ function init3DScene(){
   gnd.rotation.x=-Math.PI/2; gnd.position.y=-0.05;
   gnd.receiveShadow=true;
   scene3d.add(gnd);
+  window._groundMesh=gnd;
 
   // ── Road ──
   _buildRoad(scene3d);
@@ -1095,10 +1097,10 @@ function init3DScene(){
   window._lidarCloud=lcloud;
 
   // ── Camera state for smooth follow ──
-  window._cam=new THREE.Vector3(-14,8,3);
-  window._camLook=new THREE.Vector3(12,1.0,-1.75);
-  window._camTarget=new THREE.Vector3(-14,8,3);
-  window._camLookTarget=new THREE.Vector3(12,1.0,-1.75);
+  window._cam=new THREE.Vector3(-22,11,6);
+  window._camLook=new THREE.Vector3(4,1.2,-1.75);
+  window._camTarget=new THREE.Vector3(-22,11,6);
+  window._camLookTarget=new THREE.Vector3(4,1.2,-1.75);
 
   // ── Animation loop ──
   function anim3D(){
@@ -1153,9 +1155,20 @@ function _renderFrame(){
   // ── Ego car: world-space position (road is STATIC at origin) ──
   if(ego){ego.position.set(sx, ego.position.y, sz); ego.rotation.y=-_dr.smoothHeading;}
 
+  // Keep the static road/ground near ego for long-running demos. This avoids
+  // driving beyond the initial mesh and ending up with an empty/dark 3D view.
+  var chunkX = Math.round(sx / 1000) * 1000;
+  if(window._roadGroup) window._roadGroup.position.x = chunkX;
+  if(window._groundMesh) window._groundMesh.position.x = sx;
+  if(window._envGroup) window._envGroup.position.x = chunkX;
+
   // ── Chase camera: behind+above ego in world space ──
-  window._camTarget.set(sx-14, 8, sz+4);
-  window._camLookTarget.set(sx+12, 1.0, sz);
+  var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
+  var back = narrow ? 26 : 22;
+  var height = narrow ? 12 : 11;
+  var side = narrow ? 7 : 6;
+  window._camTarget.set(sx-back, height, sz+side);
+  window._camLookTarget.set(sx+4, 1.2, sz);
   window._cam.lerp(window._camTarget, 0.08);
   window._camLook.lerp(window._camLookTarget, 0.08);
   camera3d.position.copy(window._cam);
@@ -1202,7 +1215,7 @@ function _renderFrame(){
   // ── Car bounce ──
   var v=(topoData.metrics||{}).vehicle||{};
   if(ego&&v.speed>0.5){
-    ego.position.y=Math.sin(_animT*14)*0.05*Math.min(1,v.speed*0.12);
+    ego.position.y=0.05+Math.sin(_animT*14)*0.04*Math.min(1,v.speed*0.12);
   }
 }
 
