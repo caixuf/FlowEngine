@@ -275,8 +275,13 @@ static int run_dlopen_mode(int duration, int stagger_ms,
 
     LOG_INFO("launcher", "all nodes running (%ds) — dashboard: http://localhost:8800", duration);
 
-    /* 等待运行时间或信号 */
-    for (int t = 0; t < duration && g_running; t++) sleep(1);
+    /* 等待运行时间或信号: duration ≤ 0 表示持续运行直到 Ctrl+C */
+    if (duration > 0) {
+        for (int t = 0; t < duration && g_running; t++) sleep(1);
+    } else {
+        LOG_INFO("launcher", "running indefinitely — press Ctrl+C to stop");
+        while (g_running) sleep(1);
+    }
 
     /* 优雅停止 */
     LOG_INFO("launcher", "stopping nodes...");

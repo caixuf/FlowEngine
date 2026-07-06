@@ -22,7 +22,7 @@ for port in 8800 8765; do
 done
 sleep 0.5
 
-DURATION=15
+DURATION=0  # 0 = 持续运行直到 Ctrl+C，设置正数 = 限时运行秒数
 OPEN_BROWSER=true
 MULTI_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -104,11 +104,21 @@ rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
 if [ "$MULTI_MODE" = true ]; then
   echo "  Multi-process mode: each node runs as a separate process"
-  "$LAUNCHER_BIN" "$PIPELINE" --multi --duration "$DURATION" \
-    > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  if [ "$DURATION" -gt 0 ] 2>/dev/null; then
+    "$LAUNCHER_BIN" "$PIPELINE" --multi --duration "$DURATION" \
+      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  else
+    "$LAUNCHER_BIN" "$PIPELINE" --multi \
+      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  fi
 else
-  "$LAUNCHER_BIN" "$PIPELINE" --duration "$DURATION" \
-    > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  if [ "$DURATION" -gt 0 ] 2>/dev/null; then
+    "$LAUNCHER_BIN" "$PIPELINE" --duration "$DURATION" \
+      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  else
+    "$LAUNCHER_BIN" "$PIPELINE" \
+      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
+  fi
 fi
 LAUNCHER_PID=$!
 sleep 1
@@ -154,7 +164,10 @@ echo "  └───────────────────────
 echo ""
 
 ELAPSED=0
-while [ $ELAPSED -lt $DURATION ]; do
+# 持续运行: DURATION=0 时无限循环，直到脚本被 Ctrl+C 终止
+while true; do
+  # 限时模式: 达到时长后退出循环
+  if [ "$DURATION" -gt 0 ] 2>/dev/null && [ $ELAPSED -ge $DURATION ]; then break; fi
   if [ -f "$JSON_FILE" ]; then
     STATS=$(python3 -c "
 import json
