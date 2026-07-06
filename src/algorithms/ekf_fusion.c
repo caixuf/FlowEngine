@@ -18,7 +18,7 @@
 
 /* 过程噪声: 加速度方差 2.0 m²/s⁴, 偏航角加速度方差 0.5 rad²/s⁴ */
 #define DEFAULT_Q_ACCEL_VAR      2.0
-#define DEFAULT_Q_YAWRATE_VAR    0.5
+#define DEFAULT_Q_YAWRATE_VAR    0.01
 
 /* LiDAR 位置测量噪声: 0.25 m² */
 #define DEFAULT_R_LIDAR_VAR      0.25
@@ -293,6 +293,10 @@ void ekf_fusion_predict(EkfFusion* ekf) {
     /* ── 更新状态 ── */
     memcpy(ekf->x, x_pred, sizeof(x_pred));
     ekf->predict_count++;
+
+    /* 航向归一化到 [-π, π]，防止无限累积导致下游（Frenet 规划器等）误判 */
+    while (ekf->x[3] >  M_PI) ekf->x[3] -= 2.0 * M_PI;
+    while (ekf->x[3] < -M_PI) ekf->x[3] += 2.0 * M_PI;
 }
 
 void ekf_fusion_update_lidar(EkfFusion* ekf,

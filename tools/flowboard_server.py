@@ -194,6 +194,15 @@ def normalize_live_data(raw):
             "timestamp": data.get("timestamp", time.time()),
         }
 
+    # Hoist scene/registry from metrics to top-level if not already there
+    metrics_raw = data.get("metrics") or {}
+    if "scene" not in data and "scene" in metrics_raw:
+        data["scene"] = metrics_raw["scene"]
+    if "registry" not in data and "registry" in metrics_raw:
+        data["registry"] = metrics_raw["registry"]
+    if "sysmon" not in data and "sysmon" in metrics_raw:
+        data["sysmon"] = metrics_raw["sysmon"]
+
     registry = data.get("registry") or (data.get("metrics") or {}).get("registry") or {}
     if registry and "registry" not in data:
         data["registry"] = registry
@@ -204,8 +213,16 @@ def normalize_live_data(raw):
         nodes = _synth_nodes_from_registry(registry, stats_by_topic)
     else:
         # 补齐 discovery topic 的 role/caps/type/freq 字段。
+        # 同时兼容 NodePlugin 格式: inputs[]/outputs[] → topics[]
         type_map = _topic_type_map(registry)
         for n in nodes:
+            if not n.get("topics") and (n.get("inputs") or n.get("outputs")):
+                topics = []
+                for tp in (n.get("inputs") or []):
+                    topics.append({"topic": tp, "role": "sub", "caps": 2})
+                for tp in (n.get("outputs") or []):
+                    topics.append({"topic": tp, "role": "pub", "caps": 1})
+                n["topics"] = topics
             for t in n.get("topics", []) or []:
                 topic = t.get("topic") or t.get("name", "")
                 caps = t.get("caps", t.get("capabilities", 0))

@@ -345,7 +345,7 @@ static int run_multi_process_mode(int duration, int stagger_ms, const char* self
 
 int main(int argc, char** argv) {
     const char* config_path = "config/pipeline.json";
-    int duration = 30;
+    int duration = 0;  /* 0 = 持续运行直到 Ctrl+C */
     int multi_mode = 0;
 
     for (int i = 1; i < argc; i++) {
