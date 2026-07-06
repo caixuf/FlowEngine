@@ -49,6 +49,7 @@ static inline int frenet_plan(FrenetHandle* h, double sx, double sy, double sv,
     { (void)h; (void)sx; (void)sy; (void)sv; (void)tv; (void)s; (void)d; (void)spd; (void)max_wp; return 0; }
 #endif
 #include "nuscenes_loader.h"
+#include "sysmonitor.h"
 #include <dirent.h>
 
 /* ── LiDAR 回放数据 ─────────────────────────────────────────── */
@@ -1103,6 +1104,7 @@ typedef struct {
     int       tid;
     ObstacleList latest_obstacles;   /**< 从 perception/obstacles 订阅 */
     bool         has_obstacles;
+    SysMonitor*  sysmon;             /**< 系统资源监控 */
 } MonitorTask;
 
 static void monitor_on_obstacles(const Message* msg, void* user_data) {
@@ -1122,6 +1124,7 @@ static int monitor_init(TaskBase* base) {
     transport_subscribe(g_transport, "perception/obstacles", monitor_on_obstacles, mt);
     discovery_advertise(g_discovery, "perception/obstacles", 0x0B5A010Eu,
                         CAP_SUBSCRIBER, 0);
+    mt->sysmon = sysmonitor_create();
     statem_send_event(&base->sm, SM_EVENT_START, base);
     LOG_INFO("monitor", "initialized (10Hz stats reporter, subscribed to perception/obstacles)");
     return 0;
@@ -1148,6 +1151,11 @@ static int monitor_execute(TaskBase* base) {
         /* ── Discovery stats ── */
         const TopologyGraph* topo = discovery_get_topology(g_discovery);
 
+        /* ── System resource snapshot ── */
+        SysMonitorSnapshot ssnap;
+        memset(&ssnap, 0, sizeof(ssnap));
+        if (mt->sysmon) sysmonitor_snapshot(mt->sysmon, &ssnap);
+
         printf("\n┌─── Monitor @ %lu ──────────────────────────┐\n",
                (unsigned long)time(NULL));
         printf("│ Bus:     pub=%lu del=%lu drop=%lu\n",
@@ -1160,6 +1168,30 @@ static int monitor_execute(TaskBase* base) {
         printf("│ Routes:  IPC=%d TCP=%d\n",
                transport_ipc_channel_count(g_transport),
                transport_remote_peer_count(g_transport));
+        if (mt->sysmon) {
+            printf("│ CPU:     %.1f%% (user=%.1f%% sys=%.1f%% iowait=%.1f%%) cores=%d\n",
+                   ssnap.cpu_total_pct, ssnap.cpu_user_pct,
+                   ssnap.cpu_sys_pct, ssnap.cpu_iowait_pct, ssnap.cpu_count);
+            printf("│ Mem:     %.1f%% used  %lluMB/%lluMB  RSS=%lluMB\n",
+                   ssnap.mem_used_pct,
+                   (unsigned long long)(ssnap.mem_used_kb / 1024),
+                   (unsigned long long)(ssnap.mem_total_kb / 1024),
+                   (unsigned long long)(ssnap.proc_rss_kb / 1024));
+            printf("│ Disk:    R=%.1fKB/s W=%.1fKB/s\n",
+                   ssnap.disk_read_bps / 1024.0, ssnap.disk_write_bps / 1024.0);
+            printf("│ Load:    %.2f %.2f %.2f  up=%.0fs\n",
+                   ssnap.load1, ssnap.load5, ssnap.load15, ssnap.uptime_sec);
+            if (ssnap.thread_count > 0) {
+                printf("│ Threads: %d\n", ssnap.thread_count);
+                for (int ti = 0; ti < ssnap.thread_count && ti < 6; ti++) {
+                    SysMonitorThreadSnapshot* th = &ssnap.threads[ti];
+                    printf("│   [%d] %-15s  cpu=%.1f%%  state=%c\n",
+                           (int)th->tid, th->name, th->cpu_pct, th->state);
+                }
+                if (ssnap.thread_count > 6)
+                    printf("│   ... (%d more)\n", ssnap.thread_count - 6);
+            }
+        }
         printf("└───────────────────────────────────────────┘\n");
 
         /* ── Export for FlowBoard dashboard (atomic write) ── */
@@ -1296,6 +1328,52 @@ static int monitor_execute(TaskBase* base) {
                     fprintf(jf, ",\"registry\":%s", reg_json);
                     free(reg_json);
                 }
+
+                /* ── Sysmon: CPU / memory / disk / load / threads ── */
+                fprintf(jf, ",\"sysmon\":{"
+                        "\"cpu_total_pct\":%.1f,"
+                        "\"cpu_user_pct\":%.1f,"
+                        "\"cpu_sys_pct\":%.1f,"
+                        "\"cpu_iowait_pct\":%.1f,"
+                        "\"cpu_idle_pct\":%.1f,"
+                        "\"cpu_count\":%d,"
+                        "\"mem_total_kb\":%llu,"
+                        "\"mem_used_kb\":%llu,"
+                        "\"mem_used_pct\":%.1f,"
+                        "\"mem_available_kb\":%llu,"
+                        "\"proc_rss_kb\":%llu,"
+                        "\"proc_vms_kb\":%llu,"
+                        "\"disk_read_bps\":%.0f,"
+                        "\"disk_write_bps\":%.0f,"
+                        "\"load1\":%.2f,"
+                        "\"load5\":%.2f,"
+                        "\"load15\":%.2f,"
+                        "\"uptime_sec\":%.0f,"
+                        "\"thread_count\":%d",
+                        ssnap.cpu_total_pct, ssnap.cpu_user_pct,
+                        ssnap.cpu_sys_pct, ssnap.cpu_iowait_pct,
+                        ssnap.cpu_idle_pct, ssnap.cpu_count,
+                        (unsigned long long)ssnap.mem_total_kb,
+                        (unsigned long long)ssnap.mem_used_kb,
+                        ssnap.mem_used_pct,
+                        (unsigned long long)ssnap.mem_available_kb,
+                        (unsigned long long)ssnap.proc_rss_kb,
+                        (unsigned long long)ssnap.proc_vms_kb,
+                        ssnap.disk_read_bps, ssnap.disk_write_bps,
+                        ssnap.load1, ssnap.load5, ssnap.load15,
+                        ssnap.uptime_sec,
+                        ssnap.thread_count);
+                fprintf(jf, ",\"threads\":[");
+                for (int ti = 0; ti < ssnap.thread_count; ti++) {
+                    SysMonitorThreadSnapshot* th = &ssnap.threads[ti];
+                    fprintf(jf, "%s{\"tid\":%d,\"name\":\"%s\","
+                            "\"cpu_pct\":%.1f,\"state\":\"%c\"}",
+                            ti > 0 ? "," : "",
+                            (int)th->tid, th->name,
+                            th->cpu_pct, th->state);
+                }
+                fprintf(jf, "]}");
+
                 fprintf(jf, "}}\n");
                 fclose(jf);
 
@@ -1311,7 +1389,11 @@ static int monitor_execute(TaskBase* base) {
 }
 
 static void monitor_cleanup(TaskBase* base) {
-    (void)base;
+    MonitorTask* mt = (MonitorTask*)base;
+    if (mt->sysmon) {
+        sysmonitor_destroy(mt->sysmon);
+        mt->sysmon = NULL;
+    }
 }
 
 static TaskInterface g_monitor_vtable = {

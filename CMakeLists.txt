@@ -166,13 +166,18 @@ if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
 endif()
 
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-if(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
+# Use system-installed Eigen if available (fastest path, no network/download needed)
+find_package(Eigen3 3.3 QUIET NO_MODULE)
+if(Eigen3_FOUND)
+    set(FLOWENGINE_HAVE_EIGEN TRUE)
+    message(STATUS "Eigen found (system) — frenet planner will be built")
+elseif(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
     # Add Eigen as interface library without building its tests/docs
     if(NOT TARGET Eigen3::Eigen)
         add_subdirectory("${_EIGEN_SRC_DIR}" "${CMAKE_BINARY_DIR}/_deps/eigen-build" EXCLUDE_FROM_ALL)
     endif()
     set(FLOWENGINE_HAVE_EIGEN TRUE)
-    message(STATUS "Eigen found — frenet planner will be built")
+    message(STATUS "Eigen found (downloaded) — frenet planner will be built")
 else()
     set(FLOWENGINE_HAVE_EIGEN FALSE)
     message(STATUS "Eigen not available — building without frenet planner (core + unit tests unaffected)")
@@ -226,6 +231,7 @@ set(CORE_SOURCES
     src/core/monitor_server.c
     src/core/mcap_writer.c
     src/core/mcap_reader.c
+    src/core/sysmonitor.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
