@@ -1149,6 +1149,8 @@ var _tmpScale = null; // pre-allocated for scale lerp
 // Road is STATIC at world origin. Ego moves through the world.
 // Camera follows ego. Other vehicles move independently.
 var _animT=0;
+// Obstacle height lookup — defined once, shared across all _renderFrame calls.
+var _OBS_H={truck:2.8,pedestrian:1.8,cyclist:1.7};
 function _renderFrame(){
   _animT+=0.016;
   var ego=window._carGroup; if(!ego)return;
@@ -1202,8 +1204,8 @@ function _renderFrame(){
       var ow=window._obsWorld[oi];
       if(ow){
         var L=ow.len||4,W=ow.wid||2;
-        // Type-based real height: keeps trucks tall, pedestrians slim.
-        var H=ow.type==='truck'?2.8:ow.type==='pedestrian'?1.8:ow.type==='cyclist'?1.7:1.5;
+        // Type-based real height: trucks tall, pedestrians slim.
+        var H=_OBS_H[ow.type]||1.5;
         // 按世界速度外推到当前时刻 → 60fps 平滑, 不再随 10Hz 数据跳动。
         var dtObs=Math.min(now-(ow.t0||now),1.0);
         var tx=ow.x+(ow.vx||0)*dtObs, tz=ow.z+(ow.vz||0)*dtObs;
@@ -1368,6 +1370,10 @@ function _2dAnimLoop(){
   draw2D();
 }
 
+// Obstacle color/label maps — defined once, shared across all draw2D calls.
+var OBS_COL={car:"#ff9944",truck:"#ff4422",pedestrian:"#44ee88",cyclist:"#44ccff",vehicle:"#ffaa33",unknown:"#aaaaaa"};
+var OBS_LBL={car:"CAR",truck:"TRUCK",pedestrian:"PED",cyclist:"CYC",vehicle:"VEH",unknown:"OBJ"};
+
 function draw2D(){
   if(!_2d.active||!_2d.ctx)return;
   var ctx=_2d.ctx, W=_2d.w, H=_2d.h;
@@ -1463,8 +1469,6 @@ function draw2D(){
   }
 
   // ── Obstacles (ADAS-HMI bounding-box style) ──
-  var OBS_COL={car:"#ff9944",truck:"#ff4422",pedestrian:"#44ee88",cyclist:"#44ccff",vehicle:"#ffaa33",unknown:"#aaaaaa"};
-  var OBS_LBL={car:"CAR",truck:"TRUCK",pedestrian:"PED",cyclist:"CYC",vehicle:"VEH",unknown:"OBJ"};
   window._obsTargets2d=window._obsTargets2d||[];
   // Dead-reckoning target: advance obstacle screen position using relative velocity
   // between data ticks so motion looks smooth at 60fps.
@@ -1477,6 +1481,8 @@ function draw2D(){
       // Data target in screen coords (data updates ~10Hz)
       var dtx=carX-(o.y||0)*s, dty=carY-(o.x||0)*s;
       var cur=window._obsTargets2d[i];
+      // isNaN guard: handles stale entries (e.g. index reuse after obstacle count change)
+      // that may have been set to NaN through a failed lerp in a previous frame.
       if(!cur||isNaN(cur.x)){cur={x:dtx,y:dty,lastDataX:o.x,lastDataY:o.y,lastDataT:_dtNow}; window._obsTargets2d[i]=cur;}
       // Detect data update
       if(o.x!==cur.lastDataX||o.y!==cur.lastDataY){cur.lastDataX=o.x;cur.lastDataY=o.y;cur.lastDataT=_dtNow;}
@@ -1528,7 +1534,7 @@ function draw2D(){
     [{x:20,y:-1.75,col:"#ff9944",lbl:"CAR"},{x:40,y:1.75,col:"#ff4422",lbl:"CAR"},{x:30,y:8,col:"#44ee88",lbl:"PED"}].forEach(function(p){
       var bx=carX-p.y*s, by=carY-p.x*s;
       ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(bx-13+2,by-9+2,26,18);
-      ctx.fillStyle=p.col.replace('#','')==='44ee88'?"rgba(68,238,136,0.12)":"rgba(255,153,68,0.12)";
+      ctx.fillStyle="rgba("+hexToRgb(p.col)+",0.12)";
       ctx.fillRect(bx-13,by-9,26,18);
       ctx.strokeStyle=p.col; ctx.lineWidth=1.5; ctx.strokeRect(bx-13,by-9,26,18);
       ctx.fillStyle=p.col; ctx.font="bold 8px 'JetBrains Mono',monospace"; ctx.textAlign="center"; ctx.textBaseline="middle";
