@@ -150,33 +150,23 @@ static void calc_cpu_pct(const CpuRaw* prev, const CpuRaw* cur,
     *total_pct  = (double)(total - d_idle - d_iowait) * inv;
 }
 
-/* 解析 /proc/meminfo 中的一个字段 (kB) */
-static uint64_t read_meminfo_field(const char* target) {
-    FILE* f = fopen(PROC_MEMINFO_PATH, "r");
-    if (!f) return 0;
-    char key[64];
-    uint64_t val = 0;
-    while (fscanf(f, "%63s %llu kB\n", key, (unsigned long long*)&val) == 2) {
-        if (strcmp(key, target) == 0) { fclose(f); return val; }
-    }
-    fclose(f);
-    return 0;
-}
-
 /* 一次读取所需全部 meminfo 字段 */
 static void read_meminfo(uint64_t* total, uint64_t* free_kb,
                          uint64_t* cached, uint64_t* available) {
     FILE* f = fopen(PROC_MEMINFO_PATH, "r");
     *total = *free_kb = *cached = *available = 0;
     if (!f) return;
-    char key[64];
-    uint64_t val;
-    char unit[8];
-    while (fscanf(f, "%63s %llu %7s\n", key, (unsigned long long*)&val, unit) >= 2) {
-        if      (strcmp(key, "MemTotal:")     == 0) *total     = val;
-        else if (strcmp(key, "MemFree:")      == 0) *free_kb   = val;
-        else if (strcmp(key, "Cached:")       == 0) *cached    = val;
-        else if (strcmp(key, "MemAvailable:") == 0) *available = val;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char key[64];
+        uint64_t val = 0;
+        /* All memory fields we care about have a "kB" unit suffix */
+        if (sscanf(line, "%63s %llu kB", key, (unsigned long long*)&val) == 2) {
+            if      (strcmp(key, "MemTotal:")     == 0) *total     = val;
+            else if (strcmp(key, "MemFree:")      == 0) *free_kb   = val;
+            else if (strcmp(key, "Cached:")       == 0) *cached    = val;
+            else if (strcmp(key, "MemAvailable:") == 0) *available = val;
+        }
     }
     fclose(f);
 }
@@ -247,43 +237,55 @@ static void read_proc_mem(uint64_t* rss_kb, uint64_t* vms_kb) {
     FILE* f = fopen(PROC_SELF_STATUS, "r");
     *rss_kb = *vms_kb = 0;
     if (!f) return;
-    char key[32];
-    uint64_t val;
-    while (fscanf(f, "%31s %llu kB\n", key, (unsigned long long*)&val) >= 1) {
-        if      (strcmp(key, "VmRSS:") == 0) *rss_kb = val;
-        else if (strcmp(key, "VmSize:") == 0) *vms_kb = val;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32];
+        uint64_t val = 0;
+        /* Only lines with "kB" suffix carry memory values */
+        if (sscanf(line, "%31s %llu kB", key, (unsigned long long*)&val) == 2) {
+            if      (strcmp(key, "VmRSS:") == 0) *rss_kb = val;
+            else if (strcmp(key, "VmSize:") == 0) *vms_kb = val;
+        }
     }
     fclose(f);
 }
 
-/* 读取单个线程 stat: utime/stime/state/comm */
+/* 读取单个线程 stat: utime/stime/state
+ * /proc/[pid]/stat 格式: "pid (comm) state ppid ... utime(14) stime(15) ..."
+ * comm 字段用括号括起, 可含空格, 不能用 %s 直接解析; 需跳过最后一个 ')' 后再继续。 */
 static int read_thread_stat(pid_t tid, uint64_t* utime, uint64_t* stime, char* state) {
     char path[64];
     snprintf(path, sizeof(path), PROC_SELF_TASK "/%d/stat", (int)tid);
     FILE* f = fopen(path, "r");
     if (!f) return -1;
-    /* 格式: pid (comm) state ppid ... utime stime ... (字段14,15) */
-    int pid_r;
-    char comm[64];
-    char st;
+
+    char line[512];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    fclose(f);
+
+    /* 跳过 pid 字段, 找到最后一个 ')' (comm 字段结束) */
+    char* rp = strrchr(line, ')');
+    if (!rp) return -1;
+    rp++;  /* 指向 ')' 之后的字符 */
+
+    /* 此后格式: " state ppid pgrp session tty tpgid flags
+     *            minflt cminflt majflt cmajflt utime stime ..." */
+    char st = '?';
     int ppid, pgrp, session, tty, tpgid;
     unsigned int flags;
-    uint64_t minflt, cminflt, majflt, cmajflt;
-    uint64_t ut, st2;
-    int r = fscanf(f,
-                   "%d %63s %c %d %d %d %d %d %u"
+    uint64_t minflt, cminflt, majflt, cmajflt, ut, st2;
+    int r = sscanf(rp,
+                   " %c %d %d %d %d %d %u"
                    " %llu %llu %llu %llu"
                    " %llu %llu",
-                   &pid_r, comm, &st, &ppid, &pgrp,
-                   &session, &tty, &tpgid, &flags,
+                   &st, &ppid, &pgrp, &session, &tty, &tpgid, &flags,
                    (unsigned long long*)&minflt,
                    (unsigned long long*)&cminflt,
                    (unsigned long long*)&majflt,
                    (unsigned long long*)&cmajflt,
                    (unsigned long long*)&ut,
                    (unsigned long long*)&st2);
-    fclose(f);
-    if (r < 15) return -1;
+    if (r < 13) return -1;
     *utime = ut;
     *stime = st2;
     if (state) *state = st;
