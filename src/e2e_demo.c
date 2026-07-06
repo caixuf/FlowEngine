@@ -447,6 +447,12 @@ static int fusion_init(TaskBase* base) {
     transport_subscribe(g_transport, "sensor/lidar", fusion_on_lidar, ft);
     transport_subscribe(g_transport, "sensor/gps",   fusion_on_gps,   ft);
 
+    /* ── 发现: 广告订阅 (多进程路由必须) ── */
+    discovery_advertise(g_discovery, "sensor/lidar", LIDARFRAME_TYPE_ID,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(g_discovery, "sensor/gps",   GPSDATA_TYPE_ID,
+                        CAP_SUBSCRIBER, 0);
+
     /* ── 发现: 广告融合输出 ── */
     discovery_advertise(g_discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_FUSION | CAP_PUBLISHER, 10.0);
@@ -1411,14 +1417,17 @@ static TaskInterface g_monitor_vtable = {
 int main(int argc, char** argv) {
     int duration = 10;
     bool smoke_mode = false;
+    bool multi_mode = false;
     const char* role = NULL;
     const char* node_name = "e2e_node";
 
-    /* Parse args: flow_e2e [--smoke] [--role <name>] [--lidar <dir>] [duration_sec] */
+    /* Parse args: flow_e2e [--smoke] [--multi] [--role <name>] [--lidar <dir>] [duration_sec] */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--smoke") == 0) {
             smoke_mode = true;
             duration   = 5;  /* smoke: short run */
+        } else if (strcmp(argv[i], "--multi") == 0) {
+            multi_mode = true;
         } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
             role = argv[++i];
             char name_buf[64];
@@ -1459,6 +1468,15 @@ int main(int argc, char** argv) {
         LOG_INFO("e2e", "║  FlowEngine End-to-End Demo (%ds)        ║", duration);
         LOG_INFO("e2e", "║  感知→融合→控制→规划→监控  全组件串联    ║");
         LOG_INFO("e2e", "╚══════════════════════════════════════════╝");
+    }
+
+    /* ── 多进程模式入口 (--multi: fork+exec 各 role) ── */
+    if (!role && multi_mode) {
+        /* TODO: fork+exec each role in a separate process, e.g.:
+         *   char* args[] = { argv[0], "--role", "perception", NULL };
+         *   execv(argv[0], args);
+         * For now, fall through to single-process mode with a warning. */
+        LOG_WARN("e2e", "--multi: auto-fork not yet implemented; running single-process");
     }
 
     /* ── 序列化: 注册 ADAS 类型 ── */
@@ -1588,12 +1606,12 @@ int main(int argc, char** argv) {
              /* count hot-reloadable */ 2);
 
     /* ── 启动任务（先启动消费者，再启动生产者，确保 trigger 就绪）── */
-    task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)");
-    task_start(&plt->base); LOG_INFO("e2e", "planning:   started (NORMAL, choreo)");
-    task_start(&ct->base);  LOG_INFO("e2e", "control:    started (NORMAL, choreo)");
-    task_start(&mt->base);  LOG_INFO("e2e", "monitor:    started (10Hz)");
+    if (ft)  { task_start(&ft->base);  LOG_INFO("e2e", "fusion:     started (HIGH, choreo)"); }
+    if (plt) { task_start(&plt->base); LOG_INFO("e2e", "planning:   started (NORMAL, choreo)"); }
+    if (ct)  { task_start(&ct->base);  LOG_INFO("e2e", "control:    started (NORMAL, choreo)"); }
+    if (mt)  { task_start(&mt->base);  LOG_INFO("e2e", "monitor:    started (10Hz)"); }
     usleep(200000);  /* wait 200ms for subscriptions to take effect */
-    task_start(&pt->base);  LOG_INFO("e2e", "perception: started (CRITICAL, 10Hz)");
+    if (pt)  { task_start(&pt->base);  LOG_INFO("e2e", "perception: started (CRITICAL, 10Hz)"); }
 
     /* ── 信号处理 ── */
     signal(SIGINT, sig_handler);
@@ -1624,11 +1642,11 @@ int main(int argc, char** argv) {
 
     /* ── 等待任务结束 ── */
     LOG_INFO("e2e", "stopping tasks...");
-    task_stop(&pt->base);
-    task_stop(&ft->base);
-    task_stop(&plt->base);
-    task_stop(&ct->base);
-    task_stop(&mt->base);
+    if (pt)  task_stop(&pt->base);
+    if (ft)  task_stop(&ft->base);
+    if (plt) task_stop(&plt->base);
+    if (ct)  task_stop(&ct->base);
+    if (mt)  task_stop(&mt->base);
 
     /* ── 统计摘要 ── */
     printf("\n╔══════════════════════════════════════════╗\n");
@@ -1637,20 +1655,23 @@ int main(int argc, char** argv) {
 
     /* ── 状态机 ── */
     printf("║  State Machines:                         ║\n");
-    printf("║    perception: %-26s ║\n",
+    if (pt) printf("║    perception: %-26s ║\n",
            statem_state_name(NULL, statem_current(&pt->base.sm)));
-    printf("║    fusion:     %-26s ║\n",
+    if (ft) printf("║    fusion:     %-26s ║\n",
            statem_state_name(NULL, statem_current(&ft->base.sm)));
-    printf("║    control:    %-26s ║\n",
+    if (ct) printf("║    control:    %-26s ║\n",
            statem_state_name(NULL, statem_current(&ct->base.sm)));
 
     /* ── 延迟 ── */
-    LatencyStats ls = latency_tracker_stats(scheduler_get_latency(g_scheduler, ft->tid));
-    printf("║  Fusion Latency (us):                    ║\n");
-    printf("║    avg=%lu p50=%lu p99=%lu min=%lu max=%lu   ║\n",
-           (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
-           (unsigned long)ls.p99_us, (unsigned long)ls.min_us,
-           (unsigned long)ls.max_us);
+    LatencyStats ls = {0};
+    if (ft) {
+        ls = latency_tracker_stats(scheduler_get_latency(g_scheduler, ft->tid));
+        printf("║  Fusion Latency (us):                    ║\n");
+        printf("║    avg=%lu p50=%lu p99=%lu min=%lu max=%lu   ║\n",
+               (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
+               (unsigned long)ls.p99_us, (unsigned long)ls.min_us,
+               (unsigned long)ls.max_us);
+    }
 
     /* ── 传输统计 ── */
     TransportStats ts;
@@ -1687,15 +1708,19 @@ int main(int argc, char** argv) {
         if (!ok2) smoke_result = 1;
 
         /* 3. Fusion average latency < 200ms */
-        int ok3 = (ls.avg_us > 0 && ls.avg_us < 200000ULL);
-        printf("  [%s] fusion avg_latency < 200ms  (got %lu us)\n",
-               ok3 ? "PASS" : "FAIL", (unsigned long)ls.avg_us);
-        if (!ok3) smoke_result = 1;
+        if (ft) {
+            int ok3 = (ls.avg_us > 0 && ls.avg_us < 200000ULL);
+            printf("  [%s] fusion avg_latency < 200ms  (got %lu us)\n",
+                   ok3 ? "PASS" : "FAIL", (unsigned long)ls.avg_us);
+            if (!ok3) smoke_result = 1;
+        } else {
+            printf("  [SKIP] fusion avg_latency (fusion not running in this role)\n");
+        }
 
         /* 4. No tasks ended in ERROR state */
-        int ok4 = (statem_current(&pt->base.sm) != TASK_STATE_ERROR &&
-                   statem_current(&ft->base.sm) != TASK_STATE_ERROR &&
-                   statem_current(&ct->base.sm) != TASK_STATE_ERROR);
+        int ok4 = (!pt || statem_current(&pt->base.sm) != TASK_STATE_ERROR) &&
+                  (!ft || statem_current(&ft->base.sm) != TASK_STATE_ERROR) &&
+                  (!ct || statem_current(&ct->base.sm) != TASK_STATE_ERROR);
         printf("  [%s] no task in ERROR state\n", ok4 ? "PASS" : "FAIL");
         if (!ok4) smoke_result = 1;
 
