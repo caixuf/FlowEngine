@@ -119,13 +119,17 @@ set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
 # never registered with CTest.  We restore it immediately after so that
 # FlowEngine's own enable_testing() / add_test() calls work normally.
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    Eigen
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG        3.4.0
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(Eigen)
+# Use system-installed Eigen if available (avoids network fetch)
+find_package(Eigen3 3.3 QUIET NO_MODULE)
+if(NOT Eigen3_FOUND)
+    FetchContent_Declare(
+        Eigen
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG        3.4.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(Eigen)
+endif()
 set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 
 # =============================================================================
@@ -175,6 +179,7 @@ set(CORE_SOURCES
     src/core/monitor_server.c
     src/core/mcap_writer.c
     src/core/mcap_reader.c
+    src/core/sysmonitor.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
