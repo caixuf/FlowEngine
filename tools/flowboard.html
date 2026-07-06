@@ -1688,14 +1688,19 @@ setTimeout(function(){
   // Resize 3D renderer once card is visible
   setTimeout(resize3D, 200);
   // Re-resize whenever the browser window is resized (orientation change, snap layout, etc.)
-  window.addEventListener('resize', resize3D);
-  // On mobile the 3D card starts off-screen; re-resize when it scrolls into view
+  // Debounce to avoid firing resize3D on every pixel during a drag-resize.
+  var _resizeDebounce;
+  window.addEventListener('resize', function(){
+    clearTimeout(_resizeDebounce);
+    _resizeDebounce=setTimeout(resize3D, 100);
+  });
+  // On mobile the 3D card starts off-screen; re-resize once when it first scrolls into view.
   try{
-    var _s3obs=new IntersectionObserver(function(entries){
-      if(entries[0].isIntersecting)resize3D();
+    var scene3dObserver=new IntersectionObserver(function(entries){
+      if(entries[0].isIntersecting){resize3D();scene3dObserver.disconnect();}
     },{threshold:0.1});
-    var _s3el=document.getElementById('scene3d');
-    if(_s3el)_s3obs.observe(_s3el);
+    var scene3dElement=document.getElementById('scene3d');
+    if(scene3dElement)scene3dObserver.observe(scene3dElement);
   }catch(e){}
 },100);
 
