@@ -1,5 +1,6 @@
 # 编译输出目录
 build/
+build_asan_rel/
 bin/
 lib/
 obj/
