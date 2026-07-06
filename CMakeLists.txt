@@ -113,8 +113,12 @@ FetchContent_MakeAvailable(flowcoro)
 
 # ── Eigen3 (header-only linear algebra, for Frenet planner) ──
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
-set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+# Eigen uses BUILD_TESTING (not EIGEN_BUILD_TESTING) to gate its test suite.
+# Disable it before FetchContent_MakeAvailable so Eigen's BLAS/unit tests are
+# never registered with CTest.  We restore it immediately after so that
+# FlowEngine's own enable_testing() / add_test() calls work normally.
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     Eigen
     GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
@@ -122,6 +126,7 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(Eigen)
+set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 
 # =============================================================================
 # flowcoro_headers — 全局 INTERFACE 目标
