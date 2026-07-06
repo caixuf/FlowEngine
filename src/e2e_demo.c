@@ -1472,8 +1472,9 @@ int main(int argc, char** argv) {
 
     /* ── 多进程模式入口 (--multi: fork+exec 各 role) ── */
     if (!role && multi_mode) {
-        /* TODO: fork+exec each role in a separate process using
-         * execv(argv[0], {"--role","perception",...}, NULL) etc.
+        /* TODO: fork+exec each role in a separate process, e.g.:
+         *   char* args[] = { argv[0], "--role", "perception", NULL };
+         *   execv(argv[0], args);
          * For now, fall through to single-process mode with a warning. */
         LOG_WARN("e2e", "--multi: auto-fork not yet implemented; running single-process");
     }
@@ -1707,10 +1708,14 @@ int main(int argc, char** argv) {
         if (!ok2) smoke_result = 1;
 
         /* 3. Fusion average latency < 200ms */
-        int ok3 = !ft || (ls.avg_us > 0 && ls.avg_us < 200000ULL);
-        printf("  [%s] fusion avg_latency < 200ms  (got %lu us)\n",
-               ok3 ? "PASS" : "FAIL", (unsigned long)ls.avg_us);
-        if (!ok3) smoke_result = 1;
+        if (ft) {
+            int ok3 = (ls.avg_us > 0 && ls.avg_us < 200000ULL);
+            printf("  [%s] fusion avg_latency < 200ms  (got %lu us)\n",
+                   ok3 ? "PASS" : "FAIL", (unsigned long)ls.avg_us);
+            if (!ok3) smoke_result = 1;
+        } else {
+            printf("  [SKIP] fusion avg_latency (fusion not running in this role)\n");
+        }
 
         /* 4. No tasks ended in ERROR state */
         int ok4 = (!pt || statem_current(&pt->base.sm) != TASK_STATE_ERROR) &&
