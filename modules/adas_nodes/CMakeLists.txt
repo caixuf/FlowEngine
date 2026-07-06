@@ -74,21 +74,25 @@ target_link_libraries(sim_world ${NODE_LINK_LIBS})
 # planning_node: Frenet 轨迹规划（需要 C++ 运行时的 frenet_bridge）
 find_library(FRENET_BRIDGE
     NAMES frenet_bridge
-    HINTS ${FLOWENGINE_BUILD}/lib
+    HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
 find_library(FRENET_PLANNER
     NAMES frenet_planner
-    HINTS ${FLOWENGINE_BUILD}/lib
+    HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
-add_library(planning_node SHARED planning_node.c)
-target_link_libraries(planning_node ${NODE_LINK_LIBS}
-    ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++)
-target_include_directories(planning_node PRIVATE
-    ${FLOW_ROOT}/third_party/frenet_planner/src
-    ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
-)
-if(FRENET_BRIDGE)
+if(FRENET_BRIDGE AND FRENET_PLANNER)
+    add_library(planning_node SHARED planning_node.c)
+    target_link_libraries(planning_node ${NODE_LINK_LIBS}
+        ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++)
+    target_include_directories(planning_node PRIVATE
+        ${FLOW_ROOT}/third_party/frenet_planner/src
+        ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
+    )
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")
+    message(STATUS "planning_node: frenet_planner found at ${FRENET_PLANNER}")
+    set(PLANNING_NODE_TARGET planning_node)
+else()
+    message(WARNING "planning_node disabled: missing frenet_bridge/frenet_planner (searched in ${FLOWENGINE_BUILD}/lib and ${FLOW_ROOT}/build-algo/lib)")
 endif()
 
 # control_node: PID 纵向/横向控制
@@ -100,7 +104,7 @@ add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sim_world planning_node control_node monitor_node
+install(TARGETS fusion_node perception_node sim_world ${PLANNING_NODE_TARGET} control_node monitor_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

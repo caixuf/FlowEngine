@@ -32,9 +32,10 @@ logs/
 *.log
 
 # 配置文件（除了示例配置）
-config/*.json
+# config/*.json
 !config/demo.json
 !config/example.json
+!config/pipeline.json
 
 # 临时文件
 *.tmp
