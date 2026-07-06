@@ -107,13 +107,13 @@ static void handle_interactive_commands(ProcessManager* manager) {
             printf("Loaded processes (%d):\n", n);
             printf("  %-20s %-8s %-8s %s\n", "NAME", "STATE", "PRIO", "RESTARTS");
             for (int k = 0; k < n; k++) {
-                const char* pname = (procs[k].sched_priority == 3) ? "crit" :
+                const char* prio_label = (procs[k].sched_priority == 3) ? "crit" :
                                     (procs[k].sched_priority == 2) ? "high" :
                                     (procs[k].sched_priority == 1) ? "norm" : "low";
                 printf("  %-20s %-8s %-8s %u\n",
                        procs[k].name,
                        procs[k].is_running ? "RUNNING" : "STOPPED",
-                       pname,
+                       prio_label,
                        procs[k].restart_count);
             }
             if (n == 0) printf("  (no processes loaded)\n");

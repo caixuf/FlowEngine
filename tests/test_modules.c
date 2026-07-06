@@ -652,7 +652,7 @@ static void test_bus_qos_deadline_violations(void) {
     /* Very tight deadline: 1ms. With a slow subscriber the dispatch will exceed it. */
     TopicQos q = { .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_OLDEST, .deadline_ms = 1 };
     message_bus_set_topic_qos(bus, "t/dl2", &q);
-    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 5000 }; /* 5ms per callback >> 1ms deadline */
+    BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 5000 }; /* 5ms per callback, much greater than 1ms deadline */
     message_bus_subscribe(bus, "t/dl2", bus_counter_cb, &c);
 
     const int N = 5;

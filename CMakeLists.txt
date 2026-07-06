@@ -150,7 +150,7 @@ if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
     execute_process(
         COMMAND ${_GIT_EXE} clone
             --depth 1 --branch 3.4.0 --quiet
-            -c credential.helper=
+            -c credential.helper=   # disable interactive credential prompts so the clone fails fast if auth is needed
             https://github.com/libeigen/eigen.git
             "${_EIGEN_SRC_DIR}"
         TIMEOUT 60
