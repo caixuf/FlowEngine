@@ -1,13 +1,18 @@
 #include "process_manager.h"
 #include "config_manager.h"
+#include "message_bus.h"
+#include "param_registry.h"
 #include "logger.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 
 static ProcessManager* g_manager = NULL;
+static MessageBus*     g_bus     = NULL;
 
 /**
  * 信号处理函数
@@ -20,6 +25,10 @@ static void signal_handler(int sig) {
         process_manager_destroy(g_manager);
         g_manager = NULL;
     }
+    if (g_bus) {
+        message_bus_destroy(g_bus);
+        g_bus = NULL;
+    }
 
     log_shutdown();
     exit(0);
@@ -29,8 +38,9 @@ static void signal_handler(int sig) {
  * 打印使用帮助
  */
 static void print_usage(const char* program_name) {
-    printf("Usage: %s <config_file>\n", program_name);
-    printf("  config_file: JSON configuration file path\n");
+    printf("Usage: %s [--daemon] <config_file>\n", program_name);
+    printf("  --daemon     Run in background (no interactive mode)\n");
+    printf("  config_file  JSON configuration file path\n");
     printf("\nExample config file:\n");
     printf("{\n");
     printf("  \"log_file\": \"launcher.log\",\n");
@@ -125,8 +135,113 @@ static void handle_interactive_commands(ProcessManager* manager) {
     }
 }
 
+/**
+ * 将配置文件中声明的 publish QoS 写入消息总线。
+ * 支持 depth / policy / reliability / deadline_ms / lifespan_ms。
+ */
+static void apply_config_qos(MessageBus* bus, const LauncherConfig* cfg) {
+    if (!bus || !cfg) return;
+    for (int i = 0; i < cfg->process_count; i++) {
+        const ProcessConfig* pc = &cfg->processes[i];
+        for (int k = 0; k < pc->publish_count; k++) {
+            const TopicDecl* td = &pc->publish[k];
+            if (td->topic[0] == '\0') continue;
+            if (td->qos_depth == 0 && td->qos_policy[0] == '\0') continue;
+
+            TopicQos qos;
+            memset(&qos, 0, sizeof(qos));
+            qos.depth = td->qos_depth > 0 ? (uint32_t)td->qos_depth : 10;
+
+            if (strstr(td->qos_policy, "block"))
+                qos.policy = QOS_BLOCK;
+            else if (strstr(td->qos_policy, "drop_latest"))
+                qos.policy = QOS_DROP_LATEST;
+            else
+                qos.policy = QOS_DROP_OLDEST;
+
+            if (strstr(td->qos_policy, "reliable"))
+                qos.reliability = QOS_RELIABLE;
+            else
+                qos.reliability = QOS_BEST_EFFORT;
+
+            message_bus_set_topic_qos(bus, td->topic, &qos);
+            LOG_INFO("launcher", "  qos[%s]: depth=%u policy=%s reliability=%s",
+                     td->topic, qos.depth,
+                     (qos.policy == QOS_BLOCK) ? "block" :
+                     (qos.policy == QOS_DROP_LATEST) ? "drop_latest" : "drop_oldest",
+                     (qos.reliability == QOS_RELIABLE) ? "reliable" : "best_effort");
+        }
+    }
+}
+
+/**
+ * 将配置文件中声明的 subscribe remap 规则写入消息总线。
+ */
+static void apply_config_remaps(MessageBus* bus, const LauncherConfig* cfg) {
+    if (!bus || !cfg) return;
+    for (int i = 0; i < cfg->process_count; i++) {
+        const ProcessConfig* pc = &cfg->processes[i];
+        for (int k = 0; k < pc->subscribe_count; k++) {
+            const TopicDecl* td = &pc->subscribe[k];
+            if (td->topic[0] == '\0' || td->remap[0] == '\0') continue;
+            message_bus_add_remap(bus, td->topic, td->remap);
+            LOG_INFO("launcher", "  remap: %s → %s", td->topic, td->remap);
+        }
+    }
+}
+
+/**
+ * 将配置文件中声明的 params 写入 param_registry。
+ * 格式：每个 process 的 params 字段为 JSON object，key=param名，value=初始值。
+ */
+static void apply_config_params(const LauncherConfig* cfg) {
+    if (!cfg) return;
+    for (int i = 0; i < cfg->process_count; i++) {
+        const ProcessConfig* pc = &cfg->processes[i];
+        if (pc->params[0] == '\0') continue;
+        /* params 字段已在 config_manager.c 中以 JSON 字符串形式保存。
+         * 注册为字符串参数，供插件通过 param_get_string() 读取。 */
+        char param_name[128];
+        snprintf(param_name, sizeof(param_name), "%s.params", pc->name);
+        param_register_string(param_name, pc->params, "Process params JSON blob");
+    }
+}
+
+/**
+ * 进入 daemon 模式：fork 到后台，关闭 stdin/stdout/stderr。
+ */
+static int daemonize(void) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid > 0) exit(0);  /* parent exits */
+
+    setsid();
+
+    /* Redirect standard fds to /dev/null */
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
+    bool daemon_mode = false;
+    const char* config_file = NULL;
+
+    /* Parse arguments */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--daemon") == 0) {
+            daemon_mode = true;
+        } else if (argv[i][0] != '-') {
+            config_file = argv[i];
+        }
+    }
+
+    if (!config_file) {
         print_usage(argv[0]);
         return 1;
     }
@@ -136,20 +251,44 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
     
     // 加载配置
-    LauncherConfig* config = config_load(argv[1]);
+    LauncherConfig* config = config_load(config_file);
     if (!config) {
-        printf("Failed to load config file: %s\n", argv[1]);
+        printf("Failed to load config file: %s\n", config_file);
         return 1;
+    }
+
+    // daemon 模式：fork 到后台（在日志初始化之前，避免文件描述符问题）
+    if (daemon_mode) {
+        if (daemonize() != 0) {
+            fprintf(stderr, "Failed to daemonize\n");
+            config_free(config);
+            return 1;
+        }
     }
     
     // 初始化全局日志系统
     log_init((LogLevel)(config->log_level & 0xff), config->log_file);
-    LOG_INFO("launcher", "starting...");
+    LOG_INFO("launcher", "starting... (daemon=%s)", daemon_mode ? "yes" : "no");
+
+    // 创建共享消息总线（供 QoS/remap 配置使用）
+    g_bus = message_bus_create("launcher_bus");
+    if (!g_bus) {
+        LOG_WARN("launcher", "Failed to create message bus; QoS/remap config skipped");
+    } else {
+        // 应用 QoS 配置
+        apply_config_qos(g_bus, config);
+        // 应用 topic remap 规则
+        apply_config_remaps(g_bus, config);
+    }
+
+    // 注册进程参数到 param_registry
+    apply_config_params(config);
 
     // 创建进程管理器
     g_manager = process_manager_create(default_log_callback);
     if (!g_manager) {
         LOG_ERROR("launcher", "Failed to create process manager");
+        if (g_bus) { message_bus_destroy(g_bus); g_bus = NULL; }
         log_shutdown();
         config_free(config);
         return 1;
@@ -200,8 +339,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 进入交互模式
-    handle_interactive_commands(g_manager);
+    // 交互模式：若是 tty 且非 daemon，进入交互命令行；否则等待信号
+    if (!daemon_mode && isatty(STDIN_FILENO)) {
+        handle_interactive_commands(g_manager);
+    } else {
+        LOG_INFO("launcher", "Running in non-interactive mode, waiting for signal...");
+        pause();  /* sleep until SIGINT/SIGTERM */
+    }
 
     // 清理资源
     LOG_INFO("launcher", "shutting down...");
@@ -209,6 +353,11 @@ int main(int argc, char* argv[]) {
     if (g_manager) {
         process_manager_stop_all(g_manager);
         process_manager_destroy(g_manager);
+        g_manager = NULL;
+    }
+    if (g_bus) {
+        message_bus_destroy(g_bus);
+        g_bus = NULL;
     }
     
     config_free(config);

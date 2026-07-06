@@ -65,6 +65,16 @@ typedef struct {
 
 #define MAX_PENDING_REPLIES 16
 
+/* ── Remap table entry ────────────────────────────────── */
+
+#define BUS_MAX_REMAPS 32
+
+typedef struct {
+    char from[MSG_BUS_MAX_TOPIC_LEN];
+    char to[MSG_BUS_MAX_TOPIC_LEN];
+    bool active;
+} RemapEntry;
+
 /* ── MessageBus ───────────────────────────────────────── */
 
 struct MessageBus {
@@ -118,6 +128,11 @@ struct MessageBus {
     } topic_entries[BUS_MAX_TOPIC_ENTRIES];
     int        topic_count;
     pthread_mutex_t topic_mutex;
+
+    /* ── Topic remap table ─────────────────────────────── */
+    RemapEntry remaps[BUS_MAX_REMAPS];
+    int        remap_count;
+    pthread_mutex_t remap_mutex;
 };
 
 /* ── Helpers ──────────────────────────────────────────── */
@@ -392,6 +407,7 @@ MessageBus* message_bus_create(const char* bus_name) {
     atomic_init(&bus->stat_zc_published, 0);
     atomic_init(&bus->stat_zc_delivered, 0);
     pthread_mutex_init(&bus->topic_mutex, NULL);
+    pthread_mutex_init(&bus->remap_mutex, NULL);
 
     atomic_store(&bus->running, true);
     if (pthread_create(&bus->dispatch_thread, NULL, dispatch_thread_fn, bus) != 0) {
@@ -418,6 +434,7 @@ void message_bus_destroy(MessageBus* bus) {
     pthread_mutex_destroy(&bus->svc_mutex);
     pthread_mutex_destroy(&bus->reply_mutex);
     pthread_mutex_destroy(&bus->topic_mutex);
+    pthread_mutex_destroy(&bus->remap_mutex);
 
     for (int i = 0; i < MAX_PENDING_REPLIES; i++) {
         pthread_mutex_destroy(&bus->reply_slots[i].mutex);
@@ -433,9 +450,22 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     if (!bus || !topic) return ERR_INVALID_PARAM;
     if (size > MSG_BUS_MAX_DATA_SIZE) return ERR_OVERFLOW;
 
+    /* ── Remap: resolve topic to its routing target ── */
+    char resolved_topic[MSG_BUS_MAX_TOPIC_LEN];
+    snprintf(resolved_topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    pthread_mutex_lock(&bus->remap_mutex);
+    for (int i = 0; i < bus->remap_count; i++) {
+        if (bus->remaps[i].active &&
+            strcmp(bus->remaps[i].from, topic) == 0) {
+            snprintf(resolved_topic, MSG_BUS_MAX_TOPIC_LEN, "%s", bus->remaps[i].to);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&bus->remap_mutex);
+
     Message msg;
     memset(&msg, 0, sizeof(msg));
-    snprintf(msg.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    snprintf(msg.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", resolved_topic);
     if (sender) snprintf(msg.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     msg.msg_id       = atomic_fetch_add(&bus->msg_id_counter, 1);
     msg.type         = MSG_TYPE_PUBLISH;
@@ -447,13 +477,13 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     pthread_mutex_lock(&bus->topic_mutex);
     int ti = -1;
     for (int i = 0; i < bus->topic_count; i++) {
-        if (strcmp(bus->topic_entries[i].topic, topic) == 0) { ti = i; break; }
+        if (strcmp(bus->topic_entries[i].topic, resolved_topic) == 0) { ti = i; break; }
     }
     /* Auto-register topic if new */
     if (ti < 0 && bus->topic_count < BUS_MAX_TOPIC_ENTRIES) {
         ti = bus->topic_count++;
         memset(&bus->topic_entries[ti], 0, sizeof(bus->topic_entries[ti]));
-        snprintf(bus->topic_entries[ti].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+        snprintf(bus->topic_entries[ti].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", resolved_topic);
         bus->topic_entries[ti].active = true;
         bus->topic_entries[ti].qos.policy = QOS_DROP_OLDEST;
     }
@@ -471,7 +501,11 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
 
         /* Enforce per-topic depth using accurate in-flight (pending) count */
         if (bus->topic_entries[ti].pending_count >= depth) {
-            switch (q->policy) {
+            /* QOS_RELIABLE overrides policy: always block to guarantee delivery */
+            QosPolicy effective_policy = (q->reliability == QOS_RELIABLE)
+                                         ? QOS_BLOCK
+                                         : q->policy;
+            switch (effective_policy) {
                 case QOS_DROP_OLDEST:
                     /* Evict the oldest queued message of this topic (done below,
                      * outside topic_mutex, to preserve lock ordering) */
@@ -482,9 +516,12 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
                     s->drop_count++;
                     break;
                 case QOS_BLOCK: {
-                    /* Block until the topic has drained below depth (bounded) */
+                    /* Block until the topic has drained below depth (bounded).
+                     * For QOS_RELIABLE: waits up to 5s (5000 x 1ms) before
+                     * giving up — avoids deadlock if consumer is gone. */
+                    int max_waits = (q->reliability == QOS_RELIABLE) ? 5000 : 1000;
                     int waits = 0;
-                    while (bus->topic_entries[ti].pending_count >= depth && waits < 1000) {
+                    while (bus->topic_entries[ti].pending_count >= depth && waits < max_waits) {
                         pthread_mutex_unlock(&bus->topic_mutex);
                         usleep(1000);  /* 1ms */
                         pthread_mutex_lock(&bus->topic_mutex);
@@ -507,7 +544,7 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     }
 
     /* DROP_OLDEST: make room by removing the oldest queued message of this topic */
-    if (need_evict && rb_evict_oldest_topic(&bus->queue, topic)) {
+    if (need_evict && rb_evict_oldest_topic(&bus->queue, resolved_topic)) {
         pthread_mutex_lock(&bus->topic_mutex);
         if (ti >= 0) {
             if (bus->topic_entries[ti].pending_count > 0)
@@ -892,4 +929,65 @@ int message_bus_get_all_topic_stats(MessageBus* bus, TopicStats* stats, int max)
     }
     pthread_mutex_unlock(&bus->topic_mutex);
     return n;
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* Topic Remap                                                */
+/* ══════════════════════════════════════════════════════════ */
+
+int message_bus_add_remap(MessageBus* bus, const char* from, const char* to) {
+    if (!bus || !from || !to) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->remap_mutex);
+
+    /* Check for existing rule — update in place */
+    for (int i = 0; i < bus->remap_count; i++) {
+        if (bus->remaps[i].active &&
+            strcmp(bus->remaps[i].from, from) == 0) {
+            snprintf(bus->remaps[i].to, MSG_BUS_MAX_TOPIC_LEN, "%s", to);
+            pthread_mutex_unlock(&bus->remap_mutex);
+            return 0;
+        }
+    }
+
+    if (bus->remap_count >= BUS_MAX_REMAPS) {
+        pthread_mutex_unlock(&bus->remap_mutex);
+        return ERR_OVERFLOW;
+    }
+
+    RemapEntry* e = &bus->remaps[bus->remap_count++];
+    snprintf(e->from, MSG_BUS_MAX_TOPIC_LEN, "%s", from);
+    snprintf(e->to,   MSG_BUS_MAX_TOPIC_LEN, "%s", to);
+    e->active = true;
+    pthread_mutex_unlock(&bus->remap_mutex);
+    return 0;
+}
+
+int message_bus_remove_remap(MessageBus* bus, const char* from) {
+    if (!bus || !from) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->remap_mutex);
+    for (int i = 0; i < bus->remap_count; i++) {
+        if (bus->remaps[i].active &&
+            strcmp(bus->remaps[i].from, from) == 0) {
+            bus->remaps[i].active = false;
+            pthread_mutex_unlock(&bus->remap_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&bus->remap_mutex);
+    return ERR_NOT_FOUND;
+}
+
+void message_bus_resolve_topic(MessageBus* bus, const char* topic, char* out_topic) {
+    if (!bus || !topic || !out_topic) return;
+    pthread_mutex_lock(&bus->remap_mutex);
+    for (int i = 0; i < bus->remap_count; i++) {
+        if (bus->remaps[i].active &&
+            strcmp(bus->remaps[i].from, topic) == 0) {
+            snprintf(out_topic, MSG_BUS_MAX_TOPIC_LEN, "%s", bus->remaps[i].to);
+            pthread_mutex_unlock(&bus->remap_mutex);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&bus->remap_mutex);
+    snprintf(out_topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
 }

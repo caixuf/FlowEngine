@@ -256,8 +256,8 @@ void message_bus_get_zc_stats(MessageBus* bus,
 
 /** 可靠性 */
 typedef enum {
-    QOS_BEST_EFFORT = 0,  /**< 尽力传输（允许丢帧） */
-    QOS_RELIABLE    = 1,  /**< 可靠传输（保证送达） */
+    QOS_BEST_EFFORT = 0,  /**< 尽力传输（允许丢帧，遵循 QosPolicy） */
+    QOS_RELIABLE    = 1,  /**< 可靠传输（保证送达，自动升级为 QOS_BLOCK，不丢帧） */
 } QosReliability;
 
 /** 队列溢出策略 */
@@ -335,6 +335,32 @@ int message_bus_list_topics(MessageBus* bus, char topics[][64], int max);
  * @return 实际 topic 数量
  */
 int message_bus_get_all_topic_stats(MessageBus* bus, TopicStats* stats, int max);
+
+/* ── Topic Remap ─────────────────────────────────────────── */
+
+/**
+ * 添加话题重映射规则：发布到 `from` 的消息将被路由到 `to`。
+ *
+ * 常用于多节点复用同一插件、测试时将 topic 重定向，或兼容命名迁移。
+ * 重映射在 publish 路径上透明执行，订阅者按 `to` 名称注册即可。
+ *
+ * @param from  原始 topic 名（发布者使用的名称）
+ * @param to    目标 topic 名（订阅者注册的名称）
+ * @return 0 成功，-1 参数非法或表已满
+ */
+int message_bus_add_remap(MessageBus* bus, const char* from, const char* to);
+
+/**
+ * 删除重映射规则。
+ * @return 0 成功，-1 未找到
+ */
+int message_bus_remove_remap(MessageBus* bus, const char* from);
+
+/**
+ * 查询 topic 的实际路由目标（若无重映射则返回原名）。
+ * @param out_topic 输出缓冲区（至少 MSG_BUS_MAX_TOPIC_LEN 字节）
+ */
+void message_bus_resolve_topic(MessageBus* bus, const char* topic, char* out_topic);
 
 #ifdef __cplusplus
 }
