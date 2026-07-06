@@ -102,7 +102,21 @@ static void handle_interactive_commands(ProcessManager* manager) {
             const char* state_names[] = {"UNKNOWN", "INITIALIZING", "RUNNING", "STOPPING", "STOPPED", "ERROR"};
             printf("Process %s state: %s\n", process_name, state_names[state]);
         } else if (strcmp(command, "list") == 0) {
-            printf("Process list functionality not implemented yet\n");
+            ProcessSnapshot procs[64];
+            int n = process_manager_list_processes(manager, procs, 64);
+            printf("Loaded processes (%d):\n", n);
+            printf("  %-20s %-8s %-8s %s\n", "NAME", "STATE", "PRIO", "RESTARTS");
+            for (int k = 0; k < n; k++) {
+                const char* pname = (procs[k].sched_priority == 3) ? "crit" :
+                                    (procs[k].sched_priority == 2) ? "high" :
+                                    (procs[k].sched_priority == 1) ? "norm" : "low";
+                printf("  %-20s %-8s %-8s %u\n",
+                       procs[k].name,
+                       procs[k].is_running ? "RUNNING" : "STOPPED",
+                       pname,
+                       procs[k].restart_count);
+            }
+            if (n == 0) printf("  (no processes loaded)\n");
         } else if (strlen(command) > 0) {
             printf("Unknown command: %s\n", command);
         }

@@ -291,6 +291,7 @@ typedef struct {
     uint64_t  publish_count;    /**< 发布次数 */
     uint64_t  deliver_count;    /**< 投递次数 */
     uint64_t  drop_count;       /**< 丢弃次数 */
+    uint64_t  deadline_violations; /**< deadline 超时违规次数（端到端分发延迟超过 deadline_ms）*/
     uint64_t  total_latency_us; /**< 累计延迟（用于计算平均值） */
     uint64_t  min_latency_us;   /**< 最小延迟 */
     uint64_t  max_latency_us;   /**< 最大延迟 */
