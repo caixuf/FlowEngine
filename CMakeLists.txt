@@ -448,6 +448,7 @@ if(FLOWENGINE_HAVE_EIGEN)
 target_link_libraries(flow_mcap_replay flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
 else()
 target_link_libraries(flow_mcap_replay flowengine_core scheduler_cpp m)
+target_compile_definitions(flow_mcap_replay PRIVATE NO_FRENET)
 endif()
 set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
 
