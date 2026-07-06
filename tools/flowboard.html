@@ -60,6 +60,20 @@ input:focus,select:focus{border-color:#58a6ff}
 .mini-stat .val{font-size:18px;font-weight:800;color:#58a6ff;line-height:1.2}
 .mini-stat .lbl{font-size:9px;color:#8b949e;margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
 
+/* ── View toggle (System / Threads) ──────────── */
+.view-toggle{display:flex;gap:4px;margin-bottom:8px}
+.toggle-btn{flex:1;padding:4px 8px;font-size:10px;border:1px solid#21262d;border-radius:6px;background:#0d1117;color:#8b949e;cursor:pointer;text-align:center;transition:all .2s}
+.toggle-btn:hover{background:#161b22;color:#c9d1d9}
+.toggle-btn.active{background:#1f6feb22;border-color:#1f6feb;color:#58a6ff;font-weight:600}
+.thread-row{display:flex;align-items:center;padding:5px 6px;border-bottom:1px solid#161b22;gap:4px;font-size:10px}
+.thread-row:hover{background:#111820}
+.thread-row .th-name{flex:1;color:#c9d1d9;font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.thread-row .th-tid{color:#484f58;min-width:56px;font-family:'JetBrains Mono',monospace}
+.thread-row .th-cpu{min-width:40px;text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700}
+.thread-row .th-bar{flex:1;height:6px;background:#161b22;border-radius:3px;overflow:hidden;min-width:30px}
+.thread-row .th-bar-fill{height:100%;border-radius:3px;transition:width .5s}
+.thread-row .th-state{min-width:16px;text-align:center}
+
 /* ── Node detail panel ─────────────────────── */
 #detail-panel{position:fixed;right:-360px;top:0;width:340px;height:100vh;background:#0b0f16;border-left:1px solid#1a1f2b;z-index:50;transition:right .3s;padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
 #detail-panel.open{right:0}
@@ -154,7 +168,12 @@ input:focus,select:focus{border-color:#58a6ff}
   </div>
 
   <div class="card" id="sysmon-card" style="display:none"><div class="card-header" onclick="toggleCard(this)"><h2>🖥️ System</h2><span class="toggle">▼</span></div>
-    <div class="card-body"><div class="metric-grid">
+    <div class="card-body">
+      <div class="view-toggle" id="sys-view-toggle">
+        <button class="toggle-btn active" data-view="system" onclick="switchSysView('system')">📊 System</button>
+        <button class="toggle-btn" data-view="threads" onclick="switchSysView('threads')">🧵 Threads</button>
+      </div>
+      <div id="sys-view-system"><div class="metric-grid">
       <div class="mini-stat"><div class="val" id="s-cpu" style="color:#58a6ff">--</div><div class="lbl">CPU %</div></div>
       <div class="mini-stat"><div class="val" id="s-mem" style="color:#d29922">--</div><div class="lbl">Mem %</div></div>
       <div class="mini-stat"><div class="val" id="s-rss" style="color:#3fb950">--</div><div class="lbl">RSS MB</div></div>
@@ -162,10 +181,14 @@ input:focus,select:focus{border-color:#58a6ff}
     </div>
     <div style="font-size:10px;color:#484f58;margin-top:6px;padding:0 2px" id="s-detail"></div>
     </div>
+    <div id="sys-view-threads" style="display:none">
+      <div id="threads-list" style="font-size:11px"><span style="color:#484f58">Waiting for thread data...</span></div>
+    </div>
+    </div>
   </div>
 
   <div style="font-size:10px;color:#30363d;margin-top:auto">
-    Nodes: <b id="node-n">0</b> · Frames: <b id="frame-n">0</b>
+    Nodes: <b id="node-n">0</b> · Threads: <b id="thread-cnt">0</b> · Frames: <b id="frame-n">0</b>
     <span style="margin-left:8px"><span class="kbd">R</span> reset <span class="kbd">F</span> fit <span class="kbd">Esc</span></span>
   </div>
 </div>
@@ -388,6 +411,12 @@ function updateAll(){
   document.getElementById('frame-n').textContent=frameCount;
 }
 
+function switchSysView(view){
+  document.querySelectorAll('.toggle-btn').forEach(function(b){b.classList.toggle('active',b.dataset.view===view);});
+  document.getElementById('sys-view-system').style.display=(view==='system'?'':'none');
+  document.getElementById('sys-view-threads').style.display=(view==='threads'?'':'none');
+}
+
 function updateMetrics(){
   var m=topoData.metrics||{},b=m.bus||{},l=m.latency||{};
   document.getElementById('m-pub').textContent=(b.published||0).toLocaleString();
@@ -425,6 +454,26 @@ function updateMetrics(){
       'cores '+(sm.cpu_count||0)+' · mem '+usedMb+'/'+totMb+'MB · '+
       'load '+(sm.load1||0).toFixed(2)+'/'+(sm.load5||0).toFixed(2)+'/'+(sm.load15||0).toFixed(2)+' · '+
       'thr '+(sm.thread_count||0)+' · disk R'+((sm.disk_read_bps||0)/1024).toFixed(0)+' W'+((sm.disk_write_bps||0)/1024).toFixed(0)+'KB/s';
+    // Threads view
+    var thrArr=(sm.threads||[]);
+    document.getElementById('thread-cnt').textContent=thrArr.length;
+    var nodeNames=(topoData.nodes||[]).map(function(n){return n.name||'';});
+    document.getElementById('threads-list').innerHTML=thrArr.length?thrArr.map(function(th){
+      var cpuColor=th.cpu_pct>50?'#f85149':(th.cpu_pct>20?'#d29922':'#3fb950');
+      var barColor=th.cpu_pct>50?'#f85149':(th.cpu_pct>20?'#d29922':'#3fb950');
+      var barPct=Math.min(100,th.cpu_pct*2);
+      var stateIcon=th.state==='R'?'🟢':(th.state==='S'?'💤':'⏸');
+      // Match thread to node by name
+      var matchedNode=nodeNames.find(function(nm){return nm&&th.name&&th.name.indexOf(nm)>=0;});
+      var nameDisplay=matchedNode?'<span style="color:#58a6ff">'+matchedNode+'</span>':'<span>'+th.name+'</span>';
+      return '<div class="thread-row" onclick="showNodeDetail(\''+(matchedNode||'')+'\')" style="cursor:'+(matchedNode?'pointer':'default')+'">'+
+        '<span class="th-state" title="'+th.state+'">'+stateIcon+'</span>'+
+        '<span class="th-name">'+nameDisplay+'</span>'+
+        '<span class="th-tid">TID '+th.tid+'</span>'+
+        '<span class="th-cpu" style="color:'+cpuColor+'">'+th.cpu_pct.toFixed(1)+'%</span>'+
+        '<div class="th-bar"><div class="th-bar-fill" style="width:'+barPct+'%;background:'+barColor+'"></div></div>'+
+        '</div>';
+    }).join(''):'<span style="color:#484f58">No thread data</span>';
   } else { document.getElementById('sysmon-card').style.display='none'; }
   // Nodes
   var ns=topoData.nodes||[];
@@ -600,6 +649,18 @@ function showNodeDetail(name){
       html += '<div class="stat-row"><span style="font-size:10px">'+((t.topic||t.name).split('/').pop())+'</span><span style="font-size:10px">pub:'+(t.pub||0)+' del:'+(t.del||0)+' lat:'+(t.lat_us||0)+'µs</span></div>';
     });
   }
+  // Thread resource for this node
+  var smThr=(topoData.metrics||{}).sysmon||{};
+  var thrArr=smThr.threads||[];
+  var matchThreads=thrArr.filter(function(th){return th.name&&th.name.indexOf(n.name)>=0;});
+  if(matchThreads.length){
+    html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">Thread Resources</div>';
+    matchThreads.forEach(function(th){
+      var cpuColor=th.cpu_pct>50?'#f85149':(th.cpu_pct>20?'#d29922':'#3fb950');
+      var stateIcon=th.state==='R'?'🟢':(th.state==='S'?'💤':'⏸');
+      html += '<div class="stat-row"><span style="font-size:10px">'+stateIcon+' '+th.name+' (TID '+th.tid+')</span><span style="font-size:11px;font-weight:700;color:'+cpuColor+'">'+th.cpu_pct.toFixed(1)+'%</span></div>';
+    });
+  }
   document.getElementById('det-body').innerHTML = html;
   document.getElementById('detail-panel').classList.add('open');
   document.getElementById('detail-overlay').classList.add('show');
@@ -721,7 +782,17 @@ function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.c
 // ════════════════════════════════════════════════════════════
 // UI helpers
 // ════════════════════════════════════════════════════════════
-function toggleCard(hdr){hdr.parentElement.classList.toggle('collapsed');saveState();}
+function toggleCard(hdr){
+  hdr.parentElement.classList.toggle('collapsed');
+  saveState();
+  // If the 3D card was just expanded, resize the renderer to fit
+  setTimeout(function(){
+    var card=hdr.parentElement;
+    if(!card.classList.contains('collapsed')){
+      resize3D();
+    }
+  },50);
+}
 function resetView(){
   var svg=document.querySelector('#topo svg');if(!svg)return;
   d3.select('#topo svg').transition().duration(500).call(d3.zoom().transform,d3.zoomIdentity);
@@ -938,9 +1009,21 @@ function _buildObstacle(typeColor){
 // ════════════════════════════════════════════════════════════
 // init3DScene — create the full ADAS visualization
 // ════════════════════════════════════════════════════════════
+function resize3D(){
+  if(!renderer3d||!camera3d)return;
+  var el=document.getElementById("scene3d");
+  if(!el)return;
+  var w=el.clientWidth,h=el.clientHeight;
+  if(w<10||h<10)return;
+  renderer3d.setSize(w,h);
+  camera3d.aspect=w/h;
+  camera3d.updateProjectionMatrix();
+}
 function init3DScene(){
   var el=document.getElementById("scene3d");if(!el||typeof THREE==="undefined")return;
-  var w=el.clientWidth,h=el.clientHeight;
+  // Use fallback size when card is collapsed (clientWidth=0)
+  var w=el.clientWidth||el.parentElement&&el.parentElement.clientWidth||800;
+  var h=el.clientHeight||400;
 
   // Scene
   scene3d=new THREE.Scene();
@@ -1027,10 +1110,12 @@ function init3DScene(){
   anim3D();
   sceneReady=true;
   _tmpV3 = new THREE.Vector3();  // pre-alloc after THREE is loaded
+}
 
 // ── Dead-reckoning state: predicts position between sparse data updates ──
 // Data arrives at ~1Hz (SSE); we extrapolate at 60fps using last-known speed
 // so the car moves smoothly instead of freezing between data ticks.
+// NOTE: must live at TOP-LEVEL scope — update3D() and _renderFrame() use it.
 var _dr={
   // Latest ground-truth from topoData (set by update3D)
   lastX:0, lastZ:0, lastSpeed:0, lastHeading:0, lastTime:0,
@@ -1042,7 +1127,6 @@ var _dr={
   init:false
 };
 var _tmpV3 = null;  // pre-allocated after THREE loads, avoids GC pressure 每帧 new Vector3
-};
 
 // ── Per-frame render: world-space scene, chase camera ──
 // Road is STATIC at world origin. Ego moves through the world.
@@ -1563,7 +1647,7 @@ function _2dSyncTarget(){
     s.src=cdns[i++];
     // When Three.js loads: init the 3D scene.  init3D() will disable the 2D
     // animation loop and hide the 2D canvas automatically if it succeeds.
-    s.onload=function(){if(typeof THREE!=="undefined"){init3D();}else{tryLoad();}};
+    s.onload=function(){if(typeof THREE!=="undefined"){init3D();setTimeout(resize3D,300);}else{tryLoad();}};
     s.onerror=function(){tryLoad();};
     document.head.appendChild(s);
   }
@@ -1581,8 +1665,12 @@ setTimeout(function(){
   var sel = document.getElementById('chart-range');
   if(sel) sel.value = String(chartHistory.maxLen);
   if(chartTopic) document.getElementById('chart-topic').value = chartTopic;
-  // Restore collapsed cards
-  try{var s=JSON.parse(localStorage.getItem('flowboard')||'{}');(s.collapsed||[]).forEach(function(name){document.querySelectorAll('.card-header h2').forEach(function(h){if(h.textContent.trim().startsWith(name.substring(0,8)))h.parentElement.parentElement.classList.add('collapsed');});});}catch(e){}
+  // Restore collapsed cards — but NEVER collapse the 3D scene card
+  try{var s=JSON.parse(localStorage.getItem('flowboard')||'{}');(s.collapsed||[]).forEach(function(name){document.querySelectorAll('.card-header h2').forEach(function(h){var card=h.parentElement.parentElement;if(card.id==='scene3d-card')return;if(h.textContent.trim().startsWith(name.substring(0,8)))card.classList.add('collapsed');});});}catch(e){}
+  // Ensure 3D card is always open on load
+  var sc=document.getElementById('scene3d-card');if(sc)sc.classList.remove('collapsed');
+  // Resize 3D renderer once card is visible
+  setTimeout(resize3D, 200);
 },100);
 
 setTimeout(function(){doConnect().catch(function(){doSimulate();});},100);

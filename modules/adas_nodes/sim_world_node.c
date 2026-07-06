@@ -89,9 +89,12 @@ static struct {
 /* ── 障碍物初始化 ─────────────────────────────────────────────── */
 
 static void init_obstacles(void) {
-    g.obstacles[0] = (SimObstacle){ 0, "car",        12.0,  0.0, 60.0,  1.75, 4.6, 2.0 };
-    g.obstacles[1] = (SimObstacle){ 1, "car",        14.0,  0.0, 95.0,  1.75, 4.6, 2.0 };
-    g.obstacles[2] = (SimObstacle){ 2, "pedestrian",  0.0,  0.6, 55.0,  8.0,  0.6, 0.6 };
+    /* 障碍物 0: 在 ego 同车道前方 35m, 慢车 7 m/s — 用于触发变道 */
+    g.obstacles[0] = (SimObstacle){ 0, "car",          7.0,  0.0, 35.0, -1.75, 4.6, 2.0 };
+    /* 障碍物 1: 在邻道(右车道 y=1.75), 120m 前, 稍慢 — 远到不阻碍变道 */
+    g.obstacles[1] = (SimObstacle){ 1, "car",          9.0,  0.0, 120.0, 1.75, 4.6, 2.0 };
+    /* 障碍物 2: 行人, 在路边往复行走 */
+    g.obstacles[2] = (SimObstacle){ 2, "pedestrian",   0.0,  0.6, 55.0,  8.0,  0.6, 0.6 };
 }
 
 /* ── 障碍物运动学 ─────────────────────────────────────────────── */
@@ -143,35 +146,41 @@ static void vehicle_tick(void) {
     g.vehicle.speed += accel * DT_SEC;
     if (g.vehicle.speed < 0) g.vehicle.speed = 0;
 
-    /* ── 横向: 平滑变道轨迹 ── */
-    if (fabs(g.vehicle.lane_target - g.lc_target_y) > 0.1 && !g.lc_active) {
-        g.lc_start_y  = g.vehicle.y;
-        g.lc_target_y = g.vehicle.lane_target;
-        g.lc_elapsed  = 0;
-        g.lc_active   = 1;
-    }
-    if (g.lc_active && g.lc_elapsed >= g.lc_duration) {
-        g.vehicle.y = g.lc_target_y;
-        g.lc_active = 0;
-    }
-
-    double y_desired;
-    if (g.lc_active) {
-        g.lc_elapsed += DT_SEC;
-        double t = g.lc_elapsed / g.lc_duration;
-        if (t > 1.0) t = 1.0;
-        double s = sin(t * M_PI / 2.0);
-        y_desired = g.lc_start_y + (g.lc_target_y - g.lc_start_y) * s * s;
+    /* ── 横向: 收到外部 control/cmd 时完全交由外部 PID 控制 ── */
+    if (g.has_control_input) {
+        /* 外部 steer 已由 on_control_cmd 设置到 g.vehicle.steer,
+         * 直接走自行车模型积分，不覆盖 steer。 */
     } else {
-        y_desired = g.vehicle.lane_target;
-    }
+        /* ── 无外部控制时使用内置车道保持 + 平滑变道轨迹 ── */
+        if (fabs(g.vehicle.lane_target - g.lc_target_y) > 0.1 && !g.lc_active) {
+            g.lc_start_y  = g.vehicle.y;
+            g.lc_target_y = g.vehicle.lane_target;
+            g.lc_elapsed  = 0;
+            g.lc_active   = 1;
+        }
+        if (g.lc_active && g.lc_elapsed >= g.lc_duration) {
+            g.vehicle.y = g.lc_target_y;
+            g.lc_active = 0;
+        }
 
-    double y_err   = y_desired - g.vehicle.y;
-    double psi_des = 0.5 * y_err;
-    psi_des = fmax(-0.3, fmin(0.3, psi_des));
-    double steer   = 2.0 * (psi_des - g.vehicle.heading);
-    steer = fmax(-0.25, fmin(0.25, steer));
-    g.vehicle.steer = steer;
+        double y_desired;
+        if (g.lc_active) {
+            g.lc_elapsed += DT_SEC;
+            double t = g.lc_elapsed / g.lc_duration;
+            if (t > 1.0) t = 1.0;
+            double s = sin(t * M_PI / 2.0);
+            y_desired = g.lc_start_y + (g.lc_target_y - g.lc_start_y) * s * s;
+        } else {
+            y_desired = g.vehicle.lane_target;
+        }
+
+        double y_err   = y_desired - g.vehicle.y;
+        double psi_des = 0.5 * y_err;
+        psi_des = fmax(-0.3, fmin(0.3, psi_des));
+        double steer   = 2.0 * (psi_des - g.vehicle.heading);
+        steer = fmax(-0.25, fmin(0.25, steer));
+        g.vehicle.steer = steer;
+    }
 
     g.vehicle.heading += (g.vehicle.speed / g.vehicle.wheelbase)
                          * tan(g.vehicle.steer) * DT_SEC;
@@ -199,6 +208,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
 
 static void* sim_thread(void* arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "sim_world");
 
     while (!g.should_stop) {
         usleep((unsigned long)(DT_SEC * 1e6));
@@ -289,20 +299,22 @@ static int sim_init(MessageBus* bus, Transport* transport,
             sscanf(p + 12, "%lf", &g.lane_width);
         if ((p = strstr(params_json, "\"obstacle_count\":")))
             sscanf(p + 17, "%d", &g.obstacle_count);
+        if ((p = strstr(params_json, "\"lane_target\":")))
+            sscanf(p + 13, "%lf", &g.vehicle.lane_target);
     }
 
     srand((unsigned)time(NULL));
 
-    /* 初始化车辆 */
+    /* 初始化车辆 — 在左车道中心 (车道宽3.5m, 中心y=-1.75) */
     g.vehicle.x           = 0.0;
-    g.vehicle.y           = 0.0;
+    g.vehicle.y           = -1.75;
     g.vehicle.speed       = g.init_speed;
     g.vehicle.heading     = 0.0;
     g.vehicle.steer       = 0.0;
     g.vehicle.throttle    = 0.0;
     g.vehicle.brake       = 0.0;
     g.vehicle.target_speed = g.target_speed;
-    g.vehicle.lane_target  = 0.0;
+    g.vehicle.lane_target  = -1.75;  /* 左车道中心（车道宽3.5m） */
     g.vehicle.wheelbase   = 2.7;
     g.vehicle.mass        = 1500.0;
     g.vehicle.drag_coeff  = 0.3;

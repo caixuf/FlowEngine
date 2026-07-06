@@ -65,13 +65,14 @@ static void on_fusion(const Message* msg, void* user_data) {
 
 static void* planning_thread(void* arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "planning");
 
-    /* 参考路径: 200m 直线（后续替换为 Lanelet2 地图数据）*/
+    /* 参考路径: 200m 直线（左车道中心 y=-1.75）*/
     double wx[101], wy[101];
     int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
         wx[i] = (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
-        wy[i] = 0.0;
+        wy[i] = -1.75;
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
 
@@ -79,10 +80,11 @@ static void* planning_thread(void* arg) {
         usleep(50000);  /* 20Hz 检查 */
         if (g.should_stop || !g.has_fusion) continue;
 
-        /* Frenet 规划 */
+        /* Frenet 规划（参考路径在 y=-1.75, ego_d 是相对参考线的横向偏移） */
         double s_out[50], d_out[50], spd_out[50];
+        double ego_d = g.ego_y + 1.75;  /* 相对 y=-1.75 的偏移 */
         int n_wp = frenet_plan(g.frenet,
-            g.ego_x, g.ego_y, g.ego_v,
+            g.ego_x, ego_d, g.ego_v,
             g.target_speed,
             s_out, d_out, spd_out, 50);
 
@@ -106,8 +108,9 @@ static void* planning_thread(void* arg) {
             double failsafe = g.ego_v + 2.0;
             if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
             off = snprintf(traj, sizeof(traj),
-                "{\"type\":\"failsafe\",\"target_speed\":%.1f,\"plan\":%d}",
-                failsafe, g.plan_count);
+                "{\"type\":\"failsafe\",\"target_speed\":%.1f,\"plan\":%d,"
+                "\"lane_keep_d\":%.2f}",
+                failsafe, g.plan_count, 0.0);  /* Frenet d=0 → 保持在参考线上 */
         }
 
         /* 后向兼容: PID 也读取 speed= 字段 */

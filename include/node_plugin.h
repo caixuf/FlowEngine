@@ -103,15 +103,17 @@ typedef NodePlugin* (*NodeGetPluginFn)(void);
 #include "transport.h"
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static inline void node_announce_self(Transport* transport, const NodePlugin* plugin) {
     if (!transport || !plugin || !plugin->name) return;
     char json[1024];
     int n = snprintf(json, sizeof(json),
-        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"inputs\":[",
+        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"pid\":%d,\"inputs\":[",
         plugin->name,
         plugin->version     ? plugin->version     : "1.0.0",
-        plugin->description ? plugin->description : "");
+        plugin->description ? plugin->description : "",
+        (int)getpid());
     if (plugin->input_topics) {
         for (int i = 0; plugin->input_topics[i] && n < (int)sizeof(json)-4; i++)
             n += snprintf(json+n, sizeof(json)-n, "%s\"%s\"", i?",":"", plugin->input_topics[i]);

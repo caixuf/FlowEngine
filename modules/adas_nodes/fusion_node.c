@@ -81,6 +81,7 @@ static void on_gps(const Message* msg, void* user_data) {
 
 static void* fusion_thread(void* arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "fusion");
 
     /* 注册成调度器 choreo 任务 (无 TaskBase 封装，直接使用调度器 API) */
     /* 触发 topic: sensor/lidar — LiDAR 每帧触发一次融合 */

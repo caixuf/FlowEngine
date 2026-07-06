@@ -308,6 +308,7 @@ static void export_dashboard_json(void) {
 
 static void* monitor_thread(void* arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "monitor");
     long period_us = (long)(1.0 / g.frequency_hz * 1e6);
 
     while (!g.should_stop) {

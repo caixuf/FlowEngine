@@ -39,6 +39,7 @@ static struct {
 
     /* 仿真状态 (通过 vehicle/state topic 更新) */
     double  ego_x, ego_y, ego_heading;
+    double  ego_speed;
     double  obs_x[3], obs_y[3], obs_vx[3];
 
     /* 发布帧计数 */
@@ -63,6 +64,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"x\":")))   sscanf(p + 4, "%lf", &g.ego_x);
     if ((p = strstr(d, "\"y\":")))   sscanf(p + 4, "%lf", &g.ego_y);
     if ((p = strstr(d, "\"hdg\":"))) sscanf(p + 6, "%lf", &g.ego_heading);
+    if ((p = strstr(d, "\"spd\":"))) sscanf(p + 6, "%lf", &g.ego_speed);
     for (int i = 0; i < 3; i++) {
         char kx[16], ky[16], kvx[16];
         snprintf(kx,  sizeof(kx),  "\"ox%d\":", i);
@@ -78,6 +80,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 static void* perception_thread(void* arg) {
     (void)arg;
+    pthread_setname_np(pthread_self(), "perception");
 
     long period_us = 1000000L / (g.lidar_rate_hz > 0 ? g.lidar_rate_hz : 20);
 
@@ -110,7 +113,7 @@ static void* perception_thread(void* arg) {
             GpsData gps = {
                 .latitude    = 39.904 + g.ego_x * 0.00001,
                 .longitude   = 116.407 + g.ego_y * 0.00001,
-                .speed_mps   = (float)(5.0 + noise_s),
+                .speed_mps   = (float)(g.ego_speed + noise_s),
                 .heading_deg = (float)(g.ego_heading * 180.0 / M_PI + noise_h),
                 .accuracy_m  = 0.5f,
             };
