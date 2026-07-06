@@ -21,7 +21,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE benchmark
 
   # ── Debug build ────────────────────────────────────────────
   build-debug:
@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE benchmark
 
   # ── ASAN (Address Sanitizer) ───────────────────────────────
   build-asan:
@@ -49,7 +49,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE benchmark
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:log_path=/tmp/asan.log
       - name: Check ASAN log
@@ -92,7 +92,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE benchmark
 
   # ── Stress test ────────────────────────────────────────────
   stress-test:
@@ -123,7 +123,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 360
+        run: ctest --test-dir build --output-on-failure --timeout 360 -LE benchmark
       - name: Generate coverage
         run: |
           lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused,negative

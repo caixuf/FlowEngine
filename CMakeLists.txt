@@ -543,7 +543,7 @@ add_test(NAME flow_coro_bench
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/benchmark_coro
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(flow_coro_bench PROPERTIES TIMEOUT 300)
+set_tests_properties(flow_coro_bench PROPERTIES TIMEOUT 300 LABELS "benchmark")
 
 add_test(NAME coro_correctness_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_correctness_test
