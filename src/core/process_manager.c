@@ -65,9 +65,11 @@ static void* monitor_thread_fn(void* arg) {
                 node->is_running = false;
                 node->restart_count++;
 
-                /* Restart with exponential backoff: min(2^restart_count, 60) seconds */
+                /* Restart with exponential backoff: min(2^restart_count, 60) seconds.
+                 * Cap the shift operand at 5 to avoid UB when restart_count > 31. */
                 if (node->should_restart) {
-                    uint32_t backoff_s = 1u << node->restart_count;  /* 1, 2, 4, 8, ... */
+                    uint32_t shift = node->restart_count < 6 ? node->restart_count : 6;
+                    uint32_t backoff_s = 1u << shift;  /* 1, 2, 4, 8, 16, 32, 64→60, ... */
                     if (backoff_s > 60) backoff_s = 60;
                     pthread_mutex_unlock(&mgr->mutex);
                     if (mgr->log_callback) {

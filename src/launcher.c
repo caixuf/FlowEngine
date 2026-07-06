@@ -152,14 +152,14 @@ static void apply_config_qos(MessageBus* bus, const LauncherConfig* cfg) {
             memset(&qos, 0, sizeof(qos));
             qos.depth = td->qos_depth > 0 ? (uint32_t)td->qos_depth : 10;
 
-            if (strstr(td->qos_policy, "block"))
+            if (strcmp(td->qos_policy, "block") == 0)
                 qos.policy = QOS_BLOCK;
-            else if (strstr(td->qos_policy, "drop_latest"))
+            else if (strcmp(td->qos_policy, "drop_latest") == 0)
                 qos.policy = QOS_DROP_LATEST;
             else
                 qos.policy = QOS_DROP_OLDEST;
 
-            if (strstr(td->qos_policy, "reliable"))
+            if (strcmp(td->qos_policy, "reliable") == 0)
                 qos.reliability = QOS_RELIABLE;
             else
                 qos.reliability = QOS_BEST_EFFORT;
@@ -199,8 +199,10 @@ static void apply_config_params(const LauncherConfig* cfg) {
     for (int i = 0; i < cfg->process_count; i++) {
         const ProcessConfig* pc = &cfg->processes[i];
         if (pc->params[0] == '\0') continue;
-        /* params 字段已在 config_manager.c 中以 JSON 字符串形式保存。
-         * 注册为字符串参数，供插件通过 param_get_string() 读取。 */
+        /* params 字段在 config_manager.c 中以原始 JSON object 字符串保存。
+         * 以 "{process_name}.params" 为键注册到 param_registry，插件可通过
+         * param_get_string("{name}.params") 读取并自行解析 JSON 键值。
+         * 示例配置：{"max_speed": 10.5, "sensor_id": 2} */
         char param_name[128];
         snprintf(param_name, sizeof(param_name), "%s.params", pc->name);
         param_register_string(param_name, pc->params, "Process params JSON blob");
@@ -217,12 +219,15 @@ static int daemonize(void) {
 
     setsid();
 
-    /* Redirect standard fds to /dev/null */
+    /* Redirect standard fds to /dev/null; handle partial dup2 failure */
     int devnull = open("/dev/null", O_RDWR);
     if (devnull >= 0) {
-        dup2(devnull, STDIN_FILENO);
-        dup2(devnull, STDOUT_FILENO);
-        dup2(devnull, STDERR_FILENO);
+        if (dup2(devnull, STDIN_FILENO)  < 0 ||
+            dup2(devnull, STDOUT_FILENO) < 0 ||
+            dup2(devnull, STDERR_FILENO) < 0) {
+            close(devnull);
+            return -1;
+        }
         close(devnull);
     }
     return 0;
