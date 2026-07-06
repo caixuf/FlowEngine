@@ -102,12 +102,15 @@ input:focus,select:focus{border-color:#58a6ff}
   .chart-box{min-width:auto;height:180px}
   #topo{height:300px}
   #detail-panel{width:100vw;right:-100vw}
+  /* Keep scene canvases within the visible viewport so the car is never cropped */
+  #scene3d,#scene2d{height:clamp(260px,42vh,400px)!important}
 }
 @media (max-width:500px){
   #sidebar{padding:8px;gap:6px}
   .mini-stat .val{font-size:14px}
   .card-header h2{font-size:10px}
   button{padding:5px 10px;font-size:10px}
+  #scene3d,#scene2d{height:clamp(220px,38vh,300px)!important}
 }
 .node-selected circle{filter:brightness(1.3);stroke:#58a6ff!important;stroke-width:3!important}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#1a1f2b;border-radius:3px}
@@ -1684,6 +1687,16 @@ setTimeout(function(){
   var sc=document.getElementById('scene3d-card');if(sc)sc.classList.remove('collapsed');
   // Resize 3D renderer once card is visible
   setTimeout(resize3D, 200);
+  // Re-resize whenever the browser window is resized (orientation change, snap layout, etc.)
+  window.addEventListener('resize', resize3D);
+  // On mobile the 3D card starts off-screen; re-resize when it scrolls into view
+  try{
+    var _s3obs=new IntersectionObserver(function(entries){
+      if(entries[0].isIntersecting)resize3D();
+    },{threshold:0.1});
+    var _s3el=document.getElementById('scene3d');
+    if(_s3el)_s3obs.observe(_s3el);
+  }catch(e){}
 },100);
 
 setTimeout(function(){doConnect().catch(function(){doSimulate();});},100);
