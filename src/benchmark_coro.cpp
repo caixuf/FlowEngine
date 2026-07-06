@@ -129,23 +129,26 @@ static void bench_buschannel_throughput() {
     std::mutex mtx; std::condition_variable cv;
 
     MessageBus* bus = message_bus_create("b1");
-    Bench1Task task(bus, TOTAL, cnt, done_flag, mtx, cv);
-    std::thread t([&]{ task.execute(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     uint8_t payload[64]{};
-    uint64_t t0 = now_ns();
+    uint64_t t0 = 0, t1 = 0;
+    {
+        Bench1Task task(bus, TOTAL, cnt, done_flag, mtx, cv);
+        std::thread t([&]{ task.execute(); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    for (int r = 0; r < ROUNDS; ++r) {
-        int target_r = (r + 1) * BATCH;
-        for (int i = 0; i < BATCH; ++i)
-            message_bus_publish(bus, "b1/msg", "bench", payload, sizeof(payload));
-        while (cnt.load(std::memory_order_relaxed) < target_r)
-            std::this_thread::yield();
+        t0 = now_ns();
+        for (int r = 0; r < ROUNDS; ++r) {
+            int target_r = (r + 1) * BATCH;
+            for (int i = 0; i < BATCH; ++i)
+                message_bus_publish(bus, "b1/msg", "bench", payload, sizeof(payload));
+            while (cnt.load(std::memory_order_relaxed) < target_r)
+                std::this_thread::yield();
+        }
+
+        t1 = now_ns();
+        safe_stop(task, t, bus, "b1/msg", done_flag, mtx, cv);
     }
-
-    uint64_t t1 = now_ns();
-    safe_stop(task, t, bus, "b1/msg", done_flag, mtx, cv);
 
     double elapsed_s = (t1 - t0) / 1e9;
     printf("  总消息数:       %d\n", TOTAL);
@@ -249,15 +252,17 @@ static void bench_subscribe_once_vs_channel() {
         std::mutex mtx; std::condition_variable cv;
 
         MessageBus* bus = message_bus_create("b2a");
-        Bench2OnceTask task(bus, N, samples, started, done_flag, mtx, cv);
-        std::thread t([&]{ task.execute(); });
+        {
+            Bench2OnceTask task(bus, N, samples, started, done_flag, mtx, cv);
+            std::thread t([&]{ task.execute(); });
 
-        drive_latency(bus, "b2/once", started, N);
+            drive_latency(bus, "b2/once", started, N);
 
-        { std::unique_lock<std::mutex> lk(mtx);
-          cv.wait_for(lk, std::chrono::seconds(30),
-                      [&]{ return done_flag.load(std::memory_order_acquire); }); }
-        safe_stop(task, t, bus, "b2/once", done_flag, mtx, cv);
+            { std::unique_lock<std::mutex> lk(mtx);
+              cv.wait_for(lk, std::chrono::seconds(30),
+                          [&]{ return done_flag.load(std::memory_order_acquire); }); }
+            safe_stop(task, t, bus, "b2/once", done_flag, mtx, cv);
+        }
 
         Stats s = calc_stats(samples);
         print_latency_row("subscribe_once (N=200)", s);
@@ -271,15 +276,17 @@ static void bench_subscribe_once_vs_channel() {
         std::mutex mtx; std::condition_variable cv;
 
         MessageBus* bus = message_bus_create("b2b");
-        Bench2ChanTask task(bus, N, samples, started, done_flag, mtx, cv);
-        std::thread t([&]{ task.execute(); });
+        {
+            Bench2ChanTask task(bus, N, samples, started, done_flag, mtx, cv);
+            std::thread t([&]{ task.execute(); });
 
-        drive_latency(bus, "b2/chan", started, N);
+            drive_latency(bus, "b2/chan", started, N);
 
-        { std::unique_lock<std::mutex> lk(mtx);
-          cv.wait_for(lk, std::chrono::seconds(30),
-                      [&]{ return done_flag.load(std::memory_order_acquire); }); }
-        safe_stop(task, t, bus, "b2/chan", done_flag, mtx, cv);
+            { std::unique_lock<std::mutex> lk(mtx);
+              cv.wait_for(lk, std::chrono::seconds(30),
+                          [&]{ return done_flag.load(std::memory_order_acquire); }); }
+            safe_stop(task, t, bus, "b2/chan", done_flag, mtx, cv);
+        }
 
         Stats s = calc_stats(samples);
         print_latency_row("BusChannel     (N=200)", s);
@@ -333,24 +340,26 @@ static void bench_when_any_latency() {
     std::mutex mtx; std::condition_variable cv;
 
     MessageBus* bus = message_bus_create("b3");
-    Bench3Task task(bus, N, samples, started, done_flag, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    {
+        Bench3Task task(bus, N, samples, started, done_flag, mtx, cv);
+        std::thread t([&]{ task.execute(); });
 
-    while (!started.load(std::memory_order_acquire))
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        while (!started.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
 
-    uint8_t payload[8]{};
-    for (int i = 0; i < N; ++i) {
-        const char* topic = (i % 2 == 0) ? "b3/a" : "b3/b";
-        message_bus_publish(bus, topic, "bench", payload, sizeof(payload));
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        uint8_t payload[8]{};
+        for (int i = 0; i < N; ++i) {
+            const char* topic = (i % 2 == 0) ? "b3/a" : "b3/b";
+            message_bus_publish(bus, topic, "bench", payload, sizeof(payload));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        { std::unique_lock<std::mutex> lk(mtx);
+          cv.wait_for(lk, std::chrono::seconds(30),
+                      [&]{ return done_flag.load(std::memory_order_acquire); }); }
+        safe_stop(task, t, bus, "b3/a", done_flag, mtx, cv);
     }
-
-    { std::unique_lock<std::mutex> lk(mtx);
-      cv.wait_for(lk, std::chrono::seconds(30),
-                  [&]{ return done_flag.load(std::memory_order_acquire); }); }
-    safe_stop(task, t, bus, "b3/a", done_flag, mtx, cv);
 
     Stats s = calc_stats(samples);
     print_latency_row("when_any_bus (N=200, 2 topics)", s);
@@ -413,46 +422,48 @@ static void bench_heavy_callback_throughput() {
     std::vector<std::atomic<bool>> done_flags(NUM_WORKERS);
     for (auto& f : done_flags) f.store(false);
 
-    std::vector<std::unique_ptr<Bench4Task>> tasks;
-    std::vector<std::thread> threads;
-
-    for (int i = 0; i < NUM_WORKERS; ++i) {
-        tasks.push_back(std::make_unique<Bench4Task>(
-            bus, TOTAL, cnt, done_flags[i], mtx, cv));
-    }
-    for (auto& task : tasks)
-        threads.emplace_back([&t = *task]{ t.execute(); });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
     uint8_t payload[8]{};
-    uint64_t t0 = now_ns();
+    uint64_t t0 = 0, t1 = 0;
+    {
+        std::vector<std::unique_ptr<Bench4Task>> tasks;
+        std::vector<std::thread> threads;
 
-    const int BATCH = 50;
-    for (int sent = 0; sent < TOTAL; ) {
-        int batch = std::min(BATCH, TOTAL - sent);
-        for (int i = 0; i < batch; ++i)
-            message_bus_publish(bus, "b4/heavy", "bench", payload, sizeof(payload));
-        sent += batch;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+        for (int i = 0; i < NUM_WORKERS; ++i) {
+            tasks.push_back(std::make_unique<Bench4Task>(
+                bus, TOTAL, cnt, done_flags[i], mtx, cv));
+        }
+        for (auto& task : tasks)
+            threads.emplace_back([&t = *task]{ t.execute(); });
 
-    { std::unique_lock<std::mutex> lk(mtx);
-      cv.wait_for(lk, std::chrono::seconds(60),
-                  [&]{ return cnt.load() >= TOTAL; }); }
-    uint64_t t1 = now_ns();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    for (int i = 0; i < NUM_WORKERS; ++i) {
-        tasks[i]->stop();
-        message_bus_publish(bus, "b4/heavy", "bench", nullptr, 0);
-    }
-    for (int i = 0; i < NUM_WORKERS; ++i) {
-        auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!done_flags[i].load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < dl)
+        t0 = now_ns();
+        const int BATCH = 50;
+        for (int sent = 0; sent < TOTAL; ) {
+            int batch = std::min(BATCH, TOTAL - sent);
+            for (int i = 0; i < batch; ++i)
+                message_bus_publish(bus, "b4/heavy", "bench", payload, sizeof(payload));
+            sent += batch;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        { std::unique_lock<std::mutex> lk(mtx);
+          cv.wait_for(lk, std::chrono::seconds(60),
+                      [&]{ return cnt.load() >= TOTAL; }); }
+        t1 = now_ns();
+
+        for (int i = 0; i < NUM_WORKERS; ++i) {
+            tasks[i]->stop();
+            message_bus_publish(bus, "b4/heavy", "bench", nullptr, 0);
+        }
+        for (int i = 0; i < NUM_WORKERS; ++i) {
+            auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!done_flags[i].load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < dl)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        for (auto& th : threads) th.join();
     }
-    for (auto& th : threads) th.join();
 
     double elapsed_s = (t1 - t0) / 1e9;
     double throughput = cnt.load() / elapsed_s;
@@ -518,45 +529,47 @@ static void bench_concurrent_tasks() {
         std::vector<std::atomic<bool>> done_flags(num_workers);
         for (auto& f : done_flags) f.store(false);
 
-        std::vector<std::unique_ptr<Bench5Task>> tasks;
-        std::vector<std::thread> threads;
-
-        for (int i = 0; i < num_workers; ++i) {
-            tasks.push_back(std::make_unique<Bench5Task>(
-                bus, total, cnt, done_flags[i], mtx, cv));
-        }
-        for (auto& task : tasks)
-            threads.emplace_back([&t = *task]{ t.execute(); });
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-
         uint8_t payload[8]{};
-        uint64_t t0 = now_ns();
+        uint64_t t0 = 0, t1 = 0;
+        {
+            std::vector<std::unique_ptr<Bench5Task>> tasks;
+            std::vector<std::thread> threads;
 
-        const int BATCH = 100;
-        for (int sent = 0; sent < total; ) {
-            int batch = std::min(BATCH, total - sent);
-            for (int i = 0; i < batch; ++i)
-                message_bus_publish(bus, "b5/fanout", "bench", payload, sizeof(payload));
-            sent += batch;
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+            for (int i = 0; i < num_workers; ++i) {
+                tasks.push_back(std::make_unique<Bench5Task>(
+                    bus, total, cnt, done_flags[i], mtx, cv));
+            }
+            for (auto& task : tasks)
+                threads.emplace_back([&t = *task]{ t.execute(); });
 
-        { std::unique_lock<std::mutex> lk(mtx);
-          cv.wait_for(lk, std::chrono::seconds(30),
-                      [&]{ return cnt.load() >= total; }); }
-        uint64_t t1 = now_ns();
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
-        for (int i = 0; i < num_workers; ++i) {
-            tasks[i]->stop();
-            message_bus_publish(bus, "b5/fanout", "bench", nullptr, 0);
+            t0 = now_ns();
+            const int BATCH = 100;
+            for (int sent = 0; sent < total; ) {
+                int batch = std::min(BATCH, total - sent);
+                for (int i = 0; i < batch; ++i)
+                    message_bus_publish(bus, "b5/fanout", "bench", payload, sizeof(payload));
+                sent += batch;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+
+            { std::unique_lock<std::mutex> lk(mtx);
+              cv.wait_for(lk, std::chrono::seconds(30),
+                          [&]{ return cnt.load() >= total; }); }
+            t1 = now_ns();
+
+            for (int i = 0; i < num_workers; ++i) {
+                tasks[i]->stop();
+                message_bus_publish(bus, "b5/fanout", "bench", nullptr, 0);
+            }
+            for (int i = 0; i < num_workers; ++i) {
+                auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                while (!done_flags[i].load(std::memory_order_acquire) && std::chrono::steady_clock::now() < dl)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            for (auto& th : threads) th.join();
         }
-        for (int i = 0; i < num_workers; ++i) {
-            auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!done_flags[i].load(std::memory_order_acquire) && std::chrono::steady_clock::now() < dl)
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        for (auto& th : threads) th.join();
 
         double elapsed_s = (t1 - t0) / 1e9;
         printf("  workers=%d  总消息=%d  耗时=%.1f ms  吞吐=%.0f 消息/秒\n",
