@@ -67,11 +67,13 @@ static void build_sse_json(MessageBus* bus, DiscoveryManager* dm, char* buf, siz
             ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
         off += snprintf(buf + off, sz - (size_t)off,
             "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
+            "\"deadline_violations\":%lu,"
             "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
             i > 0 ? "," : "", tstats[i].topic,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
+            (unsigned long)tstats[i].deadline_violations,
             (unsigned long)avg_lat, tstats[i].frequency_hz,
             tstats[i].subscriber_count);
     }

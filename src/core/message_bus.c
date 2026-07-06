@@ -219,6 +219,29 @@ static bool rb_pop(RingBuffer* rb, Message* out, atomic_bool* running) {
 
 static void dispatch_message(MessageBus* bus, const Message* msg) {
     int delivered = 0;
+
+    /* ── Lifespan check: drop expired messages before dispatching ── */
+    if (msg->type == MSG_TYPE_PUBLISH && msg->timestamp_us > 0) {
+        pthread_mutex_lock(&bus->topic_mutex);
+        for (int i = 0; i < bus->topic_count; i++) {
+            if (strcmp(bus->topic_entries[i].topic, msg->topic) == 0) {
+                TopicQos* q = &bus->topic_entries[i].qos;
+                if (q->lifespan_ms > 0) {
+                    uint64_t age_ms = (monotonic_us() - msg->timestamp_us) / 1000ULL;
+                    if (age_ms > (uint64_t)q->lifespan_ms) {
+                        bus->topic_entries[i].stats.drop_count++;
+                        if (bus->topic_entries[i].pending_count > 0)
+                            bus->topic_entries[i].pending_count--;
+                        pthread_mutex_unlock(&bus->topic_mutex);
+                        return; /* message expired — skip dispatch entirely */
+                    }
+                }
+                break;
+            }
+        }
+        pthread_mutex_unlock(&bus->topic_mutex);
+    }
+
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
         SubEntry* s = &bus->subs[i];
@@ -248,6 +271,12 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
                     s->total_latency_us += lat;
                     if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
                     if (lat > s->max_latency_us) s->max_latency_us = lat;
+
+                    /* Deadline violation: end-to-end dispatch latency exceeded deadline_ms */
+                    TopicQos* q = &bus->topic_entries[i].qos;
+                    if (q->deadline_ms > 0 && lat > (uint64_t)q->deadline_ms * 1000ULL)
+                        s->deadline_violations++;
+
                     /* Update subscriber count */
                     int subc = 0;
                     pthread_mutex_lock(&bus->sub_mutex);
@@ -436,23 +465,9 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
         TopicQos*   q = &bus->topic_entries[ti].qos;
         uint32_t depth = q->depth > 0 ? q->depth : MSG_BUS_QUEUE_SIZE;
 
-        /* ── Deadline check: 如果设置，检查消息是否过期 ── */
-        if (q->deadline_ms > 0) {
-            uint64_t now = monotonic_us();
-            uint64_t deadline_us = q->deadline_ms * 1000ULL;
-            /* This is a per-message check — in production, compare against source timestamp */
-            (void)deadline_us; (void)now;
-        }
-
-        /* ── Lifespan check: 过期消息直接丢弃 ── */
-        if (q->lifespan_ms > 0 && msg.timestamp_us > 0) {
-            uint64_t now = monotonic_us();
-            uint64_t age_ms = (now - msg.timestamp_us) / 1000ULL;
-            if (age_ms > (uint64_t)q->lifespan_ms) {
-                should_drop = true;
-                s->drop_count++;
-            }
-        }
+        /* Lifespan expiry is checked at dispatch time (in dispatch_message),
+         * where the message has had a chance to age in the queue.
+         * Here at publish time the message age is always ~0. */
 
         /* Enforce per-topic depth using accurate in-flight (pending) count */
         if (bus->topic_entries[ti].pending_count >= depth) {

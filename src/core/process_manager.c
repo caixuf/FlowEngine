@@ -313,3 +313,24 @@ void process_manager_stop_monitor(ProcessManager* mgr) {
     mgr->is_running = false;
     pthread_join(mgr->monitor_thread, NULL);
 }
+
+/* ── Process enumeration ───────────────────────────────── */
+
+int process_manager_list_processes(ProcessManager* mgr,
+                                   ProcessSnapshot* buf, int max) {
+    if (!mgr || !buf || max <= 0) return 0;
+    int count = 0;
+    pthread_mutex_lock(&mgr->mutex);
+    ProcessNode* node;
+    TAILQ_FOREACH(node, &mgr->process_list, entries) {
+        if (count >= max) break;
+        ProcessSnapshot* pi = &buf[count++];
+        snprintf(pi->name, sizeof(pi->name), "%s", node->name);
+        snprintf(pi->library_path, sizeof(pi->library_path), "%s", node->library_path);
+        pi->is_running     = node->is_running;
+        pi->restart_count  = node->restart_count;
+        pi->sched_priority = node->sched_priority;
+    }
+    pthread_mutex_unlock(&mgr->mutex);
+    return count;
+}
