@@ -11,7 +11,7 @@
 #include <stdio.h>
 
 /* Compile-time guard: StatsPacket must fit in a single IPC Message payload */
-typedef char _stats_packet_size_check[
+typedef char stats_packet_size_check[
     sizeof(StatsPacket) <= MSG_BUS_MAX_DATA_SIZE ? 1 : -1];
 
 /* ── Public API ─────────────────────────────────────────── */

@@ -60,7 +60,7 @@ typedef struct {
     uint64_t total_latency_us;
     double   frequency_hz;
     uint32_t subscriber_count;
-    uint32_t _pad;              /**< Alignment padding */
+    uint32_t reserved;          /**< Alignment padding */
 } RemoteTopicStat;
 
 /* ── Stats packet sent over IPC ─────────────────────────── */

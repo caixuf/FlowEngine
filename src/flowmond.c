@@ -29,9 +29,6 @@
 
 static volatile bool g_running = true;
 
-/* MonitorServer instance; shared with IPC stats callback */
-static MonitorServer* g_ms = NULL;
-
 static void sig_handler(int sig) {
     (void)sig;
     g_running = false;
@@ -41,15 +38,17 @@ static void sig_handler(int sig) {
 
 /** Called by the IPC background thread when a StatsPacket arrives */
 static void on_remote_stats(const Message* msg, void* user_data) {
-    (void)user_data;
     if (!msg || msg->data_size < sizeof(StatsPacket)) return;
+    MonitorServer* ms = (MonitorServer*)user_data;
     const StatsPacket* pkt = (const StatsPacket*)msg->data;
-    if (g_ms) {
-        monitor_server_inject_remote_stats(g_ms, pkt);
-        LOG_INFO("flowmond", "stats bridge: received %u topics from '%s'",
-                 pkt->topic_count, pkt->source_name);
-    }
+    monitor_server_inject_remote_stats(ms, pkt);
+    LOG_INFO("flowmond", "stats bridge: received %u topics from '%s'",
+             pkt->topic_count, pkt->source_name);
 }
+
+typedef struct {
+    MonitorServer* ms;
+} ReconnectArgs;
 
 /**
  * Background thread: keep trying to connect to the stats IPC channel
@@ -57,22 +56,26 @@ static void on_remote_stats(const Message* msg, void* user_data) {
  * Retries every 2 seconds until the publisher opens the channel.
  */
 static void* stats_bridge_reconnect_fn(void* arg) {
-    (void)arg;
+    ReconnectArgs* ra = (ReconnectArgs*)arg;
     IpcChannel* sub = NULL;
 
     while (g_running) {
         if (!sub) {
-            sub = stats_bridge_subscriber_open(on_remote_stats, NULL);
+            sub = stats_bridge_subscriber_open(on_remote_stats, ra->ms);
             if (sub) {
                 ipc_channel_start(sub);
                 LOG_INFO("flowmond", "stats bridge: connected to IPC channel '%s'",
                          STATS_BRIDGE_CHANNEL);
+            } else {
+                sleep(2);  /* publisher not up yet, retry */
             }
+        } else {
+            sleep(2);
         }
-        sleep(2);
     }
 
     if (sub) ipc_channel_close(sub);
+    free(ra);
     return NULL;
 }
 
@@ -152,7 +155,6 @@ int main(int argc, char** argv) {
 
     /* ── 启动 HTTP 监控服务器 ── */
     MonitorServer* ms = monitor_server_create(bus, dm, port);
-    g_ms = ms;
     monitor_server_start(ms);
     LOG_INFO("flowmond", "dashboard: http://localhost:%d", port);
     printf("  Endpoints:\n");
@@ -163,8 +165,10 @@ int main(int argc, char** argv) {
     printf("\n");
 
     /* ── IPC stats bridge: subscribe to stats from other processes ── */
+    ReconnectArgs* ra = (ReconnectArgs*)malloc(sizeof(ReconnectArgs));
+    ra->ms = ms;
     pthread_t stats_reconnect_thread;
-    pthread_create(&stats_reconnect_thread, NULL, stats_bridge_reconnect_fn, NULL);
+    pthread_create(&stats_reconnect_thread, NULL, stats_bridge_reconnect_fn, ra);
     LOG_INFO("flowmond", "stats bridge: watching for IPC channel '%s'",
              STATS_BRIDGE_CHANNEL);
 
@@ -193,7 +197,6 @@ int main(int argc, char** argv) {
 
     /* ── 清理 ── */
     pthread_join(stats_reconnect_thread, NULL);
-    g_ms = NULL;
     monitor_server_stop(ms);
     monitor_server_destroy(ms);
     discovery_stop(dm);

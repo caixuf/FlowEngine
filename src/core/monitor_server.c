@@ -40,7 +40,6 @@ typedef struct {
     StatsPacket pkt;
     bool        valid;
 } RemoteSource;
-
 typedef struct {
     MessageBus*       bus;
     DiscoveryManager* discovery;
@@ -70,6 +69,13 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     TopicStats tstats[32];
     int nt = message_bus_get_all_topic_stats(bus, tstats, 32);
 
+    /* Safe append helper: never write past buf+sz */
+#define SSE_APPEND(fmt, ...) \
+    do { \
+        if (off >= 0 && (size_t)off < sz) \
+            off += snprintf(buf + off, sz - (size_t)off, fmt, ##__VA_ARGS__); \
+    } while (0)
+
     int off = snprintf(buf, sz,
         "{\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
         "\"topology\":%s,"
@@ -82,7 +88,7 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     for (int i = 0; i < nt; i++) {
         uint64_t avg_lat = tstats[i].deliver_count > 0
             ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
-        off += snprintf(buf + off, sz - (size_t)off,
+        SSE_APPEND(
             "%s{\"topic\":\"%s\",\"source\":\"local\","
             "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
             "\"deadline_violations\":%lu,"
@@ -106,7 +112,7 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             const RemoteTopicStat* t = &src->pkt.topics[i];
             uint64_t avg_lat = t->deliver_count > 0
                 ? t->total_latency_us / t->deliver_count : 0;
-            off += snprintf(buf + off, sz - (size_t)off,
+            SSE_APPEND(
                 "%s{\"topic\":\"%s\",\"source\":\"%s\","
                 "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
                 "\"deadline_violations\":0,"
@@ -122,8 +128,8 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     }
     pthread_mutex_unlock(&ms->remote_mutex);
 
-    off += snprintf(buf + off, sz - (size_t)off, "]}");
-    (void)off;
+    SSE_APPEND("]}");
+#undef SSE_APPEND
 }
 
 /* ── HTTP 响应 ──────────────────────────────────────────── */

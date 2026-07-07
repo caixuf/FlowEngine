@@ -1853,12 +1853,15 @@ int main(int argc, char** argv) {
     LOG_INFO("e2e", "monitor: start 'flowmond --port 8800' in another terminal for live dashboard");
 
     /* ── Stats IPC bridge: publish bus stats so flowmond can aggregate them ── */
-    pthread_t stats_pub_thread = 0;
+    bool stats_pub_thread_started = false;
+    pthread_t stats_pub_thread;
     g_stats_pub_ch = stats_bridge_publisher_open();
     if (g_stats_pub_ch) {
-        pthread_create(&stats_pub_thread, NULL, stats_publisher_thread_fn, NULL);
-        LOG_INFO("e2e", "stats bridge: publishing to IPC channel '%s'",
-                 STATS_BRIDGE_CHANNEL);
+        if (pthread_create(&stats_pub_thread, NULL, stats_publisher_thread_fn, NULL) == 0) {
+            stats_pub_thread_started = true;
+            LOG_INFO("e2e", "stats bridge: publishing to IPC channel '%s'",
+                     STATS_BRIDGE_CHANNEL);
+        }
     } else {
         LOG_WARN("e2e", "stats bridge: could not open IPC channel (flowmond won't see stats)");
     }
@@ -1875,7 +1878,7 @@ int main(int argc, char** argv) {
     if (mt)  task_stop(&mt->base);
 
     /* ── 关闭 stats bridge ── */
-    if (stats_pub_thread) pthread_join(stats_pub_thread, NULL);
+    if (stats_pub_thread_started) pthread_join(stats_pub_thread, NULL);
     if (g_stats_pub_ch) { ipc_channel_close(g_stats_pub_ch); g_stats_pub_ch = NULL; }
 
     /* ── 统计摘要 ── */
