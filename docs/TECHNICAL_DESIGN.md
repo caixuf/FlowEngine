@@ -198,7 +198,38 @@ CMakeLists.txt
 3. **新增话题**：直接调用 `message_bus_publish(bus, "my/topic", data, size, "sender")`
 4. **自定义时钟**：调用 `clock_service_set_mode(CLOCK_MODE_SIMULATION)` 后控制速率
 
-## 9. 已知限制
+## 10. 监控与可视化架构
+
+FlowEngine 提供两条可视化链路，但当前仅**文件桥接**完全可用：
+
+### 10.1 文件桥接（当前唯一可用链路）
+
+```
+flow_e2e (业务/仿真节点)
+  └─ monitor 任务 (10Hz) 原子写入 /tmp/flow_topology.json
+        │  (bus/topic 统计 + 车辆遥测 + 3D scene{ego, obstacles, lidar})
+        ▼
+flowboard_server.py (Python HTTP/SSE, 端口 8800)
+        │
+        ▼
+FlowBoard Dashboard (浏览器, Three.js 3D + Canvas 2D + D3 拓扑)
+```
+
+- 数据通过`tmp + rename`原子写入，避免读半截脏数据
+- 桥接层使用 `ThreadingHTTPServer`，不被 SSE 长连接饿死
+- 前端三态显示：LIVE / STALE / OFFLINE
+
+### 10.2 flowmond（部分实现）
+
+`flowmond` 创建自己的进程内 `MessageBus`，与 `flow_e2e` 等业务节点的总线**不共享**。跨进程 topic 统计聚合需要 IPC/TCP bridge，当前未实现。
+
+- `flowmond` 能启动 HTTP Dashboard，但只能看到自己总线上的空统计
+- 如需使用 `flowmond`，需先实现跨进程 topic 转发
+
+### 10.3 详细参考
+
+- [可视化架构](../VISUALIZATION_ARCHITECTURE.md) — 文件桥接架构、API 端点、数据结构
+- [监控架构](../MONITORING_ARCHITECTURE.md) — flowmond 设计目标与实现状态
 
 - MessageBus 单进程内使用；跨进程请用 IPC Channel
 - 协程任务需要 GCC 11+ 或 Clang 14+（`-fcoroutines` / `-fcoroutines-ts`）

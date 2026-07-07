@@ -1,5 +1,20 @@
 # FlowEngine 监控与数据采集架构
 
+> ⚠️ **重要：本文档描述的是监控系统的设计目标与架构规划，并非当前实现。**
+>
+> **当前实际可用的监控/可视化链路：**
+> ```
+> flow_e2e → 写 /tmp/flow_topology.json → flowboard_server.py (Python HTTP) → 浏览器
+> ```
+>
+> **`flowmond` 当前实现状态：**
+> - `flowmond` 进程内部创建自己的 `MessageBus`，与 `flow_e2e` 等业务节点的总线**不共享**
+> - 跨进程 topic 聚合需要 IPC/TCP bridge，**当前未实现**
+> - `flowmond` 内嵌的 HTTP 服务器只能看到它自己总线上的空 topic 统计
+> - 如需使用 flowmond，请参考 `docs/VISUALIZATION_ARCHITECTURE.md` 了解实际的"文件桥接"方案
+>
+> ---
+
 ## 设计原则
 
 ```

@@ -41,113 +41,27 @@ bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 
 ---
 
-# 可视化进化路线图
+# 可视化架构
 
-## 现状
-
-- 传感器: 代码生成假 LiDAR/GPS
-- 感知: 无
-- 融合: 仅时间对齐
-- 规划: 硬编码 lane_target
-- 控制: PID 纵向 + P 横向
-- 地图: 手工 4 车道直线
-- 可视化: 手工 Three.js 3D + Canvas 2D fallback
-
-## 目标技术栈
+## 当前唯一可用链路
 
 ```
-┌──────────────────────────────────────────────────┐
-│                    数据源                         │
-│  CARLA 仿真器  or  nuScenes/Waymo 回放           │
-└──────────────────────┬───────────────────────────┘
-                       ↓
-┌──────────────────────────────────────────────────┐
-│               算法引擎 (Autoware.Universe)         │
-│  Perception → Planning → Control                 │
-│  每个节点独立 ROS2 package，topic 输入输出         │
-└──────────────────────┬───────────────────────────┘
-                       ↓ (ROS2↔Flow bridge, ~300行)
-┌──────────────────────────────────────────────────┐
-│              FlowEngine Message Bus               │
-│   sensor/*  fusion/*  planning/*  control/*       │
-│   map/*     perception/*                          │
-└──────┬───────────────────────────────┬────────────┘
-       ↓                               ↓
-┌──────────────────┐    ┌──────────────────────────┐
-│  FlowBoard (Web)  │    │  Foxglove Studio (桌面)   │
-│  ┌──────────────┐ │    │  MCAP 回放 + 时间轴       │
-│  │streetscape.gl│ │    │  3D 全景 + 点云渲染       │
-│  │ XvizLayer    │ │    │  (已有 bridge @8765)      │
-│  ├──────────────┤ │    └──────────────────────────┘
-│  │ D3.js Charts │ │
-│  │ 拓扑图        │ │
-│  └──────────────┘ │
-└──────────────────┘
+flow_e2e ─→ 10Hz 写 /tmp/flow_topology.json ─→ flowboard_server.py :8800 ─→ 浏览器
 ```
 
-## Phase 计划
+> **核心原则**：所有数据通过**状态文件 JSON 桥接**，不依赖跨进程 topic 聚合。
 
-### Phase 0: 环境搭建 (当前)
-- [ ] 安装 CARLA 0.9.15 (Docker 或源码)
-- [ ] 安装 Autoware.Universe (Docker)
-- [ ] 验证 CARLA-Autoware 联通
-- **开源依赖**: CARLA, Autoware.Universe
+## 关键说明
 
-### Phase 1: ROS2↔FlowEngine Bridge (2天)
-- [ ] 写 `ros2_flow_bridge` 节点
-  - ROS2 侧: 订阅 `/perception/*`, `/planning/*`, `/control/*`
-  - FlowEngine 侧: 发布到对应 topic
-  - 消息格式转换 (ROS2 msg → FlowEngine internal)
-- **开源依赖**: rclcpp/rclpy
-- **工作量**: ~300 行 C++/Python
+| 组件 | 状态 |
+|------|------|
+| `flowboard_server.py` (HTTP/SSE) | ✅ 当前默认，demo 脚本使用 |
+| `flowboard.html` (Three.js 3D + Canvas 2D) | ✅ 由 flowboard_server 服务 |
+| `foxglove_bridge.py` (WebSocket @8765) | ✅ MCAP 回放可视化 |
+| `flowmond` (监控守护进程) | ⚠️ 创建独立 MessageBus，无法获取业务节点 topic 统计；跨进程 IPC/TCP bridge 未实现 |
 
-### Phase 2: CARLA→Autoware 感知管线 (1周)
-- [ ] CARLA 连 Autoware `lidar_centerpoint`
-- [ ] 检测框经 bridge 进 FlowEngine
-- [ ] 3D 场景渲染检测框
-- **开源依赖**: Autoware Perception 模块, OpenPCDet (推理)
+## 详细文档
 
-### Phase 3: streetscape.gl 替换手工 Three.js (1周)
-- [ ] 安装 streetscape.gl + deck.gl (React)
-- [ ] 写 XVIZ 格式转换层 (FlowEngine data → XVIZ frames)
-- [ ] XvizLayer 渲染: 检测框, 车道线, 轨迹, 点云
-- [ ] 保留 D3.js 图表和拓扑图
-- **开源依赖**: [streetscape.gl](https://github.com/uber/streetscape.gl), [deck.gl](https://deck.gl/)
-- **替换**: ~800 行手工 Three.js → ~50 行 XVIZ 转换 + 组件
-
-### Phase 4: Autoware 规划控制接入 (1周)
-- [ ] `behavior_path_planner` → 变道决策
-- [ ] `trajectory_follower` → MPC 控制
-- [ ] 过 bridge 驱动 CARLA 车辆
-- **开源依赖**: Autoware Planning + Control 模块
-
-### Phase 5: HD Map (Lanelet2) 渲染 (3天)
-- [ ] Lanelet2 加载 CARLA Town 地图
-- [ ] 经 bridge 发布到 `map/lanelet` topic
-- [ ] streetscape.gl 渲染车道线 (从地图数据驱动)
-- **开源依赖**: Lanelet2, streetscape.gl 内置 MapLayer
-
-### Phase 6: Foxglove MCAP 完善 (1天)
-- [ ] 补全 MCAP channel (检测框, 轨迹, 地图)
-- [ ] Foxglove Studio 布局模板
-- **开源依赖**: 已有 mcap_writer + foxglove_bridge
-
-## 开源全家福
-
-| 模块 | 开源项目 | 规模 | 链接 |
-|------|---------|------|------|
-| 全套 #1 | Apollo | ★★★★★ | github.com/ApolloAuto/apollo |
-| 全套 #2 | Autoware.Universe | ★★★★★ | github.com/autowarefoundation/autoware.universe |
-| 仿真器 | CARLA | ★★★★ | github.com/carla-simulator/carla |
-| 数据集 | nuScenes | ★★★ | nuscenes.org |
-| 数据集 | Waymo Open | ★★★★ | waymo.com/open |
-| 感知 | OpenPCDet | ★★★★ | github.com/open-mmlab/OpenPCDet |
-| 感知 | MMDetection3D | ★★★★★ | github.com/open-mmlab/mmdetection3d |
-| 跟踪 | AB3DMOT | ★★ | github.com/xinshuoweng/AB3DMOT |
-| 融合 | Apollo Fusion | ★★★ | apollo.auto |
-| 地图 | Lanelet2 | ★★★ | github.com/fzi-forschungszentrum-informatik/Lanelet2 |
-| 规划 | Apollo/ Autoware Planning | ★★★★ | apollo.auto / autoware.org |
-| 控制 | Apollo/ Autoware Control (MPC) | ★★★ | apollo.auto / autoware.org |
-| BEV 可视化 | streetscape.gl | ★★★ | github.com/uber/streetscape.gl |
-| 3D 可视化 | Foxglove Studio | ★★★ | github.com/foxglove/studio |
-| 交通流 | SUMO | ★★★ | github.com/eclipse-sumo/sumo |
+- [可视化架构](docs/VISUALIZATION_ARCHITECTURE.md) — API 端点、数据契约、鲁棒性设计
+- [监控架构](docs/MONITORING_ARCHITECTURE.md) — flowmond 设计目标与当前局限
+- [E2E 仿真设计](docs/E2E_SIMULATION_DESIGN.md) — offline 根因修复与 3D 仿真 |
