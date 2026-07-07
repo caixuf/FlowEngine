@@ -1,11 +1,13 @@
 /**
  * test_modules.c — FlowEngine 模块单元测试
  *
- * 覆盖: serializer, state_machine, scheduler, fusion
+ * 覆盖: serializer, state_machine, scheduler, fusion,
+ *       clock_service, scenario_loader
  *
  * 编译: gcc -I include -I build/gen tests/test_modules.c src/core/serializer.c
  *        src/core/state_machine.c src/core/scheduler.c src/core/fusion.c
- *        src/core/message_bus.c ... -lpthread -lrt -lm
+ *        src/core/message_bus.c src/core/clock_service.c
+ *        src/core/scenario_loader.c ... -lpthread -lrt -lm -lcjson
  *
  * 运行: ./build/bin/test_modules
  */
@@ -17,6 +19,8 @@
 #include "message_bus.h"
 #include "error_codes.h"
 #include "adas_msgs_gen.h"
+#include "clock_service.h"
+#include "scenario_loader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -676,6 +680,210 @@ static void test_bus_qos_deadline_violations(void) {
 /* Main                                                       */
 /* ══════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════ */
+/* Clock Service Tests                                        */
+/* ══════════════════════════════════════════════════════════ */
+
+static void test_clock_real_mode(void) {
+    TEST("clock real mode returns non-zero");
+    clock_set_sim_mode(false);
+    uint64_t t = clock_now_us();
+    ASSERT(t > 0, "real clock_now_us should be non-zero");
+
+    TEST("clock real mode is_sim_mode = false");
+    ASSERT(!clock_is_sim_mode(), "should not be in sim mode");
+
+    TEST("clock real mode advances with time");
+    uint64_t t2 = clock_now_us();
+    ASSERT(t2 >= t, "monotonic clock must not go backwards");
+    PASS();
+}
+
+static void test_clock_sim_mode(void) {
+    TEST("clock sim_mode set/get");
+    clock_set_sim_mode(true);
+    ASSERT(clock_is_sim_mode(), "is_sim_mode should be true after set");
+
+    TEST("clock sim set/get time");
+    clock_set_sim_time(1000000ULL);
+    ASSERT(clock_now_us() == 1000000ULL, "sim time should match set value");
+
+    TEST("clock advance_us accumulates");
+    clock_set_sim_time(0);
+    clock_advance_us(5000);
+    clock_advance_us(3000);
+    ASSERT(clock_now_us() == 8000ULL, "advance_us should accumulate: expected 8000");
+
+    TEST("clock advance_us no-op in real mode");
+    clock_set_sim_mode(false);
+    uint64_t before = clock_now_us();
+    clock_advance_us(1000000ULL); /* should have no effect */
+    uint64_t after = clock_now_us();
+    /* In real mode, now returns CLOCK_MONOTONIC, not the sim counter */
+    ASSERT(after >= before, "real clock still monotonic after advance_us no-op");
+
+    /* Restore clean state */
+    clock_set_sim_mode(false);
+    PASS();
+}
+
+static void test_clock_step_us(void) {
+    TEST("clock step_us set/get");
+    clock_set_step_us(50000ULL); /* 50 ms */
+    ASSERT(clock_get_step_us() == 50000ULL, "step_us should match set value");
+
+    TEST("clock step_us non-sim-mode returns 0 after reset");
+    clock_set_step_us(0);
+    ASSERT(clock_get_step_us() == 0, "step_us should be 0 after reset");
+
+    /* Reset to known clean state */
+    clock_set_sim_mode(false);
+    PASS();
+}
+
+static void test_clock_sim_loop(void) {
+    TEST("clock sim loop tick-driven");
+    clock_set_sim_mode(true);
+    clock_set_sim_time(0);
+    clock_set_step_us(10000ULL); /* 10 ms per step */
+
+    const int STEPS = 5;
+    for (int i = 0; i < STEPS; i++)
+        clock_advance_us(clock_get_step_us());
+
+    uint64_t expected = (uint64_t)STEPS * 10000ULL;
+    ASSERT(clock_now_us() == expected,
+           "after %d steps of 10ms, sim_time should be %llu us (got %llu)",
+           STEPS, (unsigned long long)expected, (unsigned long long)clock_now_us());
+
+    /* Clean up */
+    clock_set_sim_mode(false);
+    clock_set_step_us(0);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* Scenario Loader Tests                                      */
+/* ══════════════════════════════════════════════════════════ */
+
+static void test_scenario_load_null(void) {
+    TEST("scenario_load NULL path returns NULL");
+    ASSERT(scenario_load(NULL) == NULL, "NULL path should return NULL");
+
+    TEST("scenario_load missing file returns NULL");
+    ASSERT(scenario_load("/tmp/nonexistent_scenario_xyz.json") == NULL,
+           "missing file should return NULL");
+    PASS();
+}
+
+/* Helper: construct path relative to repo root (CWD during test run).
+ * `filename` must be a plain basename (no path separators or traversal). */
+static void make_scenario_path(char* buf, size_t bufsz, const char* filename) {
+    /* CMake sets the working directory to the build directory; the scenario
+     * files are at <repo>/scenarios/.  Use the compile-time PROJECT_SOURCE_DIR
+     * macro when available, otherwise fall back to a relative path. */
+#ifdef PROJECT_SOURCE_DIR
+    snprintf(buf, bufsz, "%s/scenarios/%s", PROJECT_SOURCE_DIR, filename);
+#else
+    snprintf(buf, bufsz, "scenarios/%s", filename);
+#endif
+}
+
+static void test_scenario_load_pedestrian_crossing(void) {
+    char path[512];
+    make_scenario_path(path, sizeof(path), "pedestrian_crossing.json");
+
+    TEST("scenario_load pedestrian_crossing.json succeeds");
+    ScenarioConfig* sc = scenario_load(path);
+    ASSERT(sc != NULL, "scenario_load should succeed for pedestrian_crossing.json");
+
+    TEST("scenario name matches");
+    ASSERT(strcmp(sc->name, "pedestrian_crossing") == 0,
+           "name mismatch: got '%s'", sc->name);
+
+    TEST("scenario random_seed is 42");
+    ASSERT(sc->random_seed == 42u, "random_seed should be 42 (got %u)", sc->random_seed);
+
+    TEST("scenario actor_count is 4");
+    ASSERT_EQ(sc->actor_count, 4, "actor_count wrong");
+
+    TEST("scenario actor[0] is car at x=35");
+    ASSERT(strcmp(sc->actors[0].type, "car") == 0,
+           "actor[0] type should be 'car' (got '%s')", sc->actors[0].type);
+    ASSERT(fabs(sc->actors[0].x - 35.0) < 0.01,
+           "actor[0].x should be 35.0 (got %.2f)", sc->actors[0].x);
+
+    TEST("scenario actor[2] is pedestrian");
+    ASSERT(strcmp(sc->actors[2].type, "pedestrian") == 0,
+           "actor[2] type should be 'pedestrian' (got '%s')", sc->actors[2].type);
+
+    TEST("scenario ego initial state");
+    ASSERT(fabs(sc->ego.y - (-1.75)) < 0.01,
+           "ego.y should be -1.75 (got %.2f)", sc->ego.y);
+    ASSERT(fabs(sc->ego.init_speed - 5.0) < 0.01,
+           "ego.init_speed should be 5.0 (got %.2f)", sc->ego.init_speed);
+
+    TEST("scenario pass_criteria no_collision");
+    ASSERT(sc->criteria.no_collision, "no_collision should be true");
+
+    scenario_free(sc);
+    PASS();
+}
+
+static void test_scenario_load_highway_overtake(void) {
+    char path[512];
+    make_scenario_path(path, sizeof(path), "highway_overtake.json");
+
+    TEST("scenario_load highway_overtake.json succeeds");
+    ScenarioConfig* sc = scenario_load(path);
+    ASSERT(sc != NULL, "scenario_load should succeed for highway_overtake.json");
+
+    TEST("scenario highway_overtake name matches");
+    ASSERT(strcmp(sc->name, "highway_overtake") == 0,
+           "name mismatch: got '%s'", sc->name);
+
+    TEST("scenario highway_overtake has actors");
+    ASSERT(sc->actor_count > 0, "actor_count should be > 0 (got %d)", sc->actor_count);
+
+    scenario_free(sc);
+    PASS();
+}
+
+static void test_scenario_to_json(void) {
+    char path[512];
+    make_scenario_path(path, sizeof(path), "pedestrian_crossing.json");
+
+    ScenarioConfig* sc = scenario_load(path);
+    if (!sc) {
+        /* If file is not accessible from the test working dir, skip gracefully */
+        TEST("scenario_to_json (skip: file not found)");
+        PASS();
+        return;
+    }
+
+    TEST("scenario_to_json returns non-NULL");
+    char* json = scenario_to_json(sc);
+    ASSERT(json != NULL, "scenario_to_json should return non-NULL");
+
+    TEST("scenario_to_json contains name field");
+    ASSERT(strstr(json, "pedestrian_crossing") != NULL,
+           "JSON output should contain scenario name");
+
+    TEST("scenario_to_json contains actors array");
+    ASSERT(strstr(json, "actors") != NULL,
+           "JSON output should contain 'actors'");
+
+    free(json);
+    scenario_free(sc);
+    PASS();
+}
+
+static void test_scenario_free_null(void) {
+    TEST("scenario_free NULL is safe");
+    scenario_free(NULL); /* must not crash */
+    PASS();
+}
+
 int main(void) {
     printf("\n╔══════════════════════════════════════════╗\n");
     printf("║  FlowEngine Unit Tests                    ║\n");
@@ -721,6 +929,21 @@ int main(void) {
     test_bus_qos_drop_oldest();
     test_bus_qos_lifespan();
     test_bus_qos_deadline_violations();
+
+    /* ── Clock Service ──────────────────────── */
+    printf("\n═══ Clock Service ═══\n");
+    test_clock_real_mode();
+    test_clock_sim_mode();
+    test_clock_step_us();
+    test_clock_sim_loop();
+
+    /* ── Scenario Loader ────────────────────── */
+    printf("\n═══ Scenario Loader ═══\n");
+    test_scenario_load_null();
+    test_scenario_load_pedestrian_crossing();
+    test_scenario_load_highway_overtake();
+    test_scenario_to_json();
+    test_scenario_free_null();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");
