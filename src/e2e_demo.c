@@ -699,9 +699,9 @@ VehicleModel g_vehicle = {
 
 /* ── 3D 场景: 障碍物 (真实运动学，供可视化与 ACC 使用) ── */
 SimObstacle g_obstacles[SIM_OBSTACLE_COUNT] = {
-    { 0, "car",         35.0, -1.75,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 (右车道) */
-    { 1, "car",         95.0,  1.75, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 (左车道) */
-    { 2, "pedestrian",  55.0,  8.0,   0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
+    { 0, "car",          50.0, -1.75,  6.0, 0.0, 4.6, 2.0 }, /* 同车道前车 (右车道, 50m 起步给 ACC 空间) */
+    { 1, "car",         120.0,  1.75, -9.0, 0.0, 4.6, 2.0 }, /* 对向来车 (左车道, 120m 远给变道窗口) */
+    { 2, "pedestrian",   55.0,  8.0,   0.0, 0.6, 0.6, 0.6 }, /* 过街行人 */
 };
 
 /* 障碍物运动学 + 循环边界，使场景持续有内容 */
@@ -729,16 +729,23 @@ static void obstacles_tick(double dt) {
     }
 }
 
-/* 与同车道前车的纵向间距 (m)，无则返回大值。
+/* 变道状态: vehicle_tick() 写入, control_execute() 读取
+ * 用于 ACC 在变道期间仍追踪源车道前车, 防止物理追尾。
+ * 命名前缀 g_ 区分同名局部变量 (lc_active / lc_source_y 在 vehicle_tick 内) */
+static int    g_lc_active    = 0;    /* 1 = 变道进行中 (shared across functions) */
+static double g_lc_source_y  = 0;   /* 变道起始车道中心 y (m, shared across functions) */
+
+/* 与指定车道中心前车的纵向净间距 (m)，无则返回大值。
+ * lane_y: 要检查的车道 y 坐标 (变道时传源车道, 正常时传 g_vehicle.y)
  * 返回"车头到车尾"的净间距 (减去两车半长)，避免 ACC 只按中心距保 6m
  * 而车身(≈4.6m)相互重叠、视觉上"贴上/撞上"。 */
 #define EGO_LEN_M 4.6
-static double lead_gap(void) {
+static double lead_gap_at(double lane_y) {
     double best = 1e9;
     for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
         SimObstacle* o = &g_obstacles[i];
         if (o->vx < 0) continue;                 /* 忽略对向车 */
-        if (fabs(o->y - g_vehicle.y) > SAME_LANE_TOL_M) continue; /* 不在本车道 */
+        if (fabs(o->y - lane_y) > SAME_LANE_TOL_M) continue; /* 不在目标车道 */
         double center = o->x - g_vehicle.x;
         double gap = center - (o->len * 0.5 + EGO_LEN_M * 0.5); /* 车尾到车头净距 */
         if (center > 0 && gap < best) best = gap;
@@ -760,7 +767,6 @@ static void vehicle_tick(double dt) {
     /* ── 横向: 平滑变道轨迹 + 车道保持 ── */
     static double lc_start_y   = 0;     /* 变道起点 y */
     static double lc_target_y  = 0;     /* 变道终点 y */
-    static double lc_start_t   = 0;     /* 变道开始时刻 (s) */
     static double lc_duration  = 3.5;   /* 变道时长 (s) — 缓打方向 */
     static double lc_elapsed   = 0;     /* 变道累计时间 */
     static int    lc_active    = 0;     /* 变道进行中? */
@@ -771,12 +777,14 @@ static void vehicle_tick(double dt) {
         lc_target_y = g_vehicle.lane_target;
         lc_elapsed  = 0;
         lc_active   = 1;
+        g_lc_source_y = lc_start_y;  /* 暴露给 ACC 使用 */
     }
     /* 变道完成检测 */
     if (lc_active && lc_elapsed >= lc_duration) {
         g_vehicle.y = lc_target_y;   /* 微调确保精确到达 */
         lc_active   = 0;
     }
+    g_lc_active = lc_active;   /* 同步给 control_execute() */
 
     double y_desired;
     if (lc_active) {
@@ -790,12 +798,18 @@ static void vehicle_tick(double dt) {
         y_desired = g_vehicle.lane_target;
     }
 
-    /* 横向 P 控制器 (追踪平滑轨迹) */
+    /* ── Stanley 横向控制器 ──
+     * steer = -heading + atan(k * y_err / max(speed, v_min))
+     * 坐标约定: y 左正，heading 逆时针正 (标准车辆坐标系)。
+     * -heading 项修正当前航向偏差; atan 项追踪横向偏差。
+     * 两项同时作用，无 P-P 级联超调，行业标准算法。
+     * k=0.8: 低速时偏向航向修正，高速时偏向跟踪精度。*/
     double y_err   = y_desired - g_vehicle.y;
-    double psi_des = 0.5 * y_err;                 /* 期望航向 (比之前柔和) */
-    psi_des = fmax(-0.3, fmin(0.3, psi_des));     /* 限制航向角 */
-    double steer   = 2.0 * (psi_des - g_vehicle.heading);
-    steer = fmax(-0.25, fmin(0.25, steer));       /* ±0.25 rad ≈ 14° 柔和转向 */
+    const double STANLEY_K   = 0.8;
+    const double STANLEY_VMIN = 0.5;  /* 防除零最小速度 (m/s) */
+    double steer = -g_vehicle.heading
+                   + atan(STANLEY_K * y_err / fmax(g_vehicle.speed, STANLEY_VMIN));
+    steer = fmax(-0.3, fmin(0.3, steer));   /* ±0.3 rad ≈ 17° 上限 */
     g_vehicle.steer = steer;
 
     /* ── Bicycle 模型: 航向随转向角与速度演化 ── */
@@ -899,8 +913,10 @@ static int control_execute(TaskBase* base) {
             boost_target = ct->target_speed * 1.15;  /* +15% 加速变道 */
         }
 
-        /* ── ACC: 依据与同车道前车的间距动态限制目标速度 ── */
-        double gap       = lead_gap();
+        /* ── ACC: 依据与同车道前车的间距动态限制目标速度 ──
+         * 变道期间追踪源车道 (g_lc_source_y)，防止横移后 ACC 失联源车道前车 */
+        double acc_lane_y = g_lc_active ? g_lc_source_y : g_vehicle.y;
+        double gap       = lead_gap_at(acc_lane_y);
         double time_hw   = 2.0;                               /* 时距 (s) */
         double min_gap   = 6.0;                               /* 最小间距 (m) */
         double safe_gap  = min_gap + g_vehicle.speed * time_hw;
@@ -956,7 +972,11 @@ static int control_execute(TaskBase* base) {
                 }
             }
         } else if (!blocked && lc_state == 0) {
-            lc_timer = 0;              /* 没被堵，重置计时 */
+            /* 软衰减而非硬清零: PID 噪声导致短暂 unblocked 不再重置计时器。
+             * 衰减速率 2 s/s (即 0.1 s 衰减 0.1×dt/0.05): 每 50ms tick 减 0.1 s */
+            const double LC_TIMER_DECAY_RATE = 2.0;  /* s 衰减 / s 实时 */
+            lc_timer -= LC_TIMER_DECAY_RATE * 0.05;  /* 0.05 = tick dt */
+            if (lc_timer < 0) lc_timer = 0;
         }
 
         /* 变道回正：左车道巡航一段时间后回到原车道 */

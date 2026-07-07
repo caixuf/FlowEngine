@@ -1199,18 +1199,23 @@ function _renderFrame(){
   // Here we just smooth-lerp toward those fixed world targets so
   // obstacles stay anchored in their real lanes regardless of ego motion.
   if(window._obsPool&&window._obsWorld){
+    // Half-length of ego vehicle for overlap-safe occlusion threshold
+    var EGO_HALF_LEN = 2.3;
+    // Default obstacle length when not specified in data
+    var DEFAULT_OBS_LEN = 4;
     for(var oi=0;oi<window._obsPool.length;oi++){
       var om=window._obsPool[oi];
       var ow=window._obsWorld[oi];
       if(ow){
-        var L=ow.len||4,W=ow.wid||2;
+        var L=ow.len||DEFAULT_OBS_LEN,W=ow.wid||2;
         // Type-based real height: trucks tall, pedestrians slim.
         var H=_OBS_H[ow.type]||1.5;
         // 按世界速度外推到当前时刻 → 60fps 平滑, 不再随 10Hz 数据跳动。
         var dtObs=Math.min(now-(ow.t0||now),1.0);
         var tx=ow.x+(ow.vx||0)*dtObs, tz=ow.z+(ow.vz||0)*dtObs;
         var distToEgo=Math.sqrt((tx-sx)*(tx-sx)+(tz-sz)*(tz-sz));
-        if(distToEgo<3.5){om.visible=false;continue;}
+        // Bounding-box-aware occlusion: hide only when truly overlapping ego body
+        if(distToEgo < L*0.5 + EGO_HALF_LEN){om.visible=false;continue;}
         // Unit-normalised model: group origin at road surface (y=0.05).
         // Children sit at fractions 0-1 so scale.set maps directly to metres.
         _tmpV3.set(tx,0.05,tz); om.position.lerp(_tmpV3,0.18);
@@ -1236,7 +1241,7 @@ function _renderFrame(){
   // ── Car bounce ──
   var v=(topoData.metrics||{}).vehicle||{};
   if(ego&&v.speed>0.5){
-    ego.position.y=0.05+Math.sin(_animT*14)*0.04*Math.min(1,v.speed*0.12);
+    ego.position.y=0.05+Math.sin(_animT*6.5)*0.008*Math.min(1,v.speed*0.12);
   }
 }
 
@@ -1546,8 +1551,8 @@ function draw2D(){
 
   // ── Ego vehicle (detailed top-down view, with subtle speed animation) ──
   ctx.save(); ctx.translate(carX,carY); ctx.rotate(-e.heading);
-  // Speed-based bounce (subtle vertical oscillation)
-  var bounce = Math.sin(_2d.frame * 0.15) * Math.min(1, e.speed * 0.15);
+  // Speed-based bounce removed — was Math.sin(frame*0.15)*... which caused visual shimmy
+  var bounce = 0;
   ctx.translate(0, bounce);
   // Speed-based forward tilt (visual acceleration cue)
   if(e.speed > 0.5) ctx.translate(Math.min(3, e.speed * 0.3), 0);
