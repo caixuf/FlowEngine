@@ -70,7 +70,8 @@ static void* stats_bridge_reconnect_fn(void* arg) {
                 sleep(2);  /* publisher not up yet, retry */
             }
         } else {
-            sleep(2);
+            /* Already connected — nothing to do; check g_running periodically */
+            sleep(1);
         }
     }
 

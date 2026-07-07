@@ -112,8 +112,10 @@ static void lat_ring_percentiles(const LatencyRing* r,
 
     qsort(sorted, n, sizeof(uint64_t), cmp_u64_bus);
 
-    *out_p50 = sorted[(uint32_t)(n * 0.50)];
-    *out_p99 = sorted[(uint32_t)(n * 0.99)];
+    /* Use (n-1)*percentile to avoid out-of-bounds on full arrays and to give
+     * a lower-bound "nearest rank" result that works correctly for small n. */
+    *out_p50 = sorted[(uint32_t)((n - 1) * 0.50)];
+    *out_p99 = sorted[(uint32_t)((n - 1) * 0.99)];
 }
 
 /* ── MessageBus ───────────────────────────────────────── */

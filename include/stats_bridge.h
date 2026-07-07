@@ -58,6 +58,9 @@ typedef struct {
     uint64_t deliver_count;
     uint64_t drop_count;
     uint64_t total_latency_us;
+    uint64_t p50_latency_us;    /**< 50th percentile latency */
+    uint64_t p99_latency_us;    /**< 99th percentile latency */
+    uint64_t deadline_violations;
     double   frequency_hz;
     uint32_t subscriber_count;
     uint32_t reserved;          /**< Alignment padding */

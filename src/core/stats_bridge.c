@@ -42,12 +42,15 @@ int stats_bridge_publish(IpcChannel* ch, MessageBus* bus, const char* source_nam
     for (int i = 0; i < nt; i++) {
         snprintf(pkt.topics[i].topic, sizeof(pkt.topics[i].topic),
                  "%s", tstats[i].topic);
-        pkt.topics[i].publish_count    = tstats[i].publish_count;
-        pkt.topics[i].deliver_count    = tstats[i].deliver_count;
-        pkt.topics[i].drop_count       = tstats[i].drop_count;
-        pkt.topics[i].total_latency_us = tstats[i].total_latency_us;
-        pkt.topics[i].frequency_hz     = tstats[i].frequency_hz;
-        pkt.topics[i].subscriber_count = tstats[i].subscriber_count;
+        pkt.topics[i].publish_count     = tstats[i].publish_count;
+        pkt.topics[i].deliver_count     = tstats[i].deliver_count;
+        pkt.topics[i].drop_count        = tstats[i].drop_count;
+        pkt.topics[i].total_latency_us  = tstats[i].total_latency_us;
+        pkt.topics[i].p50_latency_us    = tstats[i].p50_latency_us;
+        pkt.topics[i].p99_latency_us    = tstats[i].p99_latency_us;
+        pkt.topics[i].deadline_violations = tstats[i].deadline_violations;
+        pkt.topics[i].frequency_hz      = tstats[i].frequency_hz;
+        pkt.topics[i].subscriber_count  = tstats[i].subscriber_count;
     }
 
     return ipc_channel_publish(ch, STATS_BRIDGE_TOPIC, source_name,

@@ -174,7 +174,7 @@ A: 检查：
 ## 目录结构
 
 ```
-startTool/
+FlowEngine/
 ├── src/
 │   ├── launcher.c              # 主启动器
 │   ├── core/                   # 核心模块

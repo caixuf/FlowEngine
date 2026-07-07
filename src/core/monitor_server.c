@@ -118,13 +118,17 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             SSE_APPEND(
                 "%s{\"topic\":\"%s\",\"source\":\"%s\","
                 "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                "\"deadline_violations\":0,"
-                "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                "\"deadline_violations\":%lu,"
+                "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
                 total > 0 ? "," : "", t->topic, src->source_name,
                 (unsigned long)t->publish_count,
                 (unsigned long)t->deliver_count,
                 (unsigned long)t->drop_count,
-                (unsigned long)avg_lat, t->frequency_hz,
+                (unsigned long)t->deadline_violations,
+                (unsigned long)avg_lat,
+                (unsigned long)t->p50_latency_us,
+                (unsigned long)t->p99_latency_us,
+                t->frequency_hz,
                 t->subscriber_count);
             total++;
         }
