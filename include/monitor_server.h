@@ -29,6 +29,16 @@ void monitor_server_destroy(MonitorServer* ms);
  */
 void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pkt);
 
+/**
+ * 注入来自其他进程的完整 dashboard JSON（跨进程 IPC dashboard bridge）。
+ * 线程安全；由 flowmond IPC 接收线程调用。
+ * @param ms   MonitorServer 实例
+ * @param json Null-terminated JSON string
+ * @param len  Length of json
+ */
+void monitor_server_inject_dashboard_json(MonitorServer* ms,
+                                          const char* json, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

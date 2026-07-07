@@ -33,6 +33,7 @@
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
 #define MONITOR_MAX_REMOTE_SRCS   8
+#define DASHBOARD_CACHE_STALE_SEC 3  /* seconds before cached JSON considered stale */
 
 /* ── Remote source entry (stats from another process via IPC) */
 typedef struct {
@@ -52,6 +53,11 @@ typedef struct {
     RemoteSource      remote[MONITOR_MAX_REMOTE_SRCS];
     int               remote_count;
     pthread_mutex_t   remote_mutex;
+    /* Cached full dashboard JSON from monitor_node via IPC */
+    char*             cached_json;
+    size_t            cached_json_len;
+    uint64_t          cached_json_time_us;
+    pthread_mutex_t   cached_mutex;
 } MonitorServer;
 
 /* ── File read helper ────────────────────────────────────── */
@@ -74,7 +80,60 @@ static char* read_file(const char* path, size_t* out_len) {
 
 /* ── SSE 数据生成 (flowboard.html 兼容格式) ────────────────── */
 
+/**
+ * Include <time.h> for clock_gettime if not already included.
+ * It's already included above.
+ */
+
+/**
+ * Build dashboard JSON from cached data (from monitor_node).
+ * Wraps the cached JSON with source/stale/age_sec fields.
+ * @return Length written to buf, or 0 if no cache available.
+ */
+static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) {
+    if (!ms || !buf || sz == 0) return 0;
+
+    pthread_mutex_lock(&ms->cached_mutex);
+    int ret = 0;
+    if (ms->cached_json && ms->cached_json_len > 1) {
+        uint64_t now_us;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now_us = (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+
+        uint64_t age_us = (now_us > ms->cached_json_time_us)
+                          ? now_us - ms->cached_json_time_us : 0;
+        double age_sec = (double)age_us / 1000000.0;
+        bool stale = (age_sec > (double)DASHBOARD_CACHE_STALE_SEC);
+
+        /* Inject source/stale/age_sec right after the opening '{' */
+        const char* src = stale ? "stale" : "live";
+        int off = snprintf(buf, sz,
+            "{\"source\":\"%s\",\"stale\":%s,\"age_sec\":%.1f,",
+            src, stale ? "true" : "false", age_sec);
+
+        size_t remain = sz - (size_t)off;
+        if (off > 0 && remain > 1) {
+            /* Skip the leading '{' of cached JSON */
+            const char* body = ms->cached_json + 1;
+            size_t body_len = ms->cached_json_len - 1;
+            size_t copy = body_len < remain - 1 ? body_len : remain - 1;
+            memcpy(buf + off, body, copy);
+            off += (int)copy;
+            buf[off] = '\0';
+            ret = off;
+        }
+    }
+    pthread_mutex_unlock(&ms->cached_mutex);
+    return ret;
+}
+
 static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
+    /* If we have a cached full dashboard JSON from monitor_node, use it */
+    int cached_len = build_cached_dashboard_json(ms, buf, sz);
+    if (cached_len > 0) return;
+
+    /* Fallback: build from local bus + discovery */
     MessageBus* bus = ms->bus;
     DiscoveryManager* dm = ms->discovery;
 
@@ -277,11 +336,16 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
-    /* Route: /api/topology → JSON */
+    /* Route: /api/topology → JSON (prefer cached dashboard JSON) */
     if (strstr(req, "GET /api/topology")) {
         char buf[MONITOR_HTTP_BUF_SIZE];
-        build_sse_json(ms, buf, sizeof(buf));
-        send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+        int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
+        if (cached_len > 0) {
+            send_response(fd, "200 OK", "application/json", buf, cached_len);
+        } else {
+            build_sse_json(ms, buf, sizeof(buf));
+            send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+        }
         close(fd);
         return;
     }
@@ -289,9 +353,13 @@ static void handle_client(int fd, MonitorServer* ms) {
     /* Route: /api/topics → per-topic stats (local + remote) */
     if (strstr(req, "GET /api/topics")) {
         char buf[MONITOR_HTTP_BUF_SIZE];
-        build_sse_json(ms, buf, sizeof(buf));
-        /* build_sse_json includes topics already; return full payload */
-        send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+        int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
+        if (cached_len > 0) {
+            send_response(fd, "200 OK", "application/json", buf, cached_len);
+        } else {
+            build_sse_json(ms, buf, sizeof(buf));
+            send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+        }
         close(fd);
         return;
     }
@@ -382,6 +450,7 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
     if (html_path && html_path[0])
         snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
     pthread_mutex_init(&ms->remote_mutex, NULL);
+    pthread_mutex_init(&ms->cached_mutex, NULL);
     return ms;
 }
 
@@ -401,6 +470,8 @@ void monitor_server_stop(MonitorServer* ms) {
 void monitor_server_destroy(MonitorServer* ms) {
     if (!ms) return;
     if (ms->running) monitor_server_stop(ms);
+    pthread_mutex_destroy(&ms->cached_mutex);
+    if (ms->cached_json) { free(ms->cached_json); ms->cached_json = NULL; }
     pthread_mutex_destroy(&ms->remote_mutex);
     free(ms);
 }
@@ -430,4 +501,29 @@ void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pk
     }
 
     pthread_mutex_unlock(&ms->remote_mutex);
+}
+
+void monitor_server_inject_dashboard_json(MonitorServer* ms,
+                                          const char* json, size_t len) {
+    if (!ms || !json || len == 0) return;
+
+    pthread_mutex_lock(&ms->cached_mutex);
+
+    /* Free old cache */
+    if (ms->cached_json) free(ms->cached_json);
+
+    /* Copy the JSON string */
+    ms->cached_json = (char*)malloc(len + 1);
+    if (ms->cached_json) {
+        memcpy(ms->cached_json, json, len);
+        ms->cached_json[len] = '\0';
+        ms->cached_json_len = len;
+
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ms->cached_json_time_us = (uint64_t)ts.tv_sec * 1000000
+                                  + (uint64_t)ts.tv_nsec / 1000;
+    }
+
+    pthread_mutex_unlock(&ms->cached_mutex);
 }

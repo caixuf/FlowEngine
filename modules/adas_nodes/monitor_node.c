@@ -12,6 +12,7 @@
 #include "flow_registry.h"
 #include "logger.h"
 #include "stats_bridge.h"
+#include "dashboard_bridge.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +56,9 @@ static struct {
 
     /* 跨进程 stats bridge */
     IpcChannel* stats_ch;
+
+    /* 跨进程 dashboard JSON bridge */
+    IpcChannel* dashboard_ch;
 
     /* 配置 */
     double frequency_hz;
@@ -119,6 +123,10 @@ static double json_extract_double(const char* json, const char* key) {
 /* ── 导出 JSON 到 state_file ──────────────────────────────── */
 
 static void export_dashboard_json(void) {
+    struct timespec now_ts;
+    clock_gettime(CLOCK_REALTIME, &now_ts);
+    double timestamp = (double)now_ts.tv_sec + (double)now_ts.tv_nsec / 1000000000.0;
+
     /* 收集指标 */
     uint64_t pub = 0, del = 0, drop = 0;
     if (g.bus) message_bus_get_stats(g.bus, &pub, &del, &drop);
@@ -145,7 +153,7 @@ static void export_dashboard_json(void) {
      * (方案B: nodes 来自各节点广播的 flowengine/node_info，
      *  而不是 flow_registry / discovery peer，解决静态库全局状态不跨 dlopen 共享的问题) */
     const char* self_name = "flow_launcher";
-    fprintf(jf, "{\"self\":\"%s\",\"nodes\":[", self_name);
+    fprintf(jf, "{\"self\":\"%s\",\"timestamp\":%.3f,\"nodes\":[", self_name, timestamp);
     for (int i = 0; i < g.node_info_count; i++) {
         fprintf(jf, "%s%s", i ? "," : "", g.node_info_json[i]);
     }
@@ -300,11 +308,34 @@ static void export_dashboard_json(void) {
                 (int)th->tid, th->name,
                 th->cpu_pct, th->state);
     }
-    fprintf(jf, "]}\n");
+    fprintf(jf, "]}");
 
-    fprintf(jf, "}}\n");  /* close metrics + close top-level */
+    fprintf(jf, "}}");  /* close metrics + close top-level */
     fclose(jf);
     rename(tmp_path, g.state_file);
+
+    /* Publish the same JSON via IPC dashboard bridge for flowmond */
+    if (g.dashboard_ch) {
+        /* Read the file back and publish */
+        size_t json_len;
+        char* json_buf = NULL;
+        FILE* rf = fopen(g.state_file, "rb");
+        if (rf) {
+            fseek(rf, 0, SEEK_END);
+            long flen = ftell(rf);
+            fseek(rf, 0, SEEK_SET);
+            if (flen > 0) {
+                json_buf = (char*)malloc((size_t)flen + 1);
+                if (json_buf) {
+                    json_len = fread(json_buf, 1, (size_t)flen, rf);
+                    json_buf[json_len] = '\0';
+                    dashboard_bridge_publish(g.dashboard_ch, json_buf, json_len);
+                    free(json_buf);
+                }
+            }
+            fclose(rf);
+        }
+    }
     free(topo_json);
 }
 
@@ -413,6 +444,14 @@ static int monitor_init(MessageBus* bus, Transport* transport,
         LOG_INFO("monitor", "stats bridge publisher opened");
     }
 
+    /* Open IPC dashboard JSON bridge for flowmond */
+    g.dashboard_ch = dashboard_bridge_publisher_open();
+    if (!g.dashboard_ch) {
+        LOG_WARN("monitor", "dashboard bridge publisher open failed (flowmond not running yet)");
+    } else {
+        LOG_INFO("monitor", "dashboard bridge publisher opened");
+    }
+
     LOG_INFO("monitor", "initialized (%.0f Hz, state_file=%s)",
              g.frequency_hz, g.state_file);
     return 0;
@@ -430,6 +469,7 @@ static void monitor_cleanup(void) {
     if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
     if (g.sysmon) { sysmonitor_destroy(g.sysmon); g.sysmon = NULL; }
     if (g.stats_ch) { ipc_channel_close(g.stats_ch); g.stats_ch = NULL; }
+    if (g.dashboard_ch) { ipc_channel_close(g.dashboard_ch); g.dashboard_ch = NULL; }
     LOG_INFO("monitor", "cleanup done");
 }
 static int  monitor_health(void)        { return 0; }

@@ -19,6 +19,7 @@
 #include "discovery.h"
 #include "monitor_server.h"
 #include "stats_bridge.h"
+#include "dashboard_bridge.h"
 #include "logger.h"
 #include <libgen.h>
 #include <unistd.h>
@@ -79,6 +80,41 @@ static void* stats_bridge_reconnect_fn(void* arg) {
 
     if (sub) ipc_channel_close(sub);
     free(ra);
+    return NULL;
+}
+
+/* ── Dashboard JSON bridge ──────────────────────────── */
+
+/** Called when a complete dashboard JSON snapshot arrives from monitor_node */
+static void on_dashboard_json(const char* json, size_t len, void* user_data) {
+    MonitorServer* ms = (MonitorServer*)user_data;
+    monitor_server_inject_dashboard_json(ms, json, len);
+}
+
+/**
+ * Background thread: keep trying to connect to the dashboard IPC channel
+ * published by monitor_node.
+ */
+static void* dashboard_bridge_reconnect_fn(void* arg) {
+    MonitorServer* ms = (MonitorServer*)arg;
+    IpcChannel* sub = NULL;
+
+    while (g_running) {
+        if (!sub) {
+            sub = dashboard_bridge_subscriber_open(on_dashboard_json, ms);
+            if (sub) {
+                ipc_channel_start(sub);
+                LOG_INFO("flowmond", "dashboard bridge: connected to IPC channel '%s'",
+                         DASHBOARD_BRIDGE_CHANNEL);
+            } else {
+                sleep(2);  /* publisher not up yet, retry */
+            }
+        } else {
+            sleep(1);
+        }
+    }
+
+    if (sub) ipc_channel_close(sub);
     return NULL;
 }
 
@@ -195,6 +231,12 @@ int main(int argc, char** argv) {
     LOG_INFO("flowmond", "stats bridge: watching for IPC channel '%s'",
              STATS_BRIDGE_CHANNEL);
 
+    /* ── IPC dashboard JSON bridge: subscribe to full JSON from monitor_node ── */
+    pthread_t dashboard_reconnect_thread;
+    pthread_create(&dashboard_reconnect_thread, NULL, dashboard_bridge_reconnect_fn, ms);
+    LOG_INFO("flowmond", "dashboard bridge: watching for IPC channel '%s'",
+             DASHBOARD_BRIDGE_CHANNEL);
+
     /* ── 告警规则 ── */
     AlertRule rules[] = {
         { .name = "default", .max_drop_rate = 10, .max_latency_us = 5000, .max_node_offline_sec = 30 },
@@ -220,6 +262,7 @@ int main(int argc, char** argv) {
 
     /* ── 清理 ── */
     pthread_join(stats_reconnect_thread, NULL);
+    pthread_join(dashboard_reconnect_thread, NULL);
     monitor_server_stop(ms);
     monitor_server_destroy(ms);
     discovery_stop(dm);

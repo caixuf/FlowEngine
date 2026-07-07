@@ -109,19 +109,25 @@ static inline void node_announce_self(Transport* transport, const NodePlugin* pl
     if (!transport || !plugin || !plugin->name) return;
     char json[1024];
     int n = snprintf(json, sizeof(json),
-        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"pid\":%d,\"inputs\":[",
+        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"pid\":%d,\"alive\":true,\"topics\":[",
         plugin->name,
         plugin->version     ? plugin->version     : "1.0.0",
         plugin->description ? plugin->description : "",
         (int)getpid());
+    int need_comma = 0;
     if (plugin->input_topics) {
-        for (int i = 0; plugin->input_topics[i] && n < (int)sizeof(json)-4; i++)
-            n += snprintf(json+n, sizeof(json)-n, "%s\"%s\"", i?",":"", plugin->input_topics[i]);
+        for (int i = 0; plugin->input_topics[i] && n < (int)sizeof(json)-60; i++) {
+            n += snprintf(json+n, sizeof(json)-n, "%s{\"topic\":\"%s\",\"role\":\"sub\",\"caps\":2}",
+                         need_comma ? "," : "", plugin->input_topics[i]);
+            need_comma = 1;
+        }
     }
-    n += snprintf(json+n, sizeof(json)-n, "],\"outputs\":[");
     if (plugin->output_topics) {
-        for (int i = 0; plugin->output_topics[i] && n < (int)sizeof(json)-4; i++)
-            n += snprintf(json+n, sizeof(json)-n, "%s\"%s\"", i?",":"", plugin->output_topics[i]);
+        for (int i = 0; plugin->output_topics[i] && n < (int)sizeof(json)-60; i++) {
+            n += snprintf(json+n, sizeof(json)-n, "%s{\"topic\":\"%s\",\"role\":\"pub\",\"caps\":1}",
+                         need_comma ? "," : "", plugin->output_topics[i]);
+            need_comma = 1;
+        }
     }
     n += snprintf(json+n, sizeof(json)-n, "]}");
     transport_publish(transport, "flowengine/node_info", json, (uint32_t)n + 1);

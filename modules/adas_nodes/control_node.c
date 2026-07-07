@@ -64,6 +64,8 @@ static struct {
     int    lc_state;     /* 0=正常 1=左变道中 2=左车道巡航 3=右回正 */
     double lc_timer;
     double lc_wait;
+    double lc_origin_y;
+    double lc_target_y;
     double lane_width;
     double blocked_timeout_s;
 
@@ -148,7 +150,6 @@ static void* control_thread(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "control");
 
-    const double lane_width    = 3.5;
     const double same_lane_tol = 2.0;
     const double time_headway  = 2.0;
     const double min_gap       = 6.0;
@@ -191,7 +192,8 @@ static void* control_thread(void* arg) {
         }
 
         /* ── 自适应变道状态机 ── */
-        double effective_lane_d = ref_y + g.lane_d;  /* Frenet d → 世界坐标 */
+        double cruise_lane_y = ref_y + g.lane_d;  /* Frenet d → 世界坐标 */
+        double effective_lane_d = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
 
         if (blocked && g.lc_state == 0) {
             g.lc_timer += 0.05;
@@ -200,7 +202,7 @@ static void* control_thread(void* arg) {
                 int left_clear = 1;
                 for (int i = 0; i < MAX_OBS; i++) {
                     if (!g.obs_valid[i]) continue;
-                    double dy = fabs(g.obs_y[i] - (g.ego_y + lane_width));
+                    double dy = fabs(g.obs_y[i] - (g.ego_y + g.lane_width));
                     if (dy < same_lane_tol) {
                         double dx = g.obs_x[i] - g.ego_x;
                         double rel_spd = g.current_speed - g.obs_vx[i];
@@ -211,7 +213,9 @@ static void* control_thread(void* arg) {
                     }
                 }
                 if (left_clear) {
-                    effective_lane_d = g.ego_y + lane_width;
+                    g.lc_origin_y = cruise_lane_y;
+                    g.lc_target_y = g.lc_origin_y + g.lane_width;
+                    effective_lane_d = g.lc_target_y;
                     g.lc_state = 1; g.lc_timer = 0;
                     LOG_INFO("control", ">>> LANE CHANGE (gap=%.1f ego@(%.1f,%.1f) d=%.2f→%.2f)",
                              best_gap, g.ego_x, g.ego_y, g.lane_d, effective_lane_d);
@@ -229,7 +233,7 @@ static void* control_thread(void* arg) {
             g.lc_wait += 0.05;
             if (g.lc_wait > 8.0) {
                 int right_clear = 1;
-                double orig_y = g.ego_y - lane_width;
+                double orig_y = g.lc_origin_y;
                 for (int i = 0; i < MAX_OBS; i++) {
                     if (!g.obs_valid[i]) continue;
                     double dy = fabs(g.obs_y[i] - orig_y);
@@ -243,7 +247,8 @@ static void* control_thread(void* arg) {
                     }
                 }
                 if (right_clear) {
-                    effective_lane_d = orig_y;
+                    g.lc_target_y = orig_y;
+                    effective_lane_d = g.lc_target_y;
                     g.lc_state = 3;
                     LOG_INFO("control", ">>> LANE CHANGE RETURN (orig_y=%.1f)", orig_y);
                 }
@@ -355,8 +360,8 @@ static int control_init(MessageBus* bus, Transport* transport,
             sscanf(p + 9, "%lf", &g.cfg_ki);
         if ((p = strstr(params_json, "\"pid_kd\":")))
             sscanf(p + 9, "%lf", &g.cfg_kd);
-        if ((p = strstr(params_json, "\"acc_time_headway\":")))
-            sscanf(p + 19, "%lf", &g.lane_width);  /* 暂不独立使用 */
+        if ((p = strstr(params_json, "\"lane_width\":")))
+            sscanf(p + 13, "%lf", &g.lane_width);
         if ((p = strstr(params_json, "\"lat_kp\":")))
             sscanf(p + 9, "%lf", &g.lat_kp);
         if ((p = strstr(params_json, "\"lat_kd_heading\":")))

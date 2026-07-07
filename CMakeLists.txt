@@ -230,6 +230,7 @@ set(CORE_SOURCES
     src/core/param_registry.c
     src/core/monitor_server.c
     src/core/stats_bridge.c
+    src/core/dashboard_bridge.c
     src/core/mcap_writer.c
     src/core/mcap_reader.c
     src/core/sysmonitor.c

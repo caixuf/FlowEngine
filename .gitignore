@@ -52,6 +52,7 @@ logs/
 .idea/
 *.sublime-project
 *.sublime-workspace
+.reasonix/
 
 # 系统文件
 .DS_Store
