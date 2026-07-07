@@ -7,7 +7,7 @@
 ## 学习目标
 
 完成本指南后，你将能够：
-- [x] 理解StartTool的整体架构设计
+- [x] 理解FlowEngine的整体架构设计
 - [x] 掌握C语言面向对象编程技巧
 - [x] 学会编写和集成自己的任务插件
 - [x] 理解多线程编程和进程管理
@@ -19,7 +19,7 @@
 
 ### 1.1 项目整体架构
 
-StartTool采用**插件化架构**，类似于以下结构：
+FlowEngine采用**插件化架构**，类似于以下结构：
 
 ```
 启动器 (launcher)
@@ -94,7 +94,7 @@ typedef struct TaskInterface {
 ```bash
 # 1. 克隆项目
 git clone <your-repo-url>
-cd startTool
+cd FlowEngine
 
 # 2. 编译
 mkdir build && cd build
@@ -489,7 +489,7 @@ static inline void update_stats_safe(TaskBase* task) {
 
 完成学习后，你应该能够：
 
-- [ ] 解释StartTool的整体架构
+- [ ] 解释FlowEngine的整体架构
 - [ ] 手写一个简单的C任务插件
 - [ ] 理解虚函数表的工作原理
 - [ ] 使用多线程和互斥锁
