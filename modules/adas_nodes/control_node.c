@@ -193,7 +193,7 @@ static void* control_thread(void* arg) {
 
         /* ── 自适应变道状态机 ── */
         double cruise_lane_y = ref_y + g.lane_d;  /* Frenet d → 世界坐标 */
-        double effective_lane_d = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
+        double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
 
         if (blocked && g.lc_state == 0) {
             g.lc_timer += 0.05;
@@ -215,10 +215,10 @@ static void* control_thread(void* arg) {
                 if (left_clear) {
                     g.lc_origin_y = cruise_lane_y;
                     g.lc_target_y = g.lc_origin_y + g.lane_width;
-                    effective_lane_d = g.lc_target_y;
+                    effective_target_y = g.lc_target_y;
                     g.lc_state = 1; g.lc_timer = 0;
                     LOG_INFO("control", ">>> LANE CHANGE (gap=%.1f ego@(%.1f,%.1f) d=%.2f→%.2f)",
-                             best_gap, g.ego_x, g.ego_y, g.lane_d, effective_lane_d);
+                             best_gap, g.ego_x, g.ego_y, g.lane_d, effective_target_y - ref_y);
                 } else {
                     LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
                     g.lc_timer = g.blocked_timeout_s;
@@ -248,7 +248,7 @@ static void* control_thread(void* arg) {
                 }
                 if (right_clear) {
                     g.lc_target_y = orig_y;
-                    effective_lane_d = g.lc_target_y;
+                    effective_target_y = g.lc_target_y;
                     g.lc_state = 3;
                     LOG_INFO("control", ">>> LANE CHANGE RETURN (orig_y=%.1f)", orig_y);
                 }
@@ -256,11 +256,11 @@ static void* control_thread(void* arg) {
         }
 
         /* 检测变道完成 (横向偏差 < 0.3m) */
-        if (g.lc_state == 1 && fabs(g.ego_y - effective_lane_d) < 0.3) {
+        if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < 0.3) {
             g.lc_state = 2; g.lc_wait = 0;
             LOG_INFO("control", ">>> lane change complete");
         }
-        if (g.lc_state == 3 && fabs(g.ego_y - effective_lane_d) < 0.3) {
+        if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < 0.3) {
             g.lc_state = 0;
             LOG_INFO("control", ">>> returned to original lane");
         }
@@ -290,7 +290,7 @@ static void* control_thread(void* arg) {
 
         /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
         double steer = 0.0;
-        double lat_error = effective_lane_d - g.ego_y;
+        double lat_error = effective_target_y - g.ego_y;
         /* P 层: 横向偏差 → 期望航向 */
         double psi_des = g.lat_kp * lat_error;
         if (psi_des >  MAX_PSI_DES_RAD) psi_des =  MAX_PSI_DES_RAD;
@@ -316,9 +316,9 @@ static void* control_thread(void* arg) {
         g.prev_error = error;
 
         if (g.cycle % 20 == 1) {
-            LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f eff=%.2f lc=%d %s",
+            LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f target_y=%.2f lc=%d %s",
                      g.cycle, g.current_speed, g.target_speed,
-                     error, throttle, brake, steer, g.lane_d, effective_lane_d, g.lc_state, mode);
+                     error, throttle, brake, steer, g.lane_d, effective_target_y, g.lc_state, mode);
         }
     }
 
