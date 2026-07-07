@@ -1,0 +1,107 @@
+#ifndef SCENARIO_LOADER_H
+#define SCENARIO_LOADER_H
+
+/**
+ * @file scenario_loader.h
+ * @brief 场景描述文件加载器（JSON → C 结构体）
+ *
+ * 场景文件格式（JSON）：
+ * {
+ *   "name": "pedestrian_crossing",
+ *   "description": "...",
+ *   "random_seed": 42,
+ *   "duration_s": 60.0,
+ *   "ego": {
+ *     "x": 0.0, "y": -1.75,
+ *     "init_speed": 5.0, "target_speed": 12.0, "heading": 0.0
+ *   },
+ *   "actors": [
+ *     { "id": 0, "type": "car", "x": 35.0, "y": -1.75,
+ *       "vx": 7.0, "vy": 0.0, "len": 4.6, "wid": 2.0 },
+ *     ...
+ *   ],
+ *   "pass_criteria": {
+ *     "no_collision": true,
+ *     "max_duration_s": 60.0,
+ *     "min_avg_speed_mps": 5.0
+ *   }
+ * }
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SCENARIO_MAX_ACTORS  16
+#define SCENARIO_NAME_LEN    64
+#define SCENARIO_DESC_LEN   128
+
+/* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
+
+typedef struct {
+    int    id;
+    char   type[16];   /**< "car" | "pedestrian" | "truck" */
+    double x, y;       /**< 初始位置（m，世界坐标系） */
+    double vx, vy;     /**< 初始速度（m/s） */
+    double len, wid;   /**< 碰撞包围盒尺寸（m） */
+} ScenarioActor;
+
+/* ── Ego 初始状态 ─────────────────────────────────────────── */
+
+typedef struct {
+    double x, y;           /**< 初始位置（m） */
+    double heading;        /**< 初始航向角（rad） */
+    double init_speed;     /**< 初始速度（m/s） */
+    double target_speed;   /**< 期望巡航速度（m/s） */
+} ScenarioEgo;
+
+/* ── 通过 / 失败判据 ──────────────────────────────────────── */
+
+typedef struct {
+    bool   no_collision;       /**< true = 碰撞即 FAIL */
+    double max_duration_s;     /**< 超时即 FAIL（0 = 不设超时） */
+    double min_avg_speed_mps;  /**< 平均速度低于此值即 FAIL（0 = 不检查） */
+    double min_distance_m;     /**< ego 行驶距离低于此值即 FAIL（0 = 不检查） */
+} ScenarioCriteria;
+
+/* ── 场景配置主体 ─────────────────────────────────────────── */
+
+typedef struct {
+    char             name[SCENARIO_NAME_LEN];
+    char             description[SCENARIO_DESC_LEN];
+    uint32_t         random_seed;      /**< 固定随机种子（确定性仿真） */
+    double           duration_s;       /**< 场景最大运行时长（s，0 = 不限制） */
+    ScenarioEgo      ego;
+    ScenarioActor    actors[SCENARIO_MAX_ACTORS];
+    int              actor_count;
+    ScenarioCriteria criteria;
+} ScenarioConfig;
+
+/**
+ * 从 JSON 文件加载场景配置。
+ *
+ * @param path  JSON 文件路径（绝对或相对路径）
+ * @return 分配的场景配置指针，失败返回 NULL。
+ *         调用者负责用 scenario_free() 释放。
+ */
+ScenarioConfig* scenario_load(const char* path);
+
+/**
+ * 释放 scenario_load() 返回的配置。
+ */
+void scenario_free(ScenarioConfig* scenario);
+
+/**
+ * 将场景配置序列化为 JSON 字符串（用于调试输出）。
+ * 返回动态分配的字符串，调用者负责 free()。
+ */
+char* scenario_to_json(const ScenarioConfig* scenario);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SCENARIO_LOADER_H */

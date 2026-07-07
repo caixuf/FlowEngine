@@ -5,6 +5,7 @@
 static pthread_mutex_t g_clock_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool     g_sim_mode   = false;
 static uint64_t g_sim_time   = 0;
+static uint64_t g_step_us    = 0;
 
 uint64_t clock_now_us(void) {
     pthread_mutex_lock(&g_clock_mutex);
@@ -37,4 +38,25 @@ bool clock_is_sim_mode(void) {
     bool sim = g_sim_mode;
     pthread_mutex_unlock(&g_clock_mutex);
     return sim;
+}
+
+void clock_advance_us(uint64_t delta_us) {
+    pthread_mutex_lock(&g_clock_mutex);
+    if (g_sim_mode) {
+        g_sim_time += delta_us;
+    }
+    pthread_mutex_unlock(&g_clock_mutex);
+}
+
+void clock_set_step_us(uint64_t step_us) {
+    pthread_mutex_lock(&g_clock_mutex);
+    g_step_us = step_us;
+    pthread_mutex_unlock(&g_clock_mutex);
+}
+
+uint64_t clock_get_step_us(void) {
+    pthread_mutex_lock(&g_clock_mutex);
+    uint64_t s = g_step_us;
+    pthread_mutex_unlock(&g_clock_mutex);
+    return s;
 }

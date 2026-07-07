@@ -6,14 +6,24 @@
  * 输出 vehicle/state JSON 供 perception_node 消费。
  *
  * NodePlugin 接口，编译为 libsim_world.so。
+ *
+ * P0 改进：
+ *   1. 确定性时钟：使用 clock_service sim 模式步进逻辑时间（脱离 wall-clock）。
+ *      每个 tick 调用 clock_advance_us(DT_US)，并发布 sim/tick 主题。
+ *      随机种子通过 params "random_seed" 配置，默认 42（固定）。
+ *   2. 场景驱动：从 JSON 文件加载 actors 初始状态（scenario_loader）。
+ *      params "scenario_file" 指向场景文件；缺省退回内置 pedestrian_crossing。
  */
 
 #include "node_plugin.h"
+#include "clock_service.h"
+#include "scenario_loader.h"
 #include "logger.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 #include <math.h>
 #include <time.h>
 #include <pthread.h>
@@ -26,10 +36,11 @@
 #define EGO_WID_M          2.0    /* 车宽（用于 AABB 碰撞检测） */
 #define AEB_GAP_RATIO      0.5    /* AEB 触发阈值：实际间距 < 安全间距 × 此比例 */
 #define AEB_MAX_GAP_M      40.0   /* AEB 仅在前车 < 此距离时激活 */
-#define SIM_OBSTACLE_COUNT 4
+#define SIM_OBSTACLE_COUNT 16     /* 最多支持 16 个 actor（场景文件上限） */
 #define MAX_SPEED          20.0
 #define FREQUENCY_HZ       20.0
 #define DT_SEC             (1.0 / FREQUENCY_HZ)
+#define DT_US              ((uint64_t)(DT_SEC * 1e6))   /* 逻辑时钟步长（微秒） */
 #define ROAD_CENTER_LIMIT_M 2.5
 
 /* ── 仿真障碍物 ────────────────────────────────────────────────── */
@@ -70,6 +81,7 @@ static struct {
     /* 仿真状态 */
     VehicleSim    vehicle;
     SimObstacle   obstacles[SIM_OBSTACLE_COUNT];
+    int           obstacle_count;   /* 本次场景中实际的 actor 数量 */
     uint32_t      cycle;
     int           has_control_input;  /* 是否收到过 control/cmd */
 
@@ -87,29 +99,54 @@ static struct {
     double init_speed;
     double target_speed;
     double lane_width;
-    int    obstacle_count;
+
+    /* P0.1 确定性时钟：固定随机种子 */
+    uint32_t random_seed;
+
+    /* P0.2 场景文件路径（空字符串表示使用内置默认值） */
+    char scenario_file[256];
 
     /* 碰撞冷却（防止每帧重复报错） */
     int    collision_cooldown[SIM_OBSTACLE_COUNT];
 } g;
 
-/* ── 障碍物初始化 ─────────────────────────────────────────────── */
+/* ── 内置默认场景（等价于 pedestrian_crossing.json）─────────── */
 
-static void init_obstacles(void) {
+static void init_obstacles_default(void) {
+    g.obstacle_count = 4;
     /* 障碍物 0: 在 ego 同车道前方 35m, 慢车 7 m/s — 用于触发变道 */
     g.obstacles[0] = (SimObstacle){ 0, "car",          7.0,  0.0, 35.0, -1.75, 4.6, 2.0 };
     /* 障碍物 1: 在 ego 同车道前方 90m, 也是慢车 — 第二次变道触发 */
     g.obstacles[1] = (SimObstacle){ 1, "car",          7.0,  0.0, 90.0, -1.75, 4.6, 2.0 };
-    /* 障碍物 2: 行人, 在更远处路边往复行走，避免和首个慢车超车场景重叠 */
+    /* 障碍物 2: 行人, 在更远处路边往复行走 */
     g.obstacles[2] = (SimObstacle){ 2, "pedestrian",   0.0,  0.6, 140.0,  8.0,  0.6, 0.6 };
-    /* 障碍物 3: 在邻道(右车道 y=1.75), 120m 前, 稍快 — 远到不阻碍变道 */
+    /* 障碍物 3: 在邻道(右车道 y=1.75), 120m 前, 稍快 */
     g.obstacles[3] = (SimObstacle){ 3, "car",         12.0,  0.0, 130.0, 1.75, 4.6, 2.0 };
+}
+
+/* ── 从场景文件初始化障碍物 ───────────────────────────────────── */
+
+static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
+    int n = sc->actor_count;
+    if (n > SIM_OBSTACLE_COUNT) n = SIM_OBSTACLE_COUNT;
+    g.obstacle_count = n;
+    for (int i = 0; i < n; i++) {
+        const ScenarioActor* a = &sc->actors[i];
+        g.obstacles[i].id  = a->id;
+        strncpy(g.obstacles[i].type, a->type, sizeof(g.obstacles[i].type) - 1);
+        g.obstacles[i].vx  = a->vx;
+        g.obstacles[i].vy  = a->vy;
+        g.obstacles[i].x   = a->x;
+        g.obstacles[i].y   = a->y;
+        g.obstacles[i].len = a->len;
+        g.obstacles[i].wid = a->wid;
+    }
 }
 
 /* ── 障碍物运动学 ─────────────────────────────────────────────── */
 
 static void obstacles_tick(void) {
-    for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+    for (int i = 0; i < g.obstacle_count; i++) {
         SimObstacle* o = &g.obstacles[i];
         o->x += o->vx * DT_SEC;
         o->y += o->vy * DT_SEC;
@@ -131,7 +168,7 @@ static void obstacles_tick(void) {
 
 static double lead_gap(void) {
     double best = 1e9;
-    for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+    for (int i = 0; i < g.obstacle_count; i++) {
         SimObstacle* o = &g.obstacles[i];
         if (o->vx < 0) continue;
         if (fabs(o->y - g.vehicle.y) > SAME_LANE_TOL_M) continue;
@@ -228,8 +265,14 @@ static void* sim_thread(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "sim_world");
 
+    /* P0.1: 仿真时钟从 0 开始步进（逻辑时间，不依赖 wall-clock） */
+    clock_set_sim_mode(true);
+    clock_set_sim_time(0);
+    clock_set_step_us(DT_US);
+
     while (!g.should_stop) {
-        usleep((unsigned long)(DT_SEC * 1e6));
+        /* 用 wall-clock sleep 来限制实时输出速率，但逻辑时间由 clock 独立管理 */
+        usleep((unsigned long)DT_US);
         if (g.should_stop) break;
 
         /* 未收到 control/cmd 时：使用内置简单巡航 + 车道保持 */
@@ -274,7 +317,7 @@ static void* sim_thread(void* arg) {
         /* ── AABB 碰撞检测 ── */
         const double ego_half_len = EGO_LEN_M * 0.5;
         const double ego_half_wid = EGO_WID_M * 0.5;
-        for (int i = 0; i < SIM_OBSTACLE_COUNT; i++) {
+        for (int i = 0; i < g.obstacle_count; i++) {
             SimObstacle* o = &g.obstacles[i];
             double overlap_x = (ego_half_len + o->len * 0.5) - fabs(g.vehicle.x - o->x);
             double overlap_y = (ego_half_wid + o->wid * 0.5) - fabs(g.vehicle.y - o->y);
@@ -299,17 +342,28 @@ static void* sim_thread(void* arg) {
             }
         }
 
+        /* ── P0.1: 推进逻辑时钟并发布 sim/tick ── */
+        clock_advance_us(DT_US);
+        uint64_t sim_time_us = clock_now_us();
+        char tick_buf[64];
+        snprintf(tick_buf, sizeof(tick_buf),
+                 "{\"t_us\":%" PRIu64 ",\"cycle\":%u}", sim_time_us, g.cycle);
+        transport_publish(g.transport, "sim/tick",
+                          (const uint8_t*)tick_buf, (uint32_t)strlen(tick_buf) + 1);
+
         /* ── 发布 vehicle/state ── */
         char vstate[512];
         snprintf(vstate, sizeof(vstate),
                  "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
                  "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
+                 "\"t_us\":%" PRIu64 ","
                  "\"ox0\":%.2f,\"oy0\":%.2f,\"ov0\":%.3f,"
                  "\"ox1\":%.2f,\"oy1\":%.2f,\"ov1\":%.3f,"
                  "\"ox2\":%.2f,\"oy2\":%.2f,\"ov2\":%.3f,"
                  "\"ox3\":%.2f,\"oy3\":%.2f,\"ov3\":%.3f}",
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
                  g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
+                 sim_time_us,
                  g.obstacles[0].x, g.obstacles[0].y, g.obstacles[0].vx,
                  g.obstacles[1].x, g.obstacles[1].y, g.obstacles[1].vx,
                  g.obstacles[2].x, g.obstacles[2].y, g.obstacles[2].vx,
@@ -320,15 +374,15 @@ static void* sim_thread(void* arg) {
         g.cycle++;
     }
 
-    LOG_INFO("sim_world", "stopped (%u cycles, final speed=%.1f m/s)",
-             g.cycle, g.vehicle.speed);
+    LOG_INFO("sim_world", "stopped (%u cycles, sim_time=%.3fs, final speed=%.1f m/s)",
+             g.cycle, (double)clock_now_us() / 1e6, g.vehicle.speed);
     return NULL;
 }
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
-static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", NULL };
+static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
@@ -345,7 +399,7 @@ static int sim_init(MessageBus* bus, Transport* transport,
     g.init_speed    = 5.0;
     g.target_speed  = 10.0;
     g.lane_width    = 3.5;
-    g.obstacle_count = 3;
+    g.random_seed   = 42;   /* P0.1: 固定默认种子 */
 
     if (params_json) {
         const char* p;
@@ -355,24 +409,57 @@ static int sim_init(MessageBus* bus, Transport* transport,
             sscanf(p + 14, "%lf", &g.target_speed);
         if ((p = strstr(params_json, "\"lane_width\":")))
             sscanf(p + 12, "%lf", &g.lane_width);
-        if ((p = strstr(params_json, "\"obstacle_count\":")))
-            sscanf(p + 17, "%d", &g.obstacle_count);
         if ((p = strstr(params_json, "\"lane_target\":")))
             sscanf(p + 13, "%lf", &g.vehicle.lane_target);
+        /* P0.1: 固定随机种子 */
+        if ((p = strstr(params_json, "\"random_seed\":")))
+            sscanf(p + 14, "%u", &g.random_seed);
+        /* P0.2: 场景文件 */
+        if ((p = strstr(params_json, "\"scenario_file\":"))) {
+            const char* start = strchr(p + 16, '"');
+            if (start) {
+                start++;
+                const char* end = strchr(start, '"');
+                if (end) {
+                    size_t len = (size_t)(end - start);
+                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
+                    memcpy(g.scenario_file, start, len);
+                    g.scenario_file[len] = '\0';
+                }
+            }
+        }
     }
 
-    srand((unsigned)time(NULL));
+    /* P0.1: 使用固定种子（保证确定性） */
+    srand(g.random_seed);
 
-    /* 初始化车辆 — 在左车道中心 (车道宽3.5m, 中心y=-1.75) */
-    g.vehicle.x           = 0.0;
-    g.vehicle.y           = -1.75;
+    /* P0.2: 优先从场景文件加载 actors；否则使用内置默认 */
+    ScenarioConfig* scenario = NULL;
+    if (g.scenario_file[0] != '\0') {
+        scenario = scenario_load(g.scenario_file);
+    }
+
+    /* 车辆初始状态：场景文件 > params > 内置默认 */
+    double ego_x = 0.0, ego_y = -1.75, ego_heading = 0.0;
+    if (scenario) {
+        ego_x       = scenario->ego.x;
+        ego_y       = scenario->ego.y;
+        ego_heading = scenario->ego.heading;
+        if (scenario->ego.init_speed > 0)   g.init_speed   = scenario->ego.init_speed;
+        if (scenario->ego.target_speed > 0) g.target_speed = scenario->ego.target_speed;
+        /* 场景自带固定种子（优先于 params） */
+        srand(scenario->random_seed);
+    }
+
+    g.vehicle.x           = ego_x;
+    g.vehicle.y           = ego_y;
     g.vehicle.speed       = g.init_speed;
-    g.vehicle.heading     = 0.0;
+    g.vehicle.heading     = ego_heading;
     g.vehicle.steer       = 0.0;
     g.vehicle.throttle    = 0.0;
     g.vehicle.brake       = 0.0;
     g.vehicle.target_speed = g.target_speed;
-    g.vehicle.lane_target  = -1.75;  /* 左车道中心（车道宽3.5m） */
+    g.vehicle.lane_target  = ego_y;
     g.vehicle.wheelbase   = 2.7;
     g.vehicle.mass        = 1500.0;
     g.vehicle.drag_coeff  = 0.3;
@@ -380,7 +467,12 @@ static int sim_init(MessageBus* bus, Transport* transport,
     /* 变道状态 */
     g.lc_duration = 3.5;
 
-    init_obstacles();
+    if (scenario) {
+        init_obstacles_from_scenario(scenario);
+        scenario_free(scenario);
+    } else {
+        init_obstacles_default();
+    }
 
     /* 订阅 control/cmd */
     transport_subscribe(transport, "control/cmd", on_control_cmd, NULL);
@@ -394,8 +486,15 @@ static int sim_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, "sim/collision", 0xC0115101u);
     discovery_advertise(discovery, "sim/collision", 0xC0115101u, CAP_PUBLISHER, 0);
 
-    LOG_INFO("sim_world", "initialized (init=%.1f m/s, target=%.1f m/s, %.0f Hz)",
-             g.init_speed, g.target_speed, FREQUENCY_HZ);
+    /* P0.1: 发布 sim/tick（每步逻辑时钟心跳） */
+    transport_advertise(transport, "sim/tick", 0x51C7710Cu);
+    discovery_advertise(discovery, "sim/tick", 0x51C7710Cu, CAP_PUBLISHER, FREQUENCY_HZ);
+
+    LOG_INFO("sim_world", "initialized (init=%.1f m/s, target=%.1f m/s, %.0f Hz, "
+             "seed=%u, actors=%d, scenario='%s')",
+             g.init_speed, g.target_speed, FREQUENCY_HZ,
+             g.random_seed, g.obstacle_count,
+             g.scenario_file[0] ? g.scenario_file : "(built-in)");
     return 0;
 }
 

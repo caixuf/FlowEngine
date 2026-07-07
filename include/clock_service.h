@@ -49,6 +49,33 @@ void clock_set_sim_time(uint64_t timestamp_us);
  */
 bool clock_is_sim_mode(void);
 
+/**
+ * 在仿真模式下将逻辑时钟推进 delta_us 微秒。
+ * 等价于 clock_set_sim_time(clock_now_us() + delta_us)。
+ * 非仿真模式下调用本函数为空操作。
+ *
+ * 使用方式（仿真主循环）：
+ *   clock_set_sim_mode(true);
+ *   clock_set_sim_time(0);
+ *   while (running) {
+ *       // ... 执行一步仿真 ...
+ *       clock_advance_us(10000);   // 逻辑时间 +10 ms
+ *   }
+ */
+void clock_advance_us(uint64_t delta_us);
+
+/**
+ * 获取仿真步长（微秒）— 由 sim_world_node 初始化时配置。
+ * 非仿真模式下返回 0。
+ */
+uint64_t clock_get_step_us(void);
+
+/**
+ * 设置仿真步长（微秒），供 sim_world_node 在 init 时调用。
+ * @param step_us  每个 tick 推进的逻辑时间（例如 50000 = 50 ms @20 Hz）
+ */
+void clock_set_step_us(uint64_t step_us);
+
 #ifdef __cplusplus
 }
 #endif

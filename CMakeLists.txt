@@ -234,6 +234,7 @@ set(CORE_SOURCES
     src/core/mcap_writer.c
     src/core/mcap_reader.c
     src/core/sysmonitor.c
+    src/core/scenario_loader.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────

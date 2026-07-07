@@ -8,7 +8,9 @@
       "params": {
         "init_speed": 5.0,
           "target_speed": 12.0,
-        "frequency_hz": 50.0
+        "frequency_hz": 50.0,
+        "random_seed": 42,
+        "scenario_file": "scenarios/pedestrian_crossing.json"
       }
     },
     {
