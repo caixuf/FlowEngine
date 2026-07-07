@@ -11,6 +11,7 @@
 #include "sysmonitor.h"
 #include "flow_registry.h"
 #include "logger.h"
+#include "stats_bridge.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,9 @@ static struct {
 
     /* 导出路径 */
     char state_file[512];
+
+    /* 跨进程 stats bridge */
+    IpcChannel* stats_ch;
 
     /* 配置 */
     double frequency_hz;
@@ -318,6 +322,11 @@ static void* monitor_thread(void* arg) {
         /* 收集并导出仪表盘 JSON */
         export_dashboard_json();
 
+        /* Publish stats via IPC bridge for flowmond */
+        if (g.stats_ch) {
+            stats_bridge_publish(g.stats_ch, g.bus, "monitor_node");
+        }
+
         /* 简略控制台输出 */
         uint64_t pub = 0, del = 0, drop = 0;
         if (g.bus) message_bus_get_stats(g.bus, &pub, &del, &drop);
@@ -396,6 +405,14 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
+    /* Open IPC stats bridge for flowmond */
+    g.stats_ch = stats_bridge_publisher_open();
+    if (!g.stats_ch) {
+        LOG_WARN("monitor", "stats bridge publisher open failed (flowmond not running yet)");
+    } else {
+        LOG_INFO("monitor", "stats bridge publisher opened");
+    }
+
     LOG_INFO("monitor", "initialized (%.0f Hz, state_file=%s)",
              g.frequency_hz, g.state_file);
     return 0;
@@ -412,6 +429,7 @@ static void monitor_stop(void)          { g.should_stop = 1; }
 static void monitor_cleanup(void) {
     if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
     if (g.sysmon) { sysmonitor_destroy(g.sysmon); g.sysmon = NULL; }
+    if (g.stats_ch) { ipc_channel_close(g.stats_ch); g.stats_ch = NULL; }
     LOG_INFO("monitor", "cleanup done");
 }
 static int  monitor_health(void)        { return 0; }
