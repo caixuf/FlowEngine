@@ -1405,13 +1405,15 @@ static int monitor_execute(TaskBase* base) {
                     uint64_t avg_lat = tstats[ti].deliver_count > 0
                         ? tstats[ti].total_latency_us / tstats[ti].deliver_count : 0;
                     fprintf(jf, "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
                             ti > 0 ? "," : "",
                             tstats[ti].topic,
                             (unsigned long)tstats[ti].publish_count,
                             (unsigned long)tstats[ti].deliver_count,
                             (unsigned long)tstats[ti].drop_count,
                             (unsigned long)avg_lat,
+                            (unsigned long)tstats[ti].p50_latency_us,
+                            (unsigned long)tstats[ti].p99_latency_us,
                             tstats[ti].frequency_hz,
                             tstats[ti].subscriber_count);
                 }

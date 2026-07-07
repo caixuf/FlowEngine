@@ -259,24 +259,50 @@ static int cmd_topic_stats(const char* topic) {
         fclose(f);
         buf[n] = '\0';
 
-        /* Parse metrics */
-        const char* mp = strstr(buf, "\"metrics\"");
         printf("Topic: %s\n\n", topic);
-        if (mp) {
-            const char* bp = strstr(mp, "\"published\"");
-            const char* dp = strstr(mp, "\"delivered\"");
-            const char* drp = strstr(mp, "\"dropped\"");
-            const char* lp = strstr(mp, "\"avg_us\"");
-            const char* p99 = strstr(mp, "\"p99_us\"");
 
-            printf("  %-20s %s\n", "Published:", bp ? "see bus stats" : "—");
-            printf("  %-20s %s\n", "Delivered:", dp ? "see bus stats" : "—");
-            printf("  %-20s %s\n", "Dropped:",   drp ? "see bus stats" : "—");
-            printf("  %-20s %s\n", "Avg latency:", lp ? "see latency stats" : "—");
-            printf("  %-20s %s\n", "P99 latency:", p99 ? "see latency stats" : "—");
-            printf("  %-20s %s\n", "Frequency:", "—");
+        /* Search per-topic stats in "topics":[...] array */
+        const char* tp = strstr(buf, "\"topics\":[");
+        if (tp) {
+            const char* p = tp + 10;  /* skip past "topics":[ */
+            while ((p = strstr(p, "\"topic\":\""))) {
+                p += 9;
+                char tname[64] = {0};
+                int i = 0;
+                while (*p && *p != '"' && i < 63) tname[i++] = *p++;
+
+                if (strcmp(tname, topic) == 0) {
+                    /* Found matching entry — extract fields */
+                    unsigned long pub = 0, del = 0, drop = 0;
+                    unsigned long lat_avg = 0, p50 = 0, p99 = 0;
+                    double freq = 0.0;
+                    unsigned int subs = 0;
+
+                    const char* kp;
+                    if ((kp = strstr(p, "\"pub\":")))      pub      = strtoul(kp + 6,  NULL, 10);
+                    if ((kp = strstr(p, "\"del\":")))      del      = strtoul(kp + 6,  NULL, 10);
+                    if ((kp = strstr(p, "\"drop\":")))     drop     = strtoul(kp + 7,  NULL, 10);
+                    if ((kp = strstr(p, "\"lat_us\":")))   lat_avg  = strtoul(kp + 9,  NULL, 10);
+                    if ((kp = strstr(p, "\"p50_us\":")))   p50      = strtoul(kp + 9,  NULL, 10);
+                    if ((kp = strstr(p, "\"p99_us\":")))   p99      = strtoul(kp + 9,  NULL, 10);
+                    if ((kp = strstr(p, "\"freq\":")))     freq     = atof(kp + 7);
+                    if ((kp = strstr(p, "\"subs\":")))     subs     = (unsigned int)strtoul(kp + 7, NULL, 10);
+
+                    /* Limit field parsing to current object (stop at next '}') */
+                    printf("  %-22s %lu\n",      "Published:",    pub);
+                    printf("  %-22s %lu\n",      "Delivered:",    del);
+                    printf("  %-22s %lu\n",      "Dropped:",      drop);
+                    printf("  %-22s %u\n",       "Subscribers:",  subs);
+                    printf("  %-22s %.1f Hz\n",  "Frequency:",    freq);
+                    printf("  %-22s %lu µs\n",   "Avg latency:",  lat_avg);
+                    printf("  %-22s %lu µs\n",   "P50 latency:",  p50);
+                    printf("  %-22s %lu µs\n",   "P99 latency:",  p99);
+                    message_bus_destroy(bus);
+                    return 0;
+                }
+            }
         }
-        printf("\n  (connect to live system for per-topic breakdown)\n");
+        printf("  (topic not found in state file)\n");
         message_bus_destroy(bus);
         return 0;
     }

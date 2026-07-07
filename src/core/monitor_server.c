@@ -92,13 +92,16 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             "%s{\"topic\":\"%s\",\"source\":\"local\","
             "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
             "\"deadline_violations\":%lu,"
-            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
             total > 0 ? "," : "", tstats[i].topic,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
             (unsigned long)tstats[i].deadline_violations,
-            (unsigned long)avg_lat, tstats[i].frequency_hz,
+            (unsigned long)avg_lat,
+            (unsigned long)tstats[i].p50_latency_us,
+            (unsigned long)tstats[i].p99_latency_us,
+            tstats[i].frequency_hz,
             tstats[i].subscriber_count);
         total++;
     }
