@@ -776,7 +776,8 @@ static void test_scenario_load_null(void) {
     PASS();
 }
 
-/* Helper: construct path relative to repo root (CWD during test run) */
+/* Helper: construct path relative to repo root (CWD during test run).
+ * `filename` must be a plain basename (no path separators or traversal). */
 static void make_scenario_path(char* buf, size_t bufsz, const char* filename) {
     /* CMake sets the working directory to the build directory; the scenario
      * files are at <repo>/scenarios/.  Use the compile-time PROJECT_SOURCE_DIR

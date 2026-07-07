@@ -43,6 +43,11 @@
 #define DT_US              ((uint64_t)(DT_SEC * 1e6))   /* 逻辑时钟步长（微秒） */
 #define ROAD_CENTER_LIMIT_M 2.5
 
+/* Bytes reserved at the end of the vstate JSON buffer for the closing "}"
+ * and any trailing characters.  Each obstacle entry is at most ~100 B;
+ * 2 B for the closing brace is well within this margin. */
+#define VSTATE_JSON_FOOTER_RESERVE 128
+
 /* ── 仿真障碍物 ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -365,7 +370,7 @@ static void* sim_thread(void* arg) {
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
                  g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
                  sim_time_us, g.obstacle_count);
-        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - 128; i++) {
+        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - VSTATE_JSON_FOOTER_RESERVE; i++) {
             voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
                              ",\"ox%d\":%.2f,\"oy%d\":%.2f,\"ov%d\":%.3f"
                              ",\"ovy%d\":%.3f,\"ot%d\":\"%s\",\"ol%d\":%.2f,\"ow%d\":%.2f",
@@ -446,7 +451,8 @@ static int sim_init(MessageBus* bus, Transport* transport,
         scenario = scenario_load(g.scenario_file);
     }
 
-    /* 场景文件的种子优先于 params 里的种子（两者都有时以场景为准） */
+    /* Seed precedence (highest to lowest): scenario file → params JSON → built-in default (42).
+     * 场景文件的种子优先于 params 里的种子（两者都有时以场景为准） */
     if (scenario) {
         g.random_seed = scenario->random_seed;
     }
