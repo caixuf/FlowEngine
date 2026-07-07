@@ -1412,15 +1412,22 @@ function draw2D(){
   // ── Road: NS only — no intersection. Left/right shoulders. ──
   var rw=3.5*s;           // one lane width in px
   var rdW=2*rw;           // 2 lanes each side = 4-lane road half-width
+  // Road is drawn in ego-relative frame: world lane-center (y=0) is offset from
+  // the screen center by the ego's lateral position, so the fixed ego marker
+  // correctly sits inside its actual lane instead of on the centre line.
+  var cx = carX + (e.y||0)*s;
+  // Longitudinal scroll: dashed markings flow backwards as ego advances,
+  // giving a clear sense of motion (previously static → "car looks frozen").
+  var scroll = ((e.x||0)*s) % (s*3);
   // Shoulder grass
   ctx.fillStyle="#0b1008";
-  ctx.fillRect(0,0,carX-rdW,H);
-  ctx.fillRect(carX+rdW,0,W-(carX+rdW),H);
+  ctx.fillRect(0,0,cx-rdW,H);
+  ctx.fillRect(cx+rdW,0,W-(cx+rdW),H);
   // Kerb strip
-  ctx.fillStyle="#1a2218"; ctx.fillRect(carX-rdW-6,0,6,H);
-  ctx.fillStyle="#1a2218"; ctx.fillRect(carX+rdW,0,6,H);
+  ctx.fillStyle="#1a2218"; ctx.fillRect(cx-rdW-6,0,6,H);
+  ctx.fillStyle="#1a2218"; ctx.fillRect(cx+rdW,0,6,H);
   // Asphalt
-  ctx.fillStyle="#111520"; ctx.fillRect(carX-rdW,0,rdW*2,H);
+  ctx.fillStyle="#111520"; ctx.fillRect(cx-rdW,0,rdW*2,H);
 
   // ── Range rings (semi-circles ahead of ego) ──
   ctx.save();
@@ -1441,19 +1448,19 @@ function draw2D(){
   ctx.lineWidth=2;
   // Solid road edge lines
   ctx.strokeStyle="#2a3a28"; ctx.setLineDash([]);
-  ctx.beginPath(); ctx.moveTo(carX-rdW,0); ctx.lineTo(carX-rdW,H); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(carX+rdW,0); ctx.lineTo(carX+rdW,H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx-rdW,0); ctx.lineTo(cx-rdW,H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+rdW,0); ctx.lineTo(cx+rdW,H); ctx.stroke();
   // Inner dashed lane dividers (1 divider each side of center)
   ctx.strokeStyle="#223322"; ctx.lineWidth=2; ctx.setLineDash([s*1.5,s*1.2]);
-  ctx.lineDashOffset=0;
+  ctx.lineDashOffset=scroll;
   for(var li=-1;li<=1;li+=2){
-    ctx.beginPath(); ctx.moveTo(carX+li*rw,0); ctx.lineTo(carX+li*rw,H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx+li*rw,0); ctx.lineTo(cx+li*rw,H); ctx.stroke();
   }
   // Double center line (yellow)
   ctx.strokeStyle="#554422"; ctx.lineWidth=1.5; ctx.setLineDash([s*4,s*1.5]);
-  ctx.lineDashOffset=0;
-  ctx.beginPath(); ctx.moveTo(carX-3,0); ctx.lineTo(carX-3,H); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(carX+3,0); ctx.lineTo(carX+3,H); ctx.stroke();
+  ctx.lineDashOffset=scroll;
+  ctx.beginPath(); ctx.moveTo(cx-3,0); ctx.lineTo(cx-3,H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+3,0); ctx.lineTo(cx+3,H); ctx.stroke();
   ctx.setLineDash([]); ctx.lineDashOffset=0;
 
   // ── Forward-distance ruler (right side of road) ──
@@ -1462,10 +1469,10 @@ function draw2D(){
     var dy=carY-d*s;
     if(dy<4||dy>H-4)continue;
     ctx.strokeStyle="rgba(88,166,255,0.06)"; ctx.lineWidth=0.5;
-    ctx.beginPath(); ctx.moveTo(carX-rdW,dy); ctx.lineTo(carX+rdW,dy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx-rdW,dy); ctx.lineTo(cx+rdW,dy); ctx.stroke();
     if(d%20===0){
       ctx.fillStyle="rgba(88,166,255,0.22)";
-      ctx.fillText(d+"m", carX+rdW+8, dy);
+      ctx.fillText(d+"m", cx+rdW+8, dy);
     }
   }
 
