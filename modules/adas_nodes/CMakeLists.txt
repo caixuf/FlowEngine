@@ -45,6 +45,35 @@ message(STATUS "libflowengine_core: ${FLOWENGINE_CORE}")
 # Threads — 节点直接指定 -lpthread，不走 FindThreads（避免 c89-gcc 检测失败）
 set(NODE_LINK_LIBS ${FLOWENGINE_CORE} m pthread)
 
+# ── cJSON ─────────────────────────────────────────────────────
+# libflowengine_core.a 是静态库，包含 scenario_loader.o，其中引用了 cJSON 符号。
+# 节点插件编译为 .so，dlopen 加载时这些符号必须可解析，故也需链接 cJSON。
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(CJSON QUIET libcjson)
+endif()
+if(NOT CJSON_FOUND)
+    # 主项目通过 FetchContent 构建的 cJSON 位于 build/_deps/cjson-build/
+    find_library(CJSON_LIB
+        NAMES cjson libcjson
+        HINTS
+            ${FLOWENGINE_BUILD}/_deps/cjson-build
+            ${FLOWENGINE_BUILD}/_deps/cjson-build/Debug
+            ${FLOWENGINE_BUILD}/_deps/cjson-build/Release
+    )
+    if(CJSON_LIB)
+        set(CJSON_LIBRARIES ${CJSON_LIB})
+        set(CJSON_FOUND TRUE)
+    endif()
+endif()
+# 节点插件本身不包含 cJSON 头文件，只需链接库以解析 scenario_loader.o 引入的符号
+if(CJSON_FOUND)
+    list(APPEND NODE_LINK_LIBS ${CJSON_LIBRARIES})
+    message(STATUS "cJSON found for node plugins: ${CJSON_LIBRARIES}")
+else()
+    message(WARNING "cJSON not found — node plugins may fail at dlopen due to undefined cJSON symbols")
+endif()
+
 # ── 编译选项 ──────────────────────────────────────────────────
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
