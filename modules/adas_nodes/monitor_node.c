@@ -120,6 +120,34 @@ static double json_extract_double(const char* json, const char* key) {
     return val;
 }
 
+/* Extract an integer value from a JSON string, e.g. "n_obs":4 → 4. */
+static int json_extract_int(const char* json, const char* key) {
+    if (!json || !key) return 0;
+    char search[64];
+    int klen = snprintf(search, sizeof(search), "\"%s\":", key);
+    const char* p = strstr(json, search);
+    if (!p) return 0;
+    int val = 0;
+    sscanf(p + klen, "%d", &val);
+    return val;
+}
+
+/* Extract a quoted string value from a JSON string, e.g. "ot0":"car" → "car".
+ * dst is NUL-terminated and truncated to dst_size-1 bytes. */
+static void json_extract_str(const char* json, const char* key,
+                             char* dst, size_t dst_size) {
+    if (!json || !key || !dst || dst_size == 0) return;
+    dst[0] = '\0';
+    char search[64];
+    int klen = snprintf(search, sizeof(search), "\"%s\":\"", key);
+    const char* p = strstr(json, search);
+    if (!p) return;
+    p += klen;
+    size_t n = 0;
+    while (*p && *p != '"' && n < dst_size - 1) dst[n++] = *p++;
+    dst[n] = '\0';
+}
+
 /* ── 导出 JSON 到 state_file ──────────────────────────────── */
 
 static void export_dashboard_json(void) {
@@ -215,34 +243,51 @@ static void export_dashboard_json(void) {
             ego_x, ego_y, hdg, spd, steer);
     fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
 
-    /* 障碍物 (简化为从 vehicle/state 提取) */
-    double ox[3], oy[3], ovx[3];
-    char kn[16];
-    for (int i = 0; i < 3; i++) {
+    /* 障碍物（从 vehicle/state 动态读取，障碍物数量由 n_obs 决定） */
+    int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");
+    if (n_obs < 0 || n_obs > 16) n_obs = 0;
+
+#define MAX_OBS_SCENE 16
+    double ox[MAX_OBS_SCENE], oy[MAX_OBS_SCENE], ovx[MAX_OBS_SCENE], ovy[MAX_OBS_SCENE];
+    double olen[MAX_OBS_SCENE], owid[MAX_OBS_SCENE];
+    char   otype[MAX_OBS_SCENE][16];
+    char kn[20];
+    for (int i = 0; i < n_obs; i++) {
         snprintf(kn, sizeof(kn), "ox%d", i);
         ox[i] = json_extract_double(g.latest_vehicle_state, kn);
         snprintf(kn, sizeof(kn), "oy%d", i);
         oy[i] = json_extract_double(g.latest_vehicle_state, kn);
         snprintf(kn, sizeof(kn), "ov%d", i);
         ovx[i] = json_extract_double(g.latest_vehicle_state, kn);
+        snprintf(kn, sizeof(kn), "ovy%d", i);
+        ovy[i] = json_extract_double(g.latest_vehicle_state, kn);
+        snprintf(kn, sizeof(kn), "ot%d", i);
+        json_extract_str(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
+        if (otype[i][0] == '\0') {
+            /* Legacy messages without type field: use position-based heuristic */
+            snprintf(otype[i], sizeof(otype[i]), "car");
+        }
+        snprintf(kn, sizeof(kn), "ol%d", i);
+        olen[i] = json_extract_double(g.latest_vehicle_state, kn);
+        if (olen[i] < 0.1) olen[i] = strcmp(otype[i], "pedestrian") == 0 ? 0.6 : 4.6;
+        snprintf(kn, sizeof(kn), "ow%d", i);
+        owid[i] = json_extract_double(g.latest_vehicle_state, kn);
+        if (owid[i] < 0.1) owid[i] = strcmp(otype[i], "pedestrian") == 0 ? 0.6 : 2.0;
     }
     fprintf(jf, "\"obstacles\":[");
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < n_obs; i++) {
         double rx = ox[i] - ego_x;
         double ry = oy[i] - ego_y;
-        const char* type = (i == 2) ? "pedestrian" : "car";
-        double len = (i == 2) ? 0.6 : 4.6;
-        double wid = (i == 2) ? 0.6 : 2.0;
         fprintf(jf, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
-            "\"vx\":%.2f,\"vy\":0,\"len\":%.1f,\"wid\":%.1f}",
-            i > 0 ? "," : "", i, type, rx, ry, ovx[i], len, wid);
+            "\"vx\":%.2f,\"vy\":%.2f,\"len\":%.2f,\"wid\":%.2f}",
+            i > 0 ? "," : "", i, otype[i], rx, ry, ovx[i], ovy[i], olen[i], owid[i]);
     }
     fprintf(jf, "],");
 
-    /* LiDAR 点云 (简略) */
+    /* LiDAR 点云（对每个障碍物生成环形点，加地面环带） */
     fprintf(jf, "\"lidar\":[");
     int lp = 0;
-    for (int oi = 0; oi < 3; oi++) {
+    for (int oi = 0; oi < n_obs; oi++) {
         double rx = ox[oi] - ego_x;
         double ry = oy[oi] - ego_y;
         if (rx < -20 || rx > 60) continue;

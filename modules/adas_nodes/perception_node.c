@@ -40,7 +40,8 @@ static struct {
     /* 仿真状态 (通过 vehicle/state topic 更新) */
     double  ego_x, ego_y, ego_heading;
     double  ego_speed;
-    double  obs_x[3], obs_y[3], obs_vx[3];
+    int     n_obs;                          /* 当前场景实际 actor 数量 */
+    double  obs_x[16], obs_y[16], obs_vx[16];
 
     /* 发布帧计数 */
     uint32_t frame_id;
@@ -65,7 +66,11 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"y\":")))   sscanf(p + 4, "%lf", &g.ego_y);
     if ((p = strstr(d, "\"hdg\":"))) sscanf(p + 6, "%lf", &g.ego_heading);
     if ((p = strstr(d, "\"spd\":"))) sscanf(p + 6, "%lf", &g.ego_speed);
-    for (int i = 0; i < 3; i++) {
+    int n = 0;
+    if ((p = strstr(d, "\"n_obs\":"))) sscanf(p + 8, "%d", &n);
+    if (n < 1 || n > 16) n = 3;   /* fall back to 3 for legacy messages */
+    g.n_obs = n;
+    for (int i = 0; i < n; i++) {
         char kx[16], ky[16], kvx[16];
         snprintf(kx,  sizeof(kx),  "\"ox%d\":", i);
         snprintf(ky,  sizeof(ky),  "\"oy%d\":", i);
@@ -140,7 +145,7 @@ static void* perception_thread(void* arg) {
                 }
             }
             /* 障碍物表面点 */
-            for (int oi = 0; oi < 3 && np < 256; oi++) {
+            for (int oi = 0; oi < g.n_obs && np < 256; oi++) {
                 double dx = g.obs_x[oi] - g.ego_x, dy = g.obs_y[oi] - g.ego_y;
                 double rx = dx * ch - dy * sh, ry = dx * sh + dy * ch;
                 if (rx < -10 || rx > 50) continue;

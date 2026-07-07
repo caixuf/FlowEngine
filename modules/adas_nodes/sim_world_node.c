@@ -352,7 +352,9 @@ static void* sim_thread(void* arg) {
                           (const uint8_t*)tick_buf, (uint32_t)strlen(tick_buf) + 1);
 
         /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
-        char vstate[1024];
+        /* Buffer sizing: fixed header ~150 B + per-obstacle ~100 B (worst: "pedestrian")
+         * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient. */
+        char vstate[2048];
         int voff = snprintf(vstate, sizeof(vstate),
                  "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
                  "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
@@ -360,10 +362,17 @@ static void* sim_thread(void* arg) {
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
                  g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
                  sim_time_us, g.obstacle_count);
-        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - 64; i++) {
+        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - 128; i++) {
             voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
-                             ",\"ox%d\":%.2f,\"oy%d\":%.2f,\"ov%d\":%.3f",
-                             i, g.obstacles[i].x, i, g.obstacles[i].y, i, g.obstacles[i].vx);
+                             ",\"ox%d\":%.2f,\"oy%d\":%.2f,\"ov%d\":%.3f"
+                             ",\"ovy%d\":%.3f,\"ot%d\":\"%s\",\"ol%d\":%.2f,\"ow%d\":%.2f",
+                             i, g.obstacles[i].x,
+                             i, g.obstacles[i].y,
+                             i, g.obstacles[i].vx,
+                             i, g.obstacles[i].vy,
+                             i, g.obstacles[i].type,
+                             i, g.obstacles[i].len,
+                             i, g.obstacles[i].wid);
         }
         voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff, "}");
         transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
