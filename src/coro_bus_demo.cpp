@@ -262,22 +262,23 @@ int main() {
 
     /* 运行直到两个协程都完成或用户中断 */
     for (int tick = 0; tick < 60 && !g_stop; ++tick) {
+        /* 每两个 tick 发一帧 GPS。GPS tick 先发低频 topic，避免高频 LiDAR
+         * 在 when_any_bus 演示中总是抢先唤醒 FusionTask。 */
+        if (tick % 2 == 0) {
+            Message msg{};
+            msg.msg_id = static_cast<uint32_t>(++gps_seq);
+            snprintf(msg.topic,  sizeof(msg.topic),  "sensor/gps");
+            snprintf(msg.sender, sizeof(msg.sender), "gps_driver");
+            msg.data_size = 0;
+            message_bus_publish(bus, msg.topic, msg.sender, nullptr, 0);
+        }
+
         /* 每 tick（100ms）发一帧激光雷达 */
         {
             Message msg{};
             msg.msg_id = static_cast<uint32_t>(++lidar_seq);
             snprintf(msg.topic,  sizeof(msg.topic),  "sensor/lidar");
             snprintf(msg.sender, sizeof(msg.sender), "lidar_driver");
-            msg.data_size = 0;
-            message_bus_publish(bus, msg.topic, msg.sender, nullptr, 0);
-        }
-
-        /* 每两个 tick 发一帧 GPS */
-        if (tick % 2 == 0) {
-            Message msg{};
-            msg.msg_id = static_cast<uint32_t>(++gps_seq);
-            snprintf(msg.topic,  sizeof(msg.topic),  "sensor/gps");
-            snprintf(msg.sender, sizeof(msg.sender), "gps_driver");
             msg.data_size = 0;
             message_bus_publish(bus, msg.topic, msg.sender, nullptr, 0);
         }

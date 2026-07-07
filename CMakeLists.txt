@@ -128,7 +128,7 @@ set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     flowcoro
     GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
-    GIT_TAG        9f05443
+    GIT_TAG        0934b6f22cf75bc12ca2c60caaaf78519bf4921c
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(flowcoro)

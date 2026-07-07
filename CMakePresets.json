@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc",
+        "CMAKE_CXX_COMPILER": "/usr/bin/c++"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
+  ]
+}

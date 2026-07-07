@@ -45,12 +45,24 @@
       "name": "control",
       "library": "build/lib/libcontrol_node.so",
       "inputs": ["planning/trajectory", "vehicle/state"],
-      "outputs": ["control/cmd"],
+      "outputs": ["control/raw_cmd"],
       "params": {
         "kp_speed": 0.4,
         "ki_speed": 0.05,
         "kd_speed": 0.01,
         "kp_steer": 0.2
+      }
+    },
+    {
+      "name": "safety_control",
+      "library": "build/lib/libsafety_control_node.so",
+      "inputs": ["control/raw_cmd", "vehicle/state"],
+      "outputs": ["control/cmd"],
+      "params": {
+        "max_throttle": 0.85,
+        "max_steer": 0.22,
+        "low_speed_steer": 0.18,
+        "time_headway": 1.8
       }
     },
     {

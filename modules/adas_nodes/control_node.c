@@ -2,7 +2,7 @@
  * control_node.c — PID 纵向/横向控制节点插件
  *
  * 订阅 fusion/localization, planning/trajectory
- * PID 计算油门/刹车/转向 → 发布 control/cmd
+ * PID 计算油门/刹车/转向 → 发布 control/raw_cmd
  *
  * 与 sim_world_node 配合: control 产生指令, sim_world 执行物理模拟。
  *
@@ -310,7 +310,7 @@ static void* control_thread(void* arg) {
                  "speed=%.1f target=%.1f error=%.1f mode=%s",
                  throttle, brake, steer,
                  g.current_speed, boost_target, error, mode);
-        transport_publish(g.transport, "control/cmd",
+        transport_publish(g.transport, "control/raw_cmd",
                           (const uint8_t*)cmd, (uint32_t)strlen(cmd) + 1);
 
         g.prev_error = error;
@@ -330,7 +330,7 @@ static void* control_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", NULL };
-static const char* s_outputs[] = { "control/cmd", NULL };
+static const char* s_outputs[] = { "control/raw_cmd", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int control_init(MessageBus* bus, Transport* transport,
@@ -374,7 +374,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "planning/trajectory", on_trajectory, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
-    transport_advertise(transport, "control/cmd", 0x2D95C6D2u);
+    transport_advertise(transport, "control/raw_cmd", 0x2D95C6D3u);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
@@ -382,7 +382,7 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "control/cmd", 0x2D95C6D2u,
+    discovery_advertise(discovery, "control/raw_cmd", 0x2D95C6D3u,
                         CAP_PUBLISHER, 100.0);
 
     LOG_INFO("control", "initialized (PID: kp=%.0f ki=%.0f kd=%.0f)",

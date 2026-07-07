@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(flowengine_nodes C)
+project(flowengine_nodes C CXX)
 
 # ── 节点插件独立 cmake 子项目 ───────────────────────────────────
 #
@@ -48,6 +48,9 @@ set(NODE_LINK_LIBS ${FLOWENGINE_CORE} m pthread)
 # ── 编译选项 ──────────────────────────────────────────────────
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -99,12 +102,17 @@ endif()
 add_library(control_node SHARED control_node.c)
 target_link_libraries(control_node ${NODE_LINK_LIBS})
 
+# safety_control_node: FlowCoro 安全控制限幅/兜底
+add_library(safety_control_node SHARED safety_control_node.cpp)
+target_link_libraries(safety_control_node ${NODE_LINK_LIBS} stdc++)
+target_compile_definitions(safety_control_node PRIVATE FLOWCORO_INTEGRATION)
+
 # monitor_node: 系统监控 + 仪表盘 JSON 导出
 add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sim_world ${PLANNING_NODE_TARGET} control_node monitor_node
+install(TARGETS fusion_node perception_node sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
