@@ -68,7 +68,9 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"spd\":"))) sscanf(p + 6, "%lf", &g.ego_speed);
     int n = 0;
     if ((p = strstr(d, "\"n_obs\":"))) sscanf(p + 8, "%d", &n);
-    if (n < 1 || n > 16) n = 3;   /* fall back to 3 for legacy messages */
+    /* 3 was the original hardcoded obstacle count before P0.2; keep it as the
+     * legacy fall-back so old vehicle/state messages without "n_obs" still work. */
+    if (n < 1 || n > 16) n = 3;
     g.n_obs = n;
     for (int i = 0; i < n; i++) {
         char kx[16], ky[16], kvx[16];

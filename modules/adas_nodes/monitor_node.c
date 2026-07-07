@@ -247,7 +247,13 @@ static void export_dashboard_json(void) {
     int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");
     if (n_obs < 0 || n_obs > 16) n_obs = 0;
 
+    /* Must match SIM_OBSTACLE_COUNT in sim_world_node.c */
 #define MAX_OBS_SCENE 16
+    /* Default dimensions used as fallback for legacy vehicle/state messages that
+     * pre-date the ot%d/ol%d/ow%d fields (matches scenario_loader defaults). */
+#define OBS_FALLBACK_CAR_LEN   4.6
+#define OBS_FALLBACK_CAR_WID   2.0
+#define OBS_FALLBACK_PED_SIZE  0.6
     double ox[MAX_OBS_SCENE], oy[MAX_OBS_SCENE], ovx[MAX_OBS_SCENE], ovy[MAX_OBS_SCENE];
     double olen[MAX_OBS_SCENE], owid[MAX_OBS_SCENE];
     char   otype[MAX_OBS_SCENE][16];
@@ -264,15 +270,16 @@ static void export_dashboard_json(void) {
         snprintf(kn, sizeof(kn), "ot%d", i);
         json_extract_str(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
         if (otype[i][0] == '\0') {
-            /* Legacy messages without type field: use position-based heuristic */
+            /* Legacy messages without type field: default to car */
             snprintf(otype[i], sizeof(otype[i]), "car");
         }
+        int is_ped = strcmp(otype[i], "pedestrian") == 0;
         snprintf(kn, sizeof(kn), "ol%d", i);
         olen[i] = json_extract_double(g.latest_vehicle_state, kn);
-        if (olen[i] < 0.1) olen[i] = strcmp(otype[i], "pedestrian") == 0 ? 0.6 : 4.6;
+        if (olen[i] < 0.1) olen[i] = is_ped ? OBS_FALLBACK_PED_SIZE : OBS_FALLBACK_CAR_LEN;
         snprintf(kn, sizeof(kn), "ow%d", i);
         owid[i] = json_extract_double(g.latest_vehicle_state, kn);
-        if (owid[i] < 0.1) owid[i] = strcmp(otype[i], "pedestrian") == 0 ? 0.6 : 2.0;
+        if (owid[i] < 0.1) owid[i] = is_ped ? OBS_FALLBACK_PED_SIZE : OBS_FALLBACK_CAR_WID;
     }
     fprintf(jf, "\"obstacles\":[");
     for (int i = 0; i < n_obs; i++) {

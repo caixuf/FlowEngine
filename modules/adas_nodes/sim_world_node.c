@@ -353,7 +353,10 @@ static void* sim_thread(void* arg) {
 
         /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
         /* Buffer sizing: fixed header ~150 B + per-obstacle ~100 B (worst: "pedestrian")
-         * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient. */
+         * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient.
+         * The loop guard (voff < sizeof - 128) ensures the closing "}" always fits;
+         * if the estimate is wrong the tail of the JSON is truncated — receivers must
+         * tolerate missing keys (they already do via json_extract_double returning 0). */
         char vstate[2048];
         int voff = snprintf(vstate, sizeof(vstate),
                  "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
