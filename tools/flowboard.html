@@ -1432,8 +1432,7 @@ function draw2D(){
   });
   ctx.setLineDash([]); ctx.restore();
 
-  // ── Lane markings (scroll with ego for speed feel) ──
-  var scrollOff=(_2d.ego.x*s)%(s*3);
+  // ── Lane markings ──
   ctx.lineWidth=2;
   // Solid road edge lines
   ctx.strokeStyle="#2a3a28"; ctx.setLineDash([]);
@@ -1441,13 +1440,13 @@ function draw2D(){
   ctx.beginPath(); ctx.moveTo(carX+rdW,0); ctx.lineTo(carX+rdW,H); ctx.stroke();
   // Inner dashed lane dividers (1 divider each side of center)
   ctx.strokeStyle="#223322"; ctx.lineWidth=2; ctx.setLineDash([s*1.5,s*1.2]);
-  ctx.lineDashOffset=-scrollOff;
+  ctx.lineDashOffset=0;
   for(var li=-1;li<=1;li+=2){
     ctx.beginPath(); ctx.moveTo(carX+li*rw,0); ctx.lineTo(carX+li*rw,H); ctx.stroke();
   }
   // Double center line (yellow)
   ctx.strokeStyle="#554422"; ctx.lineWidth=1.5; ctx.setLineDash([s*4,s*1.5]);
-  ctx.lineDashOffset=-scrollOff;
+  ctx.lineDashOffset=0;
   ctx.beginPath(); ctx.moveTo(carX-3,0); ctx.lineTo(carX-3,H); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(carX+3,0); ctx.lineTo(carX+3,H); ctx.stroke();
   ctx.setLineDash([]); ctx.lineDashOffset=0;
@@ -1572,42 +1571,41 @@ function draw2D(){
   var bounce = 0;
   ctx.translate(0, bounce);
   // Speed-based forward tilt (visual acceleration cue)
-  if(e.speed > 0.5) ctx.translate(Math.min(3, e.speed * 0.3), 0);
+  if(e.speed > 0.5) ctx.translate(0, -Math.min(3, e.speed * 0.3));
   // Glow (pulses with speed)
   var glowPulse = 0.15 + Math.sin(_2d.frame * 0.1) * 0.05 + e.speed * 0.01;
   var glow=ctx.createRadialGradient(0,0,4,0,0,22);
   glow.addColorStop(0,"rgba(88,166,255,"+glowPulse+")"); glow.addColorStop(1,"rgba(88,166,255,0)");
   ctx.fillStyle=glow; ctx.beginPath(); ctx.arc(0,0,22,0,Math.PI*2); ctx.fill();
   // Shadow
-  ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(-21,2,42,12);
+  ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(-11,2,22,42);
   // Body
-  var bodyGrad=ctx.createLinearGradient(0,-11,0,11);
+  var bodyGrad=ctx.createLinearGradient(0,-22,0,22);
   bodyGrad.addColorStop(0,"#6ab4ff"); bodyGrad.addColorStop(0.5,"#4488dd"); bodyGrad.addColorStop(1,"#3377cc");
   ctx.fillStyle=bodyGrad;
   ctx.beginPath();
   // Rounded car body
-  var bw=20, bh=9; // half-width, half-height
-  ctx.moveTo(-bw,-bh+4); ctx.quadraticCurveTo(-bw,-bh,-bw+4,-bh);
-  ctx.lineTo(bw-4,-bh); ctx.quadraticCurveTo(bw,-bh,bw,-bh+4);
-  ctx.lineTo(bw,bh-4); ctx.quadraticCurveTo(bw,bh,bw-4,bh);
-  ctx.lineTo(-bw+8,bh); ctx.lineTo(-bw+6,bh+3); // rear bumper
-  ctx.lineTo(bw-6,bh+3); ctx.lineTo(bw-8,bh);
-  ctx.quadraticCurveTo(-bw,bh,-bw,bh-4);
+  var bw=9, bh=20; // half-width, half-length; local -Y is forward
+  ctx.moveTo(-bw+4,-bh); ctx.lineTo(bw-4,-bh);
+  ctx.quadraticCurveTo(bw,-bh,bw,-bh+4);
+  ctx.lineTo(bw,bh-6); ctx.quadraticCurveTo(bw,bh,bw-4,bh);
+  ctx.lineTo(-bw+4,bh); ctx.quadraticCurveTo(-bw,bh,-bw,bh-6);
+  ctx.lineTo(-bw,-bh+4); ctx.quadraticCurveTo(-bw,-bh,-bw+4,-bh);
   ctx.closePath(); ctx.fill();
   // Roof/windshield (darker)
-  ctx.fillStyle="#5599cc"; ctx.fillRect(-7,-5,14,10);
+  ctx.fillStyle="#5599cc"; ctx.fillRect(-5,-7,10,14);
   // Windshield (front, lighter)
-  ctx.fillStyle="#99ccff"; ctx.fillRect(3,-3,6,7);
+  ctx.fillStyle="#99ccff"; ctx.fillRect(-4,-9,8,6);
   // Rear window
-  ctx.fillStyle="#4480b0"; ctx.fillRect(-8,-3,5,7);
+  ctx.fillStyle="#4480b0"; ctx.fillRect(-4,6,8,5);
   // Front bumper accent
-  ctx.fillStyle="#c9d1d9"; ctx.fillRect(bw-3,-3,2,6);
+  ctx.fillStyle="#c9d1d9"; ctx.fillRect(-4,-bh+1,8,2);
   // Wheels
   ctx.fillStyle="#111";
-  ctx.fillRect(-17,-10,8,3.5); ctx.fillRect(-17,6,8,3.5);
-  ctx.fillRect(10,-10,8,3.5); ctx.fillRect(10,6,8,3.5);
+  ctx.fillRect(-11,-16,3.5,8); ctx.fillRect(7.5,-16,3.5,8);
+  ctx.fillRect(-11,8,3.5,8); ctx.fillRect(7.5,8,3.5,8);
   // Front direction arrow
-  ctx.fillStyle="#fff"; ctx.beginPath(); ctx.moveTo(bw+2,0); ctx.lineTo(bw-5,-4); ctx.lineTo(bw-5,4); ctx.fill();
+  ctx.fillStyle="#fff"; ctx.beginPath(); ctx.moveTo(0,-bh-4); ctx.lineTo(-4,-bh+4); ctx.lineTo(4,-bh+4); ctx.fill();
   ctx.restore();
 
   // ── Speed indicator bar (top center) ──
