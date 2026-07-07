@@ -152,6 +152,35 @@ param_set_int("control.max_speed", 100);  // validated
 param_enable_hot_reload("control.max_speed");
 ```
 
+## Stats Bridge (Cross-process IPC)
+
+```c
+// Publisher side — call once at startup in the business process
+IpcChannel* ch = stats_bridge_publisher_open();
+
+// Serialize MessageBus stats and send to flowmond (call periodically, e.g. every 5 s)
+stats_bridge_publish(ch, bus, "flow_e2e");
+
+// Subscriber side — call in flowmond; returns NULL until publisher opens the channel
+IpcChannel* sub = stats_bridge_subscriber_open(on_stats_callback, user_data);
+if (sub) ipc_channel_start(sub);   // starts non-blocking background receive thread
+
+// Cleanup
+ipc_channel_close(ch);
+ipc_channel_close(sub);
+```
+
+Callback signature:
+
+```c
+void on_stats_callback(const Message* msg, void* user_data) {
+    const StatsPacket* pkt = (const StatsPacket*)msg->data;
+    // pkt->source_name — sending process (e.g. "flow_e2e")
+    // pkt->topic_count — number of entries in pkt->topics[]
+    // pkt->bus_pub / bus_del / bus_drop — aggregate bus counters
+}
+```
+
 ## Bag
 
 ```c

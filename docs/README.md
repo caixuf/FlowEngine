@@ -59,6 +59,7 @@ docs/
 ├── TECHNICAL_DESIGN.md    # 技术设计文档
 ├── PROJECT_REVIEW.md      # 项目完善度评估
 ├── EVOLUTION_ROADMAP.md   # 项目进化路线图
+├── MONITORING_ARCHITECTURE.md # flowmond 监控守护进程 + stats_bridge IPC 桥接
 ├── ALGORITHM_INTEGRATION.md # 算法集成指南
 ├── FLOW_REGISTRY_PLAN.md  # FlowRegistry 设计规划
 └── ...

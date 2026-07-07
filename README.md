@@ -19,7 +19,7 @@ A from-scratch middleware framework providing the core abstractions of CyberRT i
 | **Execution** | Coroutine Scheduler (FIFO + CPU affinity + rate limit), Choreo DAG mode, Cancelable Coroutine Primitives (pub/sub · select · timer · req-reply, with timeout & graceful cancel) |
 | **Introspection** | Reflective State Machine, UDP Service Discovery, Topology Tracking |
 | **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion |
-| **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, CI/CD |
+| **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, flowmond Monitor Daemon, Stats Bridge (cross-process IPC stats), CI/CD |
 
 ## Quick Start
 
@@ -96,6 +96,30 @@ flowctl schema <type>           # Type information
 flowctl dashboard               # Launch FlowBoard
 flowctl version                 # Build info
 ```
+
+## Monitoring (flowmond)
+
+`flowmond` is a standalone monitor daemon — it aggregates stats from all running processes via a POSIX shared-memory IPC bridge and serves a live dashboard.
+
+```bash
+# Terminal 1: start the monitor daemon
+./build/bin/flowmond --port 8800
+
+# Terminal 2: run the business process (publishes stats every 5 s)
+./build/bin/flow_e2e 60
+
+# Open dashboard in browser (~5 s after both processes are up)
+open http://localhost:8800
+```
+
+Dashboard endpoints:
+
+| Path | Description |
+|------|-------------|
+| `/` | Live FlowBoard UI |
+| `/api/topics` | Per-topic stats (local + remote processes) |
+| `/api/topology` | Topology JSON |
+| `/api/stream` | SSE real-time push (500 ms interval) |
 
 ## Docker (easiest)
 
@@ -200,6 +224,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 | [Technical Design](docs/TECHNICAL_DESIGN.md) | Architecture |
 | [Learning Guide](docs/LEARNING_GUIDE.md) | 2-4 week path |
 | [Task System](docs/TASK_SYSTEM_GUIDE.md) | Plugin development |
+| [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
 | [Skills](skills/) | Deep dives (serializer, statem, discovery, fusion, bus, IPC, bag, clock, coroutine) |
 
 ## License
