@@ -213,7 +213,7 @@ input:focus,select:focus{border-color:#58a6ff}
   <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>3D — Foxglove Studio <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0">| 2D — live preview below</span></h2><span class="toggle">▼</span></div>
+  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Scene View</h2><div style="display:flex;align-items:center;gap:6px" id="scene-view-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-view="3d" onclick="switchSceneView('3d')" style="padding:3px 10px;font-size:10px">3D</button><button class="toggle-btn" data-view="2d" onclick="switchSceneView('2d')" style="padding:3px 10px;font-size:10px">2D</button></div><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="width:100%;height:400px;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:400px;background:#070a0f;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div></div>
   </div>
 
@@ -1199,18 +1199,23 @@ function _renderFrame(){
   // Here we just smooth-lerp toward those fixed world targets so
   // obstacles stay anchored in their real lanes regardless of ego motion.
   if(window._obsPool&&window._obsWorld){
+    // Half-length of ego vehicle for overlap-safe occlusion threshold
+    var EGO_HALF_LEN = 2.3;
+    // Default obstacle length when not specified in data
+    var DEFAULT_OBS_LEN = 4;
     for(var oi=0;oi<window._obsPool.length;oi++){
       var om=window._obsPool[oi];
       var ow=window._obsWorld[oi];
       if(ow){
-        var L=ow.len||4,W=ow.wid||2;
+        var L=ow.len||DEFAULT_OBS_LEN,W=ow.wid||2;
         // Type-based real height: trucks tall, pedestrians slim.
         var H=_OBS_H[ow.type]||1.5;
         // 按世界速度外推到当前时刻 → 60fps 平滑, 不再随 10Hz 数据跳动。
         var dtObs=Math.min(now-(ow.t0||now),1.0);
         var tx=ow.x+(ow.vx||0)*dtObs, tz=ow.z+(ow.vz||0)*dtObs;
         var distToEgo=Math.sqrt((tx-sx)*(tx-sx)+(tz-sz)*(tz-sz));
-        if(distToEgo<3.5){om.visible=false;continue;}
+        // Bounding-box-aware occlusion: hide only when truly overlapping ego body
+        if(distToEgo < L*0.5 + EGO_HALF_LEN){om.visible=false;continue;}
         // Unit-normalised model: group origin at road surface (y=0.05).
         // Children sit at fractions 0-1 so scale.set maps directly to metres.
         _tmpV3.set(tx,0.05,tz); om.position.lerp(_tmpV3,0.18);
@@ -1236,7 +1241,7 @@ function _renderFrame(){
   // ── Car bounce ──
   var v=(topoData.metrics||{}).vehicle||{};
   if(ego&&v.speed>0.5){
-    ego.position.y=0.05+Math.sin(_animT*14)*0.04*Math.min(1,v.speed*0.12);
+    ego.position.y=0.05+Math.sin(_animT*6.5)*0.008*Math.min(1,v.speed*0.12);
   }
 }
 
@@ -1339,9 +1344,26 @@ function hexToRgb(hex){
   return r+","+g+","+b;
 }
 
-function init2DFallback(){
-  // If 3D scene is already ready, don't override it with 2D
-  if(_2d.active || sceneReady) return;
+function switchSceneView(mode){
+  var c2d=document.getElementById('scene2d');
+  var c3d=document.getElementById('scene3d');
+  document.querySelectorAll('#scene-view-btns .toggle-btn').forEach(function(b){b.classList.toggle('active',b.dataset.view===mode);});
+  if(mode==='2d'){
+    if(c3d)c3d.style.display='none';
+    if(c2d)c2d.style.display='';
+    if(!_2d.active)init2DFallback(true);
+  }else{
+    if(c2d)c2d.style.display='none';
+    if(c3d)c3d.style.display='';
+    if(_2d.animId)cancelAnimationFrame(_2d.animId);
+    _2d.active=false;
+    if(!sceneReady&&typeof THREE!=='undefined'){try{init3DScene();sceneReady=true;}catch(e){}}
+    setTimeout(resize3D,100);
+  }
+}
+function init2DFallback(force){
+  // If 3D scene is already ready, don't override it with 2D (unless forced by user)
+  if(!force&&(_2d.active||sceneReady))return;
   var el=document.getElementById("scene2d");if(!el)return;
   _2d.active=true; _2d.canvas=el; _2d.ctx=el.getContext("2d");
   // HiDPI
@@ -1546,8 +1568,8 @@ function draw2D(){
 
   // ── Ego vehicle (detailed top-down view, with subtle speed animation) ──
   ctx.save(); ctx.translate(carX,carY); ctx.rotate(-e.heading);
-  // Speed-based bounce (subtle vertical oscillation)
-  var bounce = Math.sin(_2d.frame * 0.15) * Math.min(1, e.speed * 0.15);
+  // Speed-based bounce removed — was Math.sin(frame*0.15)*... which caused visual shimmy
+  var bounce = 0;
   ctx.translate(0, bounce);
   // Speed-based forward tilt (visual acceleration cue)
   if(e.speed > 0.5) ctx.translate(Math.min(3, e.speed * 0.3), 0);

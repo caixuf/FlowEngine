@@ -22,7 +22,7 @@ static void on_fusion(const Message* msg, void* u) {
     float x=0,speed=10.0f;
     if(strstr(data,"pos=(")) sscanf(data,"pos=(%f",&x);
     if(strstr(data,"speed=")) sscanf(data,"speed=%f",&speed);
-    float ts = speed>15?15:speed;
+    float ts = 15.0f;  /* 固定巡航目标 15 m/s，不随当前速度变化 */
     char traj[256];
     snprintf(traj,sizeof(traj),"traj=(%.1f,0.0) speed=%.1f lane=center",x+2.0f,ts);
     Message omsg; msg_init_typed(&omsg,"planning/trajectory","planning",0x3A7B1C2Du,1,traj,(uint32_t)(strlen(traj)+1));
