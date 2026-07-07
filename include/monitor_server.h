@@ -13,7 +13,7 @@ typedef struct MonitorServer MonitorServer;
 
 /** 创建内嵌 HTTP 监控服务器 */
 MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discovery,
-                                     int port);
+                                     int port, const char* html_path);
 /** 启动 (后台线程) */
 void monitor_server_start(MonitorServer* ms);
 /** 停止 */

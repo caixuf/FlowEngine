@@ -83,7 +83,7 @@ echo "  ✓ Build complete"
 cleanup() {
   echo ""
   echo "───[Cleanup] Shutting down..."
-  kill $LAUNCHER_PID $SERVER_PID $BRIDGE_PID $FLOWMOND_PID 2>/dev/null
+  kill $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID 2>/dev/null
   wait 2>/dev/null
   rm -f "$JSON_FILE"
 
@@ -128,35 +128,23 @@ if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
 fi
 echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
-# ── Start dashboard server ──────────────────────────────────
+# ── Start dashboard server (flowmond) ──────────────────────
 echo "───[3/5] Starting dashboard server..."
-python3 "$ROOT/tools/flowboard_server.py" --json-file "$JSON_FILE" --port 8800 \
-  > /tmp/flowboard.log 2>&1 &
-SERVER_PID=$!
+"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard.html" \
+  > /tmp/flowmond.log 2>&1 &
+FLOWMOND_PID=$!
 sleep 2
-if kill -0 $SERVER_PID 2>/dev/null; then
+if kill -0 $FLOWMOND_PID 2>/dev/null; then
     echo "  ✓ Dashboard at http://localhost:8800"
 else
-    echo "  ✗ Server failed! Check /tmp/flowboard.log"
-    cat /tmp/flowboard.log
+    echo "  ✗ flowmond failed! Check /tmp/flowmond.log"
+    cat /tmp/flowmond.log
 fi
 
 python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \
   > /tmp/foxglove_bridge.log 2>&1 &
 BRIDGE_PID=$!
 echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
-
-# ── Start flowmond (stats IPC bridge) ────────────────────
-echo "───[3.5/5] Starting flowmond stats bridge..."
-"$BUILD_DIR/bin/flowmond" --port 8801 \
-  > /tmp/flowmond.log 2>&1 &
-FLOWMOND_PID=$!
-sleep 1
-if kill -0 $FLOWMOND_PID 2>/dev/null; then
-    echo "  ✓ flowmond at http://localhost:8801 (cross-process stats)"
-else
-    echo "  ⚠ flowmond not started (stats bridge unavailable, check /tmp/flowmond.log)"
-fi
 
 # ── Open browser ────────────────────────────────────────────
 if $OPEN_BROWSER; then

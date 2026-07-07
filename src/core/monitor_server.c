@@ -47,13 +47,32 @@ typedef struct {
     int               listen_fd;
     volatile bool     running;
     pthread_t         server_thread;
+    char              html_path[512];  /**< Path to flowboard.html (empty = embedded) */
     /* Remote stats injected via IPC bridge */
     RemoteSource      remote[MONITOR_MAX_REMOTE_SRCS];
     int               remote_count;
     pthread_mutex_t   remote_mutex;
 } MonitorServer;
 
-/* ── SSE 数据生成 ────────────────────────────────────────── */
+/* ── File read helper ────────────────────────────────────── */
+
+static char* read_file(const char* path, size_t* out_len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len <= 0) { fclose(f); return NULL; }
+    char* buf = (char*)malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t n = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[n] = '\0';
+    if (out_len) *out_len = n;
+    return buf;
+}
+
+/* ── SSE 数据生成 (flowboard.html 兼容格式) ────────────────── */
 
 static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     MessageBus* bus = ms->bus;
@@ -62,14 +81,20 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     uint64_t pub, del, drop;
     message_bus_get_stats(bus, &pub, &del, &drop);
 
-    /* Topology */
-    char* topo = dm ? discovery_export_json(dm) : strdup("{}");
-
     /* Local topic stats */
     TopicStats tstats[32];
     int nt = message_bus_get_all_topic_stats(bus, tstats, 32);
 
-    /* Safe append helper: never write past buf+sz */
+    /* Compute avg latency from local topics */
+    uint64_t lat_total = 0, lat_count = 0;
+    for (int i = 0; i < nt; i++) {
+        if (tstats[i].deliver_count > 0) {
+            lat_total += tstats[i].total_latency_us;
+            lat_count += tstats[i].deliver_count;
+        }
+    }
+
+    /* Safe append helper */
 #define SSE_APPEND(fmt, ...) \
     do { \
         if (off >= 0 && (size_t)off < sz) \
@@ -77,30 +102,79 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     } while (0)
 
     int off = snprintf(buf, sz,
-        "{\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
-        "\"topology\":%s,"
-        "\"topics\":[",
-        (unsigned long)pub, (unsigned long)del, (unsigned long)drop,
-        topo);
-    free(topo);
+        "{\"self\":\"flowmond\",");
 
+    /* Nodes + endpoints from discovery topology */
+    const TopologyGraph* g = dm ? discovery_get_topology(dm) : NULL;
+    if (g && g->node_count > 0) {
+        SSE_APPEND("\"nodes\":[");
+        for (uint32_t ni = 0; ni < g->node_count; ni++) {
+            const NodeInfo* n = &g->nodes[ni];
+            SSE_APPEND(
+                "%s{\"name\":\"%s\",\"pid\":%u,\"alive\":%s,\"topics\":[",
+                ni > 0 ? "," : "", n->name, n->pid,
+                n->alive ? "true" : "false");
+            for (uint32_t tj = 0; tj < n->topic_count; tj++) {
+                SSE_APPEND(
+                    "%s{\"topic\":\"%s\",\"freq\":%.1f}",
+                    tj > 0 ? "," : "", n->topics[tj].topic,
+                    n->topics[tj].frequency_hz);
+            }
+            SSE_APPEND("]}");
+        }
+        SSE_APPEND("],");
+
+        /* endpoints */
+        SSE_APPEND("\"endpoints\":[");
+        int ep_count = 0;
+        for (uint32_t ni = 0; ni < g->node_count; ni++) {
+            const NodeInfo* n = &g->nodes[ni];
+            for (uint32_t tj = 0; tj < n->topic_count; tj++) {
+                const char* role = (n->topics[tj].capabilities & 0x01) ? "pub" : "sub";
+                SSE_APPEND(
+                    "%s{\"node\":\"%s\",\"topic\":\"%s\","
+                    "\"role\":\"%s\",\"type_id\":\"0x00000000\",\"freq\":%.1f}",
+                    ep_count > 0 ? "," : "",
+                    n->name, n->topics[tj].topic, role,
+                    n->topics[tj].frequency_hz);
+                ep_count++;
+            }
+        }
+        SSE_APPEND("],");
+    } else {
+        SSE_APPEND("\"nodes\":[],\"endpoints\":[],");
+    }
+
+    /* metrics wrapper */
+    SSE_APPEND("\"metrics\":{");
+
+    /* bus */
+    SSE_APPEND("\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},",
+        (unsigned long)pub, (unsigned long)del, (unsigned long)drop);
+
+    /* transport / scheduler / latency (static/placeholder) */
+    SSE_APPEND("\"transport\":{\"local_pub\":%lu,\"remote_pub\":0},",
+        (unsigned long)pub);
+    uint64_t avg_latency = lat_count > 0 ? lat_total / lat_count : 0;
+    SSE_APPEND("\"scheduler\":{\"tasks\":0,\"mode\":\"CHOREO\"},"
+        "\"latency\":{\"avg_us\":%lu,\"p50_us\":0,\"p99_us\":0},",
+        (unsigned long)avg_latency);
+
+    /* topics (local + remote) */
+    SSE_APPEND("\"topics\":[");
     int total = 0;
     for (int i = 0; i < nt; i++) {
-        uint64_t avg_lat = tstats[i].deliver_count > 0
+        uint64_t lat = tstats[i].deliver_count > 0
             ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
         SSE_APPEND(
             "%s{\"topic\":\"%s\",\"source\":\"local\","
             "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-            "\"deadline_violations\":%lu,"
-            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
             total > 0 ? "," : "", tstats[i].topic,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
-            (unsigned long)tstats[i].deadline_violations,
-            (unsigned long)avg_lat,
-            (unsigned long)tstats[i].p50_latency_us,
-            (unsigned long)tstats[i].p99_latency_us,
+            (unsigned long)lat,
             tstats[i].frequency_hz,
             tstats[i].subscriber_count);
         total++;
@@ -113,21 +187,17 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
         if (!src->valid) continue;
         for (uint32_t i = 0; i < src->pkt.topic_count; i++) {
             const RemoteTopicStat* t = &src->pkt.topics[i];
-            uint64_t avg_lat = t->deliver_count > 0
+            uint64_t lat = t->deliver_count > 0
                 ? t->total_latency_us / t->deliver_count : 0;
             SSE_APPEND(
                 "%s{\"topic\":\"%s\",\"source\":\"%s\","
                 "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                "\"deadline_violations\":%lu,"
-                "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
                 total > 0 ? "," : "", t->topic, src->source_name,
                 (unsigned long)t->publish_count,
                 (unsigned long)t->deliver_count,
                 (unsigned long)t->drop_count,
-                (unsigned long)t->deadline_violations,
-                (unsigned long)avg_lat,
-                (unsigned long)t->p50_latency_us,
-                (unsigned long)t->p99_latency_us,
+                (unsigned long)lat,
                 t->frequency_hz,
                 t->subscriber_count);
             total++;
@@ -135,7 +205,11 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     }
     pthread_mutex_unlock(&ms->remote_mutex);
 
-    SSE_APPEND("]}");
+    /* Close topics, add placeholder metrics, close metrics + top-level */
+    SSE_APPEND("],"
+        "\"sysmon\":{},"
+        "\"vehicle\":{},"
+        "\"scene\":{}}}");
 #undef SSE_APPEND
 }
 
@@ -222,47 +296,31 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
-    /* Route: / → dashboard HTML (embedded) */
+    /* Route: / → flowboard.html (from disk) or embedded fallback */
     if (strstr(req, "GET / ") || strstr(req, "GET /index.html")) {
-        /* Serve a minimal live dashboard */
-        const char* html =
-            "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>FlowBoard Live</title>"
-            "<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font:13px system-ui;padding:16px}"
-            "h1{color:#58a6ff;margin-bottom:12px}.card{background:#161b22;border:1px solid#21262d;border-radius:8px;padding:12px;margin-bottom:8px}"
-            "h2{font-size:12px;color:#8b949e;margin-bottom:4px}.stat{display:flex;justify-content:space-between;font-size:11px;padding:2px 0}"
-            ".v{color:#58a6ff;font-weight:600}.topic-table{width:100%;font-size:11px;border-collapse:collapse}"
-            ".topic-table th,.topic-table td{padding:4px 8px;text-align:right;border-bottom:1px solid#161b22}"
-            ".topic-table th{color:#8b949e}.topic-table td:first-child{text-align:left;color:#58a6ff}"
-            ".green{color:#3fb950}.red{color:#f85149}.yellow{color:#d29922}"
-            ".live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;animation:pulse 2s infinite;margin-right:4px}"
-            "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}"
-            "</style></head><body>"
-            "<h1><span class='live-dot'></span>FlowBoard Live</h1>"
-            "<div class='card'><h2>Bus Stats</h2><div id='bus'></div></div>"
-            "<div class='card'><h2>Topic Monitor</h2><table class='topic-table'>"
-            "<thead><tr><th>Topic</th><th>Pub</th><th>Del</th><th>Drop</th><th>Lat</th><th>Freq</th><th>Subs</th></tr></thead>"
-            "<tbody id='topics'></tbody></table></div>"
-            "<div style='font-size:10px;color:#484f58;margin-top:8px' id='status'>Connecting...</div>"
-            "<script>"
-            "var src=new EventSource('/api/stream');"
-            "src.onmessage=function(e){"
-            "var d=JSON.parse(e.data);"
-            "document.getElementById('bus').innerHTML="
-            "'<div class=stat><span>Published</span><span class=v>'+d.bus.published+'</span></div>'"
-            "+'<div class=stat><span>Delivered</span><span class=v>'+d.bus.delivered+'</span></div>'"
-            "+'<div class=stat><span>Dropped</span><span class=v style=color:'+(d.bus.dropped>0?'#f85149':'#3fb950')+'>'+d.bus.dropped+'</span></div>';"
-            "var rows='';"
-            "(d.topics||[]).forEach(function(t){"
-            "rows+='<tr><td>'+t.topic+'</td><td>'+t.pub+'</td><td>'+t.del+'</td>'"
-            "+'<td class='+(t.drop>0?'red':'green')+'>'+t.drop+'</td>'"
-            "+'<td class=yellow>'+t.lat_us+'us</td><td>'+t.freq.toFixed(1)+'Hz</td><td>'+t.subs+'</td></tr>';"
-            "});"
-            "document.getElementById('topics').innerHTML=rows||'<tr><td colspan=7>Waiting for data...</td></tr>';"
-            "document.getElementById('status').textContent='Live | '+new Date().toLocaleTimeString();"
-            "};"
-            "src.onerror=function(){document.getElementById('status').innerHTML='<span class=red>Disconnected — retrying...</span>';};"
-            "</script></body></html>";
-        send_response(fd, "200 OK", "text/html; charset=utf-8", html, (int)strlen(html));
+        char* html = NULL;
+        size_t html_len = 0;
+        /* Try reading from disk first */
+        if (ms->html_path[0]) {
+            html = read_file(ms->html_path, &html_len);
+        }
+        if (html) {
+            send_response(fd, "200 OK", "text/html; charset=utf-8", html, (int)html_len);
+            free(html);
+        } else {
+            /* Fallback: minimal embedded dashboard */
+            const char* fallback =
+                "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>FlowBoard</title>"
+                "<style>body{background:#0d1117;color:#c9d1d9;font:13px system-ui;padding:16px}"
+                "h1{color:#58a6ff}a{color:#3fb950}.info{color:#8b949e;margin-top:8px}</style></head><body>"
+                "<h1>⚠ FlowBoard HTML not found</h1>"
+                "<p class=info>Set <code>--html-path</code> or check the tools/ directory.</p>"
+                "<p><a href='/api/topology'>/api/topology</a> — JSON data</p>"
+                "<p><a href='/api/stream'>/api/stream</a> — SSE live feed</p>"
+                "</body></html>";
+            send_response(fd, "200 OK", "text/html; charset=utf-8",
+                          fallback, (int)strlen(fallback));
+        }
         close(fd);
         return;
     }
@@ -316,11 +374,13 @@ static void* server_thread_fn(void* arg) {
 /* ══════════════════════════════════════════════════════════ */
 
 MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discovery,
-                                     int port) {
+                                     int port, const char* html_path) {
     MonitorServer* ms = (MonitorServer*)calloc(1, sizeof(MonitorServer));
     ms->bus       = bus;
     ms->discovery = discovery;
     ms->port      = port > 0 ? port : 8800;
+    if (html_path && html_path[0])
+        snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
     pthread_mutex_init(&ms->remote_mutex, NULL);
     return ms;
 }

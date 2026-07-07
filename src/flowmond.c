@@ -20,6 +20,8 @@
 #include "monitor_server.h"
 #include "stats_bridge.h"
 #include "logger.h"
+#include <libgen.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,12 +130,31 @@ static void check_alerts(MessageBus* bus, const AlertRule* rules, int rule_count
 int main(int argc, char** argv) {
     int port = 8800;
     const char* config_file = NULL;
+    char html_path[512] = "";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
             config_file = argv[++i];
+        else if (strcmp(argv[i], "--html-path") == 0 && i + 1 < argc) {
+            snprintf(html_path, sizeof(html_path), "%s", argv[++i]);
+        }
+    }
+
+    /* Auto-detect html_path if not specified: look next to the binary */
+    if (!html_path[0]) {
+        char self_path[1024];
+        ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
+        if (len > 0) {
+            self_path[len] = '\0';
+            /* dirname may modify input, use a copy */
+            char dir_buf[1024];
+            snprintf(dir_buf, sizeof(dir_buf), "%s", self_path);
+            char* dir = dirname(dir_buf);
+            snprintf(html_path, sizeof(html_path),
+                     "%s/../../tools/flowboard.html", dir);
+        }
     }
 
     log_init(LOG_INFO, NULL);
@@ -155,7 +176,8 @@ int main(int argc, char** argv) {
     LOG_INFO("flowmond", "discovery started — watching for nodes");
 
     /* ── 启动 HTTP 监控服务器 ── */
-    MonitorServer* ms = monitor_server_create(bus, dm, port);
+    MonitorServer* ms = monitor_server_create(bus, dm, port,
+                               html_path[0] ? html_path : NULL);
     monitor_server_start(ms);
     LOG_INFO("flowmond", "dashboard: http://localhost:%d", port);
     printf("  Endpoints:\n");
