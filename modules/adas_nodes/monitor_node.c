@@ -230,9 +230,12 @@ static void export_dashboard_json(void) {
     for (int i = 0; i < 3; i++) {
         double rx = ox[i] - ego_x;
         double ry = oy[i] - ego_y;
-        fprintf(jf, "%s{\"id\":%d,\"type\":\"car\",\"x\":%.2f,\"y\":%.2f,"
-                "\"vx\":%.2f,\"vy\":0,\"len\":4.6,\"wid\":2.0}",
-                i > 0 ? "," : "", i, rx, ry, ovx[i]);
+        const char* type = (i == 2) ? "pedestrian" : "car";
+        double len = (i == 2) ? 0.6 : 4.6;
+        double wid = (i == 2) ? 0.6 : 2.0;
+        fprintf(jf, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
+            "\"vx\":%.2f,\"vy\":0,\"len\":%.1f,\"wid\":%.1f}",
+            i > 0 ? "," : "", i, type, rx, ry, ovx[i], len, wid);
     }
     fprintf(jf, "],");
 

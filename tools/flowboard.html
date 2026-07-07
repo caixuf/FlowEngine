@@ -1218,7 +1218,12 @@ function _renderFrame(){
         if(distToEgo < L*0.5 + EGO_HALF_LEN){om.visible=false;continue;}
         // Unit-normalised model: group origin at road surface (y=0.05).
         // Children sit at fractions 0-1 so scale.set maps directly to metres.
-        _tmpV3.set(tx,0.05,tz); om.position.lerp(_tmpV3,0.18);
+        _tmpV3.set(tx,0.05,tz);
+        if(!om.visible || om.position.distanceTo(_tmpV3)>35){
+          om.position.copy(_tmpV3);
+        }else{
+          om.position.lerp(_tmpV3,0.18);
+        }
         _tmpScale.set(L,H,W); om.scale.lerp(_tmpScale,0.18);
         var c=(window._obsColors&&window._obsColors[ow.type])||0xff9944;
         if(om.children.length>0&&om.children[0].material&&om.children[0].material.color){

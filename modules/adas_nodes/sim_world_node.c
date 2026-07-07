@@ -26,10 +26,11 @@
 #define EGO_WID_M          2.0    /* 车宽（用于 AABB 碰撞检测） */
 #define AEB_GAP_RATIO      0.5    /* AEB 触发阈值：实际间距 < 安全间距 × 此比例 */
 #define AEB_MAX_GAP_M      40.0   /* AEB 仅在前车 < 此距离时激活 */
-#define SIM_OBSTACLE_COUNT 3
+#define SIM_OBSTACLE_COUNT 4
 #define MAX_SPEED          20.0
 #define FREQUENCY_HZ       20.0
 #define DT_SEC             (1.0 / FREQUENCY_HZ)
+#define ROAD_CENTER_LIMIT_M 2.5
 
 /* ── 仿真障碍物 ────────────────────────────────────────────────── */
 
@@ -97,10 +98,12 @@ static struct {
 static void init_obstacles(void) {
     /* 障碍物 0: 在 ego 同车道前方 35m, 慢车 7 m/s — 用于触发变道 */
     g.obstacles[0] = (SimObstacle){ 0, "car",          7.0,  0.0, 35.0, -1.75, 4.6, 2.0 };
-    /* 障碍物 1: 在邻道(右车道 y=1.75), 120m 前, 稍慢 — 远到不阻碍变道 */
-    g.obstacles[1] = (SimObstacle){ 1, "car",          9.0,  0.0, 120.0, 1.75, 4.6, 2.0 };
-    /* 障碍物 2: 行人, 在路边往复行走 */
-    g.obstacles[2] = (SimObstacle){ 2, "pedestrian",   0.0,  0.6, 55.0,  8.0,  0.6, 0.6 };
+    /* 障碍物 1: 在 ego 同车道前方 90m, 也是慢车 — 第二次变道触发 */
+    g.obstacles[1] = (SimObstacle){ 1, "car",          7.0,  0.0, 90.0, -1.75, 4.6, 2.0 };
+    /* 障碍物 2: 行人, 在更远处路边往复行走，避免和首个慢车超车场景重叠 */
+    g.obstacles[2] = (SimObstacle){ 2, "pedestrian",   0.0,  0.6, 140.0,  8.0,  0.6, 0.6 };
+    /* 障碍物 3: 在邻道(右车道 y=1.75), 120m 前, 稍快 — 远到不阻碍变道 */
+    g.obstacles[3] = (SimObstacle){ 3, "car",         12.0,  0.0, 130.0, 1.75, 4.6, 2.0 };
 }
 
 /* ── 障碍物运动学 ─────────────────────────────────────────────── */
@@ -192,6 +195,15 @@ static void vehicle_tick(void) {
                          * tan(g.vehicle.steer) * DT_SEC;
     g.vehicle.x += g.vehicle.speed * DT_SEC * cos(g.vehicle.heading);
     g.vehicle.y += g.vehicle.speed * DT_SEC * sin(g.vehicle.heading);
+    if (g.vehicle.y > ROAD_CENTER_LIMIT_M) {
+        g.vehicle.y = ROAD_CENTER_LIMIT_M;
+        if (g.vehicle.heading > 0.0) g.vehicle.heading = 0.0;
+        if (g.vehicle.speed > 6.0) g.vehicle.speed = 6.0;
+    } else if (g.vehicle.y < -ROAD_CENTER_LIMIT_M) {
+        g.vehicle.y = -ROAD_CENTER_LIMIT_M;
+        if (g.vehicle.heading < 0.0) g.vehicle.heading = 0.0;
+        if (g.vehicle.speed > 6.0) g.vehicle.speed = 6.0;
+    }
 
     obstacles_tick();
 }
@@ -266,7 +278,7 @@ static void* sim_thread(void* arg) {
             SimObstacle* o = &g.obstacles[i];
             double overlap_x = (ego_half_len + o->len * 0.5) - fabs(g.vehicle.x - o->x);
             double overlap_y = (ego_half_wid + o->wid * 0.5) - fabs(g.vehicle.y - o->y);
-            if (overlap_x > 0.0 && overlap_y > 0.0) {
+            if (overlap_x > 0.10 && overlap_y > 0.30) {
                 if (g.collision_cooldown[i] <= 0) {
                     LOG_ERROR("sim_world", "COLLISION ego(%.1f,%.1f) ↔ obs%d(%.1f,%.1f) ovlp(%.2f,%.2f)",
                               g.vehicle.x, g.vehicle.y, i, o->x, o->y, overlap_x, overlap_y);
@@ -294,12 +306,14 @@ static void* sim_thread(void* arg) {
                  "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
                  "\"ox0\":%.2f,\"oy0\":%.2f,\"ov0\":%.3f,"
                  "\"ox1\":%.2f,\"oy1\":%.2f,\"ov1\":%.3f,"
-                 "\"ox2\":%.2f,\"oy2\":%.2f,\"ov2\":%.3f}",
+                 "\"ox2\":%.2f,\"oy2\":%.2f,\"ov2\":%.3f,"
+                 "\"ox3\":%.2f,\"oy3\":%.2f,\"ov3\":%.3f}",
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
                  g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
                  g.obstacles[0].x, g.obstacles[0].y, g.obstacles[0].vx,
                  g.obstacles[1].x, g.obstacles[1].y, g.obstacles[1].vx,
-                 g.obstacles[2].x, g.obstacles[2].y, g.obstacles[2].vx);
+                 g.obstacles[2].x, g.obstacles[2].y, g.obstacles[2].vx,
+                 g.obstacles[3].x, g.obstacles[3].y, g.obstacles[3].vx);
         transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
                           (uint32_t)strlen(vstate) + 1);
 

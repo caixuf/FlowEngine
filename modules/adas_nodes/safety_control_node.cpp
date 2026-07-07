@@ -45,10 +45,10 @@ struct VehicleState {
     double y{0.0};
     double speed{0.0};
     double heading{0.0};
-    double obs_x[3]{0.0, 0.0, 0.0};
-    double obs_y[3]{0.0, 0.0, 0.0};
-    double obs_v[3]{0.0, 0.0, 0.0};
-    bool obs_valid[3]{false, false, false};
+    double obs_x[4]{0.0, 0.0, 0.0, 0.0};
+    double obs_y[4]{0.0, 0.0, 0.0, 0.0};
+    double obs_v[4]{0.0, 0.0, 0.0, 0.0};
+    bool obs_valid[4]{false, false, false, false};
 };
 
 struct SafetyParams {
@@ -72,6 +72,9 @@ struct SafetyContext {
     std::atomic<bool> running{false};
     std::atomic<bool> should_stop{false};
     SafetyParams params;
+    pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+    VehicleState latest_state;
+    bool has_state{false};
 };
 
 SafetyContext g;
@@ -117,7 +120,7 @@ VehicleState parse_vehicle_state(const Message& msg) {
     scan_double(text, "\"y\":", &state.y);
     scan_double(text, "\"spd\":", &state.speed);
     scan_double(text, "\"hdg\":", &state.heading);
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         char key[16];
         std::snprintf(key, sizeof(key), "\"ox%d\":", i);
         state.obs_valid[i] = scan_double(text, key, &state.obs_x[i]);
@@ -129,9 +132,18 @@ VehicleState parse_vehicle_state(const Message& msg) {
     return state;
 }
 
+void on_vehicle_state(const Message* msg, void*) {
+    if (!msg) return;
+    VehicleState state = parse_vehicle_state(*msg);
+    pthread_mutex_lock(&g.state_mutex);
+    g.latest_state = state;
+    g.has_state = true;
+    pthread_mutex_unlock(&g.state_mutex);
+}
+
 double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& params) {
     double best_gap = 1e9;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 2; ++i) {
         if (!state.obs_valid[i]) continue;
         if (std::fabs(state.obs_y[i] - state.y) > params.same_lane_tol) continue;
         double dx = state.obs_x[i] - state.x;
@@ -141,6 +153,15 @@ double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& para
     return best_gap;
 }
 
+double pedestrian_collision_gap(const VehicleState& state) {
+    constexpr int pedestrian_index = 2;
+    if (!state.obs_valid[pedestrian_index]) return 1e9;
+    double dx = state.obs_x[pedestrian_index] - state.x;
+    double dy = std::fabs(state.obs_y[pedestrian_index] - state.y);
+    if (std::fabs(dx) > 70.0 || dy > 4.5) return 1e9;
+    return std::fabs(dx) - 2.8;
+}
+
 class SafetyControlTask : public FlowCoroTask {
 public:
     SafetyControlTask(MessageBus* bus, Transport* transport, const SafetyParams& params)
@@ -148,21 +169,20 @@ public:
 
 protected:
     Task run() override {
-        VehicleState state;
-        bool has_state = false;
         uint32_t cycle = 0;
 
         LOG_INFO("safety_control", "FlowCoro safety gate started");
         while (!should_stop()) {
-            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "vehicle/state"}, &cancel_token_);
-            if (std::strcmp(msg.topic, "vehicle/state") == 0) {
-                state = parse_vehicle_state(msg);
-                has_state = true;
-                continue;
-            }
+            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd"}, &cancel_token_);
             if (std::strcmp(msg.topic, "control/raw_cmd") != 0) continue;
 
             ControlCmd cmd = parse_control_cmd(msg);
+            VehicleState state;
+            bool has_state = false;
+            pthread_mutex_lock(&g.state_mutex);
+            state = g.latest_state;
+            has_state = g.has_state;
+            pthread_mutex_unlock(&g.state_mutex);
             bool intervened = apply_safety(cmd, state, has_state);
             publish_cmd(cmd, intervened);
 
@@ -198,6 +218,16 @@ private:
                 set_changed(cmd.throttle, std::min(cmd.throttle, limited_throttle));
                 if (ratio < params_.hard_brake_ratio) {
                     set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
+                }
+            }
+            double ped_gap = pedestrian_collision_gap(state);
+            double ped_stop_gap = std::max(24.0, state.speed * 5.0);
+            if (ped_gap < ped_stop_gap) {
+                double ratio = clamp(ped_gap / ped_stop_gap, 0.0, 1.0);
+                set_changed(cmd.throttle, 0.0);
+                set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
+                if (ped_gap < ped_stop_gap * 0.55) {
+                    set_changed(cmd.brake, 1.0);
                 }
             }
         }
@@ -244,6 +274,7 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
     g.should_stop = false;
     g.running = false;
     g.params = SafetyParams{};
+    g.has_state = false;
 
     if (params_json) {
         scan_double(params_json, "\"max_throttle\":", &g.params.max_throttle);
@@ -252,6 +283,7 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
         scan_double(params_json, "\"time_headway\":", &g.params.time_headway);
     }
 
+    transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_advertise(transport, "control/cmd", CONTROL_CMD_TYPE_ID);
 
     discovery_advertise(discovery, "control/raw_cmd", CONTROL_RAW_TYPE_ID, CAP_SUBSCRIBER, 0);

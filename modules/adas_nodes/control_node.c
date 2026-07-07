@@ -21,12 +21,13 @@
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
-#define MAX_OBS 3
+#define MAX_OBS 4
 
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
 #define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
+#define CONTROL_WHEELBASE_M 2.7
 
 static struct {
     Transport*        transport;
@@ -62,6 +63,7 @@ static struct {
 
     /* 变道状态机 */
     int    lc_state;     /* 0=正常 1=左变道中 2=左车道巡航 3=右回正 */
+    int    lc_attempted;
     double lc_timer;
     double lc_wait;
     double lc_origin_y;
@@ -73,7 +75,17 @@ static struct {
 
     /* 配置参数 */
     double cfg_kp, cfg_ki, cfg_kd;
+    double cfg_cruise_speed;
 } g;
+
+static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_mps2) {
+    double speed = speed_mps;
+    if (speed < 2.0) speed = 2.0;
+    double limit = atan(max_lateral_accel_mps2 * CONTROL_WHEELBASE_M / (speed * speed));
+    if (limit < 0.012) limit = 0.012;
+    if (limit > 0.24) limit = 0.24;
+    return limit;
+}
 
 /* ── 订阅回调 ────────────────────────────────────────────────── */
 
@@ -102,6 +114,9 @@ static void on_trajectory(const Message* msg, void* user_data) {
 
     if (strstr(d, "speed="))
         sscanf(strstr(d, "speed=") + 6, "%lf", &g.target_speed);
+    const char* target_speed_json = strstr(d, "\"target_speed\":");
+    if (target_speed_json)
+        sscanf(target_speed_json + 15, "%lf", &g.target_speed);
 
     /* 解析第一个路径点的 d 值（横向偏移），格式: [s,d,spd] */
     const char* bracket = strchr(d, '[');
@@ -124,7 +139,6 @@ static void on_trajectory(const Message* msg, void* user_data) {
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置 ─────────────────────── */
-
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
@@ -144,6 +158,67 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     }
 }
 
+static double lane_lead_gap(double lane_y, double same_lane_tol) {
+    double best_gap = 1e9;
+    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+        if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
+        if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
+        double dx = g.obs_x[i] - g.ego_x;
+        double gap = dx - 4.6;
+        if (dx > 0 && gap < best_gap) best_gap = gap;
+    }
+    return best_gap;
+}
+
+static double lane_lead_speed(double lane_y, double same_lane_tol) {
+    double best_dx = 1e9;
+    double speed = 1e9;
+    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+        if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
+        if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
+        double dx = g.obs_x[i] - g.ego_x;
+        if (dx > 0 && dx < best_dx) {
+            best_dx = dx;
+            speed = g.obs_vx[i];
+        }
+    }
+    return speed;
+}
+
+static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
+    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+        if (!g.obs_valid[i]) continue;
+        if (fabs(g.obs_y[i] - target_lane_y) > same_lane_tol) continue;
+        double dx = g.obs_x[i] - g.ego_x;
+        if (dx >= 0.0) continue;
+        double closing_speed = g.obs_vx[i] - g.current_speed;
+        double required_rear_gap = 12.0 + fmax(0.0, closing_speed) * 2.0;
+        if (-dx < required_rear_gap) return 0;
+    }
+    return 1;
+}
+
+static int lane_front_allows_merge(double target_lane_y, double same_lane_tol, int* need_accel) {
+    double target_gap = lane_lead_gap(target_lane_y, same_lane_tol);
+    double target_speed = lane_lead_speed(target_lane_y, same_lane_tol);
+    *need_accel = 0;
+    if (target_gap > 40.0) return 1;
+    if (target_gap > 18.0 && target_speed > g.current_speed + 1.5) {
+        *need_accel = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int lane_has_pedestrian_risk(double target_lane_y, double same_lane_tol) {
+    const int pedestrian_index = 2;
+    if (pedestrian_index >= MAX_OBS || !g.obs_valid[pedestrian_index]) return 0;
+    double dx = g.obs_x[pedestrian_index] - g.ego_x;
+    if (dx < -8.0 || dx > 90.0) return 0;
+    if (fabs(g.obs_y[pedestrian_index] - target_lane_y) <= same_lane_tol + 0.8) return 1;
+    return fabs(g.obs_y[pedestrian_index]) < 9.0 && fabs(target_lane_y) <= g.lane_width * 0.5 + 0.2;
+}
+
 /* ── 任务线程 ────────────────────────────────────────────────── */
 
 static void* control_thread(void* arg) {
@@ -151,8 +226,8 @@ static void* control_thread(void* arg) {
     pthread_setname_np(pthread_self(), "control");
 
     const double same_lane_tol = 2.0;
-    const double time_headway  = 2.0;
-    const double min_gap       = 6.0;
+    const double time_headway  = 1.4;
+    const double min_gap       = 5.0;
     const double ref_y         = -1.75;  /* Frenet 参考路径在左车道中心 */
 
     while (!g.should_stop) {
@@ -165,19 +240,27 @@ static void* control_thread(void* arg) {
         if (!g.has_fusion) continue;
         if (!g.has_planning) continue;
 
-        /* ── ACC & 变道: 计算本车道前车间距 ── */
-        double best_gap = 1e9;
-        for (int i = 0; i < MAX_OBS; i++) {
-            if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
-            if (fabs(g.obs_y[i] - g.ego_y) > same_lane_tol) continue;
-            double dx = g.obs_x[i] - g.ego_x;
-            double gap = dx - 4.6;  /* 粗略车头到后保险杠 */
-            if (dx > 0 && gap < best_gap) best_gap = gap;
+        double road_center_limit = g.lane_width - 1.0;
+        double cruise_lane_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+        double adjacent_lane_y = (cruise_lane_y < 0.0) ? g.lane_width * 0.5
+                                   : -g.lane_width * 0.5;
+        if (fabs(g.ego_y) > road_center_limit - 0.4) {
+            cruise_lane_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+            adjacent_lane_y = -cruise_lane_y;
+            g.lc_state = 2;
+            g.lc_timer = 0.0;
         }
+
+        /* ── ACC & 变道: 计算本车道前车间距 ── */
+        double best_gap = lane_lead_gap(cruise_lane_y, same_lane_tol);
+        double adjacent_gap = lane_lead_gap(adjacent_lane_y, same_lane_tol);
+        double lead_speed = lane_lead_speed(cruise_lane_y, same_lane_tol);
         double safe_gap = min_gap + g.current_speed * time_headway;
-        double boost_target = g.target_speed;
+        double boost_target = fmax(g.target_speed, g.cfg_cruise_speed);
         double acc_target = boost_target;
         int blocked = 0;
+        int overtake_worthwhile = 0;
+        int overtake_need_accel = 0;
         if (best_gap < safe_gap && best_gap < 80.0) {
             double ratio = best_gap / safe_gap;
             if (ratio < 0.2) ratio = 0.2;
@@ -185,40 +268,60 @@ static void* control_thread(void* arg) {
             if (acc_target < boost_target * 0.7) blocked = 1;
         }
 
+        double min_overtake_gap = 22.0 + g.current_speed * 2.6;
+        if (min_overtake_gap > 70.0) min_overtake_gap = 70.0;
+        if (!g.lc_attempted && g.lc_state == 0 && best_gap > min_overtake_gap && best_gap < 90.0) {
+            int lead_is_slow = lead_speed < boost_target - 2.0;
+            int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &overtake_need_accel);
+            if (lead_is_slow && !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
+                lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
+                if (!front_allows_merge) overtake_need_accel = 1;
+                overtake_worthwhile = 1;
+                blocked = 1;
+            }
+        }
+
+        /* ── 变道等待期: 不减速，维持当前速度准备变道 ── */
+        if (blocked && overtake_worthwhile && g.lc_state == 0) {
+            if (acc_target < g.current_speed) acc_target = g.current_speed + 0.5;
+            if (overtake_need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
+        }
+
         /* ── 变道中: 临时提高目标速度，加速完成变道 ── */
         if (g.lc_state == 1) {
-            boost_target = g.target_speed * 1.15;
+            boost_target = g.cfg_cruise_speed;
             acc_target = boost_target;
         }
 
+        if (acc_target > g.cfg_cruise_speed) acc_target = g.cfg_cruise_speed;
+        if (g.current_speed > g.cfg_cruise_speed + 1.0) acc_target = g.cfg_cruise_speed - 1.0;
+
         /* ── 自适应变道状态机 ── */
-        double cruise_lane_y = ref_y + g.lane_d;  /* Frenet d → 世界坐标 */
         double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
+        if (fabs(g.ego_y) > road_center_limit - 0.4) {
+            effective_target_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+            if (acc_target > 6.0) acc_target = 6.0;
+        }
+        if (effective_target_y > g.lane_width * 0.5) effective_target_y = g.lane_width * 0.5;
+        if (effective_target_y < -g.lane_width * 0.5) effective_target_y = -g.lane_width * 0.5;
 
         if (blocked && g.lc_state == 0) {
             g.lc_timer += 0.05;
-            if (g.lc_timer > g.blocked_timeout_s) {
-                /* 检查左车道是否通畅 */
-                int left_clear = 1;
-                for (int i = 0; i < MAX_OBS; i++) {
-                    if (!g.obs_valid[i]) continue;
-                    double dy = fabs(g.obs_y[i] - (g.ego_y + g.lane_width));
-                    if (dy < same_lane_tol) {
-                        double dx = g.obs_x[i] - g.ego_x;
-                        double rel_spd = g.current_speed - g.obs_vx[i];
-                        if ((dx > -20.0 && dx < 80.0 && rel_spd > -3.0) ||
-                            (dx < 0.0 && dx > -20.0 && rel_spd > 2.0)) {
-                            left_clear = 0; break;
-                        }
-                    }
-                }
-                if (left_clear) {
+            if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
+                int need_accel = 0;
+                int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &need_accel);
+                if (!lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
+                    lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
+                    if (!front_allows_merge) need_accel = 1;
                     g.lc_origin_y = cruise_lane_y;
-                    g.lc_target_y = g.lc_origin_y + g.lane_width;
+                    g.lc_target_y = adjacent_lane_y;
                     effective_target_y = g.lc_target_y;
-                    g.lc_state = 1; g.lc_timer = 0;
-                    LOG_INFO("control", ">>> LANE CHANGE (gap=%.1f ego@(%.1f,%.1f) d=%.2f→%.2f)",
-                             best_gap, g.ego_x, g.ego_y, g.lane_d, effective_target_y - ref_y);
+                    if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
+                    g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
+                    LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f)",
+                             overtake_worthwhile ? "OVERTAKE" : "BLOCKED",
+                             need_accel ? "+ACCEL" : "+CRUISE",
+                             best_gap, adjacent_gap, lead_speed, g.ego_x, g.ego_y, effective_target_y);
                 } else {
                     LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
                     g.lc_timer = g.blocked_timeout_s;
@@ -228,12 +331,18 @@ static void* control_thread(void* arg) {
             g.lc_timer = 0;
         }
 
-        /* 变道回正: 左车道巡航后回到原车道 */
-        if (g.lc_state == 2) {
+        /* 超车后保持当前车道，避免短 demo 中来回变道造成横向振荡。 */
+        if (0 && g.lc_state == 2) {
             g.lc_wait += 0.05;
             if (g.lc_wait > 8.0) {
                 int right_clear = 1;
                 double orig_y = g.lc_origin_y;
+                double current_lane_gap = lane_lead_gap(g.lc_target_y, same_lane_tol);
+                double original_lane_gap = lane_lead_gap(orig_y, same_lane_tol);
+                if (current_lane_gap > original_lane_gap + 20.0 || current_lane_gap > 80.0) {
+                    g.lc_wait = 6.0;
+                    continue;
+                }
                 for (int i = 0; i < MAX_OBS; i++) {
                     if (!g.obs_valid[i]) continue;
                     double dy = fabs(g.obs_y[i] - orig_y);
@@ -288,20 +397,44 @@ static void* control_thread(void* arg) {
             mode = "BRAKE";
         }
 
+        if (g.current_speed > g.cfg_cruise_speed + 1.0) {
+            throttle = 0.0;
+            double overspeed_brake = (g.current_speed - g.cfg_cruise_speed - 1.0) / 5.0;
+            if (overspeed_brake > brake) brake = overspeed_brake;
+            if (brake > 1.0) brake = 1.0;
+            g.integral = 0.0;
+            mode = "SPEED_LIMIT";
+        }
+
         /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
         double steer = 0.0;
         double lat_error = effective_target_y - g.ego_y;
-        /* P 层: 横向偏差 → 期望航向 */
-        double psi_des = g.lat_kp * lat_error;
-        if (psi_des >  MAX_PSI_DES_RAD) psi_des =  MAX_PSI_DES_RAD;
-        if (psi_des < -MAX_PSI_DES_RAD) psi_des = -MAX_PSI_DES_RAD;
-        /* D 层: 航向误差 → 转向（阻尼项，防止欠阻尼振荡） */
-        steer = g.lat_kd_heading * (psi_des - g.ego_heading);
-        if (steer >  0.25) steer =  0.25;
-        if (steer < -0.25) steer = -0.25;
-        /* 一阶低通滤波，防止跳变 */
-        steer = STEER_FILTER_NEW * steer + STEER_FILTER_PREV * g.prev_steer;
-        g.prev_steer = steer;
+        if (fabs(g.ego_y) > road_center_limit - 0.4) {
+            double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
+            steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
+            if (fabs(g.ego_y) > road_center_limit && g.current_speed < 2.5) {
+                throttle = 0.18;
+                brake = 0.0;
+            } else {
+                throttle = 0.0;
+                if (brake < 0.65) brake = 0.65;
+            }
+            g.prev_steer = steer;
+            mode = "ROAD_GUARD";
+        } else {
+            /* ── Stanley 式横向控制（收敛，不自激） ──
+             * cross-track 项: atan2(k*e, v) 随速度自然衰减 → 高速小幅打方向;
+             * heading 项: 弱阻尼 (0.5) 抑制航向偏差, 避免旧 kd=2.0 的极限环振荡。 */
+            double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
+            double heading_term = 0.5 * g.ego_heading;
+            steer = cte_term - heading_term;
+            double steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+            if (steer >  steer_limit) steer =  steer_limit;
+            if (steer < -steer_limit) steer = -steer_limit;
+            /* 一阶低通滤波，防止跳变 */
+            steer = STEER_FILTER_NEW * steer + STEER_FILTER_PREV * g.prev_steer;
+            g.prev_steer = steer;
+        }
 
         /* ── 发布控制指令 ── */
         char cmd[256];
@@ -309,7 +442,7 @@ static void* control_thread(void* arg) {
                  "throttle=%.2f brake=%.2f steer=%.4f "
                  "speed=%.1f target=%.1f error=%.1f mode=%s",
                  throttle, brake, steer,
-                 g.current_speed, boost_target, error, mode);
+                 g.current_speed, acc_target, error, mode);
         transport_publish(g.transport, "control/raw_cmd",
                           (const uint8_t*)cmd, (uint32_t)strlen(cmd) + 1);
 
@@ -346,6 +479,7 @@ static int control_init(MessageBus* bus, Transport* transport,
 
     /* 默认 PID 参数 */
     g.cfg_kp = 800.0; g.cfg_ki = 50.0; g.cfg_kd = 100.0;
+    g.cfg_cruise_speed = 12.0;
     g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
@@ -360,6 +494,8 @@ static int control_init(MessageBus* bus, Transport* transport,
             sscanf(p + 9, "%lf", &g.cfg_ki);
         if ((p = strstr(params_json, "\"pid_kd\":")))
             sscanf(p + 9, "%lf", &g.cfg_kd);
+        if ((p = strstr(params_json, "\"target_speed\":")))
+            sscanf(p + 15, "%lf", &g.cfg_cruise_speed);
         if ((p = strstr(params_json, "\"lane_width\":")))
             sscanf(p + 13, "%lf", &g.lane_width);
         if ((p = strstr(params_json, "\"lat_kp\":")))

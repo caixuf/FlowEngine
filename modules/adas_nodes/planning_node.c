@@ -39,7 +39,7 @@ static struct {
     volatile int has_fusion;
 
     /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
-    double obs_x[3], obs_y[3], obs_vx[3];
+    double obs_x[4], obs_y[4], obs_vx[4];
     volatile int has_vstate;
 
     /* 配置参数 */
@@ -88,7 +88,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         char key[16];
         int klen;
         klen = snprintf(key, sizeof(key), "\"ox%d\":", i);
@@ -131,7 +131,7 @@ static void* planning_thread(void* arg) {
         if (g.has_vstate) {
             double ox[3], oy[3], ow[3], ol[3];
             int n_obs = 0;
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
                 double dx = g.obs_x[i] - g.ego_x;
                 if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
@@ -141,16 +141,6 @@ static void* planning_thread(void* arg) {
                 ow[n_obs] = OBSTACLE_WIDTH_M;
                 ol[n_obs] = OBSTACLE_LENGTH_M;
                 n_obs++;
-
-                if (fabs(g.obs_y[i] - g.ego_y) < 2.0 && dx > 0.0 && dx < 45.0) {
-                    double safe_gap = 6.0 + g.ego_v * 2.0;
-                    double ratio = dx / safe_gap;
-                    if (ratio < 0.2) ratio = 0.2;
-                    if (ratio < 1.0) {
-                        double acc_speed = g.target_speed * ratio;
-                        if (acc_speed < command_speed) command_speed = acc_speed;
-                    }
-                }
             }
             frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
         }

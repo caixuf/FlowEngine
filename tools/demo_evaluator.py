@@ -80,6 +80,15 @@ def nearest_lane_error(y: float, lane_width: float = 3.5) -> float:
     return min(abs(y - center) for center in lane_centers)
 
 
+def angle_diff(a: float, b: float) -> float:
+    d = a - b
+    while d > math.pi:
+        d -= 2.0 * math.pi
+    while d < -math.pi:
+        d += 2.0 * math.pi
+    return d
+
+
 def sample_metrics(sample: dict) -> dict:
     metrics = sample.get("metrics", {})
     vehicle = metrics.get("vehicle", {})
@@ -91,17 +100,28 @@ def sample_metrics(sample: dict) -> dict:
     speed = float(vehicle.get("speed", ego.get("speed", 0.0)) or 0.0)
     x = float(vehicle.get("x", ego.get("x", 0.0)) or 0.0)
     y = float(ego.get("y", 0.0) or 0.0)
+    heading = float(ego.get("heading", 0.0) or 0.0)
     steer = abs(float(ego.get("steer", 0.0) or 0.0))
+    steer_signed = float(ego.get("steer", 0.0) or 0.0)
     lane_width = float(lane.get("width", 3.5) or 3.5)
     lane_count = int(lane.get("count", 2) or 2)
 
     min_forward_gap = math.inf
     min_abs_gap = math.inf
+    obs_world = []
     for obs in obstacles:
-        rel_x = float(obs.get("x", math.inf) or math.inf)
-        rel_y = abs(float(obs.get("y", math.inf) or math.inf))
+        rel_x = float(obs.get("x", math.inf))
+        rel_y_signed = float(obs.get("y", math.inf))
+        if not math.isfinite(rel_x) or not math.isfinite(rel_y_signed):
+            continue
+        rel_y = abs(rel_y_signed)
         length = float(obs.get("len", 4.6) or 4.6)
         width = float(obs.get("wid", 2.0) or 2.0)
+        obs_world.append({
+            "id": int(obs.get("id", len(obs_world)) or len(obs_world)),
+            "x": x + rel_x,
+            "y": y + rel_y_signed,
+        })
         gap_x = abs(rel_x) - (4.6 + length) * 0.5
         gap_y = rel_y - (2.0 + width) * 0.5
         min_abs_gap = min(min_abs_gap, max(gap_x, gap_y))
@@ -112,12 +132,28 @@ def sample_metrics(sample: dict) -> dict:
         "speed": speed,
         "x": x,
         "y": y,
+        "heading": heading,
         "steer": steer,
+        "steer_signed": steer_signed,
         "lane_error": nearest_lane_error(y, lane_width),
         "road_edge_margin": lane_width * lane_count * 0.5 - abs(y) - 1.0,
         "min_forward_gap": min_forward_gap,
         "min_abs_gap": min_abs_gap,
+        "obs_world": obs_world,
     }
+
+
+def sign_flips(values: list[float], deadband: float) -> int:
+    flips = 0
+    prev = 0
+    for value in values:
+        sign = 1 if value > deadband else -1 if value < -deadband else 0
+        if sign == 0:
+            continue
+        if prev and sign != prev:
+            flips += 1
+        prev = sign
+    return flips
 
 
 def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[list[dict], int]:
@@ -179,6 +215,9 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
     lane_errors = [m["lane_error"] for m in series]
     road_margins = [m["road_edge_margin"] for m in series]
     steer_values = [m["steer"] for m in series]
+    steer_signed = [m["steer_signed"] for m in series]
+    headings = [m["heading"] for m in series]
+    timestamps = [float(s.get("timestamp", 0.0) or 0.0) for s in samples]
 
     topics = topic_map(last)
     pubs, subs = node_topic_roles(last)
@@ -216,9 +255,89 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
     if max(speeds) > 25.0:
         failures.append(f"unrealistic speed spike: max speed {max(speeds):.1f} m/s")
 
+    # ── 低速停滞检测（龟速） ──
+    low_speed_thresh = 6.0  # m/s, 低于此判为龟速
+    low_speed_samples = sum(1 for s in speeds if s < low_speed_thresh)
+    low_speed_ratio = low_speed_samples / max(1, len(speeds))
+    # 最长连续龟速区间
+    longest_stagnation = 0
+    current_stagnation = 0
+    for s in speeds:
+        if s < low_speed_thresh:
+            current_stagnation += 1
+            if current_stagnation > longest_stagnation:
+                longest_stagnation = current_stagnation
+        else:
+            current_stagnation = 0
+    stagnation_duration_s = longest_stagnation * (samples[1].get("timestamp", 0) - samples[0].get("timestamp", 0)) if len(samples) >= 2 else 0.0
+
+    # ── 变道次数统计（基于 y 显著偏移） ──
+    ys = [m["y"] for m in series]
+    lane_change_count = 0
+    prev_lane = None
+    for y_val in ys:
+        # 左车道中心 y≈-1.75，右车道中心 y≈1.75，lane_width=3.5
+        lane_idx = 0 if y_val < 0 else 1  # 0=左车道 1=右车道
+        if prev_lane is not None and lane_idx != prev_lane:
+            lane_change_count += 1
+        prev_lane = lane_idx
+
+    if low_speed_ratio > 0.50 and stagnation_duration_s > 5.0:
+        failures.append(
+            f"low-speed stagnation: {low_speed_ratio*100:.0f}% samples below {low_speed_thresh} m/s, "
+            f"longest run {stagnation_duration_s:.1f}s"
+        )
+    if lane_change_count < 1:
+        failures.append(f"no lane changes detected in {len(ys)} samples")
+
     steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:
         warnings.append(f"steer saturated often: {steer_saturation_ratio * 100:.0f}% samples")
+
+    yaw_rates: list[float] = []
+    steer_rates: list[float] = []
+    npc_speed_spikes: list[float] = []
+    npc_lateral_spikes: list[float] = []
+    for i in range(1, len(series)):
+        dt = timestamps[i] - timestamps[i - 1]
+        if dt <= 1e-3 or dt > 2.0:
+            continue
+        yaw_rates.append(abs(angle_diff(headings[i], headings[i - 1])) / dt)
+        steer_rates.append(abs(steer_signed[i] - steer_signed[i - 1]) / dt)
+
+        prev_obs = {o["id"]: o for o in series[i - 1]["obs_world"]}
+        for obs in series[i]["obs_world"]:
+            prev = prev_obs.get(obs["id"])
+            if not prev:
+                continue
+            dx = obs["x"] - prev["x"]
+            dy = obs["y"] - prev["y"]
+            npc_speed_spikes.append(math.hypot(dx, dy) / dt)
+            npc_lateral_spikes.append(abs(dy) / dt)
+
+    yaw_rate_rms = math.sqrt(statistics.fmean([r * r for r in yaw_rates])) if yaw_rates else 0.0
+    max_yaw_rate = max(yaw_rates) if yaw_rates else 0.0
+    steer_rate_rms = math.sqrt(statistics.fmean([r * r for r in steer_rates])) if steer_rates else 0.0
+    max_steer_rate = max(steer_rates) if steer_rates else 0.0
+    steer_flip_rate = sign_flips(steer_signed, 0.03) / max(1e-6, (timestamps[-1] - timestamps[0]))
+    heading_flip_rate = sign_flips([angle_diff(headings[i], headings[i - 1]) for i in range(1, len(headings))], 0.003) / max(1e-6, (timestamps[-1] - timestamps[0]))
+    max_npc_speed = max(npc_speed_spikes) if npc_speed_spikes else 0.0
+    max_npc_lateral_speed = max(npc_lateral_spikes) if npc_lateral_spikes else 0.0
+
+    if yaw_rate_rms > 0.35 or max_yaw_rate > 1.2 or (heading_flip_rate > 1.2 and yaw_rate_rms > 0.1):
+        warnings.append(
+            f"ego yaw wobble: yaw_rms={yaw_rate_rms:.2f} rad/s, max={max_yaw_rate:.2f}, flips={heading_flip_rate:.2f}/s"
+        )
+    if steer_rate_rms > 0.9 or max_steer_rate > 3.0 or steer_flip_rate > 1.0:
+        warnings.append(
+            f"steer oscillation: steer_rate_rms={steer_rate_rms:.2f}/s, max={max_steer_rate:.2f}/s, flips={steer_flip_rate:.2f}/s"
+        )
+    if max_npc_lateral_speed > 12.0:
+        warnings.append(
+            f"npc motion spike: max_speed={max_npc_speed:.1f} m/s, max_lateral={max_npc_lateral_speed:.1f} m/s"
+        )
+    elif max_npc_speed > 45.0:
+        warnings.append(f"npc respawn jump: max_speed={max_npc_speed:.1f} m/s, max_lateral={max_npc_lateral_speed:.1f} m/s")
 
     drops = sum(int(t.get("drop", 0) or 0) for t in topics.values())
     if drops > 0:
@@ -237,6 +356,17 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
         "min_road_margin_m": min_road_margin,
         "min_road_margin_at_s": max(0.0, samples[min_road_margin_index].get("timestamp", 0) - samples[0].get("timestamp", 0)),
         "steer_saturation_ratio": steer_saturation_ratio,
+        "yaw_rate_rms_radps": yaw_rate_rms,
+        "max_yaw_rate_radps": max_yaw_rate,
+        "heading_flip_rate_hz": heading_flip_rate,
+        "low_speed_ratio": low_speed_ratio,
+        "stagnation_duration_s": stagnation_duration_s,
+        "lane_change_count": lane_change_count,
+        "steer_rate_rms_per_s": steer_rate_rms,
+        "max_steer_rate_per_s": max_steer_rate,
+        "steer_flip_rate_hz": steer_flip_rate,
+        "max_npc_speed_mps": max_npc_speed,
+        "max_npc_lateral_speed_mps": max_npc_lateral_speed,
         "collision_topic_pub": collision_pub,
         "topic_freq_hz": {topic: float(topics.get(topic, {}).get("freq", 0.0) or 0.0) for topic in TOPIC_MIN_FREQ},
     }
