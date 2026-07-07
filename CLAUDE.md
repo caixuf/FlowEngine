@@ -13,7 +13,7 @@ PerceptionTask → FusionTask → ControlTask → MonitorTask
                          ↓
                   Transport (IPC/TCP) → Discovery → FlowRegistry
                          ↓
-                  FlowBoard Server (HTTP/SSE) → DashBoard
+                  flowmond (IPC stats bridge + HTTP/SSE) → DashBoard
 ```
 
 ## 关键文件
@@ -24,7 +24,9 @@ PerceptionTask → FusionTask → ControlTask → MonitorTask
 | `src/core/message_bus.c` | 进程内 Pub/Sub 总线 |
 | `src/core/transport.c` | 统一传输抽象（local/IPC/TCP） |
 | `src/core/scheduler.c` | 任务调度器（classic/choreo 模式） |
-| `tools/flowboard_server.py` | 仪表盘 HTTP/SSE 服务器 |
+| `src/flowmond.c` | 监控守护进程（HTTP 仪表盘 + IPC 统计桥接） |
+| `src/core/monitor_server.c` | 内嵌 HTTP 服务器（流量盘/API/SSE） |
+| `src/core/stats_bridge.c` | 跨进程 topic 统计 IPC 桥接 |
 | `tools/flowboard.html` | 前端仪表盘（3D+2D+图表+拓扑） |
 | `tools/foxglove_bridge.py` | Foxglove Studio WebSocket 桥接 |
 | `scripts/demo.sh` | 一键启动脚本 |
@@ -43,25 +45,35 @@ bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 
 # 可视化架构
 
-## 当前唯一可用链路
+## 当前可视化链路
+
+### 主链路：flowmond (C HTTP 服务 + IPC 桥接)
 
 ```
-flow_e2e ─→ 10Hz 写 /tmp/flow_topology.json ─→ flowboard_server.py :8800 ─→ 浏览器
+pipeline 节点 (monitor_node)
+  │  stats_bridge_publish() → IPC SHM → stats_bridge_subscriber()
+  ▼
+flowmond :8800 (monitor_server.c — HTTP/SSE)
+  │  内嵌 HTTP 服务，直接读取 bus + discovery + IPC 聚合统计
+  ▼
+浏览器 (flowboard.html — Three.js 3D + Canvas 2D + D3 拓扑)
 ```
 
-> **核心原则**：所有数据通过**状态文件 JSON 桥接**，不依赖跨进程 topic 聚合。
+### 辅助链路：文件桥接（foxglove MCAP 回放）
+
+```
+monitor_node ─→ 10Hz 写 /tmp/flow_topology.json ─→ foxglove_bridge.py :8765
+```
 
 ## 关键说明
 
-| 组件 | 状态 |
-|------|------|
-| `flowboard_server.py` (HTTP/SSE) | ✅ 当前默认，demo 脚本使用 |
-| `flowboard.html` (Three.js 3D + Canvas 2D) | ✅ 由 flowboard_server 服务 |
-| `foxglove_bridge.py` (WebSocket @8765) | ✅ MCAP 回放可视化 |
-| `flowmond` (监控守护进程) | ⚠️ 创建独立 MessageBus，无法获取业务节点 topic 统计；跨进程 IPC/TCP bridge 未实现 |
+| 组件 | 端口 | 说明 |
+|------|------|------|
+| `flowmond` (C) | 8800 | 主仪表盘：HTTP/SSE + IPC 统计聚合 + 拓扑发现 |
+| `foxglove_bridge.py` | 8765 | Foxglove Studio 桥接（读取状态文件） |
 
 ## 详细文档
 
 - [可视化架构](docs/VISUALIZATION_ARCHITECTURE.md) — API 端点、数据契约、鲁棒性设计
-- [监控架构](docs/MONITORING_ARCHITECTURE.md) — flowmond 设计目标与当前局限
-- [E2E 仿真设计](docs/E2E_SIMULATION_DESIGN.md) — offline 根因修复与 3D 仿真 |
+- [监控架构](docs/MONITORING_ARCHITECTURE.md) — flowmond 设计目标与实现
+- [E2E 仿真设计](docs/E2E_SIMULATION_DESIGN.md) — offline 根因修复与 3D 仿真
