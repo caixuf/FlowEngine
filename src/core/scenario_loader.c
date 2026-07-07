@@ -122,8 +122,7 @@ ScenarioConfig* scenario_load(const char* path) {
     if (cJSON_IsObject(jcrit)) {
         cJSON* j;
         j = cJSON_GetObjectItemCaseSensitive(jcrit, "no_collision");
-        sc->criteria.no_collision = cJSON_IsTrue(j) || (!cJSON_IsFalse(j) && cJSON_IsNull(j) == 0 && j == NULL);
-        /* default: no_collision=true */
+        /* default: no_collision=true; only override when explicitly set to false */
         if (!cJSON_IsBool(j)) sc->criteria.no_collision = true;
         else sc->criteria.no_collision = cJSON_IsTrue(j);
 

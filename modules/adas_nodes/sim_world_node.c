@@ -351,25 +351,23 @@ static void* sim_thread(void* arg) {
         transport_publish(g.transport, "sim/tick",
                           (const uint8_t*)tick_buf, (uint32_t)strlen(tick_buf) + 1);
 
-        /* ── 发布 vehicle/state ── */
-        char vstate[512];
-        snprintf(vstate, sizeof(vstate),
+        /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
+        char vstate[1024];
+        int voff = snprintf(vstate, sizeof(vstate),
                  "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
                  "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
-                 "\"t_us\":%" PRIu64 ","
-                 "\"ox0\":%.2f,\"oy0\":%.2f,\"ov0\":%.3f,"
-                 "\"ox1\":%.2f,\"oy1\":%.2f,\"ov1\":%.3f,"
-                 "\"ox2\":%.2f,\"oy2\":%.2f,\"ov2\":%.3f,"
-                 "\"ox3\":%.2f,\"oy3\":%.2f,\"ov3\":%.3f}",
+                 "\"t_us\":%" PRIu64 ",\"n_obs\":%d",
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
                  g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
-                 sim_time_us,
-                 g.obstacles[0].x, g.obstacles[0].y, g.obstacles[0].vx,
-                 g.obstacles[1].x, g.obstacles[1].y, g.obstacles[1].vx,
-                 g.obstacles[2].x, g.obstacles[2].y, g.obstacles[2].vx,
-                 g.obstacles[3].x, g.obstacles[3].y, g.obstacles[3].vx);
+                 sim_time_us, g.obstacle_count);
+        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - 64; i++) {
+            voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
+                             ",\"ox%d\":%.2f,\"oy%d\":%.2f,\"ov%d\":%.3f",
+                             i, g.obstacles[i].x, i, g.obstacles[i].y, i, g.obstacles[i].vx);
+        }
+        voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff, "}");
         transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
-                          (uint32_t)strlen(vstate) + 1);
+                          (uint32_t)voff + 1);
 
         g.cycle++;
     }
@@ -430,14 +428,19 @@ static int sim_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* P0.1: 使用固定种子（保证确定性） */
-    srand(g.random_seed);
-
     /* P0.2: 优先从场景文件加载 actors；否则使用内置默认 */
     ScenarioConfig* scenario = NULL;
     if (g.scenario_file[0] != '\0') {
         scenario = scenario_load(g.scenario_file);
     }
+
+    /* 场景文件的种子优先于 params 里的种子（两者都有时以场景为准） */
+    if (scenario) {
+        g.random_seed = scenario->random_seed;
+    }
+
+    /* P0.1: 使用固定种子（保证确定性），在所有种子来源确定后只调用一次 */
+    srand(g.random_seed);
 
     /* 车辆初始状态：场景文件 > params > 内置默认 */
     double ego_x = 0.0, ego_y = -1.75, ego_heading = 0.0;
@@ -447,8 +450,6 @@ static int sim_init(MessageBus* bus, Transport* transport,
         ego_heading = scenario->ego.heading;
         if (scenario->ego.init_speed > 0)   g.init_speed   = scenario->ego.init_speed;
         if (scenario->ego.target_speed > 0) g.target_speed = scenario->ego.target_speed;
-        /* 场景自带固定种子（优先于 params） */
-        srand(scenario->random_seed);
     }
 
     g.vehicle.x           = ego_x;
