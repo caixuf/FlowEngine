@@ -18,6 +18,7 @@
 #include "message_bus.h"
 #include "discovery.h"
 #include "serializer.h"
+#include "stats_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,9 +30,16 @@
 #include <time.h>
 #include <sys/time.h>
 
-#define MONITOR_MAX_CLIENTS 8
-#define MONITOR_HTTP_BUF_SIZE 65536
+#define MONITOR_MAX_CLIENTS       8
+#define MONITOR_HTTP_BUF_SIZE     65536
+#define MONITOR_MAX_REMOTE_SRCS   8
 
+/* ── Remote source entry (stats from another process via IPC) */
+typedef struct {
+    char        source_name[64];
+    StatsPacket pkt;
+    bool        valid;
+} RemoteSource;
 typedef struct {
     MessageBus*       bus;
     DiscoveryManager* discovery;
@@ -39,20 +47,34 @@ typedef struct {
     int               listen_fd;
     volatile bool     running;
     pthread_t         server_thread;
+    /* Remote stats injected via IPC bridge */
+    RemoteSource      remote[MONITOR_MAX_REMOTE_SRCS];
+    int               remote_count;
+    pthread_mutex_t   remote_mutex;
 } MonitorServer;
 
 /* ── SSE 数据生成 ────────────────────────────────────────── */
 
-static void build_sse_json(MessageBus* bus, DiscoveryManager* dm, char* buf, size_t sz) {
+static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
+    MessageBus* bus = ms->bus;
+    DiscoveryManager* dm = ms->discovery;
+
     uint64_t pub, del, drop;
     message_bus_get_stats(bus, &pub, &del, &drop);
 
     /* Topology */
     char* topo = dm ? discovery_export_json(dm) : strdup("{}");
 
-    /* Topic stats */
+    /* Local topic stats */
     TopicStats tstats[32];
     int nt = message_bus_get_all_topic_stats(bus, tstats, 32);
+
+    /* Safe append helper: never write past buf+sz */
+#define SSE_APPEND(fmt, ...) \
+    do { \
+        if (off >= 0 && (size_t)off < sz) \
+            off += snprintf(buf + off, sz - (size_t)off, fmt, ##__VA_ARGS__); \
+    } while (0)
 
     int off = snprintf(buf, sz,
         "{\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
@@ -62,22 +84,59 @@ static void build_sse_json(MessageBus* bus, DiscoveryManager* dm, char* buf, siz
         topo);
     free(topo);
 
+    int total = 0;
     for (int i = 0; i < nt; i++) {
         uint64_t avg_lat = tstats[i].deliver_count > 0
             ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
+        SSE_APPEND(
+            "%s{\"topic\":\"%s\",\"source\":\"local\","
+            "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
             "\"deadline_violations\":%lu,"
-            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
-            i > 0 ? "," : "", tstats[i].topic,
+            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+            total > 0 ? "," : "", tstats[i].topic,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
             (unsigned long)tstats[i].deadline_violations,
-            (unsigned long)avg_lat, tstats[i].frequency_hz,
+            (unsigned long)avg_lat,
+            (unsigned long)tstats[i].p50_latency_us,
+            (unsigned long)tstats[i].p99_latency_us,
+            tstats[i].frequency_hz,
             tstats[i].subscriber_count);
+        total++;
     }
-    off += snprintf(buf + off, sz - (size_t)off, "]}");
+
+    /* Remote topic stats (from other processes via IPC bridge) */
+    pthread_mutex_lock(&ms->remote_mutex);
+    for (int r = 0; r < ms->remote_count; r++) {
+        const RemoteSource* src = &ms->remote[r];
+        if (!src->valid) continue;
+        for (uint32_t i = 0; i < src->pkt.topic_count; i++) {
+            const RemoteTopicStat* t = &src->pkt.topics[i];
+            uint64_t avg_lat = t->deliver_count > 0
+                ? t->total_latency_us / t->deliver_count : 0;
+            SSE_APPEND(
+                "%s{\"topic\":\"%s\",\"source\":\"%s\","
+                "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
+                "\"deadline_violations\":%lu,"
+                "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                total > 0 ? "," : "", t->topic, src->source_name,
+                (unsigned long)t->publish_count,
+                (unsigned long)t->deliver_count,
+                (unsigned long)t->drop_count,
+                (unsigned long)t->deadline_violations,
+                (unsigned long)avg_lat,
+                (unsigned long)t->p50_latency_us,
+                (unsigned long)t->p99_latency_us,
+                t->frequency_hz,
+                t->subscriber_count);
+            total++;
+        }
+    }
+    pthread_mutex_unlock(&ms->remote_mutex);
+
+    SSE_APPEND("]}");
+#undef SSE_APPEND
 }
 
 /* ── HTTP 响应 ──────────────────────────────────────────── */
@@ -112,7 +171,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
 
     char buf[MONITOR_HTTP_BUF_SIZE];
     for (int tick = 0; tick < 3000 && ms->running; tick++) {  /* ~5 min max */
-        build_sse_json(ms->bus, ms->discovery, buf, sizeof(buf));
+        build_sse_json(ms, buf, sizeof(buf));
         char frame[MONITOR_HTTP_BUF_SIZE + 32];
         int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
         if (write(fd, frame, (size_t)fl) <= 0) break;
@@ -147,29 +206,18 @@ static void handle_client(int fd, MonitorServer* ms) {
     /* Route: /api/topology → JSON */
     if (strstr(req, "GET /api/topology")) {
         char buf[MONITOR_HTTP_BUF_SIZE];
-        build_sse_json(ms->bus, ms->discovery, buf, sizeof(buf));
+        build_sse_json(ms, buf, sizeof(buf));
         send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
         close(fd);
         return;
     }
 
-    /* Route: /api/topics → per-topic stats only */
+    /* Route: /api/topics → per-topic stats (local + remote) */
     if (strstr(req, "GET /api/topics")) {
-        TopicStats tstats[32];
-        int nt = message_bus_get_all_topic_stats(ms->bus, tstats, 32);
         char buf[MONITOR_HTTP_BUF_SIZE];
-        int off = snprintf(buf, sizeof(buf), "{\"topics\":[");
-        for (int i = 0; i < nt; i++) {
-            off += snprintf(buf + off, sizeof(buf) - (size_t)off,
-                "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,\"freq\":%.1f,\"subs\":%u}",
-                i > 0 ? "," : "", tstats[i].topic,
-                (unsigned long)tstats[i].publish_count,
-                (unsigned long)tstats[i].deliver_count,
-                (unsigned long)tstats[i].drop_count,
-                tstats[i].frequency_hz, tstats[i].subscriber_count);
-        }
-        off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]}");
-        send_response(fd, "200 OK", "application/json", buf, off);
+        build_sse_json(ms, buf, sizeof(buf));
+        /* build_sse_json includes topics already; return full payload */
+        send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
         close(fd);
         return;
     }
@@ -273,6 +321,7 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
     ms->bus       = bus;
     ms->discovery = discovery;
     ms->port      = port > 0 ? port : 8800;
+    pthread_mutex_init(&ms->remote_mutex, NULL);
     return ms;
 }
 
@@ -292,5 +341,33 @@ void monitor_server_stop(MonitorServer* ms) {
 void monitor_server_destroy(MonitorServer* ms) {
     if (!ms) return;
     if (ms->running) monitor_server_stop(ms);
+    pthread_mutex_destroy(&ms->remote_mutex);
     free(ms);
+}
+
+void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pkt) {
+    if (!ms || !pkt) return;
+
+    pthread_mutex_lock(&ms->remote_mutex);
+
+    /* Find existing slot for this source or allocate a new one */
+    RemoteSource* slot = NULL;
+    for (int i = 0; i < ms->remote_count; i++) {
+        if (strcmp(ms->remote[i].source_name, pkt->source_name) == 0) {
+            slot = &ms->remote[i];
+            break;
+        }
+    }
+    if (!slot && ms->remote_count < MONITOR_MAX_REMOTE_SRCS) {
+        slot = &ms->remote[ms->remote_count++];
+    }
+
+    if (slot) {
+        snprintf(slot->source_name, sizeof(slot->source_name),
+                 "%s", pkt->source_name);
+        slot->pkt   = *pkt;
+        slot->valid = true;
+    }
+
+    pthread_mutex_unlock(&ms->remote_mutex);
 }

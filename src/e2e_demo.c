@@ -64,6 +64,7 @@ static inline int frenet_plan(FrenetHandle* h, double sx, double sy, double sv,
 #endif
 #include "nuscenes_loader.h"
 #include "sysmonitor.h"
+#include "stats_bridge.h"
 #include <dirent.h>
 
 /* ── LiDAR 回放数据 ─────────────────────────────────────────── */
@@ -145,6 +146,19 @@ static DiscoveryManager* g_discovery = NULL;
 static Transport*        g_transport = NULL;
 static Scheduler*        g_scheduler = NULL;
 static int               g_fusion_tid = -1;   /**< for monitor latency reporting */
+static IpcChannel*       g_stats_pub_ch = NULL;  /**< stats IPC bridge publisher */
+
+/* ── Stats publisher thread: periodically exports bus stats via IPC ──── */
+static void* stats_publisher_thread_fn(void* arg) {
+    (void)arg;
+    /* Publish stats every 5 seconds so flowmond can aggregate them */
+    while (g_running) {
+        sleep(5);
+        if (g_stats_pub_ch && g_bus)
+            stats_bridge_publish(g_stats_pub_ch, g_bus, "flow_e2e");
+    }
+    return NULL;
+}
 
 /* 多进程: fusion 进程通过 fusion/latency topic 上报延迟统计,
  * monitor 进程订阅后填入导出 JSON (monitor 进程拿不到 fusion 的本地 tracker)。 */
@@ -1391,13 +1405,15 @@ static int monitor_execute(TaskBase* base) {
                     uint64_t avg_lat = tstats[ti].deliver_count > 0
                         ? tstats[ti].total_latency_us / tstats[ti].deliver_count : 0;
                     fprintf(jf, "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
                             ti > 0 ? "," : "",
                             tstats[ti].topic,
                             (unsigned long)tstats[ti].publish_count,
                             (unsigned long)tstats[ti].deliver_count,
                             (unsigned long)tstats[ti].drop_count,
                             (unsigned long)avg_lat,
+                            (unsigned long)tstats[ti].p50_latency_us,
+                            (unsigned long)tstats[ti].p99_latency_us,
                             tstats[ti].frequency_hz,
                             tstats[ti].subscriber_count);
                 }
@@ -1837,6 +1853,21 @@ int main(int argc, char** argv) {
     /* ── 运行 ── */
     LOG_INFO("e2e", "running for %d seconds... (Ctrl+C to stop)", duration);
     LOG_INFO("e2e", "monitor: start 'flowmond --port 8800' in another terminal for live dashboard");
+
+    /* ── Stats IPC bridge: publish bus stats so flowmond can aggregate them ── */
+    bool stats_pub_thread_started = false;
+    pthread_t stats_pub_thread;
+    g_stats_pub_ch = stats_bridge_publisher_open();
+    if (g_stats_pub_ch) {
+        if (pthread_create(&stats_pub_thread, NULL, stats_publisher_thread_fn, NULL) == 0) {
+            stats_pub_thread_started = true;
+            LOG_INFO("e2e", "stats bridge: publishing to IPC channel '%s'",
+                     STATS_BRIDGE_CHANNEL);
+        }
+    } else {
+        LOG_WARN("e2e", "stats bridge: could not open IPC channel (flowmond won't see stats)");
+    }
+
     sleep((unsigned)duration);
     g_running = false;
 
@@ -1847,6 +1878,10 @@ int main(int argc, char** argv) {
     if (plt) task_stop(&plt->base);
     if (ct)  task_stop(&ct->base);
     if (mt)  task_stop(&mt->base);
+
+    /* ── 关闭 stats bridge ── */
+    if (stats_pub_thread_started) pthread_join(stats_pub_thread, NULL);
+    if (g_stats_pub_ch) { ipc_channel_close(g_stats_pub_ch); g_stats_pub_ch = NULL; }
 
     /* ── 统计摘要 ── */
     printf("\n╔══════════════════════════════════════════╗\n");

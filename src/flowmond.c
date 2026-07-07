@@ -6,9 +6,9 @@
  *
  * 功能:
  *   - UDP 发现所有业务节点
- *   - 订阅 topic 统计 (通配符 *)
- *   - HTTP Dashboard (:8800) — 实时 topic 监控表
+ *   - HTTP Dashboard (:8800) — 实时 topic 监控表（本地 + 远程进程统计）
  *   - JSON API — /api/topology /api/topics /api/stream
+ *   - IPC stats bridge — 聚合 flow_e2e 等进程的 bus 统计数据
  *   - 告警规则引擎
  *   - 独立进程，不影响业务节点性能
  *
@@ -18,18 +18,66 @@
 #include "message_bus.h"
 #include "discovery.h"
 #include "monitor_server.h"
+#include "stats_bridge.h"
 #include "logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <pthread.h>
 
 static volatile bool g_running = true;
 
 static void sig_handler(int sig) {
     (void)sig;
     g_running = false;
+}
+
+/* ── IPC stats bridge ────────────────────────────────────── */
+
+/** Called by the IPC background thread when a StatsPacket arrives */
+static void on_remote_stats(const Message* msg, void* user_data) {
+    if (!msg || msg->data_size < sizeof(StatsPacket)) return;
+    MonitorServer* ms = (MonitorServer*)user_data;
+    const StatsPacket* pkt = (const StatsPacket*)msg->data;
+    monitor_server_inject_remote_stats(ms, pkt);
+    LOG_INFO("flowmond", "stats bridge: received %u topics from '%s'",
+             pkt->topic_count, pkt->source_name);
+}
+
+typedef struct {
+    MonitorServer* ms;
+} ReconnectArgs;
+
+/**
+ * Background thread: keep trying to connect to the stats IPC channel
+ * published by business processes (e.g., flow_e2e).
+ * Retries every 2 seconds until the publisher opens the channel.
+ */
+static void* stats_bridge_reconnect_fn(void* arg) {
+    ReconnectArgs* ra = (ReconnectArgs*)arg;
+    IpcChannel* sub = NULL;
+
+    while (g_running) {
+        if (!sub) {
+            sub = stats_bridge_subscriber_open(on_remote_stats, ra->ms);
+            if (sub) {
+                ipc_channel_start(sub);
+                LOG_INFO("flowmond", "stats bridge: connected to IPC channel '%s'",
+                         STATS_BRIDGE_CHANNEL);
+            } else {
+                sleep(2);  /* publisher not up yet, retry */
+            }
+        } else {
+            /* Already connected — nothing to do; check g_running periodically */
+            sleep(1);
+        }
+    }
+
+    if (sub) ipc_channel_close(sub);
+    free(ra);
+    return NULL;
 }
 
 /* ── 告警检查 ────────────────────────────────────────────── */
@@ -106,12 +154,6 @@ int main(int argc, char** argv) {
     discovery_start(dm);
     LOG_INFO("flowmond", "discovery started — watching for nodes");
 
-    /* ── 订阅所有 topic (通配符) ── */
-    /* In production, the monitor subscribes to each node's stats topic
-     * via IPC or TCP bridge. For single-process demo, subscribe to local bus. */
-    message_bus_subscribe(bus, "*", NULL, NULL);
-    LOG_INFO("flowmond", "subscribed to all topics");
-
     /* ── 启动 HTTP 监控服务器 ── */
     MonitorServer* ms = monitor_server_create(bus, dm, port);
     monitor_server_start(ms);
@@ -119,9 +161,17 @@ int main(int argc, char** argv) {
     printf("  Endpoints:\n");
     printf("    /              Live dashboard\n");
     printf("    /api/topology  Bus + topology JSON\n");
-    printf("    /api/topics    Per-topic QoS stats\n");
+    printf("    /api/topics    Per-topic QoS stats (local + remote)\n");
     printf("    /api/stream    SSE real-time push\n");
     printf("\n");
+
+    /* ── IPC stats bridge: subscribe to stats from other processes ── */
+    ReconnectArgs* ra = (ReconnectArgs*)malloc(sizeof(ReconnectArgs));
+    ra->ms = ms;
+    pthread_t stats_reconnect_thread;
+    pthread_create(&stats_reconnect_thread, NULL, stats_bridge_reconnect_fn, ra);
+    LOG_INFO("flowmond", "stats bridge: watching for IPC channel '%s'",
+             STATS_BRIDGE_CHANNEL);
 
     /* ── 告警规则 ── */
     AlertRule rules[] = {
@@ -147,6 +197,7 @@ int main(int argc, char** argv) {
     }
 
     /* ── 清理 ── */
+    pthread_join(stats_reconnect_thread, NULL);
     monitor_server_stop(ms);
     monitor_server_destroy(ms);
     discovery_stop(dm);

@@ -75,6 +75,49 @@ typedef struct {
     bool active;
 } RemapEntry;
 
+/* ── Per-topic latency ring buffer (for p50/p99) ─────── */
+
+#define BUS_LATENCY_RING_SIZE 128
+
+typedef struct {
+    uint64_t samples[BUS_LATENCY_RING_SIZE];
+    uint32_t head;   /**< next write position */
+    uint32_t count;  /**< number of valid entries (≤ BUS_LATENCY_RING_SIZE) */
+} LatencyRing;
+
+static void lat_ring_push(LatencyRing* r, uint64_t latency_us) {
+    r->samples[r->head] = latency_us;
+    r->head = (r->head + 1) % BUS_LATENCY_RING_SIZE;
+    if (r->count < BUS_LATENCY_RING_SIZE) r->count++;
+}
+
+static int cmp_u64_bus(const void* a, const void* b) {
+    uint64_t ua = *(const uint64_t*)a;
+    uint64_t ub = *(const uint64_t*)b;
+    return (ua > ub) - (ua < ub);
+}
+
+/** Compute p50/p99 from ring buffer. Must be called with topic_mutex held. */
+static void lat_ring_percentiles(const LatencyRing* r,
+                                  uint64_t* out_p50, uint64_t* out_p99) {
+    *out_p50 = 0;
+    *out_p99 = 0;
+    if (r->count == 0) return;
+
+    uint64_t sorted[BUS_LATENCY_RING_SIZE];
+    uint32_t n = r->count;
+    uint32_t start = (r->head + BUS_LATENCY_RING_SIZE - n) % BUS_LATENCY_RING_SIZE;
+    for (uint32_t i = 0; i < n; i++)
+        sorted[i] = r->samples[(start + i) % BUS_LATENCY_RING_SIZE];
+
+    qsort(sorted, n, sizeof(uint64_t), cmp_u64_bus);
+
+    /* Use (n-1)*percentile to avoid out-of-bounds on full arrays and to give
+     * a lower-bound "nearest rank" result that works correctly for small n. */
+    *out_p50 = sorted[(uint32_t)((n - 1) * 0.50)];
+    *out_p99 = sorted[(uint32_t)((n - 1) * 0.99)];
+}
+
 /* ── MessageBus ───────────────────────────────────────── */
 
 struct MessageBus {
@@ -119,12 +162,13 @@ struct MessageBus {
     /* ── Per-topic tracking (QoS) ──────────────────────── */
     #define BUS_MAX_TOPIC_ENTRIES 128
     struct {
-        char      topic[MSG_BUS_MAX_TOPIC_LEN];
-        TopicQos  qos;
+        char       topic[MSG_BUS_MAX_TOPIC_LEN];
+        TopicQos   qos;
         TopicStats stats;
-        uint64_t  prev_publish_us;  /**< 上一次发布时间戳（用于频率估算） */
-        uint32_t  pending_count;    /**< 当前在途（已入队未分发）消息数 */
-        bool      active;
+        LatencyRing lat_ring;           /**< 最近 128 次投递延迟样本 */
+        uint64_t   prev_publish_us;     /**< 上一次发布时间戳（用于频率估算） */
+        uint32_t   pending_count;       /**< 当前在途（已入队未分发）消息数 */
+        bool       active;
     } topic_entries[BUS_MAX_TOPIC_ENTRIES];
     int        topic_count;
     pthread_mutex_t topic_mutex;
@@ -286,6 +330,9 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
                     s->total_latency_us += lat;
                     if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
                     if (lat > s->max_latency_us) s->max_latency_us = lat;
+
+                    /* Record sample for p50/p99 computation */
+                    lat_ring_push(&bus->topic_entries[i].lat_ring, lat);
 
                     /* Deadline violation: end-to-end dispatch latency exceeded deadline_ms */
                     TopicQos* q = &bus->topic_entries[i].qos;
@@ -900,6 +947,9 @@ int message_bus_get_topic_stats(MessageBus* bus, const char* topic,
             *stats = bus->topic_entries[i].stats;
             stats->qos = bus->topic_entries[i].qos;
             snprintf(stats->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+            lat_ring_percentiles(&bus->topic_entries[i].lat_ring,
+                                 &stats->p50_latency_us,
+                                 &stats->p99_latency_us);
             pthread_mutex_unlock(&bus->topic_mutex);
             return 0;
         }
@@ -926,6 +976,9 @@ int message_bus_get_all_topic_stats(MessageBus* bus, TopicStats* stats, int max)
         stats[i] = bus->topic_entries[i].stats;
         stats[i].qos = bus->topic_entries[i].qos;
         snprintf(stats[i].topic, MSG_BUS_MAX_TOPIC_LEN, "%s", bus->topic_entries[i].topic);
+        lat_ring_percentiles(&bus->topic_entries[i].lat_ring,
+                             &stats[i].p50_latency_us,
+                             &stats[i].p99_latency_us);
     }
     pthread_mutex_unlock(&bus->topic_mutex);
     return n;

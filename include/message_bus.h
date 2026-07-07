@@ -295,6 +295,8 @@ typedef struct {
     uint64_t  total_latency_us; /**< 累计延迟（用于计算平均值） */
     uint64_t  min_latency_us;   /**< 最小延迟 */
     uint64_t  max_latency_us;   /**< 最大延迟 */
+    uint64_t  p50_latency_us;   /**< 中位数延迟（最近 128 次采样） */
+    uint64_t  p99_latency_us;   /**< 99 分位延迟（最近 128 次采样） */
     uint64_t  last_publish_us;  /**< 最近发布时间 */
     uint32_t  subscriber_count; /**< 当前订阅者数 */
     double    frequency_hz;     /**< 估算发布频率 */
