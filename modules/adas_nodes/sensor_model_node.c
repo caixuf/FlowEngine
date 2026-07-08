@@ -225,7 +225,8 @@ static int sensor_model_init(MessageBus* bus, Transport* transport,
             sscanf(p + 26, "%d", &g.enable_simple_occlusion);
     }
 
-    srand((unsigned)time(NULL));
+    /* Fixed seed for reproducibility — sim_world drives deterministic time */
+    srand(42u);
 
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
 

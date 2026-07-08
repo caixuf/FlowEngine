@@ -301,17 +301,26 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
         pthread_mutex_unlock(&bus->topic_mutex);
     }
 
+    /* Snapshot matching subscribers under lock to avoid holding lock during callbacks.
+     * This prevents deadlock when a callback calls subscribe/unsubscribe on the bus. */
+    typedef struct { MessageCallback cb; void* ud; } CbSnap;
+    CbSnap snap[MSG_BUS_MAX_SUBSCRIBERS];
+    int snap_count = 0;
+
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
         SubEntry* s = &bus->subs[i];
         if (!s->active) continue;
-        if (topic_match(s->topic, msg->topic)) {
-            s->callback(msg, s->user_data);
-            atomic_fetch_add(&bus->stat_delivered, 1);
-            delivered++;
-        }
+        if (topic_match(s->topic, msg->topic))
+            snap[snap_count++] = (CbSnap){ s->callback, s->user_data };
     }
     pthread_mutex_unlock(&bus->sub_mutex);
+
+    for (int i = 0; i < snap_count; i++) {
+        snap[i].cb(msg, snap[i].ud);
+        atomic_fetch_add(&bus->stat_delivered, 1);
+        delivered++;
+    }
 
     /* Per-topic tracking: decrement in-flight count + update delivery stats */
     if (msg->type == MSG_TYPE_PUBLISH) {

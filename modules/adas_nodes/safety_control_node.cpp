@@ -50,6 +50,8 @@ struct VehicleState {
     double obs_v[4]{0.0, 0.0, 0.0, 0.0};
     double obs_vy[4]{0.0, 0.0, 0.0, 0.0};
     bool obs_valid[4]{false, false, false, false};
+    char obs_type[4][16]{};   /* "car", "pedestrian", ... */
+    int  ped_index{-1};       /* index of first pedestrian obs, -1 if none */
 };
 
 struct SafetyParams {
@@ -131,6 +133,21 @@ VehicleState parse_vehicle_state(const Message& msg) {
         scan_double(text, key, &state.obs_v[i]);
         std::snprintf(key, sizeof(key), "\"ovy%d\":", i);
         scan_double(text, key, &state.obs_vy[i]);
+        /* parse obstacle type to detect pedestrian dynamically */
+        std::snprintf(key, sizeof(key), "\"ot%d\":\"", i);
+        const char* p = std::strstr(text, key);
+        if (p) {
+            p += std::strlen(key);
+            const char* end = std::strchr(p, '"');
+            if (end) {
+                std::size_t tlen = static_cast<std::size_t>(end - p);
+                if (tlen >= sizeof(state.obs_type[i])) tlen = sizeof(state.obs_type[i]) - 1;
+                std::memcpy(state.obs_type[i], p, tlen);
+                state.obs_type[i][tlen] = '\0';
+                if (state.ped_index < 0 && std::strcmp(state.obs_type[i], "pedestrian") == 0)
+                    state.ped_index = i;
+            }
+        }
     }
     return state;
 }
@@ -157,21 +174,21 @@ double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& para
 }
 
 double pedestrian_collision_gap(const VehicleState& state) {
-    constexpr int pedestrian_index = 2;
-    if (!state.obs_valid[pedestrian_index]) return 1e9;
-    double dx = state.obs_x[pedestrian_index] - state.x;
-    double dy = std::fabs(state.obs_y[pedestrian_index] - state.y);
+    int pi = state.ped_index;
+    if (pi < 0 || !state.obs_valid[pi]) return 1e9;
+    double dx = state.obs_x[pi] - state.x;
+    double dy = std::fabs(state.obs_y[pi] - state.y);
     if (std::fabs(dx) > 70.0 || dy > 4.5) return 1e9;
     return std::fabs(dx) - 2.8;
 }
 
 double pedestrian_crossing_hold_gap(const VehicleState& state) {
-    constexpr int pedestrian_index = 2;
-    if (!state.obs_valid[pedestrian_index]) return 1e9;
+    int pi = state.ped_index;
+    if (pi < 0 || !state.obs_valid[pi]) return 1e9;
 
-    const double dx = state.obs_x[pedestrian_index] - state.x;
-    const double dy = std::fabs(state.obs_y[pedestrian_index] - state.y);
-    const double vyy = std::fabs(state.obs_vy[pedestrian_index]);
+    const double dx = state.obs_x[pi] - state.x;
+    const double dy = std::fabs(state.obs_y[pi] - state.y);
+    const double vyy = std::fabs(state.obs_vy[pi]);
 
     /* Guard zone: if pedestrian is crossing (or very close to lane center),
      * keep ego at least this distance behind the crossing line. */

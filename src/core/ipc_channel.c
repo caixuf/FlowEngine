@@ -193,10 +193,14 @@ void ipc_channel_close(IpcChannel* ch) {
         sem_close(ch->sem_mutex);
 
     if (ch->role == IPC_ROLE_PUBLISHER) {
-        shm_unlink(ch->shm_name);
-        sem_unlink(ch->sem_items_name);
-        sem_unlink(ch->sem_space_name);
-        sem_unlink(ch->sem_mutex_name);
+        /* Do NOT unlink the shared memory or semaphore names here.
+         * Subscribers may still have the region mapped; POSIX guarantees
+         * an existing mmap remains valid after shm_unlink (the name is
+         * removed but the backing object lives until all mappings close).
+         * However, unlink + sem_unlink at close races with live subscribers
+         * that are blocked in sem_timedwait on the same handles, and the
+         * next publisher open's "clean stale" step already calls shm_unlink
+         * before creating fresh resources, so there is no name leakage. */
     }
 
     free(ch);

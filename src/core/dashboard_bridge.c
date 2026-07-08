@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 /* ── Private reassembly state (per subscriber instance) ──── */
 
@@ -48,7 +49,7 @@ IpcChannel* dashboard_bridge_publisher_open(void) {
 int dashboard_bridge_publish(IpcChannel* ch, const char* json, size_t len) {
     if (!ch || !json || len == 0) return -1;
 
-    static uint32_t g_seq = 0;
+    static _Atomic uint32_t g_seq = 0;
 
     const size_t chunk_max = DASHBOARD_CHUNK_DATA_SIZE;
     uint16_t total_chunks = (uint16_t)((len + chunk_max - 1) / chunk_max);
@@ -56,7 +57,7 @@ int dashboard_bridge_publish(IpcChannel* ch, const char* json, size_t len) {
 
     uint32_t seq;
     if (total_chunks > 1) {
-        seq = ++g_seq;
+        seq = atomic_fetch_add(&g_seq, 1u) + 1u;
     } else {
         seq = 0;  /* single-chunk: seq=0 signals no reassembly needed */
     }

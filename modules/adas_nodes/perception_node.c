@@ -247,7 +247,8 @@ static int perception_init(MessageBus* bus, Transport* transport,
             sscanf(p + 26, "%d", &g.enable_simple_occlusion);
     }
 
-    srand((unsigned)time(NULL));
+    /* Fixed seed for reproducibility — sim_world drives deterministic time */
+    srand(42u);
     dbscan_init(&g.dbscan, (float)g.dbscan_eps, g.dbscan_min_pts);
     dbscan_set_ransac(&g.dbscan, 100, 0.2f, 0.3f);
 

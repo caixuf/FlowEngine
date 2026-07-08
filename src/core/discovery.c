@@ -146,8 +146,12 @@ static int deserialize_beacon(const uint8_t* buf, size_t len,
     memcpy(&node->ipv4_address, buf + off, 4); off += 4;
     memcpy(&node->unicast_port, buf + off, 2); off += 2;
 
-    /* Skip CRC verification for now */
-    (void)len;
+    /* Verify CRC32 (covers everything after the 4-byte magic) */
+    if (off + 4 > len) return ERR_INVALID_PARAM;
+    uint32_t received_crc;
+    memcpy(&received_crc, buf + off, 4);
+    uint32_t computed_crc = crc32(buf + 4, off - 4);
+    if (received_crc != computed_crc) return ERR_INVALID_PARAM;
 
     node->alive = true;
     return 0;

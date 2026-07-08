@@ -667,7 +667,7 @@ int statem_add_transition(ReflectiveStateMachine* sm,
     r->from        = from;
     r->event       = event;
     r->to          = to;
-    r->description = description;
+    r->description = description ? strdup(description) : NULL;
     r->is_auto     = false;
 
     if (sm->trace_enabled) {
@@ -688,6 +688,8 @@ int statem_remove_transition(ReflectiveStateMachine* sm,
     for (int i = 0; i < sm->dynamic_count; i++) {
         TransitionRule* r = &sm->dynamic_rules[i];
         if (r->from == from && r->event == event) {
+            free((void*)r->description);
+            r->description = NULL;
             /* Shift remaining entries */
             if (i < sm->dynamic_count - 1) {
                 memmove(&sm->dynamic_rules[i], &sm->dynamic_rules[i + 1],
@@ -718,4 +720,14 @@ void statem_set_trace(ReflectiveStateMachine* sm, bool enabled) {
                  sm->task_name ? sm->task_name : "?",
                  state_name_str(sm->current));
     }
+}
+
+void statem_cleanup(ReflectiveStateMachine* sm) {
+    if (!sm) return;
+    for (int i = 0; i < sm->dynamic_count; i++)
+        free((void*)sm->dynamic_rules[i].description);
+    free(sm->dynamic_rules);
+    sm->dynamic_rules = NULL;
+    sm->dynamic_count = 0;
+    sm->dynamic_cap   = 0;
 }

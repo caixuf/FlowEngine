@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
@@ -57,9 +58,13 @@ static struct {
     /* 障碍物数据 (从 vehicle/state 解析) */
     double obs_x[MAX_OBS], obs_y[MAX_OBS], obs_vx[MAX_OBS];
     int    obs_valid[MAX_OBS];
+    char   obs_type[MAX_OBS][16]; /* e.g. "car", "pedestrian" */
+    int    ped_index;              /* index of pedestrian obs, -1 if none */
 
     volatile int has_fusion;
     volatile int has_planning;
+    uint64_t last_fusion_us;    /* monotonic timestamp of last fusion message */
+    uint64_t last_planning_us;  /* monotonic timestamp of last planning message */
 
     /* 变道状态机 */
     int    lc_state;     /* 0=正常 1=左变道中 2=左车道巡航 3=右回正 */
@@ -106,6 +111,8 @@ static void on_fusion(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
 
     g.has_fusion = 1;
+    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
+    g.last_fusion_us = (uint64_t)_ts.tv_sec * 1000000ULL + (uint64_t)_ts.tv_nsec / 1000ULL;
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
@@ -137,6 +144,8 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
 
     g.has_planning = 1;
+    struct timespec _ts2; clock_gettime(CLOCK_MONOTONIC, &_ts2);
+    g.last_planning_us = (uint64_t)_ts2.tv_sec * 1000000ULL + (uint64_t)_ts2.tv_nsec / 1000ULL;
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置 ─────────────────────── */
@@ -144,6 +153,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
+    g.ped_index = -1;
     for (int i = 0; i < MAX_OBS; i++) {
         char key[16];
         int klen = snprintf(key, sizeof(key), "\"ox%d\":", i);
@@ -156,6 +166,20 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_y[i]);
         klen = snprintf(key, sizeof(key), "\"ov%d\":", i);
         if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vx[i]);
+        /* parse obstacle type to detect pedestrian dynamically */
+        klen = snprintf(key, sizeof(key), "\"ot%d\":\"", i);
+        if ((p = strstr(d, key))) {
+            p += klen;
+            const char* end = strchr(p, '"');
+            if (end) {
+                size_t tlen = (size_t)(end - p);
+                if (tlen >= sizeof(g.obs_type[i])) tlen = sizeof(g.obs_type[i]) - 1;
+                memcpy(g.obs_type[i], p, tlen);
+                g.obs_type[i][tlen] = '\0';
+                if (strcmp(g.obs_type[i], "pedestrian") == 0 && g.ped_index < 0)
+                    g.ped_index = i;
+            }
+        }
     }
 }
 
@@ -212,12 +236,12 @@ static int lane_front_allows_merge(double target_lane_y, double same_lane_tol, i
 }
 
 static int lane_has_pedestrian_risk(double target_lane_y, double same_lane_tol) {
-    const int pedestrian_index = 2;
-    if (pedestrian_index >= MAX_OBS || !g.obs_valid[pedestrian_index]) return 0;
-    double dx = g.obs_x[pedestrian_index] - g.ego_x;
+    int pi = g.ped_index;
+    if (pi < 0 || pi >= MAX_OBS || !g.obs_valid[pi]) return 0;
+    double dx = g.obs_x[pi] - g.ego_x;
     if (dx < -8.0 || dx > 90.0) return 0;
-    if (fabs(g.obs_y[pedestrian_index] - target_lane_y) <= same_lane_tol + 0.8) return 1;
-    return fabs(g.obs_y[pedestrian_index]) < 9.0 && fabs(target_lane_y) <= g.lane_width * 0.5 + 0.2;
+    if (fabs(g.obs_y[pi] - target_lane_y) <= same_lane_tol + 0.8) return 1;
+    return fabs(g.obs_y[pi]) < 9.0 && fabs(target_lane_y) <= g.lane_width * 0.5 + 0.2;
 }
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
@@ -236,6 +260,12 @@ static void* control_thread(void* arg) {
         if (g.should_stop) break;
 
         g.cycle++;
+
+        /* Reset stale data flags: if no message received for >500ms, clear flag */
+        struct timespec _now; clock_gettime(CLOCK_MONOTONIC, &_now);
+        uint64_t now_us = (uint64_t)_now.tv_sec * 1000000ULL + (uint64_t)_now.tv_nsec / 1000ULL;
+        if (g.has_fusion   && now_us - g.last_fusion_us   > 500000ULL) g.has_fusion   = 0;
+        if (g.has_planning && now_us - g.last_planning_us > 500000ULL) g.has_planning = 0;
 
         /* 等待初始数据 */
         if (!g.has_fusion) continue;
@@ -462,6 +492,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.discovery    = discovery;
     g.scheduler    = scheduler;
     g.should_stop  = 0;
+    g.ped_index    = -1;
 
     /* 默认 PID 参数 */
     g.cfg_kp = 800.0; g.cfg_ki = 50.0; g.cfg_kd = 100.0;
