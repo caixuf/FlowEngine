@@ -58,6 +58,10 @@ typedef struct {
     size_t            cached_json_len;
     uint64_t          cached_json_time_us;
     pthread_mutex_t   cached_mutex;
+    /* Count of in-flight per-connection handler threads (e.g. SSE streams).
+     * Used so shutdown can wait for them to drain before the struct is freed. */
+    volatile int      active_clients;
+    pthread_mutex_t   client_mutex;
 } MonitorServer;
 
 /* ── File read helper ────────────────────────────────────── */
@@ -393,6 +397,66 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
+    /* Route: /tools/<file> → static asset served from the directory that
+     * contains flowboard.html (i.e. the repo's tools/ folder). The dashboard
+     * loads three.min.js / d3.v7.min.js from here so the 3D view and topology
+     * graph work offline without relying on external CDNs. */
+    if (strstr(req, "GET /tools/") && ms->html_path[0]) {
+        /* Extract the requested path from the request line. */
+        const char* p = strstr(req, "GET /tools/") + 4;  /* points at "/tools/..." */
+        char reqpath[256];
+        int j = 0;
+        while (*p && *p != ' ' && *p != '?' && *p != '\r' && *p != '\n' &&
+               j < (int)sizeof(reqpath) - 1) {
+            reqpath[j++] = *p++;
+        }
+        reqpath[j] = '\0';
+
+        /* Reject path traversal. */
+        if (strstr(reqpath, "..")) {
+            const char* forbidden = "{\"error\":\"forbidden\"}";
+            send_response(fd, "403 Forbidden", "application/json",
+                          forbidden, (int)strlen(forbidden));
+            close(fd);
+            return;
+        }
+
+        /* Basename after the last '/'. */
+        const char* base = strrchr(reqpath, '/');
+        base = base ? base + 1 : reqpath;
+
+        /* Directory of html_path (the tools/ folder). */
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s", ms->html_path);
+        char* slash = strrchr(dir, '/');
+        if (slash) *slash = '\0'; else dir[0] = '\0';
+
+        char filepath[768];
+        snprintf(filepath, sizeof(filepath), "%s/%s", dir, base);
+
+        size_t flen = 0;
+        char* fbuf = read_file(filepath, &flen);
+        if (fbuf) {
+            /* Content type by extension. */
+            const char* ctype = "application/octet-stream";
+            const char* dot = strrchr(base, '.');
+            if (dot) {
+                if (strcmp(dot, ".js") == 0)       ctype = "application/javascript; charset=utf-8";
+                else if (strcmp(dot, ".css") == 0) ctype = "text/css; charset=utf-8";
+                else if (strcmp(dot, ".html") == 0)ctype = "text/html; charset=utf-8";
+                else if (strcmp(dot, ".json") == 0)ctype = "application/json";
+            }
+            send_response(fd, "200 OK", ctype, fbuf, (int)flen);
+            free(fbuf);
+        } else {
+            const char* notfound = "{\"error\":\"not found\"}";
+            send_response(fd, "404 Not Found", "application/json",
+                          notfound, (int)strlen(notfound));
+        }
+        close(fd);
+        return;
+    }
+
     /* 404 */
     const char* notfound = "{\"error\":\"not found\"}";
     send_response(fd, "404 Not Found", "application/json", notfound, (int)strlen(notfound));
@@ -400,6 +464,23 @@ static void handle_client(int fd, MonitorServer* ms) {
 }
 
 /* ── Server thread ───────────────────────────────────────── */
+
+/* Per-connection context passed to the client handler thread. */
+typedef struct {
+    int            fd;
+    MonitorServer* ms;
+} ClientCtx;
+
+static void* client_thread_fn(void* arg) {
+    ClientCtx* ctx = (ClientCtx*)arg;
+    MonitorServer* ms = ctx->ms;
+    handle_client(ctx->fd, ms);
+    free(ctx);
+    pthread_mutex_lock(&ms->client_mutex);
+    ms->active_clients--;
+    pthread_mutex_unlock(&ms->client_mutex);
+    return NULL;
+}
 
 static void* server_thread_fn(void* arg) {
     MonitorServer* ms = (MonitorServer*)arg;
@@ -430,7 +511,34 @@ static void* server_thread_fn(void* arg) {
 
         if (select(ms->listen_fd + 1, &fds, NULL, NULL, &tv) > 0) {
             int client = accept(ms->listen_fd, NULL, NULL);
-            if (client >= 0) handle_client(client, ms);
+            if (client < 0) continue;
+
+            /* Handle each connection in its own detached thread so that a
+             * long-lived SSE stream (/api/stream) cannot block the accept
+             * loop — otherwise a single open dashboard tab would monopolise
+             * the server and every subsequent request (page reload, new tab,
+             * /api/topology, static assets) would hang. */
+            ClientCtx* ctx = (ClientCtx*)malloc(sizeof(ClientCtx));
+            if (!ctx) { close(client); continue; }
+            ctx->fd = client;
+            ctx->ms = ms;
+
+            pthread_mutex_lock(&ms->client_mutex);
+            ms->active_clients++;
+            pthread_mutex_unlock(&ms->client_mutex);
+
+            pthread_t th;
+            if (pthread_create(&th, NULL, client_thread_fn, ctx) != 0) {
+                /* Thread creation failed — fall back to inline handling so the
+                 * request is still served (at the cost of blocking). */
+                free(ctx);
+                pthread_mutex_lock(&ms->client_mutex);
+                ms->active_clients--;
+                pthread_mutex_unlock(&ms->client_mutex);
+                handle_client(client, ms);
+            } else {
+                pthread_detach(th);
+            }
         }
     }
     close(ms->listen_fd);
@@ -451,6 +559,7 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
         snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
     pthread_mutex_init(&ms->remote_mutex, NULL);
     pthread_mutex_init(&ms->cached_mutex, NULL);
+    pthread_mutex_init(&ms->client_mutex, NULL);
     return ms;
 }
 
@@ -464,6 +573,16 @@ void monitor_server_stop(MonitorServer* ms) {
     if (!ms || !ms->running) return;
     ms->running = false;
     pthread_join(ms->server_thread, NULL);
+
+    /* Wait for in-flight per-connection handler threads (SSE streams check
+     * ms->running every ~500ms) to finish so they don't touch a freed struct. */
+    for (int i = 0; i < 200; i++) {  /* up to ~2s */
+        pthread_mutex_lock(&ms->client_mutex);
+        int n = ms->active_clients;
+        pthread_mutex_unlock(&ms->client_mutex);
+        if (n <= 0) break;
+        usleep(10000);
+    }
     printf("[monitor_server] Stopped\n");
 }
 
@@ -473,6 +592,7 @@ void monitor_server_destroy(MonitorServer* ms) {
     pthread_mutex_destroy(&ms->cached_mutex);
     if (ms->cached_json) { free(ms->cached_json); ms->cached_json = NULL; }
     pthread_mutex_destroy(&ms->remote_mutex);
+    pthread_mutex_destroy(&ms->client_mutex);
     free(ms);
 }
 
