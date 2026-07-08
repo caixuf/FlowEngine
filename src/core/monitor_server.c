@@ -413,8 +413,10 @@ static void handle_client(int fd, MonitorServer* ms) {
         }
         reqpath[j] = '\0';
 
-        /* Reject path traversal. */
-        if (strstr(reqpath, "..")) {
+        /* Reject path traversal — block ".." and backslash.
+         * Note: the basename extraction below (strrchr) already neutralises
+         * embedded '/' by only using the part after the last '/'. */
+        if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
             send_response(fd, "403 Forbidden", "application/json",
                           forbidden, (int)strlen(forbidden));
@@ -442,10 +444,13 @@ static void handle_client(int fd, MonitorServer* ms) {
             const char* ctype = "application/octet-stream";
             const char* dot = strrchr(base, '.');
             if (dot) {
-                if (strcmp(dot, ".js") == 0)       ctype = "application/javascript; charset=utf-8";
-                else if (strcmp(dot, ".css") == 0) ctype = "text/css; charset=utf-8";
-                else if (strcmp(dot, ".html") == 0)ctype = "text/html; charset=utf-8";
-                else if (strcmp(dot, ".json") == 0)ctype = "application/json";
+                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
+                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
+                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
+                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
+                else if (strcmp(dot, ".svg") == 0)  ctype = "image/svg+xml";
+                else if (strcmp(dot, ".wasm") == 0) ctype = "application/wasm";
+                else if (strcmp(dot, ".png") == 0)  ctype = "image/png";
             }
             send_response(fd, "200 OK", ctype, fbuf, (int)flen);
             free(fbuf);
