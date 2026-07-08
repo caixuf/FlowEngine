@@ -403,7 +403,8 @@ static void handle_client(int fd, MonitorServer* ms) {
      * graph work offline without relying on external CDNs. */
     if (strstr(req, "GET /tools/") && ms->html_path[0]) {
         /* Extract the requested path from the request line. */
-        const char* p = strstr(req, "GET /tools/") + 4;  /* points at "/tools/..." */
+        const char* tools_hit = strstr(req, "GET /tools/");
+        const char* p = tools_hit + 4;  /* points at "/tools/..." */
         char reqpath[256];
         int j = 0;
         while (*p && *p != ' ' && *p != '?' && *p != '\r' && *p != '\n' &&
@@ -530,7 +531,13 @@ static void* server_thread_fn(void* arg) {
             pthread_t th;
             if (pthread_create(&th, NULL, client_thread_fn, ctx) != 0) {
                 /* Thread creation failed — fall back to inline handling so the
-                 * request is still served (at the cost of blocking). */
+                 * request is still served. Note: this reverts to the old
+                 * blocking behaviour for this connection, so an SSE stream here
+                 * could still stall the accept loop. Log it so operators can
+                 * spot resource exhaustion. */
+                fprintf(stderr,
+                        "[monitor_server] WARN: pthread_create failed, handling "
+                        "connection inline (may block)\n");
                 free(ctx);
                 pthread_mutex_lock(&ms->client_mutex);
                 ms->active_clients--;
@@ -576,13 +583,15 @@ void monitor_server_stop(MonitorServer* ms) {
 
     /* Wait for in-flight per-connection handler threads (SSE streams check
      * ms->running every ~500ms) to finish so they don't touch a freed struct. */
-    for (int i = 0; i < 200; i++) {  /* up to ~2s */
+    #define MONITOR_SHUTDOWN_WAIT_ITERS 200  /* 200 * 10ms = ~2s max */
+    for (int i = 0; i < MONITOR_SHUTDOWN_WAIT_ITERS; i++) {
         pthread_mutex_lock(&ms->client_mutex);
         int n = ms->active_clients;
         pthread_mutex_unlock(&ms->client_mutex);
         if (n <= 0) break;
         usleep(10000);
     }
+    #undef MONITOR_SHUTDOWN_WAIT_ITERS
     printf("[monitor_server] Stopped\n");
 }
 
