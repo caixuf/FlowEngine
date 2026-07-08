@@ -45,8 +45,13 @@ static void on_remote_stats(const Message* msg, void* user_data) {
     MonitorServer* ms = (MonitorServer*)user_data;
     const StatsPacket* pkt = (const StatsPacket*)msg->data;
     monitor_server_inject_remote_stats(ms, pkt);
-    LOG_INFO("flowmond", "stats bridge: received %u topics from '%s'",
-             pkt->topic_count, pkt->source_name);
+    /* Stats arrive at ~10Hz — only log count changes to avoid log spam. */
+    static uint32_t last_count = 0;
+    if (pkt->topic_count != last_count) {
+        LOG_INFO("flowmond", "stats bridge: received %u topics from '%s'",
+                 pkt->topic_count, pkt->source_name);
+        last_count = pkt->topic_count;
+    }
 }
 
 typedef struct {
@@ -56,7 +61,10 @@ typedef struct {
 /**
  * Background thread: keep trying to connect to the stats IPC channel
  * published by business processes (e.g., flow_e2e).
- * Retries every 2 seconds until the publisher opens the channel.
+ *
+ * Same reconnect-on-idle logic as the dashboard bridge: when the publisher
+ * restarts it creates new shm/sem, so the subscriber must detect the silence
+ * and reconnect.
  */
 static void* stats_bridge_reconnect_fn(void* arg) {
     ReconnectArgs* ra = (ReconnectArgs*)arg;
@@ -73,8 +81,14 @@ static void* stats_bridge_reconnect_fn(void* arg) {
                 sleep(2);  /* publisher not up yet, retry */
             }
         } else {
-            /* Already connected — nothing to do; check g_running periodically */
             sleep(1);
+            double age = monitor_server_stats_age_sec(ra->ms);
+            if (age > (double)IPC_RECONNECT_STALE_SEC) {
+                ipc_channel_stop(sub);
+                ipc_channel_close(sub);
+                sub = NULL;
+                sleep(1);  /* let publisher unlink old shm before retry */
+            }
         }
     }
 
@@ -94,6 +108,11 @@ static void on_dashboard_json(const char* json, size_t len, void* user_data) {
 /**
  * Background thread: keep trying to connect to the dashboard IPC channel
  * published by monitor_node.
+ *
+ * When the pipeline is killed and restarted, the IPC publisher creates NEW
+ * shared memory and semaphores.  The subscriber must detect this (by
+ * observing that no data has arrived for IPC_RECONNECT_STALE_SEC seconds)
+ * and reconnect to the new channel.
  */
 static void* dashboard_bridge_reconnect_fn(void* arg) {
     MonitorServer* ms = (MonitorServer*)arg;
@@ -111,6 +130,15 @@ static void* dashboard_bridge_reconnect_fn(void* arg) {
             }
         } else {
             sleep(1);
+            double age = monitor_server_dashboard_age_sec(ms);
+            if (age > (double)IPC_RECONNECT_STALE_SEC) {
+                ipc_channel_stop(sub);
+                ipc_channel_close(sub);
+                sub = NULL;
+                /* Brief sleep so the publisher has time to unlink old shm
+                 * before we retry — avoids reconnecting to a dead channel. */
+                sleep(1);
+            }
         }
     }
 

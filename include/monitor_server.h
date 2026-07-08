@@ -5,6 +5,10 @@
 #include "discovery.h"
 #include "stats_bridge.h"
 
+/** Seconds without IPC data before the reconnect thread tears down and
+ *  re-opens the channel (pipeline restart creates new shm/sem). */
+#define IPC_RECONNECT_STALE_SEC 5
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,6 +42,19 @@ void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pk
  */
 void monitor_server_inject_dashboard_json(MonitorServer* ms,
                                           const char* json, size_t len);
+
+/**
+ * 返回自上次 dashboard JSON 注入以来的秒数。
+ * 用于 IPC 重连线程判断 publisher 是否已重启。
+ * @return 秒数，若从未注入则返回一个大值。
+ */
+double monitor_server_dashboard_age_sec(MonitorServer* ms);
+
+/**
+ * 返回自上次远程统计注入以来的秒数。
+ * @return 秒数，若从未注入则返回一个大值。
+ */
+double monitor_server_stats_age_sec(MonitorServer* ms);
 
 #ifdef __cplusplus
 }

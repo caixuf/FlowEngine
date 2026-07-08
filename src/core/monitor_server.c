@@ -62,6 +62,10 @@ typedef struct {
      * Used so shutdown can wait for them to drain before the struct is freed. */
     volatile int      active_clients;
     pthread_mutex_t   client_mutex;
+    /* Timestamps for IPC data freshness (used by reconnect logic in flowmond) */
+    uint64_t          last_dashboard_data_us;
+    uint64_t          last_stats_data_us;
+    pthread_mutex_t   freshness_mutex;
 } MonitorServer;
 
 /* ── File read helper ────────────────────────────────────── */
@@ -85,6 +89,15 @@ static char* read_file(const char* path, size_t* out_len) {
 /* ── SSE 数据生成 (flowboard.html 兼容格式) ────────────────── */
 
 /**
+ * Return current monotonic time in microseconds.
+ */
+static uint64_t monotonic_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
+}
+
+/**
  * Include <time.h> for clock_gettime if not already included.
  * It's already included above.
  */
@@ -100,21 +113,24 @@ static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) 
     pthread_mutex_lock(&ms->cached_mutex);
     int ret = 0;
     if (ms->cached_json && ms->cached_json_len > 1) {
-        uint64_t now_us;
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        now_us = (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
-
+        uint64_t now_us = monotonic_us();
         uint64_t age_us = (now_us > ms->cached_json_time_us)
                           ? now_us - ms->cached_json_time_us : 0;
         double age_sec = (double)age_us / 1000000.0;
         bool stale = (age_sec > (double)DASHBOARD_CACHE_STALE_SEC);
 
+        /* When data is seriously stale (pipeline likely stopped/restarted),
+         * don't return cached data at all — fall through to local bus. */
+        if (stale) {
+            pthread_mutex_unlock(&ms->cached_mutex);
+            return 0;
+        }
+
         /* Inject source/stale/age_sec right after the opening '{' */
-        const char* src = stale ? "stale" : "live";
+        const char* src = "live";
         int off = snprintf(buf, sz,
-            "{\"source\":\"%s\",\"stale\":%s,\"age_sec\":%.1f,",
-            src, stale ? "true" : "false", age_sec);
+            "{\"source\":\"%s\",\"stale\":false,\"age_sec\":%.1f,",
+            src, age_sec);
 
         size_t remain = sz - (size_t)off;
         if (off > 0 && remain > 1) {
@@ -132,8 +148,24 @@ static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) 
     return ret;
 }
 
+/**
+ * Write a JSON-safe copy of src to dst (max dst_sz bytes).
+ * Non-printable / control characters are replaced with '?'.
+ */
+static int json_safe_str(char* dst, size_t dst_sz, const char* src) {
+    if (!dst || dst_sz == 0) return 0;
+    size_t j = 0;
+    for (const char* p = src; p && *p && j + 1 < dst_sz; p++) {
+        unsigned char c = (unsigned char)*p;
+        dst[j++] = (c >= 0x20 && c != '"' && c != '\\') ? (char)c : '?';
+    }
+    dst[j] = '\0';
+    return (int)j;
+}
+
 static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
-    /* If we have a cached full dashboard JSON from monitor_node, use it */
+    /* Only serve cached dashboard JSON when it's fresh.
+     * Stale cache means the pipeline stopped → fall through to local bus data. */
     int cached_len = build_cached_dashboard_json(ms, buf, sz);
     if (cached_len > 0) return;
 
@@ -164,6 +196,7 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             off += snprintf(buf + off, sz - (size_t)off, fmt, ##__VA_ARGS__); \
     } while (0)
 
+    char safe[128], safe2[128];
     int off = snprintf(buf, sz,
         "{\"self\":\"flowmond\",");
 
@@ -173,14 +206,16 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
         SSE_APPEND("\"nodes\":[");
         for (uint32_t ni = 0; ni < g->node_count; ni++) {
             const NodeInfo* n = &g->nodes[ni];
+            json_safe_str(safe, sizeof(safe), n->name);
             SSE_APPEND(
                 "%s{\"name\":\"%s\",\"pid\":%u,\"alive\":%s,\"topics\":[",
-                ni > 0 ? "," : "", n->name, n->pid,
+                ni > 0 ? "," : "", safe, n->pid,
                 n->alive ? "true" : "false");
             for (uint32_t tj = 0; tj < n->topic_count; tj++) {
+                json_safe_str(safe, sizeof(safe), n->topics[tj].topic);
                 SSE_APPEND(
                     "%s{\"topic\":\"%s\",\"freq\":%.1f}",
-                    tj > 0 ? "," : "", n->topics[tj].topic,
+                    tj > 0 ? "," : "", safe,
                     n->topics[tj].frequency_hz);
             }
             SSE_APPEND("]}");
@@ -194,11 +229,13 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             const NodeInfo* n = &g->nodes[ni];
             for (uint32_t tj = 0; tj < n->topic_count; tj++) {
                 const char* role = (n->topics[tj].capabilities & 0x01) ? "pub" : "sub";
+                json_safe_str(safe, sizeof(safe), n->name);
+                json_safe_str(safe2, sizeof(safe2), n->topics[tj].topic);
                 SSE_APPEND(
                     "%s{\"node\":\"%s\",\"topic\":\"%s\","
                     "\"role\":\"%s\",\"type_id\":\"0x00000000\",\"freq\":%.1f}",
                     ep_count > 0 ? "," : "",
-                    n->name, n->topics[tj].topic, role,
+                    safe, safe2, role,
                     n->topics[tj].frequency_hz);
                 ep_count++;
             }
@@ -229,11 +266,12 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     for (int i = 0; i < nt; i++) {
         uint64_t lat = tstats[i].deliver_count > 0
             ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
+        json_safe_str(safe, sizeof(safe), tstats[i].topic);
         SSE_APPEND(
             "%s{\"topic\":\"%s\",\"source\":\"local\","
             "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
             "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
-            total > 0 ? "," : "", tstats[i].topic,
+            total > 0 ? "," : "", safe,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
@@ -252,11 +290,13 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             const RemoteTopicStat* t = &src->pkt.topics[i];
             uint64_t lat = t->deliver_count > 0
                 ? t->total_latency_us / t->deliver_count : 0;
+            json_safe_str(safe, sizeof(safe), t->topic);
+            json_safe_str(safe2, sizeof(safe2), src->source_name);
             SSE_APPEND(
                 "%s{\"topic\":\"%s\",\"source\":\"%s\","
                 "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
                 "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
-                total > 0 ? "," : "", t->topic, src->source_name,
+                total > 0 ? "," : "", safe, safe2,
                 (unsigned long)t->publish_count,
                 (unsigned long)t->deliver_count,
                 (unsigned long)t->drop_count,
@@ -572,6 +612,7 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
     pthread_mutex_init(&ms->remote_mutex, NULL);
     pthread_mutex_init(&ms->cached_mutex, NULL);
     pthread_mutex_init(&ms->client_mutex, NULL);
+    pthread_mutex_init(&ms->freshness_mutex, NULL);
     return ms;
 }
 
@@ -607,6 +648,7 @@ void monitor_server_destroy(MonitorServer* ms) {
     if (ms->cached_json) { free(ms->cached_json); ms->cached_json = NULL; }
     pthread_mutex_destroy(&ms->remote_mutex);
     pthread_mutex_destroy(&ms->client_mutex);
+    pthread_mutex_destroy(&ms->freshness_mutex);
     free(ms);
 }
 
@@ -635,6 +677,11 @@ void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pk
     }
 
     pthread_mutex_unlock(&ms->remote_mutex);
+
+    /* Update freshness timestamp for IPC reconnect detection */
+    pthread_mutex_lock(&ms->freshness_mutex);
+    ms->last_stats_data_us = monotonic_us();
+    pthread_mutex_unlock(&ms->freshness_mutex);
 }
 
 void monitor_server_inject_dashboard_json(MonitorServer* ms,
@@ -652,12 +699,33 @@ void monitor_server_inject_dashboard_json(MonitorServer* ms,
         memcpy(ms->cached_json, json, len);
         ms->cached_json[len] = '\0';
         ms->cached_json_len = len;
-
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        ms->cached_json_time_us = (uint64_t)ts.tv_sec * 1000000
-                                  + (uint64_t)ts.tv_nsec / 1000;
+        ms->cached_json_time_us = monotonic_us();
     }
 
     pthread_mutex_unlock(&ms->cached_mutex);
+
+    /* Update freshness timestamp for IPC reconnect detection */
+    pthread_mutex_lock(&ms->freshness_mutex);
+    ms->last_dashboard_data_us = monotonic_us();
+    pthread_mutex_unlock(&ms->freshness_mutex);
+}
+
+double monitor_server_dashboard_age_sec(MonitorServer* ms) {
+    if (!ms) return 1e9;
+    pthread_mutex_lock(&ms->freshness_mutex);
+    uint64_t last = ms->last_dashboard_data_us;
+    pthread_mutex_unlock(&ms->freshness_mutex);
+    if (last == 0) return 1e9;  /* never received data */
+    uint64_t now = monotonic_us();
+    return (double)(now - last) / 1000000.0;
+}
+
+double monitor_server_stats_age_sec(MonitorServer* ms) {
+    if (!ms) return 1e9;
+    pthread_mutex_lock(&ms->freshness_mutex);
+    uint64_t last = ms->last_stats_data_us;
+    pthread_mutex_unlock(&ms->freshness_mutex);
+    if (last == 0) return 1e9;  /* never received data */
+    uint64_t now = monotonic_us();
+    return (double)(now - last) / 1000000.0;
 }
