@@ -31,12 +31,19 @@ def load_schema() -> Optional[Dict[str, Any]]:
     return _SCHEMA_CACHE or None
 
 
-def validate_payload(raw: Any) -> Tuple[bool, str]:
-    """Lightweight contract validation.
+def validate_payload(raw: Any, strict: bool = False) -> Tuple[bool, str]:
+    """Contract validation.
 
-    Returns (ok, reason). Uses `jsonschema` when installed (dev/CI); otherwise
-    falls back to a minimal structural check so production stays zero-dependency.
-    Validation is advisory: callers should degrade gracefully, never crash.
+    Two modes:
+      * default (strict=False): cheap STRUCTURAL check only — top-level is an
+        object and known container fields have the right type. Used on the hot
+        path (watcher/normalize) so slightly-off-but-usable data still renders
+        instead of blanking the dashboard.
+      * strict=True: additionally run full JSON-Schema validation when the
+        `jsonschema` package is available (dev/CI). Used by the contract tests
+        to keep all producers aligned with the canonical schema.
+
+    Returns (ok, reason). Never raises.
     """
     if not isinstance(raw, dict):
         return False, f"top-level payload must be an object, got {type(raw).__name__}"
@@ -48,15 +55,16 @@ def validate_payload(raw: Any) -> Tuple[bool, str]:
         if key in raw and not isinstance(raw[key], typ):
             return False, f"field '{key}' must be {typ.__name__}, got {type(raw[key]).__name__}"
 
-    schema = load_schema()
-    if schema:
-        try:
-            import jsonschema  # type: ignore
-            jsonschema.validate(instance=raw, schema=schema)
-        except ImportError:
-            pass  # jsonschema not installed → structural check above is enough
-        except Exception as e:  # jsonschema.ValidationError
-            return False, f"schema validation failed: {getattr(e, 'message', str(e))}"
+    if strict:
+        schema = load_schema()
+        if schema:
+            try:
+                import jsonschema  # type: ignore
+                jsonschema.validate(instance=raw, schema=schema)
+            except ImportError:
+                pass  # jsonschema not installed → structural check above is enough
+            except Exception as e:  # jsonschema.ValidationError
+                return False, f"schema validation failed: {getattr(e, 'message', str(e))}"
     return True, "ok"
 
 

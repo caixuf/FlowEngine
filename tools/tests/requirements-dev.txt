@@ -1,0 +1,4 @@
+# Dev/CI-only dependencies for the FlowBoard visualization test suite.
+# Production (running the dashboard server) stays zero-dependency (stdlib only).
+pytest>=7.0
+jsonschema>=4.0

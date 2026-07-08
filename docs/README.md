@@ -20,6 +20,10 @@
 - [项目完善度评估](PROJECT_REVIEW.md) - 当前完成度、模块成熟度、短板与下一步路线
 - [项目进化路线图](EVOLUTION_ROADMAP.md) - 从中间件原型进化到可部署框架的阶段规划
 
+## 可视化 (FlowBoard)
+
+- [FlowBoard 数据契约](FLOWBOARD_CONTRACT.md) - 可视化链路数据格式的唯一事实来源(schema + live/stale/demo 语义 + 原子写约定)。测试见 `tools/tests/`。
+
 ## 学习路径
 
 ### 初学者路径（1年经验左右）
