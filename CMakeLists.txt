@@ -579,6 +579,15 @@ target_include_directories(test_modules PRIVATE ${GEN_DIR})
 add_test(NAME unit_tests COMMAND test_modules)
 set_tests_properties(unit_tests PROPERTIES TIMEOUT 10)
 
+# ── 新增模块单元测试（Task Manager / IPC / Discovery / Bag / FlowRegistry）──
+add_executable(test_new_modules tests/test_new_modules.c)
+target_link_libraries(test_new_modules flowengine_core)
+add_dependencies(test_new_modules msg_codegen)
+target_include_directories(test_new_modules PRIVATE ${GEN_DIR})
+
+add_test(NAME new_module_tests COMMAND test_new_modules)
+set_tests_properties(new_module_tests PROPERTIES TIMEOUT 10)
+
 # ── Smoke test: end-to-end pipeline validates key metrics ──
 add_test(NAME e2e_smoke
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke

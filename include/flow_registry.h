@@ -87,6 +87,22 @@ int flow_registry_register_topic(const char* name, uint32_t type_id,
 /** 注册一个类型 (自动调用 serializer_register_type) */
 int flow_registry_register_type(const TypeRegistryEntry* entry);
 
+/* ── MsgSchema Integration ─────────────────────────────── */
+
+/** Schema entry for topic type checking */
+typedef struct {
+    char    topic[64];       /**< Topic name */
+    size_t  struct_size;     /**< Expected struct size */
+    char    type_name[64];   /**< C type name */
+} FlowSchemaEntry;
+
+/** Register a schema (delegates to msg_schema) */
+int flow_registry_register_schema(const char* topic, size_t struct_size,
+                                  const char* type_name);
+const FlowSchemaEntry* flow_registry_get_schema(const char* topic);
+int flow_registry_list_schemas(FlowSchemaEntry* buf, int max);
+int flow_registry_schema_count(void);
+
 /** 注册一个插件 */
 int flow_registry_register_plugin(const char* name, const char* path,
                                   const char** tasks,

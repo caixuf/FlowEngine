@@ -1,5 +1,8 @@
 /**
  * flow_registry.c — 统一注册中心实现
+ *
+ * 把 msg_schema / serializer / task_manager / process_manager 的
+ * 元信息统一管理，提供 JSON 导出供 flowctl / dashboard 使用。
  */
 
 #include "flow_registry.h"
@@ -19,6 +22,9 @@ static int          g_topic_count = 0;
 
 static PluginMeta   g_plugins[FLOW_REGISTRY_MAX_PLUGINS];
 static int          g_plugin_count = 0;
+
+static FlowSchemaEntry g_schemas[FLOW_REGISTRY_MAX_TOPICS];
+static int          g_schema_count = 0;
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -157,6 +163,61 @@ int flow_registry_type_count(void) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/* Schema Registry (bridges msg_schema)                       */
+/* ══════════════════════════════════════════════════════════ */
+
+int flow_registry_register_schema(const char* topic, size_t struct_size,
+                                  const char* type_name) {
+    if (!topic || !type_name || struct_size == 0) return ERR_INVALID_PARAM;
+
+    pthread_mutex_lock(&g_mutex);
+    for (int i = 0; i < g_schema_count; i++) {
+        if (strcmp(g_schemas[i].topic, topic) == 0) {
+            g_schemas[i].struct_size = struct_size;
+            snprintf(g_schemas[i].type_name, sizeof(g_schemas[i].type_name), "%s", type_name);
+            pthread_mutex_unlock(&g_mutex);
+            return 0;
+        }
+    }
+    if (g_schema_count >= FLOW_REGISTRY_MAX_TOPICS) {
+        pthread_mutex_unlock(&g_mutex);
+        return ERR_OVERFLOW;
+    }
+    FlowSchemaEntry* s = &g_schemas[g_schema_count++];
+    memset(s, 0, sizeof(*s));
+    snprintf(s->topic, sizeof(s->topic), "%s", topic);
+    s->struct_size = struct_size;
+    snprintf(s->type_name, sizeof(s->type_name), "%s", type_name);
+    pthread_mutex_unlock(&g_mutex);
+    return 0;
+}
+
+const FlowSchemaEntry* flow_registry_get_schema(const char* topic) {
+    if (!topic) return NULL;
+    pthread_mutex_lock(&g_mutex);
+    for (int i = 0; i < g_schema_count; i++)
+        if (strcmp(g_schemas[i].topic, topic) == 0) {
+            pthread_mutex_unlock(&g_mutex);
+            return &g_schemas[i];
+        }
+    pthread_mutex_unlock(&g_mutex);
+    return NULL;
+}
+
+int flow_registry_list_schemas(FlowSchemaEntry* buf, int max) {
+    if (!buf || max <= 0) return 0;
+    pthread_mutex_lock(&g_mutex);
+    int n = (g_schema_count < max) ? g_schema_count : max;
+    memcpy(buf, g_schemas, (size_t)n * sizeof(FlowSchemaEntry));
+    pthread_mutex_unlock(&g_mutex);
+    return n;
+}
+
+int flow_registry_schema_count(void) {
+    return g_schema_count;
+}
+
+/* ══════════════════════════════════════════════════════════ */
 /* Plugin Registry                                            */
 /* ══════════════════════════════════════════════════════════ */
 
@@ -217,7 +278,7 @@ int flow_registry_list_plugins(PluginMeta* buf, int max) {
 /* ══════════════════════════════════════════════════════════ */
 
 int flow_registry_total_count(void) {
-    return g_task_count + g_topic_count + g_plugin_count + serializer_type_count();
+    return g_task_count + g_topic_count + g_plugin_count + g_schema_count + serializer_type_count();
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -265,9 +326,18 @@ char* flow_registry_export_json(void) {
             g_plugins[i].task_count, g_plugins[i].type_count);
     }
 
+    off += snprintf(buf + off, sz - (size_t)off, "],\"schemas\":[");
+    for (int i = 0; i < g_schema_count; i++) {
+        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+        off += snprintf(buf + off, sz - (size_t)off,
+            "%s{\"topic\":\"%s\",\"type\":\"%s\",\"size\":%zu}",
+            i > 0 ? "," : "", g_schemas[i].topic, g_schemas[i].type_name,
+            g_schemas[i].struct_size);
+    }
+
     off += snprintf(buf + off, sz - (size_t)off,
-        "],\"summary\":{\"tasks\":%d,\"topics\":%d,\"plugins\":%d,\"types\":%d}}",
-        g_task_count, g_topic_count, g_plugin_count, serializer_type_count());
+        "],\"summary\":{\"tasks\":%d,\"topics\":%d,\"plugins\":%d,\"schemas\":%d,\"types\":%d}}",
+        g_task_count, g_topic_count, g_plugin_count, g_schema_count, serializer_type_count());
 
     pthread_mutex_unlock(&g_mutex);
     return buf;

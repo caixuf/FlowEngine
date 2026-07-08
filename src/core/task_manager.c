@@ -5,6 +5,12 @@
 #include <stdio.h>
 #include <unistd.h>
 
+/* Forward declaration to avoid including flow_registry.h */
+int flow_registry_register_task(const char* name, const char* description,
+                                const char* plugin_path,
+                                const char** inputs, const char** outputs,
+                                const char** params);
+
 /* ── Internal helpers ─────────────────────────────────── */
 
 static TaskNode* find_node(TaskManager* mgr, const char* name) {
@@ -121,6 +127,10 @@ int task_manager_register(TaskManager* mgr, TaskBase* task, const char* name) {
     TAILQ_INSERT_TAIL(&mgr->task_list, node, entries);
     mgr->task_count++;
     pthread_mutex_unlock(&mgr->mutex);
+
+    /* Bridge: sync to FlowRegistry for unified query */
+    flow_registry_register_task(name, "Registered task", NULL,
+                                NULL, NULL, NULL);
     return 0;
 }
 

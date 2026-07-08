@@ -20,7 +20,7 @@
  *   // 订阅回调中校验
  *   MSG_CHECK_SIZE(msg->topic, msg->data_size);
  *
- * 注意：注册表存储在 starttool_core 库中（唯一实例），所有插件
+ * 注意：注册表存储在 FlowEngine 核心库中（唯一实例），所有插件
  *       共享同一注册表，跨 .so 注册互通。
  */
 
