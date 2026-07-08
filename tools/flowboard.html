@@ -114,6 +114,7 @@ input:focus,select:focus{border-color:#58a6ff}
 </style>
 </head>
 <body>
+<div id="demo-watermark" style="display:none;position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:9999;padding:4px 14px;border-radius:0 0 8px 8px;background:linear-gradient(135deg,#33220d,#4d351a);color:#f0c674;border:1px solid#5c401a;border-top:none;font-size:11px;font-weight:600;letter-spacing:1px;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)">⚠ DEMO 模拟数据 — 非实时链路</div>
 <div id="sidebar">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
     <div class="icon" style="width:32px;height:32px;border-radius:8px;background:linear-gradient(135deg,#1f6feb,#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:16px">⚡</div>
@@ -121,6 +122,7 @@ input:focus,select:focus{border-color:#58a6ff}
     <div style="font-size:9px;color:#484f58">Live Monitor</div></div>
   </div>
   <span id="conn-dot" class="pill pill-dead" style="align-self:flex-start">● loading...</span>
+  <div id="diag-bar" style="display:none;margin-top:4px;padding:4px 6px;border-radius:6px;background:#3a1414;border:1px solid#5c1a1a;color:#f0a0a0;font-size:10px;line-height:1.4;max-height:90px;overflow:auto;cursor:pointer" title="点击清除" onclick="clearDiag()"></div>
 
   <div style="margin-top:4px">
     <input id="url" value="http://localhost:8800" placeholder="Monitor server URL">
@@ -269,6 +271,7 @@ var serverUrl = 'http://localhost:8800';
 var eventSource = null;
 var selectedNode = null;
 var reconnectTimer = null;
+var sseRenewTimer = null;
 var COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 
 // Load saved state
@@ -277,6 +280,37 @@ try {
   if (saved.url) serverUrl = saved.url;
   if (saved.topic) chartTopic = saved.topic;
 } catch(e) {}
+
+// ════════════════════════════════════════════════════════════
+// Error isolation — a fault in one render module must never blank
+// the whole page. Every sub-renderer runs inside safeCall(); errors
+// are surfaced in a diagnostic bar instead of being silently swallowed
+// by requestAnimationFrame.
+// ════════════════════════════════════════════════════════════
+var _diag = {msgs:[], seen:{}};
+function reportDiag(where, err){
+  var msg = (err && err.message) ? err.message : String(err);
+  var key = where+':'+msg;
+  // De-dupe: a broken field repeats every frame; count instead of spamming.
+  if(_diag.seen[key]){_diag.seen[key].n++;}
+  else{_diag.seen[key]={n:1,where:where,msg:msg};_diag.msgs.push(key);}
+  if(_diag.msgs.length>8)_diag.msgs.shift();
+  try{
+    var bar=document.getElementById('diag-bar');
+    if(!bar)return;
+    bar.style.display='';
+    bar.innerHTML=_diag.msgs.map(function(k){var e=_diag.seen[k];return '⚠ <b>'+e.where+'</b>: '+e.msg+(e.n>1?' ×'+e.n:'');}).join('<br>');
+  }catch(_){}
+}
+function clearDiag(){_diag={msgs:[],seen:{}};var b=document.getElementById('diag-bar');if(b){b.style.display='none';b.innerHTML='';}}
+// Run fn; on throw, isolate + report. Returns true on success.
+function safeCall(where, fn){
+  try{fn();return true;}
+  catch(err){reportDiag(where, err);if(window.console&&console.warn)console.warn('['+where+']',err);return false;}
+}
+// Global safety net for anything outside safeCall (async, event handlers, 3D loop).
+window.addEventListener('error', function(ev){reportDiag('window', ev.error||ev.message);});
+window.addEventListener('unhandledrejection', function(ev){reportDiag('promise', ev.reason);});
 
 // ════════════════════════════════════════════════════════════
 // Demo data
@@ -320,6 +354,7 @@ function doSimulate(){
   };
   updateAll();
   setConnStatus('live','● demo');
+  var wm=document.getElementById('demo-watermark');if(wm)wm.style.display='';
   document.getElementById('vehicle-card').style.display = '';
 }
 
@@ -335,8 +370,10 @@ function setConnStatus(cls, text) {
 // Crucially we keep showing the last *real* data when stale instead of silently
 // swapping in fake numbers.
 function applyLiveStatus(d){
-  if(!d||typeof d!=='object'){setConnStatus('live','● live');return;}
-  if(d.source==='demo'){setConnStatus('live','● demo');return;}
+  var wm=document.getElementById('demo-watermark');
+  if(!d||typeof d!=='object'){setConnStatus('live','● live');if(wm)wm.style.display='none';return;}
+  if(d.source==='demo'){setConnStatus('live','● demo');if(wm)wm.style.display='';return;}
+  if(wm)wm.style.display='none';
   if(d.stale===true){
     var age=(typeof d.age_sec==='number')?(' '+Math.round(d.age_sec)+'s'):'';
     setConnStatus('warn','● stale'+age);
@@ -346,7 +383,12 @@ function applyLiveStatus(d){
 }
 function startSSE() {
   if(eventSource){eventSource.close();eventSource=null;}
+  if(sseRenewTimer){clearTimeout(sseRenewTimer);sseRenewTimer=null;}
   eventSource = new EventSource(serverUrl+'/api/stream');
+  // Seamless renewal: the server caps each SSE stream at 300s. Reopen a fresh
+  // stream at 270s — before the server closes the old one — so the swap is
+  // invisible and never triggers the error/retry path (no visible flicker).
+  sseRenewTimer=setTimeout(function(){if(!paused)startSSE();},270000);
   // SSE → 只更新数据模型, 渲染全部交给 rAF。
 // 避免 updateAll() 在 SSE 回调里同步执行大量 DOM/canvas 工作 → 每 100ms 阻塞主线程 → drop帧。
 var _pendingUpdate = false;
@@ -363,7 +405,7 @@ eventSource.onmessage = function(e){
     });
   }
 }
-  eventSource.onerror = function(){setConnStatus('warn','● retry');if(eventSource){eventSource.close();eventSource=null;}if(reconnectTimer)clearTimeout(reconnectTimer);reconnectTimer=setTimeout(tryReconnect,2000);}
+  eventSource.onerror = function(){setConnStatus('warn','● retry');if(eventSource){eventSource.close();eventSource=null;}if(sseRenewTimer){clearTimeout(sseRenewTimer);sseRenewTimer=null;}if(reconnectTimer)clearTimeout(reconnectTimer);reconnectTimer=setTimeout(tryReconnect,2000);}
   eventSource.onopen = function(){setConnStatus('live','● live');}
 }
 function tryReconnect(){
@@ -402,14 +444,23 @@ function clearFrames(){frames=[];frameCount=0;updateFrames()}
 // ════════════════════════════════════════════════════════════
 var lastNodeNames = '';
 function updateAll(){
-  updateMetrics();updateFrames();updateTopicStats();updateProcessTopics();
-  update3D();
+  // Each sub-renderer is isolated: a fault in update3D() must not stop
+  // updateTopo()/updateCharts() from running. Failures surface in the diag bar.
+  safeCall('metrics', updateMetrics);
+  safeCall('frames', updateFrames);
+  safeCall('topicStats', updateTopicStats);
+  safeCall('processTopics', updateProcessTopics);
+  safeCall('scene3d', update3D);
   // 2D draws at 60fps via requestAnimationFrame — no need to redraw here
-  var nn = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
-  if(nn!==lastNodeNames){lastNodeNames=nn;updateTopo();}
-  updateCharts();
-  document.getElementById('node-n').textContent=(topoData.nodes||[]).length;
-  document.getElementById('frame-n').textContent=frameCount;
+  safeCall('topology', function(){
+    var nn = (topoData.nodes||[]).map(function(n){return n.name;}).sort().join(',');
+    if(nn!==lastNodeNames){lastNodeNames=nn;updateTopo();}
+  });
+  safeCall('charts', updateCharts);
+  safeCall('counters', function(){
+    document.getElementById('node-n').textContent=(topoData.nodes||[]).length;
+    document.getElementById('frame-n').textContent=frameCount;
+  });
 }
 
 function switchSysView(view){
@@ -1043,6 +1094,20 @@ function init3DScene(){
   el.appendChild(renderer3d.domElement);
   document.getElementById("scene3d-msg").style.display="none";
 
+  // WebGL context loss (GPU reset, tab backgrounded, driver hiccup) must not
+  // crash the render loop. Suspend cleanly on loss, rebuild on restore; fall
+  // back to the 2D canvas while the context is gone.
+  renderer3d.domElement.addEventListener("webglcontextlost", function(ev){
+    ev.preventDefault();               // required so 'restored' can fire later
+    reportDiag('scene3d','WebGL context lost — using 2D fallback');
+    window._glLost=true;
+    try{init2DFallback();}catch(_){}
+  }, false);
+  renderer3d.domElement.addEventListener("webglcontextrestored", function(){
+    window._glLost=false;
+    safeCall('scene3d.restore', function(){ init3DScene(); });
+  }, false);
+
   // Lighting
   scene3d.add(new THREE.AmbientLight(0x8899cc, 0.7));
   var sun=new THREE.DirectionalLight(0xfff8ee, 2.0);
@@ -1106,8 +1171,12 @@ function init3DScene(){
   function anim3D(){
     requestAnimationFrame(anim3D);
     if(!sceneReady)return;
-    _renderFrame();
-    renderer3d.render(scene3d,camera3d);
+    if(window._glLost)return;               // skip while WebGL context is lost
+    if(!renderer3d||!scene3d||!camera3d)return;
+    safeCall('scene3d.frame', function(){
+      _renderFrame();
+      renderer3d.render(scene3d,camera3d);
+    });
   }
   anim3D();
   sceneReady=true;
