@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege default for GITHUB_TOKEN across all jobs (read-only checkout).
+permissions:
+  contents: read
+
 jobs:
   # ── Standard build + test (Release) ────────────────────────
   build-release:

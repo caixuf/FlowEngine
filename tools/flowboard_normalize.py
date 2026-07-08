@@ -214,6 +214,12 @@ def normalize_live_data(raw: Any) -> Dict[str, Any]:
                 topic = t.get("topic") or t.get("name", "")
                 caps = t.get("caps", t.get("capabilities", 0))
                 role = t.get("role") or _cap_role(caps)
+                # Heuristic: when neither an explicit role nor caps bits are
+                # available, a positive publish frequency implies this endpoint
+                # is producing on the topic → treat as publisher. FlowEngine's
+                # bus reports freq only for the publishing side; if a future
+                # transport also reports subscriber receive-rate, this should be
+                # gated on caps instead.
                 if role == "unknown" and float(t.get("freq", 0) or 0) > 0:
                     role = "pub"
                 t["role"] = role
