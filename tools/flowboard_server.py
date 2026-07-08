@@ -25,7 +25,17 @@ import threading
 import random
 import math
 import argparse
+import logging
 from pathlib import Path
+
+# 归一化 + 契约校验从独立模块导入（便于单测；见 tools/flowboard_normalize.py）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from flowboard_normalize import (  # noqa: E402
+    normalize_live_data, validate_payload,
+    _cap_role, _topic_type_map, _stats_map, _synth_nodes_from_registry,
+)
+
+log = logging.getLogger("flowboard")
 
 # ── 全局状态 ──────────────────────────────────────────────
 g_data = {"nodes": [], "metrics": {}, "timestamp": 0, "endpoints": []}
@@ -33,6 +43,7 @@ g_lock = threading.Lock()
 g_json_file = None
 g_simulate = True
 g_last_update = 0.0          # wall-clock time the state file was last successfully read
+g_read_failures = 0          # cumulative state-file read failures (corrupt/partial JSON, IO errors)
 STALE_AFTER_SEC = 5.0        # data older than this is considered stale (e2e stopped/stuck)
 DEFAULT_STATE_FILE = os.environ.get("FLOWENGINE_STATE_FILE", "/tmp/flow_topology.json")
 
@@ -100,184 +111,10 @@ def generate_sample_data():
 
     return {"nodes": nodes, "metrics": metrics, "timestamp": t}
 
-# ── 真实数据归一化 ────────────────────────────────────────
-
-def _cap_role(caps):
-    try:
-        caps = int(caps)
-    except Exception:
-        caps = 0
-    is_pub = bool(caps & 1)
-    is_sub = bool(caps & 2)
-    if is_pub and is_sub:
-        return "pubsub"
-    if is_pub:
-        return "pub"
-    if is_sub:
-        return "sub"
-    return "unknown"
-
-def _topic_type_map(registry):
-    out = {}
-    for t in (registry or {}).get("topics", []) or []:
-        name = t.get("name") or t.get("topic")
-        if name:
-            out[name] = t.get("type_id", "0x00000000")
-    return out
-
-def _stats_map(raw):
-    stats = {}
-    metric_topics = []
-    if isinstance(raw.get("metrics"), dict):
-        metric_topics.extend(raw["metrics"].get("topics", []) or [])
-    metric_topics.extend(raw.get("topics", []) or [])
-    for t in metric_topics:
-        name = t.get("topic") or t.get("name")
-        if name:
-            stats[name] = t
-    return stats
-
-def _synth_nodes_from_registry(registry, stats_by_topic):
-    nodes = []
-    type_map = _topic_type_map(registry)
-    for i, task in enumerate((registry or {}).get("tasks", []) or []):
-        name = task.get("name") or f"task_{i}"
-        topics = []
-        for topic in task.get("inputs", []) or []:
-            s = stats_by_topic.get(topic, {})
-            topics.append({
-                "topic": topic,
-                "role": "sub",
-                "caps": 2,
-                "type_id": type_map.get(topic, s.get("type_id", "0x00000000")),
-                "freq": float(s.get("freq", 0) or 0),
-            })
-        for topic in task.get("outputs", []) or []:
-            s = stats_by_topic.get(topic, {})
-            topics.append({
-                "topic": topic,
-                "role": "pub",
-                "caps": 1,
-                "type_id": type_map.get(topic, s.get("type_id", "0x00000000")),
-                "freq": float(s.get("freq", 0) or 0),
-            })
-        nodes.append({
-            "name": name,
-            "pid": task.get("pid", 0),
-            "alive": task.get("alive", True),
-            "caps": task.get("caps", 0),
-            "kind": "task",
-            "description": task.get("desc", ""),
-            "plugin": task.get("plugin", ""),
-            "topics": topics,
-        })
-    return nodes
-
-def normalize_live_data(raw):
-    """把 flow_e2e 状态文件、monitor_server JSON、discovery JSON 统一成 FlowBoard 模型。"""
-    if not isinstance(raw, dict):
-        return {"nodes": [], "metrics": {}, "timestamp": time.time(), "endpoints": []}
-
-    data = dict(raw)
-
-    # monitor_server.c 输出: {bus, topology:{nodes}, topics}
-    if "topology" in data and isinstance(data.get("topology"), dict):
-        topo = data.get("topology") or {}
-        metrics = data.get("metrics") or {}
-        metrics.setdefault("bus", data.get("bus", {}))
-        metrics.setdefault("topics", data.get("topics", []))
-        data = {
-            "self": topo.get("self", data.get("self", "flowengine")),
-            "nodes": topo.get("nodes", []),
-            "metrics": metrics,
-            "registry": data.get("registry", {}),
-            "timestamp": data.get("timestamp", time.time()),
-        }
-
-    # Hoist scene/registry from metrics to top-level if not already there
-    metrics_raw = data.get("metrics") or {}
-    if "scene" not in data and "scene" in metrics_raw:
-        data["scene"] = metrics_raw["scene"]
-    if "registry" not in data and "registry" in metrics_raw:
-        data["registry"] = metrics_raw["registry"]
-    if "sysmon" not in data and "sysmon" in metrics_raw:
-        data["sysmon"] = metrics_raw["sysmon"]
-
-    registry = data.get("registry") or (data.get("metrics") or {}).get("registry") or {}
-    if registry and "registry" not in data:
-        data["registry"] = registry
-    stats_by_topic = _stats_map(data)
-
-    nodes = data.get("nodes") or []
-    if (not nodes) and registry.get("tasks"):
-        nodes = _synth_nodes_from_registry(registry, stats_by_topic)
-    else:
-        # 补齐 discovery topic 的 role/caps/type/freq 字段。
-        # 同时兼容 NodePlugin 格式: inputs[]/outputs[] → topics[]
-        type_map = _topic_type_map(registry)
-        for n in nodes:
-            if not n.get("topics") and (n.get("inputs") or n.get("outputs")):
-                topics = []
-                for tp in (n.get("inputs") or []):
-                    topics.append({"topic": tp, "role": "sub", "caps": 2})
-                for tp in (n.get("outputs") or []):
-                    topics.append({"topic": tp, "role": "pub", "caps": 1})
-                n["topics"] = topics
-            for t in n.get("topics", []) or []:
-                topic = t.get("topic") or t.get("name", "")
-                caps = t.get("caps", t.get("capabilities", 0))
-                role = t.get("role") or _cap_role(caps)
-                if role == "unknown" and float(t.get("freq", 0) or 0) > 0:
-                    role = "pub"
-                t["role"] = role
-                t["caps"] = caps
-                if topic and not t.get("type_id"):
-                    t["type_id"] = type_map.get(topic, "0x00000000")
-
-    topic_roles = {}
-    endpoints = []
-    for n in nodes:
-        node_name = n.get("name", "unknown")
-        for t in n.get("topics", []) or []:
-            topic = t.get("topic") or t.get("name")
-            if not topic:
-                continue
-            role = t.get("role") or _cap_role(t.get("caps", 0))
-            s = stats_by_topic.get(topic, {})
-            topic_roles.setdefault(topic, {"topic": topic, "publishers": [], "subscribers": []})
-            if role in ("pub", "pubsub"):
-                topic_roles[topic]["publishers"].append(node_name)
-            if role in ("sub", "pubsub"):
-                topic_roles[topic]["subscribers"].append(node_name)
-            endpoints.append({
-                "node": node_name,
-                "topic": topic,
-                "role": role,
-                "type_id": t.get("type_id", s.get("type_id", "0x00000000")),
-                "freq": float(t.get("freq", s.get("freq", 0)) or 0),
-                "pub": s.get("pub", s.get("publish_count", 0)),
-                "del": s.get("del", s.get("deliver_count", 0)),
-                "drop": s.get("drop", s.get("drop_count", 0)),
-                "lat_us": s.get("lat_us", 0),
-                "subs": s.get("subs", s.get("subscriber_count", 0)),
-            })
-
-    metrics = data.get("metrics") or {}
-    if "topics" not in metrics:
-        metrics["topics"] = data.get("topics", []) or []
-
-    data["nodes"] = nodes
-    data["metrics"] = metrics
-    data["topic_roles"] = list(topic_roles.values())
-    data["endpoints"] = endpoints
-    data["timestamp"] = time.time()
-    data["source"] = "live"
-    return data
-
 # ── 文件监视线程 ──────────────────────────────────────────
 
 def file_watcher():
-    global g_data, g_simulate, g_last_update
+    global g_data, g_simulate, g_last_update, g_read_failures
     last_mtime = 0
     while True:
         try:
@@ -287,14 +124,26 @@ def file_watcher():
                     last_mtime = mtime
                     with open(g_json_file) as f:
                         raw = json.load(f)
+                    # Contract check before it reaches the renderer. On failure we
+                    # KEEP the previous good frame (do not clobber g_data) so a
+                    # single malformed write can't blank the dashboard.
+                    ok, reason = validate_payload(raw)
+                    if not ok:
+                        g_read_failures += 1
+                        log.warning("state file failed contract check (%s) — keeping last frame", reason)
+                        continue
+                    normalized = normalize_live_data(raw)
                     with g_lock:
-                        g_data = normalize_live_data(raw)
+                        g_data = normalized
                         g_simulate = False
                         g_last_update = time.time()
         except json.JSONDecodeError:
-            pass  # file being written — try next cycle
+            # File being written (non-atomic writer) — retain last frame, count it.
+            g_read_failures += 1
+            log.debug("state file partial/corrupt JSON — retrying next cycle")
         except Exception as e:
-            print(f"[watcher] error: {e}", file=sys.stderr)
+            g_read_failures += 1
+            log.warning("watcher error: %s — keeping last frame", e)
         time.sleep(0.1)  # 10 Hz — matches monitor task write rate
 
 # ── HTTP 请求处理器 ───────────────────────────────────────
@@ -310,7 +159,10 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
         """Return (data, source) under lock. source ∈ live|stale|demo."""
         with g_lock:
             if g_simulate:
-                return generate_sample_data(), "demo"
+                data = generate_sample_data()
+                data["source"] = "demo"
+                data["stale"] = False
+                return data, "demo"
             data = dict(g_data)
             source = "stale" if _is_stale() else "live"
             data["source"] = source
@@ -323,12 +175,16 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             with g_lock:
                 source = "demo" if g_simulate else ("stale" if _is_stale() else "live")
                 age = None if g_simulate else round(time.time() - g_last_update, 1)
+                read_failures = g_read_failures
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok", "source": source, "age_sec": age}).encode())
+            self.wfile.write(json.dumps({
+                "status": "ok", "source": source,
+                "age_sec": age, "read_failures": read_failures,
+            }).encode())
 
         elif self.path == '/api/topology':
             self.send_response(200)
@@ -427,19 +283,30 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        pass  # quiet
+        # Route HTTP access logs through the logger at DEBUG so they are silent
+        # by default but available with --log-level debug.
+        log.debug("%s - %s", self.address_string(), format % args)
 
 # ── Main ──────────────────────────────────────────────────
 
 def main():
-    global g_json_file, g_simulate, g_last_update
+    global g_json_file, g_simulate, g_last_update, g_data
 
     parser = argparse.ArgumentParser(description='FlowBoard Server')
     parser.add_argument('--port', type=int, default=8800)
     parser.add_argument('--json-file', type=str, default=DEFAULT_STATE_FILE,
                         help=f'Path to live state JSON file (default: {DEFAULT_STATE_FILE})')
     parser.add_argument('--demo', action='store_true', help='Force built-in demo data instead of live state file')
+    parser.add_argument('--log-level', default='info',
+                        choices=['debug', 'info', 'warning', 'error'],
+                        help='Logging verbosity (default: info)')
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format='%(asctime)s %(levelname)-7s [%(name)s] %(message)s',
+        stream=sys.stderr,
+    )
 
     g_json_file = args.json_file
     g_simulate = bool(args.demo)
@@ -452,7 +319,8 @@ def main():
                 g_data = normalize_live_data(raw)
                 g_simulate = False
                 g_last_update = time.time()
-            except Exception:
+            except Exception as e:
+                log.warning("initial state load failed (%s) — starting in demo mode", e)
                 g_simulate = True  # fallback to simulation on parse error
         else:
             g_simulate = True
@@ -460,22 +328,24 @@ def main():
 
     # Threaded server: one worker thread per connection so a long-lived SSE
     # stream can never starve /api/topology, reconnects, or extra browser tabs.
-    server = ThreadingHTTPServer(('0.0.0.0', args.port), FlowBoardHandler)
+    try:
+        server = ThreadingHTTPServer(('0.0.0.0', args.port), FlowBoardHandler)
+    except OSError as e:
+        log.error("cannot bind port %d: %s", args.port, e)
+        log.error("Is another FlowBoard server already running? "
+                  "Try: `ss -tlnp 'sport = :%d'` and kill the stale PID.", args.port)
+        sys.exit(1)
 
-    print(f"╔══════════════════════════════════════╗")
-    print(f"║  FlowBoard Server                    ║")
-    print(f"║  http://localhost:{args.port}           ║")
-    print(f"║  API: /api/topology  /api/stream    ║")
+    log.info("FlowBoard server on http://localhost:%d  (API: /api/topology /api/stream /api/health)", args.port)
     if g_json_file and not args.demo:
-        print(f"║  Watching: {g_json_file}")
+        log.info("Watching state file: %s", g_json_file)
     else:
-        print(f"║  Mode: simulation (demo data)")
-    print(f"╚══════════════════════════════════════╝")
+        log.info("Mode: simulation (demo data)")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        log.info("Shutting down...")
         server.shutdown()
 
 if __name__ == '__main__':
