@@ -111,8 +111,8 @@ static void on_fusion(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
 
     g.has_fusion = 1;
-    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
-    g.last_fusion_us = (uint64_t)_ts.tv_sec * 1000000ULL + (uint64_t)_ts.tv_nsec / 1000ULL;
+    struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
+    g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
@@ -144,8 +144,8 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
 
     g.has_planning = 1;
-    struct timespec _ts2; clock_gettime(CLOCK_MONOTONIC, &_ts2);
-    g.last_planning_us = (uint64_t)_ts2.tv_sec * 1000000ULL + (uint64_t)_ts2.tv_nsec / 1000ULL;
+    struct timespec ts_plan; clock_gettime(CLOCK_MONOTONIC, &ts_plan);
+    g.last_planning_us = (uint64_t)ts_plan.tv_sec * 1000000ULL + (uint64_t)ts_plan.tv_nsec / 1000ULL;
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置 ─────────────────────── */
@@ -262,8 +262,8 @@ static void* control_thread(void* arg) {
         g.cycle++;
 
         /* Reset stale data flags: if no message received for >500ms, clear flag */
-        struct timespec _now; clock_gettime(CLOCK_MONOTONIC, &_now);
-        uint64_t now_us = (uint64_t)_now.tv_sec * 1000000ULL + (uint64_t)_now.tv_nsec / 1000ULL;
+        struct timespec now_ts; clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        uint64_t now_us = (uint64_t)now_ts.tv_sec * 1000000ULL + (uint64_t)now_ts.tv_nsec / 1000ULL;
         if (g.has_fusion   && now_us - g.last_fusion_us   > 500000ULL) g.has_fusion   = 0;
         if (g.has_planning && now_us - g.last_planning_us > 500000ULL) g.has_planning = 0;
 

@@ -88,7 +88,7 @@ static void* fusion_thread(void* arg) {
     /* TODO: 未来用 task_base_init + choreo_trigger 重构；此处直接用消息缓冲区轮询 */
 
     while (!g.should_stop) {
-        /* 轮询 lidar 缓冲区，20Hz 检查间隔（与 LiDAR 发布频率匹配，减少空轮询） */
+        /* 轮询 lidar 缓冲区，50ms 检查间隔 (20Hz，与 LiDAR 发布频率匹配，减少空轮询) */
         usleep(50000);
         const Message* lidar_msg = message_buffer_latest(g.lidar_buf);
         if (!lidar_msg) continue;

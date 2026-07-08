@@ -302,7 +302,8 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
     }
 
     /* Snapshot matching subscribers under lock to avoid holding lock during callbacks.
-     * This prevents deadlock when a callback calls subscribe/unsubscribe on the bus. */
+     * This prevents deadlock when a callback calls subscribe/unsubscribe on the bus.
+     * Stack allocation is safe: MSG_BUS_MAX_SUBSCRIBERS is 32 (256 bytes max). */
     typedef struct { MessageCallback cb; void* ud; } CbSnap;
     CbSnap snap[MSG_BUS_MAX_SUBSCRIBERS];
     int snap_count = 0;
