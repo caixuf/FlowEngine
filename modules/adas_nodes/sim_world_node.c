@@ -56,6 +56,8 @@ typedef struct {
     double vx, vy;
     double x, y;
     double len, wid;
+    int    ped_crossed_center;
+    int    ped_parked;
 } SimObstacle;
 
 /* ── 车辆状态 ────────────────────────────────────────────────── */
@@ -145,6 +147,8 @@ static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
         g.obstacles[i].y   = a->y;
         g.obstacles[i].len = a->len;
         g.obstacles[i].wid = a->wid;
+        g.obstacles[i].ped_crossed_center = 0;
+        g.obstacles[i].ped_parked = 0;
     }
 }
 
@@ -153,12 +157,41 @@ static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
 static void obstacles_tick(void) {
     for (int i = 0; i < g.obstacle_count; i++) {
         SimObstacle* o = &g.obstacles[i];
+
+        if (strcmp(o->type, "pedestrian") == 0 && o->ped_parked) {
+            continue;
+        }
+
         o->x += o->vx * DT_SEC;
         o->y += o->vy * DT_SEC;
         if (strcmp(o->type, "pedestrian") == 0) {
-            if (o->y >  8.0) { o->y =  8.0; o->vy = -fabs(o->vy); }
-            if (o->y < -8.0) { o->y = -8.0; o->vy =  fabs(o->vy); }
+            /* One-shot crossing behavior:
+             * - enter road once
+             * - after crossing centerline, stop at opposite curb
+             * - no periodic back-and-forth oscillation */
+            if (o->y >= 7.8 && o->vy > 0.0) o->vy = -fabs(o->vy);
+            if (o->y <= -7.8 && o->vy < 0.0) o->vy = fabs(o->vy);
+
+            if (fabs(o->y) < 1.0) {
+                o->ped_crossed_center = 1;
+            }
+
+            if (o->ped_crossed_center) {
+                if (o->vy < 0.0 && o->y <= -7.2) {
+                    o->y = -7.2;
+                    o->vy = 0.0;
+                    o->ped_parked = 1;
+                } else if (o->vy > 0.0 && o->y >= 7.2) {
+                    o->y = 7.2;
+                    o->vy = 0.0;
+                    o->ped_parked = 1;
+                }
+            }
+
+            /* Pedestrian should not respawn/teleport with traffic flow. */
+            continue;
         }
+
         double rel = o->x - g.vehicle.x;
         if (o->vx >= 0) {
             if (rel < -40.0)  o->x = g.vehicle.x + 120.0 + (double)i * 5.0;

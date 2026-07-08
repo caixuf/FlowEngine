@@ -4,12 +4,12 @@
  * 实现 NodePlugin 接口，编译为 libperception_node.so。
  *
  * 输入 topics: vehicle/state (IPC 模式下同步仿真状态)
- * 输出 topics: sensor/lidar, sensor/gps, sensor/camera, perception/obstacles
+ * 输出 topics: perception/obstacles
  *
  * 算法:
  *   - DBSCAN 点云聚类 (dbscan_cluster.c) — eps=2m, min_pts=4
  *   - RANSAC 地面移除
- *   - 仿真传感器数据生成 (无真实传感器时)
+ *   - 基于真值的障碍物聚类仿真
  */
 
 #include "node_plugin.h"
@@ -53,7 +53,23 @@ static struct {
     double dbscan_eps;
     int    dbscan_min_pts;
     int    lidar_rate_hz;
+    double lidar_fov_deg;
+    double lidar_max_range_m;
+    double obs_noise_std_m;
+    int    enable_simple_occlusion;
 } g;
+
+static double rand_uniform_signed(double span) {
+    return (((double)rand() / (double)RAND_MAX) * 2.0 - 1.0) * span;
+}
+
+static int obstacle_in_fov(double rx, double ry, double max_range_m, double fov_deg) {
+    const double range = hypot(rx, ry);
+    if (range > max_range_m || range < 0.05) return 0;
+    const double half_fov_rad = (fov_deg * 0.5) * M_PI / 180.0;
+    const double ang = atan2(ry, rx);
+    return fabs(ang) <= half_fov_rad;
+}
 
 /* ── vehicle/state 订阅 ──────────────────────────────────────── */
 
@@ -95,42 +111,6 @@ static void* perception_thread(void* arg) {
         usleep((unsigned long)period_us);
         if (g.should_stop) break;
 
-        double noise_x = ((double)(rand() % 200) - 100.0) / 1000.0;
-        double noise_y = ((double)(rand() % 200) - 100.0) / 1000.0;
-
-        /* ── LiDAR @lidar_rate_hz ── */
-        LidarFrame lidar = {
-            .x = (float)(g.ego_x + noise_x),
-            .y = (float)(g.ego_y + noise_y),
-            .z = 0.0f,
-            .intensity = 0.85f,
-            .point_count = 64000 + g.frame_id,
-            .frame_id = g.frame_id,
-        };
-        Message lmsg;
-        msg_init_typed(&lmsg, "sensor/lidar", "perception",
-                       LIDARFRAME_TYPE_ID, LIDARFRAME_SCHEMA_VERSION,
-                       &lidar, sizeof(lidar));
-        transport_publish(g.transport, "sensor/lidar", lmsg.data, lmsg.data_size);
-
-        /* ── GPS @10Hz (every other cycle) ── */
-        if (g.frame_id % 2 == 0) {
-            double noise_s = ((double)(rand() % 500) - 250.0) / 1000.0;
-            double noise_h = ((double)(rand() % 500) - 250.0) / 1000.0;
-            GpsData gps = {
-                .latitude    = 39.904 + g.ego_x * 0.00001,
-                .longitude   = 116.407 + g.ego_y * 0.00001,
-                .speed_mps   = (float)(g.ego_speed + noise_s),
-                .heading_deg = (float)(g.ego_heading * 180.0 / M_PI + noise_h),
-                .accuracy_m  = 0.5f,
-            };
-            Message gmsg;
-            msg_init_typed(&gmsg, "sensor/gps", "perception",
-                           GPSDATA_TYPE_ID, GPSDATA_SCHEMA_VERSION,
-                           &gps, sizeof(gps));
-            transport_publish(g.transport, "sensor/gps", gmsg.data, gmsg.data_size);
-        }
-
         /* ── DBSCAN ── */
         {
             Point3D pts[256];
@@ -146,14 +126,51 @@ static void* perception_thread(void* arg) {
                     pts[np].z = 0.05f; pts[np].intensity = 0.3f; np++;
                 }
             }
+            /* 传感器可见障碍物（FOV/量程/简化遮挡） */
+            double vis_rx[16], vis_ry[16], vis_r[16], vis_a[16];
+            int vis_idx[16];
+            int vis_count = 0;
+            for (int oi = 0; oi < g.n_obs && vis_count < 16; oi++) {
+                double dx = g.obs_x[oi] - g.ego_x;
+                double dy = g.obs_y[oi] - g.ego_y;
+                double rx = dx * ch - dy * sh;
+                double ry = dx * sh + dy * ch;
+                if (!obstacle_in_fov(rx, ry, g.lidar_max_range_m, g.lidar_fov_deg)) {
+                    continue;
+                }
+                vis_rx[vis_count] = rx;
+                vis_ry[vis_count] = ry;
+                vis_r[vis_count] = hypot(rx, ry);
+                vis_a[vis_count] = atan2(ry, rx);
+                vis_idx[vis_count] = oi;
+                vis_count++;
+            }
+
+            int vis_keep[16];
+            for (int i = 0; i < vis_count; i++) vis_keep[i] = 1;
+            if (g.enable_simple_occlusion) {
+                const double occ_beam = 5.0 * M_PI / 180.0;
+                for (int i = 0; i < vis_count; i++) {
+                    if (!vis_keep[i]) continue;
+                    for (int j = 0; j < vis_count; j++) {
+                        if (i == j || !vis_keep[j]) continue;
+                        if (fabs(vis_a[i] - vis_a[j]) < occ_beam && vis_r[j] + 2.0 < vis_r[i]) {
+                            vis_keep[i] = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+
             /* 障碍物表面点 */
-            for (int oi = 0; oi < g.n_obs && np < 256; oi++) {
-                double dx = g.obs_x[oi] - g.ego_x, dy = g.obs_y[oi] - g.ego_y;
-                double rx = dx * ch - dy * sh, ry = dx * sh + dy * ch;
-                if (rx < -10 || rx > 50) continue;
+            for (int vi = 0; vi < vis_count && np < 256; vi++) {
+                if (!vis_keep[vi]) continue;
+                (void)vis_idx[vi];
+                double rx = vis_rx[vi];
+                double ry = vis_ry[vi];
                 for (int k = 0; k < 8 && np < 256; k++) {
-                    pts[np].x = (float)rx + ((float)(k % 3) - 1.0f) * 0.8f;
-                    pts[np].y = (float)ry + ((float)(k / 3) - 1.0f) * 1.6f;
+                    pts[np].x = (float)rx + ((float)(k % 3) - 1.0f) * 0.8f + (float)rand_uniform_signed(g.obs_noise_std_m);
+                    pts[np].y = (float)ry + ((float)(k / 3) - 1.0f) * 1.6f + (float)rand_uniform_signed(g.obs_noise_std_m);
                     pts[np].z = 0.6f + (float)(k % 4) * 0.4f;
                     pts[np].intensity = 0.7f; np++;
                 }
@@ -193,8 +210,7 @@ static void* perception_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "vehicle/state", NULL };
-static const char* s_outputs[] = { "sensor/lidar", "sensor/gps",
-                                   "sensor/camera", "perception/obstacles", NULL };
+static const char* s_outputs[] = { "perception/obstacles", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int perception_init(MessageBus* bus, Transport* transport,
@@ -209,6 +225,10 @@ static int perception_init(MessageBus* bus, Transport* transport,
     g.dbscan_eps   = 2.0;
     g.dbscan_min_pts = 4;
     g.lidar_rate_hz  = 20;
+    g.lidar_fov_deg = 120.0;
+    g.lidar_max_range_m = 60.0;
+    g.obs_noise_std_m = 0.08;
+    g.enable_simple_occlusion = 1;
 
     /* 解析参数 */
     if (params_json) {
@@ -217,6 +237,14 @@ static int perception_init(MessageBus* bus, Transport* transport,
             sscanf(p + 13, "%lf", &g.dbscan_eps);
         if ((p = strstr(params_json, "\"lidar_rate_hz\":")))
             sscanf(p + 16, "%d", &g.lidar_rate_hz);
+        if ((p = strstr(params_json, "\"lidar_fov_deg\":")))
+            sscanf(p + 16, "%lf", &g.lidar_fov_deg);
+        if ((p = strstr(params_json, "\"lidar_max_range_m\":")))
+            sscanf(p + 20, "%lf", &g.lidar_max_range_m);
+        if ((p = strstr(params_json, "\"obs_noise_std_m\":")))
+            sscanf(p + 18, "%lf", &g.obs_noise_std_m);
+        if ((p = strstr(params_json, "\"enable_simple_occlusion\":")))
+            sscanf(p + 26, "%d", &g.enable_simple_occlusion);
     }
 
     srand((unsigned)time(NULL));
@@ -226,18 +254,13 @@ static int perception_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
 
     discovery_advertise(discovery, "vehicle/state",         0x1C0E5A7Eu, CAP_SUBSCRIBER,  0);
-    discovery_advertise(discovery, "sensor/lidar",          LIDARFRAME_TYPE_ID, CAP_PUBLISHER, 20.0);
-    discovery_advertise(discovery, "sensor/gps",            GPSDATA_TYPE_ID,    CAP_PUBLISHER, 10.0);
-    discovery_advertise(discovery, "sensor/camera",         LIDARFRAME_TYPE_ID, CAP_PUBLISHER, 20.0);
     discovery_advertise(discovery, "perception/obstacles",  0x0B5A010Eu, CAP_PUBLISHER, 20.0);
 
-    transport_advertise(transport, "sensor/lidar",         LIDARFRAME_TYPE_ID);
-    transport_advertise(transport, "sensor/gps",           GPSDATA_TYPE_ID);
-    transport_advertise(transport, "sensor/camera",        LIDARFRAME_TYPE_ID);
     transport_advertise(transport, "perception/obstacles", 0x0B5A010Eu);
 
-    LOG_INFO("perception", "initialized (DBSCAN eps=%.1f, %dHz LiDAR)",
-             g.dbscan_eps, g.lidar_rate_hz);
+    LOG_INFO("perception", "initialized (DBSCAN eps=%.1f, LiDAR %dHz FOV=%.0fdeg range=%.0fm noise=%.2f occ=%d)",
+             g.dbscan_eps, g.lidar_rate_hz, g.lidar_fov_deg, g.lidar_max_range_m,
+             g.obs_noise_std_m, g.enable_simple_occlusion);
     return 0;
 }
 

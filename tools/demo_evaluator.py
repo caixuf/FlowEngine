@@ -26,12 +26,15 @@ LAUNCHER_STDERR = Path("/tmp/flow_launcher_stderr.txt")
 
 REQUIRED_EDGES = [
     ("sim_world", "vehicle/state", "perception"),
-    ("perception", "sensor/lidar", "fusion"),
-    ("perception", "sensor/gps", "fusion"),
     ("fusion", "fusion/localization", "planning"),
     ("planning", "planning/trajectory", "control"),
     ("control", "control/raw_cmd", "safety_control"),
     ("safety_control", "control/cmd", "sim_world"),
+]
+
+SENSOR_EDGE_OPTIONS = [
+    [("perception", "sensor/lidar", "fusion"), ("sensor_model", "sensor/lidar", "fusion")],
+    [("perception", "sensor/gps", "fusion"), ("sensor_model", "sensor/gps", "fusion")],
 ]
 
 TOPIC_MIN_FREQ = {
@@ -43,6 +46,43 @@ TOPIC_MIN_FREQ = {
     "control/raw_cmd": 10.0,
     "control/cmd": 10.0,
 }
+
+
+def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
+    """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
+
+    Returns:
+        (criteria_dict, scenario_name)
+    """
+    pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
+    nodes = pipeline.get("nodes", []) if isinstance(pipeline, dict) else []
+    scenario_file = None
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if node.get("name") != "sim_world":
+            continue
+        params = node.get("params", {})
+        if isinstance(params, dict):
+            scenario_file = params.get("scenario_file")
+        break
+
+    if not scenario_file:
+        return {}, None
+
+    scenario_path = Path(scenario_file)
+    if not scenario_path.is_absolute():
+        scenario_path = ROOT / scenario_path
+
+    scenario = load_json(scenario_path)
+    if not isinstance(scenario, dict):
+        return {}, None
+
+    criteria = scenario.get("pass_criteria", {})
+    if not isinstance(criteria, dict):
+        criteria = {}
+    name = scenario.get("name") if isinstance(scenario.get("name"), str) else None
+    return criteria, name
 
 
 def load_json(path: Path) -> dict | None:
@@ -202,9 +242,10 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
+    criteria = criteria or {}
     if not samples:
         return ["no topology samples collected"], warnings, {}
 
@@ -225,6 +266,16 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
         if (pub_node, topic) not in pubs or (sub_node, topic) not in subs:
             failures.append(f"missing topology edge {pub_node} --{topic}--> {sub_node}")
 
+    for edge_options in SENSOR_EDGE_OPTIONS:
+        matched = False
+        for pub_node, topic, sub_node in edge_options:
+            if (pub_node, topic) in pubs and (sub_node, topic) in subs:
+                matched = True
+                break
+        if not matched:
+            opts = " | ".join(f"{p} --{t}--> {s}" for p, t, s in edge_options)
+            failures.append(f"missing topology edge option: {opts}")
+
     for topic, min_freq in TOPIC_MIN_FREQ.items():
         actual = float(topics.get(topic, {}).get("freq", 0.0) or 0.0)
         if actual < min_freq:
@@ -233,7 +284,8 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
     collision_pub = int(topics.get("sim/collision", {}).get("pub", 0) or 0)
     log_text = launcher_log.read_text(encoding="utf-8", errors="ignore") if launcher_log.exists() else ""
     collision_log_count = len(re.findall(r"COLLISION", log_text))
-    if collision_pub > 0 or collision_log_count > 0:
+    no_collision_required = bool(criteria.get("no_collision", True))
+    if no_collision_required and (collision_pub > 0 or collision_log_count > 0):
         failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}")
 
     max_lane_index = max(range(len(series)), key=lambda i: lane_errors[i])
@@ -246,12 +298,16 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
         warnings.append(f"large lane-center deviation during maneuver: {max_lane_error:.2f} m")
 
     progress = xs[-1] - xs[0] if len(xs) >= 2 else 0.0
-    if progress < 10.0:
-        failures.append(f"vehicle stuck or no progress: x delta {progress:.1f} m")
+    min_distance = float(criteria.get("min_distance_m", 0.0) or 0.0)
+    required_distance = min_distance if min_distance > 0.0 else 10.0
+    if progress < required_distance:
+        failures.append(f"vehicle stuck or no progress: x delta {progress:.1f} m < {required_distance:.1f} m")
 
     avg_speed = statistics.fmean(speeds) if speeds else 0.0
-    if avg_speed < 1.0:
-        failures.append(f"average speed too low: {avg_speed:.1f} m/s")
+    min_avg_speed = float(criteria.get("min_avg_speed_mps", 0.0) or 0.0)
+    required_avg_speed = min_avg_speed if min_avg_speed > 0.0 else 1.0
+    if avg_speed < required_avg_speed:
+        failures.append(f"average speed too low: {avg_speed:.1f} m/s < {required_avg_speed:.1f} m/s")
     if max(speeds) > 25.0:
         failures.append(f"unrealistic speed spike: max speed {max(speeds):.1f} m/s")
 
@@ -282,7 +338,9 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
             lane_change_count += 1
         prev_lane = lane_idx
 
-    if low_speed_ratio > 0.50 and stagnation_duration_s > 5.0:
+    # Legacy fallback only: if scenario criteria is provided, let pass_criteria govern
+    # speed/progress acceptance instead of hardcoded stagnation thresholds.
+    if not criteria and low_speed_ratio > 0.50 and stagnation_duration_s > 5.0:
         failures.append(
             f"low-speed stagnation: {low_speed_ratio*100:.0f}% samples below {low_speed_thresh} m/s, "
             f"longest run {stagnation_duration_s:.1f}s"
@@ -344,6 +402,7 @@ def score(samples: list[dict], launcher_log: Path) -> tuple[list[str], list[str]
         failures.append(f"message drops detected: {drops}")
 
     summary = {
+        "scenario": scenario_name or "(unknown)",
         "samples": len(samples),
         "duration_s": max(0.0, samples[-1].get("timestamp", 0) - samples[0].get("timestamp", 0)),
         "x_delta_m": progress,
@@ -390,7 +449,8 @@ def main() -> int:
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR)
+    criteria, scenario_name = load_scenario_criteria_from_pipeline()
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():

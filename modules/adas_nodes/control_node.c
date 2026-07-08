@@ -66,6 +66,7 @@ static struct {
     int    lc_attempted;
     double lc_timer;
     double lc_wait;
+    double lc_cooldown;
     double lc_origin_y;
     double lc_target_y;
     double lane_width;
@@ -160,7 +161,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 static double lane_lead_gap(double lane_y, double same_lane_tol) {
     double best_gap = 1e9;
-    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+    for (int i = 0; i < MAX_OBS; i++) {
         if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
         if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
         double dx = g.obs_x[i] - g.ego_x;
@@ -173,7 +174,7 @@ static double lane_lead_gap(double lane_y, double same_lane_tol) {
 static double lane_lead_speed(double lane_y, double same_lane_tol) {
     double best_dx = 1e9;
     double speed = 1e9;
-    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+    for (int i = 0; i < MAX_OBS; i++) {
         if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
         if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
         double dx = g.obs_x[i] - g.ego_x;
@@ -186,7 +187,7 @@ static double lane_lead_speed(double lane_y, double same_lane_tol) {
 }
 
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
-    for (int i = 0; i < 2 && i < MAX_OBS; i++) {
+    for (int i = 0; i < MAX_OBS; i++) {
         if (!g.obs_valid[i]) continue;
         if (fabs(g.obs_y[i] - target_lane_y) > same_lane_tol) continue;
         double dx = g.obs_x[i] - g.ego_x;
@@ -240,6 +241,8 @@ static void* control_thread(void* arg) {
         if (!g.has_fusion) continue;
         if (!g.has_planning) continue;
 
+        if (g.lc_cooldown > 0.0) g.lc_cooldown -= 0.05;
+
         double road_center_limit = g.lane_width - 1.0;
         double cruise_lane_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
         double adjacent_lane_y = (cruise_lane_y < 0.0) ? g.lane_width * 0.5
@@ -270,7 +273,9 @@ static void* control_thread(void* arg) {
 
         double min_overtake_gap = 22.0 + g.current_speed * 2.6;
         if (min_overtake_gap > 70.0) min_overtake_gap = 70.0;
-        if (!g.lc_attempted && g.lc_state == 0 && best_gap > min_overtake_gap && best_gap < 90.0) {
+        if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
+            (!g.lc_attempted) &&
+            best_gap > min_overtake_gap && best_gap < 90.0) {
             int lead_is_slow = lead_speed < boost_target - 2.0;
             int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &overtake_need_accel);
             if (lead_is_slow && !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
@@ -331,36 +336,14 @@ static void* control_thread(void* arg) {
             g.lc_timer = 0;
         }
 
-        /* 超车后保持当前车道，避免短 demo 中来回变道造成横向振荡。 */
-        if (0 && g.lc_state == 2) {
+        /* 超车后先稳定巡航，不强制回原车道，避免回切与慢车重叠。
+         * 通过重置 lc_attempted 允许后续再次发起变道。 */
+        if (g.lc_state == 2) {
             g.lc_wait += 0.05;
-            if (g.lc_wait > 8.0) {
-                int right_clear = 1;
-                double orig_y = g.lc_origin_y;
-                double current_lane_gap = lane_lead_gap(g.lc_target_y, same_lane_tol);
-                double original_lane_gap = lane_lead_gap(orig_y, same_lane_tol);
-                if (current_lane_gap > original_lane_gap + 20.0 || current_lane_gap > 80.0) {
-                    g.lc_wait = 6.0;
-                    continue;
-                }
-                for (int i = 0; i < MAX_OBS; i++) {
-                    if (!g.obs_valid[i]) continue;
-                    double dy = fabs(g.obs_y[i] - orig_y);
-                    if (dy < same_lane_tol) {
-                        double dx = g.obs_x[i] - g.ego_x;
-                        double rel_spd = g.current_speed - g.obs_vx[i];
-                        if ((dx > -20.0 && dx < 80.0 && rel_spd > -3.0) ||
-                            (dx < 0.0 && dx > -20.0 && rel_spd > 2.0)) {
-                            right_clear = 0; break;
-                        }
-                    }
-                }
-                if (right_clear) {
-                    g.lc_target_y = orig_y;
-                    effective_target_y = g.lc_target_y;
-                    g.lc_state = 3;
-                    LOG_INFO("control", ">>> LANE CHANGE RETURN (orig_y=%.1f)", orig_y);
-                }
+            if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
+                g.lc_attempted = 0;
+                g.lc_cooldown = 3.0;
+                g.lc_wait = 0.0;
             }
         }
 
@@ -371,6 +354,9 @@ static void* control_thread(void* arg) {
         }
         if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < 0.3) {
             g.lc_state = 0;
+            g.lc_attempted = 0;
+            g.lc_cooldown = 4.0;
+            g.lc_timer = 0.0;
             LOG_INFO("control", ">>> returned to original lane");
         }
 

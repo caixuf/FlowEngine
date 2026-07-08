@@ -97,6 +97,10 @@ target_link_libraries(fusion_node ${NODE_LINK_LIBS})
 add_library(perception_node SHARED perception_node.c)
 target_link_libraries(perception_node ${NODE_LINK_LIBS})
 
+# sensor_model_node: 噪声/FOV/遮挡传感器模型
+add_library(sensor_model SHARED sensor_model_node.c)
+target_link_libraries(sensor_model ${NODE_LINK_LIBS})
+
 # ── 新增节点插件 ──────────────────────────────────────────────
 
 # sim_world_node: 车辆动力学 + 障碍物仿真
@@ -141,7 +145,7 @@ add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node
+install(TARGETS fusion_node perception_node sensor_model sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

@@ -98,7 +98,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── Start flow_launcher with pipeline ───────────────────────
-echo "───[2/5] Starting pipeline (sim_world→perception→fusion→planning→control→monitor)..."
+echo "───[2/5] Starting pipeline (sim_world→sensor_model→perception→fusion→planning→control→monitor)..."
 rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
 if [ "$MULTI_MODE" = true ]; then

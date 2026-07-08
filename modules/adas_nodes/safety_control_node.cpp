@@ -48,6 +48,7 @@ struct VehicleState {
     double obs_x[4]{0.0, 0.0, 0.0, 0.0};
     double obs_y[4]{0.0, 0.0, 0.0, 0.0};
     double obs_v[4]{0.0, 0.0, 0.0, 0.0};
+    double obs_vy[4]{0.0, 0.0, 0.0, 0.0};
     bool obs_valid[4]{false, false, false, false};
 };
 
@@ -128,6 +129,8 @@ VehicleState parse_vehicle_state(const Message& msg) {
         scan_double(text, key, &state.obs_y[i]);
         std::snprintf(key, sizeof(key), "\"ov%d\":", i);
         scan_double(text, key, &state.obs_v[i]);
+        std::snprintf(key, sizeof(key), "\"ovy%d\":", i);
+        scan_double(text, key, &state.obs_vy[i]);
     }
     return state;
 }
@@ -143,7 +146,7 @@ void on_vehicle_state(const Message* msg, void*) {
 
 double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& params) {
     double best_gap = 1e9;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (!state.obs_valid[i]) continue;
         if (std::fabs(state.obs_y[i] - state.y) > params.same_lane_tol) continue;
         double dx = state.obs_x[i] - state.x;
@@ -160,6 +163,73 @@ double pedestrian_collision_gap(const VehicleState& state) {
     double dy = std::fabs(state.obs_y[pedestrian_index] - state.y);
     if (std::fabs(dx) > 70.0 || dy > 4.5) return 1e9;
     return std::fabs(dx) - 2.8;
+}
+
+double pedestrian_crossing_hold_gap(const VehicleState& state) {
+    constexpr int pedestrian_index = 2;
+    if (!state.obs_valid[pedestrian_index]) return 1e9;
+
+    const double dx = state.obs_x[pedestrian_index] - state.x;
+    const double dy = std::fabs(state.obs_y[pedestrian_index] - state.y);
+    const double vyy = std::fabs(state.obs_vy[pedestrian_index]);
+
+    /* Guard zone: if pedestrian is crossing (or very close to lane center),
+     * keep ego at least this distance behind the crossing line. */
+    const bool crossing_active = (dy < 6.5) || (vyy > 0.05 && dy < 9.5);
+    if (!crossing_active) return 1e9;
+    if (dx < -2.0 || dx > 35.0) return 1e9;
+
+    constexpr double kCrossingBufferM = 6.0;
+    return dx - kCrossingBufferM;
+}
+
+double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, double* out_dy = nullptr) {
+    double best_ttc = 1e9;
+    double best_dx = 0.0;
+    double best_dy = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (!state.obs_valid[i]) continue;
+        const double dx = state.obs_x[i] - state.x;
+        const double dy = std::fabs(state.obs_y[i] - state.y);
+        if (dx < 0.0 || dx > 35.0 || dy > 2.3) continue;
+
+        const double closing = state.speed - state.obs_v[i];
+        if (closing <= 0.4) continue;
+
+        const double clearance = dx - 4.8;
+        const double ttc = clearance / std::max(0.1, closing);
+        if (ttc < best_ttc) {
+            best_ttc = ttc;
+            best_dx = dx;
+            best_dy = dy;
+        }
+    }
+    if (out_dx) *out_dx = best_dx;
+    if (out_dy) *out_dy = best_dy;
+    return best_ttc;
+}
+
+double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out_dx = nullptr, double* out_dy_signed = nullptr) {
+    double best = 1e9;
+    double best_dx = 0.0;
+    double best_dy_signed = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (!state.obs_valid[i]) continue;
+        const double dx = state.obs_x[i] - state.x;
+        const double dy_signed = state.obs_y[i] - state.y;
+        const double dy = std::fabs(dy_signed);
+        if (dx < -5.0 || dx > 12.0) continue;
+        if (dy > 2.2) continue;
+        const double metric = std::fabs(dx) + 2.0 * dy;
+        if (metric < best) {
+            best = metric;
+            best_dx = dx;
+            best_dy_signed = dy_signed;
+        }
+    }
+    if (out_dx) *out_dx = best_dx;
+    if (out_dy_signed) *out_dy_signed = best_dy_signed;
+    return best;
 }
 
 class SafetyControlTask : public FlowCoroTask {
@@ -220,6 +290,46 @@ private:
                     set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
                 }
             }
+
+            /* Near-field vehicle guard: brake by TTC to avoid side/front scrape
+             * when ego is between lanes and still closing on a lead vehicle. */
+            double risk_dx = 0.0;
+            double risk_dy = 0.0;
+            double ttc = min_vehicle_ttc(state, &risk_dx, &risk_dy);
+            if (ttc < 2.2) {
+                set_changed(cmd.throttle, 0.0);
+                double brake_floor = clamp((2.2 - ttc) / 2.2, 0.45, 1.0);
+                if (risk_dx < 8.0 && risk_dy < 2.1) {
+                    brake_floor = std::max(brake_floor, 0.85);
+                }
+                set_changed(cmd.brake, std::max(cmd.brake, brake_floor));
+                if (ttc < 1.0 || (risk_dx < 6.5 && risk_dy < 1.9)) {
+                    set_changed(cmd.brake, 1.0);
+                }
+            }
+
+            /* Lateral crossing guard: if another car is near while ego is crossing lanes,
+             * suppress steering authority and force stronger braking. */
+            double cross_dx = 0.0;
+            double cross_dy_signed = 0.0;
+            double cross_risk = nearest_vehicle_lateral_cross_risk(state, &cross_dx, &cross_dy_signed);
+            const bool crossing_intent = std::fabs(cmd.steer) > 0.08 &&
+                                         cmd.mode.find("ROAD_GUARD") == std::string::npos;
+            if (crossing_intent && cross_risk < 9.0 && state.speed > 7.0) {
+                set_changed(cmd.throttle, 0.0);
+                set_changed(cmd.brake, std::max(cmd.brake, 0.65));
+                double steer_guard = 0.06;
+                const double cross_dy = std::fabs(cross_dy_signed);
+                if (std::fabs(cross_dx) < 5.0 && cross_dy < 1.9) {
+                    set_changed(cmd.brake, 1.0);
+                    steer_guard = 0.03;
+                }
+
+                /* Force steering away from nearest risk vehicle during lane crossing. */
+                double safe_steer = (cross_dy_signed < 0.0) ? steer_guard : -steer_guard;
+                set_changed(cmd.steer, safe_steer);
+            }
+
             double ped_gap = pedestrian_collision_gap(state);
             double ped_stop_gap = std::max(24.0, state.speed * 5.0);
             if (ped_gap < ped_stop_gap) {
@@ -227,6 +337,17 @@ private:
                 set_changed(cmd.throttle, 0.0);
                 set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
                 if (ped_gap < ped_stop_gap * 0.55) {
+                    set_changed(cmd.brake, 1.0);
+                }
+            }
+
+            /* Crossing-line hold: do not stop on/near the pedestrian crossing line. */
+            double hold_gap = pedestrian_crossing_hold_gap(state);
+            if (hold_gap < 10.0) {
+                double ratio = clamp(hold_gap / 10.0, 0.0, 1.0);
+                set_changed(cmd.throttle, 0.0);
+                set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
+                if (hold_gap < 1.5) {
                     set_changed(cmd.brake, 1.0);
                 }
             }

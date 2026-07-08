@@ -4,7 +4,7 @@
     {
       "name": "sim_world",
       "library": "build/lib/libsim_world.so",
-      "outputs": ["sensor/lidar", "sensor/gps", "vehicle/state"],
+      "outputs": ["vehicle/state"],
       "params": {
         "init_speed": 5.0,
           "target_speed": 12.0,
@@ -14,9 +14,22 @@
       }
     },
     {
+      "name": "sensor_model",
+      "library": "build/lib/libsensor_model.so",
+      "inputs": ["vehicle/state"],
+      "outputs": ["sensor/lidar", "sensor/gps", "sensor/camera"],
+      "params": {
+        "lidar_rate_hz": 20,
+        "lidar_fov_deg": 120.0,
+        "lidar_max_range_m": 60.0,
+        "obs_noise_std_m": 0.08,
+        "enable_simple_occlusion": 1
+      }
+    },
+    {
       "name": "perception",
       "library": "build/lib/libperception_node.so",
-      "inputs": ["sensor/lidar"],
+      "inputs": ["vehicle/state", "sensor/lidar"],
       "outputs": ["perception/obstacles"],
       "params": {
         "frequency_hz": 10.0
