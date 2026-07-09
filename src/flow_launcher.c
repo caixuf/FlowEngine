@@ -286,9 +286,12 @@ int main(int argc, char** argv) {
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
 
-    /* ── Replay mode: bag → bus → monitor_node → dashboard JSON ── */
+    /* ── SIL Replay mode: bag传感器数据 → 算法pipeline → 输出对比 ──
+     * 核心思路: bag提供sensor/lidar、sensor/gps、vehicle/state等原始数据,
+     * perception→fusion→planning→control→safety→monitor完整运行,
+     * 算法在真实录制数据上计算, 不再是假仿真数据。 */
     if (replay_path) {
-        LOG_INFO("launcher", "REPLAY mode: %s", replay_path);
+        LOG_INFO("launcher", "SIL REPLAY: %s (bag→pipeline→dashboard)", replay_path);
         BagReader* r = bag_reader_open(replay_path);
         if (!r) { LOG_WARN("launcher", "cannot open bag: %s", replay_path); log_shutdown(); return 1; }
 
@@ -299,25 +302,48 @@ int main(int argc, char** argv) {
         discovery_start(discovery);
         Transport* transport = transport_create(bus, discovery, TRANSPORT_LOCAL);
         transport_start(transport);
-        Scheduler* scheduler = scheduler_create(&(SchedulerConfig)SCHEDULER_CONFIG_DEFAULT);
+        SchedulerConfig scfg = SCHEDULER_CONFIG_DEFAULT;
+        scfg.mode = SCHEDULER_MODE_CHOREO;
+        Scheduler* scheduler = scheduler_create(&scfg);
+        scheduler_set_choreo_bus(scheduler, bus);
         scheduler_start(scheduler);
 
-        /* Load monitor_node only — it subscribes to replayed messages
-         * and generates the dashboard JSON that flowmond serves. */
-        void* mon_handle = dlopen("build/lib/libmonitor_node.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (!mon_handle) mon_handle = dlopen("libmonitor_node.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (mon_handle) {
-            NodeGetPluginFn get_fn = (NodeGetPluginFn)dlsym(mon_handle, NODE_PLUGIN_SYMBOL);
-            if (get_fn) {
-                NodePlugin* mon = get_fn();
-                if (mon && mon->init(bus, transport, discovery, scheduler,
-                    "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}") == 0) {
-                    mon->start();
-                    LOG_INFO("launcher", "monitor_node started for replay");
-                }
+        /* Load pipeline nodes (skip sim_world + sensor_model — bag provides their data).
+         * perception→fusion→planning→control→safety→monitor all run on real sensor data. */
+        const char* pipeline_libs[] = {
+            "build/lib/libperception_node.so",
+            "build/lib/libfusion_node.so",
+            "build/lib/libplanning_node.so",
+            "build/lib/libcontrol_node.so",
+            "build/lib/libsafety_control_node.so",
+            "build/lib/libmonitor_node.so",
+        };
+        NodePlugin* plugins[6] = {NULL};
+        void* handles[6] = {NULL};
+        int n_loaded = 0;
+
+        for (int i = 0; i < 6; i++) {
+            handles[i] = dlopen(pipeline_libs[i], RTLD_LAZY | RTLD_GLOBAL);
+            if (!handles[i]) {
+                LOG_WARN("launcher", "skip %s: %s", pipeline_libs[i], dlerror());
+                continue;
+            }
+            NodeGetPluginFn get_fn = (NodeGetPluginFn)dlsym(handles[i], NODE_PLUGIN_SYMBOL);
+            if (!get_fn) { dlclose(handles[i]); handles[i] = NULL; continue; }
+            plugins[i] = get_fn();
+            if (!plugins[i]) { dlclose(handles[i]); handles[i] = NULL; continue; }
+            const char* params = NULL;
+            if (i == 5) params = "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}";
+            if (plugins[i]->init(bus, transport, discovery, scheduler, params) == 0) {
+                plugins[i]->start();
+                n_loaded++;
+                LOG_INFO("launcher", "  [%d/6] %s", n_loaded, plugins[i]->name);
+                usleep(50000);
             }
         }
+        LOG_INFO("launcher", "SIL pipeline: %d/6 nodes loaded (bag provides sensor data)", n_loaded);
 
+        /* Replay bag at 1x speed — pipeline nodes subscribe and process in real time */
         uint64_t msg_count = 0, duration_us = 0;
         bag_reader_info(r, &msg_count, &duration_us);
         LOG_INFO("launcher", "replaying %llu msgs (%.1fs)...",
@@ -325,14 +351,21 @@ int main(int argc, char** argv) {
         clock_set_sim_mode(true);
         int replayed = bag_reader_play(r, bus, 1.0f);
         clock_set_sim_mode(false);
-        LOG_INFO("launcher", "replay complete: %d msgs", replayed);
+        LOG_INFO("launcher", "SIL replay done: %d msgs replayed", replayed);
 
-        sleep(2); bag_reader_close(r);
+        /* Let pipeline finish processing last frames */
+        sleep(1);
+
+        /* Stop pipeline in reverse order */
+        for (int i = 5; i >= 0; i--) {
+            if (plugins[i]) { plugins[i]->stop(); plugins[i]->cleanup(); }
+        }
+        bag_reader_close(r);
         scheduler_stop(scheduler); scheduler_destroy(scheduler);
         transport_stop(transport); transport_destroy(transport);
         discovery_stop(discovery); discovery_destroy(discovery);
         message_bus_destroy(bus);
-        if (mon_handle) dlclose(mon_handle);
+        for (int i = 0; i < 6; i++) if (handles[i]) dlclose(handles[i]);
         log_shutdown();
         return 0;
     }
