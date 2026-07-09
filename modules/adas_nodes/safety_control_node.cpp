@@ -106,7 +106,7 @@ ControlCmd parse_control_cmd(const Message& msg) {
     ControlCmd cmd;
 
     /* Try binary deserialization first (serializer path) */
-    if (msg.data_size >= sizeof(ControlRaw)) {
+    {
         ControlRaw raw;
         if (ControlRaw_deserialize(&raw, (const uint8_t*)msg.data, msg.data_size) == 0) {
             cmd.throttle = raw.throttle;

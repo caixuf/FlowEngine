@@ -103,7 +103,7 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
     if (!msg || !msg->data) return;
 
     /* Try binary deserialization (serializer path) */
-    if (msg->data_size >= 12) {
+    {
         LatencyReport lr;
         if (LatencyReport_deserialize(&lr, (const uint8_t*)msg->data, msg->data_size) == 0) {
             g.fusion_lat_avg_us = lr.avg_us;

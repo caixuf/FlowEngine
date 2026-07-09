@@ -51,6 +51,7 @@ PRIMITIVE_SIZES = {
     'int64':   8, 'uint64':  8,
     'float':   4,            # IEEE 754 single
     'float64': 8,            # IEEE 754 double
+    'char':    1,            # single byte (arrays = fixed strings)
 }
 
 PRIMITIVE_C_TYPES = {

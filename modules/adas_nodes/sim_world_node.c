@@ -295,7 +295,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     if (!msg || !msg->data) return;
 
     /* Try binary deserialization first (serializer path) */
-    if (msg->data_size >= 18) {
+    {
         ControlCmd bin;
         if (ControlCmd_deserialize(&bin, (const uint8_t*)msg->data, msg->data_size) == 0) {
             g.vehicle.throttle     = bin.throttle;

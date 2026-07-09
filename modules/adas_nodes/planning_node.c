@@ -80,7 +80,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     if (!msg || !msg->data) return;
 
     /* Try binary deserialization (serializer path) */
-    if (msg->data_size >= 56) {
+    {
         Localization loc;
         if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
             g.ego_x       = loc.x;
