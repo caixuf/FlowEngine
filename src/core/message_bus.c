@@ -224,7 +224,7 @@ static int rb_push(RingBuffer* rb, const Message* msg) {
 
 /* Evict the oldest queued message matching `topic`.
  * Caller must NOT hold rb->mutex. Returns true if one was removed.
- * O(queue length) in the worst case; acceptable for the bounded 256-slot queue. */
+ * O(queue length) in the worst case; acceptable for the bounded 1024-slot queue. */
 static bool rb_evict_oldest_topic(RingBuffer* rb, const char* topic) {
     bool evicted = false;
     pthread_mutex_lock(&rb->mutex);

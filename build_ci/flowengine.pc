@@ -1,0 +1,11 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include/flowengine
+
+Name: FlowEngine
+Description: Lightweight middleware for autonomous driving & robotics
+Version: 1.0.0
+Requires: libcjson
+Libs: -L${libdir} -lflowengine_core -lpthread -ldl -lrt
+Cflags: -I${includedir} -D_GNU_SOURCE

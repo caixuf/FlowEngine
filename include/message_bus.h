@@ -35,7 +35,7 @@ extern "C" {
 #define MSG_BUS_MAX_DATA_SIZE    4096
 #define MSG_BUS_MAX_TOPICS       64
 #define MSG_BUS_MAX_SUBSCRIBERS  32
-#define MSG_BUS_QUEUE_SIZE       256
+#define MSG_BUS_QUEUE_SIZE       1024
 
 /* ── 消息结构 ────────────────────────────────────────────── */
 
