@@ -1,0 +1,25 @@
+{
+  "log_file": "launcher.log",
+  "log_level": 2,
+  "monitor_interval": 5,
+  "enable_monitor": true,
+  "scheduler": {
+    "mode": "classic",
+    "worker_threads": 0,
+    "tick_us": 1000
+  },
+  "processes": [
+    {
+      "name": "example_process",
+      "library_path": "./lib/flowengine/plugins/libexample_process.so",
+      "config_data": "{\"test\": \"value\", \"interval\": 3}",
+      "priority": 1,
+      "auto_start": true,
+      "scheduling": {
+        "priority": "normal",
+        "cpu_affinity": [],
+        "max_frequency_hz": 0
+      }
+    }
+  ]
+}
