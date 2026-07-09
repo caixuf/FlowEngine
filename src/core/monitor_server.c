@@ -270,14 +270,23 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
         SSE_APPEND(
             "%s{\"topic\":\"%s\",\"source\":\"local\","
             "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-            "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,"
+            "\"freq\":%.1f,\"subs\":%u,"
+            "\"deadline_violations\":%lu,"
+            "\"qos_depth\":%u,\"qos_reliability\":\"%s\""
+            "}",
             total > 0 ? "," : "", safe,
             (unsigned long)tstats[i].publish_count,
             (unsigned long)tstats[i].deliver_count,
             (unsigned long)tstats[i].drop_count,
             (unsigned long)lat,
+            (unsigned long)tstats[i].p50_latency_us,
+            (unsigned long)tstats[i].p99_latency_us,
             tstats[i].frequency_hz,
-            tstats[i].subscriber_count);
+            tstats[i].subscriber_count,
+            (unsigned long)tstats[i].deadline_violations,
+            tstats[i].qos.depth,
+            tstats[i].qos.reliability == QOS_RELIABLE ? "reliable" : "best_effort");
         total++;
     }
 
@@ -295,14 +304,19 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
             SSE_APPEND(
                 "%s{\"topic\":\"%s\",\"source\":\"%s\","
                 "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
+                "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,"
+                "\"freq\":%.1f,\"subs\":%u,"
+                "\"deadline_violations\":%lu}",
                 total > 0 ? "," : "", safe, safe2,
                 (unsigned long)t->publish_count,
                 (unsigned long)t->deliver_count,
                 (unsigned long)t->drop_count,
                 (unsigned long)lat,
+                (unsigned long)t->p50_latency_us,
+                (unsigned long)t->p99_latency_us,
                 t->frequency_hz,
-                t->subscriber_count);
+                t->subscriber_count,
+                (unsigned long)t->deadline_violations);
             total++;
         }
     }

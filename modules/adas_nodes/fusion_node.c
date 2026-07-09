@@ -132,22 +132,29 @@ static void* fusion_thread(void* arg) {
             ekf_fusion_reset(&g.ekf);
         }
 
-        /* ── 发布融合结果 ── */
-        char fused[512];
-        snprintf(fused, sizeof(fused),
-            "{\"x\":%.2f,\"y\":%.2f,\"v\":%.2f,\"heading\":%.3f,"
-            "\"yaw_rate\":%.3f,\"cov\":[%.2f,%.2f,%.2f,%.3f,%.4f],"
-            "\"innovation\":%.3f,\"diverged\":%d"
-            ",\"raw\":\"pos=(%.1f,%.1f) speed=%.1f\"}",
-            g.fused_x, g.fused_y, g.fused_v, g.fused_heading,
-            g.fused_yaw_rate,
-            diag[0], diag[1], diag[2], diag[3], diag[4],
-            g.ekf.last_innovation, g.ekf.diverged,
-            lidar->x, lidar->y,
-            gps ? (double)gps->speed_mps : g.fused_v);
+        /* ── 发布融合结果 (二进制序列化) ── */
+        Localization loc;
+        loc.x          = (float)g.fused_x;
+        loc.y          = (float)g.fused_y;
+        loc.v          = (float)g.fused_v;
+        loc.heading    = (float)g.fused_heading;
+        loc.yaw_rate   = (float)g.fused_yaw_rate;
+        loc.cov_xx     = (float)diag[0];
+        loc.cov_yy     = (float)diag[1];
+        loc.cov_vv     = (float)diag[2];
+        loc.cov_hh     = (float)diag[3];
+        loc.cov_yyaw   = (float)diag[4];
+        loc.innovation = (float)g.ekf.last_innovation;
+        loc.diverged   = g.ekf.diverged;
+        loc.raw_pos_x  = (float)(lidar ? lidar->x : g.fused_x);
+        loc.raw_pos_y  = (float)(lidar ? lidar->y : g.fused_y);
+        loc.raw_speed  = (float)(gps ? (double)gps->speed_mps : g.fused_v);
 
+        uint8_t loc_buf[128];
+        size_t  loc_len = sizeof(loc_buf);
+        Localization_serialize(&loc, loc_buf, &loc_len);
         transport_publish(g.transport, "fusion/localization",
-                          fused, (uint32_t)strlen(fused) + 1);
+                          loc_buf, (uint32_t)loc_len);
 
         if (g.fused_count % 50 == 0) {
             LOG_INFO("fusion", "#%u EKF:(%.1f,%.1f) v=%.1f hdg=%.1f° innov=%.2f",
@@ -165,12 +172,16 @@ static void* fusion_thread(void* arg) {
         }
         if (g.fused_count % 20 == 0) {
             LatencyStats ls = latency_tracker_stats(&g.lat_tracker);
-            char lat[128];
-            int n = snprintf(lat, sizeof(lat),
-                             "{\"avg_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu}",
-                             (unsigned long)ls.avg_us, (unsigned long)ls.p50_us,
-                             (unsigned long)ls.p99_us);
-            transport_publish(g.transport, "fusion/latency", lat, (uint32_t)n + 1);
+            LatencyReport lr;
+            lr.avg_us = (uint32_t)ls.avg_us;
+            lr.p50_us = (uint32_t)ls.p50_us;
+            lr.p99_us = (uint32_t)ls.p99_us;
+
+            uint8_t lr_buf[32];
+            size_t  lr_len = sizeof(lr_buf);
+            LatencyReport_serialize(&lr, lr_buf, &lr_len);
+            transport_publish(g.transport, "fusion/latency",
+                              lr_buf, (uint32_t)lr_len);
         }
     }
 

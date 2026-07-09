@@ -127,3 +127,4 @@ data/
 2011_09_26_drive_0001_sync.zip
 third_party/frenet-optimal-trajectory-planner/
 third_party/tinympc/
+build-*/

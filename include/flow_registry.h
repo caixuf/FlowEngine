@@ -87,6 +87,12 @@ int flow_registry_register_topic(const char* name, uint32_t type_id,
 /** 注册一个类型 (自动调用 serializer_register_type) */
 int flow_registry_register_type(const TypeRegistryEntry* entry);
 
+/**
+ * 类型注册通知（由 serializer_register_type() 调用，避免循环委托）。
+ * 仅缓存元数据供 JSON 导出，不回调 serializer。
+ */
+void flow_registry_on_type_registered(const TypeRegistryEntry* entry);
+
 /* ── MsgSchema Integration ─────────────────────────────── */
 
 /** Schema entry for topic type checking */
@@ -102,6 +108,20 @@ int flow_registry_register_schema(const char* topic, size_t struct_size,
 const FlowSchemaEntry* flow_registry_get_schema(const char* topic);
 int flow_registry_list_schemas(FlowSchemaEntry* buf, int max);
 int flow_registry_schema_count(void);
+
+/* ── Param Integration ──────────────────────────────────── */
+
+/** Re-export param_registry ParamEntry as FlowRegistry's ParamMeta */
+typedef struct {
+    char        name[64];
+    int         type;           /**< 0=int,1=float,2=bool,3=string */
+    char        value_str[64];  /**< Current value as string */
+    char        description[128];
+    bool        hot_reload;
+} FlowParamMeta;
+
+int  flow_registry_list_params(FlowParamMeta* buf, int max);
+int  flow_registry_param_count(void);
 
 /** 注册一个插件 */
 int flow_registry_register_plugin(const char* name, const char* path,
@@ -126,12 +146,34 @@ int flow_registry_type_count(void);  /**< 已注册类型数 */
 /** 注册中心条目总数 */
 int flow_registry_total_count(void);
 
+/* ── Unregister ──────────────────────────────────────────── */
+
+int flow_registry_unregister_task(const char* name);
+int flow_registry_unregister_topic(const char* name);
+int flow_registry_unregister_plugin(const char* name);
+
 /* ══════════════════════════════════════════════════════════ */
 /* 导出                                                        */
 /* ══════════════════════════════════════════════════════════ */
 
 /** 导出完整注册中心状态为 JSON (调用者 free) */
 char* flow_registry_export_json(void);
+
+/* ══════════════════════════════════════════════════════════ */
+/* Plugin Self-Declaration Macro                              */
+/* ══════════════════════════════════════════════════════════ */
+
+/**
+ * 插件自声明宏 — 在 .so 加载时自动向注册中心注册插件元信息。
+ *
+ * 用法（放在插件 .c 文件顶层）：
+ *   FLOW_REGISTRY_DECLARE_PLUGIN(my_plugin, "1.0.0", "My ADAS plugin");
+ */
+#define FLOW_REGISTRY_DECLARE_PLUGIN(pname, pver, pdesc) \
+    __attribute__((constructor)) \
+    static void _flow_registry_declare_##pname(void) { \
+        flow_registry_register_plugin(#pname, NULL, NULL, NULL); \
+    }
 
 #ifdef __cplusplus
 }

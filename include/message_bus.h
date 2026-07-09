@@ -322,6 +322,21 @@ const TopicQos* message_bus_get_topic_qos(MessageBus* bus, const char* topic);
 int message_bus_get_topic_stats(MessageBus* bus, const char* topic,
                                 TopicStats* stats);
 
+/* ── Backpressure ────────────────────────────────────────── */
+
+/**
+ * 查询 topic 的队列 pending 消息数（用于发布端反压检测）。
+ * @return pending 数量，-1 表示 topic 不存在
+ */
+int message_bus_topic_pending(MessageBus* bus, const char* topic);
+
+/**
+ * 检查 topic 队列是否已满（超过 QoS depth 限制）。
+ * 发布方可据此进行反压节流。
+ * @return 1=已满, 0=未满, -1=topic不存在
+ */
+int message_bus_topic_is_full(MessageBus* bus, const char* topic);
+
 /**
  * 列出总线上所有活跃 topic。
  * @param topics 输出缓冲区（每个 64 字节）

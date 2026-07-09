@@ -84,7 +84,44 @@ struct EgoState {
     float    acceleration_mss # 纵向加速度（m/s²）
 }
 
+# ── 融合输出 ─────────────────────────────────────────────────
+
+struct Localization {
+    float    x              # 融合后 X 坐标（米）
+    float    y              # 融合后 Y 坐标（米）
+    float    v              # 融合速度（m/s）
+    float    heading        # 航向角（弧度）
+    float    yaw_rate       # 偏航角速度（弧度/秒）
+    float    cov_xx         # 协方差对角元素 [0]
+    float    cov_yy         # 协方差对角元素 [1]
+    float    cov_vv         # 协方差对角元素 [2]
+    float    cov_hh         # 协方差对角元素 [3]
+    float    cov_yyaw       # 协方差对角元素 [4]
+    float    innovation     # EKF 新息
+    bool     diverged       # EKF 发散标志
+    float    raw_pos_x      # 原始 GPS 位置 X
+    float    raw_pos_y      # 原始 GPS 位置 Y
+    float    raw_speed      # 原始 GPS 速度
+}
+
+struct LatencyReport {
+    uint32   avg_us         # 平均延迟（微秒）
+    uint32   p50_us         # P50 延迟（微秒）
+    uint32   p99_us         # P99 延迟（微秒）
+}
+
 # ── 控制输出 ─────────────────────────────────────────────────
+
+struct ControlRaw {
+    uint32   seq            # 指令序号
+    float    throttle       # 油门 [0.0, 1.0]
+    float    brake          # 制动 [0.0, 1.0]
+    float    steering       # 转向：-1.0=最大左转，+1.0=最大右转
+    float    speed          # 当前速度 (m/s)
+    float    target         # 目标速度 (m/s)
+    float    error          # 速度误差 (m/s)
+    char     mode[24]       # 模式字符串: ACCEL/BRAKE/HOLD/ROAD_GUARD等
+}
 
 struct ControlCmd {
     uint32   seq            # 指令序号

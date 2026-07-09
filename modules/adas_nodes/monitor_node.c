@@ -13,6 +13,7 @@
 #include "logger.h"
 #include "stats_bridge.h"
 #include "dashboard_bridge.h"
+#include "adas_msgs_gen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,19 @@ static void on_node_info(const Message* msg, void* user_data) {
 static void on_fusion_latency(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
+
+    /* Try binary deserialization (serializer path) */
+    if (msg->data_size >= 12) {
+        LatencyReport lr;
+        if (LatencyReport_deserialize(&lr, (const uint8_t*)msg->data, msg->data_size) == 0) {
+            g.fusion_lat_avg_us = lr.avg_us;
+            g.fusion_lat_p50_us = lr.p50_us;
+            g.fusion_lat_p99_us = lr.p99_us;
+            return;
+        }
+    }
+
+    /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
     const char* p;
     if ((p = strstr(d, "\"avg_us\":")))  sscanf(p + 9, "%lf", &g.fusion_lat_avg_us);

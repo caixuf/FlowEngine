@@ -18,6 +18,8 @@
 #include "node_plugin.h"
 #include "clock_service.h"
 #include "scenario_loader.h"
+#include "state_machine.h"
+#include "adas_msgs_gen.h"
 #include "logger.h"
 
 #include <stdlib.h>
@@ -84,6 +86,9 @@ static struct {
     pthread_t   thread;
     volatile int running;
     volatile int should_stop;
+
+    /* 反射式状态机：跟踪生命周期 */
+    ReflectiveStateMachine sm;
 
     /* 仿真状态 */
     VehicleSim    vehicle;
@@ -288,6 +293,21 @@ static void vehicle_tick(void) {
 static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
+
+    /* Try binary deserialization first (serializer path) */
+    if (msg->data_size >= 18) {
+        ControlCmd bin;
+        if (ControlCmd_deserialize(&bin, (const uint8_t*)msg->data, msg->data_size) == 0) {
+            g.vehicle.throttle     = bin.throttle;
+            g.vehicle.brake        = bin.brake;
+            g.vehicle.steer        = bin.steering;
+            g.vehicle.target_speed = 12.0;  /* default, not in ControlCmd */
+            g.has_control_input    = 1;
+            return;
+        }
+    }
+
+    /* Fallback: text format parsing */
     const char* d = (const char*)msg->data;
     const char* p;
     if ((p = strstr(d, "throttle="))) sscanf(p + 9, "%lf", &g.vehicle.throttle);
@@ -422,8 +442,11 @@ static void* sim_thread(void* arg) {
         g.cycle++;
     }
 
-    LOG_INFO("sim_world", "stopped (%u cycles, sim_time=%.3fs, final speed=%.1f m/s)",
-             g.cycle, (double)clock_now_us() / 1e6, g.vehicle.speed);
+    LOG_INFO("sim_world", "stopped (%u cycles, sim_time=%.3fs, final speed=%.1f m/s, state=%s)",
+             g.cycle, (double)clock_now_us() / 1e6, g.vehicle.speed,
+             statem_state_name(&g.sm, g.sm.current));
+    statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
+    statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
     return NULL;
 }
 
@@ -542,6 +565,10 @@ static int sim_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, "sim/tick", 0x51C7710Cu);
     discovery_advertise(discovery, "sim/tick", 0x51C7710Cu, CAP_PUBLISHER, FREQUENCY_HZ);
 
+    /* 初始化反射式状态机 */
+    statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "sim_world");
+    statem_send_event(&g.sm, SM_EVENT_START, NULL);
+
     LOG_INFO("sim_world", "initialized (init=%.1f m/s, target=%.1f m/s, %.0f Hz, "
              "seed=%u, actors=%d, scenario='%s')",
              g.init_speed, g.target_speed, FREQUENCY_HZ,
@@ -553,7 +580,7 @@ static int sim_init(MessageBus* bus, Transport* transport,
 static int sim_start(void) {
     g.running = 1; g.should_stop = 0;
     if (pthread_create(&g.thread, NULL, sim_thread, NULL) != 0) return -1;
-    LOG_INFO("sim_world", "started");
+    LOG_INFO("sim_world", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
     return 0;
 }

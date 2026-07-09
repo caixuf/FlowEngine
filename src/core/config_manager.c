@@ -130,18 +130,9 @@ LauncherConfig* config_load(const char* config_file) {
 
                         pc->publish[k].qos_depth = jd ? (int)jd->valuedouble : 0;
                         if (jp) snprintf(pc->publish[k].qos_policy, 16, "%s", jp->valuestring);
-
-                        /* Store extra QoS fields in qos_policy string as JSON subset */
-                        if (jr || jdl || jtr) {
-                            char extra[128] = {0};
-                            snprintf(extra, sizeof(extra), "%s%s%s%s%s%s",
-                                jr ? (strcmp(jr->valuestring,"reliable")==0?"reliable ":"best_effort ") : "",
-                                jdl ? "deadline=" : "", jdl ? jdl->valuestring : "",
-                                jdl ? "ms " : "",
-                                jtr ? "transport=" : "", jtr ? jtr->valuestring : "");
-                            strncat(pc->publish[k].qos_policy, " ", 15);
-                            strncat(pc->publish[k].qos_policy, extra, 15);
-                        }
+                        if (jr) snprintf(pc->publish[k].qos_reliability, 16, "%s", jr->valuestring);
+                        if (jdl) pc->publish[k].qos_deadline_ms = (int)jdl->valuedouble;
+                        if (jls) pc->publish[k].qos_lifespan_ms = (int)jls->valuedouble;
                     }
                     pc->publish_count++;
                 }
@@ -296,6 +287,79 @@ int config_save(const LauncherConfig* config, const char* config_file) {
         if (pc->scheduling.cpu_affinity_mask != 0)
             cJSON_AddNumberToObject(js, "cpu_affinity", (double)pc->scheduling.cpu_affinity_mask);
         cJSON_AddItemToObject(item, "scheduling", js);
+
+        /* resources */
+        if (pc->resources.max_memory_mb > 0 || pc->resources.max_cpu_percent > 0) {
+            cJSON* jr = cJSON_CreateObject();
+            if (pc->resources.max_memory_mb > 0)
+                cJSON_AddNumberToObject(jr, "max_memory_mb", pc->resources.max_memory_mb);
+            if (pc->resources.max_cpu_percent > 0)
+                cJSON_AddNumberToObject(jr, "max_cpu_percent", pc->resources.max_cpu_percent);
+            cJSON_AddItemToObject(item, "resources", jr);
+        }
+
+        /* publish topics */
+        if (pc->publish_count > 0) {
+            cJSON* jp = cJSON_CreateArray();
+            for (int k = 0; k < pc->publish_count; k++) {
+                cJSON* jt = cJSON_CreateObject();
+                cJSON_AddStringToObject(jt, "topic", pc->publish[k].topic);
+                if (pc->publish[k].type[0])
+                    cJSON_AddStringToObject(jt, "type", pc->publish[k].type);
+                if (pc->publish[k].qos_depth > 0 || pc->publish[k].qos_policy[0]
+                    || pc->publish[k].qos_deadline_ms > 0 || pc->publish[k].qos_reliability[0]) {
+                    cJSON* jq = cJSON_CreateObject();
+                    if (pc->publish[k].qos_depth > 0)
+                        cJSON_AddNumberToObject(jq, "depth", pc->publish[k].qos_depth);
+                    if (pc->publish[k].qos_policy[0])
+                        cJSON_AddStringToObject(jq, "policy", pc->publish[k].qos_policy);
+                    if (pc->publish[k].qos_reliability[0])
+                        cJSON_AddStringToObject(jq, "reliability", pc->publish[k].qos_reliability);
+                    if (pc->publish[k].qos_deadline_ms > 0)
+                        cJSON_AddNumberToObject(jq, "deadline_ms", pc->publish[k].qos_deadline_ms);
+                    if (pc->publish[k].qos_lifespan_ms > 0)
+                        cJSON_AddNumberToObject(jq, "lifespan_ms", pc->publish[k].qos_lifespan_ms);
+                    cJSON_AddItemToObject(jt, "qos", jq);
+                }
+                cJSON_AddItemToArray(jp, jt);
+            }
+            cJSON_AddItemToObject(item, "publish", jp);
+        }
+
+        /* subscribe topics */
+        if (pc->subscribe_count > 0) {
+            cJSON* jsb = cJSON_CreateArray();
+            for (int k = 0; k < pc->subscribe_count; k++) {
+                if (pc->subscribe[k].remap[0]) {
+                    cJSON* jt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(jt, "topic", pc->subscribe[k].topic);
+                    cJSON_AddStringToObject(jt, "remap", pc->subscribe[k].remap);
+                    cJSON_AddItemToArray(jsb, jt);
+                } else {
+                    cJSON_AddItemToArray(jsb,
+                        cJSON_CreateString(pc->subscribe[k].topic));
+                }
+            }
+            cJSON_AddItemToObject(item, "subscribe", jsb);
+        }
+
+        /* depends */
+        if (pc->depends_count > 0) {
+            cJSON* jd = cJSON_CreateArray();
+            for (int k = 0; k < pc->depends_count; k++)
+                cJSON_AddItemToArray(jd, cJSON_CreateString(pc->depends[k]));
+            cJSON_AddItemToObject(item, "depends", jd);
+        }
+
+        /* params */
+        if (pc->params[0]) {
+            cJSON* jpm = cJSON_Parse(pc->params);
+            if (jpm) {
+                cJSON_AddItemToObject(item, "params", jpm);
+            } else {
+                cJSON_AddStringToObject(item, "params", pc->params);
+            }
+        }
 
         cJSON_AddItemToArray(jprocs, item);
     }

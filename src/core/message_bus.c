@@ -632,7 +632,18 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
             s->last_publish_us = msg.timestamp_us;
             if (prev != 0) {
                 uint64_t elapsed = msg.timestamp_us - prev;
-                if (elapsed > 0) s->frequency_hz = 1000000.0 / (double)elapsed;
+                /* Require minimum 500us gap to reject burst/startup noise
+                 * (e.g. node_info one-shot announces all fire within µs).
+                 * EWMA smooths the estimate for steady-state topics. */
+                if (elapsed > 500) {
+                    double instant_hz = 1000000.0 / (double)elapsed;
+                    if (s->frequency_hz == 0.0) {
+                        s->frequency_hz = instant_hz;
+                    } else {
+                        /* alpha = 0.2: respond to genuine rate changes, dampen jitter */
+                        s->frequency_hz = s->frequency_hz * 0.8 + instant_hz * 0.2;
+                    }
+                }
             }
         } else {
             s->drop_count++;
@@ -966,6 +977,37 @@ int message_bus_get_topic_stats(MessageBus* bus, const char* topic,
     }
     pthread_mutex_unlock(&bus->topic_mutex);
     return ERR_NOT_FOUND;
+}
+
+int message_bus_topic_pending(MessageBus* bus, const char* topic) {
+    if (!bus || !topic) return -1;
+    pthread_mutex_lock(&bus->topic_mutex);
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            int pending = (int)bus->topic_entries[i].pending_count;
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return pending;
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return -1;  /* topic not found */
+}
+
+int message_bus_topic_is_full(MessageBus* bus, const char* topic) {
+    if (!bus || !topic) return -1;
+    pthread_mutex_lock(&bus->topic_mutex);
+    for (int i = 0; i < bus->topic_count; i++) {
+        if (strcmp(bus->topic_entries[i].topic, topic) == 0) {
+            uint32_t depth = bus->topic_entries[i].qos.depth > 0
+                           ? bus->topic_entries[i].qos.depth
+                           : MSG_BUS_QUEUE_SIZE;
+            int full = bus->topic_entries[i].pending_count >= depth ? 1 : 0;
+            pthread_mutex_unlock(&bus->topic_mutex);
+            return full;
+        }
+    }
+    pthread_mutex_unlock(&bus->topic_mutex);
+    return -1;  /* topic not found */
 }
 
 int message_bus_list_topics(MessageBus* bus, char topics[][64], int max) {

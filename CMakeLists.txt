@@ -560,7 +560,7 @@ add_test(NAME flow_coro_bench
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/benchmark_coro
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(flow_coro_bench PROPERTIES TIMEOUT 300 LABELS "benchmark")
+set_tests_properties(flow_coro_bench PROPERTIES TIMEOUT 300 LABELS "benchmark;manual")
 
 add_test(NAME coro_correctness_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_correctness_test
@@ -594,6 +594,13 @@ add_test(NAME e2e_smoke
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 30)
+
+# ── Stability test: long-running pipeline (10 min, optional/manual) ──
+add_test(NAME e2e_stability
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e 600
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual")
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

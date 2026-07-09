@@ -565,18 +565,21 @@ function updateTopicStats(){
   if(!ts.length){document.getElementById('topic-stats').innerHTML='<span style="color:#484f58">Waiting for per-topic data...</span>';return;}
   document.getElementById('topic-stats').innerHTML=
     '<table style="width:100%;font-size:10px;border-collapse:collapse">'+
-    '<tr style="color:#8b949e;border-bottom:1px solid#21262d"><th style="text-align:left;padding:2px 3px">Topic</th><th style="text-align:center;padding:2px 3px">QoS</th><th style="text-align:right;padding:2px 3px">Pub</th><th style="text-align:right;padding:2px 3px">Del</th><th style="text-align:right;padding:2px 3px">Drop</th><th style="text-align:right;padding:2px 3px">Lat</th><th style="text-align:right;padding:2px 3px">Hz</th></tr>'+
+    '<tr style="color:#8b949e;border-bottom:1px solid#21262d"><th style="text-align:left;padding:2px 3px">Topic</th><th style="text-align:center;padding:2px 3px">QoS</th><th style="text-align:right;padding:2px 3px">Pub</th><th style="text-align:right;padding:2px 3px">Del</th><th style="text-align:right;padding:2px 3px">Drop</th><th style="text-align:right;padding:2px 3px">Lat</th><th style="text-align:right;padding:2px 3px">DL</th><th style="text-align:right;padding:2px 3px">Hz</th></tr>'+
     ts.map(function(t){
       var dropColor=(t.drop||0)>0?'color:#f85149':'color:#3fb950';
-      var rel=(t.reliability||'best_effort');
+      var dl=(t.deadline_violations||0);
+      var dlColor=dl>0?'color:#f85149;font-weight:bold':'color:#3fb950';
+      var rel=(t.qos_reliability||t.reliability||'best_effort');
       var relColor=rel==='reliable'?'color:#3fb950':'color:#8b949e';
       return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="document.getElementById(\'topic-filter\').value=\''+(t.topic||t.name)+'\';onFilterChange()">'+
         '<td style="padding:2px 3px;color:#58a6ff" title="'+(t.topic||t.name)+'">'+((t.topic||t.name||'?').split('/').pop())+'</td>'+
-        '<td style="text-align:center;padding:2px 3px;font-size:9px;'+relColor+'">'+rel+'</td>'+
+        '<td style="text-align:center;padding:2px 3px;font-size:9px;'+relColor+'" title="depth='+(t.qos_depth||'?')+' '+rel+'">'+rel+'</td>'+
         '<td style="text-align:right;padding:2px 3px">'+(t.pub||0)+'</td>'+
         '<td style="text-align:right;padding:2px 3px">'+(t.del||0)+'</td>'+
         '<td style="text-align:right;padding:2px 3px;'+dropColor+'">'+(t.drop||0)+'</td>'+
-        '<td style="text-align:right;padding:2px 3px;color:#d29922">'+(t.lat_us||0)+'µs</td>'+
+        '<td style="text-align:right;padding:2px 3px;color:#d29922" title="p50='+(t.p50_us||'?')+'µs p99='+(t.p99_us||'?')+'µs">'+(t.lat_us||0)+'µs</td>'+
+        '<td style="text-align:right;padding:2px 3px;'+dlColor+'" title="deadline violations">'+(dl>999?'999+':dl)+'</td>'+
         '<td style="text-align:right;padding:2px 3px">'+(t.freq||0).toFixed(1)+'</td></tr>';
     }).join('')+'</table>';
 }

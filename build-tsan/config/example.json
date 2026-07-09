@@ -6,7 +6,7 @@
   "processes": [
     {
       "name": "example_process",
-      "library_path": "./lib/starttool/plugins/libexample_process.so",
+      "library_path": "./lib/flowengine/plugins/libexample_process.so",
       "config_data": "{\"test\": \"value\", \"interval\": 3}",
       "priority": 1,
       "auto_start": true

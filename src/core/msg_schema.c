@@ -1,4 +1,5 @@
 #include "msg_schema.h"
+#include "flow_registry.h"
 #include "error_codes.h"
 #include <string.h>
 #include <stdio.h>
@@ -28,6 +29,8 @@ int msg_schema_register(const char* topic, size_t struct_size, const char* type_
             g_schema_table[i].struct_size = struct_size;
             strncpy(g_schema_table[i].type_name, type_name, sizeof(g_schema_table[i].type_name) - 1);
             pthread_mutex_unlock(&g_schema_mutex);
+            /* Bridge: sync update to unified FlowRegistry */
+            flow_registry_register_schema(topic, struct_size, type_name);
             return 0;
         }
     }
@@ -43,6 +46,10 @@ int msg_schema_register(const char* topic, size_t struct_size, const char* type_
     strncpy(e->type_name, type_name, sizeof(e->type_name) - 1);
 
     pthread_mutex_unlock(&g_schema_mutex);
+
+    /* Bridge: sync to unified FlowRegistry for query/export */
+    flow_registry_register_schema(topic, struct_size, type_name);
+
     return 0;
 }
 

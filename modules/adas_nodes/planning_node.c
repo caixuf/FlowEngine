@@ -9,6 +9,8 @@
 
 #include "node_plugin.h"
 #include "frenet_bridge.h"
+#include "state_machine.h"
+#include "adas_msgs_gen.h"
 #include "logger.h"
 
 #include <stdlib.h>
@@ -28,6 +30,9 @@ static struct {
     pthread_t   thread;
     volatile int running;
     volatile int should_stop;
+
+    /* 反射式状态机：跟踪生命周期 */
+    ReflectiveStateMachine sm;
 
     /* Frenet 规划器 */
     FrenetHandle* frenet;
@@ -73,6 +78,21 @@ static void update_reference_path(double start_x) {
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
+
+    /* Try binary deserialization (serializer path) */
+    if (msg->data_size >= 56) {
+        Localization loc;
+        if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
+            g.ego_x       = loc.x;
+            g.ego_y       = loc.y;
+            g.ego_v       = loc.v;
+            g.ego_heading = loc.heading;
+            g.has_fusion  = 1;
+            return;
+        }
+    }
+
+    /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
     const char* p;
     if ((p = strstr(d, "\"x\":")))       sscanf(p + 4, "%lf", &g.ego_x);
@@ -197,7 +217,10 @@ static void* planning_thread(void* arg) {
         }
     }
 
-    LOG_INFO("planning", "stopped (%d trajectories)", g.plan_count);
+    LOG_INFO("planning", "stopped (%d trajectories, state=%s)",
+             g.plan_count, statem_state_name(&g.sm, g.sm.current));
+    statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
+    statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
     return NULL;
 }
 
@@ -257,6 +280,10 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);
 
+    /* 初始化反射式状态机 */
+    statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "planning");
+    statem_send_event(&g.sm, SM_EVENT_START, NULL);
+
     LOG_INFO("planning", "initialized (Frenet, target=%.0f m/s, max=%.0f m/s)",
              g.cfg_target_speed, g.cfg_max_speed);
     return 0;
@@ -265,7 +292,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 static int planning_start(void) {
     g.running = 1; g.should_stop = 0;
     if (pthread_create(&g.thread, NULL, planning_thread, NULL) != 0) return -1;
-    LOG_INFO("planning", "started");
+    LOG_INFO("planning", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
     return 0;
 }

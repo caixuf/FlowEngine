@@ -39,61 +39,8 @@
 #include "discovery.h"
 #include "scheduler.h"
 #include "flow_registry.h"
+#include "config_manager.h"
 #include "adas_msgs_gen.h"
-
-/* ── 简单 JSON 字段提取 ─────────────────────────────────────── */
-
-static int json_get_str(const char* json, const char* key, char* out, int out_len) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return 0;
-    p += strlen(search);
-    while (*p == ' ') p++;
-    if (*p != '"') return 0;
-    p++;
-    int i = 0;
-    while (*p && *p != '"' && i < out_len - 1) out[i++] = *p++;
-    out[i] = '\0';
-    return 1;
-}
-
-static int json_get_str_array(const char* json, const char* key,
-                               char out[][64], int max_items) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return 0;
-    p += strlen(search);
-    while (*p == ' ') p++;
-    if (*p != '[') return 0;
-    p++;
-    int count = 0;
-    while (*p && *p != ']' && count < max_items) {
-        while (*p == ' ' || *p == ',') p++;
-        if (*p == '"') {
-            p++;
-            int i = 0;
-            while (*p && *p != '"' && i < 63) out[count][i++] = *p++;
-            out[count][i] = '\0';
-            if (i > 0) count++;
-            if (*p == '"') p++;
-        } else break;
-    }
-    return count;
-}
-
-static int json_get_int(const char* json, const char* key, int* out) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return 0;
-    p += strlen(search);
-    while (*p == ' ') p++;
-    if (*p != '-' && (*p < '0' || *p > '9')) return 0;
-    *out = atoi(p);
-    return 1;
-}
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
 
@@ -122,84 +69,44 @@ static int      g_node_count = 0;
 
 static void sig_handler(int sig) { (void)sig; g_running = 0; }
 
-/* ── 解析 pipeline.json ────────────────────────────────────── */
+/* ── 加载配置 (统一使用 config_manager) ──────────────────────── */
 
 static int parse_pipeline(const char* path, int* stagger_ms_out) {
-    FILE* f = fopen(path, "r");
-    if (!f) { perror(path); return -1; }
-    fseek(f, 0, SEEK_END);
-    long fsize = ftell(f); rewind(f);
-    char* buf = (char*)malloc((size_t)fsize + 1);
-    if (!buf) { fclose(f); return -1; }
-    if (fread(buf, 1, (size_t)fsize, f) != (size_t)fsize && fsize > 0) {
-        free(buf); fclose(f); return -1;
+    LauncherConfig* cfg = config_load(path);
+    if (!cfg) {
+        LOG_WARN("launcher", "failed to load config: %s", path);
+        return -1;
     }
-    buf[fsize] = '\0';
-    fclose(f);
 
-    int stagger = 300;
-    json_get_int(buf, "startup_stagger_ms", &stagger);
-    *stagger_ms_out = stagger;
+    *stagger_ms_out = 300;  /* default stagger */
 
-    const char* nodes_start = strstr(buf, "\"nodes\":");
-    if (!nodes_start) { free(buf); return 0; }
-    nodes_start = strchr(nodes_start, '[');
-    if (!nodes_start) { free(buf); return 0; }
-    nodes_start++;
-
-    const char* p = nodes_start;
     g_node_count = 0;
-
-    while (*p && g_node_count < MAX_NODES) {
-        while (*p && *p != '{' && *p != ']') p++;
-        if (!*p || *p == ']') break;
-        const char* obj_start = p;
-        int depth = 0;
-        const char* q = p;
-        while (*q) {
-            if (*q == '{') depth++;
-            else if (*q == '}') { depth--; if (depth == 0) { q++; break; } }
-            q++;
-        }
-        size_t obj_len = (size_t)(q - obj_start);
-        char* obj = (char*)malloc(obj_len + 1);
-        if (!obj) break;
-        memcpy(obj, obj_start, obj_len);
-        obj[obj_len] = '\0';
-
+    for (int i = 0; i < cfg->process_count && g_node_count < MAX_NODES; i++) {
+        ProcessConfig* pc = &cfg->processes[i];
         NodeDesc* nd = &g_nodes[g_node_count];
         memset(nd, 0, sizeof(*nd));
-        nd->stagger_after_ms = stagger;
+        nd->stagger_after_ms = *stagger_ms_out;
         nd->pid = -1;
 
-        json_get_str(obj, "name",    nd->name,    sizeof(nd->name));
-        json_get_str(obj, "library", nd->library, sizeof(nd->library));
-        nd->input_count  = json_get_str_array(obj, "inputs",  nd->inputs,  MAX_TOPICS_PER_NODE);
-        nd->output_count = json_get_str_array(obj, "outputs", nd->outputs, MAX_TOPICS_PER_NODE);
+        snprintf(nd->name, sizeof(nd->name), "%s", pc->name);
+        snprintf(nd->library, sizeof(nd->library), "%s", pc->library_path);
 
-        const char* params_p = strstr(obj, "\"params\":");
-        if (params_p) {
-            params_p = strchr(params_p, '{');
-            if (params_p) {
-                int d2 = 0; const char* pq = params_p;
-                while (*pq) {
-                    if (*pq == '{') d2++;
-                    else if (*pq == '}') { d2--; if (d2 == 0) { pq++; break; } }
-                    pq++;
-                }
-                size_t plen = (size_t)(pq - params_p);
-                if (plen < sizeof(nd->params_json) - 1) {
-                    memcpy(nd->params_json, params_p, plen);
-                    nd->params_json[plen] = '\0';
-                }
-            }
-        }
-        free(obj);
+        /* Map publish → outputs, subscribe → inputs (from node's perspective) */
+        for (int k = 0; k < pc->subscribe_count && nd->input_count < MAX_TOPICS_PER_NODE; k++)
+            snprintf(nd->inputs[nd->input_count++], 64, "%s", pc->subscribe[k].topic);
+        for (int k = 0; k < pc->publish_count && nd->output_count < MAX_TOPICS_PER_NODE; k++)
+            snprintf(nd->outputs[nd->output_count++], 64, "%s", pc->publish[k].topic);
+
+        /* Copy params */
+        if (pc->params[0])
+            snprintf(nd->params_json, sizeof(nd->params_json), "%s", pc->params);
+
         if (nd->name[0]) g_node_count++;
-        p = q;
     }
-    free(buf);
-    LOG_INFO("launcher", "pipeline parsed: %d nodes", g_node_count);
+
+    LOG_INFO("launcher", "config loaded: %d nodes (from %d processes)",
+             g_node_count, cfg->process_count);
+    config_free(cfg);
     return g_node_count;
 }
 
@@ -265,11 +172,13 @@ static int run_dlopen_mode(int duration, int stagger_ms,
         usleep((unsigned)stagger_ms * 1000);
     }
 
-    /* 启动所有已初始化的节点 */
+    /* 启动所有已初始化的节点（留微小间隔避免多节点广播同一 topic 时
+     * 在微秒级内连续 publish 导致频率估算出现尖峰，如 node_info 的 52kHz） */
     for (int i = 0; i < g_node_count; i++) {
         if (g_nodes[i].plugin) {
             g_nodes[i].plugin->start();
             LOG_INFO("launcher", "  started %s", g_nodes[i].name);
+            usleep(5000);  /* 5ms stagger — 总计 <50ms，用户无感 */
         }
     }
 
@@ -409,6 +318,34 @@ int main(int argc, char** argv) {
         LOG_INFO("launcher", "registry: %d total entries", flow_registry_total_count());
 
         MessageBus*       bus       = message_bus_create("launcher_bus");
+
+        /* 从配置加载 QoS 并应用到 message_bus */
+        LauncherConfig* qos_cfg = config_load(config_path);
+        if (qos_cfg) {
+            int qos_count = 0;
+            for (int i = 0; i < qos_cfg->process_count; i++) {
+                ProcessConfig* pc = &qos_cfg->processes[i];
+                for (int k = 0; k < pc->publish_count; k++) {
+                    TopicDecl* td = &pc->publish[k];
+                    if (td->qos_depth > 0 || td->qos_policy[0]) {
+                        TopicQos tq = {0};
+                        tq.depth       = (uint32_t)(td->qos_depth > 0 ? td->qos_depth : 8);
+                        tq.policy      = strcmp(td->qos_policy, "block") == 0 ? QOS_BLOCK :
+                                         strcmp(td->qos_policy, "drop_latest") == 0 ? QOS_DROP_LATEST :
+                                         QOS_DROP_OLDEST;
+                        tq.reliability = strcmp(td->qos_reliability, "reliable") == 0 ? QOS_RELIABLE : QOS_BEST_EFFORT;
+                        tq.deadline_ms = (uint32_t)(td->qos_deadline_ms > 0 ? td->qos_deadline_ms : 0);
+                        tq.lifespan_ms = (uint32_t)(td->qos_lifespan_ms > 0 ? td->qos_lifespan_ms : 0);
+                        message_bus_set_topic_qos(bus, td->topic, &tq);
+                        qos_count++;
+                    }
+                }
+            }
+            if (qos_count > 0)
+                LOG_INFO("launcher", "QoS applied to %d topics", qos_count);
+            config_free(qos_cfg);
+        }
+
         DiscoveryManager* discovery = discovery_create("flow_launcher",
             CAP_PUBLISHER | CAP_SUBSCRIBER | CAP_FUSION);
         discovery_start(discovery);

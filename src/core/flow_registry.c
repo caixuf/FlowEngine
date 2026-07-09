@@ -6,6 +6,7 @@
  */
 
 #include "flow_registry.h"
+#include "param_registry.h"
 #include "error_codes.h"
 #include <stdlib.h>
 #include <string.h>
@@ -154,12 +155,46 @@ int flow_registry_list_topics(TopicMeta* buf, int max) {
 /* Type Registry (wraps existing serializer)                  */
 /* ══════════════════════════════════════════════════════════ */
 
+/* Lightweight type metadata cache — populated by serializer notifications */
+#define FLOW_REGISTRY_MAX_TYPES 128
+static struct {
+    char     type_name[64];
+    uint32_t type_id;
+    size_t   struct_size;
+} g_type_cache[FLOW_REGISTRY_MAX_TYPES];
+static int g_type_cache_count = 0;
+
 int flow_registry_register_type(const TypeRegistryEntry* entry) {
     return serializer_register_type(entry);
 }
 
+void flow_registry_on_type_registered(const TypeRegistryEntry* entry) {
+    if (!entry) return;
+    pthread_mutex_lock(&g_mutex);
+    /* Avoid duplicates */
+    for (int i = 0; i < g_type_cache_count; i++) {
+        if (g_type_cache[i].type_id == entry->type_id) {
+            snprintf(g_type_cache[i].type_name, sizeof(g_type_cache[i].type_name),
+                     "%s", entry->type_name);
+            g_type_cache[i].struct_size = entry->struct_size;
+            pthread_mutex_unlock(&g_mutex);
+            return;
+        }
+    }
+    if (g_type_cache_count < FLOW_REGISTRY_MAX_TYPES) {
+        int i = g_type_cache_count++;
+        snprintf(g_type_cache[i].type_name, sizeof(g_type_cache[i].type_name),
+                 "%s", entry->type_name);
+        g_type_cache[i].type_id      = entry->type_id;
+        g_type_cache[i].struct_size  = entry->struct_size;
+    }
+    pthread_mutex_unlock(&g_mutex);
+}
+
 int flow_registry_type_count(void) {
-    return serializer_type_count();
+    /* Prefer cached count if available, fall back to serializer */
+    int cached = g_type_cache_count;
+    return cached > 0 ? cached : serializer_type_count();
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -274,7 +309,99 @@ int flow_registry_list_plugins(PluginMeta* buf, int max) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
+/* Unregister                                                  */
+/* ══════════════════════════════════════════════════════════ */
+
+int flow_registry_unregister_task(const char* name) {
+    if (!name) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&g_mutex);
+    for (int i = 0; i < g_task_count; i++) {
+        if (strcmp(g_tasks[i].name, name) == 0) {
+            if (i < g_task_count - 1)
+                memmove(&g_tasks[i], &g_tasks[i+1],
+                        (size_t)(g_task_count - i - 1) * sizeof(TaskMeta));
+            g_task_count--;
+            pthread_mutex_unlock(&g_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_mutex);
+    return ERR_NOT_FOUND;
+}
+
+int flow_registry_unregister_topic(const char* name) {
+    if (!name) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&g_mutex);
+    for (int i = 0; i < g_topic_count; i++) {
+        if (strcmp(g_topics[i].name, name) == 0) {
+            if (i < g_topic_count - 1)
+                memmove(&g_topics[i], &g_topics[i+1],
+                        (size_t)(g_topic_count - i - 1) * sizeof(TopicMeta));
+            g_topic_count--;
+            pthread_mutex_unlock(&g_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_mutex);
+    return ERR_NOT_FOUND;
+}
+
+int flow_registry_unregister_plugin(const char* name) {
+    if (!name) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&g_mutex);
+    for (int i = 0; i < g_plugin_count; i++) {
+        if (strcmp(g_plugins[i].name, name) == 0) {
+            if (i < g_plugin_count - 1)
+                memmove(&g_plugins[i], &g_plugins[i+1],
+                        (size_t)(g_plugin_count - i - 1) * sizeof(PluginMeta));
+            g_plugin_count--;
+            pthread_mutex_unlock(&g_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_mutex);
+    return ERR_NOT_FOUND;
+}
+
+/* ══════════════════════════════════════════════════════════ */
 /* Summary                                                    */
+/* ══════════════════════════════════════════════════════════ */
+
+/* ── Param bridge (delegates to param_registry) ─────────── */
+
+int flow_registry_list_params(FlowParamMeta* buf, int max) {
+    if (!buf || max <= 0) return 0;
+    ParamEntry pe[64];
+    int n = param_list_all(pe, max < 64 ? max : 64);
+    for (int i = 0; i < n && i < max; i++) {
+        snprintf(buf[i].name, sizeof(buf[i].name), "%s", pe[i].name);
+        buf[i].type = (int)pe[i].type;
+        buf[i].hot_reload = pe[i].hot_reload;
+        snprintf(buf[i].description, sizeof(buf[i].description), "%s", pe[i].description);
+        /* Serialize current value to string */
+        switch (pe[i].type) {
+            case PARAM_INT:
+                snprintf(buf[i].value_str, sizeof(buf[i].value_str), "%ld",
+                         (long)pe[i].current_value.int_val); break;
+            case PARAM_FLOAT:
+                snprintf(buf[i].value_str, sizeof(buf[i].value_str), "%.3f",
+                         pe[i].current_value.float_val); break;
+            case PARAM_BOOL:
+                snprintf(buf[i].value_str, sizeof(buf[i].value_str), "%s",
+                         pe[i].current_value.bool_val ? "true" : "false"); break;
+            case PARAM_STRING:
+                snprintf(buf[i].value_str, sizeof(buf[i].value_str), "%s",
+                         pe[i].current_value.str_val); break;
+            default: buf[i].value_str[0] = '\0'; break;
+        }
+    }
+    return n;
+}
+
+int flow_registry_param_count(void) {
+    return param_count();
+}
+
 /* ══════════════════════════════════════════════════════════ */
 
 int flow_registry_total_count(void) {
@@ -335,9 +462,35 @@ char* flow_registry_export_json(void) {
             g_schemas[i].struct_size);
     }
 
+    off += snprintf(buf + off, sz - (size_t)off, "],\"params\":[");
+    {
+        FlowParamMeta pm[64];
+        int pn = flow_registry_list_params(pm, 64);
+        for (int i = 0; i < pn; i++) {
+            if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+            const char* type_str = pm[i].type == 0 ? "int" :
+                                   pm[i].type == 1 ? "float" :
+                                   pm[i].type == 2 ? "bool" : "string";
+            off += snprintf(buf + off, sz - (size_t)off,
+                "%s{\"name\":\"%s\",\"type\":\"%s\",\"value\":\"%s\",\"hot_reload\":%s}",
+                i > 0 ? "," : "", pm[i].name, type_str, pm[i].value_str,
+                pm[i].hot_reload ? "true" : "false");
+        }
+    }
+
+    off += snprintf(buf + off, sz - (size_t)off, "],\"types\":[");
+    for (int i = 0; i < g_type_cache_count; i++) {
+        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+        off += snprintf(buf + off, sz - (size_t)off,
+            "%s{\"name\":\"%s\",\"type_id\":\"0x%08x\",\"size\":%zu}",
+            i > 0 ? "," : "", g_type_cache[i].type_name,
+            g_type_cache[i].type_id, g_type_cache[i].struct_size);
+    }
+
     off += snprintf(buf + off, sz - (size_t)off,
-        "],\"summary\":{\"tasks\":%d,\"topics\":%d,\"plugins\":%d,\"schemas\":%d,\"types\":%d}}",
-        g_task_count, g_topic_count, g_plugin_count, g_schema_count, serializer_type_count());
+        "],\"summary\":{\"tasks\":%d,\"topics\":%d,\"plugins\":%d,\"schemas\":%d,\"params\":%d,\"types\":%d}}",
+        g_task_count, g_topic_count, g_plugin_count, g_schema_count,
+        flow_registry_param_count(), flow_registry_type_count());
 
     pthread_mutex_unlock(&g_mutex);
     return buf;

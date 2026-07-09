@@ -14,6 +14,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "node_plugin.h"
+#include "adas_msgs_gen.h"
 
 #include <algorithm>
 #include <atomic>
@@ -103,6 +104,23 @@ std::string scan_mode(const char* text) {
 
 ControlCmd parse_control_cmd(const Message& msg) {
     ControlCmd cmd;
+
+    /* Try binary deserialization first (serializer path) */
+    if (msg.data_size >= sizeof(ControlRaw)) {
+        ControlRaw raw;
+        if (ControlRaw_deserialize(&raw, (const uint8_t*)msg.data, msg.data_size) == 0) {
+            cmd.throttle = raw.throttle;
+            cmd.brake    = raw.brake;
+            cmd.steer    = raw.steering;
+            cmd.speed    = raw.speed;
+            cmd.target   = raw.target;
+            cmd.error    = raw.error;
+            cmd.mode     = raw.mode;
+            return cmd;
+        }
+    }
+
+    /* Fallback: text format parsing */
     const char* text = reinterpret_cast<const char*>(msg.data);
     if (!text) return cmd;
     scan_double(text, "throttle=", &cmd.throttle);
@@ -191,8 +209,13 @@ double pedestrian_crossing_hold_gap(const VehicleState& state) {
     const double vyy = std::fabs(state.obs_vy[pi]);
 
     /* Guard zone: if pedestrian is crossing (or very close to lane center),
-     * keep ego at least this distance behind the crossing line. */
-    const bool crossing_active = (dy < 6.5) || (vyy > 0.05 && dy < 9.5);
+     * keep ego at least this distance behind the crossing line.
+     *
+     * Two-tier detection:
+     *   dy < 3.0m     → always active (pedestrian ON the road, even if stopped)
+     *   vyy > 0.05    → pedestrian is actively moving near the road (crossing intent)
+     * Otherwise        → pedestrian is parked at curb → NOT crossing, release hold */
+    const bool crossing_active = (dy < 3.0) || (vyy > 0.05 && dy < 6.5);
     if (!crossing_active) return 1e9;
     if (dx < -2.0 || dx > 35.0) return 1e9;
 
@@ -376,13 +399,29 @@ private:
     }
 
     void publish_cmd(const ControlCmd& cmd, bool intervened) const {
+        /* Binary serialized ControlCmd (serializer path) */
+        ::ControlCmd bin;
+        bin.seq            = 0;
+        bin.throttle       = (float)cmd.throttle;
+        bin.brake          = (float)cmd.brake;
+        bin.steering       = (float)cmd.steer;
+        bin.gear           = GEAR_DRIVE;
+        bin.emergency_stop = cmd.brake > 0.95;
+
+        uint8_t buf[32];
+        size_t len = sizeof(buf);
+        ControlCmd_serialize(&bin, buf, &len);
+        transport_publish(transport_, "control/cmd", buf, (uint32_t)len);
+
+        /* Text format for logging/backward compat */
         char out[320];
         std::snprintf(out, sizeof(out),
                       "throttle=%.2f brake=%.2f steer=%.4f speed=%.1f target=%.1f "
                       "error=%.1f mode=%s safety=%s",
                       cmd.throttle, cmd.brake, cmd.steer, cmd.speed, cmd.target, cmd.error,
                       cmd.mode.c_str(), intervened ? "intervened" : "pass");
-        transport_publish(transport_, "control/cmd", out, static_cast<uint32_t>(std::strlen(out) + 1));
+        transport_publish(transport_, "control/cmd/text", out,
+                          static_cast<uint32_t>(std::strlen(out) + 1));
     }
 
     Transport* transport_;

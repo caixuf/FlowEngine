@@ -11,6 +11,9 @@
 
 #include "node_plugin.h"
 #include "logger.h"
+#include "param_registry.h"
+#include "state_machine.h"
+#include "adas_msgs_gen.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +32,31 @@
 #define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
 #define CONTROL_WHEELBASE_M 2.7
+
+/* ── 控制节点状态机定义 ─────────────────────────────────────── */
+/* 自定义事件 (从 SM_EVENT_USER_BASE=16 开始) */
+#define CTL_EVENT_OBSTACLE_BLOCKED  16
+#define CTL_EVENT_OBSTACLE_CLEARED  17
+#define CTL_EVENT_LANE_CHANGE_START 18
+#define CTL_EVENT_LANE_CHANGE_DONE  19
+#define CTL_EVENT_SPEED_LIMITED     20
+
+/* 自定义状态 */
+#define CTL_STATE_CRUISING    SM_STATE_RUNNING     /* 复用 RUNNING = 正常巡航 */
+/* blocked/lane_change 通过 TransitionRule 的 description 区分 */
+
+static const TransitionRule g_ctl_transitions[] = {
+    { SM_STATE_INITIALIZED, SM_EVENT_START,             SM_STATE_RUNNING,    "INIT→RUNNING",          false },
+    { SM_STATE_RUNNING,     CTL_EVENT_OBSTACLE_BLOCKED, SM_STATE_RUNNING,    "RUNNING: obstacle_blocked", false },
+    { SM_STATE_RUNNING,     CTL_EVENT_OBSTACLE_CLEARED, SM_STATE_RUNNING,    "RUNNING: obstacle_cleared", false },
+    { SM_STATE_RUNNING,     CTL_EVENT_LANE_CHANGE_START,SM_STATE_RUNNING,    "RUNNING: lane_change_start",false },
+    { SM_STATE_RUNNING,     CTL_EVENT_LANE_CHANGE_DONE, SM_STATE_RUNNING,    "RUNNING: lane_change_done", false },
+    { SM_STATE_RUNNING,     SM_EVENT_STOP,              SM_STATE_STOPPING,   "RUNNING→STOPPING",       false },
+    { SM_STATE_STOPPING,    SM_EVENT_DONE,              SM_STATE_STOPPED,    "STOPPING→STOPPED",       false },
+    { SM_STATE_RUNNING,     SM_EVENT_ERROR,             SM_STATE_ERROR,      "RUNNING→ERROR",          false },
+    { SM_STATE_ERROR,       SM_EVENT_RESTART,           SM_STATE_INITIALIZED,"ERROR→INIT",             false },
+    TRANSITION_TABLE_END
+};
 
 static struct {
     Transport*        transport;
@@ -79,6 +107,9 @@ static struct {
 
     uint32_t cycle;
 
+    /* 状态机（反射式生命周期跟踪） */
+    ReflectiveStateMachine sm;
+
     /* 配置参数 */
     double cfg_kp, cfg_ki, cfg_kd;
     double cfg_cruise_speed;
@@ -98,18 +129,32 @@ static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_m
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
+
+    /* Try binary deserialization (serializer path) */
+    if (msg->data_size >= 56) {
+        Localization loc;
+        if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
+            g.current_speed = loc.v;
+            g.ego_x         = loc.x;
+            g.ego_y         = loc.y;
+            g.ego_heading   = loc.heading;
+            g.has_fusion    = 1;
+            struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
+            g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
+            return;
+        }
+    }
+
+    /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
     const char* p;
-
     if ((p = strstr(d, "\"v\":")))
         sscanf(p + 4, "%lf", &g.current_speed);
     else if ((p = strstr(d, "speed=")))
         sscanf(p + 6, "%lf", &g.current_speed);
-
     if ((p = strstr(d, "\"x\":")))       sscanf(p + 4,  "%lf", &g.ego_x);
     if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
-
     g.has_fusion = 1;
     struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
     g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
@@ -300,6 +345,13 @@ static void* control_thread(void* arg) {
             acc_target = boost_target * ratio;
             if (acc_target < boost_target * 0.7) blocked = 1;
         }
+        /* 状态机: 跟踪障碍物阻塞状态变化 */
+        static int was_blocked_sm = 0;
+        if (blocked && !was_blocked_sm)
+            statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_BLOCKED, NULL);
+        else if (!blocked && was_blocked_sm)
+            statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_CLEARED, NULL);
+        was_blocked_sm = blocked;
 
         double min_overtake_gap = 22.0 + g.current_speed * 2.6;
         if (min_overtake_gap > 70.0) min_overtake_gap = 70.0;
@@ -353,6 +405,7 @@ static void* control_thread(void* arg) {
                     effective_target_y = g.lc_target_y;
                     if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
                     g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
+                    statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_START, NULL);
                     LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f)",
                              overtake_worthwhile ? "OVERTAKE" : "BLOCKED",
                              need_accel ? "+ACCEL" : "+CRUISE",
@@ -380,6 +433,7 @@ static void* control_thread(void* arg) {
         /* 检测变道完成 (横向偏差 < 0.3m) */
         if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < 0.3) {
             g.lc_state = 2; g.lc_wait = 0;
+            statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
             LOG_INFO("control", ">>> lane change complete");
         }
         if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < 0.3) {
@@ -412,6 +466,12 @@ static void* control_thread(void* arg) {
             if (brake > 1.0) brake = 1.0;
             mode = "BRAKE";
         }
+
+        /* Anti-windup: don't accumulate integral when output is saturated */
+        if (g.integral > 0 && throttle >= 1.0 && error > 0)
+            g.integral -= error * 0.05;  /* unwind positive accumulation */
+        if (g.integral < 0 && brake >= 1.0 && error < 0)
+            g.integral -= error * 0.05;  /* unwind negative accumulation */
 
         if (g.current_speed > g.cfg_cruise_speed + 1.0) {
             throttle = 0.0;
@@ -452,15 +512,33 @@ static void* control_thread(void* arg) {
             g.prev_steer = steer;
         }
 
-        /* ── 发布控制指令 ── */
-        char cmd[256];
-        snprintf(cmd, sizeof(cmd),
+        /* ── 发布控制指令 (二进制序列化 ControlRaw) ── */
+        ControlRaw raw;
+        raw.seq      = g.cycle;
+        raw.throttle = (float)throttle;
+        raw.brake    = (float)brake;
+        raw.steering = (float)steer;
+        raw.speed    = (float)g.current_speed;
+        raw.target   = (float)acc_target;
+        raw.error    = (float)error;
+        memset(raw.mode, 0, sizeof(raw.mode));
+        snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
+
+        uint8_t raw_buf[64];
+        size_t  raw_len = sizeof(raw_buf);
+        ControlRaw_serialize(&raw, raw_buf, &raw_len);
+        transport_publish(g.transport, "control/raw_cmd",
+                          raw_buf, (uint32_t)raw_len);
+
+        /* Also publish text format for backward compat (monitor/logging) */
+        char cmd_text[256];
+        snprintf(cmd_text, sizeof(cmd_text),
                  "throttle=%.2f brake=%.2f steer=%.4f "
                  "speed=%.1f target=%.1f error=%.1f mode=%s",
                  throttle, brake, steer,
                  g.current_speed, acc_target, error, mode);
-        transport_publish(g.transport, "control/raw_cmd",
-                          (const uint8_t*)cmd, (uint32_t)strlen(cmd) + 1);
+        transport_publish(g.transport, "control/raw_cmd/text",
+                          (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
         g.prev_error = error;
 
@@ -473,6 +551,9 @@ static void* control_thread(void* arg) {
 
     LOG_INFO("control", "stopped (%u cycles, final speed=%.1f m/s)",
              g.cycle, g.current_speed);
+    statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
+    statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
+    LOG_INFO("control", "state machine: %s", statem_state_name(&g.sm, g.sm.current));
     return NULL;
 }
 
@@ -503,24 +584,40 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lane_width = 3.5;
     g.blocked_timeout_s = 2.0;
 
+    /* 注册参数到 param_registry (类型安全，可运行时热重载) */
+    param_register_float("control.pid_kp", g.cfg_kp, 0.0, 5000.0, "PID proportional gain");
+    param_register_float("control.pid_ki", g.cfg_ki, 0.0, 1000.0, "PID integral gain");
+    param_register_float("control.pid_kd", g.cfg_kd, 0.0, 2000.0, "PID derivative gain");
+    param_register_float("control.cruise_speed", g.cfg_cruise_speed, 1.0, 50.0, "Target cruise speed m/s");
+    param_register_float("control.lane_width", g.lane_width, 2.5, 5.0, "Lane width meters");
+    param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
+    param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
+    param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
+
+    /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载) */
+    g.kp = param_get_float("control.pid_kp");
+    g.ki = param_get_float("control.pid_ki");
+    g.kd = param_get_float("control.pid_kd");
+    g.cfg_cruise_speed = param_get_float("control.cruise_speed");
+    g.lane_width       = param_get_float("control.lane_width");
+    g.lat_kp           = param_get_float("control.lat_kp");
+    g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
+    g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
+
+    /* 初始化反射式状态机 */
+    statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
+    statem_send_event(&g.sm, SM_EVENT_START, NULL);  /* INITIALIZED → RUNNING */
+
     if (params_json) {
+        /* Fallback: override with JSON params if provided (backward compat) */
         const char* p;
-        if ((p = strstr(params_json, "\"pid_kp\":")))
-            sscanf(p + 9, "%lf", &g.cfg_kp);
-        if ((p = strstr(params_json, "\"pid_ki\":")))
-            sscanf(p + 9, "%lf", &g.cfg_ki);
-        if ((p = strstr(params_json, "\"pid_kd\":")))
-            sscanf(p + 9, "%lf", &g.cfg_kd);
-        if ((p = strstr(params_json, "\"target_speed\":")))
-            sscanf(p + 15, "%lf", &g.cfg_cruise_speed);
-        if ((p = strstr(params_json, "\"lane_width\":")))
-            sscanf(p + 13, "%lf", &g.lane_width);
-        if ((p = strstr(params_json, "\"lat_kp\":")))
-            sscanf(p + 9, "%lf", &g.lat_kp);
-        if ((p = strstr(params_json, "\"lat_kd_heading\":")))
-            sscanf(p + 17, "%lf", &g.lat_kd_heading);
-        if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":")))
-            sscanf(p + 32, "%lf", &g.blocked_timeout_s);
+        if ((p = strstr(params_json, "\"pid_kp\":")))          sscanf(p + 9, "%lf", &g.cfg_kp);
+        if ((p = strstr(params_json, "\"pid_ki\":")))          sscanf(p + 9, "%lf", &g.cfg_ki);
+        if ((p = strstr(params_json, "\"pid_kd\":")))          sscanf(p + 9, "%lf", &g.cfg_kd);
+        if ((p = strstr(params_json, "\"target_speed\":")))    sscanf(p + 15, "%lf", &g.cfg_cruise_speed);
+        if ((p = strstr(params_json, "\"lat_kp\":")))          sscanf(p + 9, "%lf", &g.lat_kp);
+        if ((p = strstr(params_json, "\"lat_kd_heading\":")))  sscanf(p + 17, "%lf", &g.lat_kd_heading);
+        if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":"))) sscanf(p + 32, "%lf", &g.blocked_timeout_s);
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     }
 

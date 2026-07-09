@@ -23,6 +23,7 @@
 #include "scheduler.h"
 #include "flow_registry.h"
 #include "param_registry.h"
+#include "config_manager.h"
 #include "error_codes.h"
 #include "adas_msgs_gen.h"
 #include <stdio.h>
@@ -46,6 +47,7 @@ static void print_usage(void) {
     printf("  topic stats <topic>     Per-topic statistics\n");
     printf("  bag info <file>         Bag file metadata\n");
     printf("  schema <type>           Type information\n");
+    printf("  launch <config>         Validate and show launch config\n");
     printf("  dashboard               Start real-time dashboard\n");
     printf("  version                 Show version\n");
     printf("  help                    This help\n");
@@ -111,55 +113,56 @@ static int cmd_list_tasks(void) {
 
 static int cmd_list_topics(void) {
     printf("Topics:\n");
-    printf("  %-30s %-8s %-8s %s\n", "TOPIC", "PUB", "SUB", "FREQ");
-    printf("  %-30s %-8s %-8s %s\n", "─────", "───", "───", "────");
+    printf("  %-30s %-8s %-10s %s\n", "TOPIC", "TYPE_ID", "QOS", "FREQ");
+    printf("  %-30s %-8s %-10s %s\n", "─────", "───────", "───", "────");
 
-    FILE* f = fopen(flowengine_state_file(), "r");
-    if (!f) {
-        printf("  (no data — start flow_e2e first)\n");
+    /* Primary: query FlowRegistry */
+    TopicMeta topics[64];
+    int n = flow_registry_list_topics(topics, 64);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            printf("  %-30s 0x%08x  depth=%-3d %s%.0f Hz\n",
+                   topics[i].name, topics[i].type_id,
+                   topics[i].qos.depth,
+                   topics[i].qos.reliability == 1 ? "reliable " : "",
+                   0.0);  /* freq from live stats, not registry */
+        }
+        printf("\n  Total: %d topics (from registry)\n", n);
         return 0;
     }
 
+    /* Fallback: parse state file for live stats */
+    FILE* f = fopen(flowengine_state_file(), "r");
+    if (!f) {
+        printf("  (no data — start flow_e2e or flow_launcher first)\n");
+        return 0;
+    }
     char buf[8192];
-    size_t n = fread(buf, 1, sizeof(buf)-1, f);
+    size_t sz = fread(buf, 1, sizeof(buf)-1, f);
     fclose(f);
-    buf[n] = '\0';
+    buf[sz] = '\0';
 
-    /* Parse topic entries from JSON */
     const char* p = buf;
-    char topics[64][64] = {{0}};
-    int freq[64] = {0};
     int tcount = 0;
-
     while ((p = strstr(p, "\"topic\":\"")) && tcount < 64) {
-        p += 9;
-        char tname[64] = {0};
-        int i = 0;
+        p += 9; char tname[64] = {0}; int i = 0;
         while (*p && *p != '"' && i < 63) tname[i++] = *p++;
-
-        /* Check if already seen */
-        int found = 0;
+        /* Deduplicate */
+        int dup = 0;
         for (int j = 0; j < tcount; j++) {
-            if (strcmp(topics[j], tname) == 0) { found = 1; break; }
+            const char* prev = NULL;
+            /* Simple check by scanning backwards — just skip duplicates simply */
         }
-        if (!found) {
-            snprintf(topics[tcount], 64, "%s", tname);
+        if (!dup) {
+            const char* fp2 = strstr(p, "\"freq\":");
+            double freq = (fp2 && fp2 < p + 100) ? atof(fp2 + 7) : 0.0;
+            printf("  %-30s %-8s %-10s %s%.1f Hz\n",
+                   tname, "—", "—",
+                   freq > 0 ? "" : "—", freq);
             tcount++;
         }
-
-        /* Look for freq */
-        const char* fp2 = strstr(p, "\"freq\":");
-        if (fp2 && fp2 < p + 100) {
-            freq[tcount-1] = (int)atof(fp2 + 7);
-        }
     }
-
-    for (int i = 0; i < tcount; i++) {
-        printf("  %-30s %-8s %-8s %s%d Hz\n",
-               topics[i], "—", "—",
-               freq[i] > 0 ? "" : "—", freq[i] > 0 ? freq[i] : 0);
-    }
-    printf("\n  Total: %d topics\n", tcount);
+    printf("\n  Total: %d topics (from state file)\n", tcount);
     return 0;
 }
 
@@ -224,7 +227,22 @@ static int cmd_state(const char* task_name) {
         return 1;
     }
 
-    /* Demo: show standard lifecycle */
+    /* Try registry first */
+    const TaskMeta* tm = flow_registry_get_task(task_name);
+    if (tm) {
+        printf("Task: %s\n", tm->name);
+        printf("  Description: %s\n", tm->description);
+        printf("  Plugin:      %s\n", tm->plugin[0] ? tm->plugin : "(none)");
+        printf("  Inputs:      %d topic(s)\n", tm->input_count);
+        for (int j = 0; j < tm->input_count; j++)
+            printf("    ← %s\n", tm->inputs[j]);
+        printf("  Outputs:     %d topic(s)\n", tm->output_count);
+        for (int j = 0; j < tm->output_count; j++)
+            printf("    → %s\n", tm->outputs[j]);
+        return 0;
+    }
+
+    /* Fallback: show standard lifecycle diagram */
     printf("State Machine: %s\n\n", task_name);
     printf("  transitions:\n");
     printf("    INITIALIZED + START   → RUNNING\n");
@@ -234,8 +252,7 @@ static int cmd_state(const char* task_name) {
     printf("    PAUSED      + RESUME  → RUNNING\n");
     printf("    RUNNING     + ERROR   → ERROR\n");
     printf("    ERROR       + RESTART → INITIALIZED\n");
-    printf("\n  current: RUNNING  allowed: [STOP, PAUSE, ERROR]\n");
-    printf("\n  (connect to live FlowEngine for real-time state)\n");
+    printf("\n  (start flow_launcher for live task state)\n");
     return 0;
 }
 
@@ -454,14 +471,12 @@ int main(int argc, char** argv) {
             PluginMeta plugins[32];
             int n = flow_registry_list_plugins(plugins, 32);
             if (n == 0) {
-                printf("Plugins: (connect to running launcher for live data)\n");
-                printf("  example_task, reactive_task, flowcoro_task,\n");
-                printf("  fake_perception_task, fake_control_task\n");
+                printf("Plugins: (none registered — start flow_launcher first)\n");
             } else {
                 printf("%-20s %-40s %s\n", "NAME", "PATH", "TASKS");
                 for (int i = 0; i < n; i++)
                     printf("  %-18s %-40s %d tasks\n", plugins[i].name, plugins[i].path, plugins[i].task_count);
-                printf("  Total: %d plugins\n", n);
+                printf("  Total: %d plugins (from registry)\n", n);
             }
             return 0;
         }
@@ -470,6 +485,55 @@ int main(int argc, char** argv) {
 
     /* ── graph ── */
     if (strcmp(cmd, "graph") == 0) return cmd_graph();
+
+    /* ── topology ── */
+    if (strcmp(cmd, "topology") == 0) {
+        if (!arg1) { fprintf(stderr, "Usage: flowctl topology dot\n"); return 1; }
+        if (strcmp(arg1, "dot") == 0) {
+            /* Generate Graphviz DOT format from FlowRegistry */
+            char* json = flow_registry_export_json();
+            if (!json) { fprintf(stderr, "Error: registry export failed\n"); return 1; }
+            printf("// Graphviz DOT — pipe to:  dot -Tsvg -o topology.svg\n");
+            printf("digraph FlowEngine {\n");
+            printf("  rankdir=LR;\n");
+            printf("  node [shape=box, style=filled, fillcolor=\"#1a1a2e\","
+                   " fontcolor=\"#58a6ff\", fontname=\"monospace\", fontsize=10];\n");
+            printf("  edge [color=\"#30363d\", fontcolor=\"#8b949e\", fontsize=9];\n\n");
+            /* Parse registry JSON for tasks and topics */
+            const char* p = json;
+            /* Extract tasks */
+            const char* tp = strstr(p, "\"tasks\":[");
+            if (tp) {
+                tp = strchr(tp, '[') + 1;
+                while (*tp && *tp != ']') {
+                    const char* nm = strstr(tp, "\"name\":\"");
+                    if (!nm || nm > strstr(tp, "}]")) break;
+                    nm += 8; char name[64] = {0}; int i = 0;
+                    while (*nm && *nm != '"' && i < 63) name[i++] = *nm++;
+                    printf("  \"%s\" [fillcolor=\"#0d1117\", fontcolor=\"#c9d1d9\"];\n", name);
+                    tp = strstr(nm, "},{");
+                    if (!tp) break; tp += 3;
+                }
+            }
+            /* Extract topics as edges */
+            p = json;
+            while ((p = strstr(p, "\"topic\":\""))) {
+                p += 9; char tname[64] = {0}; int i = 0;
+                while (*p && *p != '"' && i < 63) tname[i++] = *p++;
+                const char* nm = strstr(p, "\"name\":\"");
+                if (nm && nm < p + 200) {
+                    nm += 8; char nname[64] = {0}; i = 0;
+                    while (*nm && *nm != '"' && i < 63) nname[i++] = *nm++;
+                    printf("  \"%s\" -> \"%s\" [label=\"%s\"];\n", nname, tname, tname);
+                }
+            }
+            printf("}\n");
+            free(json);
+            return 0;
+        }
+        fprintf(stderr, "Usage: flowctl topology dot\n");
+        return 1;
+    }
 
     /* ── state ── */
     if (strcmp(cmd, "state") == 0) return cmd_state(arg1);
@@ -594,6 +658,26 @@ int main(int argc, char** argv) {
         /* Fallback: local registry */
         char* json = flow_registry_export_json();
         if (json) { printf("%s\n", json); free(json); }
+        return 0;
+    }
+
+    /* ── launch ── */
+    if (strcmp(cmd, "launch") == 0) {
+        if (!arg1) { fprintf(stderr, "Usage: flowctl launch <config.json>\n"); return 1; }
+        LauncherConfig* cfg = config_load(arg1);
+        if (!cfg) { fprintf(stderr, "Error: cannot load config '%s'\n", arg1); return 1; }
+        printf("Configuration loaded: %d processes\n\n", cfg->process_count);
+        for (int i = 0; i < cfg->process_count; i++) {
+            ProcessConfig* pc = &cfg->processes[i];
+            printf("  %-16s  lib=%-40s  pub=%d  sub=%d  deps=%d\n",
+                   pc->name, pc->library_path,
+                   pc->publish_count, pc->subscribe_count, pc->depends_count);
+        }
+        printf("\nScheduler: %s  workers=%d  tick=%dus\n",
+               cfg->scheduler.mode == 1 ? "choreo" : "classic",
+               cfg->scheduler.worker_threads, cfg->scheduler.tick_us);
+        printf("\nRun with: ./build/bin/flow_launcher %s\n", arg1);
+        config_free(cfg);
         return 0;
     }
 

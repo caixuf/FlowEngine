@@ -4,6 +4,7 @@
  */
 
 #include "serializer.h"
+#include "flow_registry.h"
 #include "error_codes.h"
 #include <string.h>
 #include <stdio.h>
@@ -83,6 +84,8 @@ int serializer_register_type(const TypeRegistryEntry* entry) {
         if (g_type_table[i].type_id == entry->type_id) {
             g_type_table[i] = *entry;
             pthread_mutex_unlock(&g_type_mutex);
+            /* Bridge: notify FlowRegistry of update */
+            flow_registry_on_type_registered(entry);
             return 0;
         }
     }
@@ -97,6 +100,10 @@ int serializer_register_type(const TypeRegistryEntry* entry) {
 
     g_type_table[g_type_count++] = *entry;
     pthread_mutex_unlock(&g_type_mutex);
+
+    /* Bridge: notify FlowRegistry for unified JSON export */
+    flow_registry_on_type_registered(entry);
+
     return 0;
 }
 

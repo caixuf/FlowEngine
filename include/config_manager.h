@@ -23,6 +23,9 @@ typedef struct {
     char     remap[64];          /**< Remap target (empty = no remap) */
     int      qos_depth;          /**< QoS queue depth (0=default) */
     char     qos_policy[16];     /**< QoS policy */
+    char     qos_reliability[16]; /**< "best_effort" or "reliable" */
+    int      qos_deadline_ms;    /**< Deadline in ms (0=off) */
+    int      qos_lifespan_ms;    /**< Lifespan in ms (0=off) */
 } TopicDecl;
 
 /** Resource limits */

@@ -143,7 +143,7 @@ run_launcher() {
 
 # 显示帮助信息
 show_help() {
-    echo "StartTool CMake构建脚本"
+    echo "FlowEngine CMake构建脚本"
     echo ""
     echo "用法: $0 [选项]"
     echo ""
