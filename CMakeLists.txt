@@ -326,6 +326,7 @@ target_link_libraries(flow_ipc flowengine_core rt)
 # ── Step 3: Bag 录制回放（含 Step 5 统一时钟）────────────
 add_executable(flow_bag src/bag_demo.c)
 target_link_libraries(flow_bag flowengine_core m)
+target_link_options(flow_bag PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
 
 # ── Step 4: 消息驱动任务插件 ─────────────────────────────
 add_library(reactive_task SHARED src/plugins/reactive_task.c)

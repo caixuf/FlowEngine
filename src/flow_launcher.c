@@ -41,7 +41,6 @@
 #include "flow_registry.h"
 #include "config_manager.h"
 #include "bag.h"
-#include "clock_service.h"
 #include "adas_msgs_gen.h"
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
@@ -257,14 +256,12 @@ static int run_multi_process_mode(int duration, int stagger_ms, const char* self
 int main(int argc, char** argv) {
     const char* config_path = "config/pipeline.json";
     const char* bag_path    = NULL;
-    const char* replay_path = NULL;
     int duration = 0;
     int multi_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) duration = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bag") == 0 && i + 1 < argc) bag_path = argv[++i];
-        else if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) replay_path = argv[++i];
         else if (strcmp(argv[i], "--multi") == 0) multi_mode = 1;
         else if (argv[i][0] != '-') config_path = argv[i];
     }
@@ -285,90 +282,6 @@ int main(int argc, char** argv) {
     }
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-
-    /* ── SIL Replay mode: bag传感器数据 → 算法pipeline → 输出对比 ──
-     * 核心思路: bag提供sensor/lidar、sensor/gps、vehicle/state等原始数据,
-     * perception→fusion→planning→control→safety→monitor完整运行,
-     * 算法在真实录制数据上计算, 不再是假仿真数据。 */
-    if (replay_path) {
-        LOG_INFO("launcher", "SIL REPLAY: %s (bag→pipeline→dashboard)", replay_path);
-        BagReader* r = bag_reader_open(replay_path);
-        if (!r) { LOG_WARN("launcher", "cannot open bag: %s", replay_path); log_shutdown(); return 1; }
-
-        adas_msgs_register_all();
-        MessageBus*       bus       = message_bus_create("replay_bus");
-        DiscoveryManager* discovery = discovery_create("replay",
-            CAP_PUBLISHER | CAP_SUBSCRIBER);
-        discovery_start(discovery);
-        Transport* transport = transport_create(bus, discovery, TRANSPORT_LOCAL);
-        transport_start(transport);
-        SchedulerConfig scfg = SCHEDULER_CONFIG_DEFAULT;
-        scfg.mode = SCHEDULER_MODE_CHOREO;
-        Scheduler* scheduler = scheduler_create(&scfg);
-        scheduler_set_choreo_bus(scheduler, bus);
-        scheduler_start(scheduler);
-
-        /* Load pipeline nodes (skip sim_world + sensor_model — bag provides their data).
-         * perception→fusion→planning→control→safety→monitor all run on real sensor data. */
-        const char* pipeline_libs[] = {
-            "build/lib/libperception_node.so",
-            "build/lib/libfusion_node.so",
-            "build/lib/libplanning_node.so",
-            "build/lib/libcontrol_node.so",
-            "build/lib/libsafety_control_node.so",
-            "build/lib/libmonitor_node.so",
-        };
-        NodePlugin* plugins[6] = {NULL};
-        void* handles[6] = {NULL};
-        int n_loaded = 0;
-
-        for (int i = 0; i < 6; i++) {
-            handles[i] = dlopen(pipeline_libs[i], RTLD_LAZY | RTLD_GLOBAL);
-            if (!handles[i]) {
-                LOG_WARN("launcher", "skip %s: %s", pipeline_libs[i], dlerror());
-                continue;
-            }
-            NodeGetPluginFn get_fn = (NodeGetPluginFn)dlsym(handles[i], NODE_PLUGIN_SYMBOL);
-            if (!get_fn) { dlclose(handles[i]); handles[i] = NULL; continue; }
-            plugins[i] = get_fn();
-            if (!plugins[i]) { dlclose(handles[i]); handles[i] = NULL; continue; }
-            const char* params = NULL;
-            if (i == 5) params = "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}";
-            if (plugins[i]->init(bus, transport, discovery, scheduler, params) == 0) {
-                plugins[i]->start();
-                n_loaded++;
-                LOG_INFO("launcher", "  [%d/6] %s", n_loaded, plugins[i]->name);
-                usleep(50000);
-            }
-        }
-        LOG_INFO("launcher", "SIL pipeline: %d/6 nodes loaded (bag provides sensor data)", n_loaded);
-
-        /* Replay bag at 1x speed — pipeline nodes subscribe and process in real time */
-        uint64_t msg_count = 0, duration_us = 0;
-        bag_reader_info(r, &msg_count, &duration_us);
-        LOG_INFO("launcher", "replaying %llu msgs (%.1fs)...",
-                 (unsigned long long)msg_count, (double)duration_us / 1e6);
-        clock_set_sim_mode(true);
-        int replayed = bag_reader_play(r, bus, 1.0f);
-        clock_set_sim_mode(false);
-        LOG_INFO("launcher", "SIL replay done: %d msgs replayed", replayed);
-
-        /* Let pipeline finish processing last frames */
-        sleep(1);
-
-        /* Stop pipeline in reverse order */
-        for (int i = 5; i >= 0; i--) {
-            if (plugins[i]) { plugins[i]->stop(); plugins[i]->cleanup(); }
-        }
-        bag_reader_close(r);
-        scheduler_stop(scheduler); scheduler_destroy(scheduler);
-        transport_stop(transport); transport_destroy(transport);
-        discovery_stop(discovery); discovery_destroy(discovery);
-        message_bus_destroy(bus);
-        for (int i = 0; i < 6; i++) if (handles[i]) dlclose(handles[i]);
-        log_shutdown();
-        return 0;
-    }
 
     if (multi_mode) {
         signal(SIGCHLD, SIG_DFL);

@@ -56,7 +56,7 @@ if [ -n "$REPLAY_FILE" ]; then
   if $OPEN_BROWSER; then
     xdg-open http://localhost:8800 2>/dev/null || open http://localhost:8800 2>/dev/null || true
   fi
-  "$LAUNCHER_BIN" --replay "$REPLAY_FILE" 2>&1 | grep -E "replay|monitor|bag"
+  "$BUILD_DIR/bin/flow_bag" --sil "$REPLAY_FILE" "$PIPELINE" 2>&1 | grep -E "SIL|Replaying|loaded|done"
   kill $FLOWMOND_PID 2>/dev/null
   exit 0
 fi

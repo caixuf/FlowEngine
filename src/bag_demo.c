@@ -1,15 +1,23 @@
 /**
- * bag_demo.c — 消息录制与回放演示（Step 3 + Step 5）
+ * bag_demo.c / flow_bag — Bag 录制、回放、SIL仿真
  *
  * 用法：
- *   ./bag_demo --record out.bag   # 录制 3 秒
- *   ./bag_demo --play   out.bag   # 以录制时间回放
+ *   flow_bag --record out.bag                # 录制
+ *   flow_bag --play   in.bag                 # 全部topic回放
+ *   flow_bag --replay in.bag                 # 回放+仪表盘JSON
+ *   flow_bag --sil    in.bag pipeline.json   # SIL仿真(传感器数据→算法pipeline)
  */
 
 #include "message_bus.h"
 #include "bag.h"
+#include "config_manager.h"
 #include "clock_service.h"
 #include "msg_schema.h"
+#include "node_plugin.h"
+#include "transport.h"
+#include "discovery.h"
+#include "scheduler.h"
+#include "logger.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +25,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dlfcn.h>
 #include <math.h>
 
 /* ── Demo data types ─────────────────────────────────── */
@@ -172,26 +181,118 @@ static int do_play(const char* path) {
     return 0;
 }
 
+/* ── SIL 仿真: bag传感器数据 → 算法pipeline ──────────────── */
+
+static int do_sil(const char* bagfile, const char* pipeline_cfg) {
+    printf("SIL仿真: bag=%s  config=%s\n", bagfile, pipeline_cfg);
+
+    /* Load pipeline config to know which nodes to run */
+    LauncherConfig* cfg = config_load(pipeline_cfg);
+    if (!cfg) { fprintf(stderr, "failed to load %s\n", pipeline_cfg); return 1; }
+
+    BagReader* r = bag_reader_open(bagfile);
+    if (!r) { fprintf(stderr, "cannot open %s\n", bagfile); config_free(cfg); return 1; }
+
+    /* Init infrastructure */
+    log_init(LOG_INFO, NULL);
+    MessageBus*       bus       = message_bus_create("sil_bus");
+    DiscoveryManager* discovery = discovery_create("sil", CAP_PUBLISHER | CAP_SUBSCRIBER);
+    discovery_start(discovery);
+    Transport* transport = transport_create(bus, discovery, TRANSPORT_LOCAL);
+    transport_start(transport);
+    SchedulerConfig scfg = SCHEDULER_CONFIG_DEFAULT;
+    scfg.mode = SCHEDULER_MODE_CHOREO;
+    Scheduler* scheduler = scheduler_create(&scfg);
+    scheduler_set_choreo_bus(scheduler, bus);
+    scheduler_start(scheduler);
+
+    /* Load pipeline nodes from config, skip sim_world + sensor_model
+     * (bag provides sensor/lidar, sensor/gps, vehicle/state). */
+    #define SIL_MAX_NODES 8
+    NodePlugin* plugins[SIL_MAX_NODES] = {NULL};
+    void* handles[SIL_MAX_NODES] = {NULL};
+    int n_loaded = 0;
+
+    for (int i = 0; i < cfg->process_count && n_loaded < SIL_MAX_NODES; i++) {
+        ProcessConfig* pc = &cfg->processes[i];
+        /* Skip data source nodes — bag provides their output */
+        if (strcmp(pc->name, "sim_world") == 0 || strcmp(pc->name, "sensor_model") == 0)
+            continue;
+
+        handles[n_loaded] = dlopen(pc->library_path, RTLD_LAZY | RTLD_GLOBAL);
+        if (!handles[n_loaded]) {
+            char alt[512];
+            const char* bn = strrchr(pc->library_path, '/');
+            bn = bn ? bn + 1 : pc->library_path;
+            snprintf(alt, sizeof(alt), "build/lib/%s", bn);
+            handles[n_loaded] = dlopen(alt, RTLD_LAZY | RTLD_GLOBAL);
+        }
+        if (!handles[n_loaded]) {
+            fprintf(stderr, "  skip %s: %s\n", pc->name, dlerror());
+            continue;
+        }
+        NodeGetPluginFn get_fn = (NodeGetPluginFn)dlsym(handles[n_loaded], NODE_PLUGIN_SYMBOL);
+        if (!get_fn) { dlclose(handles[n_loaded]); handles[n_loaded] = NULL; continue; }
+        plugins[n_loaded] = get_fn();
+        if (!plugins[n_loaded]) { dlclose(handles[n_loaded]); handles[n_loaded] = NULL; continue; }
+
+        if (plugins[n_loaded]->init(bus, transport, discovery, scheduler,
+            pc->params[0] ? pc->params : NULL) == 0) {
+            plugins[n_loaded]->start();
+            printf("  [%d] %s\n", n_loaded + 1, plugins[n_loaded]->name);
+            n_loaded++;
+            usleep(50000);
+        }
+    }
+    config_free(cfg);
+    printf("SIL pipeline: %d nodes (bag provides sensor data)\n", n_loaded);
+
+    /* Replay bag → pipeline runs on real data */
+    uint64_t msg_count = 0, dur_us = 0;
+    bag_reader_info(r, &msg_count, &dur_us);
+    printf("Replaying %llu msgs (%.1fs)...\n", (unsigned long long)msg_count, dur_us / 1e6);
+    clock_set_sim_mode(true);
+    int replayed = bag_reader_play(r, bus, 1.0f);
+    clock_set_sim_mode(false);
+    printf("SIL done: %d msgs replayed\n", replayed);
+
+    sleep(1);
+    for (int i = n_loaded - 1; i >= 0; i--) {
+        if (plugins[i]) { plugins[i]->stop(); plugins[i]->cleanup(); }
+    }
+    bag_reader_close(r);
+    scheduler_stop(scheduler); scheduler_destroy(scheduler);
+    transport_stop(transport); transport_destroy(transport);
+    discovery_stop(discovery); discovery_destroy(discovery);
+    message_bus_destroy(bus);
+    for (int i = 0; i < n_loaded; i++) if (handles[i]) dlclose(handles[i]);
+    log_shutdown();
+    return 0;
+}
+
 /* ── main ────────────────────────────────────────────── */
 
 int main(int argc, char* argv[]) {
     signal(SIGINT,  sighandler);
     signal(SIGTERM, sighandler);
 
-    const char* cmd     = NULL;
-    const char* bagfile = NULL;
-    int dashboard_mode  = 0;
+    const char* cmd      = NULL;
+    const char* bagfile  = NULL;
+    const char* sil_cfg  = NULL;
+    int dashboard_mode   = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dashboard") == 0) dashboard_mode = 1;
         else if (!cmd) cmd = argv[i];
         else if (!bagfile) bagfile = argv[i];
+        else if (!sil_cfg) sil_cfg = argv[i];
     }
 
     if (!cmd || !bagfile) {
         fprintf(stderr, "用法: %s [--dashboard] --record <file.bag>\n", argv[0]);
         fprintf(stderr, "      %s [--dashboard] --play   <file.bag>\n", argv[0]);
         fprintf(stderr, "      %s [--dashboard] --replay <file.bag>\n", argv[0]);
+        fprintf(stderr, "      %s --sil <file.bag> <pipeline.json>\n", argv[0]);
         return 1;
     }
 
@@ -216,7 +317,10 @@ int main(int argc, char* argv[]) {
     int ret = 0;
     if (strcmp(cmd, "--record") == 0) ret = do_record(bagfile);
     else if (strcmp(cmd, "--play") == 0) ret = do_play(bagfile);
-    else if (strcmp(cmd, "--replay") == 0) {
+    else if (strcmp(cmd, "--sil") == 0) {
+        if (!sil_cfg) sil_cfg = "config/pipeline.json";
+        ret = do_sil(bagfile, sil_cfg);
+    } else if (strcmp(cmd, "--replay") == 0) {
         printf("Replay+Dashboard mode: %s\n", bagfile);
         MessageBus* bus = message_bus_create("replay_bus");
         BagReader*  r   = bag_reader_open(bagfile);
