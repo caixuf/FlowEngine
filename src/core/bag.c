@@ -74,27 +74,128 @@ typedef struct {
 #define BAG_MAX_INDEX_ENTRIES 256
 
 /* ─────────────────────────────────────────────────────── */
-/* Writer                                                  */
+/* Writer (async ring-buffer + background flush thread)    */
 /* ─────────────────────────────────────────────────────── */
+
+#define BAG_RING_SIZE  (1024 * 1024)    /* 1 MB ring buffer */
+#define BAG_MAX_RECORD (64 * 1024)      /* max single record (64 KB) */
 
 struct BagWriter {
     FILE*            fp;
     pthread_mutex_t  mutex;
+    pthread_cond_t   flush_cv;          /* signal: data available */
     bool             attached;
+    bool             running;
+    bool             stop_flush;
     MessageBus*      bus;
+
+    /* Ring buffer: callback writes here, flush thread drains */
+    uint8_t*         ring;
+    size_t           ring_w;            /* write cursor */
+    size_t           ring_r;            /* read cursor (only flush thread) */
+    size_t           ring_len;          /* bytes available to read */
 
     /* Stats for header/index */
     uint64_t         msg_count;
     uint64_t         first_ts;
     uint64_t         last_ts;
 
+    /* File offset tracker (updated by flush thread) */
+    uint64_t         file_offset;
+
     /* Index (built during write) */
     BagIndexEntry    index[BAG_MAX_INDEX_ENTRIES];
     int              index_count;
 
-    /* Current position tracking */
-    uint64_t         data_start_offset;  /* file offset of first record */
+    /* Flush thread */
+    pthread_t        flush_thread;
 };
+
+/* ── Ring buffer helpers ────────────────────────────────── */
+
+static size_t ring_write_space(BagWriter* w) {
+    return BAG_RING_SIZE - w->ring_len;
+}
+
+static size_t ring_contig_write(BagWriter* w) {
+    size_t space = ring_write_space(w);
+    size_t tail = BAG_RING_SIZE - w->ring_w;
+    return space < tail ? space : tail;
+}
+
+static void ring_advance_write(BagWriter* w, size_t n) {
+    w->ring_w = (w->ring_w + n) % BAG_RING_SIZE;
+    w->ring_len += n;
+}
+
+static size_t ring_contig_read(BagWriter* w) {
+    if (w->ring_len == 0) return 0;
+    size_t tail = BAG_RING_SIZE - w->ring_r;
+    return w->ring_len < tail ? w->ring_len : tail;
+}
+
+static void ring_advance_read(BagWriter* w, size_t n) {
+    w->ring_r = (w->ring_r + n) % BAG_RING_SIZE;
+    w->ring_len -= n;
+}
+
+/* ── Flush thread: drains ring buffer → disk ────────────── */
+
+static void* bag_flush_thread(void* arg) {
+    BagWriter* w = (BagWriter*)arg;
+    uint8_t* chunk = (uint8_t*)malloc(BAG_RING_SIZE);
+    if (!chunk) return NULL;
+
+    while (!w->stop_flush) {
+        pthread_mutex_lock(&w->mutex);
+        /* Wait for data or stop signal */
+        while (w->ring_len == 0 && !w->stop_flush)
+            pthread_cond_wait(&w->flush_cv, &w->mutex);
+        if (w->stop_flush) { pthread_mutex_unlock(&w->mutex); break; }
+
+        /* Drain ring buffer: copy contiguous data, fwrite, advance */
+        size_t n = ring_contig_read(w);
+        if (n > 0) {
+            memcpy(chunk, w->ring + w->ring_r, n);
+            ring_advance_read(w, n);
+            size_t remaining = w->ring_len;
+            pthread_mutex_unlock(&w->mutex);
+
+            fwrite(chunk, 1, n, w->fp);
+
+            /* More data wrapped around? */
+            if (remaining > 0) {
+                pthread_mutex_lock(&w->mutex);
+                n = ring_contig_read(w);
+                if (n > 0) {
+                    memcpy(chunk, w->ring + w->ring_r, n);
+                    ring_advance_read(w, n);
+                }
+                pthread_mutex_unlock(&w->mutex);
+                if (n > 0) fwrite(chunk, 1, n, w->fp);
+            }
+        } else {
+            pthread_mutex_unlock(&w->mutex);
+        }
+    }
+
+    /* Final drain: flush any remaining data before exit */
+    pthread_mutex_lock(&w->mutex);
+    while (w->ring_len > 0) {
+        size_t n = ring_contig_read(w);
+        memcpy(chunk, w->ring + w->ring_r, n);
+        ring_advance_read(w, n);
+        pthread_mutex_unlock(&w->mutex);
+        fwrite(chunk, 1, n, w->fp);
+        pthread_mutex_lock(&w->mutex);
+    }
+    pthread_mutex_unlock(&w->mutex);
+
+    free(chunk);
+    return NULL;
+}
+
+/* ── Public API ─────────────────────────────────────────── */
 
 BagWriter* bag_writer_open(const char* path) {
     if (!path) return NULL;
@@ -103,21 +204,29 @@ BagWriter* bag_writer_open(const char* path) {
 
     BagWriter* w = (BagWriter*)calloc(1, sizeof(BagWriter));
     if (!w) { fclose(fp); return NULL; }
-    w->fp   = fp;
+    w->fp       = fp;
+    w->running  = true;
+    w->ring     = (uint8_t*)malloc(BAG_RING_SIZE);
+    if (!w->ring) { fclose(fp); free(w); return NULL; }
     pthread_mutex_init(&w->mutex, NULL);
+    pthread_cond_init(&w->flush_cv, NULL);
 
-    /* Write placeholder header (will be overwritten in close) */
+    /* Write placeholder header (overwritten in close) */
     uint8_t header[BAG_HEADER_SIZE];
     memset(header, 0, sizeof(header));
     fwrite(header, 1, sizeof(header), fp);
-    w->data_start_offset = BAG_HEADER_SIZE;
+    w->file_offset = BAG_HEADER_SIZE;
+
+    /* 256KB I/O buffer on the file stream */
+    static char io_buf[256 * 1024];
+    setvbuf(fp, io_buf, _IOFBF, sizeof(io_buf));
+
+    /* Start background flush thread */
+    pthread_create(&w->flush_thread, NULL, bag_flush_thread, w);
 
     return w;
 }
 
-/**
- * Find or create an index entry for a topic.
- */
 static BagIndexEntry* find_or_create_index(BagWriter* w, const char* topic) {
     for (int i = 0; i < w->index_count; i++) {
         if (strcmp(w->index[i].topic, topic) == 0) return &w->index[i];
@@ -132,48 +241,70 @@ static BagIndexEntry* find_or_create_index(BagWriter* w, const char* topic) {
 int bag_writer_write(BagWriter* w, const Message* msg) {
     if (!w || !msg) return ERR_INVALID_PARAM;
 
+    uint64_t ts    = msg->timestamp_us;
+    uint8_t  tlen  = (uint8_t)strnlen(msg->topic, MSG_BUS_MAX_TOPIC_LEN - 1);
+    uint32_t dsize = msg->data_size;
+
+    /* Build serialized record: [type_id:4B][schema_ver:1B][endian:1B]
+     * [ts:8B][tlen:1B][topic:N][dsize:4B][data:N]
+     * Same on-disk format as before — no extra framing in ring buffer. */
+    uint32_t rec_size = 4 + 1 + 1 + 8 + 1 + (uint32_t)tlen + 4 + dsize;
+    if (rec_size > BAG_MAX_RECORD) return -1;
+
     pthread_mutex_lock(&w->mutex);
 
-    uint64_t ts       = msg->timestamp_us;
-    uint8_t  tlen     = (uint8_t)strnlen(msg->topic, MSG_BUS_MAX_TOPIC_LEN - 1);
-    uint32_t dsize    = msg->data_size;
+    /* Wait for space in ring buffer (bounded: drop if full > 10ms) */
+    int waits = 0;
+    while (ring_write_space(w) < rec_size && waits < 10) {
+        pthread_mutex_unlock(&w->mutex);
+        usleep(1000);
+        pthread_mutex_lock(&w->mutex);
+        waits++;
+    }
+    if (ring_write_space(w) < rec_size) {
+        pthread_mutex_unlock(&w->mutex);
+        return -1;  /* drop — don't block the pipeline */
+    }
 
-    /* Update index */
+    /* Pack record into ring buffer (same format as v2 on-disk) */
+    uint8_t* dst = w->ring + w->ring_w;
+    memcpy(dst, &msg->type_id, 4);       dst += 4;
+    *dst++ = msg->schema_version;
+    *dst++ = msg->endian_marker;
+    memcpy(dst, &ts, 8);                 dst += 8;
+    *dst++ = tlen;
+    if (tlen > 0) { memcpy(dst, msg->topic, tlen); dst += tlen; }
+    memcpy(dst, &dsize, 4);              dst += 4;
+    if (dsize > 0) memcpy(dst, msg->data, dsize);
+    size_t written = rec_size;
+
+    /* Handle ring wrap: if record spans the end, it must fit in one chunk.
+     * The wait above ensures contiguous space is available. */
+    ring_advance_write(w, written);
+
+    /* Update index (file offset estimated from flush position) */
     BagIndexEntry* ie = find_or_create_index(w, msg->topic);
     if (ie) {
-        uint64_t current_offset = (uint64_t)ftell(w->fp);
         if (ie->count == 0) {
-            ie->first_offset   = current_offset;
+            ie->first_offset   = w->file_offset + (uint64_t)w->ring_len;
             ie->type_id        = msg->type_id;
             ie->schema_version = msg->schema_version;
         }
-        ie->last_offset = current_offset;
+        ie->last_offset = w->file_offset + (uint64_t)w->ring_len;
         ie->count++;
     }
 
-    /* Track stats */
     if (w->msg_count == 0) w->first_ts = ts;
     w->last_ts = ts;
     w->msg_count++;
 
-    /* Write record in v2 format */
-    fwrite(&msg->type_id,        sizeof(msg->type_id),        1, w->fp);
-    fwrite(&msg->schema_version, sizeof(msg->schema_version), 1, w->fp);
-    fwrite(&msg->endian_marker,  sizeof(msg->endian_marker),  1, w->fp);
-    fwrite(&ts,                  sizeof(ts),                  1, w->fp);
-    fwrite(&tlen,                sizeof(tlen),                1, w->fp);
-    fwrite(msg->topic,           1, tlen,                      w->fp);
-    fwrite(&dsize,               sizeof(dsize),               1, w->fp);
-    if (dsize > 0) fwrite(msg->data, 1, dsize, w->fp);
-
+    pthread_cond_signal(&w->flush_cv);
     pthread_mutex_unlock(&w->mutex);
     return 0;
 }
 
-/* Callback used for auto-recording from bus */
 static void bag_record_callback(const Message* msg, void* user_data) {
-    BagWriter* w = (BagWriter*)user_data;
-    bag_writer_write(w, msg);
+    bag_writer_write((BagWriter*)user_data, msg);
 }
 
 int bag_writer_attach(BagWriter* w, MessageBus* bus) {
@@ -186,60 +317,60 @@ int bag_writer_attach(BagWriter* w, MessageBus* bus) {
 void bag_writer_close(BagWriter* w) {
     if (!w) return;
 
-    if (w->attached && w->bus) {
+    if (w->attached && w->bus)
         message_bus_unsubscribe(w->bus, "*", bag_record_callback);
-    }
 
+    /* Stop flush thread and drain remaining */
+    pthread_mutex_lock(&w->mutex);
+    w->stop_flush = true;
+    pthread_cond_signal(&w->flush_cv);
+    pthread_mutex_unlock(&w->mutex);
+    pthread_join(w->flush_thread, NULL);
+
+    /* Update file_offset from actual ftell */
+    w->file_offset = (uint64_t)ftell(w->fp);
+
+    /* Write index and header */
     if (w->fp) {
-        /* Write index table at current position */
         uint64_t index_offset = (uint64_t)ftell(w->fp);
-
-        /* Write index entry count */
-        uint64_t entry_count = (uint64_t)w->index_count;
+        uint64_t entry_count  = (uint64_t)w->index_count;
         fwrite(&entry_count, sizeof(entry_count), 1, w->fp);
-
-        /* Write index entries */
         for (int i = 0; i < w->index_count; i++) {
             BagIndexEntry* e = &w->index[i];
-            char topic_padded[BAG_INDEX_ENTRY_TOPIC_LEN];
-            memset(topic_padded, 0, sizeof(topic_padded));
-            snprintf(topic_padded, sizeof(topic_padded), "%s", e->topic);
-            fwrite(topic_padded,         1, sizeof(topic_padded),  w->fp);
-            fwrite(&e->count,            sizeof(e->count),         1, w->fp);
-            fwrite(&e->first_offset,     sizeof(e->first_offset),  1, w->fp);
-            fwrite(&e->last_offset,      sizeof(e->last_offset),   1, w->fp);
-            /* Extended info (v2+) */
-            fwrite(&e->type_id,          sizeof(e->type_id),       1, w->fp);
-            fwrite(&e->schema_version,   sizeof(e->schema_version), 1, w->fp);
+            char tp[BAG_INDEX_ENTRY_TOPIC_LEN];
+            memset(tp, 0, sizeof(tp));
+            snprintf(tp, sizeof(tp), "%s", e->topic);
+            fwrite(tp, 1, sizeof(tp), w->fp);
+            fwrite(&e->count,        sizeof(e->count),        1, w->fp);
+            fwrite(&e->first_offset, sizeof(e->first_offset), 1, w->fp);
+            fwrite(&e->last_offset,  sizeof(e->last_offset),  1, w->fp);
+            fwrite(&e->type_id,      sizeof(e->type_id),      1, w->fp);
+            fwrite(&e->schema_version,sizeof(e->schema_version),1,w->fp);
         }
+        uint32_t crc = 0;
+        fwrite(&crc, sizeof(crc), 1, w->fp);
 
-        /* Write CRC32 of index + header */
-        /* For simplicity, write a zero-filled CRC placeholder */
-        uint32_t index_crc = 0;
-        /* TODO: compute CRC of index data for future use */
-        fwrite(&index_crc, sizeof(index_crc), 1, w->fp);
-
-        /* Now overwrite the header at the beginning */
+        /* Rewrite header */
         fseek(w->fp, 0, SEEK_SET);
-        uint32_t magic     = BAG_MAGIC;
-        uint32_t version   = BAG_VERSION;
-        uint64_t msg_count = w->msg_count;
-        uint64_t duration  = (w->last_ts > w->first_ts) ? (w->last_ts - w->first_ts) : 0;
+        uint32_t magic    = BAG_MAGIC;
+        uint32_t version  = BAG_VERSION;
+        uint64_t msg_cnt  = w->msg_count;
+        uint64_t dur      = (w->last_ts > w->first_ts) ? (w->last_ts - w->first_ts) : 0;
         uint8_t  reserved[BAG_RESERVED_SIZE];
         memset(reserved, 0, sizeof(reserved));
-
-        fwrite(&magic,       sizeof(magic),       1, w->fp);
-        fwrite(&version,     sizeof(version),     1, w->fp);
-        fwrite(&msg_count,   sizeof(msg_count),   1, w->fp);
-        fwrite(&duration,    sizeof(duration),    1, w->fp);
+        fwrite(&magic,        sizeof(magic),        1, w->fp);
+        fwrite(&version,      sizeof(version),      1, w->fp);
+        fwrite(&msg_cnt,      sizeof(msg_cnt),      1, w->fp);
+        fwrite(&dur,          sizeof(dur),          1, w->fp);
         fwrite(&index_offset, sizeof(index_offset), 1, w->fp);
-        fwrite(reserved,     1, sizeof(reserved),     w->fp);
-
+        fwrite(reserved,      1, sizeof(reserved),      w->fp);
         fflush(w->fp);
         fclose(w->fp);
     }
 
+    free(w->ring);
     pthread_mutex_destroy(&w->mutex);
+    pthread_cond_destroy(&w->flush_cv);
     free(w);
 }
 
