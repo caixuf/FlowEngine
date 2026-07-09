@@ -69,10 +69,39 @@ static void* gps_pub_thread(void* arg) {
 
 static void on_playback(const Message* msg, void* user_data) {
     (void)user_data;
-    uint64_t now = clock_now_us();   /* sim_mode 下返回录制时间戳 */
-    printf("[PLAY] ts=%-20lu topic=%-20s size=%u  (sim_now=%lu)\n",
-           (unsigned long)msg->timestamp_us, msg->topic,
-           msg->data_size, (unsigned long)now);
+    uint64_t now = clock_now_us();
+    printf("[PLAY] ts=%-20lu topic=%-20s size=%u\n",
+           (unsigned long)msg->timestamp_us, msg->topic, msg->data_size);
+}
+
+/* ── Replay + Dashboard subscriber ────────────────────── */
+
+static void on_replay_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    /* Write vehicle/state as dashboard JSON — flowmond reads this file */
+    const char* jf_path = "/tmp/flow_topology.json";
+    FILE* jf = fopen(jf_path, "w");
+    if (!jf) return;
+    fprintf(jf, "{\"self\":\"replay\",\"timestamp\":0,\"nodes\":[],");
+    fprintf(jf, "\"metrics\":{\"bus\":{\"published\":0,\"delivered\":0,\"dropped\":0},");
+    fprintf(jf, "\"transport\":{\"local_pub\":0,\"remote_pub\":0},");
+    fprintf(jf, "\"scheduler\":{\"tasks\":0,\"mode\":\"REPLAY\"},");
+    fprintf(jf, "\"latency\":{\"avg_us\":0,\"p50_us\":0,\"p99_us\":0},");
+    fprintf(jf, "\"topics\":[]},");
+    /* Embed the raw vehicle state into the dashboard JSON */
+    fprintf(jf, "\"vehicle\":{");
+    const char* d = (const char*)msg->data;
+    /* Extract speed from JSON */
+    const char* p = strstr(d, "\"spd\":");
+    double spd = p ? atof(p + 6) : 0;
+    p = strstr(d, "\"tgt\":");
+    double tgt = p ? atof(p + 6) : 0;
+    p = strstr(d, "\"x\":");
+    double x = p ? atof(p + 4) : 0;
+    fprintf(jf, "\"speed\":%.1f,\"target_speed\":%.1f,\"x\":%.1f}", spd, tgt, x);
+    fprintf(jf, ",\"scene\":{\"ego\":{\"x\":%.1f,\"y\":-1.75,\"heading\":0,\"speed\":%.1f,\"steer\":0}}}", x, spd);
+    fclose(jf);
 }
 
 /* ── Record mode ─────────────────────────────────────── */
@@ -151,11 +180,31 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         fprintf(stderr, "用法: %s --record <file.bag>\n", argv[0]);
         fprintf(stderr, "      %s --play   <file.bag>\n", argv[0]);
+        fprintf(stderr, "      %s --replay <file.bag>  # 回放+输出dashboard JSON\n", argv[0]);
         return 1;
     }
 
     if (strcmp(argv[1], "--record") == 0) return do_record(argv[2]);
     if (strcmp(argv[1], "--play")   == 0) return do_play  (argv[2]);
+    if (strcmp(argv[1], "--replay") == 0) {
+        /* Replay mode with dashboard JSON output.
+         * Subscribes to vehicle/state during replay and writes
+         * /tmp/flow_topology.json so the dashboard can visualize. */
+        printf("Replay+Dashboard mode: %s\n", argv[2]);
+        MessageBus* bus = message_bus_create("replay_bus");
+        BagReader*  r   = bag_reader_open(argv[2]);
+        if (!bus || !r) { fprintf(stderr, "init failed\n"); return 1; }
+
+        /* Subscribe vehicle/state: write dashboard JSON on each message */
+        message_bus_subscribe(bus, "vehicle/state", on_replay_state, NULL);
+        clock_set_sim_mode(true);
+        int count = bag_reader_play(r, bus, 1.0f);
+        printf("Replay done: %d messages\n", count);
+        clock_set_sim_mode(false);
+        bag_reader_close(r);
+        message_bus_destroy(bus);
+        return 0;
+    }
 
     fprintf(stderr, "未知选项: %s\n", argv[1]);
     return 1;
