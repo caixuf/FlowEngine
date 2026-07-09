@@ -10,6 +10,8 @@
 #include "bag.h"
 #include "clock_service.h"
 #include "msg_schema.h"
+#include "dashboard_bridge.h"
+#include "ipc_channel.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,10 +33,15 @@ typedef struct {
     float  speed_mps;
 } GpsData;
 
-/* ── Publisher threads ───────────────────────────────── */
+/* ── Global state ────────────────────────────────────── */
 
 static volatile int g_running = 1;
 static void sighandler(int sig) { (void)sig; g_running = 0; }
+
+/* IPC dashboard bridge publisher for --replay mode */
+static IpcChannel* g_replay_dashboard_ch = NULL;
+
+/* ── Publisher threads ───────────────────────────────── */
 
 static void* lidar_pub_thread(void* arg) {
     MessageBus* bus = (MessageBus*)arg;
@@ -79,47 +86,64 @@ static void on_playback(const Message* msg, void* user_data) {
 static void on_replay_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    /* Write vehicle/state as dashboard JSON — flowmond reads this file */
-    const char* jf_path = "/tmp/flow_topology.json";
-    FILE* jf = fopen(jf_path, "w");
-    if (!jf) return;
-    fprintf(jf, "{\"self\":\"replay\",\"timestamp\":0,\"nodes\":[],");
-    fprintf(jf, "\"metrics\":{\"bus\":{\"published\":0,\"delivered\":0,\"dropped\":0},");
-    fprintf(jf, "\"transport\":{\"local_pub\":0,\"remote_pub\":0},");
-    fprintf(jf, "\"scheduler\":{\"tasks\":0,\"mode\":\"REPLAY\"},");
-    fprintf(jf, "\"latency\":{\"avg_us\":0,\"p50_us\":0,\"p99_us\":0},");
-    fprintf(jf, "\"topics\":[]},");
-    /* Embed the raw vehicle state into the dashboard JSON */
-    fprintf(jf, "\"vehicle\":{");
+
+    /* Build dashboard JSON in memory so it can be sent to both
+     * /tmp/flow_topology.json (foxglove_bridge.py) and the IPC
+     * dashboard bridge (flowmond — makes the browser visualization update). */
+    char dash_buf[8192];
+    int off = 0;
+
+#define RBUF_APPEND(fmt, ...) \
+    do { \
+        if (off >= 0 && (size_t)off < sizeof(dash_buf)) \
+            off += snprintf(dash_buf + off, sizeof(dash_buf) - (size_t)off, \
+                            fmt, ##__VA_ARGS__); \
+    } while (0)
+
     const char* d = (const char*)msg->data;
-    /* Extract speed from JSON */
-    const char* p = strstr(d, "\"spd\":");
-    double spd = p ? atof(p + 6) : 0;
-    p = strstr(d, "\"tgt\":");
-    double tgt = p ? atof(p + 6) : 0;
-    p = strstr(d, "\"x\":");
-    double x = p ? atof(p + 4) : 0;
-    p = strstr(d, "\"y\":");
-    double ey = p ? atof(p + 5) : -1.75;
-    p = strstr(d, "\"hdg\":");
-    double hdg = p ? atof(p + 7) : 0.0;
-    p = strstr(d, "\"st\":");
-    double st = p ? atof(p + 6) : 0.0;
-    p = strstr(d, "\"n_obs\":");
-    int n_obs = p ? atoi(p + 8) : 0;
-    fprintf(jf, "\"speed\":%.1f,\"target_speed\":%.1f,\"x\":%.1f}", spd, tgt, x);
-    fprintf(jf, ",\"scene\":{\"ego\":{\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,\"speed\":%.2f,\"steer\":%.3f},", x, ey, hdg, spd, st);
-    fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},\"obstacles\":[");
+    const char* p;
+    p = strstr(d, "\"spd\":");   double spd = p ? atof(p + 6) : 0;
+    p = strstr(d, "\"tgt\":");   double tgt = p ? atof(p + 6) : 0;
+    p = strstr(d, "\"x\":");     double x   = p ? atof(p + 4) : 0;
+    p = strstr(d, "\"y\":");     double ey  = p ? atof(p + 5) : -1.75;
+    p = strstr(d, "\"hdg\":");   double hdg = p ? atof(p + 7) : 0.0;
+    p = strstr(d, "\"st\":");    double st  = p ? atof(p + 6) : 0.0;
+    p = strstr(d, "\"n_obs\":"); int n_obs  = p ? atoi(p + 8) : 0;
+
+    RBUF_APPEND("{\"self\":\"replay\",\"timestamp\":0,\"nodes\":[],"
+        "\"metrics\":{"
+        "\"bus\":{\"published\":0,\"delivered\":0,\"dropped\":0},"
+        "\"transport\":{\"local_pub\":0,\"remote_pub\":0},"
+        "\"scheduler\":{\"tasks\":0,\"mode\":\"REPLAY\"},"
+        "\"latency\":{\"avg_us\":0,\"p50_us\":0,\"p99_us\":0},"
+        "\"topics\":[]},"
+        "\"vehicle\":{\"speed\":%.1f,\"target_speed\":%.1f,\"x\":%.1f},"
+        "\"scene\":{\"ego\":{"
+        "\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,\"speed\":%.2f,\"steer\":%.3f},"
+        "\"lane\":{\"width\":3.5,\"count\":2},\"obstacles\":[",
+        spd, tgt, x, x, ey, hdg, spd, st);
+
     for (int i = 0; i < n_obs && i < 16; i++) {
         char kx[16]; snprintf(kx, 16, "\"ox%d\":", i);
         char ky[16]; snprintf(ky, 16, "\"oy%d\":", i);
         double ox = 0, oy = 0;
         const char* pp = strstr(d, kx); if (pp) ox = atof(pp + strlen(kx));
         pp = strstr(d, ky); if (pp) oy = atof(pp + strlen(ky));
-        fprintf(jf, "%s{\"x\":%.2f,\"y\":%.2f}", i > 0 ? "," : "", ox, oy);
+        RBUF_APPEND("%s{\"x\":%.2f,\"y\":%.2f}", i > 0 ? "," : "", ox, oy);
     }
-    fprintf(jf, "]}}");
-    fclose(jf);
+
+    RBUF_APPEND("]}}");
+#undef RBUF_APPEND
+
+    /* Write to state file for foxglove_bridge.py */
+    const char* jf_path = "/tmp/flow_topology.json";
+    FILE* jf = fopen(jf_path, "w");
+    if (jf) { fputs(dash_buf, jf); fclose(jf); }
+
+    /* Publish via IPC dashboard bridge so flowmond updates the browser.
+     * Skip if JSON was truncated due to buffer overflow. */
+    if (g_replay_dashboard_ch && off > 0 && off < (int)sizeof(dash_buf))
+        dashboard_bridge_publish(g_replay_dashboard_ch, dash_buf, (size_t)off);
 }
 
 /* ── Record mode ─────────────────────────────────────── */
@@ -206,12 +230,20 @@ int main(int argc, char* argv[]) {
     if (strcmp(argv[1], "--play")   == 0) return do_play  (argv[2]);
     if (strcmp(argv[1], "--replay") == 0) {
         /* Replay mode with dashboard JSON output.
-         * Subscribes to vehicle/state during replay and writes
-         * /tmp/flow_topology.json so the dashboard can visualize. */
+         * Subscribes to vehicle/state during replay, writes
+         * /tmp/flow_topology.json for foxglove_bridge.py, and also
+         * publishes via the IPC dashboard bridge so flowmond updates
+         * the browser visualization in real time. */
         printf("Replay+Dashboard mode: %s\n", argv[2]);
         MessageBus* bus = message_bus_create("replay_bus");
         BagReader*  r   = bag_reader_open(argv[2]);
         if (!bus || !r) { fprintf(stderr, "init failed\n"); return 1; }
+
+        /* Open IPC dashboard bridge publisher (flowmond subscribes to this) */
+        g_replay_dashboard_ch = dashboard_bridge_publisher_open();
+        if (!g_replay_dashboard_ch)
+            fprintf(stderr, "[replay] dashboard bridge unavailable — "
+                    "flowmond visualization will not update\n");
 
         /* Subscribe vehicle/state: write dashboard JSON on each message */
         message_bus_subscribe(bus, "vehicle/state", on_replay_state, NULL);
@@ -219,6 +251,11 @@ int main(int argc, char* argv[]) {
         int count = bag_reader_play(r, bus, 1.0f);
         printf("Replay done: %d messages\n", count);
         clock_set_sim_mode(false);
+
+        if (g_replay_dashboard_ch) {
+            ipc_channel_close(g_replay_dashboard_ch);
+            g_replay_dashboard_ch = NULL;
+        }
         bag_reader_close(r);
         message_bus_destroy(bus);
         return 0;
