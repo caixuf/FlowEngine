@@ -142,7 +142,8 @@ input:focus,select:focus{border-color:#58a6ff}
     </div>
   </div>
 
-  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="onFilterChange()">
+  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="onFilterChange()" style="width:calc(100% - 28px)">
+  <span onclick="document.getElementById('topic-filter').value='';onFilterChange()" title="Clear filter" style="cursor:pointer;color:#8b949e;font-size:14px;padding:2px 6px">✕</span>
 
   <div style="display:flex;gap:4px">
     <button onclick="doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
@@ -572,7 +573,7 @@ function updateTopicStats(){
       var dlColor=dl>0?'color:#f85149;font-weight:bold':'color:#3fb950';
       var rel=(t.qos_reliability||t.reliability||'best_effort');
       var relColor=rel==='reliable'?'color:#3fb950':'color:#8b949e';
-      return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="document.getElementById(\'topic-filter\').value=\''+(t.topic||t.name)+'\';onFilterChange()">'+
+      return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="var el=document.getElementById(\'topic-filter\');if(el.value===\''+(t.topic||t.name)+'\')el.value=\'\';else el.value=\''+(t.topic||t.name)+'\';onFilterChange()">'+
         '<td style="padding:2px 3px;color:#58a6ff" title="'+(t.topic||t.name)+'">'+((t.topic||t.name||'?').split('/').pop())+'</td>'+
         '<td style="text-align:center;padding:2px 3px;font-size:9px;'+relColor+'" title="depth='+(t.qos_depth||'?')+' '+rel+'">'+rel+'</td>'+
         '<td style="text-align:right;padding:2px 3px">'+(t.pub||0)+'</td>'+
