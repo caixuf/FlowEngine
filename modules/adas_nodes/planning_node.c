@@ -129,7 +129,7 @@ static void* planning_thread(void* arg) {
 
         /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
         if (g.has_vstate) {
-            double ox[3], oy[3], ow[3], ol[3];
+            double ox[4], oy[4], ow[4], ol[4];
             int n_obs = 0;
             for (int i = 0; i < 4; i++) {
                 /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */

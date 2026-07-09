@@ -111,8 +111,10 @@ LogLevel log_get_module_level(const char* module) {
 }
 
 void log_set_output_file(const char* filename) {
+    pthread_mutex_lock(&g_log.mutex);
     if (g_log.output && g_log.output != stderr) {
         fclose(g_log.output);
+        g_log.output = NULL;
     }
     if (filename && filename[0]) {
         g_log.output = fopen(filename, "a");
@@ -120,6 +122,7 @@ void log_set_output_file(const char* filename) {
     if (!g_log.output) {
         g_log.output = stderr;
     }
+    pthread_mutex_unlock(&g_log.mutex);
 }
 
 FILE* log_get_output(void) {

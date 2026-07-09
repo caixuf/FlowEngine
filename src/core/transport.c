@@ -37,6 +37,7 @@ typedef struct {
 
     /* IPC 通道（跨进程同机） */
     IpcChannel*      ipc_channel;
+    void*            ipc_relay_ctx;  /* IpcRelayCtx*, freed on unsubscribe/destroy */
 
     /* 远端连接（跨机） */
     bool             remote_bridged;
@@ -152,6 +153,8 @@ void transport_destroy(Transport* t) {
         if (t->routes[i].ipc_channel) {
             ipc_channel_close(t->routes[i].ipc_channel);
         }
+        free(t->routes[i].ipc_relay_ctx);
+        t->routes[i].ipc_relay_ctx = NULL;
     }
 
     if (t->net_transport) {
@@ -294,6 +297,7 @@ int transport_subscribe(Transport* t, const char* topic,
             if (ctx) {
                 ctx->bus = t->bus;
                 ipc_channel_subscribe(r->ipc_channel, ipc_to_bus_relay, ctx);
+                r->ipc_relay_ctx = ctx;  /* tracked for cleanup */
             }
             ipc_channel_start(r->ipc_channel);
         } else {
@@ -321,6 +325,8 @@ int transport_unsubscribe(Transport* t, const char* topic,
             if (t->routes[i].ipc_channel) {
                 ipc_channel_close(t->routes[i].ipc_channel);
                 t->routes[i].ipc_channel = NULL;
+                free(t->routes[i].ipc_relay_ctx);
+                t->routes[i].ipc_relay_ctx = NULL;
             }
             t->routes[i].is_subscriber = false;
             break;

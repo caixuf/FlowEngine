@@ -165,6 +165,12 @@ typedef struct {
 void statem_init(ReflectiveStateMachine* sm, const TransitionRule* table,
                  StateId initial_state, const char* task_name);
 
+/**
+ * 释放 statem_add_transition() 为 description 分配的内存，
+ * 以及 dynamic_rules 数组本身。在不再使用状态机时调用。
+ */
+void statem_cleanup(ReflectiveStateMachine* sm);
+
 /* ══════════════════════════════════════════════════════════ */
 /* 事件驱动                                                   */
 /* ══════════════════════════════════════════════════════════ */
