@@ -8,6 +8,10 @@
 #include <sched.h>
 #include <errno.h>
 
+/* Forward declaration to avoid including flow_registry.h */
+int flow_registry_register_plugin(const char* name, const char* path,
+                                  const char** tasks, const char** types);
+
 /* ── Thread entry: runs a loaded plugin ──────────────── */
 
 static void* process_thread_fn(void* arg) {
@@ -188,6 +192,9 @@ int process_manager_load_plugin(ProcessManager* mgr,
     pthread_mutex_lock(&mgr->mutex);
     TAILQ_INSERT_TAIL(&mgr->process_list, node, entries);
     pthread_mutex_unlock(&mgr->mutex);
+
+    /* Bridge: sync to FlowRegistry for unified query */
+    flow_registry_register_plugin(name, library_path, NULL, NULL);
     return 0;
 }
 
