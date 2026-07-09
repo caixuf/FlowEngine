@@ -41,6 +41,7 @@
 #include "flow_registry.h"
 #include "config_manager.h"
 #include "bag.h"
+#include "clock_service.h"
 #include "adas_msgs_gen.h"
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
@@ -256,12 +257,14 @@ static int run_multi_process_mode(int duration, int stagger_ms, const char* self
 int main(int argc, char** argv) {
     const char* config_path = "config/pipeline.json";
     const char* bag_path    = NULL;
-    int duration = 0;  /* 0 = 持续运行直到 Ctrl+C */
+    const char* replay_path = NULL;
+    int duration = 0;
     int multi_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) duration = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bag") == 0 && i + 1 < argc) bag_path = argv[++i];
+        else if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) replay_path = argv[++i];
         else if (strcmp(argv[i], "--multi") == 0) multi_mode = 1;
         else if (argv[i][0] != '-') config_path = argv[i];
     }
@@ -282,6 +285,57 @@ int main(int argc, char** argv) {
     }
 
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
+
+    /* ── Replay mode: bag → bus → monitor_node → dashboard JSON ── */
+    if (replay_path) {
+        LOG_INFO("launcher", "REPLAY mode: %s", replay_path);
+        BagReader* r = bag_reader_open(replay_path);
+        if (!r) { LOG_WARN("launcher", "cannot open bag: %s", replay_path); log_shutdown(); return 1; }
+
+        adas_msgs_register_all();
+        MessageBus*       bus       = message_bus_create("replay_bus");
+        DiscoveryManager* discovery = discovery_create("replay",
+            CAP_PUBLISHER | CAP_SUBSCRIBER);
+        discovery_start(discovery);
+        Transport* transport = transport_create(bus, discovery, TRANSPORT_LOCAL);
+        transport_start(transport);
+        Scheduler* scheduler = scheduler_create(&(SchedulerConfig)SCHEDULER_CONFIG_DEFAULT);
+        scheduler_start(scheduler);
+
+        /* Load monitor_node only — it subscribes to replayed messages
+         * and generates the dashboard JSON that flowmond serves. */
+        void* mon_handle = dlopen("build/lib/libmonitor_node.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (!mon_handle) mon_handle = dlopen("libmonitor_node.so", RTLD_LAZY | RTLD_GLOBAL);
+        if (mon_handle) {
+            NodeGetPluginFn get_fn = (NodeGetPluginFn)dlsym(mon_handle, NODE_PLUGIN_SYMBOL);
+            if (get_fn) {
+                NodePlugin* mon = get_fn();
+                if (mon && mon->init(bus, transport, discovery, scheduler,
+                    "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}") == 0) {
+                    mon->start();
+                    LOG_INFO("launcher", "monitor_node started for replay");
+                }
+            }
+        }
+
+        uint64_t msg_count = 0, duration_us = 0;
+        bag_reader_info(r, &msg_count, &duration_us);
+        LOG_INFO("launcher", "replaying %llu msgs (%.1fs)...",
+                 (unsigned long long)msg_count, (double)duration_us / 1e6);
+        clock_set_sim_mode(true);
+        int replayed = bag_reader_play(r, bus, 1.0f);
+        clock_set_sim_mode(false);
+        LOG_INFO("launcher", "replay complete: %d msgs", replayed);
+
+        sleep(2); bag_reader_close(r);
+        scheduler_stop(scheduler); scheduler_destroy(scheduler);
+        transport_stop(transport); transport_destroy(transport);
+        discovery_stop(discovery); discovery_destroy(discovery);
+        message_bus_destroy(bus);
+        if (mon_handle) dlclose(mon_handle);
+        log_shutdown();
+        return 0;
+    }
 
     if (multi_mode) {
         signal(SIGCHLD, SIG_DFL);

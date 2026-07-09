@@ -26,6 +26,7 @@ DURATION=0  # 0 = 持续运行直到 Ctrl+C，设置正数 = 限时运行秒数
 OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
+REPLAY_FILE=""
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -38,11 +39,27 @@ for arg in "$@"; do
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
     --record) RECORD_MODE=true ;;
+    --replay) REPLAY_FILE="$2"; shift ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$arg" ;;
   esac
   shift 2>/dev/null || true
 done
+
+# ── Replay fast path: no pipeline, just flowmond + flow_launcher --replay ──
+if [ -n "$REPLAY_FILE" ]; then
+  echo "═══ Replay Mode: $REPLAY_FILE ═══"
+  "$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard.html" > /tmp/flowmond.log 2>&1 &
+  FLOWMOND_PID=$!
+  sleep 1
+  echo "  Dashboard: http://localhost:8800"
+  if $OPEN_BROWSER; then
+    xdg-open http://localhost:8800 2>/dev/null || open http://localhost:8800 2>/dev/null || true
+  fi
+  "$LAUNCHER_BIN" --replay "$REPLAY_FILE" 2>&1 | grep -E "replay|monitor|bag"
+  kill $FLOWMOND_PID 2>/dev/null
+  exit 0
+fi
 
 # ── Banner ──────────────────────────────────────────────────
 clear

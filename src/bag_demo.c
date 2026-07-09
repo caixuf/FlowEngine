@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <math.h>
 
 /* ── Demo data types ─────────────────────────────────── */
@@ -177,25 +178,49 @@ int main(int argc, char* argv[]) {
     signal(SIGINT,  sighandler);
     signal(SIGTERM, sighandler);
 
-    if (argc < 3) {
-        fprintf(stderr, "用法: %s --record <file.bag>\n", argv[0]);
-        fprintf(stderr, "      %s --play   <file.bag>\n", argv[0]);
-        fprintf(stderr, "      %s --replay <file.bag>  # 回放+输出dashboard JSON\n", argv[0]);
+    const char* cmd     = NULL;
+    const char* bagfile = NULL;
+    int dashboard_mode  = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dashboard") == 0) dashboard_mode = 1;
+        else if (!cmd) cmd = argv[i];
+        else if (!bagfile) bagfile = argv[i];
+    }
+
+    if (!cmd || !bagfile) {
+        fprintf(stderr, "用法: %s [--dashboard] --record <file.bag>\n", argv[0]);
+        fprintf(stderr, "      %s [--dashboard] --play   <file.bag>\n", argv[0]);
+        fprintf(stderr, "      %s [--dashboard] --replay <file.bag>\n", argv[0]);
         return 1;
     }
 
-    if (strcmp(argv[1], "--record") == 0) return do_record(argv[2]);
-    if (strcmp(argv[1], "--play")   == 0) return do_play  (argv[2]);
-    if (strcmp(argv[1], "--replay") == 0) {
-        /* Replay mode with dashboard JSON output.
-         * Subscribes to vehicle/state during replay and writes
-         * /tmp/flow_topology.json so the dashboard can visualize. */
-        printf("Replay+Dashboard mode: %s\n", argv[2]);
-        MessageBus* bus = message_bus_create("replay_bus");
-        BagReader*  r   = bag_reader_open(argv[2]);
-        if (!bus || !r) { fprintf(stderr, "init failed\n"); return 1; }
+    /* Auto-start flowmond if --dashboard flag given */
+    pid_t flowmond_pid = 0;
+    if (dashboard_mode) {
+        flowmond_pid = fork();
+        if (flowmond_pid == 0) {
+            /* Child: start flowmond (redirect output to /dev/null) */
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+            execlp("flowmond", "flowmond", "--port", "8800", NULL);
+            /* If execlp fails, try relative path */
+            execl("./build/bin/flowmond", "flowmond", "--port", "8800", NULL);
+            _exit(1);
+        }
+        usleep(500000);  /* 500ms for flowmond to start */
+        printf("[dashboard] flowmond started (pid=%d) → http://localhost:8800\n",
+               (int)flowmond_pid);
+    }
 
-        /* Subscribe vehicle/state: write dashboard JSON on each message */
+    int ret = 0;
+    if (strcmp(cmd, "--record") == 0) ret = do_record(bagfile);
+    else if (strcmp(cmd, "--play") == 0) ret = do_play(bagfile);
+    else if (strcmp(cmd, "--replay") == 0) {
+        printf("Replay+Dashboard mode: %s\n", bagfile);
+        MessageBus* bus = message_bus_create("replay_bus");
+        BagReader*  r   = bag_reader_open(bagfile);
+        if (!bus || !r) { fprintf(stderr, "init failed\n"); ret = 1; goto cleanup; }
         message_bus_subscribe(bus, "vehicle/state", on_replay_state, NULL);
         clock_set_sim_mode(true);
         int count = bag_reader_play(r, bus, 1.0f);
@@ -203,9 +228,12 @@ int main(int argc, char* argv[]) {
         clock_set_sim_mode(false);
         bag_reader_close(r);
         message_bus_destroy(bus);
-        return 0;
-    }
+    } else { fprintf(stderr, "未知选项: %s\n", cmd); ret = 1; }
 
-    fprintf(stderr, "未知选项: %s\n", argv[1]);
-    return 1;
+cleanup:
+    if (flowmond_pid > 0) {
+        kill(flowmond_pid, SIGTERM);
+        waitpid(flowmond_pid, NULL, 0);
+    }
+    return ret;
 }
