@@ -40,6 +40,7 @@
 #include "scheduler.h"
 #include "flow_registry.h"
 #include "config_manager.h"
+#include "bag.h"
 #include "adas_msgs_gen.h"
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
@@ -254,11 +255,13 @@ static int run_multi_process_mode(int duration, int stagger_ms, const char* self
 
 int main(int argc, char** argv) {
     const char* config_path = "config/pipeline.json";
+    const char* bag_path    = NULL;
     int duration = 0;  /* 0 = 持续运行直到 Ctrl+C */
     int multi_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) duration = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--bag") == 0 && i + 1 < argc) bag_path = argv[++i];
         else if (strcmp(argv[i], "--multi") == 0) multi_mode = 1;
         else if (argv[i][0] != '-') config_path = argv[i];
     }
@@ -317,7 +320,17 @@ int main(int argc, char** argv) {
         }
         LOG_INFO("launcher", "registry: %d total entries", flow_registry_total_count());
 
-        MessageBus*       bus       = message_bus_create("launcher_bus");
+        MessageBus* bus       = message_bus_create("launcher_bus");
+
+        /* Bag recording (optional: --bag /path/to/output.bag) */
+        BagWriter* bag_writer = NULL;
+        if (bag_path) {
+            bag_writer = bag_writer_open(bag_path);
+            if (bag_writer) {
+                bag_writer_attach(bag_writer, bus);
+                LOG_INFO("launcher", "bag recording: %s", bag_path);
+            }
+        }
 
         /* 从配置加载 QoS 并应用到 message_bus */
         LauncherConfig* qos_cfg = config_load(config_path);
@@ -359,6 +372,11 @@ int main(int argc, char** argv) {
         scheduler_start(scheduler);
 
         run_dlopen_mode(duration, stagger_ms, bus, transport, discovery, scheduler);
+
+        if (bag_writer) {
+            bag_writer_close(bag_writer);
+            LOG_INFO("launcher", "bag saved: %s", bag_path);
+        }
 
         scheduler_stop(scheduler);  scheduler_destroy(scheduler);
         transport_stop(transport);  transport_destroy(transport);

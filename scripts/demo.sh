@@ -25,16 +25,19 @@ sleep 0.5
 DURATION=0  # 0 = 持续运行直到 Ctrl+C，设置正数 = 限时运行秒数
 OPEN_BROWSER=true
 MULTI_MODE=false
+RECORD_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
 PIPELINE="$ROOT/config/pipeline.json"
 JSON_FILE="/tmp/flow_topology.json"
+BAG_FILE="/tmp/flow_demo_$(date +%Y%m%d_%H%M%S).bag"
 
 for arg in "$@"; do
   case "$arg" in
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
+    --record) RECORD_MODE=true ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$arg" ;;
   esac
@@ -101,24 +104,18 @@ trap cleanup EXIT INT TERM
 echo "───[2/5] Starting pipeline (sim_world→sensor_model→perception→fusion→planning→control→monitor)..."
 rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
-if [ "$MULTI_MODE" = true ]; then
-  echo "  Multi-process mode: each node runs as a separate process"
-  if [ "$DURATION" -gt 0 ] 2>/dev/null; then
-    "$LAUNCHER_BIN" "$PIPELINE" --multi --duration "$DURATION" \
-      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
-  else
-    "$LAUNCHER_BIN" "$PIPELINE" --multi \
-      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
-  fi
-else
-  if [ "$DURATION" -gt 0 ] 2>/dev/null; then
-    "$LAUNCHER_BIN" "$PIPELINE" --duration "$DURATION" \
-      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
-  else
-    "$LAUNCHER_BIN" "$PIPELINE" \
-      > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
-  fi
+
+LAUNCHER_ARGS=("$PIPELINE")
+[ "$DURATION" -gt 0 ] 2>/dev/null && LAUNCHER_ARGS+=(--duration "$DURATION")
+[ "$MULTI_MODE" = true ] && LAUNCHER_ARGS+=(--multi)
+if [ "$RECORD_MODE" = true ]; then
+  LAUNCHER_ARGS+=(--bag "$BAG_FILE")
+  echo "  Recording to: $BAG_FILE"
 fi
+[ "$MULTI_MODE" = true ] && echo "  Multi-process mode: each node runs as a separate process"
+
+"$LAUNCHER_BIN" "${LAUNCHER_ARGS[@]}" \
+  > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
 LAUNCHER_PID=$!
 sleep 1
 if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
@@ -211,4 +208,8 @@ echo "  Control    : $CTRL control cycles"
 echo ""
 echo "  Dashboard  : http://localhost:8800"
 echo "  Topology   : tools/topology_viewer.html (standalone)"
+if [ "$RECORD_MODE" = true ] && [ -f "$BAG_FILE" ]; then
+  BAG_SIZE=$(du -h "$BAG_FILE" 2>/dev/null | cut -f1)
+  echo "  Bag        : $BAG_FILE ($BAG_SIZE)"
+fi
 echo "  CI Status  : github.com/caixuf/FlowEngine/actions"
