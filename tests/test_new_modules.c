@@ -471,6 +471,83 @@ static void test_bag_filtered_play(void) {
     PASS();
 }
 
+static void test_bag_async_flush(void) {
+    TEST("bag async ring buffer flush");
+    const char* path = "/tmp/test_bag_async.bag";
+    BagWriter* w = bag_writer_open(path);
+    ASSERT(w != NULL, "bag_writer_open failed");
+
+    /* Write 100 messages rapidly — ring buffer + flush thread must keep up */
+    Message msg;
+    memset(&msg, 0, sizeof(msg));
+    snprintf(msg.topic, 64, "t/async");
+    msg.data_size = 32;
+    memset(msg.data, 0xAB, 32);
+    for (int i = 0; i < 100; i++) {
+        msg.timestamp_us = (uint64_t)(i * 10000);
+        ASSERT_EQ(bag_writer_write(w, &msg), 0, "write %d failed", i);
+    }
+    bag_writer_close(w);
+
+    /* Verify all 100 messages reached disk */
+    BagReader* r = bag_reader_open(path);
+    ASSERT(r != NULL, "reader open failed");
+    uint64_t count = 0;
+    ASSERT_EQ(bag_reader_info(r, &count, NULL), 0, "info failed");
+    ASSERT(count == 100, "expected 100 msgs, got %llu", (unsigned long long)count);
+    bag_reader_close(r);
+    remove(path);
+    PASS();
+}
+
+static void test_bag_attach_detach(void) {
+    TEST("bag attach and auto-record from bus");
+    const char* path = "/tmp/test_bag_attach.bag";
+    MessageBus* bus = message_bus_create("bag_attach_test");
+    ASSERT(bus != NULL, "bus create failed");
+
+    BagWriter* w = bag_writer_open(path);
+    ASSERT(w != NULL, "open failed");
+    ASSERT_EQ(bag_writer_attach(w, bus), 0, "attach failed");
+
+    /* Publish to bus — bag records via wildcard subscription */
+    int val = 42;
+    for (int i = 0; i < 10; i++) {
+        message_bus_publish(bus, "t/auto", "tester", &val, sizeof(val));
+    }
+    usleep(100000);  /* let flush thread drain */
+
+    bag_writer_close(w);
+    message_bus_destroy(bus);
+
+    BagReader* r = bag_reader_open(path);
+    ASSERT(r != NULL, "reader open failed");
+    uint64_t count = 0;
+    ASSERT_EQ(bag_reader_info(r, &count, NULL), 0, "info failed");
+    ASSERT(count == 10, "expected 10 auto-recorded msgs, got %llu",
+           (unsigned long long)count);
+    bag_reader_close(r);
+    remove(path);
+    PASS();
+}
+
+static void test_bag_empty_close(void) {
+    TEST("bag close without any writes");
+    const char* path = "/tmp/test_bag_empty.bag";
+    BagWriter* w = bag_writer_open(path);
+    ASSERT(w != NULL, "open failed");
+    bag_writer_close(w);  /* must not crash */
+
+    BagReader* r = bag_reader_open(path);
+    ASSERT(r != NULL, "reader open empty bag");
+    uint64_t count = 0;
+    ASSERT_EQ(bag_reader_info(r, &count, NULL), 0, "info failed");
+    ASSERT(count == 0, "expected 0 msgs, got %llu", (unsigned long long)count);
+    bag_reader_close(r);
+    remove(path);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════ */
 /* FlowRegistry Tests                                         */
 /* ══════════════════════════════════════════════════════════ */
@@ -611,6 +688,9 @@ int main(void) {
     printf("\n═══ Bag ═══\n");
     test_bag_write_read();
     test_bag_filtered_play();
+    test_bag_async_flush();
+    test_bag_attach_detach();
+    test_bag_empty_close();
 
     /* ── FlowRegistry ───────────────────────── */
     printf("\n═══ FlowRegistry ═══\n");
