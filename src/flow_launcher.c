@@ -165,7 +165,7 @@ static int run_dlopen_mode(int duration, int stagger_ms,
         if (nd->plugin->api_version == 0) {
             LOG_WARN("launcher",
                      "%s: plugin declares no ABI version (expected %u) — "
-                     "loading as legacy, behaviour may be undefined",
+                     "loading as legacy, behavior may be undefined",
                      nd->library, NODE_PLUGIN_API_VERSION);
         } else if (nd->plugin->api_version != NODE_PLUGIN_API_VERSION) {
             LOG_WARN("launcher",

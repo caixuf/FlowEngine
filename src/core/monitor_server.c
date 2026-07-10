@@ -403,6 +403,13 @@ static void handle_client(int fd, MonitorServer* ms) {
     char* qs = strchr(path, '?');
     if (qs) *qs = '\0';
 
+    /* Malformed request line (no method/path) → 400 Bad Request. */
+    if (method[0] == '\0' || path[0] == '\0') {
+        send_response(fd, "400 Bad Request", "text/plain", "bad request", 11);
+        close(fd);
+        return;
+    }
+
     /* CORS preflight */
     if (strcmp(method, "OPTIONS") == 0) {
         const char* cors = "HTTP/1.1 204\r\nAccess-Control-Allow-Origin: *\r\n"
@@ -580,6 +587,8 @@ static void* server_thread_fn(void* arg) {
                                 .sin_port = htons((uint16_t)ms->port) };
     if (inet_pton(AF_INET, ms->bind_addr, &addr.sin_addr) != 1) {
         /* Fall back to loopback if the configured address is invalid. */
+        fprintf(stderr, "[monitor_server] WARN: invalid bind address '%s', "
+                        "falling back to 127.0.0.1\n", ms->bind_addr);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         snprintf(ms->bind_addr, sizeof(ms->bind_addr), "%s", "127.0.0.1");
     }

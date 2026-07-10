@@ -36,6 +36,8 @@ if [ ! -f "$BUILD_DIR/lib/libsim_world.so" ]; then
 fi
 
 # ── 3. 运行 launcher 一小段时间 ───────────────────────────────
+# 外层 timeout 是安全网（节点插件构建后 8 节点按 300ms 错峰加载 + DURATION 运行
+# + 优雅退出），取固定 90s 上限，独立于较小的 DURATION。
 echo "INFO: running flow_launcher (duration=${DURATION}s) ..."
 timeout 90 "$BUILD_DIR/bin/flow_launcher" config/pipeline.json --duration "$DURATION" \
     > "$LOG" 2>&1
