@@ -62,7 +62,9 @@ if [ -n "$REPLAY_FILE" ]; then
 fi
 
 # ── Banner ──────────────────────────────────────────────────
-clear
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != "dumb" ] && command -v clear >/dev/null 2>&1; then
+  clear
+fi
 cat << 'BANNER'
 
   ╔══════════════════════════════════════════════════════════╗
