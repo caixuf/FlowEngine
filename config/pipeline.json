@@ -88,10 +88,28 @@
       "params": "{\"max_throttle\":1.0,\"max_steer\":0.22,\"low_speed_steer\":0.18,\"time_headway\":1.3}"
     },
     {
+      "name": "inference",
+      "library_path": "build/lib/libinference_node.so",
+      "auto_start": true,
+      "subscribe": ["fusion/localization", "planning/trajectory"],
+      "publish": [
+        {"topic": "inference/trajectory", "type": "Trajectory",
+         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "best_effort"}}
+      ],
+      "params": "{\"max_speed\":20.0,\"frequency_hz\":10.0,\"model_path\":\"tools/train/model.txt\"}"
+    },
+    {
+      "name": "data_recorder",
+      "library_path": "build/lib/libdata_recorder_node.so",
+      "auto_start": true,
+      "subscribe": ["fusion/localization", "planning/trajectory"],
+      "params": "{\"frequency_hz\":10.0,\"output_path\":\"/tmp/flow_train_samples.jsonl\"}"
+    },
+    {
       "name": "monitor",
       "library_path": "build/lib/libmonitor_node.so",
       "auto_start": true,
-      "subscribe": ["perception/obstacles", "vehicle/state", "fusion/latency"],
+      "subscribe": ["perception/obstacles", "vehicle/state", "fusion/latency", "inference/trajectory"],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
     }
   ]

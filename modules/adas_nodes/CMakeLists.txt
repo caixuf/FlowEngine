@@ -144,8 +144,18 @@ target_compile_definitions(safety_control_node PRIVATE FLOWCORO_INTEGRATION)
 add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
+# ── 车端学习闭环节点 (data → train → inference) ───────────────
+
+# inference_node: 内置 tiny-MLP 车端推理（影子模式，零重型依赖）
+add_library(inference_node SHARED inference_node.c)
+target_link_libraries(inference_node ${NODE_LINK_LIBS})
+
+# data_recorder_node: 训练样本采集（模仿学习 JSONL）
+add_library(data_recorder_node SHARED data_recorder_node.c)
+target_link_libraries(data_recorder_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node
+install(TARGETS fusion_node perception_node sensor_model sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node inference_node data_recorder_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
