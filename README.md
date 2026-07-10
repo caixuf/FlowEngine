@@ -20,6 +20,7 @@ A from-scratch middleware framework providing the core abstractions of CyberRT i
 | **Introspection** | Reflective State Machine, UDP Service Discovery, Topology Tracking |
 | **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion |
 | **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, flowmond Monitor Daemon, Stats Bridge (cross-process IPC stats), CI/CD |
+| **Learning** | Vehicle-side learning loop: data recorder → offline trainer → on-vehicle tiny-MLP inference (shadow mode). See [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ## Quick Start
 
