@@ -16,7 +16,10 @@
  *
  * 数据契约:
  *   输入特征 x[4] = { ego_v, ego_y, ego_heading, ego_yaw_rate }
- *   输出     y[2] = { target_speed (m/s), lateral_d (m, 相对参考线的横向偏移) }
+ *   输出     y[1..2] = { target_speed (m/s)[, lateral_d (m)] }
+ *     本节点支持 1 或 2 维输出：内置演示模型 (tools/train/model.txt) 只输出
+ *     target_speed（1 维），此时 lateral_d 回退为 0；若后续训练出 2 维模型，
+ *     第二维即为相对参考线的横向偏移 lateral_d。
  *
  * NodePlugin 接口，编译为 libinference_node.so。
  */

@@ -78,10 +78,10 @@ static void on_planning(const Message* msg, void* user_data) {
     g.has_planning = 1;
 }
 
-static long now_ms(void) {
+static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 static void* recorder_thread(void* arg) {
@@ -98,7 +98,7 @@ static void* recorder_thread(void* arg) {
         if (!g.has_fusion || !g.has_planning || !g.out) continue;
 
         fprintf(g.out,
-            "{\"t\":%ld,\"features\":[%.4f,%.4f,%.4f,%.4f],"
+            "{\"t\":%lld,\"features\":[%.4f,%.4f,%.4f,%.4f],"
             "\"label\":%.4f,\"ego\":{\"x\":%.3f,\"y\":%.3f}}\n",
             now_ms(),
             g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
