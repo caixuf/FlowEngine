@@ -11,7 +11,7 @@ train.py — 车端学习闭环 · Stage 1: 离线训练桥接
 只要最终产物遵循同一份数据契约 / 权重契约即可（见 README.md）。
 
 数据契约（与 data_recorder_node / inference_node 一致）:
-    features = [ego_v, ego_y, ego_heading, ego_yaw_rate]   # 4 维输入
+    features = [...]                                      # v1 4 维或 v2 16 维输入
     label    = planning_target_speed                        # 1 维输出
 
 用法:
@@ -29,12 +29,13 @@ import math
 import random
 import sys
 
-IN_DIM = 4
+MAX_IN_DIM = 16
 OUT_DIM = 1
 
 
 def load_samples(path):
     feats, labels = [], []
+    in_dim = None
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -46,7 +47,11 @@ def load_samples(path):
                 continue
             x = obj.get("features")
             y = obj.get("label")
-            if not isinstance(x, list) or len(x) != IN_DIM or y is None:
+            if not isinstance(x, list) or y is None or not 0 < len(x) <= MAX_IN_DIM:
+                continue
+            if in_dim is None:
+                in_dim = len(x)
+            if len(x) != in_dim:
                 continue
             feats.append([float(v) for v in x])
             labels.append([float(y)])
@@ -95,6 +100,7 @@ def normalize(cols, mean, std):
 def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
     rng = random.Random(seed)
     n = len(feats)
+    in_dim = len(feats[0])
 
     x_mean, x_std = stats(feats)
     y_mean, y_std = stats(labels)
@@ -106,7 +112,7 @@ def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
         scale = 1.0 / math.sqrt(ncol)
         return [[rng.uniform(-scale, scale) for _ in range(ncol)] for _ in range(rows)]
 
-    W1 = rand_mat(hidden, IN_DIM)     # [hidden][in]
+    W1 = rand_mat(hidden, in_dim)     # [hidden][in]
     b1 = [0.0] * hidden
     W2 = rand_mat(OUT_DIM, hidden)    # [out][hidden]
     b2 = [0.0] * OUT_DIM
@@ -119,7 +125,7 @@ def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
             x = xn[i]
             t = yn[i]
             # 前向
-            h_pre = [b1[j] + sum(W1[j][k] * x[k] for k in range(IN_DIM))
+            h_pre = [b1[j] + sum(W1[j][k] * x[k] for k in range(in_dim))
                      for j in range(hidden)]
             h = [math.tanh(v) for v in h_pre]
             out = [b2[o] + sum(W2[o][j] * h[j] for j in range(hidden))
@@ -137,7 +143,7 @@ def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
                 b2[o] -= lr * dout[o]
             for j in range(hidden):
                 dpre = dh[j] * (1.0 - h[j] * h[j])  # tanh'
-                for k in range(IN_DIM):
+                for k in range(in_dim):
                     W1[j][k] -= lr * dpre * x[k]
                 b1[j] -= lr * dpre
         if ep % 50 == 0 or ep == epochs - 1:
@@ -145,6 +151,7 @@ def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
 
     return {
         "hidden": hidden,
+        "in_dim": in_dim,
         "x_mean": x_mean, "x_std": x_std,
         "y_mean": y_mean, "y_std": y_std,
         "W1": W1, "b1": b1, "W2": W2, "b2": b2,
@@ -153,11 +160,12 @@ def train(feats, labels, hidden=8, epochs=300, lr=0.05, seed=1):
 
 def export(model, path):
     hidden = model["hidden"]
+    in_dim = model.get("in_dim", len(model["x_mean"]))
     with open(path, "w", encoding="utf-8") as f:
         f.write("# flowengine-tinymlp v1\n")
-        f.write("# features: [ego_v, ego_y, ego_heading, ego_yaw_rate]\n")
+        f.write(f"# features: {in_dim} dims\n")
         f.write("# output:   [target_speed]\n")
-        f.write(f"in {IN_DIM}\n")
+        f.write(f"in {in_dim}\n")
         f.write(f"hidden {hidden}\n")
         f.write(f"out {OUT_DIM}\n")
         f.write("norm_mean " + " ".join(f"{v:.6f}" for v in model["x_mean"]) + "\n")
@@ -165,7 +173,7 @@ def export(model, path):
         f.write("out_mean " + " ".join(f"{v:.6f}" for v in model["y_mean"]) + "\n")
         f.write("out_scale " + " ".join(f"{v:.6f}" for v in model["y_std"]) + "\n")
         f.write("w1 " + " ".join(f"{model['W1'][j][k]:.6f}"
-                                 for j in range(hidden) for k in range(IN_DIM)) + "\n")
+                                 for j in range(hidden) for k in range(in_dim)) + "\n")
         f.write("b1 " + " ".join(f"{v:.6f}" for v in model["b1"]) + "\n")
         f.write("w2 " + " ".join(f"{model['W2'][o][j]:.6f}"
                                  for o in range(OUT_DIM) for j in range(hidden)) + "\n")
@@ -202,8 +210,9 @@ def main():
                   f"用 --synthetic 或采集更多数据。", file=sys.stderr)
             return 1
 
-    print(f"training on {len(feats)} samples "
-          f"(in={IN_DIM}, hidden={args.hidden}, out={OUT_DIM})", file=sys.stderr)
+        in_dim = len(feats[0])
+        print(f"training on {len(feats)} samples "
+            f"(in={in_dim}, hidden={args.hidden}, out={OUT_DIM})", file=sys.stderr)
     model = train(feats, labels, hidden=args.hidden, epochs=args.epochs, lr=args.lr)
     export(model, args.output)
     return 0

@@ -118,7 +118,7 @@ static void on_planning(const Message* msg, void* user_data) {
 static void run_inference(double* out_speed, double* out_d) {
     float y[TINY_MLP_MAX_OUT];
     if (g.model.loaded) {
-        float x[4];
+        float x[TINY_MLP_MAX_IN] = {0};
         x[0] = (float)g.ego_v;
         x[1] = (float)g.ego_y;
         x[2] = (float)g.ego_heading;
