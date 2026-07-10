@@ -11,6 +11,8 @@
  *   - 数据契约 (与 inference_node / tools/train 一致):
  *       特征 features = [ego_v, ego_y, ego_heading, ego_yaw_rate]
  *       标签 label    = planning_target_speed (模仿学习: 学 planning 的目标速度)
+ *     v2 样本额外写入 obstacles/planning/control/features_v2，供 PyTorch
+ *     场景特征训练使用；features 保持 v1 兼容。
  *   - 轻量: 只写文本 JSONL，不引入 Bag v2 二进制依赖，便于 Python 直接解析。
  *
  * NodePlugin 接口，编译为 libdata_recorder_node.so。
@@ -27,6 +29,8 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+
+#define RECORDER_MAX_OBSTACLES 8
 
 static struct {
     Transport*        transport;
@@ -45,8 +49,12 @@ static struct {
     /* 最新锁存值 */
     double ego_x, ego_y, ego_v, ego_heading, ego_yaw_rate;
     double planning_target_speed;
+    ObstacleList obstacles;
+    ControlCmd   control;
     volatile int has_fusion;
     volatile int has_planning;
+    volatile int has_obstacles;
+    volatile int has_control;
 
     double cfg_frequency_hz;
     int    sample_count;
@@ -78,6 +86,53 @@ static void on_planning(const Message* msg, void* user_data) {
     g.has_planning = 1;
 }
 
+static void on_obstacles(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    ObstacleList obs;
+    if (ObstacleList_deserialize(&obs, (const uint8_t*)msg->data, msg->data_size) == 0) {
+        g.obstacles = obs;
+        if (g.obstacles.count > RECORDER_MAX_OBSTACLES) g.obstacles.count = RECORDER_MAX_OBSTACLES;
+        g.has_obstacles = 1;
+    }
+}
+
+static void on_control(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    ControlCmd cmd;
+    if (ControlCmd_deserialize(&cmd, (const uint8_t*)msg->data, msg->data_size) == 0) {
+        g.control = cmd;
+        g.has_control = 1;
+    }
+}
+
+static void select_front_obstacles(const ObstacleList* src, const Obstacle** first, const Obstacle** second) {
+    *first = NULL;
+    *second = NULL;
+    if (!src) return;
+    for (uint32_t i = 0; i < src->count && i < RECORDER_MAX_OBSTACLES; i++) {
+        const Obstacle* obs = &src->obstacles[i];
+        if (obs->x < 0.0f) continue;
+        if (!*first || obs->x < (*first)->x) {
+            *second = *first;
+            *first = obs;
+        } else if (!*second || obs->x < (*second)->x) {
+            *second = obs;
+        }
+    }
+}
+
+static void print_obstacle_json(FILE* out, const Obstacle* obs) {
+    if (!obs) {
+        fprintf(out, "{\"id\":0,\"x\":0.000,\"y\":0.000,\"vx\":0.000,\"vy\":0.000,\"type\":0,\"confidence\":0.000}");
+        return;
+    }
+    fprintf(out,
+            "{\"id\":%u,\"x\":%.3f,\"y\":%.3f,\"vx\":%.3f,\"vy\":%.3f,\"type\":%d,\"confidence\":%.3f}",
+            obs->id, obs->x, obs->y, obs->vx, obs->vy, (int)obs->type, obs->confidence);
+}
+
 static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -97,13 +152,36 @@ static void* recorder_thread(void* arg) {
         /* 只在两路数据都到齐时采样，保证 (特征,标签) 完整 */
         if (!g.has_fusion || !g.has_planning || !g.out) continue;
 
+        const Obstacle* front0 = NULL;
+        const Obstacle* front1 = NULL;
+        select_front_obstacles(g.has_obstacles ? &g.obstacles : NULL, &front0, &front1);
+        double control_brake = g.has_control ? g.control.brake : 0.0;
+        int control_emergency_stop = g.has_control ? (g.control.emergency_stop ? 1 : 0) : 0;
+
         fprintf(g.out,
-            "{\"t\":%lld,\"features\":[%.4f,%.4f,%.4f,%.4f],"
-            "\"label\":%.4f,\"ego\":{\"x\":%.3f,\"y\":%.3f}}\n",
+            "{\"schema_version\":\"flowengine.e2e_sample.v2\",\"t\":%lld,"
+            "\"features\":[%.4f,%.4f,%.4f,%.4f],"
+            "\"features_v2\":[%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.0f],"
+            "\"label\":%.4f,\"ego\":{\"x\":%.3f,\"y\":%.3f,\"v\":%.3f,\"heading\":%.4f,\"yaw_rate\":%.4f},"
+            "\"planning\":{\"target_speed\":%.4f},\"control\":{\"throttle\":%.3f,\"brake\":%.3f,\"steering\":%.3f,\"emergency_stop\":%s},\"obstacles\":[",
             now_ms(),
             g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
+            g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
+            front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
+            front0 ? (int)front0->type : 0, front0 ? front0->confidence : 0.0,
+            front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
+            front1 ? (int)front1->type : 0, control_brake, (double)control_emergency_stop,
             g.planning_target_speed,
-            g.ego_x, g.ego_y);
+            g.ego_x, g.ego_y, g.ego_v, g.ego_heading, g.ego_yaw_rate,
+            g.planning_target_speed,
+            g.has_control ? g.control.throttle : 0.0,
+            control_brake,
+            g.has_control ? g.control.steering : 0.0,
+            control_emergency_stop ? "true" : "false");
+        print_obstacle_json(g.out, front0);
+        fprintf(g.out, ",");
+        print_obstacle_json(g.out, front1);
+        fprintf(g.out, "]}\n");
         fflush(g.out);
         g.sample_count++;
 
@@ -119,7 +197,7 @@ static void* recorder_thread(void* arg) {
     return NULL;
 }
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "perception/obstacles", "control/cmd", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
@@ -161,10 +239,16 @@ static int recorder_init(MessageBus* bus, Transport* transport,
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "planning/trajectory", on_planning, NULL);
+    transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);
+    transport_subscribe(transport, "control/cmd", on_control, NULL);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "perception/obstacles", 0x0B5A010Eu,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "control/cmd", 0x2D95C6D2u,
                         CAP_SUBSCRIBER, 0);
 
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "recorder");

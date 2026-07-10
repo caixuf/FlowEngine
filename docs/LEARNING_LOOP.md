@@ -32,7 +32,8 @@
 
 ## 数据契约 (三方一致)
 
-`data_recorder_node`、`tools/train/train.py`、`inference_node` 共享同一份契约：
+`features` v1 仍由 `data_recorder_node`、`tools/train/train.py`、`inference_node`
+共享，用于零依赖 tiny-MLP 与 C 侧推理兼容：
 
 | 项 | 定义 |
 |----|------|
@@ -44,6 +45,19 @@
 ```json
 {"t":1783660681184,"features":[5.22,-1.77,-0.0008,0.0],"label":5.2,"ego":{"x":0.47,"y":-1.77}}
 ```
+
+PyTorch 训练路径支持 v2 场景特征。v2 样本保留 `features` v1，同时增加
+`features_v2` 和结构化上下文：
+
+| 项 | 定义 |
+|----|------|
+| `features_v2` | `ego + front obstacles + control`，由 `tools/train_e2e/feature_schema.py` 统一定义 |
+| `planning.target_speed` | teacher 目标速度，同时镜像为 `label` |
+| `obstacles` | recorder 锁存的前向障碍物摘要 |
+| `control` | recorder 锁存的 `control/cmd` 摘要 |
+
+当前 v2 特征名集中定义在 `tools/train_e2e/feature_schema.py`，exporter、PyTorch
+trainer、evaluator、sidecar 都从这里读取，避免同一套拼接逻辑散在多个脚本里。
 
 ## 模型权重契约 (`tiny_mlp.h` 纯文本格式)
 
@@ -75,18 +89,54 @@ b2 <OUT floats>
 | `inference_node`     | `modules/adas_nodes/inference_node.c` | 2 | 加载模型，影子模式发布 `inference/trajectory` |
 | `tiny_mlp.h`         | `modules/adas_nodes/tiny_mlp.h` | 2 | 零依赖推理内核（后续可替换为 ONNX Runtime / TensorRT）|
 
+## 模型位置约定
+
+日常只需要先看一个入口：
+
+```bash
+python3 tools/modelctl.py list
+```
+
+FlowEngine 约定只有两类模型位置：
+
+| 位置 | 用途 |
+|------|------|
+| `tools/train/model.txt` | 当前 C runtime 模型；`demo.sh` 里的 `inference_node` 直接加载它 |
+| `models/<name>/` | 训练产物目录；包含 `manifest.json` 和 `model.txt` 或 `model.pt` |
+
+`models/<name>/model.txt` 是 tiny-MLP artifact，可以提升为 runtime 模型：
+
+```bash
+python3 tools/modelctl.py promote models/e2e_tiny_v001
+```
+
+`models/<name>/model.pt` 是 PyTorch artifact，只用于 `eval_model.py` 和
+`torch_sidecar.py`，不会自动接管 C runtime。
+
 ## 快速上手
 
 ```bash
 # 1. 构建（含节点插件）
 bash scripts/demo.sh --no-browser 12          # 采集 + 推理随 pipeline 一起跑
 
-# 2. 用采集到的样本训练模型
-python3 tools/train/train.py \
-    --input /tmp/flow_train_samples.jsonl \
-    --output tools/train/model.txt
+# 2. 用采集到的样本一键训练模型（默认 PyTorch backend）
+python3 tools/train_demo_model.py --backend torch --name e2e_torch_v001
 
-# 3. 再次运行 pipeline，inference_node 会自动加载新模型
+# 3. 基于已有 PyTorch artifact 继续训练，输出一个新版本
+python3 tools/train_demo_model.py \
+  --backend torch \
+  --name e2e_torch_v002 \
+  --init-from models/e2e_torch_v001
+
+# 4. 查看当前 runtime 模型和训练产物
+python3 tools/modelctl.py list
+```
+
+如果想让 C runtime 直接加载新模型，训练 tiny backend 并 promote：
+
+```bash
+python3 tools/train_demo_model.py --backend tiny --name e2e_tiny_v001
+python3 tools/modelctl.py promote models/e2e_tiny_v001
 bash scripts/demo.sh --no-browser 12
 ```
 
@@ -98,6 +148,110 @@ python3 tools/train/train.py --synthetic --output tools/train/model.txt
 
 仓库已内置一个用合成数据训练好的 `tools/train/model.txt`，因此 `inference_node`
 开箱即可加载真实模型；若文件缺失，节点会回退到可解释的启发式策略（不报错）。
+
+## E2E Training Bridge v0.1（无 ONNX 依赖）
+
+当前仓库提供一条不依赖 ONNX Runtime 的端到端训练框架对接骨架。它复用
+`data_recorder_node` 的 JSONL 样本：tiny-MLP 后端使用 v1 4 维特征，PyTorch 后端
+优先使用 v2 场景特征，把「采集 → 数据集 → 训练产物 → 离线评估 → shadow 推理」
+的工程契约先跑通。
+
+```bash
+# 1. 采集 recorder 样本
+bash scripts/demo.sh --no-browser 30
+
+# 2. 推荐入口：自动导出 dataset、训练、评估、写入 models/<name>/
+python3 tools/train_demo_model.py --backend torch --name e2e_torch_v001
+```
+
+如果要拆开调试，等价底层命令是：
+
+```bash
+
+# 导出版本化数据集目录
+python3 tools/dataset/export_e2e_dataset.py \
+  --input /tmp/flow_train_samples.jsonl \
+  --output datasets/demo_e2e \
+  --scenario pedestrian_crossing
+
+# 训练一个 FlowEngine artifact（tiny-MLP）
+python3 tools/train_e2e/train.py \
+  --dataset datasets/demo_e2e \
+  --output models/e2e_tiny_v001
+
+# 离线评估 teacher imitation 误差
+python3 tools/eval_model.py \
+  --model models/e2e_tiny_v001 \
+  --dataset datasets/demo_e2e \
+  --output models/e2e_tiny_v001/metrics.json
+
+# 让 inference_node 加载新产物的 model.txt 继续 shadow 运行
+python3 tools/modelctl.py promote models/e2e_tiny_v001
+bash scripts/demo.sh --no-browser 30
+```
+
+产物目录结构：
+
+```text
+models/e2e_tiny_v001/
+  model.txt              # inference_node 可直接加载
+  manifest.json          # 模型格式、输入输出 schema、训练参数、数据集摘要
+  dataset_metadata.json  # 数据集元信息快照
+  metrics.json           # eval_model.py 输出（可选）
+```
+
+这不是完整的端到端自动驾驶训练平台，而是训练框架接入点：后续把
+`tools/train_e2e/train.py` 的 tiny-MLP backend 替换成 PyTorch/ONNX 导出时，数据集目录、
+`manifest.json`、shadow mode 和评估入口可以保持稳定。
+
+`export_e2e_dataset.py` 会自动识别 recorder v2 样本并导出
+`flowengine.e2e_dataset.v2`，metadata 中的 `feature_names` 会随 artifact 写入
+checkpoint。`torch_sidecar.py` 运行时根据 checkpoint 的 `feature_names` 从
+`/tmp/flow_topology.json` 抽取同一套特征，而不是硬编码 4 维输入。
+
+如果本机安装了 PyTorch，可以直接使用可选的 PyTorch backend 训练 `model.pt`：
+
+```bash
+python3 tools/train_e2e/torch_train.py \
+  --dataset datasets/demo_e2e \
+  --output models/e2e_torch_v001
+
+python3 tools/eval_model.py \
+  --model models/e2e_torch_v001 \
+  --dataset datasets/demo_e2e \
+  --output models/e2e_torch_v001/metrics.json
+```
+
+`torch_train.py` 是可选入口；未安装 PyTorch 时，零依赖的 `tools/train_e2e/train.py`
+仍然可用。当前 C 推理节点只直接加载 `model.txt`，因此 PyTorch artifact 先用于训练框架
+接入和离线评估；后续再接 Python sidecar / ONNX Runtime / TensorRT 推理后端。
+
+如果暂时不想安装 PyTorch，也可以用零依赖 tiny-MLP sidecar 先验证运行时文件桥接：
+
+```bash
+python3 tools/train_e2e/tiny_sidecar.py \
+  --model models/e2e_tiny_v001 \
+  --state-file /tmp/flow_topology.json \
+  --output /tmp/flow_tiny_inference.json
+```
+
+也可以先用文件桥接 sidecar 把 PyTorch artifact 放到运行时 shadow 链路旁边：
+
+```bash
+# 终端 1：运行 FlowEngine，持续写 /tmp/flow_topology.json
+bash scripts/demo.sh --no-browser 30
+
+# 终端 2：读取 state JSON，写出 PyTorch shadow 推理结果
+python3 tools/train_e2e/torch_sidecar.py \
+  --model models/e2e_torch_v001 \
+  --state-file /tmp/flow_topology.json \
+  --output /tmp/flow_torch_inference.json
+```
+
+`torch_sidecar.py` 当前不向 C transport 发布 topic，而是把一帧
+`inference/trajectory` 形状的 JSON 原子写到文件；这样可以先验证 PyTorch runtime、
+模型 artifact、实时输入特征抽取和 shadow 输出契约，再决定是否升级为 IPC/HTTP/topic
+发布节点。
 
 ## 影子模式对比
 

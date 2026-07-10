@@ -329,6 +329,10 @@ add_executable(flow_bag src/bag_demo.c)
 target_link_libraries(flow_bag flowengine_core m)
 target_link_options(flow_bag PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
 
+# ── Step 3b: Bag 检查工具 ────────────────────────────────
+add_executable(bag_check tools/bag_check.c)
+target_link_libraries(bag_check flowengine_core m)
+
 # ── Step 4: 消息驱动任务插件 ─────────────────────────────
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task flowengine_core)
@@ -477,7 +481,7 @@ target_link_libraries(flow_nuscenes_demo flowengine_core m)
 add_dependencies(flow_e2e msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -589,6 +593,12 @@ target_include_directories(test_new_modules PRIVATE ${GEN_DIR})
 
 add_test(NAME new_module_tests COMMAND test_new_modules)
 set_tests_properties(new_module_tests PROPERTIES TIMEOUT 10)
+
+add_test(NAME e2e_training_tools
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(e2e_training_tools PROPERTIES TIMEOUT 30)
 
 # ── Smoke test: end-to-end pipeline validates key metrics ──
 add_test(NAME e2e_smoke
