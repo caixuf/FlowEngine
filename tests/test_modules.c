@@ -1000,6 +1000,18 @@ static void test_nmea_merge(void) {
     PASS();
 }
 
+static void test_nmea_invalid_coord(void) {
+    TEST("nmea rejects non-numeric coordinate");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    /* valid checksum, garbage coord, empty velocity → nothing valid to update */
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,A,ABCD.EF,N,ABCD.EF,E,,,230394,*03", NULL);
+    ASSERT(rc != NMEA_OK, "garbage coord should not yield OK");
+    ASSERT(!p.has_position, "position must remain unset on bad coord");
+    PASS();
+}
+
 int main(void) {
     printf("\n╔══════════════════════════════════════════╗\n");
     printf("║  FlowEngine Unit Tests                    ║\n");
@@ -1072,6 +1084,7 @@ int main(void) {
     test_nmea_gnss_talker();
     test_nmea_non_nmea();
     test_nmea_merge();
+    test_nmea_invalid_coord();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");

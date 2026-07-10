@@ -39,6 +39,13 @@ uint8_t nmea_checksum(const char* sentence) {
 static bool nmea_coord_to_deg(const char* field, char quad, double* out_deg) {
     if (!field || !*field || !out_deg) return false;
 
+    /* 仅允许数字与单个小数点（拒绝非数值字段，避免 atof 静默返回 0）*/
+    int dots = 0;
+    for (const char* c = field; *c; ++c) {
+        if (*c == '.') { if (++dots > 1) return false; }
+        else if (*c < '0' || *c > '9') return false;
+    }
+
     const char* dot = strchr(field, '.');
     /* 度部分 = 小数点前除去最后两位（分）的所有数字 */
     size_t int_len = dot ? (size_t)(dot - field) : strlen(field);
@@ -52,9 +59,11 @@ static bool nmea_coord_to_deg(const char* field, char quad, double* out_deg) {
 
     double deg = atof(deg_buf);
     double minutes = atof(field + deg_len);
+    if (minutes >= 60.0) return false;          /* 分必须 < 60 */
     double val = deg + minutes / 60.0;
 
     if (quad == 'S' || quad == 'W' || quad == 's' || quad == 'w') val = -val;
+    if (val < -180.0 || val > 180.0) return false;  /* 经纬度合法范围 */
     *out_deg = val;
     return true;
 }

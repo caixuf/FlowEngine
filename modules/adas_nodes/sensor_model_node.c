@@ -98,6 +98,11 @@ static int load_nmea_gps_log(const char* path, GpsData** out_frames) {
             frames[count++] = gps;
         }
     }
+    if (count >= SENSOR_NMEA_MAX_FRAMES && !feof(f)) {
+        LOG_WARN("sensor_model",
+                 "NMEA file truncated at %d frames (SENSOR_NMEA_MAX_FRAMES): %s",
+                 count, path);
+    }
     fclose(f);
 
     if (count == 0) {
