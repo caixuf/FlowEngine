@@ -159,6 +159,23 @@ static int run_dlopen_mode(int duration, int stagger_ms,
             continue;
         }
 
+        /* ── ABI 版本校验 ──────────────────────────────────────
+         * 防止加载与当前 NodePlugin 契约不兼容的旧/新插件而导致
+         * 难以排查的运行时崩溃。 */
+        if (nd->plugin->api_version == 0) {
+            LOG_WARN("launcher",
+                     "%s: plugin declares no ABI version (expected %u) — "
+                     "loading as legacy, behaviour may be undefined",
+                     nd->library, NODE_PLUGIN_API_VERSION);
+        } else if (nd->plugin->api_version != NODE_PLUGIN_API_VERSION) {
+            LOG_WARN("launcher",
+                     "%s: incompatible plugin ABI version %u (expected %u) — skipping",
+                     nd->library, nd->plugin->api_version, NODE_PLUGIN_API_VERSION);
+            nd->plugin = NULL;
+            dlclose(nd->lib_handle); nd->lib_handle = NULL;
+            continue;
+        }
+
         if (nd->plugin->init(bus, transport, discovery, scheduler,
                              nd->params_json[0] ? nd->params_json : NULL) != 0) {
             LOG_WARN("launcher", "node %s init() failed", nd->name);

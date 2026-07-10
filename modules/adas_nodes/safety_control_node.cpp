@@ -503,6 +503,7 @@ int safety_health() {
 }
 
 NodePlugin s_plugin = {
+    NODE_PLUGIN_API_VERSION,
     "safety_control",
     "1.0.0",
     "FlowCoro safety envelope for control commands",

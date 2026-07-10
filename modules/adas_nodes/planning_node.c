@@ -306,6 +306,7 @@ static void planning_cleanup(void) {
 static int  planning_health(void)     { return g.frenet ? 0 : -1; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "planning",
     .version       = "1.0.0",
     .description   = "Frenet Optimal Trajectory Planner",

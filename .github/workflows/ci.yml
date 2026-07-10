@@ -25,7 +25,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60 -LE benchmark
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|integration"
 
   # ── Debug build ────────────────────────────────────────────
   build-debug:
@@ -39,7 +39,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60 -LE benchmark
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|integration"
 
   # ── ASAN (Address Sanitizer) ───────────────────────────────
   build-asan:
@@ -53,7 +53,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120 -LE benchmark
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|integration"
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:log_path=/tmp/asan.log
       - name: Check ASAN log
@@ -96,7 +96,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120 -LE benchmark
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|integration"
 
   # ── Stress test ────────────────────────────────────────────
   stress-test:
@@ -115,6 +115,27 @@ jobs:
       - name: Verify
         run: echo "✓ Stress test completed — no crash"
 
+  # ── Integration test: multi-node pipeline via flow_launcher ─
+  # Builds the separate adas_nodes .so plugin subproject and verifies that
+  # flow_launcher loads every node (dlopen + ABI check) and runs the pipeline.
+  integration-test:
+    runs-on: ubuntu-24.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build framework
+        run: cmake --build build -j$(nproc)
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Run integration smoke (ctest -L integration)
+        run: ctest --test-dir build --output-on-failure -L integration
+
   # ── Coverage ───────────────────────────────────────────────
   coverage:
     runs-on: ubuntu-24.04
@@ -127,7 +148,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 360 -LE benchmark
+        run: ctest --test-dir build --output-on-failure --timeout 360 -LE "benchmark|integration"
       - name: Generate coverage
         run: |
           lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused,negative

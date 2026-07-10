@@ -268,6 +268,7 @@ static int fusion_health(void) {
 /* ── 导出入口 ────────────────────────────────────────────────── */
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "fusion",
     .version       = "1.0.0",
     .description   = "EKF 5D sensor fusion (LiDAR + GPS)",

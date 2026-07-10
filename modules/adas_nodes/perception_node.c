@@ -281,6 +281,7 @@ static void perception_cleanup(void) {
 static int  perception_health(void)  { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "perception",
     .version       = "1.0.0",
     .description   = "LiDAR/GPS/Camera simulation + DBSCAN clustering",

@@ -544,6 +544,7 @@ static void monitor_cleanup(void) {
 static int  monitor_health(void)        { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "monitor",
     .version       = "1.0.0",
     .description   = "System monitor + dashboard JSON exporter",

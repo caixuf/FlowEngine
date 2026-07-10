@@ -656,6 +656,7 @@ static void control_cleanup(void) {
 static int  control_health(void)      { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "control",
     .version       = "1.0.0",
     .description   = "PID longitudinal controller + ACC",

@@ -268,6 +268,7 @@ static void sensor_model_cleanup(void) {
 static int sensor_model_health(void) { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name = "sensor_model",
     .version = "1.0.0",
     .description = "Noisy/FOV/occlusion sensor model",
