@@ -199,10 +199,12 @@ static void obstacles_tick(void) {
 
         double rel = o->x - g.vehicle.x;
         if (o->vx >= 0) {
-            if (rel < -40.0)  o->x = g.vehicle.x + 120.0 + (double)i * 5.0;
+            /* 循环障碍车只在远离视野 (自车后方 >80m) 时才重置位置, 避免在
+             * 可视范围内瞬移造成前端插值出的"突变滑行"。 */
+            if (rel < -100.0) o->x = g.vehicle.x + 120.0 + (double)i * 5.0;
             if (rel >  220.0) o->x = g.vehicle.x + 100.0;
         } else {
-            if (rel < -50.0) o->x = g.vehicle.x + 500.0;
+            if (rel < -100.0) o->x = g.vehicle.x + 500.0;
         }
     }
 }
