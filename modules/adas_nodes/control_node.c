@@ -33,6 +33,14 @@
 #define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
 #define CONTROL_WHEELBASE_M 2.7
 
+/* 车道判定迟滞: 已提交车道保持不变, 直到 ego_y 越过中心线 ±此死区才切换,
+ * 避免车骑在车道线 (y≈0) 附近时目标车道每帧翻转造成的横向抖振。 */
+#define LANE_HYSTERESIS_M   0.5
+/* 死锁恢复: 近乎静止且横向卡在车道线附近持续超过此秒数, 强制收敛到最近车道中心。 */
+#define STUCK_SPEED_MPS     0.5    /* 判定"近乎静止"的速度阈值 */
+#define STUCK_LATERAL_M     0.6    /* 判定"卡在车道线附近"的 |ego_y| 阈值 */
+#define STUCK_RECOVER_S     3.0    /* 触发恢复所需持续时间 (秒) */
+
 /* ── 控制节点状态机定义 ─────────────────────────────────────── */
 /* 自定义事件 (从 SM_EVENT_USER_BASE=16 开始) */
 #define CTL_EVENT_OBSTACLE_BLOCKED  16
@@ -104,6 +112,10 @@ static struct {
     double lc_target_y;
     double lane_width;
     double blocked_timeout_s;
+
+    /* 车道迟滞 + 死锁恢复状态 */
+    int    committed_lane_side;  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
+    double stuck_timer;          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
 
     uint32_t cycle;
 
@@ -319,14 +331,45 @@ static void* control_thread(void* arg) {
         if (g.lc_cooldown > 0.0) g.lc_cooldown -= 0.05;
 
         double road_center_limit = g.lane_width - 1.0;
-        double cruise_lane_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
-        double adjacent_lane_y = (cruise_lane_y < 0.0) ? g.lane_width * 0.5
-                                   : -g.lane_width * 0.5;
+        double half_lane = g.lane_width * 0.5;
+
+        /* ── 车道判定加迟滞: 使用"已提交车道", 只有 ego_y 明确越过中心线
+         *    ±LANE_HYSTERESIS_M 才切换, 避免 y≈0 处目标车道每帧翻转的抖振 ── */
+        if (g.committed_lane_side == 0) {
+            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
+        } else if (g.committed_lane_side < 0 && g.ego_y > LANE_HYSTERESIS_M) {
+            g.committed_lane_side = 1;
+        } else if (g.committed_lane_side > 0 && g.ego_y < -LANE_HYSTERESIS_M) {
+            g.committed_lane_side = -1;
+        }
+        double cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
+        double adjacent_lane_y = -cruise_lane_y;
         if (fabs(g.ego_y) > road_center_limit - 0.4) {
-            cruise_lane_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
+            cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
             adjacent_lane_y = -cruise_lane_y;
             g.lc_state = 2;
             g.lc_timer = 0.0;
+        }
+
+        /* ── 死锁恢复: 车长时间近乎静止且横向卡在车道线附近 (骑线不动) 时,
+         *    强制收敛到最近车道中心并复位变道状态机, 打破 chatter/死锁 ── */
+        if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y) < STUCK_LATERAL_M) {
+            g.stuck_timer += 0.05;
+        } else {
+            g.stuck_timer = 0.0;
+        }
+        if (g.stuck_timer > STUCK_RECOVER_S) {
+            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
+            cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
+            adjacent_lane_y = -cruise_lane_y;
+            g.lc_state     = 0;
+            g.lc_attempted = 0;
+            g.lc_cooldown  = 0.0;
+            g.lc_timer     = 0.0;
+            g.stuck_timer  = 0.0;
+            LOG_WARN("control", ">>> STUCK RECOVERY: converge to lane y=%.2f (ego@(%.1f,%.1f))",
+                     cruise_lane_y, g.ego_x, g.ego_y);
         }
 
         /* ── ACC & 变道: 计算本车道前车间距 ── */

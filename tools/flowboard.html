@@ -1593,7 +1593,13 @@ function draw2D(){
       // that may have been set to NaN through a failed lerp in a previous frame.
       if(!cur||isNaN(cur.x)){cur={x:dtx,y:dty,lastDataX:o.x,lastDataY:o.y,lastDataT:_dtNow}; window._obsTargets2d[i]=cur;}
       // Detect data update
-      if(o.x!==cur.lastDataX||o.y!==cur.lastDataY){cur.lastDataX=o.x;cur.lastDataY=o.y;cur.lastDataT=_dtNow;}
+      if(o.x!==cur.lastDataX||o.y!==cur.lastDataY){
+        // Large jump in data space (e.g. sim respawn/teleport of a recycled
+        // obstacle) → snap instead of lerp, so it doesn't slide across the view.
+        var jump=Math.abs((o.x||0)-(cur.lastDataX||0))+Math.abs((o.y||0)-(cur.lastDataY||0));
+        cur.lastDataX=o.x;cur.lastDataY=o.y;cur.lastDataT=_dtNow;
+        if(jump>20){cur.x=dtx;cur.y=dty;}
+      }
       // Extrapolate screen position using relative velocity since last data tick
       var age=Math.min(_dtNow-cur.lastDataT,0.5);
       var ex=carX-(((o.y||0)+relVy*age))*s, ey=carY-(((o.x||0)+relVx*age))*s;
