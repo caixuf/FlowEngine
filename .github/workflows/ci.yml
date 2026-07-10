@@ -182,3 +182,25 @@ jobs:
           curl -sf http://localhost:8811/api/topology > /tmp/topo.json
           python3 -c "import json;d=json.load(open('/tmp/topo.json'));assert d['source']=='demo';assert len(d['nodes'])>0;print('✓ demo topology OK')"
           kill $SRV 2>/dev/null || true
+
+  # ── Algorithm evaluator (regression gate) ─────────────────────
+  # Runs the full plugin pipeline (demo.sh) and scores it against
+  # pass_criteria.  A FAIL blocks the PR — this is the quality gate
+  # for any change touching the ADAS pipeline chain.
+  evaluator:
+    runs-on: ubuntu-24.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build framework
+        run: cmake --build build -j$(nproc)
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Regression evaluator (45s demo)
+        run: python3 tools/demo_evaluator.py --duration 45 --interval 0.5
