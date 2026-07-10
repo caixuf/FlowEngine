@@ -83,7 +83,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
             try:
                 params = json.loads(params)
             except json.JSONDecodeError:
-                print("warning: sim_world.params is not valid JSON; ignoring scenario_file",
+                print("warning: sim_world.params is not valid JSON; skipping scenario_file lookup",
                       file=sys.stderr)
                 params = {}
         if isinstance(params, dict):

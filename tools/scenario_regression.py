@@ -177,8 +177,8 @@ def main() -> int:
         if not scenarios:
             raise SystemExit(f"no enabled scenario matches --only {args.only!r}")
     default_duration = int(suite.get("default_duration_s", 30))
-    tolerances = suite.get("baseline_tolerances", {}) if isinstance(
-        suite.get("baseline_tolerances"), dict) else {}
+    raw_tolerances = suite.get("baseline_tolerances")
+    tolerances = raw_tolerances if isinstance(raw_tolerances, dict) else {}
 
     if args.dry_run:
         print(f"suite: {suite.get('name')} ({len(scenarios)} scenarios)")
