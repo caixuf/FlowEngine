@@ -1,7 +1,9 @@
 # FlowRegistry — 统一元信息注册中心设计计划
 
-> 状态：待评审
-> 目标：把分散在 6 个模块里的元信息收敛为统一注册中心，为 launch、flowctl、topology viewer、bag info、schema query 提供统一基础。
+> 状态：**已实现**（2026-07-09）
+> FlowRegistry (`src/core/flow_registry.c`, `include/flow_registry.h`) 和 ParamRegistry
+> (`src/core/param_registry.c`, `include/param_registry.h`) 已完成并集成到 `msg_schema`、
+> `task_manager`、`process_manager` 和 `flowctl`。本文档保留作为原始设计记录，实际 API 以头文件为准。
 
 ## 1. 问题分析：当前元信息分散现状
 
@@ -281,7 +283,7 @@ char* flow_registry_dump_topology_json(FlowRegistry* reg);
 
 | 步骤 | 文件 | 内容 |
 |------|------|------|
-| 5.1 | `src/adas_demo.c` | 启动时调用 `flow_registry_dump_json()` 打印注册中心状态 |
+| 5.1 | `src/e2e_demo.c` | 启动时调用 `flow_registry_dump_json()` 打印注册中心状态 |
 | 5.2 | `tools/topology_viewer.html` | 验证能消费 registry JSON |
 
 ## 5. 文件清单
@@ -297,7 +299,7 @@ char* flow_registry_dump_topology_json(FlowRegistry* reg);
 - `src/core/serializer.c` — 委托给 registry
 - `src/core/task_manager.c` — 委托给 registry
 - `src/core/process_manager.c` — 委托给 registry
-- `src/adas_demo.c` — 集成验证
+- `src/e2e_demo.c` — 集成验证
 
 ## 6. 容量与约束
 

@@ -1,8 +1,12 @@
 # FlowEngine 进化路线图
 
-> 日期：2026-07-04  
-> 当前定位：自动驾驶/机器人中间件内核原型  
-> 目标方向：从“功能原型”进化为“可组织、可观察、可测试、可部署的框架”
+> 日期：2026-07-04（更新 2026-07-10）
+> 当前定位：自动驾驶/机器人中间件内核原型
+> 目标方向：从”功能原型”进化为”可组织、可观察、可测试、可部署的框架”
+>
+> **实现状态更新 (2026-07-10)：** Phase 1-3 已完成，Phase 4-7 大部分完成。
+> FlowRegistry、ParamRegistry、flow_launcher、flowctl 主要命令、QoS 系统均已实现。
+> 未完成项：跨机 TCP bridge、schema-aware bag 全功能、多进程 IPC 验证。
 
 ## 1. 总体方向
 
@@ -29,15 +33,15 @@ FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总
 
 ## 2. 推荐路线总览
 
-| 阶段 | 目标 | 关键词 |
-|---|---|---|
-| Phase 1 | 工程收敛 | 测试、脚本、命名、README |
-| Phase 2 | 统一元信息 | `FlowRegistry`、反射、Meta |
-| Phase 3 | Launch 系统 | 配置驱动启动、依赖、参数 |
-| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 |
-| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge |
-| Phase 6 | 数据闭环 | schema-aware bag、bag info、replay |
-| Phase 7 | 真实 ADAS 样例 | perception、fusion、control、monitor |
+| 阶段 | 目标 | 关键词 | 状态 |
+|---|---|---|---|
+| Phase 1 | 工程收敛 | 测试、脚本、命名、README | ✅ 已完成 |
+| Phase 2 | 统一元信息 | `FlowRegistry`、反射、Meta | ✅ 已完成 |
+| Phase 3 | Launch 系统 | 配置驱动启动、依赖、参数 | ✅ 已完成 |
+| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 | ✅ 大部分完成 |
+| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge | ✅ 同机完成 |
+| Phase 6 | 数据闭环 | schema-aware bag、bag info、replay | 🔧 部分完成 |
+| Phase 7 | 真实 ADAS 样例 | perception、fusion、control、monitor | ✅ 已完成 |
 
 ## 3. Phase 1：工程收敛
 

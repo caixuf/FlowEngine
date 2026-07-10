@@ -531,7 +531,9 @@ static void* control_thread(void* arg) {
         if (fabs(g.ego_y) > road_center_limit - 0.4) {
             double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
             steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
-            if (fabs(g.ego_y) > road_center_limit && g.current_speed < 2.5) {
+            /* 低速时给少许油门使自行车模型能横向移动回车道中心，
+             * 避免 speed=0 时永久卡在路边缘的死锁。 */
+            if (g.current_speed < 2.5) {
                 throttle = 0.18;
                 brake = 0.0;
             } else {
@@ -543,9 +545,9 @@ static void* control_thread(void* arg) {
         } else {
             /* ── Stanley 式横向控制（收敛，不自激） ──
              * cross-track 项: atan2(k*e, v) 随速度自然衰减 → 高速小幅打方向;
-             * heading 项: 弱阻尼 (0.5) 抑制航向偏差, 避免旧 kd=2.0 的极限环振荡。 */
+             * heading 项: lat_kd_heading 阻尼抑制航向偏差, 避免极限环振荡。 */
             double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
-            double heading_term = 0.5 * g.ego_heading;
+            double heading_term = g.lat_kd_heading * g.ego_heading;
             steer = cte_term - heading_term;
             double steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
             if (steer >  steer_limit) steer =  steer_limit;

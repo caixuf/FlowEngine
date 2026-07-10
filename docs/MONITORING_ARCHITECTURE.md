@@ -1,17 +1,19 @@
 # FlowEngine 监控与数据采集架构
 
-> ⚠️ **重要：本文档描述的是监控系统的设计目标与架构规划，并非当前实现。**
+> **当前可用的监控/可视化链路：**
 >
-> **当前实际可用的监控/可视化链路：**
+> **主链路（文件桥接）：**
 > ```
 > flow_e2e → 写 /tmp/flow_topology.json → flowboard_server.py (Python HTTP) → 浏览器
 > ```
 >
-> **`flowmond` 当前实现状态：**
-> - `flowmond` 进程内部创建自己的 `MessageBus`，与 `flow_e2e` 等业务节点的总线**不共享**
-> - 跨进程 topic 聚合需要 IPC/TCP bridge，**当前未实现**
-> - `flowmond` 内嵌的 HTTP 服务器只能看到它自己总线上的空 topic 统计
-> - 如需使用 flowmond，请参考 `docs/VISUALIZATION_ARCHITECTURE.md` 了解实际的"文件桥接"方案
+> **辅助链路（flowmond IPC 桥接）：**
+> `stats_bridge` 跨进程 IPC 通道已实现（`src/core/stats_bridge.c`）。
+> 业务进程通过 `stats_bridge_publish()` 发布 TopicStats，flowmond 通过
+> `stats_bridge_subscriber_open()` 订阅聚合。仪表盘 JSON 通过 `dashboard_bridge`
+> (`src/core/dashboard_bridge.c`) 跨进程传输。
+> - `flowmond` 有独立的 `MessageBus`，不共享业务节点总线
+> - 跨机 TCP bridge 尚未实现，当前仅支持同机 POSIX SHM
 >
 > ---
 

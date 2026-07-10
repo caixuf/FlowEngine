@@ -1,5 +1,9 @@
 # 仿真测试指南
 
+> **注意：** 本文档中 `scenario_runner` 二进制尚未加入构建（源码在 `tools/scenario_runner.c`）。
+> 当前可用的仿真入口是 `flow_e2e`（单进程全链路）和 `flow_launcher config/pipeline.json`（配置驱动）。
+> Carla 集成桥接 `carla_bridge.py` 尚未实现，此处保留为设计参考。
+
 ## 三层仿真体系
 
 ```
@@ -9,7 +13,7 @@ Layer 1: Bag 回放 (零依赖, 现在就能跑)
 Layer 2: 2D 运动学模拟 (轻量, 验证控制/规划)
   → 单车模型 + 简单传感器 + 场景定义
 
-Layer 3: Carla/Gazebo (真实传感器, 完整闭环)
+Layer 3: Carla/Gazebo (真实传感器, 完整闭环) — 待实现
   → 物理引擎 + 相机/LiDAR/雷达模型 + 3D 场景
 ```
 
@@ -24,60 +28,20 @@ Layer 3: Carla/Gazebo (真实传感器, 完整闭环)
 # (FlowEngine 自动通过 bag_writer_attach 录制)
 
 # 3. 回放 + 校验
-./build/bin/scenario_runner scenario.bag \
-    --plugin lib/libmy_controller.so \
-    --check "control/cmd" "throttle<0.5"
+./build/bin/flow_e2e --replay scenario.bag
 ```
 
 ## Layer 2: 2D 模拟器
 
 ```bash
-# 内置场景: 直道 + 前车
-./build/bin/scenario_runner --sim --duration 30
+# 内置场景: 直道 + 前车 + 行人横穿
+bash scripts/demo.sh
 
-# 输出:
-#   t=0.0s | ego: (0,0) 0.0 m/s | obstacle: 50m ahead
-#   t=2.0s | ego: (60,0) 30.0 m/s | obstacle: 40m ahead
-#   t=4.0s | ego: (120,0) 30.0 m/s | obstacle: 30m ahead | braking...
+# 或使用配置驱动启动器指定场景
+./build/bin/flow_launcher config/pipeline.json
 ```
 
-## Layer 3: Carla 集成（需要安装 Carla）
-
-```
-┌──────────────┐         ┌──────────────┐
-│    Carla     │  TCP    │  FlowEngine   │
-│  (simulator) │◄───────►│  (middleware) │
-│              │         │               │
-│  camera ─────┼──data──►│ perception ───┼──► planning
-│  lidar  ─────┤         │ fusion     ───┤    control
-│  radar  ─────┤         │ control ──────┼──► Carla
-└──────────────┘         └──────────────┘
-```
-
-### Carla 桥接步骤
-
-1. 安装 Carla 0.9.15+
-2. 使用 `carla_bridge.py` 将 Carla 传感器数据转发到 FlowEngine topic
-3. FlowEngine 算法处理 → control cmd 发回 Carla
-4. Carla 执行控制 → 下一帧传感器数据
-
-### 最小 Carla 集成示例
-
-```python
-# carla_bridge.py
-import carla
-
-client = carla.Client('localhost', 2000)
-world = client.get_world()
-
-# 订阅 Carla 传感器 → 发布到 FlowEngine UDP discovery
-def on_lidar(data):
-    # 转换 Carla LidarMeasurement → FlowEngine Message
-    msg = serialize_lidar(data)
-    send_to_flowengine(msg)
-
-sensor.listen(on_lidar)
-```
+内置场景定义见 `scenarios/pedestrian_crossing.json` 和 `scenarios/highway_overtake.json`。
 
 ## 场景库
 
@@ -104,15 +68,15 @@ grep "timeout\|miss" scenario.log   # 超时/丢帧
 ## 快速开始
 
 ```bash
-# 1. 最简单: 2D 模拟器 (零依赖)
-./build/bin/scenario_runner --sim --duration 30
+# 1. 最简单: 一键 demo (含全链路节点)
+bash scripts/demo.sh
 
 # 2. Bag 回放 (需要预先录制的 bag)
 ./build/bin/flow_e2e 10          # 先录制
-./build/bin/scenario_runner /tmp/test.bag  # 再回放
+./build/bin/flow_e2e --replay /tmp/test.bag  # 再回放
 
 # 3. 接入算法测试
-./build/bin/scenario_runner scenario.bag --plugin lib/libmy_algo.so
+./build/bin/flow_launcher config/pipeline.json
 ```
 
 ## e2e 内置 3D 场景仿真
