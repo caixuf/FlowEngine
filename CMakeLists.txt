@@ -600,6 +600,12 @@ add_test(NAME e2e_training_tools
 )
 set_tests_properties(e2e_training_tools PROPERTIES TIMEOUT 30)
 
+add_test(NAME demo_evaluator_tools
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_demo_evaluator.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(demo_evaluator_tools PROPERTIES TIMEOUT 10)
+
 # ── Smoke test: end-to-end pipeline validates key metrics ──
 add_test(NAME e2e_smoke
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke

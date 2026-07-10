@@ -445,8 +445,10 @@ static void* monitor_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
-                                   "fusion/latency", NULL };
+                                   "fusion/latency", "flowengine/node_info", NULL };
 static const char* s_outputs[] = { NULL };
+
+static NodePlugin s_plugin;
 
 static int monitor_init(MessageBus* bus, Transport* transport,
                         DiscoveryManager* discovery, Scheduler* scheduler,
@@ -530,6 +532,7 @@ static int monitor_start(void) {
     g.running = 1; g.should_stop = 0;
     if (pthread_create(&g.thread, NULL, monitor_thread, NULL) != 0) return -1;
     LOG_INFO("monitor", "started");
+    node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 

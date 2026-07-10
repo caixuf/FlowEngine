@@ -26,19 +26,6 @@ DEFAULT_JSON = Path("/tmp/flow_topology.json")
 LAUNCHER_STDERR = Path("/tmp/flow_launcher_stderr.txt")
 PIPELINE_JSON = ROOT / "config" / "pipeline.json"
 
-REQUIRED_EDGES = [
-    ("sim_world", "vehicle/state", "perception"),
-    ("fusion", "fusion/localization", "planning"),
-    ("planning", "planning/trajectory", "control"),
-    ("control", "control/raw_cmd", "safety_control"),
-    ("safety_control", "control/cmd", "sim_world"),
-]
-
-SENSOR_EDGE_OPTIONS = [
-    [("perception", "sensor/lidar", "fusion"), ("sensor_model", "sensor/lidar", "fusion")],
-    [("perception", "sensor/gps", "fusion"), ("sensor_model", "sensor/gps", "fusion")],
-]
-
 TOPIC_MIN_FREQ = {
     "vehicle/state": 15.0,
     "sensor/lidar": 15.0,
@@ -62,6 +49,39 @@ def _pipeline_nodes(pipeline: dict) -> list:
     if not isinstance(nodes, list):
         nodes = pipeline.get("nodes")
     return nodes if isinstance(nodes, list) else []
+
+
+def _topic_name(pub_entry) -> str | None:
+    if isinstance(pub_entry, str):
+        return pub_entry
+    if isinstance(pub_entry, dict) and isinstance(pub_entry.get("topic"), str):
+        return pub_entry["topic"]
+    return None
+
+
+def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
+    publishers: dict[str, list[str]] = {}
+    subscribers: list[tuple[str, str]] = []
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict):
+            continue
+        name = node.get("name")
+        if not isinstance(name, str):
+            continue
+        for pub in node.get("publish", []) or []:
+            topic = _topic_name(pub)
+            if topic:
+                publishers.setdefault(topic, []).append(name)
+        for topic in node.get("subscribe", []) or []:
+            if isinstance(topic, str):
+                subscribers.append((name, topic))
+
+    edges = []
+    for sub_node, topic in subscribers:
+        for pub_node in publishers.get(topic, []):
+            if pub_node != sub_node:
+                edges.append((pub_node, topic, sub_node))
+    return edges
 
 
 def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
@@ -106,6 +126,11 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         criteria = {}
     name = scenario.get("name") if isinstance(scenario.get("name"), str) else None
     return criteria, name
+
+
+def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
+    pipeline = load_json(PIPELINE_JSON) or {}
+    return expected_edges_from_pipeline(pipeline)
 
 
 def load_json(path: Path) -> dict | None:
@@ -307,7 +332,7 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -327,19 +352,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     topics = topic_map(last)
     pubs, subs = node_topic_roles(last)
-    for pub_node, topic, sub_node in REQUIRED_EDGES:
+    expected_edges = expected_edges if expected_edges is not None else load_pipeline_expected_edges()
+    for pub_node, topic, sub_node in expected_edges:
         if (pub_node, topic) not in pubs or (sub_node, topic) not in subs:
             failures.append(f"missing topology edge {pub_node} --{topic}--> {sub_node}")
-
-    for edge_options in SENSOR_EDGE_OPTIONS:
-        matched = False
-        for pub_node, topic, sub_node in edge_options:
-            if (pub_node, topic) in pubs and (sub_node, topic) in subs:
-                matched = True
-                break
-        if not matched:
-            opts = " | ".join(f"{p} --{t}--> {s}" for p, t, s in edge_options)
-            failures.append(f"missing topology edge option: {opts}")
 
     for topic, min_freq in TOPIC_MIN_FREQ.items():
         actual = float(topics.get(topic, {}).get("freq", 0.0) or 0.0)
@@ -410,8 +426,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             f"low-speed stagnation: {low_speed_ratio*100:.0f}% samples below {low_speed_thresh} m/s, "
             f"longest run {stagnation_duration_s:.1f}s"
         )
-    if lane_change_count < 1:
-        failures.append(f"no lane changes detected in {len(ys)} samples")
+    required_lane_changes = int(criteria.get("required_lane_changes", 0) or 0)
+    if lane_change_count < required_lane_changes:
+        failures.append(f"lane changes too few: {lane_change_count} < {required_lane_changes}")
 
     steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:

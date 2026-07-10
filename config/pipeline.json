@@ -38,7 +38,7 @@
       "name": "perception",
       "library_path": "build/lib/libperception_node.so",
       "auto_start": true,
-      "subscribe": ["vehicle/state", "sensor/lidar"],
+      "subscribe": ["vehicle/state"],
       "publish": [
         {"topic": "perception/obstacles", "type": "ObstacleList"}
       ],
@@ -48,7 +48,7 @@
       "name": "fusion",
       "library_path": "build/lib/libfusion_node.so",
       "auto_start": true,
-      "subscribe": ["sensor/gps", "perception/obstacles"],
+      "subscribe": ["sensor/lidar", "sensor/gps"],
       "publish": [
         {"topic": "fusion/localization", "type": "Localization"},
         {"topic": "fusion/latency", "type": "LatencyReport"}
@@ -69,7 +69,7 @@
       "name": "control",
       "library_path": "build/lib/libcontrol_node.so",
       "auto_start": true,
-      "subscribe": ["planning/trajectory", "vehicle/state"],
+      "subscribe": ["fusion/localization", "planning/trajectory", "vehicle/state"],
       "publish": [
         {"topic": "control/raw_cmd", "type": "ControlRaw",
          "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "reliable", "deadline_ms": 100}}
@@ -102,14 +102,14 @@
       "name": "data_recorder",
       "library_path": "build/lib/libdata_recorder_node.so",
       "auto_start": true,
-      "subscribe": ["fusion/localization", "planning/trajectory"],
+      "subscribe": ["fusion/localization", "planning/trajectory", "perception/obstacles", "control/cmd"],
       "params": "{\"frequency_hz\":10.0,\"output_path\":\"/tmp/flow_train_samples.jsonl\"}"
     },
     {
       "name": "monitor",
       "library_path": "build/lib/libmonitor_node.so",
       "auto_start": true,
-      "subscribe": ["perception/obstacles", "vehicle/state", "fusion/latency", "inference/trajectory"],
+      "subscribe": ["perception/obstacles", "vehicle/state", "fusion/latency", "flowengine/node_info"],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
     }
   ]
