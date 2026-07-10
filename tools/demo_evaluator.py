@@ -9,6 +9,7 @@ and missing topic data into repeatable PASS/FAIL checks.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -23,6 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSON = Path("/tmp/flow_topology.json")
 LAUNCHER_STDERR = Path("/tmp/flow_launcher_stderr.txt")
+PIPELINE_JSON = ROOT / "config" / "pipeline.json"
 
 REQUIRED_EDGES = [
     ("sim_world", "vehicle/state", "perception"),
@@ -48,6 +50,20 @@ TOPIC_MIN_FREQ = {
 }
 
 
+def _pipeline_nodes(pipeline: dict) -> list:
+    """Return the node list of a launcher config.
+
+    The launcher schema uses ``processes``; older/simpler configs use ``nodes``.
+    Accept either so scenario tooling works across both.
+    """
+    if not isinstance(pipeline, dict):
+        return []
+    nodes = pipeline.get("processes")
+    if not isinstance(nodes, list):
+        nodes = pipeline.get("nodes")
+    return nodes if isinstance(nodes, list) else []
+
+
 def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
     """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
 
@@ -55,7 +71,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         (criteria_dict, scenario_name)
     """
     pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
-    nodes = pipeline.get("nodes", []) if isinstance(pipeline, dict) else []
+    nodes = _pipeline_nodes(pipeline)
     scenario_file = None
     for node in nodes:
         if not isinstance(node, dict):
@@ -63,6 +79,11 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         if node.get("name") != "sim_world":
             continue
         params = node.get("params", {})
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                params = {}
         if isinstance(params, dict):
             scenario_file = params.get("scenario_file")
         break
@@ -91,6 +112,49 @@ def load_json(path: Path) -> dict | None:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+
+
+@contextlib.contextmanager
+def pipeline_scenario_override(scenario_file: str | None):
+    """Temporarily point config/pipeline.json's sim_world node at ``scenario_file``.
+
+    ``sim_world``'s ``params`` is a JSON-encoded string; we patch the embedded
+    ``scenario_file`` key, yield, then restore the original file byte-for-byte.
+    Passing ``None`` is a no-op so callers can use this unconditionally.
+    """
+    if not scenario_file:
+        yield None
+        return
+
+    original_text = PIPELINE_JSON.read_text(encoding="utf-8")
+    pipeline = json.loads(original_text)
+    patched = False
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict) or node.get("name") != "sim_world":
+            continue
+        params = node.get("params")
+        # params may be a JSON string (launcher format) or a plain dict.
+        if isinstance(params, str):
+            params_obj = json.loads(params)
+            params_obj["scenario_file"] = scenario_file
+            node["params"] = json.dumps(params_obj)
+        elif isinstance(params, dict):
+            params.setdefault("scenario_file", scenario_file)
+            params["scenario_file"] = scenario_file
+        else:
+            continue
+        patched = True
+        break
+
+    if not patched:
+        raise RuntimeError("sim_world node with params not found in config/pipeline.json")
+
+    try:
+        PIPELINE_JSON.write_text(json.dumps(pipeline, indent=2, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+        yield scenario_file
+    finally:
+        PIPELINE_JSON.write_text(original_text, encoding="utf-8")
 
 
 def topic_map(sample: dict) -> dict:
@@ -438,6 +502,10 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=0.25, help="JSON sample interval in seconds")
     parser.add_argument("--json-file", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--no-run", action="store_true", help="evaluate current JSON/logs without starting demo.sh")
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="scenario JSON path; temporarily overrides sim_world.scenario_file for this run")
+    parser.add_argument("--json-out", type=Path, default=None,
+                        help="write the machine-readable evaluation result to this JSON path")
     args = parser.parse_args()
 
     if args.no_run:
@@ -445,7 +513,8 @@ def main() -> int:
         samples = [sample] if sample else []
         returncode = 0
     else:
-        samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
+        with pipeline_scenario_override(args.scenario):
+            samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
@@ -467,6 +536,20 @@ def main() -> int:
         print("\nWARN:")
         for warning in warnings:
             print(f"  - {warning}")
+
+    result = "FAIL" if failures else "PASS"
+    if args.json_out:
+        payload = {
+            "scenario": summary.get("scenario"),
+            "result": result,
+            "failures": failures,
+            "warnings": warnings,
+            "summary": summary,
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+        print(f"\nwrote evaluation result to {args.json_out}")
 
     if failures:
         print("\nFAIL:")

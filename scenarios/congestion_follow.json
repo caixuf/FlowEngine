@@ -1,0 +1,45 @@
+{
+  "name": "congestion_follow",
+  "description": "拥堵跟车：前方车队走走停停，考验纵向跟车平顺性与防追尾",
+  "random_seed": 91,
+  "duration_s": 70.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 3.0,
+    "target_speed": 8.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "car",
+      "x": 12.0, "y": -1.75,
+      "vx": 2.5, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "紧前车，低速蠕行"
+    },
+    {
+      "id": 1,
+      "type": "car",
+      "x": 24.0, "y": -1.75,
+      "vx": 2.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "第二辆，走停"
+    },
+    {
+      "id": 2,
+      "type": "car",
+      "x": 38.0, "y": -1.75,
+      "vx": 3.0, "vy": 0.0,
+      "len": 8.0, "wid": 2.5,
+      "_comment": "前方大货车，限制视距"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 70.0,
+    "min_avg_speed_mps": 1.5,
+    "min_distance_m": 40.0
+  }
+}
