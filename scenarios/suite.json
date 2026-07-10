@@ -1,0 +1,19 @@
+{
+  "name": "flowengine-regression",
+  "description": "仿真即测试：场景矩阵回归套件。scenario_regression.py 逐场景跑分并与 baseline 对比。",
+  "default_duration_s": 30,
+  "scenarios": [
+    { "file": "scenarios/pedestrian_crossing.json", "duration_s": 30, "enabled": true },
+    { "file": "scenarios/highway_overtake.json",     "duration_s": 45, "enabled": true },
+    { "file": "scenarios/intersection_unprotected.json", "duration_s": 35, "enabled": true },
+    { "file": "scenarios/congestion_follow.json",    "duration_s": 40, "enabled": true },
+    { "file": "scenarios/ghost_pedestrian.json",     "duration_s": 25, "enabled": true }
+  ],
+  "baseline_tolerances": {
+    "_doc": "对 baseline summary 数值的允许漂移。缺省字段不做数值回归（仅 PASS/FAIL 回归）。",
+    "avg_speed_mps":     { "min_ratio": 0.80 },
+    "x_delta_m":         { "min_ratio": 0.80 },
+    "max_lane_error_m":  { "max_abs_increase": 0.50 },
+    "stagnation_duration_s": { "max_abs_increase": 2.0 }
+  }
+}

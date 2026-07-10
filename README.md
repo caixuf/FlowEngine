@@ -1,6 +1,11 @@
 # FlowEngine
 
-> Lightweight middleware for autonomous driving & robotics — C kernel + C++20 coroutine shell.
+> Simulation-driven middleware framework for autonomous driving & robotics — C kernel + C++20 coroutine shell.
+>
+> **Scope:** FlowEngine is a *simulation-first, reproducible experiment platform*. It deliberately does **not**
+> target real-vehicle deployment (no automotive mass production, no real ECU/CAN integration, no hard real-time
+> or functional-safety certification). Everything — perception, fusion, planning, control, learning — is
+> exercised, observed, tested, replayed and scored **entirely in simulation**.
 
 [![CI](https://github.com/caixuf/FlowEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/caixuf/FlowEngine/actions)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -11,7 +16,8 @@
 
 ## What is FlowEngine?
 
-A from-scratch middleware framework providing the core abstractions of CyberRT in a lightweight, embeddable package:
+A from-scratch middleware framework providing the core abstractions of CyberRT in a lightweight, embeddable package.
+It is built to be **organizable, observable, testable, replayable and scoreable — all inside simulation**:
 
 | Layer | Modules |
 |-------|---------|
@@ -22,7 +28,7 @@ A from-scratch middleware framework providing the core abstractions of CyberRT i
 | **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion, Schema Validation |
 | **QoS** | Per-topic QoS (depth + drop policy), Topic Stats (frequency, latency p50/p99, subscribers) |
 | **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, flowmond Monitor Daemon, Stats Bridge (cross-process IPC stats), CI/CD |
-| **Learning** | Vehicle-side learning loop: data recorder → offline trainer → on-vehicle tiny-MLP inference (shadow mode). See [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
+| **Learning** | In-sim learning loop: data recorder → offline trainer → shadow-mode tiny-MLP inference (evaluated against the rule-based controller, never actuated). See [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ## Quick Start
 
