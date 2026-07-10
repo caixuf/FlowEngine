@@ -35,7 +35,7 @@
 - 单测框架沿用 `test/`、`tests/` 现有风格（见 `tests/` 里的 `new_module_tests`）。
 
 **待实现：**
-1. `src/e2e_demo.c`：解析 `--smoke`，跑 ~3s 最小链路后自检关键 topic 频率>0 并退出。
+1. `src/e2e_demo.c`：解析 `--smoke`，跑 ~3s 最小链路后自检关键 topic 频率>0 并退出（返回非零表示失败）。
 2. `CMakeLists.txt`：新增 `add_test(NAME e2e_smoke_cli COMMAND flow_e2e --smoke)` 并设 `TIMEOUT 30`。
 3. `tests/`：给 `message_bus` QoS（depth + drop policy）、`param_registry` 范围校验、`flow_registry_export_json()` 各加 1~2 个断言用例。
 4. CI：新增可选 job 调用 `build-tsan` 跑 1 小时压力（可用现有 `benchmark` / `flow_bus --test` 循环）。

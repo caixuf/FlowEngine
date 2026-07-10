@@ -121,7 +121,7 @@ def compare_summary(baseline: dict, current: dict, tolerances: dict) -> list[str
             if cur < threshold:
                 regressions.append(
                     f"{metric}: {cur:.3f} < {threshold:.3f} "
-                    f"(baseline {base:.3f} × {rule['min_ratio']})"
+                    f"(baseline {base:.3f} x {rule['min_ratio']})"
                 )
         if "max_abs_increase" in rule:
             threshold = base + rule["max_abs_increase"]

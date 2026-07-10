@@ -83,6 +83,8 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
             try:
                 params = json.loads(params)
             except json.JSONDecodeError:
+                print("warning: sim_world.params is not valid JSON; ignoring scenario_file",
+                      file=sys.stderr)
                 params = {}
         if isinstance(params, dict):
             scenario_file = params.get("scenario_file")
@@ -139,7 +141,6 @@ def pipeline_scenario_override(scenario_file: str | None):
             params_obj["scenario_file"] = scenario_file
             node["params"] = json.dumps(params_obj)
         elif isinstance(params, dict):
-            params.setdefault("scenario_file", scenario_file)
             params["scenario_file"] = scenario_file
         else:
             continue

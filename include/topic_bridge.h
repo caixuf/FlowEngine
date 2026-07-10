@@ -80,6 +80,7 @@ typedef struct TopicBridge TopicBridge;
  * @param channel_name IPC 通道名，两个进程必须一致（如 "flowengine.sim"）。
  * @param direction    桥接方向，见 ::TopicBridgeDirection。
  * @return 句柄；失败返回 NULL。调用者负责 topic_bridge_destroy()。
+ *         当 bus 或 channel_name 为 NULL 时返回 NULL。
  *
  * @note 契约占位：实现前返回 NULL 亦属合法。
  */
