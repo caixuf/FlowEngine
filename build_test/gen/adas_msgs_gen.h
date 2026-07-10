@@ -612,6 +612,402 @@ static inline void EgoState_register_type(void) {
 }
 
 /* ──────────────────────────────────────────────────────── */
+/* Struct: Localization (size=57B, type_id=0xda16ffb9) */
+/* Sig: Localization:float_x,float_y,float_v,float_heading,float_yaw_rate,float_cov_xx,f... */
+
+#define LOCALIZATION_TYPE_ID         0xda16ffb9u
+#define LOCALIZATION_SCHEMA_VERSION  1
+#define LOCALIZATION_SCHEMA_HASH     0xfb377b50u
+#define LOCALIZATION_TYPE_NAME        "Localization"
+
+typedef struct {
+    float    x;  /**< float */
+    float    y;  /**< float */
+    float    v;  /**< float */
+    float    heading;  /**< float */
+    float    yaw_rate;  /**< float */
+    float    cov_xx;  /**< float */
+    float    cov_yy;  /**< float */
+    float    cov_vv;  /**< float */
+    float    cov_hh;  /**< float */
+    float    cov_yyaw;  /**< float */
+    float    innovation;  /**< float */
+    bool    diverged;  /**< bool */
+    float    raw_pos_x;  /**< float */
+    float    raw_pos_y;  /**< float */
+    float    raw_speed;  /**< float */
+} Localization;
+
+#ifdef __cplusplus
+}  /* close extern "C" — template specialization needs C++ linkage */
+/* C++ type traits for msg_cast<Localization>(msg) */
+template<> struct msg_traits<Localization> {
+    static constexpr uint32_t TYPE_ID = LOCALIZATION_TYPE_ID;
+    static constexpr uint8_t  SCHEMA_VERSION = LOCALIZATION_SCHEMA_VERSION;
+    static constexpr const char* TYPE_NAME = "Localization";
+};
+extern "C" {
+#endif
+
+/** Serialize Localization to buffer (endian-aware). */
+static inline int Localization_serialize(const Localization* src,
+        uint8_t* buf, size_t* out_size) {
+    if (!src) return -1;
+    size_t total = 57;
+    if (out_size) *out_size = total;
+    if (!buf) return 0;  /* size query only */
+
+    if (buf) memcpy(buf + 0, &src->x, 4);
+    if (buf) memcpy(buf + 4, &src->y, 4);
+    if (buf) memcpy(buf + 8, &src->v, 4);
+    if (buf) memcpy(buf + 12, &src->heading, 4);
+    if (buf) memcpy(buf + 16, &src->yaw_rate, 4);
+    if (buf) memcpy(buf + 20, &src->cov_xx, 4);
+    if (buf) memcpy(buf + 24, &src->cov_yy, 4);
+    if (buf) memcpy(buf + 28, &src->cov_vv, 4);
+    if (buf) memcpy(buf + 32, &src->cov_hh, 4);
+    if (buf) memcpy(buf + 36, &src->cov_yyaw, 4);
+    if (buf) memcpy(buf + 40, &src->innovation, 4);
+    if (buf) buf[44] = (uint8_t)src->diverged;
+    if (buf) memcpy(buf + 45, &src->raw_pos_x, 4);
+    if (buf) memcpy(buf + 49, &src->raw_pos_y, 4);
+    if (buf) memcpy(buf + 53, &src->raw_speed, 4);
+    return 0;
+}
+
+/** Deserialize Localization from buffer (endian-aware). */
+static inline int Localization_deserialize(Localization* dst,
+        const uint8_t* buf, size_t size) {
+    if (!dst || !buf) return -1;
+    if (size < 57) return -1;
+    memset(dst, 0, sizeof(*dst));
+
+    memcpy(&dst->x, buf + 0, 4);
+    memcpy(&dst->y, buf + 4, 4);
+    memcpy(&dst->v, buf + 8, 4);
+    memcpy(&dst->heading, buf + 12, 4);
+    memcpy(&dst->yaw_rate, buf + 16, 4);
+    memcpy(&dst->cov_xx, buf + 20, 4);
+    memcpy(&dst->cov_yy, buf + 24, 4);
+    memcpy(&dst->cov_vv, buf + 28, 4);
+    memcpy(&dst->cov_hh, buf + 32, 4);
+    memcpy(&dst->cov_yyaw, buf + 36, 4);
+    memcpy(&dst->innovation, buf + 40, 4);
+    dst->diverged = (bool)buf[44];
+    memcpy(&dst->raw_pos_x, buf + 45, 4);
+    memcpy(&dst->raw_pos_y, buf + 49, 4);
+    memcpy(&dst->raw_speed, buf + 53, 4);
+    return 0;
+}
+
+/** In-place endian swap for Localization. */
+static inline void Localization_endian_swap(void* data) {
+    if (!data) return;
+    uint8_t* p = (uint8_t*)data;
+    size_t off = 0;
+
+    serializer_swap32(p + 0);
+    serializer_swap32(p + 4);
+    serializer_swap32(p + 8);
+    serializer_swap32(p + 12);
+    serializer_swap32(p + 16);
+    serializer_swap32(p + 20);
+    serializer_swap32(p + 24);
+    serializer_swap32(p + 28);
+    serializer_swap32(p + 32);
+    serializer_swap32(p + 36);
+    serializer_swap32(p + 40);
+    serializer_swap32(p + 45);
+    serializer_swap32(p + 49);
+    serializer_swap32(p + 53);
+}
+
+/** Field-level schema descriptor table for Localization. */
+static const FieldDesc Localization_fields[] = {
+    { "x", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, x), 4, 1 },
+    { "y", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, y), 4, 1 },
+    { "v", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, v), 4, 1 },
+    { "heading", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, heading), 4, 1 },
+    { "yaw_rate", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, yaw_rate), 4, 1 },
+    { "cov_xx", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, cov_xx), 4, 1 },
+    { "cov_yy", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, cov_yy), 4, 1 },
+    { "cov_vv", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, cov_vv), 4, 1 },
+    { "cov_hh", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, cov_hh), 4, 1 },
+    { "cov_yyaw", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, cov_yyaw), 4, 1 },
+    { "innovation", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, innovation), 4, 1 },
+    { "diverged", FIELD_KIND_BOOL, (uint16_t)offsetof(Localization, diverged), 1, 1 },
+    { "raw_pos_x", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, raw_pos_x), 4, 1 },
+    { "raw_pos_y", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, raw_pos_y), 4, 1 },
+    { "raw_speed", FIELD_KIND_FLOAT, (uint16_t)offsetof(Localization, raw_speed), 4, 1 },
+};
+#define LOCALIZATION_FIELD_COUNT  (sizeof(Localization_fields)/sizeof(Localization_fields[0]))
+
+/** Auto-register Localization in type registry. */
+static inline void Localization_register_type(void) {
+    TypeRegistryEntry e = {
+        .type_id        = LOCALIZATION_TYPE_ID,
+        .schema_version = LOCALIZATION_SCHEMA_VERSION,
+        .struct_size    = sizeof(Localization),
+        .type_name      = "Localization",
+        .serialize      = (SerializeFunc)Localization_serialize,
+        .deserialize    = (DeserializeFunc)Localization_deserialize,
+        .endian_swap    = (EndianSwapFunc)Localization_endian_swap,
+        .schema_hash    = LOCALIZATION_SCHEMA_HASH,
+        .fields         = Localization_fields,
+        .field_count    = (uint16_t)LOCALIZATION_FIELD_COUNT,
+    };
+    serializer_register_type(&e);
+}
+
+/* ──────────────────────────────────────────────────────── */
+/* Struct: LatencyReport (size=12B, type_id=0xe5c06baf) */
+/* Sig: LatencyReport:uint32_avg_us,uint32_p50_us,uint32_p99_us... */
+
+#define LATENCYREPORT_TYPE_ID         0xe5c06bafu
+#define LATENCYREPORT_SCHEMA_VERSION  1
+#define LATENCYREPORT_SCHEMA_HASH     0x4b4b29e6u
+#define LATENCYREPORT_TYPE_NAME        "LatencyReport"
+
+typedef struct {
+    uint32_t    avg_us;  /**< uint32 */
+    uint32_t    p50_us;  /**< uint32 */
+    uint32_t    p99_us;  /**< uint32 */
+} LatencyReport;
+
+#ifdef __cplusplus
+}  /* close extern "C" — template specialization needs C++ linkage */
+/* C++ type traits for msg_cast<LatencyReport>(msg) */
+template<> struct msg_traits<LatencyReport> {
+    static constexpr uint32_t TYPE_ID = LATENCYREPORT_TYPE_ID;
+    static constexpr uint8_t  SCHEMA_VERSION = LATENCYREPORT_SCHEMA_VERSION;
+    static constexpr const char* TYPE_NAME = "LatencyReport";
+};
+extern "C" {
+#endif
+
+/** Serialize LatencyReport to buffer (endian-aware). */
+static inline int LatencyReport_serialize(const LatencyReport* src,
+        uint8_t* buf, size_t* out_size) {
+    if (!src) return -1;
+    size_t total = 12;
+    if (out_size) *out_size = total;
+    if (!buf) return 0;  /* size query only */
+
+    if (buf) memcpy(buf + 0, &src->avg_us, 4);
+    if (buf) memcpy(buf + 4, &src->p50_us, 4);
+    if (buf) memcpy(buf + 8, &src->p99_us, 4);
+    return 0;
+}
+
+/** Deserialize LatencyReport from buffer (endian-aware). */
+static inline int LatencyReport_deserialize(LatencyReport* dst,
+        const uint8_t* buf, size_t size) {
+    if (!dst || !buf) return -1;
+    if (size < 12) return -1;
+    memset(dst, 0, sizeof(*dst));
+
+    memcpy(&dst->avg_us, buf + 0, 4);
+    memcpy(&dst->p50_us, buf + 4, 4);
+    memcpy(&dst->p99_us, buf + 8, 4);
+    return 0;
+}
+
+/** In-place endian swap for LatencyReport. */
+static inline void LatencyReport_endian_swap(void* data) {
+    if (!data) return;
+    uint8_t* p = (uint8_t*)data;
+    size_t off = 0;
+
+    serializer_swap32(p + 0);
+    serializer_swap32(p + 4);
+    serializer_swap32(p + 8);
+}
+
+/** Field-level schema descriptor table for LatencyReport. */
+static const FieldDesc LatencyReport_fields[] = {
+    { "avg_us", FIELD_KIND_UINT, (uint16_t)offsetof(LatencyReport, avg_us), 4, 1 },
+    { "p50_us", FIELD_KIND_UINT, (uint16_t)offsetof(LatencyReport, p50_us), 4, 1 },
+    { "p99_us", FIELD_KIND_UINT, (uint16_t)offsetof(LatencyReport, p99_us), 4, 1 },
+};
+#define LATENCYREPORT_FIELD_COUNT  (sizeof(LatencyReport_fields)/sizeof(LatencyReport_fields[0]))
+
+/** Auto-register LatencyReport in type registry. */
+static inline void LatencyReport_register_type(void) {
+    TypeRegistryEntry e = {
+        .type_id        = LATENCYREPORT_TYPE_ID,
+        .schema_version = LATENCYREPORT_SCHEMA_VERSION,
+        .struct_size    = sizeof(LatencyReport),
+        .type_name      = "LatencyReport",
+        .serialize      = (SerializeFunc)LatencyReport_serialize,
+        .deserialize    = (DeserializeFunc)LatencyReport_deserialize,
+        .endian_swap    = (EndianSwapFunc)LatencyReport_endian_swap,
+        .schema_hash    = LATENCYREPORT_SCHEMA_HASH,
+        .fields         = LatencyReport_fields,
+        .field_count    = (uint16_t)LATENCYREPORT_FIELD_COUNT,
+    };
+    serializer_register_type(&e);
+}
+
+/* ──────────────────────────────────────────────────────── */
+/* Struct: ControlRaw (size=52B, type_id=0x871712d1) */
+/* Sig: ControlRaw:uint32_seq,float_throttle,float_brake,float_steering,float_speed,floa... */
+
+#define CONTROLRAW_TYPE_ID         0x871712d1u
+#define CONTROLRAW_SCHEMA_VERSION  1
+#define CONTROLRAW_SCHEMA_HASH     0x72f385ccu
+#define CONTROLRAW_TYPE_NAME        "ControlRaw"
+
+typedef struct {
+    uint32_t    seq;  /**< uint32 */
+    float    throttle;  /**< float */
+    float    brake;  /**< float */
+    float    steering;  /**< float */
+    float    speed;  /**< float */
+    float    target;  /**< float */
+    float    error;  /**< float */
+    char    mode[24];  /**< char */
+} ControlRaw;
+
+#ifdef __cplusplus
+}  /* close extern "C" — template specialization needs C++ linkage */
+/* C++ type traits for msg_cast<ControlRaw>(msg) */
+template<> struct msg_traits<ControlRaw> {
+    static constexpr uint32_t TYPE_ID = CONTROLRAW_TYPE_ID;
+    static constexpr uint8_t  SCHEMA_VERSION = CONTROLRAW_SCHEMA_VERSION;
+    static constexpr const char* TYPE_NAME = "ControlRaw";
+};
+extern "C" {
+#endif
+
+/** Serialize ControlRaw to buffer (endian-aware). */
+static inline int ControlRaw_serialize(const ControlRaw* src,
+        uint8_t* buf, size_t* out_size) {
+    if (!src) return -1;
+    size_t total = 52;
+    if (out_size) *out_size = total;
+    if (!buf) return 0;  /* size query only */
+
+    if (buf) memcpy(buf + 0, &src->seq, 4);
+    if (buf) memcpy(buf + 4, &src->throttle, 4);
+    if (buf) memcpy(buf + 8, &src->brake, 4);
+    if (buf) memcpy(buf + 12, &src->steering, 4);
+    if (buf) memcpy(buf + 16, &src->speed, 4);
+    if (buf) memcpy(buf + 20, &src->target, 4);
+    if (buf) memcpy(buf + 24, &src->error, 4);
+    if (buf) buf[28] = (uint8_t)src->mode[0];
+    if (buf) buf[29] = (uint8_t)src->mode[1];
+    if (buf) buf[30] = (uint8_t)src->mode[2];
+    if (buf) buf[31] = (uint8_t)src->mode[3];
+    if (buf) buf[32] = (uint8_t)src->mode[4];
+    if (buf) buf[33] = (uint8_t)src->mode[5];
+    if (buf) buf[34] = (uint8_t)src->mode[6];
+    if (buf) buf[35] = (uint8_t)src->mode[7];
+    if (buf) buf[36] = (uint8_t)src->mode[8];
+    if (buf) buf[37] = (uint8_t)src->mode[9];
+    if (buf) buf[38] = (uint8_t)src->mode[10];
+    if (buf) buf[39] = (uint8_t)src->mode[11];
+    if (buf) buf[40] = (uint8_t)src->mode[12];
+    if (buf) buf[41] = (uint8_t)src->mode[13];
+    if (buf) buf[42] = (uint8_t)src->mode[14];
+    if (buf) buf[43] = (uint8_t)src->mode[15];
+    if (buf) buf[44] = (uint8_t)src->mode[16];
+    if (buf) buf[45] = (uint8_t)src->mode[17];
+    if (buf) buf[46] = (uint8_t)src->mode[18];
+    if (buf) buf[47] = (uint8_t)src->mode[19];
+    if (buf) buf[48] = (uint8_t)src->mode[20];
+    if (buf) buf[49] = (uint8_t)src->mode[21];
+    if (buf) buf[50] = (uint8_t)src->mode[22];
+    if (buf) buf[51] = (uint8_t)src->mode[23];
+    return 0;
+}
+
+/** Deserialize ControlRaw from buffer (endian-aware). */
+static inline int ControlRaw_deserialize(ControlRaw* dst,
+        const uint8_t* buf, size_t size) {
+    if (!dst || !buf) return -1;
+    if (size < 52) return -1;
+    memset(dst, 0, sizeof(*dst));
+
+    memcpy(&dst->seq, buf + 0, 4);
+    memcpy(&dst->throttle, buf + 4, 4);
+    memcpy(&dst->brake, buf + 8, 4);
+    memcpy(&dst->steering, buf + 12, 4);
+    memcpy(&dst->speed, buf + 16, 4);
+    memcpy(&dst->target, buf + 20, 4);
+    memcpy(&dst->error, buf + 24, 4);
+    dst->mode[0] = (char)buf[28];
+    dst->mode[1] = (char)buf[29];
+    dst->mode[2] = (char)buf[30];
+    dst->mode[3] = (char)buf[31];
+    dst->mode[4] = (char)buf[32];
+    dst->mode[5] = (char)buf[33];
+    dst->mode[6] = (char)buf[34];
+    dst->mode[7] = (char)buf[35];
+    dst->mode[8] = (char)buf[36];
+    dst->mode[9] = (char)buf[37];
+    dst->mode[10] = (char)buf[38];
+    dst->mode[11] = (char)buf[39];
+    dst->mode[12] = (char)buf[40];
+    dst->mode[13] = (char)buf[41];
+    dst->mode[14] = (char)buf[42];
+    dst->mode[15] = (char)buf[43];
+    dst->mode[16] = (char)buf[44];
+    dst->mode[17] = (char)buf[45];
+    dst->mode[18] = (char)buf[46];
+    dst->mode[19] = (char)buf[47];
+    dst->mode[20] = (char)buf[48];
+    dst->mode[21] = (char)buf[49];
+    dst->mode[22] = (char)buf[50];
+    dst->mode[23] = (char)buf[51];
+    return 0;
+}
+
+/** In-place endian swap for ControlRaw. */
+static inline void ControlRaw_endian_swap(void* data) {
+    if (!data) return;
+    uint8_t* p = (uint8_t*)data;
+    size_t off = 0;
+
+    serializer_swap32(p + 0);
+    serializer_swap32(p + 4);
+    serializer_swap32(p + 8);
+    serializer_swap32(p + 12);
+    serializer_swap32(p + 16);
+    serializer_swap32(p + 20);
+    serializer_swap32(p + 24);
+}
+
+/** Field-level schema descriptor table for ControlRaw. */
+static const FieldDesc ControlRaw_fields[] = {
+    { "seq", FIELD_KIND_UINT, (uint16_t)offsetof(ControlRaw, seq), 4, 1 },
+    { "throttle", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, throttle), 4, 1 },
+    { "brake", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, brake), 4, 1 },
+    { "steering", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, steering), 4, 1 },
+    { "speed", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, speed), 4, 1 },
+    { "target", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, target), 4, 1 },
+    { "error", FIELD_KIND_FLOAT, (uint16_t)offsetof(ControlRaw, error), 4, 1 },
+    { "mode", FIELD_KIND_UNKNOWN, (uint16_t)offsetof(ControlRaw, mode), 1, 24 },
+};
+#define CONTROLRAW_FIELD_COUNT  (sizeof(ControlRaw_fields)/sizeof(ControlRaw_fields[0]))
+
+/** Auto-register ControlRaw in type registry. */
+static inline void ControlRaw_register_type(void) {
+    TypeRegistryEntry e = {
+        .type_id        = CONTROLRAW_TYPE_ID,
+        .schema_version = CONTROLRAW_SCHEMA_VERSION,
+        .struct_size    = sizeof(ControlRaw),
+        .type_name      = "ControlRaw",
+        .serialize      = (SerializeFunc)ControlRaw_serialize,
+        .deserialize    = (DeserializeFunc)ControlRaw_deserialize,
+        .endian_swap    = (EndianSwapFunc)ControlRaw_endian_swap,
+        .schema_hash    = CONTROLRAW_SCHEMA_HASH,
+        .fields         = ControlRaw_fields,
+        .field_count    = (uint16_t)CONTROLRAW_FIELD_COUNT,
+    };
+    serializer_register_type(&e);
+}
+
+/* ──────────────────────────────────────────────────────── */
 /* Struct: ControlCmd (size=18B, type_id=0x2d95c6d2) */
 /* Sig: ControlCmd:uint32_seq,float_throttle,float_brake,float_steering,Gear_gear,bool_e... */
 
@@ -725,6 +1121,9 @@ static inline void adas_msgs_register_all(void) {
     Obstacle_register_type();
     ObstacleList_register_type();
     EgoState_register_type();
+    Localization_register_type();
+    LatencyReport_register_type();
+    ControlRaw_register_type();
     ControlCmd_register_type();
 }
 

@@ -593,6 +593,7 @@ static void sim_cleanup(void) {
 static int  sim_health(void)        { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "sim_world",
     .version       = "1.0.0",
     .description   = "Vehicle dynamics + obstacle simulation",

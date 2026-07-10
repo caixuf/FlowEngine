@@ -45,6 +45,7 @@ typedef struct {
     MessageBus*       bus;
     DiscoveryManager* discovery;
     int               port;
+    char              bind_addr[64];   /**< Listen address (default 127.0.0.1) */
     int               listen_fd;
     volatile bool     running;
     pthread_t         server_thread;
@@ -378,8 +379,39 @@ static void handle_client(int fd, MonitorServer* ms) {
     if (n <= 0) { close(fd); return; }
     req[n] = '\0';
 
+    /* Parse the HTTP request line (first line) into method + path so routing
+     * matches on the real request target rather than a substring that could
+     * appear anywhere in the headers/body (e.g. a Referer header). */
+    char method[8] = {0};
+    char path[512] = {0};
+    {
+        const char* sp1 = strchr(req, ' ');
+        if (sp1) {
+            size_t mlen = (size_t)(sp1 - req);
+            if (mlen >= sizeof(method)) mlen = sizeof(method) - 1;
+            memcpy(method, req, mlen);
+            method[mlen] = '\0';
+            const char* pstart = sp1 + 1;
+            const char* sp2 = strpbrk(pstart, " \r\n");
+            size_t plen = sp2 ? (size_t)(sp2 - pstart) : strlen(pstart);
+            if (plen >= sizeof(path)) plen = sizeof(path) - 1;
+            memcpy(path, pstart, plen);
+            path[plen] = '\0';
+        }
+    }
+    /* Strip an optional query string so exact path matching still works. */
+    char* qs = strchr(path, '?');
+    if (qs) *qs = '\0';
+
+    /* Malformed request line (no method/path) → 400 Bad Request. */
+    if (method[0] == '\0' || path[0] == '\0') {
+        send_response(fd, "400 Bad Request", "text/plain", "bad request", 11);
+        close(fd);
+        return;
+    }
+
     /* CORS preflight */
-    if (strncmp(req, "OPTIONS", 7) == 0) {
+    if (strcmp(method, "OPTIONS") == 0) {
         const char* cors = "HTTP/1.1 204\r\nAccess-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: GET, OPTIONS\r\n\r\n";
         write(fd, cors, strlen(cors));
@@ -387,15 +419,22 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
+    /* Only GET is supported beyond this point. */
+    if (strcmp(method, "GET") != 0) {
+        send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed", 18);
+        close(fd);
+        return;
+    }
+
     /* Route: /api/stream → SSE */
-    if (strstr(req, "GET /api/stream")) {
+    if (strcmp(path, "/api/stream") == 0) {
         handle_sse(fd, ms);
         close(fd);
         return;
     }
 
     /* Route: /api/topology → JSON (prefer cached dashboard JSON) */
-    if (strstr(req, "GET /api/topology")) {
+    if (strcmp(path, "/api/topology") == 0) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
         if (cached_len > 0) {
@@ -409,7 +448,7 @@ static void handle_client(int fd, MonitorServer* ms) {
     }
 
     /* Route: /api/topics → per-topic stats (local + remote) */
-    if (strstr(req, "GET /api/topics")) {
+    if (strcmp(path, "/api/topics") == 0) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
         if (cached_len > 0) {
@@ -423,7 +462,7 @@ static void handle_client(int fd, MonitorServer* ms) {
     }
 
     /* Route: / → flowboard.html (from disk) or embedded fallback */
-    if (strstr(req, "GET / ") || strstr(req, "GET /index.html")) {
+    if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         char* html = NULL;
         size_t html_len = 0;
         /* Try reading from disk first */
@@ -455,17 +494,10 @@ static void handle_client(int fd, MonitorServer* ms) {
      * contains flowboard.html (i.e. the repo's tools/ folder). The dashboard
      * loads three.min.js / d3.v7.min.js from here so the 3D view and topology
      * graph work offline without relying on external CDNs. */
-    if (strstr(req, "GET /tools/") && ms->html_path[0]) {
-        /* Extract the requested path from the request line. */
-        const char* tools_hit = strstr(req, "GET /tools/");
-        const char* p = tools_hit + 4;  /* points at "/tools/..." */
+    if (strncmp(path, "/tools/", 7) == 0 && ms->html_path[0]) {
+        /* Use the already-parsed request path (query string stripped). */
         char reqpath[256];
-        int j = 0;
-        while (*p && *p != ' ' && *p != '?' && *p != '\r' && *p != '\n' &&
-               j < (int)sizeof(reqpath) - 1) {
-            reqpath[j++] = *p++;
-        }
-        reqpath[j] = '\0';
+        snprintf(reqpath, sizeof(reqpath), "%s", path);
 
         /* Reject path traversal — block ".." and backslash.
          * Note: the basename extraction below (strrchr) already neutralises
@@ -552,15 +584,21 @@ static void* server_thread_fn(void* arg) {
     setsockopt(ms->listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     struct sockaddr_in addr = { .sin_family = AF_INET,
-                                .sin_addr.s_addr = htonl(INADDR_ANY),
                                 .sin_port = htons((uint16_t)ms->port) };
+    if (inet_pton(AF_INET, ms->bind_addr, &addr.sin_addr) != 1) {
+        /* Fall back to loopback if the configured address is invalid. */
+        fprintf(stderr, "[monitor_server] WARN: invalid bind address '%s', "
+                        "falling back to 127.0.0.1\n", ms->bind_addr);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        snprintf(ms->bind_addr, sizeof(ms->bind_addr), "%s", "127.0.0.1");
+    }
     if (bind(ms->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(ms->listen_fd);
         return NULL;
     }
     listen(ms->listen_fd, MONITOR_MAX_CLIENTS);
 
-    printf("[monitor_server] Listening on http://0.0.0.0:%d\n", ms->port);
+    printf("[monitor_server] Listening on http://%s:%d\n", ms->bind_addr, ms->port);
     printf("[monitor_server] Endpoints: /  /api/topology  /api/topics  /api/stream\n");
 
     while (ms->running) {
@@ -621,6 +659,14 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
     ms->bus       = bus;
     ms->discovery = discovery;
     ms->port      = port > 0 ? port : 8800;
+    /* Listen address: default to loopback (127.0.0.1) so the dashboard is not
+     * exposed on all interfaces by default. Override with FLOWMOND_BIND_ADDR
+     * (e.g. "0.0.0.0" for container/remote access). */
+    {
+        const char* env = getenv("FLOWMOND_BIND_ADDR");
+        snprintf(ms->bind_addr, sizeof(ms->bind_addr), "%s",
+                 (env && env[0]) ? env : "127.0.0.1");
+    }
     if (html_path && html_path[0])
         snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
     pthread_mutex_init(&ms->remote_mutex, NULL);

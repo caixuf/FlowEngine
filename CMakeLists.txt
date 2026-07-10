@@ -243,6 +243,7 @@ set(ALGORITHM_SOURCES
     src/algorithms/dbscan_cluster.c
     src/algorithms/kalman_tracker.c
     src/algorithms/nuscenes_loader.c
+    src/algorithms/nmea_parser.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
@@ -602,6 +603,16 @@ add_test(NAME e2e_stability
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual")
+
+# ── Integration smoke: flow_launcher loads all node plugins & runs pipeline ──
+# Labeled "integration" so the standard build jobs (which don't build the
+# separate adas_nodes .so subproject) skip it; a dedicated CI job runs it.
+add_test(NAME flow_launcher_smoke
+    COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
+            bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(flow_launcher_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
