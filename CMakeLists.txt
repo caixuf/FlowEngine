@@ -243,6 +243,7 @@ set(ALGORITHM_SOURCES
     src/algorithms/dbscan_cluster.c
     src/algorithms/kalman_tracker.c
     src/algorithms/nuscenes_loader.c
+    src/algorithms/nmea_parser.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
