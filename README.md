@@ -36,6 +36,12 @@ bash scripts/demo.sh
 ./build/bin/flowctl bag info data.bag
 ```
 
+> **Entry points:** `flow_launcher config/pipeline.json` is the canonical,
+> config-driven way to run a pipeline (each node is a `dlopen`-loaded `.so`
+> plugin). `flow_e2e` is a single-binary demo that inlines every node — handy
+> for quick debugging without compiling plugins, but not the recommended
+> production entry point.
+
 ## Demo
 
 ```bash
@@ -121,6 +127,10 @@ Dashboard endpoints:
 | `/api/topology` | Topology JSON |
 | `/api/stream` | SSE real-time push (500 ms interval) |
 
+> **Bind address:** the dashboard listens on `127.0.0.1` (loopback) by default so it
+> is not exposed on every interface. For container or remote access, start it with
+> `flowmond --bind 0.0.0.0` (or set `FLOWMOND_BIND_ADDR=0.0.0.0`).
+
 ## Docker (easiest)
 
 ```bash
@@ -139,6 +149,13 @@ sudo cmake --install build
 # Verify
 pkg-config --cflags --libs flowengine
 flowctl version
+```
+
+Once installed, include the umbrella header to pull in the core public API and
+version/ABI macros:
+
+```c
+#include "flowengine.h"   /* FLOWENGINE_VERSION, NODE_PLUGIN_API_VERSION, bus/transport/... */
 ```
 
 ## Build from Source
