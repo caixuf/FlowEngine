@@ -8,10 +8,13 @@
  */
 
 #include "node_plugin.h"
-#include "frenet_bridge.h"
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
+
+#ifdef HAVE_FRENET
+#include "frenet_bridge.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +38,11 @@ static struct {
     ReflectiveStateMachine sm;
 
     /* Frenet 规划器 */
+#ifdef HAVE_FRENET
     FrenetHandle* frenet;
+#else
+    void*         frenet;  /* unused stub */
+#endif
     int           plan_count;
     double        target_speed;
 
@@ -65,6 +72,7 @@ static struct {
 #define OBSTACLE_LENGTH_M   4.6   /* 默认障碍物长度 (m) */
 
 static void update_reference_path(double start_x) {
+#ifdef HAVE_FRENET
     double wx[101], wy[101];
     const int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
@@ -73,6 +81,9 @@ static void update_reference_path(double start_x) {
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
     g.ref_path_start_x = start_x;
+#else
+    (void)start_x;
+#endif
 }
 
 static void on_fusion(const Message* msg, void* user_data) {
@@ -148,6 +159,7 @@ static void* planning_thread(void* arg) {
         double command_speed = g.target_speed;
 
         /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
+#ifdef HAVE_FRENET
         if (g.has_vstate) {
             double ox[4], oy[4], ow[4], ol[4];
             int n_obs = 0;
@@ -164,14 +176,33 @@ static void* planning_thread(void* arg) {
             }
             frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
         }
+#endif
 
-        /* Frenet 规划（参考路径在 y=-1.75, ego_d 是相对参考线的横向偏移） */
+        /* 规划轨迹 */
         double s_out[50], d_out[50], spd_out[50];
-        double ego_d = g.ego_y + 1.75;  /* 相对 y=-1.75 的偏移 */
-        int n_wp = frenet_plan(g.frenet,
-            g.ego_x, ego_d, g.ego_v,
-            command_speed,
-            s_out, d_out, spd_out, 50);
+        int n_wp = 0;
+
+#ifdef HAVE_FRENET
+        {
+            double ego_d = g.ego_y + 1.75;  /* 相对 y=-1.75 的偏移 */
+            n_wp = frenet_plan(g.frenet,
+                g.ego_x, ego_d, g.ego_v,
+                command_speed,
+                s_out, d_out, spd_out, 50);
+        }
+#else
+        /* Fallback: 生成简单的车道保持 + 恒速轨迹 */
+        {
+            double horizon = 50.0;   /* 前方 50m */
+            int n = 10;              /* 10 个路径点 */
+            for (int i = 0; i < n; i++) {
+                s_out[i] = g.ego_x + horizon * (double)i / (double)(n - 1);
+                d_out[i] = 0.0;     /* 保持参考线（y=-1.75） */
+                spd_out[i] = command_speed;
+            }
+            n_wp = n;
+        }
+#endif
 
         char traj[1024];
         int off;
@@ -263,11 +294,16 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.target_speed = g.cfg_target_speed;
 
     /* Frenet 规划器 */
+#ifdef HAVE_FRENET
     g.frenet = frenet_create(g.cfg_max_speed, g.cfg_max_accel);
     if (!g.frenet) {
         LOG_ERROR("planning", "frenet_create failed");
         return -1;
     }
+#else
+    g.frenet = NULL;
+    LOG_INFO("planning", "built without Frenet — using lane-keep fallback");
+#endif
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
@@ -300,10 +336,14 @@ static int planning_start(void) {
 static void planning_stop(void)       { g.should_stop = 1; }
 static void planning_cleanup(void) {
     if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+#ifdef HAVE_FRENET
     if (g.frenet) { frenet_destroy(g.frenet); g.frenet = NULL; }
+#else
+    g.frenet = NULL;
+#endif
     LOG_INFO("planning", "cleanup done");
 }
-static int  planning_health(void)     { return g.frenet ? 0 : -1; }
+static int  planning_health(void)     { return 0; }
 
 static NodePlugin s_plugin = {
     .api_version   = NODE_PLUGIN_API_VERSION,

@@ -455,10 +455,15 @@ set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
 # 读 config/pipeline.json → 按顺序 fork+exec 各节点进程
 # 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
 add_executable(flow_launcher src/flow_launcher.c)
-target_link_libraries(flow_launcher flowengine_core m dl)
-# net_transport_* 是 flowengine_core 的可选 TCP 组件，launcher 使用 TRANSPORT_LOCAL 不触发它。
-# 允许链接时存在未使用的未定义符号，运行时不会实际调用。
-target_link_options(flow_launcher PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+# --whole-archive: 强制拉入 cJSON 全部符号（否则链接器丢弃未直接引用的 .o）
+# scheduler_cpp: 提供 net_transport_unbridge_topic 等 C++ 符号
+target_link_libraries(flow_launcher
+    flowengine_core scheduler_cpp m dl
+    -Wl,--whole-archive ${CJSON_LIBRARIES} -Wl,--no-whole-archive)
+# --export-dynamic: 让主程序导出 cJSON 等符号，使 dlopen 加载的 .so 能解析它们
+target_link_options(flow_launcher PRIVATE
+    -Wl,--export-dynamic
+    -Wl,--unresolved-symbols=ignore-in-object-files)
 
 # ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
 # 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。
