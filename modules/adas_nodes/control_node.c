@@ -318,15 +318,45 @@ static void* control_thread(void* arg) {
 
         g.cycle++;
 
-        /* Reset stale data flags: if no message received for >500ms, clear flag */
+        /* Reset stale data flags: if no message received for >1000ms, clear flag */
         struct timespec now_ts; clock_gettime(CLOCK_MONOTONIC, &now_ts);
         uint64_t now_us = (uint64_t)now_ts.tv_sec * 1000000ULL + (uint64_t)now_ts.tv_nsec / 1000ULL;
-        if (g.has_fusion   && now_us - g.last_fusion_us   > 500000ULL) g.has_fusion   = 0;
-        if (g.has_planning && now_us - g.last_planning_us > 500000ULL) g.has_planning = 0;
+        if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;
+        if (g.has_planning && now_us - g.last_planning_us > 1000000ULL) g.has_planning = 0;
 
-        /* 等待初始数据 */
-        if (!g.has_fusion) continue;
-        if (!g.has_planning) continue;
+        /* 数据陈旧时不跳过输出——发布安全减速指令，保持下游流水线畅通 */
+        if (!g.has_fusion || !g.has_planning) {
+            ControlRaw raw;
+            raw.seq      = g.cycle;
+            raw.throttle = 0.0f;
+            raw.brake    = 0.25f;  /* 温和减速，防止无人加速撞前车 */
+            raw.steering = (float)g.prev_steer;
+            raw.speed    = (float)g.current_speed;
+            raw.target   = 0.0f;
+            raw.error    = 0.0f;
+            memset(raw.mode, 0, sizeof(raw.mode));
+            snprintf(raw.mode, sizeof(raw.mode), "DATA_TIMEOUT");
+
+            uint8_t raw_buf[64];
+            size_t  raw_len = sizeof(raw_buf);
+            ControlRaw_serialize(&raw, raw_buf, &raw_len);
+            transport_publish(g.transport, "control/raw_cmd",
+                              raw_buf, (uint32_t)raw_len);
+
+            char cmd_text[256];
+            snprintf(cmd_text, sizeof(cmd_text),
+                     "throttle=0.00 brake=0.25 steer=%.4f "
+                     "speed=%.1f target=0.0 error=0.0 mode=DATA_TIMEOUT",
+                     g.prev_steer, g.current_speed);
+            transport_publish(g.transport, "control/raw_cmd/text",
+                              (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
+
+            if (g.cycle % 20 == 1) {
+                LOG_WARN("control", "#%d DATA_TIMEOUT — publishing safe brake (spd=%.1f, steer=%.4f)",
+                         g.cycle, g.current_speed, g.prev_steer);
+            }
+            continue;
+        }
 
         if (g.lc_cooldown > 0.0) g.lc_cooldown -= 0.05;
 

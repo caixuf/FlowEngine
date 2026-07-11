@@ -96,6 +96,8 @@ static struct {
     int           obstacle_count;   /* 本次场景中实际的 actor 数量 */
     uint32_t      cycle;
     int           has_control_input;  /* 是否收到过 control/cmd */
+    uint64_t      last_control_cmd_us;  /* 最后一次 control/cmd 的 wall-clock 时间戳 (μs) */
+    int           collision_recovery_ticks; /* 碰撞冻结剩余 tick 数，到期后允许重新起步 */
 
     /* 变道状态机 */
     double lc_start_y;
@@ -305,6 +307,8 @@ static void on_control_cmd(const Message* msg, void* user_data) {
             g.vehicle.steer        = bin.steering;
             g.vehicle.target_speed = 12.0;  /* default, not in ControlCmd */
             g.has_control_input    = 1;
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            g.last_control_cmd_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
             return;
         }
     }
@@ -317,6 +321,8 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     if ((p = strstr(d, "steer=")))    sscanf(p + 6,  "%lf", &g.vehicle.steer);
     if ((p = strstr(d, "target=")))   sscanf(p + 7,  "%lf", &g.vehicle.target_speed);
     g.has_control_input = 1;
+    struct timespec ts_fb; clock_gettime(CLOCK_MONOTONIC, &ts_fb);
+    g.last_control_cmd_us = (uint64_t)ts_fb.tv_sec * 1000000ULL + (uint64_t)ts_fb.tv_nsec / 1000ULL;
 }
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
@@ -334,6 +340,16 @@ static void* sim_thread(void* arg) {
         /* 用 wall-clock sleep 来限制实时输出速率，但逻辑时间由 clock 独立管理 */
         usleep((unsigned long)DT_US);
         if (g.should_stop) break;
+
+        /* 控制指令陈旧超时: 500ms 未收到则回退到内置巡航 */
+        if (g.has_control_input) {
+            struct timespec now_ts; clock_gettime(CLOCK_MONOTONIC, &now_ts);
+            uint64_t now_us = (uint64_t)now_ts.tv_sec * 1000000ULL + (uint64_t)now_ts.tv_nsec / 1000ULL;
+            if (now_us - g.last_control_cmd_us > 500000ULL) {
+                g.has_control_input = 0;
+                LOG_WARN("sim_world", "control/cmd stale >500ms — fallback to internal cruise");
+            }
+        }
 
         /* 未收到 control/cmd 时：使用内置简单巡航 + 车道保持 */
         if (!g.has_control_input) {
@@ -362,17 +378,33 @@ static void* sim_thread(void* arg) {
             }
         }
 
-        vehicle_tick();
-
-        /* ── AEB 兜底：外部接管时仍强制紧急制动 ── */
-        if (g.has_control_input) {
+        /* ── AEB 兜底（物理运算前执行，确保本帧生效） ── */
+        if (g.collision_recovery_ticks <= 0) {
+            /* 通用 AEB — 同车道前车 */
             double gap = lead_gap();
             double safe_gap = 6.0 + g.vehicle.speed * 2.0;
             if (gap < AEB_GAP_RATIO * safe_gap && gap < AEB_MAX_GAP_M) {
                 g.vehicle.throttle = 0;
                 g.vehicle.brake    = 1.0;
             }
+            /* 行人/障碍物 AEB — 检测所有邻近障碍物（不限车道，行人随时可能横穿） */
+            for (int i = 0; i < g.obstacle_count; i++) {
+                SimObstacle* o = &g.obstacles[i];
+                double dx = o->x - g.vehicle.x;
+                double dy = fabs(o->y - g.vehicle.y);
+                if (dx < 0.0 || dx > AEB_MAX_GAP_M) continue;
+                if (dy > 5.0) continue;
+                double frontal_gap = dx - (o->len * 0.5 + EGO_LEN_M * 0.5);
+                double ped_safe_gap = fmax(10.0, g.vehicle.speed * 2.0);
+                if (frontal_gap < ped_safe_gap) {
+                    g.vehicle.throttle = 0;
+                    g.vehicle.brake    = 1.0;
+                    break;
+                }
+            }
         }
+
+        vehicle_tick();
 
         /* ── AABB 碰撞检测 ── */
         const double ego_half_len = EGO_LEN_M * 0.5;
@@ -391,14 +423,25 @@ static void* sim_thread(void* arg) {
                              g.vehicle.x, g.vehicle.y, i, overlap_x, overlap_y);
                     transport_publish(g.transport, "sim/collision",
                                       (const uint8_t*)col, (uint32_t)strlen(col) + 1);
-                    g.collision_cooldown[i] = (int)FREQUENCY_HZ;  /* 1 秒冷却 */
+                    g.collision_cooldown[i] = (int)FREQUENCY_HZ * 3;  /* 3 秒冷却，防止恢复后立即重判 */
+                    g.collision_recovery_ticks = (int)(FREQUENCY_HZ * 3);  /* 3 秒碰撞冻结 */
                 }
-                /* 停车（撞了要有后果） */
-                g.vehicle.speed    = 0.0;
-                g.vehicle.throttle = 0.0;
-                g.vehicle.brake    = 1.0;
+                /* 碰撞冻结期内强制停车；冻结期外允许物理恢复分离 */
+                if (g.collision_recovery_ticks > 0) {
+                    g.vehicle.speed    = 0.0;
+                    g.vehicle.throttle = 0.0;
+                    g.vehicle.brake    = 1.0;
+                }
             } else {
                 if (g.collision_cooldown[i] > 0) g.collision_cooldown[i]--;
+            }
+        }
+
+        /* 碰撞冻结倒数：冻结期结束后允许重新起步 */
+        if (g.collision_recovery_ticks > 0) {
+            g.collision_recovery_ticks--;
+            if (g.collision_recovery_ticks == 0) {
+                LOG_INFO("sim_world", "collision freeze expired — allowing movement");
             }
         }
 

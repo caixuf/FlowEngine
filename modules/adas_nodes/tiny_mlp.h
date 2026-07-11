@@ -33,7 +33,7 @@
 #include <math.h>
 #include <ctype.h>
 
-#define TINY_MLP_MAX_IN     16
+#define TINY_MLP_MAX_IN     128
 #define TINY_MLP_MAX_HID    64
 #define TINY_MLP_MAX_OUT    16
 

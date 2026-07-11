@@ -283,8 +283,9 @@ protected:
 
         LOG_INFO("safety_control", "FlowCoro safety gate started");
         while (!should_stop()) {
-            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd"}, &cancel_token_);
-            if (std::strcmp(msg.topic, "control/raw_cmd") != 0) continue;
+            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "inference/raw_cmd"}, &cancel_token_);
+            if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
+                std::strcmp(msg.topic, "inference/raw_cmd") != 0) continue;
 
             ControlCmd cmd = parse_control_cmd(msg);
             VehicleState state;

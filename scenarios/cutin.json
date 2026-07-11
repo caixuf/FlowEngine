@@ -1,0 +1,36 @@
+{
+  "name": "cutin",
+  "description": "邻道车辆突然切入：前方慢车 + 右侧车道车加速插入车头",
+  "random_seed": 103,
+  "duration_s": 60.0,
+  "ego": {
+    "x": 0.0, "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 14.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "car",
+      "x": 45.0, "y": -1.75,
+      "vx": 6.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "前方慢车"
+    },
+    {
+      "id": 1,
+      "type": "car",
+      "x": 18.0, "y": 1.75,
+      "vx": 11.0, "vy": -2.8,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "右侧加速超车后切入 ego 车道（vy<0 表示向左切入）"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 60.0,
+    "min_avg_speed_mps": 4.0,
+    "min_distance_m": 60.0
+  }
+}
