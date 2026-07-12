@@ -201,10 +201,10 @@ static void obstacles_tick(void) {
 
         double rel = o->x - g.vehicle.x;
         if (o->vx >= 0) {
-            /* 循环障碍车只在远离视野 (自车后方 >80m) 时才重置位置, 避免在
-             * 可视范围内瞬移造成前端插值出的"突变滑行"。 */
-            if (rel < -100.0) o->x = g.vehicle.x + 120.0 + (double)i * 5.0;
-            if (rel >  220.0) o->x = g.vehicle.x + 100.0;
+            /* 循环障碍车只在远离视野 (自车后方 >100m) 时才重置位置,
+             * 复位到前方 150m (>2.5×LiDAR 60m 量程), 确保不在传感器可见范围内。 */
+            if (rel < -100.0) o->x = g.vehicle.x + 150.0 + (double)i * 5.0;
+            if (rel >  220.0) o->x = g.vehicle.x + 150.0;
         } else {
             if (rel < -100.0) o->x = g.vehicle.x + 500.0;
         }

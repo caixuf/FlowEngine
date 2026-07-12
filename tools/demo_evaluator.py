@@ -36,6 +36,45 @@ TOPIC_MIN_FREQ = {
     "control/cmd": 10.0,
 }
 
+# Minimum expected publish frequency for inference/trajectory when inference_node is active.
+INFERENCE_TOPIC_MIN_FREQ = 5.0
+
+# Shadow inference output files written by torch_sidecar.py / tiny_sidecar.py.
+SHADOW_INFERENCE_FILES = [
+    Path("/tmp/flow_torch_inference.json"),
+    Path("/tmp/flow_tiny_inference.json"),
+]
+
+# Thresholds for shadow_delta = inference_speed - planning_speed (m/s).
+SHADOW_DELTA_WARN = 2.0   # |delta| > this → WARN
+SHADOW_DELTA_FAIL = 5.0   # |delta| > this → FAIL
+
+
+def _load_shadow_delta() -> float | None:
+    """Read the latest shadow_delta value from any active sidecar output file.
+
+    Returns the most recently written shadow_delta, or None if no sidecar file exists.
+    """
+    best_path: Path | None = None
+    best_mtime = -1.0
+    for path in SHADOW_INFERENCE_FILES:
+        try:
+            mtime = path.stat().st_mtime
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_path = path
+        except FileNotFoundError:
+            pass
+    if best_path is None:
+        return None
+    try:
+        with best_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        delta = data.get("shadow_delta")
+        return float(delta) if delta is not None else None
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
 
 def _pipeline_nodes(pipeline: dict) -> list:
     """Return the node list of a launcher config.
@@ -483,6 +522,28 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if drops > 0:
         failures.append(f"message drops detected: {drops}")
 
+    # ── inference/trajectory frequency check (only when topic is present in runtime data) ──
+    inference_freq = float(topics.get("inference/trajectory", {}).get("freq", 0.0) or 0.0)
+    inference_topic_active = "inference/trajectory" in topics
+    if inference_topic_active and inference_freq < INFERENCE_TOPIC_MIN_FREQ:
+        failures.append(
+            f"topic inference/trajectory freq too low: {inference_freq:.1f} Hz "
+            f"< {INFERENCE_TOPIC_MIN_FREQ:.1f} Hz"
+        )
+
+    # ── shadow delta check (read latest sidecar output for current-frame validation) ──
+    shadow_delta = _load_shadow_delta()
+    shadow_delta_abs = abs(shadow_delta) if shadow_delta is not None else None
+    if shadow_delta_abs is not None:
+        if shadow_delta_abs > SHADOW_DELTA_FAIL:
+            failures.append(
+                f"shadow_delta too large: {shadow_delta:+.2f} m/s (threshold {SHADOW_DELTA_FAIL:.1f} m/s)"
+            )
+        elif shadow_delta_abs > SHADOW_DELTA_WARN:
+            warnings.append(
+                f"shadow_delta elevated: {shadow_delta:+.2f} m/s (warn threshold {SHADOW_DELTA_WARN:.1f} m/s)"
+            )
+
     summary = {
         "scenario": scenario_name or "(unknown)",
         "samples": len(samples),
@@ -510,6 +571,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "max_npc_lateral_speed_mps": max_npc_lateral_speed,
         "collision_topic_pub": collision_pub,
         "topic_freq_hz": {topic: float(topics.get(topic, {}).get("freq", 0.0) or 0.0) for topic in TOPIC_MIN_FREQ},
+        "inference_topic_active": inference_topic_active,
+        "inference_freq_hz": inference_freq,
+        "shadow_delta_latest": shadow_delta,
     }
     return failures, warnings, summary
 

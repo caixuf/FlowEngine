@@ -32,6 +32,8 @@
 #define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
 #define CONTROL_WHEELBASE_M 2.7
+/* 控制环周期: 20Hz → 50ms。所有计时器累加步长使用此常量, 与实际循环频率保持一致。 */
+#define CONTROL_DT_S       0.05
 
 /* 车道判定迟滞: 已提交车道保持不变, 直到 ego_y 越过中心线 ±此死区才切换,
  * 避免车骑在车道线 (y≈0) 附近时目标车道每帧翻转造成的横向抖振。 */
@@ -40,6 +42,9 @@
 #define STUCK_SPEED_MPS     0.5    /* 判定"近乎静止"的速度阈值 */
 #define STUCK_LATERAL_M     0.6    /* 判定"卡在车道线附近"的 |ego_y| 阈值 */
 #define STUCK_RECOVER_S     3.0    /* 触发恢复所需持续时间 (秒) */
+/* 全域速度死锁: 不依赖横向位置, 只要速度持续为0超过此秒数就给小油门。
+ * 覆盖 STUCK (|y|<0.6) 和 ROAD_GUARD (|y|>2.1) 之间的盲区 0.6<|y|<2.1。 */
+#define SPEED_ZERO_RECOVER_S  5.0  /* 全域速度死锁触发阈值 (秒) */
 
 /* ── 控制节点状态机定义 ─────────────────────────────────────── */
 /* 自定义事件 (从 SM_EVENT_USER_BASE=16 开始) */
@@ -116,6 +121,7 @@ static struct {
     /* 车道迟滞 + 死锁恢复状态 */
     int    committed_lane_side;  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
     double stuck_timer;          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
+    double speed_zero_timer;     /* 全域速度死锁: 无论 y 位置, 速度持续为0的累计时间 (秒) */
 
     uint32_t cycle;
 
@@ -358,7 +364,7 @@ static void* control_thread(void* arg) {
             continue;
         }
 
-        if (g.lc_cooldown > 0.0) g.lc_cooldown -= 0.05;
+        if (g.lc_cooldown > 0.0) g.lc_cooldown -= CONTROL_DT_S;
 
         double road_center_limit = g.lane_width - 1.0;
         double half_lane = g.lane_width * 0.5;
@@ -385,7 +391,7 @@ static void* control_thread(void* arg) {
         /* ── 死锁恢复: 车长时间近乎静止且横向卡在车道线附近 (骑线不动) 时,
          *    强制收敛到最近车道中心并复位变道状态机, 打破 chatter/死锁 ── */
         if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y) < STUCK_LATERAL_M) {
-            g.stuck_timer += 0.05;
+            g.stuck_timer += CONTROL_DT_S;
         } else {
             g.stuck_timer = 0.0;
         }
@@ -398,8 +404,30 @@ static void* control_thread(void* arg) {
             g.lc_cooldown  = 0.0;
             g.lc_timer     = 0.0;
             g.stuck_timer  = 0.0;
+            g.speed_zero_timer = 0.0;
             LOG_WARN("control", ">>> STUCK RECOVERY: converge to lane y=%.2f (ego@(%.1f,%.1f))",
                      cruise_lane_y, g.ego_x, g.ego_y);
+        }
+
+        /* ── 全域速度死锁恢复: 覆盖 0.6<|y|<2.1 盲区
+         *    ROAD_GUARD (|y|>2.1) 自带低速油门; STUCK (|y|<0.6) 由上方处理。
+         *    此处捕获中间盲区: 无论 y 值, 只要速度持续为0就计时, 到阈值给小油门打破死锁。 ── */
+        if (g.current_speed < STUCK_SPEED_MPS) {
+            g.speed_zero_timer += CONTROL_DT_S;
+        } else {
+            g.speed_zero_timer = 0.0;
+        }
+        /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。 */
+        if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
+            fabs(g.ego_y) <= road_center_limit - 0.4) {
+            throttle = 0.15;
+            brake    = 0.0;
+            g.lc_state     = 0;
+            g.lc_attempted = 0;
+            g.lc_cooldown  = 0.0;
+            g.speed_zero_timer = 0.0;
+            LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f))",
+                     g.ego_y, g.ego_x, g.ego_y);
         }
 
         /* ── ACC & 变道: 计算本车道前车间距 ── */
@@ -466,7 +494,7 @@ static void* control_thread(void* arg) {
         if (effective_target_y < -g.lane_width * 0.5) effective_target_y = -g.lane_width * 0.5;
 
         if (blocked && g.lc_state == 0) {
-            g.lc_timer += 0.05;
+            g.lc_timer += CONTROL_DT_S;
             if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
                 int need_accel = 0;
                 int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &need_accel);
@@ -495,7 +523,7 @@ static void* control_thread(void* arg) {
         /* 超车后先稳定巡航，不强制回原车道，避免回切与慢车重叠。
          * 通过重置 lc_attempted 允许后续再次发起变道。 */
         if (g.lc_state == 2) {
-            g.lc_wait += 0.05;
+            g.lc_wait += CONTROL_DT_S;
             if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
                 g.lc_attempted = 0;
                 g.lc_cooldown = 3.0;
@@ -566,6 +594,7 @@ static void* control_thread(void* arg) {
             if (g.current_speed < 2.5) {
                 throttle = 0.18;
                 brake = 0.0;
+                g.speed_zero_timer = 0.0;  /* ROAD_GUARD 自己处理低速, 重置全域计时器 */
             } else {
                 throttle = 0.0;
                 if (brake < 0.65) brake = 0.65;

@@ -401,9 +401,12 @@ static int cmd_bag_info(const char* path) {
     char topics[64][64];
     uint64_t counts[64];
     int n = bag_reader_get_topics(r, topics, 64, counts);
+    double duration_sec = (double)duration_us / 1000000.0;
     printf("  Topics:     %d\n", n);
     for (int i = 0; i < n && i < 10; i++) {
-        printf("    %-30s %" PRIu64 " msgs\n", topics[i], counts[i]);
+        double freq = (duration_sec > 0.0) ? counts[i] / duration_sec : 0.0;
+        printf("    %-30s %6" PRIu64 " msgs  %6.1f Hz\n",
+               topics[i], counts[i], freq);
     }
 
     /* Type info per topic (v2 format) */
