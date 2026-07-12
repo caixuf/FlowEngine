@@ -417,19 +417,6 @@ static void* control_thread(void* arg) {
         } else {
             g.speed_zero_timer = 0.0;
         }
-        /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。 */
-        if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-            fabs(g.ego_y) <= road_center_limit - 0.4) {
-            throttle = 0.15;
-            brake    = 0.0;
-            g.lc_state     = 0;
-            g.lc_attempted = 0;
-            g.lc_cooldown  = 0.0;
-            g.speed_zero_timer = 0.0;
-            LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f))",
-                     g.ego_y, g.ego_x, g.ego_y);
-        }
-
         /* ── ACC & 变道: 计算本车道前车间距 ── */
         double best_gap = lane_lead_gap(cruise_lane_y, same_lane_tol);
         double adjacent_gap = lane_lead_gap(adjacent_lane_y, same_lane_tol);
@@ -581,6 +568,20 @@ static void* control_thread(void* arg) {
             if (brake > 1.0) brake = 1.0;
             g.integral = 0.0;
             mode = "SPEED_LIMIT";
+        }
+
+        /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。 */
+        if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
+            fabs(g.ego_y) <= road_center_limit - 0.4) {
+            throttle = 0.15;
+            brake    = 0.0;
+            mode     = "SPEED_ZERO_RECOVERY";
+            g.lc_state     = 0;
+            g.lc_attempted = 0;
+            g.lc_cooldown  = 0.0;
+            g.speed_zero_timer = 0.0;
+            LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f))",
+                     g.ego_y, g.ego_x, g.ego_y);
         }
 
         /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
