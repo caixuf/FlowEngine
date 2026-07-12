@@ -199,9 +199,9 @@ static int cmd_list_params(void) {
     FlowParamMeta params[64];
     int n = flow_registry_list_params(params, 64);
     for (int i = 0; i < n; i++) {
-        const char* type_str = params[i].type == 0 ? "int" :
-                               params[i].type == 1 ? "float" :
-                               params[i].type == 2 ? "bool" : "str";
+        const char* type_str = params[i].type == (int)PARAM_INT   ? "int" :
+                               params[i].type == (int)PARAM_FLOAT ? "float" :
+                               params[i].type == (int)PARAM_BOOL  ? "bool" : "str";
         printf("  %-28s %-8s %-12s %s%s\n", params[i].name, type_str,
                params[i].value_str, params[i].description,
                params[i].hot_reload ? " 🔥" : "");

@@ -717,14 +717,15 @@ static void test_param_not_found(void) {
 
 static void test_param_registry_bridge(void) {
     TEST("flow_registry_list_params sees param_registry entries");
-    FlowParamMeta pm[64];
-    int n = flow_registry_list_params(pm, 64);
+    enum { PM_BUF_MAX = 64 };
+    FlowParamMeta pm[PM_BUF_MAX];
+    int n = flow_registry_list_params(pm, PM_BUF_MAX);
     ASSERT(n > 0, "list_params should return > 0, got %d", n);
     int found = 0;
     for (int i = 0; i < n; i++)
         if (strcmp(pm[i].name, "test.speed") == 0) found = 1;
     ASSERT(found, "test.speed not visible through flow_registry");
-    ASSERT(flow_registry_param_count() == n || n == 64,
+    ASSERT(flow_registry_param_count() == n || n == PM_BUF_MAX,
            "param_count inconsistent with list_params");
     PASS();
 }
