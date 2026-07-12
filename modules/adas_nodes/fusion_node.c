@@ -61,6 +61,10 @@ static struct {
     /* 延迟统计 — 环形缓冲，128 个样本 */
     LatencyTracker  lat_tracker;
 
+    /* 事件驱动同步: on_lidar 回调 signal, fusion_thread wait */
+    pthread_mutex_t lidar_mu;
+    pthread_cond_t  lidar_cv;
+
     /* choreo 触发任务 ID */
     int tid;
 } g;
@@ -70,6 +74,10 @@ static struct {
 static void on_lidar(const Message* msg, void* user_data) {
     (void)user_data;
     message_buffer_push(g.lidar_buf, msg);
+    /* 事件驱动: 唤醒 fusion_thread, 避免 50ms 轮询引入的延迟抖动 */
+    pthread_mutex_lock(&g.lidar_mu);
+    pthread_cond_signal(&g.lidar_cv);
+    pthread_mutex_unlock(&g.lidar_mu);
 }
 
 static void on_gps(const Message* msg, void* user_data) {
@@ -83,16 +91,24 @@ static void* fusion_thread(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "fusion");
 
-    /* 注册成调度器 choreo 任务 (无 TaskBase 封装，直接使用调度器 API) */
-    /* 触发 topic: sensor/lidar — LiDAR 每帧触发一次融合 */
-    /* TODO: 未来用 task_base_init + choreo_trigger 重构；此处直接用消息缓冲区轮询 */
-
+    /* 事件驱动: 等待 on_lidar 信号, 100ms 超时作 watchdog (防止 lidar 停发时卡死) */
     while (!g.should_stop) {
-        /* 轮询 lidar 缓冲区，50ms 检查间隔 (20Hz，与 LiDAR 发布频率匹配，减少空轮询) */
-        usleep(50000);
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_nsec += 100000000LL;   /* +100ms */
+        if (deadline.tv_nsec >= 1000000000LL) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000LL;
+        }
+
+        pthread_mutex_lock(&g.lidar_mu);
+        pthread_cond_timedwait(&g.lidar_cv, &g.lidar_mu, &deadline);
+        pthread_mutex_unlock(&g.lidar_mu);
+
+        if (g.should_stop) break;
+
         const Message* lidar_msg = message_buffer_latest(g.lidar_buf);
         if (!lidar_msg) continue;
-        if (g.should_stop) break;
 
         uint64_t ref_ts = lidar_msg->timestamp_us;
 
@@ -218,6 +234,10 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     /* 延迟跟踪器 — 环形缓冲128样本 */
     memset(&g.lat_tracker, 0, sizeof(g.lat_tracker));
 
+    /* 事件驱动同步原语 */
+    pthread_mutex_init(&g.lidar_mu, NULL);
+    pthread_cond_init(&g.lidar_cv, NULL);
+
     /* 订阅输入 topics */
     transport_subscribe(transport, "sensor/lidar", on_lidar, NULL);
     transport_subscribe(transport, "sensor/gps",   on_gps,   NULL);
@@ -248,15 +268,26 @@ static int fusion_start(void) {
     return 0;
 }
 
-static void fusion_stop(void)    { g.should_stop = 1; }
+static void fusion_stop(void) {
+    g.should_stop = 1;
+    /* 唤醒可能阻塞在 cond_wait 的 fusion_thread */
+    pthread_mutex_lock(&g.lidar_mu);
+    pthread_cond_signal(&g.lidar_cv);
+    pthread_mutex_unlock(&g.lidar_mu);
+}
 static void fusion_cleanup(void) {
     if (g.running) {
         g.should_stop = 1;
+        pthread_mutex_lock(&g.lidar_mu);
+        pthread_cond_broadcast(&g.lidar_cv);
+        pthread_mutex_unlock(&g.lidar_mu);
         pthread_join(g.thread, NULL);
         g.running = 0;
     }
     if (g.lidar_buf) { message_buffer_destroy(g.lidar_buf); g.lidar_buf = NULL; }
     if (g.gps_buf)   { message_buffer_destroy(g.gps_buf);   g.gps_buf   = NULL; }
+    pthread_cond_destroy(&g.lidar_cv);
+    pthread_mutex_destroy(&g.lidar_mu);
     LOG_INFO("fusion", "cleanup done");
 }
 
