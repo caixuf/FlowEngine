@@ -78,7 +78,8 @@ def main() -> int:
         run_command(train_cmd)
 
         # Write a minimal manifest so modelctl.py and eval_model.py can find the artifact.
-        import json, time as _time  # noqa: E401
+        import json
+        import time as _time
         manifest = {
             "artifact_version": "flowengine.e2e_artifact.v1",
             "created_unix_ms": int(_time.time() * 1000),

@@ -97,8 +97,13 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
     dataset = manifest.get("dataset", {}) if isinstance(manifest.get("dataset"), dict) else {}
     if dataset:
-        print(f"dataset  : {dataset.get('path', '?')} ({dataset.get('sample_count', '?')} samples,"
-              f" scenario={dataset.get('scenario', '?')}, schema={dataset.get('schema_version', '?')})")
+        dataset_desc = (
+            f"{dataset.get('path', '?')} "
+            f"({dataset.get('sample_count', '?')} samples, "
+            f"scenario={dataset.get('scenario', '?')}, "
+            f"schema={dataset.get('schema_version', '?')})"
+        )
+        print(f"dataset  : {dataset_desc}")
 
     training = manifest.get("training", {}) if isinstance(manifest.get("training"), dict) else {}
     if training:
@@ -131,7 +136,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-# Metric keys that are meaningful to compare between two artifacts.
+# Epsilon for floating-point improvement comparison in diff output.
+_METRIC_EPSILON = 1e-6
 _DIFF_METRICS = [
     "mae_target_speed",
     "rmse_target_speed",
@@ -186,7 +192,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
             delta = vb - va
             sd = f"{delta:+.4f}"
             # Highlight improvement (lower error = better)
-            marker = " ✓" if delta < -1e-6 else (" ✗" if delta > 1e-6 else "")
+            marker = " ✓" if delta < -_METRIC_EPSILON else (" ✗" if delta > _METRIC_EPSILON else "")
             print(f"  {key:<{col-2}}  {sa:>14}  {sb:>14}  {sd:>14}{marker}")
         else:
             print(f"  {key:<{col-2}}  {sa:>14}  {sb:>14}")

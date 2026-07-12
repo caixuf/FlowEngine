@@ -92,6 +92,8 @@ def evaluate_tiny_mlp(model_dir: Path, dataset_dir: Path, manifest: dict) -> dic
         label = sample.get("label")
         if label is None and isinstance(sample.get("planning"), dict):
             label = sample["planning"].get("target_speed")
+        if label is None:
+            continue
         err = pred - float(label)
         signed_errors.append(err)
         abs_errors.append(abs(err))
@@ -143,6 +145,8 @@ def evaluate_torch(model_dir: Path, dataset_dir: Path, manifest: dict) -> dict:
             label = sample.get("label")
             if label is None and isinstance(sample.get("planning"), dict):
                 label = sample["planning"].get("target_speed")
+            if label is None:
+                continue
             err = pred - float(label)
             signed_errors.append(err)
             abs_errors.append(abs(err))

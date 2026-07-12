@@ -522,7 +522,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if drops > 0:
         failures.append(f"message drops detected: {drops}")
 
-    # ── inference/trajectory 频率检查（仅当该 topic 实际出现在运行时数据中时）──
+    # ── inference/trajectory frequency check (only when topic is present in runtime data) ──
     inference_freq = float(topics.get("inference/trajectory", {}).get("freq", 0.0) or 0.0)
     inference_topic_active = "inference/trajectory" in topics
     if inference_topic_active and inference_freq < INFERENCE_TOPIC_MIN_FREQ:
@@ -531,7 +531,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             f"< {INFERENCE_TOPIC_MIN_FREQ:.1f} Hz"
         )
 
-    # ── shadow delta 检查（读取 sidecar 最新输出，仅用于当前帧粗检） ──
+    # ── shadow delta check (read latest sidecar output for current-frame validation) ──
     shadow_delta = _load_shadow_delta()
     shadow_delta_abs = abs(shadow_delta) if shadow_delta is not None else None
     if shadow_delta_abs is not None:
