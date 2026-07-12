@@ -390,7 +390,7 @@ README 对以下新模块体现不足：
 
 后续任务：
 
-- 给 `flow_e2e` 增加 `--smoke` 模式纳入 CI。
+- ✅ 给 `flow_e2e` 增加 `--smoke` 模式纳入 CI（`e2e_smoke` 测试，TIMEOUT 30）。
 
 ### P1：统一命名
 

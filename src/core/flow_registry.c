@@ -197,6 +197,19 @@ int flow_registry_type_count(void) {
     return cached > 0 ? cached : serializer_type_count();
 }
 
+int flow_registry_list_types(FlowTypeMeta* buf, int max) {
+    if (!buf || max <= 0) return 0;
+    pthread_mutex_lock(&g_mutex);
+    int n = (g_type_cache_count < max) ? g_type_cache_count : max;
+    for (int i = 0; i < n; i++) {
+        snprintf(buf[i].name, sizeof(buf[i].name), "%s", g_type_cache[i].type_name);
+        buf[i].type_id     = g_type_cache[i].type_id;
+        buf[i].struct_size = g_type_cache[i].struct_size;
+    }
+    pthread_mutex_unlock(&g_mutex);
+    return n;
+}
+
 /* ══════════════════════════════════════════════════════════ */
 /* Schema Registry (bridges msg_schema)                       */
 /* ══════════════════════════════════════════════════════════ */

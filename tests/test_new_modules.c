@@ -15,6 +15,7 @@
 #include "discovery.h"
 #include "bag.h"
 #include "flow_registry.h"
+#include "param_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -634,8 +635,35 @@ static void test_freg_json_export(void) {
     ASSERT(strstr(json, "\"topics\"") != NULL, "JSON should contain topics");
     ASSERT(strstr(json, "\"plugins\"") != NULL, "JSON should contain plugins");
     ASSERT(strstr(json, "\"schemas\"") != NULL, "JSON should contain schemas");
+    ASSERT(strstr(json, "\"params\"") != NULL, "JSON should contain params");
+    ASSERT(strstr(json, "\"types\"") != NULL, "JSON should contain types");
     ASSERT(strstr(json, "\"summary\"") != NULL, "JSON should contain summary");
     free(json);
+    PASS();
+}
+
+static void test_freg_list_types(void) {
+    TEST("flow_registry list_types");
+    TypeRegistryEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    snprintf(entry.type_name, sizeof(entry.type_name), "TestTypeMeta");
+    entry.type_id     = 0xABCD1234;
+    entry.struct_size = 48;
+    flow_registry_on_type_registered(&entry);
+
+    FlowTypeMeta types[64];
+    int n = flow_registry_list_types(types, 64);
+    ASSERT(n > 0, "list_types should return > 0, got %d", n);
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        if (types[i].type_id == 0xABCD1234) {
+            ASSERT(strcmp(types[i].name, "TestTypeMeta") == 0, "type name mismatch");
+            ASSERT(types[i].struct_size == 48, "struct size mismatch");
+            found = 1;
+        }
+    }
+    ASSERT(found, "registered type not found in list_types");
+    ASSERT(flow_registry_type_count() >= n, "type_count < listed types");
     PASS();
 }
 
@@ -643,6 +671,62 @@ static void test_freg_total_count(void) {
     TEST("flow_registry total_count positive");
     int n = flow_registry_total_count();
     ASSERT(n > 0, "total_count should be positive, got %d", n);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════ */
+/* Param Registry                                              */
+/* ══════════════════════════════════════════════════════════ */
+
+static void test_param_int_range(void) {
+    TEST("param_registry int range validation");
+    ASSERT_EQ(param_register_int("test.speed", 50, 0, 100, "test int"), 0,
+              "register_int failed");
+    ASSERT(param_get_int("test.speed") == 50, "default value wrong");
+    ASSERT_EQ(param_set_int("test.speed", 80), 0, "in-range set rejected");
+    ASSERT(param_get_int("test.speed") == 80, "set value not applied");
+    ASSERT_EQ(param_set_int("test.speed", 101), ERR_INVALID_PARAM,
+              "over-max set should be rejected");
+    ASSERT_EQ(param_set_int("test.speed", -1), ERR_INVALID_PARAM,
+              "under-min set should be rejected");
+    ASSERT(param_get_int("test.speed") == 80, "rejected set must not change value");
+    PASS();
+}
+
+static void test_param_float_range(void) {
+    TEST("param_registry float range validation");
+    ASSERT_EQ(param_register_float("test.gain", 1.5, 0.5, 5.0, "test float"), 0,
+              "register_float failed");
+    ASSERT_EQ(param_set_float("test.gain", 2.5), 0, "in-range set rejected");
+    ASSERT(param_get_float("test.gain") == 2.5, "set value not applied");
+    ASSERT_EQ(param_set_float("test.gain", 5.1), ERR_INVALID_PARAM,
+              "over-max set should be rejected");
+    ASSERT_EQ(param_set_float("test.gain", 0.4), ERR_INVALID_PARAM,
+              "under-min set should be rejected");
+    PASS();
+}
+
+static void test_param_not_found(void) {
+    TEST("param_registry unknown name → NOT_FOUND");
+    ASSERT_EQ(param_set_int("test.does_not_exist", 1), ERR_NOT_FOUND,
+              "set on unknown param should return NOT_FOUND");
+    ASSERT_EQ(param_set_int(NULL, 1), ERR_INVALID_PARAM,
+              "NULL name should return INVALID_PARAM");
+    PASS();
+}
+
+static void test_param_registry_bridge(void) {
+    TEST("flow_registry_list_params sees param_registry entries");
+    enum { PM_BUF_MAX = 64 };
+    FlowParamMeta pm[PM_BUF_MAX];
+    int n = flow_registry_list_params(pm, PM_BUF_MAX);
+    ASSERT(n > 0, "list_params should return > 0, got %d", n);
+    int found = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(pm[i].name, "test.speed") == 0) found = 1;
+    ASSERT(found, "test.speed not visible through flow_registry");
+    ASSERT(flow_registry_param_count() == n || n == PM_BUF_MAX,
+           "param_count inconsistent with list_params");
     PASS();
 }
 
@@ -702,6 +786,14 @@ int main(void) {
     test_freg_plugin();
     test_freg_json_export();
     test_freg_total_count();
+    test_freg_list_types();
+
+    /* ── Param Registry ─────────────────────── */
+    printf("\n═══ Param Registry ═══\n");
+    test_param_int_range();
+    test_param_float_range();
+    test_param_not_found();
+    test_param_registry_bridge();
 
     /* ── Summary ────────────────────────────── */
     printf("\n╔════════════════════════════════╗\n");
