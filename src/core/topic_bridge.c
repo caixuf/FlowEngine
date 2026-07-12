@@ -38,6 +38,10 @@ struct TopicBridge {
     BridgeEntry entries[TOPIC_BRIDGE_MAX_TOPICS];
     int         n_topics;
 
+    /* PUB 方向: 为每个 topic 分配的回调上下文, 由 destroy 统一释放。
+     * 类型为 void* 以避免前向声明依赖; 实际指向 PubCallbackCtx。 */
+    void* pub_ctx[TOPIC_BRIDGE_MAX_TOPICS];
+
     IpcChannel*  ipc;
     volatile int running;
     volatile int should_stop;
@@ -172,18 +176,27 @@ int topic_bridge_start(TopicBridge* bridge) {
 
     if (bridge->direction == TOPIC_BRIDGE_PUB ||
         bridge->direction == TOPIC_BRIDGE_BIDIR) {
-        /* PUB: 订阅本地 bus 上所有注册 topic */
+        /* PUB: 先分配所有 ctx, 确保失败时可以整体回退 */
         for (int i = 0; i < bridge->n_topics; i++) {
-            /* 为每个 entry 分配持久的 callback 上下文（随 bridge 生命周期） */
-            PubCallbackCtx* ctx = (PubCallbackCtx*)malloc(sizeof(*ctx));
-            if (!ctx) { bridge->running = 0; return ERR_NOMEM; }
+            PubCallbackCtx* ctx = (PubCallbackCtx*)malloc(sizeof(PubCallbackCtx));
+            if (!ctx) {
+                /* 释放已分配的 ctx, 防止内存泄露 */
+                for (int j = 0; j < i; j++) { free(bridge->pub_ctx[j]); bridge->pub_ctx[j] = NULL; }
+                bridge->running = 0;
+                ipc_channel_close(bridge->ipc);
+                bridge->ipc = NULL;
+                return ERR_NOMEM;
+            }
             ctx->bridge    = bridge;
             ctx->entry_idx = i;
+            bridge->pub_ctx[i] = ctx;
+        }
+        /* 订阅本地 bus 上所有注册 topic */
+        for (int i = 0; i < bridge->n_topics; i++) {
             int rc = message_bus_subscribe(bridge->bus,
                                            bridge->entries[i].topic,
-                                           pub_on_topic, ctx);
+                                           pub_on_topic, bridge->pub_ctx[i]);
             if (rc != ERR_OK) {
-                free(ctx);
                 LOG_WARN("topic_bridge", "[PUB] subscribe '%s' failed (%d)",
                          bridge->entries[i].topic, rc);
             }
@@ -227,6 +240,13 @@ void topic_bridge_destroy(TopicBridge* bridge) {
     if (bridge->ipc) {
         ipc_channel_close(bridge->ipc);
         bridge->ipc = NULL;
+    }
+    /* 释放 PUB 方向的 callback 上下文 */
+    for (int i = 0; i < bridge->n_topics; i++) {
+        if (bridge->pub_ctx[i]) {
+            free(bridge->pub_ctx[i]);
+            bridge->pub_ctx[i] = NULL;
+        }
     }
     free(bridge);
 }

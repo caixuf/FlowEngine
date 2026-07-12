@@ -32,6 +32,8 @@
 #define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
 #define CONTROL_WHEELBASE_M 2.7
+/* 控制环周期: 20Hz → 50ms。所有计时器累加步长使用此常量, 与实际循环频率保持一致。 */
+#define CONTROL_DT_S       0.05
 
 /* 车道判定迟滞: 已提交车道保持不变, 直到 ego_y 越过中心线 ±此死区才切换,
  * 避免车骑在车道线 (y≈0) 附近时目标车道每帧翻转造成的横向抖振。 */
@@ -362,7 +364,7 @@ static void* control_thread(void* arg) {
             continue;
         }
 
-        if (g.lc_cooldown > 0.0) g.lc_cooldown -= 0.05;
+        if (g.lc_cooldown > 0.0) g.lc_cooldown -= CONTROL_DT_S;
 
         double road_center_limit = g.lane_width - 1.0;
         double half_lane = g.lane_width * 0.5;
@@ -389,7 +391,7 @@ static void* control_thread(void* arg) {
         /* ── 死锁恢复: 车长时间近乎静止且横向卡在车道线附近 (骑线不动) 时,
          *    强制收敛到最近车道中心并复位变道状态机, 打破 chatter/死锁 ── */
         if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y) < STUCK_LATERAL_M) {
-            g.stuck_timer += 0.05;
+            g.stuck_timer += CONTROL_DT_S;
         } else {
             g.stuck_timer = 0.0;
         }
@@ -411,7 +413,7 @@ static void* control_thread(void* arg) {
          *    ROAD_GUARD (|y|>2.1) 自带低速油门; STUCK (|y|<0.6) 由上方处理。
          *    此处捕获中间盲区: 无论 y 值, 只要速度持续为0就计时, 到阈值给小油门打破死锁。 ── */
         if (g.current_speed < STUCK_SPEED_MPS) {
-            g.speed_zero_timer += 0.05;
+            g.speed_zero_timer += CONTROL_DT_S;
         } else {
             g.speed_zero_timer = 0.0;
         }
@@ -492,7 +494,7 @@ static void* control_thread(void* arg) {
         if (effective_target_y < -g.lane_width * 0.5) effective_target_y = -g.lane_width * 0.5;
 
         if (blocked && g.lc_state == 0) {
-            g.lc_timer += 0.05;
+            g.lc_timer += CONTROL_DT_S;
             if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
                 int need_accel = 0;
                 int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &need_accel);
@@ -521,7 +523,7 @@ static void* control_thread(void* arg) {
         /* 超车后先稳定巡航，不强制回原车道，避免回切与慢车重叠。
          * 通过重置 lc_attempted 允许后续再次发起变道。 */
         if (g.lc_state == 2) {
-            g.lc_wait += 0.05;
+            g.lc_wait += CONTROL_DT_S;
             if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
                 g.lc_attempted = 0;
                 g.lc_cooldown = 3.0;

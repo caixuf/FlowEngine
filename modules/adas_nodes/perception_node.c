@@ -190,8 +190,14 @@ static void* perception_thread(void* arg) {
             int n_clusters = dbscan_run(&g.dbscan, pts, np);
 
             clock_gettime(CLOCK_MONOTONIC, &t_dbscan_end);
-            long dbscan_us = (long)(t_dbscan_end.tv_sec - t_dbscan_start.tv_sec) * 1000000L
-                           + (long)(t_dbscan_end.tv_nsec - t_dbscan_start.tv_nsec) / 1000L;
+            /* 正确的 timespec 减法: 处理 nanosecond 借位, 避免负数溢出 */
+            long dbscan_us;
+            {
+                long sec_diff = (long)(t_dbscan_end.tv_sec  - t_dbscan_start.tv_sec);
+                long ns_diff  = (long)(t_dbscan_end.tv_nsec - t_dbscan_start.tv_nsec);
+                if (ns_diff < 0) { sec_diff--; ns_diff += 1000000000L; }
+                dbscan_us = sec_diff * 1000000L + ns_diff / 1000L;
+            }
             long budget_warn_us = (long)(period_us * 8 / 10);   /* 80% 周期 */
 
             if (dbscan_us > period_us) {

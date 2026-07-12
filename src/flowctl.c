@@ -404,7 +404,7 @@ static int cmd_bag_info(const char* path) {
     double duration_sec = (double)duration_us / 1000000.0;
     printf("  Topics:     %d\n", n);
     for (int i = 0; i < n && i < 10; i++) {
-        double freq = (duration_sec > 0.0) ? (double)counts[i] / duration_sec : 0.0;
+        double freq = (duration_sec > 0.0) ? counts[i] / duration_sec : 0.0;
         printf("    %-30s %6" PRIu64 " msgs  %6.1f Hz\n",
                topics[i], counts[i], freq);
     }

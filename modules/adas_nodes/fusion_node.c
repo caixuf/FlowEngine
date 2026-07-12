@@ -94,7 +94,7 @@ static void* fusion_thread(void* arg) {
     /* 事件驱动: 等待 on_lidar 信号, 100ms 超时作 watchdog (防止 lidar 停发时卡死) */
     while (!g.should_stop) {
         struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
+        clock_gettime(CLOCK_MONOTONIC, &deadline);  /* 匹配 condattr CLOCK_MONOTONIC */
         deadline.tv_nsec += 100000000LL;   /* +100ms */
         if (deadline.tv_nsec >= 1000000000LL) {
             deadline.tv_sec++;
@@ -234,9 +234,15 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     /* 延迟跟踪器 — 环形缓冲128样本 */
     memset(&g.lat_tracker, 0, sizeof(g.lat_tracker));
 
-    /* 事件驱动同步原语 */
-    pthread_mutex_init(&g.lidar_mu, NULL);
-    pthread_cond_init(&g.lidar_cv, NULL);
+    /* 事件驱动同步原语 — 使用 CLOCK_MONOTONIC 避免系统时间跳变(NTP/DST)影响超时 */
+    {
+        pthread_condattr_t cattr;
+        pthread_condattr_init(&cattr);
+        pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+        pthread_mutex_init(&g.lidar_mu, NULL);
+        pthread_cond_init(&g.lidar_cv, &cattr);
+        pthread_condattr_destroy(&cattr);
+    }
 
     /* 订阅输入 topics */
     transport_subscribe(transport, "sensor/lidar", on_lidar, NULL);
