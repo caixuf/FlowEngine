@@ -41,7 +41,9 @@ static void print_usage(void) {
     printf("Commands:\n");
     printf("  list tasks              List registered tasks\n");
     printf("  list topics             List all topics with stats\n");
+    printf("  list types              List registered message types\n");
     printf("  list plugins            List loaded plugins\n");
+    printf("  list params             List registered parameters\n");
     printf("  graph                   Print topology graph\n");
     printf("  state <task>            Show task state machine\n");
     printf("  topic stats <topic>     Per-topic statistics\n");
@@ -163,6 +165,48 @@ static int cmd_list_topics(void) {
         }
     }
     printf("\n  Total: %d topics (from state file)\n", tcount);
+    return 0;
+}
+
+/* ── list types ──────────────────────────────────────────── */
+
+static int cmd_list_types(void) {
+    /* Populate registry via serializer notifications (same as cmd_schema) */
+    adas_msgs_register_all();
+
+    printf("Types:\n");
+    printf("  %-30s %-12s %s\n", "NAME", "TYPE_ID", "SIZE");
+    printf("  %-30s %-12s %s\n", "────", "───────", "────");
+    FlowTypeMeta types[64];
+    int n = flow_registry_list_types(types, 64);
+    if (n == 0) {
+        printf("  (none registered — start flow_launcher first)\n");
+        return 0;
+    }
+    for (int i = 0; i < n; i++)
+        printf("  %-30s 0x%08x   %zu bytes\n",
+               types[i].name, types[i].type_id, types[i].struct_size);
+    printf("\n  Total: %d types (from registry)\n", n);
+    return 0;
+}
+
+/* ── list params ─────────────────────────────────────────── */
+
+static int cmd_list_params(void) {
+    printf("Params:\n");
+    printf("  %-28s %-8s %-12s %s\n", "NAME", "TYPE", "VALUE", "DESC");
+    printf("  %-28s %-8s %-12s %s\n", "────", "────", "─────", "────");
+    FlowParamMeta params[64];
+    int n = flow_registry_list_params(params, 64);
+    for (int i = 0; i < n; i++) {
+        const char* type_str = params[i].type == 0 ? "int" :
+                               params[i].type == 1 ? "float" :
+                               params[i].type == 2 ? "bool" : "str";
+        printf("  %-28s %-8s %-12s %s%s\n", params[i].name, type_str,
+               params[i].value_str, params[i].description,
+               params[i].hot_reload ? " 🔥" : "");
+    }
+    printf("\n  Total: %d params (from registry)\n", n);
     return 0;
 }
 
@@ -467,6 +511,8 @@ int main(int argc, char** argv) {
         if (!arg1) { print_usage(); return 1; }
         if (strcmp(arg1, "tasks") == 0)   return cmd_list_tasks();
         if (strcmp(arg1, "topics") == 0)  return cmd_list_topics();
+        if (strcmp(arg1, "types") == 0)   return cmd_list_types();
+        if (strcmp(arg1, "params") == 0)  return cmd_list_params();
         if (strcmp(arg1, "plugins") == 0) {
             PluginMeta plugins[32];
             int n = flow_registry_list_plugins(plugins, 32);
