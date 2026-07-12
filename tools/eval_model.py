@@ -13,7 +13,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "train_e2e"))
 
-from feature_schema import FEATURE_NAMES_V1  # noqa: E402
+from feature_schema import FEATURE_NAMES_V1, features_from_sample  # noqa: E402
 
 
 def load_dataset(dataset_dir: Path) -> list[dict]:
@@ -80,12 +80,19 @@ def evaluate_tiny_mlp(model_dir: Path, dataset_dir: Path, manifest: dict) -> dic
     model_path = model_dir / manifest.get("model_path", "model.txt")
     model = load_tiny_mlp(model_path)
     samples = load_dataset(dataset_dir)
+    feature_names = manifest.get("input_schema", {}).get("features", FEATURE_NAMES_V1)
+    if not isinstance(feature_names, list):
+        feature_names = FEATURE_NAMES_V1
 
     abs_errors = []
     signed_errors = []
     for sample in samples:
-        pred = predict(model, sample["features"])
-        err = pred - float(sample["label"])
+        feats = features_from_sample(sample, feature_names)
+        pred = predict(model, feats)
+        label = sample.get("label")
+        if label is None and isinstance(sample.get("planning"), dict):
+            label = sample["planning"].get("target_speed")
+        err = pred - float(label)
         signed_errors.append(err)
         abs_errors.append(abs(err))
 
@@ -126,29 +133,58 @@ def evaluate_torch(model_dir: Path, dataset_dir: Path, manifest: dict) -> dict:
     signed_errors = []
     with torch.no_grad():
         for sample in samples:
+            feats = features_from_sample(sample, feature_names)
             x = [
-                (float(sample["features"][i]) - input_mean[i]) / input_scale[i]
+                (float(feats[i]) - input_mean[i]) / input_scale[i]
                 for i in range(len(feature_names))
             ]
             y_norm = model(torch.tensor([x], dtype=torch.float32))[0][0].item()
             pred = y_norm * output_scale[0] + output_mean[0]
-            err = pred - float(sample["label"])
+            label = sample.get("label")
+            if label is None and isinstance(sample.get("planning"), dict):
+                label = sample["planning"].get("target_speed")
+            err = pred - float(label)
             signed_errors.append(err)
             abs_errors.append(abs(err))
 
     return build_metrics(model_dir, dataset_dir, len(samples), abs_errors, signed_errors)
 
 
+def _percentile(sorted_values: list[float], p: float) -> float:
+    """Return the p-th percentile (0–100) of a pre-sorted list."""
+    if not sorted_values:
+        return 0.0
+    idx = (len(sorted_values) - 1) * p / 100.0
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = idx - lo
+    return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
+
+
 def build_metrics(model_dir: Path, dataset_dir: Path, sample_count: int,
                   abs_errors: list[float], signed_errors: list[float]) -> dict:
+    n = len(abs_errors)
+    mae = sum(abs_errors) / n
+    mean_err = sum(signed_errors) / n
+    variance = sum((e - mean_err) ** 2 for e in signed_errors) / n
+    std_err = math.sqrt(variance)
+    rmse = math.sqrt(sum(e * e for e in signed_errors) / n)
+
+    sorted_abs = sorted(abs_errors)
     return {
         "schema_version": "flowengine.e2e_eval.v1",
         "model": str(model_dir),
         "dataset": str(dataset_dir),
         "sample_count": sample_count,
-        "mae_target_speed": sum(abs_errors) / len(abs_errors),
-        "mean_error": sum(signed_errors) / len(signed_errors),
+        "mae_target_speed": mae,
+        "rmse_target_speed": rmse,
+        "std_error": std_err,
+        "mean_error": mean_err,
         "max_abs_error": max(abs_errors),
+        "p50_abs_error": _percentile(sorted_abs, 50),
+        "p90_abs_error": _percentile(sorted_abs, 90),
+        "p95_abs_error": _percentile(sorted_abs, 95),
+        "p99_abs_error": _percentile(sorted_abs, 99),
     }
 
 

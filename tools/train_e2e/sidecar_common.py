@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -62,6 +63,6 @@ def poll_state(state_file: Path, interval: float, callback) -> None:
                 callback()
         except FileNotFoundError:
             pass
-        except json.JSONDecodeError:
-            pass
+        except Exception as exc:  # noqa: BLE001 — keep sidecar alive through transient errors
+            print(f"sidecar warning: {exc}", file=sys.stderr)
         time.sleep(max(interval, 0.01))

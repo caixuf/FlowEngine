@@ -43,7 +43,7 @@ def main() -> int:
     parser.add_argument("--datasets-dir", default=str(DEFAULT_DATASETS_DIR))
     parser.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     parser.add_argument("--name", default=None, help="Dataset/model name under datasets/ and models/")
-    parser.add_argument("--backend", choices=["tiny", "torch"], default="torch")
+    parser.add_argument("--backend", choices=["tiny", "torch", "temporal"], default="torch")
     parser.add_argument("--scenario", default="demo")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--hidden", type=int, default=None)
@@ -51,7 +51,7 @@ def main() -> int:
     parser.add_argument("--init-from", default=None, help="Existing torch artifact to fine-tune from")
     args = parser.parse_args()
 
-    backend = "torch" if args.backend == "torch" else "tiny"
+    backend = args.backend
     if args.init_from and backend != "torch":
         raise SystemExit("error: --init-from is only supported for --backend torch")
     name = args.name or default_name(backend)
@@ -61,6 +61,54 @@ def main() -> int:
 
     ensure_samples(input_path, args.run_demo)
 
+    if backend == "temporal":
+        # temporal_train.py reads JSONL directly; no dataset export step needed.
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_txt = model_dir / "model.txt"
+        train_cmd = [
+            sys.executable,
+            "tools/train_e2e/temporal_train.py",
+            "--input", str(input_path),
+            "--output", str(model_txt),
+        ]
+        if args.epochs is not None:
+            train_cmd.extend(["--epochs", str(args.epochs)])
+        if args.hidden is not None:
+            train_cmd.extend(["--hidden", str(args.hidden)])
+        run_command(train_cmd)
+
+        # Write a minimal manifest so modelctl.py and eval_model.py can find the artifact.
+        import json, time as _time  # noqa: E401
+        manifest = {
+            "artifact_version": "flowengine.e2e_artifact.v1",
+            "created_unix_ms": int(_time.time() * 1000),
+            "model_format": "flowengine-tinymlp-v2",
+            "model_path": "model.txt",
+            "backend": "tiny_mlp",
+            "input_schema": {"features": "80-dim temporal (5x16)"},
+            "output_schema": {"labels": ["throttle", "brake", "steer", "lane_change", "confidence"]},
+            "dataset": {
+                "path": str(input_path),
+                "schema_version": "jsonl-raw",
+                "sample_count": sum(1 for _ in open(input_path)),
+                "scenario": args.scenario,
+            },
+            "training": {
+                "epochs": args.epochs or 300,
+                "hidden": args.hidden or 32,
+            },
+        }
+        (model_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+
+        print("\nFlowEngine temporal training recipe complete")
+        print(f"  model:   {model_dir}")
+        print(f"  promote: python3 tools/modelctl.py promote {model_dir}")
+        print("  next: python3 tools/modelctl.py list")
+        return 0
+
+    # ── tiny / torch backend (original path) ─────────────────────────────────
     run_command(
         [
             sys.executable,
