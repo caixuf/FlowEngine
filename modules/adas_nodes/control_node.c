@@ -441,8 +441,8 @@ static void* control_thread(void* arg) {
             statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_CLEARED, NULL);
         was_blocked_sm = blocked;
 
-        double min_overtake_gap = 22.0 + g.current_speed * 2.6;
-        if (min_overtake_gap > 70.0) min_overtake_gap = 70.0;
+        double min_overtake_gap = 18.0 + g.current_speed * 2.0;
+        if (min_overtake_gap > 60.0) min_overtake_gap = 60.0;
         if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
             (!g.lc_attempted) &&
             best_gap > min_overtake_gap && best_gap < 90.0) {
@@ -520,6 +520,7 @@ static void* control_thread(void* arg) {
 
         /* 检测变道完成 (横向偏差 < 0.3m) */
         if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < 0.3) {
+            g.committed_lane_side = (g.lc_target_y < 0.0) ? -1 : 1;
             g.lc_state = 2; g.lc_wait = 0;
             statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
             LOG_INFO("control", ">>> lane change complete");
@@ -609,7 +610,7 @@ static void* control_thread(void* arg) {
             double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
             double heading_term = g.lat_kd_heading * g.ego_heading;
             steer = cte_term - heading_term;
-            double steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+            double steer_limit = steer_limit_for_speed(g.current_speed, g.lc_state == 1 ? 2.8 : 1.4);
             if (steer >  steer_limit) steer =  steer_limit;
             if (steer < -steer_limit) steer = -steer_limit;
             /* 一阶低通滤波，防止跳变 */
