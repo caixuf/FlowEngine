@@ -239,6 +239,7 @@ set(CORE_SOURCES
     src/core/sysmonitor.c
     src/core/scenario_loader.c
     src/core/topic_bridge.c
+    src/core/json_extract.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
