@@ -1087,8 +1087,9 @@ function _buildEnvironment(scene){
   // Buildings (reduced for performance)
   // NOTE: lateral (Z) placement must keep the building's near face clear of
   // the chase camera's operating envelope (ego lane offset + camera "side"
-  // lerp target, up to ~9m from the road centerline — see _renderFrame's
-  // `side` chase-camera offset). Previously buildings could spawn with an
+  // lerp target, up to ~9m from the road centerline — see the `side`
+  // chase-camera offset in _renderFrame(), tools/flowboard.html:1431).
+  // Previously buildings could spawn with an
   // inner edge as close as 7m from centerline, which is *inside* the
   // camera's reachable zone: the chase camera would end up embedded in the
   // building mesh, making the ego car (and everything else) invisible.
