@@ -29,6 +29,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <sys/time.h>
+#include <signal.h>
 
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
@@ -707,6 +708,17 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
 
 void monitor_server_start(MonitorServer* ms) {
     if (!ms || ms->running) return;
+
+    /* A browser tab closing/reloading mid-response (very common with the
+     * long-lived /api/stream SSE connection, and more likely to happen the
+     * more dashboard tabs are open at once) makes write() hit a socket the
+     * peer has already closed. Without this, the default SIGPIPE disposition
+     * kills the *entire* process on the first such write — taking down the
+     * dashboard for every other connected tab too. Ignoring it here makes
+     * write() return -1/EPIPE instead, which handle_sse()/handle_client()
+     * already check for and handle by closing just that one connection. */
+    signal(SIGPIPE, SIG_IGN);
+
     ms->running = true;
     pthread_create(&ms->server_thread, NULL, server_thread_fn, ms);
 }
