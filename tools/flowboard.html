@@ -14,7 +14,7 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .pill-warn{background:linear-gradient(135deg,#33220d,#4d351a);color:#d29922;border:1px solid#5c401a}
 .pill-alert{background:linear-gradient(135deg,#4d1a1a,#5c1010);color:#fff;border:1px solid#f85149;animation:alertPulse 0.8s infinite}
 @keyframes alertPulse{0%,100%{opacity:1}50%{opacity:0.5}}
-.card{background:linear-gradient(180deg,#111820,#0d1117);border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;transition:border-color .2s}
+.card{background:linear-gradient(180deg,#111820,#0d1117);border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;transition:border-color .2s;flex-shrink:0}
 .card:hover{border-color:#252d3a}
 .card-header{padding:10px 14px;border-bottom:1px solid#1a1f2b;display:flex;align-items:center;justify-content:space-between;background:#0d1117;cursor:pointer;user-select:none;gap:8px}
 .card-header:hover{background:#111820}
@@ -1085,12 +1085,22 @@ function _buildRoad(scene){
 function _buildEnvironment(scene){
   var env = new THREE.Group();
   // Buildings (reduced for performance)
+  // NOTE: lateral (Z) placement must keep the building's near face clear of
+  // the chase camera's operating envelope (ego lane offset + camera "side"
+  // lerp target, up to ~9m from the road centerline — see the `side`
+  // chase-camera offset in _renderFrame(), tools/flowboard.html:1431).
+  // Previously buildings could spawn with an
+  // inner edge as close as 7m from centerline, which is *inside* the
+  // camera's reachable zone: the chase camera would end up embedded in the
+  // building mesh, making the ego car (and everything else) invisible.
   var bldColors = [0x445566, 0x556677, 0x4a5a6a, 0x3d4d5d, 0x5a6a7a];
   for(var b = 0; b < 12; b++){
     var side = (b % 2 === 0) ? 1 : -1;
     var bx = (b - 6) * 200 + Math.random() * 80;
-    var bz = side * (12 + Math.random() * 25);
     var bw = 4 + Math.random() * 6;
+    // Minimum offset keeps the near face (bz - bw/2) at least ~18m from the
+    // road centerline, safely outside the camera's reach.
+    var bz = side * (23 + Math.random() * 25);
     var bh = 10 + Math.random() * 35;
     var bld = _makeBox(bw, bh, bw, bldColors[b % bldColors.length], 0.1, 0.85);
     bld.position.set(bx, bh/2, bz);
@@ -1100,7 +1110,9 @@ function _buildEnvironment(scene){
   // Trees (reduced)
   for(var t = 0; t < 20; t++){
     var tx = (t - 10) * 140 + Math.random() * 60;
-    var tz = (t % 2 === 0 ? 1 : -1) * (9 + Math.random() * 35);
+    // Same clearance rationale as buildings above (canopy radius up to
+    // ~3.5m, so a base offset of 16 keeps the near edge >= ~12.5m clear).
+    var tz = (t % 2 === 0 ? 1 : -1) * (16 + Math.random() * 35);
     // Trunk
     var trunk = _makeCyl(0.2, 0.3, 2 + Math.random() * 3, 8, 0x6b4423);
     trunk.position.set(tx, 1, tz);

@@ -14,6 +14,7 @@
 #include "stats_bridge.h"
 #include "dashboard_bridge.h"
 #include "adas_msgs_gen.h"
+#include "json_extract.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -121,46 +122,9 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"p99_us\":")))  sscanf(p + 9, "%lf", &g.fusion_lat_p99_us);
 }
 
-/* ── JSON 辅助: 从 vehicle/state JSON 提取字段 ─────────────── */
-
-static double json_extract_double(const char* json, const char* key) {
-    if (!json || !key) return 0.0;
-    char search[64];
-    int klen = snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return 0.0;
-    double val = 0.0;
-    sscanf(p + klen, "%lf", &val);
-    return val;
-}
-
-/* Extract an integer value from a JSON string, e.g. "n_obs":4 → 4. */
-static int json_extract_int(const char* json, const char* key) {
-    if (!json || !key) return 0;
-    char search[64];
-    int klen = snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* p = strstr(json, search);
-    if (!p) return 0;
-    int val = 0;
-    sscanf(p + klen, "%d", &val);
-    return val;
-}
-
-/* Extract a quoted string value from a JSON string, e.g. "ot0":"car" → "car".
- * dst is NUL-terminated and truncated to dst_size-1 bytes. */
-static void json_extract_str(const char* json, const char* key,
-                             char* dst, size_t dst_size) {
-    if (!json || !key || !dst || dst_size == 0) return;
-    dst[0] = '\0';
-    char search[64];
-    int klen = snprintf(search, sizeof(search), "\"%s\":\"", key);
-    const char* p = strstr(json, search);
-    if (!p) return;
-    p += klen;
-    size_t n = 0;
-    while (*p && *p != '"' && n < dst_size - 1) dst[n++] = *p++;
-    dst[n] = '\0';
-}
+/* JSON 标量提取辅助（json_extract_double / json_extract_int / json_extract_string）
+ * 已迁移至共享工具 include/json_extract.h，避免与其他模块（如
+ * src/algorithms/nuscenes_loader.c）各自维护一份不一致的实现。 */
 
 /* 从 discovery 拓扑写出 nodes 数组 (多进程模式回退路径)。
  *
@@ -243,7 +207,7 @@ static void export_dashboard_json(void) {
          * 按 name 去重, 使拓扑图包含 monitor 节点。 */
         for (int i = 0; i < g.node_info_count; i++) {
             char nm[64] = "";
-            json_extract_str(g.node_info_json[i], "name", nm, sizeof(nm));
+            json_extract_string(g.node_info_json[i], "name", nm, sizeof(nm));
             bool dup = false;
             for (uint32_t k = 0; nm[0] && k < topo->node_count; k++) {
                 if (topo->nodes[k].alive && strcmp(topo->nodes[k].name, nm) == 0) {
@@ -340,7 +304,7 @@ static void export_dashboard_json(void) {
         snprintf(kn, sizeof(kn), "ovy%d", i);
         ovy[i] = json_extract_double(g.latest_vehicle_state, kn);
         snprintf(kn, sizeof(kn), "ot%d", i);
-        json_extract_str(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
+        json_extract_string(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
         if (otype[i][0] == '\0') {
             /* Legacy messages without type field: default to car */
             snprintf(otype[i], sizeof(otype[i]), "car");

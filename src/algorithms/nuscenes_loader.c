@@ -9,6 +9,7 @@
  */
 
 #include "nuscenes_loader.h"
+#include "json_extract.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,60 +99,8 @@ int nuscenes_load_lidar(const char* path, NuScenesScan* scan) {
 }
 
 /* ── 简单 JSON 解析 (不依赖外部库) ───────────────────────────── */
-
-/* Extract a string value for a key from JSON: "key": "value" */
-static int json_extract_string(const char* json, const char* key,
-                                char* out, size_t out_sz) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* pos = strstr(json, search);
-    if (!pos) return -1;
-    pos += strlen(search);
-    while (*pos == ' ' || *pos == '\t' || *pos == '\n') pos++;
-    if (*pos != '"') return -1;
-    pos++;
-    const char* end = strchr(pos, '"');
-    if (!end) return -1;
-    size_t len = (size_t)(end - pos);
-    if (len >= out_sz) len = out_sz - 1;
-    memcpy(out, pos, len);
-    out[len] = '\0';
-    return 0;
-}
-
-/* Extract a number value for a key from JSON: "key": <number> */
-static double json_extract_number(const char* json, const char* key) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* pos = strstr(json, search);
-    if (!pos) return 0.0;
-    pos += strlen(search);
-    while (*pos == ' ' || *pos == '\t' || *pos == '\n') pos++;
-    return atof(pos);
-}
-
-/* Extract an array of 3 doubles: "key": [a, b, c] */
-static int json_extract_vec3(const char* json, const char* key,
-                              double* a, double* b, double* c) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\":", key);
-    const char* pos = strstr(json, search);
-    if (!pos) return -1;
-    pos += strlen(search);
-    while (*pos == ' ' || *pos == '\t' || *pos == '\n') pos++;
-    if (*pos != '[') return -1;
-    pos++;
-    *a = atof(pos);
-    pos = strchr(pos, ',');
-    if (!pos) return -1;
-    pos++;
-    *b = atof(pos);
-    pos = strchr(pos, ',');
-    if (!pos) return -1;
-    pos++;
-    *c = atof(pos);
-    return 0;
-}
+/* 具体实现见共享工具 include/json_extract.h（json_extract_string /
+ * json_extract_double / json_extract_vec3），避免与其他模块重复维护。 */
 
 /* ── 加载 GT 标注 ────────────────────────────────────────────── */
 
@@ -214,8 +163,8 @@ int nuscenes_load_annotations(const char* json_path,
         json_extract_vec3(obj, "rotation",  /* quaternion in JSON */
                           &annots[idx].qw, &annots[idx].qx,
                           &annots[idx].qy);
-        annots[idx].qz = json_extract_number(obj, "num_lidar_pts");  /* not quite right but good enough */
-        json_extract_number(obj, "");  /* skip */
+        annots[idx].qz = json_extract_double(obj, "num_lidar_pts");  /* not quite right but good enough */
+        json_extract_double(obj, "");  /* skip */
 
         free(obj);
         idx++;
