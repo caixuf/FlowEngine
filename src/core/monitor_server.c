@@ -33,7 +33,8 @@
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
 #define MONITOR_MAX_REMOTE_SRCS   8
-#define DASHBOARD_CACHE_STALE_SEC 3  /* seconds before cached JSON considered stale */
+#define DASHBOARD_CACHE_STALE_SEC 3   /* seconds before cached JSON is flagged stale */
+#define DASHBOARD_CACHE_DROP_SEC  30  /* seconds before cached JSON is dropped entirely */
 
 /* ── Remote source entry (stats from another process via IPC) */
 typedef struct {
@@ -58,6 +59,7 @@ typedef struct {
     char*             cached_json;
     size_t            cached_json_len;
     uint64_t          cached_json_time_us;
+    uint64_t          cached_json_version;  /**< bumped on every fresh dashboard payload */
     pthread_mutex_t   cached_mutex;
     /* Count of in-flight per-connection handler threads (e.g. SSE streams).
      * Used so shutdown can wait for them to drain before the struct is freed. */
@@ -120,18 +122,24 @@ static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) 
         double age_sec = (double)age_us / 1000000.0;
         bool stale = (age_sec > (double)DASHBOARD_CACHE_STALE_SEC);
 
-        /* When data is seriously stale (pipeline likely stopped/restarted),
-         * don't return cached data at all — fall through to local bus. */
-        if (stale) {
+        /* Only drop the cache entirely once it is *very* old (pipeline truly
+         * stopped). A brief IPC hiccup (a few late dashboard packets) used to
+         * fall straight through to the local-bus data, which — in a standalone
+         * flowmond process — is essentially empty. The node list would collapse
+         * and re-expand on the next fresh packet, producing the visible
+         * "flicker" in multi-process mode. Instead we keep serving the last
+         * known-good frame, flagged stale, so the topology stays stable and the
+         * front-end shows a "● stale" badge rather than blanking out. */
+        if (age_sec > (double)DASHBOARD_CACHE_DROP_SEC) {
             pthread_mutex_unlock(&ms->cached_mutex);
             return 0;
         }
 
         /* Inject source/stale/age_sec right after the opening '{' */
-        const char* src = "live";
+        const char* src = stale ? "stale" : "live";
         int off = snprintf(buf, sz,
-            "{\"source\":\"%s\",\"stale\":false,\"age_sec\":%.1f,",
-            src, age_sec);
+            "{\"source\":\"%s\",\"stale\":%s,\"age_sec\":%.1f,",
+            src, stale ? "true" : "false", age_sec);
 
         size_t remain = sz - (size_t)off;
         if (off > 0 && remain > 1) {
@@ -362,12 +370,33 @@ static void handle_sse(int fd, MonitorServer* ms) {
     write(fd, sse_header, strlen(sse_header));
 
     char buf[MONITOR_HTTP_BUF_SIZE];
+    /* Push a new frame only when the underlying dashboard payload actually
+     * changed (tracked by a version counter bumped on each IPC packet), instead
+     * of blindly re-sending the full ~30 KB JSON every 500ms. Re-parsing an
+     * identical blob at a fixed rate spiked the browser main thread and was a
+     * major cause of the dashboard freezing. When idle we keep the connection
+     * warm with a lightweight comment heartbeat. */
+    uint64_t last_version = 0;
+    bool first = true;
+    int ticks_since_send = 0;
     for (int tick = 0; tick < 3000 && ms->running; tick++) {  /* ~5 min max */
-        build_sse_json(ms, buf, sizeof(buf));
-        char frame[MONITOR_HTTP_BUF_SIZE + 32];
-        int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
-        if (write(fd, frame, (size_t)fl) <= 0) break;
-        usleep(500000);  /* 500ms push interval */
+        pthread_mutex_lock(&ms->cached_mutex);
+        uint64_t version = ms->cached_json_version;
+        pthread_mutex_unlock(&ms->cached_mutex);
+
+        if (first || version != last_version) {
+            build_sse_json(ms, buf, sizeof(buf));
+            char frame[MONITOR_HTTP_BUF_SIZE + 32];
+            int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
+            if (write(fd, frame, (size_t)fl) <= 0) break;
+            last_version = version;
+            first = false;
+            ticks_since_send = 0;
+        } else if (++ticks_since_send >= 20) {  /* ~10s idle → heartbeat */
+            if (write(fd, ": keep-alive\n\n", 14) <= 0) break;
+            ticks_since_send = 0;
+        }
+        usleep(500000);  /* 500ms poll interval */
     }
 }
 
@@ -760,6 +789,7 @@ void monitor_server_inject_dashboard_json(MonitorServer* ms,
         ms->cached_json[len] = '\0';
         ms->cached_json_len = len;
         ms->cached_json_time_us = monotonic_us();
+        ms->cached_json_version++;
     }
 
     pthread_mutex_unlock(&ms->cached_mutex);
