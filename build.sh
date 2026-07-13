@@ -194,10 +194,14 @@ check_dependencies() {
 
     # 检查Eigen3（可选，但缺失时 planning 节点会静默退化为"只保持车道、永不变道/
     # 超车"的兜底模式。不作为硬性失败，只提醒用户。）
+    # 注：这里仅探测常见安装路径（pkg-config / apt 默认头文件位置），无法感知
+    # 通过 CMAKE_PREFIX_PATH / EIGEN3_ROOT 等自定义路径安装的 Eigen3，因此在非
+    # 标准安装场景下可能出现误报警告；实际是否启用 Frenet 以 CMake 配置期的
+    # find_package(Eigen3) 结果（见 CMakeLists.txt）为准。
     if ! pkg-config --exists eigen3 2>/dev/null && [ ! -f /usr/include/eigen3/Eigen/Core ] \
         && [ ! -f /usr/local/include/eigen3/Eigen/Core ]; then
         print_warning "libeigen3未安装：Frenet 规划器将不会被编译，车辆将无法变道/超车（仅保持车道）。"
-        print_warning "建议安装: sudo apt install libeigen3-dev"
+        print_warning "建议安装: sudo apt install libeigen3-dev（若已通过自定义路径安装 Eigen3，可忽略此提示）"
     fi
 
     print_success "所有依赖都已满足"

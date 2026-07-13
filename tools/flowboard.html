@@ -1230,18 +1230,30 @@ function init3DScene(){
   // stacked in the DOM alongside the new one — the stale element can end up
   // covering the freshly-rendered scene, making the ego car (and everything
   // else) appear to vanish even though rendering is actually working fine.
+  var staleCanvasCount = 0;
   if(renderer3d){
-    try{renderer3d.dispose();}catch(_){}
+    // dispose() only frees GPU resources for a context that's still alive;
+    // it's a no-op (and may throw) once the context is already lost — safe
+    // to ignore since the goal here is just removing the stale DOM element.
+    try{renderer3d.dispose();}catch(disposeErr){console.warn('[scene3d.init] renderer dispose failed (expected if context already lost):',disposeErr);}
     if(renderer3d.domElement&&renderer3d.domElement.parentNode){
       renderer3d.domElement.parentNode.removeChild(renderer3d.domElement);
+      staleCanvasCount++;
     }
   }
   // Defensive: remove any other leftover <canvas> children (e.g. from a
   // context-loss race where cleanup above didn't run before a new canvas
   // was appended).
-  Array.prototype.slice.call(el.querySelectorAll('canvas')).forEach(function(c){
-    if(c.parentNode)c.parentNode.removeChild(c);
+  Array.from(el.querySelectorAll('canvas')).forEach(function(c){
+    if(c.parentNode){c.parentNode.removeChild(c);staleCanvasCount++;}
   });
+  // Surface this in the diagnostics bar / console — a repeated context
+  // loss/restore cycle (GPU reset, tab backgrounded then foregrounded,
+  // driver hiccup) is otherwise invisible and shows up to users only as
+  // "the car disappeared", with no trace to debug from.
+  if(staleCanvasCount>0){
+    reportDiag('scene3d.init', 'removed '+staleCanvasCount+' stale <canvas> element(s) before rebuilding 3D scene (likely WebGL context restore)');
+  }
 
   // Scene
   scene3d=new THREE.Scene();
