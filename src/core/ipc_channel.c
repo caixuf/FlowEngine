@@ -88,7 +88,7 @@ struct IpcChannel {
     int       cb_count;
 
     pthread_t recv_thread;
-    bool      recv_running;
+    volatile bool recv_running;   /* read by recv thread + writer; volatile for visibility */
 };
 
 /* ── Helpers ─────────────────────────────────────────── */
