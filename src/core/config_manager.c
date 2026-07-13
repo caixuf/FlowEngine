@@ -179,7 +179,13 @@ LauncherConfig* config_load(const char* config_file) {
                 if (jcp) pc->resources.max_cpu_percent = (int)jcp->valuedouble;
             }
 
-            /* ── params (key=value) ── */
+            /* ── params (key=value) ──
+             * pipeline.json 里 "params" 既可以写成内嵌 JSON 对象，也可以写成
+             * 转义后的 JSON 字符串 (当前 config/pipeline.json 全部采用后者)。
+             * 只处理 Object 会导致字符串形式的 params 被静默丢弃，节点全部
+             * 退回硬编码默认值 (例如 safety_control.max_throttle 变成 0.85
+             * 而不是配置的 1.0, time_headway 变成 1.8 而不是 1.3), 造成
+             * 跟车永远无法拉开超车间距、车速卡死在低速的问题。 */
             cJSON* jprm = cJSON_GetObjectItemCaseSensitive(item, "params");
             if (cJSON_IsObject(jprm)) {
                 char* ps = cJSON_PrintUnformatted(jprm);
@@ -187,6 +193,8 @@ LauncherConfig* config_load(const char* config_file) {
                     snprintf(pc->params, sizeof(pc->params), "%s", ps);
                     free(ps);
                 }
+            } else if (cJSON_IsString(jprm) && jprm->valuestring) {
+                snprintf(pc->params, sizeof(pc->params), "%s", jprm->valuestring);
             }
 
             /* ── scheduling (per-process) ───────────────── */

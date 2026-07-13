@@ -387,13 +387,19 @@ static void* sim_thread(void* arg) {
                 g.vehicle.throttle = 0;
                 g.vehicle.brake    = 1.0;
             }
-            /* 行人/障碍物 AEB — 检测所有邻近障碍物（不限车道，行人随时可能横穿） */
+            /* 行人/障碍物 AEB — 行人不限车道检测（随时可能横穿）；
+             * 车辆类障碍物必须收紧到同车道容差，否则相邻车道内的正常
+             * 车辆 (dy 可达半个车道宽 ~1.75m, 之前误用 5.0m 容差) 会被
+             * 当成"即将横穿"的行人持续触发满刹车，导致本车速度被死锁
+             * 钉死在旁道车速上，永远无法超车（表现为"跟在车屁股后面"）。 */
             for (int i = 0; i < g.obstacle_count; i++) {
                 SimObstacle* o = &g.obstacles[i];
                 double dx = o->x - g.vehicle.x;
                 double dy = fabs(o->y - g.vehicle.y);
                 if (dx < 0.0 || dx > AEB_MAX_GAP_M) continue;
-                if (dy > 5.0) continue;
+                int is_pedestrian = (strcmp(o->type, "pedestrian") == 0);
+                double dy_tol = is_pedestrian ? 5.0 : SAME_LANE_TOL_M;
+                if (dy > dy_tol) continue;
                 double frontal_gap = dx - (o->len * 0.5 + EGO_LEN_M * 0.5);
                 double ped_safe_gap = fmax(10.0, g.vehicle.speed * 2.0);
                 if (frontal_gap < ped_safe_gap) {
