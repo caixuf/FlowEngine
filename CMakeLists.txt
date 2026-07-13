@@ -596,6 +596,15 @@ target_include_directories(test_new_modules PRIVATE ${GEN_DIR})
 add_test(NAME new_module_tests COMMAND test_new_modules)
 set_tests_properties(new_module_tests PROPERTIES TIMEOUT 10)
 
+# ── 传输/可视化桥接栈单元测试（transport / stats_bridge / dashboard_bridge）──
+add_executable(test_bridges tests/test_bridges.c)
+target_link_libraries(test_bridges flowengine_core scheduler_cpp)
+add_dependencies(test_bridges msg_codegen)
+target_include_directories(test_bridges PRIVATE ${GEN_DIR})
+
+add_test(NAME bridge_tests COMMAND test_bridges)
+set_tests_properties(bridge_tests PROPERTIES TIMEOUT 30)
+
 # ── Smoke test: end-to-end pipeline validates key metrics ──
 add_test(NAME e2e_smoke
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke

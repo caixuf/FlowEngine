@@ -1,0 +1,8 @@
+flow_bus_test 1 4.00656
+flow_coro_test 1 2.11539
+coro_correctness_test 1 1.23818
+unit_tests 1 1.59782
+new_module_tests 1 0.608274
+bridge_tests 1 1.00648
+e2e_smoke 1 6.00364
+---

@@ -18,8 +18,11 @@
 > `flow_e2e --role` 单体 demo。
 >
 > **下一阶段优先级（取代下方旧 Phase 1–2）**：
-> 1. 质量收敛：为传输/可视化桥接栈（transport / stats_bridge / dashboard_bridge）补单元测试；
->    重新启用 TSAN（配 suppression）；长稳/压力测试纳入 nightly。
+> 1. 质量收敛：为传输/可视化桥接栈（transport / stats_bridge / dashboard_bridge）补单元测试
+>    （✅ 已完成 `tests/test_bridges.c` → ctest `bridge_tests`：transport LOCAL 收发/统计/退订、
+>    stats_bridge 序列化往返、dashboard_bridge 单/多分块重组）；
+>    长稳/压力测试纳入 nightly（✅ 已完成，见 CI `stability` 标签 + nightly job）；
+>    重新启用 TSAN（配 suppression）（待完成）。
 > 2. 性能可信度：基于已有 per-topic P50/P99 统计建立端到端延迟/丢包回归基线。
 > 3. 真实性：强化 fusion（watermark / 乱序 / 缺传感器策略）；打通真实数据集回放闭环；扩充场景库。
 > 4. 数据资产：schema 版本兼容与 Bag schema。
