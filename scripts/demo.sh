@@ -13,8 +13,9 @@
 # =============================================================================
 set -e
 
-# Kill any stale processes from previous runs
-{ pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f foxglove; } 2>/dev/null || true
+# Kill any stale processes from previous runs (node hosts + servers + bridges)
+{ pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
+  pkill -9 -f flowmond; pkill -9 -f foxglove; } 2>/dev/null || true
 sleep 1
 for port in 8800 8765; do
   pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
@@ -102,11 +103,42 @@ cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
 echo "  ✓ Build complete"
 
 # ── Cleanup handler ─────────────────────────────────────────
+# Runs on normal exit AND on Ctrl+C (INT) / TERM. It must:
+#   1. run at most once (INT → cleanup → exit → EXIT would otherwise re-enter),
+#   2. never block forever (a plain `wait` hangs if a child ignores SIGTERM —
+#      that is exactly why a "demo.sh" process was left lingering after Ctrl+C),
+#   3. reap the whole process tree, including flow_node_host children that
+#      flow_launcher fork+execs in --multi mode.
+CLEANED_UP=false
 cleanup() {
+  $CLEANED_UP && return 0
+  CLEANED_UP=true
   echo ""
   echo "───[Cleanup] Shutting down..."
-  kill $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID 2>/dev/null
-  wait 2>/dev/null
+
+  # 1) Ask our direct children to stop.
+  for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  # 2) Give them up to ~3s to exit gracefully, without blocking indefinitely.
+  for _ in 1 2 3 4 5 6; do
+    still=""
+    for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+      [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && still="$still $pid"
+    done
+    [ -z "$still" ] && break
+    sleep 0.5
+  done
+
+  # 3) Force-kill any survivors, then sweep stragglers (multi-process node
+  #    hosts, an orphaned bridge, or a previous run's server) by name.
+  for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+  done
+  { pkill -9 -f flow_node_host; pkill -9 -f flow_launcher; \
+    pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
+
   rm -f "$JSON_FILE"
 
   echo ""
@@ -115,9 +147,14 @@ cleanup() {
   echo "  ║  Plugin Architecture                 ║"
   echo "  ║  github.com/caixuf/FlowEngine        ║"
   echo "  ╚══════════════════════════════════════╝"
-  exit 0
+  # Note: no explicit `exit` here — the INT/TERM traps below exit after us,
+  # and the EXIT trap just unwinds (guarded so we only run once).
 }
-trap cleanup EXIT INT TERM
+# On Ctrl+C / TERM we must actually terminate: without an explicit exit the
+# interrupted `sleep` in the monitor loop would resume and keep the demo alive.
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # ── Start flow_launcher with pipeline ───────────────────────
 echo "───[2/5] Starting pipeline (sim_world→sensor_model→perception→fusion→planning→control→monitor)..."
