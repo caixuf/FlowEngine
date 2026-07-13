@@ -13,6 +13,33 @@
 > 未完成项：跨进程 topic bridge、schema-aware bag 全功能、多进程仿真部署验证。
 > 落地细化见 [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md)。
 
+---
+
+> ## ⚠️ 现状更新（2026-07-13）
+>
+> 本路线图（2026-07-04 制定）大部分已落地，请勿再按原始 Phase 顺序推进。
+> 已完成：统一命名（StartTool→FlowEngine）、`FlowRegistry`、配置驱动 `flow_launcher`、
+> `flowctl`、Topic QoS + per-topic 统计、跨进程 IPC bridge、拓扑可视化（flowmond + flowboard）、
+> 8 节点多进程 ADAS 全链路 + 3D dashboard。
+>
+> **进程/线程启动已统一**：新增 `flow_node_host`，让「多进程（fork+exec）」与
+> 「单进程（dlopen 多线程）」复用同一份 NodePlugin `.so`。多进程模式不再依赖已废弃的
+> `flow_e2e --role` 单体 demo。
+>
+> **下一阶段优先级（取代下方旧 Phase 1–2）**：
+> 1. 质量收敛：为传输/可视化桥接栈（transport / stats_bridge / dashboard_bridge）补单元测试
+>    （✅ 已完成 `tests/test_bridges.c` → ctest `bridge_tests`：transport LOCAL 收发/统计/退订、
+>    stats_bridge 序列化往返、dashboard_bridge 单/多分块重组）；
+>    长稳/压力测试纳入 nightly（✅ 已完成，见 CI `stability` 标签 + nightly job）；
+>    重新启用 TSAN（配 suppression）（待完成）。
+> 2. 性能可信度：基于已有 per-topic P50/P99 统计建立端到端延迟/丢包回归基线。
+> 3. 真实性：强化 fusion（watermark / 乱序 / 缺传感器策略）；打通真实数据集回放闭环；扩充场景库。
+> 4. 数据资产：schema 版本兼容与 Bag schema。
+>
+> 下面的原始 Phase 描述保留作历史参考。
+
+---
+
 ## 1. 总体方向
 
 FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总线、IPC、Bag、Clock、协程、状态机、Discovery、Fusion、Serializer。

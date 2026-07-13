@@ -466,6 +466,13 @@ target_link_options(flow_launcher PRIVATE
     -Wl,--export-dynamic
     -Wl,--unresolved-symbols=ignore-in-object-files)
 
+# ── Node Host: 单节点插件宿主进程 ──
+# 多进程模式的正确载体: 每个进程 dlopen 一个 NodePlugin .so, 走 IPC 桥接。
+# 让「进程模式」与「线程/dlopen 模式」复用同一份节点 .so。
+add_executable(flow_node_host src/flow_node_host.c)
+target_link_libraries(flow_node_host flowengine_core m dl)
+target_link_options(flow_node_host PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+
 # ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
 # 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。
 # 构建方式: cmake -B build/modules/adas_nodes -S modules/adas_nodes && cmake --build build/modules/adas_nodes
@@ -599,6 +606,15 @@ target_include_directories(test_new_modules PRIVATE ${GEN_DIR})
 
 add_test(NAME new_module_tests COMMAND test_new_modules)
 set_tests_properties(new_module_tests PROPERTIES TIMEOUT 10)
+
+# ── 传输/可视化桥接栈单元测试（transport / stats_bridge / dashboard_bridge）──
+add_executable(test_bridges tests/test_bridges.c)
+target_link_libraries(test_bridges flowengine_core scheduler_cpp)
+add_dependencies(test_bridges msg_codegen)
+target_include_directories(test_bridges PRIVATE ${GEN_DIR})
+
+add_test(NAME bridge_tests COMMAND test_bridges)
+set_tests_properties(bridge_tests PROPERTIES TIMEOUT 30)
 
 add_test(NAME e2e_training_tools
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py

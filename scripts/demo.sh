@@ -8,7 +8,7 @@
 # 用法:
 #   bash scripts/demo.sh              # 默认 15 秒，dlopen 单进程模式
 #   bash scripts/demo.sh 30           # 30 秒演示
-#   bash scripts/demo.sh --multi      # fork+exec 多进程模式（各节点独立 PID）
+#   bash scripts/demo.sh --multi      # fork+exec 多进程模式（各节点独立 PID，经 flow_node_host 加载同一份 .so）
 #   bash scripts/demo.sh --no-browser # 不打开浏览器
 # =============================================================================
 set -e
@@ -92,7 +92,7 @@ if [ ! -f "$LAUNCHER_BIN" ]; then
   echo "  First build, this may take a moment..."
   cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc > /dev/null 2>&1
 fi
-cmake --build "$BUILD_DIR" --target flow_launcher -j$(nproc) 2>/dev/null | tail -1
+cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host -j$(nproc) 2>/dev/null | tail -1
 # Also build node plugins. They live in a separate CMake project, so the main
 # flow_launcher target does not automatically rebuild them after node source edits.
 echo "  Building node plugins..."

@@ -228,28 +228,43 @@ static int run_dlopen_mode(int duration, int stagger_ms,
 
 /* ── fork+exec 多进程模式 ─────────────────────────────────── */
 
-static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe, int duration) {
+static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe,
+                                 const char* config_path, int duration) {
     pid_t pid = fork();
     if (pid < 0) { LOG_WARN("launcher", "fork %s: %s", nd->name, strerror(errno)); return -1; }
     if (pid == 0) {
         char dur_str[16];
         snprintf(dur_str, sizeof(dur_str), "%d", duration);
-        char e2e_path[512];
-        snprintf(e2e_path, sizeof(e2e_path), "%s", self_exe);
-        char* slash = strrchr(e2e_path, '/');
-        if (slash) strcpy(slash + 1, "flow_e2e"); else strcpy(e2e_path, "./flow_e2e");
-        char* args[] = { e2e_path, "--role", (char*)nd->name, dur_str, NULL };
-        execv(e2e_path, args);
+        /* exec flow_node_host (与 launcher 同目录): 每个节点在独立进程内
+         * dlopen 自己的 .so 并走 IPC 桥接。复用与单进程模式相同的节点插件,
+         * 不再依赖已废弃的 flow_e2e --role 单体 demo。 */
+        char host_path[512];
+        const char* slash = strrchr(self_exe, '/');
+        /* 用 snprintf 从「目录前缀 + 可执行文件名」安全拼接, 避免 strcpy 越界。 */
+        int n;
+        if (slash) {
+            int dir_len = (int)(slash + 1 - self_exe);  /* 含末尾 '/' */
+            n = snprintf(host_path, sizeof(host_path), "%.*sflow_node_host", dir_len, self_exe);
+        } else {
+            n = snprintf(host_path, sizeof(host_path), "./flow_node_host");
+        }
+        if (n < 0 || n >= (int)sizeof(host_path)) {
+            LOG_WARN("launcher", "node_host path too long for %s", nd->name);
+            _exit(1);
+        }
+        char* args[] = { host_path, (char*)config_path, (char*)nd->name, dur_str, NULL };
+        execv(host_path, args);
         perror("execv"); _exit(1);
     }
     return pid;
 }
 
-static int run_multi_process_mode(int duration, int stagger_ms, const char* self_exe) {
-    LOG_INFO("launcher", "mode: multi-process (fork+exec)");
+static int run_multi_process_mode(int duration, int stagger_ms,
+                                  const char* self_exe, const char* config_path) {
+    LOG_INFO("launcher", "mode: multi-process (fork+exec flow_node_host)");
     for (int i = 0; i < g_node_count && g_running; i++) {
         NodeDesc* nd = &g_nodes[i];
-        nd->pid = launch_node_process(nd, self_exe, duration);
+        nd->pid = launch_node_process(nd, self_exe, config_path, duration);
         if (nd->pid > 0)
             LOG_INFO("launcher", "[%d/%d] started %-16s  pid=%d", i+1, g_node_count, nd->name, (int)nd->pid);
         usleep((unsigned)stagger_ms * 1000);
@@ -302,7 +317,7 @@ int main(int argc, char** argv) {
 
     if (multi_mode) {
         signal(SIGCHLD, SIG_DFL);
-        run_multi_process_mode(duration, stagger_ms, argv[0]);
+        run_multi_process_mode(duration, stagger_ms, argv[0], config_path);
     } else {
         /* dlopen 模式: 需要初始化基础设施 */
         adas_msgs_register_all();
