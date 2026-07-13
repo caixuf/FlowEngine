@@ -455,6 +455,13 @@ target_link_libraries(flow_launcher flowengine_core m dl)
 # 允许链接时存在未使用的未定义符号，运行时不会实际调用。
 target_link_options(flow_launcher PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
 
+# ── Node Host: 单节点插件宿主进程 ──
+# 多进程模式的正确载体: 每个进程 dlopen 一个 NodePlugin .so, 走 IPC 桥接。
+# 让「进程模式」与「线程/dlopen 模式」复用同一份节点 .so。
+add_executable(flow_node_host src/flow_node_host.c)
+target_link_libraries(flow_node_host flowengine_core m dl)
+target_link_options(flow_node_host PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+
 # ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
 # 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。
 # 构建方式: cmake -B build/modules/adas_nodes -S modules/adas_nodes && cmake --build build/modules/adas_nodes
