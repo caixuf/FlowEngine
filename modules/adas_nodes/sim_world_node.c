@@ -38,6 +38,7 @@
 #define EGO_WID_M          2.0    /* 车宽（用于 AABB 碰撞检测） */
 #define AEB_GAP_RATIO      0.5    /* AEB 触发阈值：实际间距 < 安全间距 × 此比例 */
 #define AEB_MAX_GAP_M      40.0   /* AEB 仅在前车 < 此距离时激活 */
+#define PEDESTRIAN_LATERAL_TOL_M 5.0  /* 行人横向检测容差（可能随时横穿车道） */
 #define SIM_OBSTACLE_COUNT 16     /* 最多支持 16 个 actor（场景文件上限） */
 #define MAX_SPEED          20.0
 #define FREQUENCY_HZ       20.0
@@ -398,7 +399,7 @@ static void* sim_thread(void* arg) {
                 double dy = fabs(o->y - g.vehicle.y);
                 if (dx < 0.0 || dx > AEB_MAX_GAP_M) continue;
                 int is_pedestrian = (strcmp(o->type, "pedestrian") == 0);
-                double dy_tol = is_pedestrian ? 5.0 : SAME_LANE_TOL_M;
+                double dy_tol = is_pedestrian ? PEDESTRIAN_LATERAL_TOL_M : SAME_LANE_TOL_M;
                 if (dy > dy_tol) continue;
                 double frontal_gap = dx - (o->len * 0.5 + EGO_LEN_M * 0.5);
                 double ped_safe_gap = fmax(10.0, g.vehicle.speed * 2.0);
