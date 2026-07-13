@@ -97,10 +97,20 @@ cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host -j$(nproc) 2>/d
 # Also build node plugins. They live in a separate CMake project, so the main
 # flow_launcher target does not automatically rebuild them after node source edits.
 echo "  Building node plugins..."
-cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
-  -DFLOWENGINE_BUILD="$BUILD_DIR" > /dev/null 2>&1
+ADAS_CFG_LOG=$(cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
+  -DFLOWENGINE_BUILD="$BUILD_DIR" 2>&1)
 cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
 echo "  ✓ Build complete"
+# planning_node silently degrades to a lane-keep-only fallback (no overtaking /
+# lane changes) when the Frenet planner isn't linked in (missing Eigen). Make
+# this loud instead of a one-line cmake log nobody reads.
+if echo "$ADAS_CFG_LOG" | grep -q "planning_node: building in fallback mode"; then
+  echo ""
+  echo "  ⚠ WARNING: Frenet planner NOT built (Eigen3 not found) — ego will"
+  echo "    NEVER change lanes or overtake, even with a clear adjacent lane."
+  echo "    Fix: sudo apt install libeigen3-dev, then re-run this script."
+  echo ""
+fi
 
 # ── Cleanup handler ─────────────────────────────────────────
 # Runs on normal exit AND on Ctrl+C (INT) / TERM. It must:

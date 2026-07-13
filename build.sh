@@ -191,7 +191,15 @@ check_dependencies() {
         print_error "libcjson未安装，请先安装libcjson-dev"
         exit 1
     fi
-    
+
+    # 检查Eigen3（可选，但缺失时 planning 节点会静默退化为"只保持车道、永不变道/
+    # 超车"的兜底模式。不作为硬性失败，只提醒用户。）
+    if ! pkg-config --exists eigen3 2>/dev/null && [ ! -f /usr/include/eigen3/Eigen/Core ] \
+        && [ ! -f /usr/local/include/eigen3/Eigen/Core ]; then
+        print_warning "libeigen3未安装：Frenet 规划器将不会被编译，车辆将无法变道/超车（仅保持车道）。"
+        print_warning "建议安装: sudo apt install libeigen3-dev"
+    fi
+
     print_success "所有依赖都已满足"
 }
 

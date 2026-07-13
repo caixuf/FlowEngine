@@ -1225,6 +1225,24 @@ function init3DScene(){
   var w=el.clientWidth||el.parentElement&&el.parentElement.clientWidth||800;
   var h=el.clientHeight||400;
 
+  // Tear down any previous renderer/canvas first. Without this, re-entering
+  // init3DScene() (e.g. on webglcontextrestored) leaves the old dead <canvas>
+  // stacked in the DOM alongside the new one — the stale element can end up
+  // covering the freshly-rendered scene, making the ego car (and everything
+  // else) appear to vanish even though rendering is actually working fine.
+  if(renderer3d){
+    try{renderer3d.dispose();}catch(_){}
+    if(renderer3d.domElement&&renderer3d.domElement.parentNode){
+      renderer3d.domElement.parentNode.removeChild(renderer3d.domElement);
+    }
+  }
+  // Defensive: remove any other leftover <canvas> children (e.g. from a
+  // context-loss race where cleanup above didn't run before a new canvas
+  // was appended).
+  Array.prototype.slice.call(el.querySelectorAll('canvas')).forEach(function(c){
+    if(c.parentNode)c.parentNode.removeChild(c);
+  });
+
   // Scene
   scene3d=new THREE.Scene();
   scene3d.background=new THREE.Color(0x334466);
