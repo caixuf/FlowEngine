@@ -61,9 +61,11 @@ void json_extract_string(const char* json, const char* key,
     p++;
 
     /* NOTE: does not handle backslash-escaped quotes (\") inside the value —
-     * matches the pre-existing behavior this consolidates. Fine for the
-     * simple, escape-free string values (names/tokens/categories) this is
-     * used for; do not use this for values that may contain '"'. */
+     * matches the pre-existing behavior this consolidates. More generally,
+     * no JSON escape sequences (\n, \t, \\, \uXXXX, ...) are decoded; bytes
+     * are copied verbatim. Fine for the simple, escape-free string values
+     * (names/tokens/categories) this is used for; do not use this for
+     * values that may contain '"' or other escaped characters. */
     size_t n = 0;
     while (*p && *p != '"' && n < dst_size - 1) dst[n++] = *p++;
     dst[n] = '\0';
@@ -79,8 +81,9 @@ int json_extract_vec3(const char* json, const char* key,
 
     /* NOTE: only the first 3 comma-separated numbers are read; a trailing
      * ']' is not required/validated (matches the pre-existing behavior this
-     * consolidates). A 4-element array silently ignores the extra value,
-     * and a missing ']' is not detected as an error. */
+     * consolidates). A 4-element array silently ignores the extra value;
+     * an array with fewer than 3 elements (missing comma before the 2nd or
+     * 3rd value) returns -1 without modifying a, b, or c. */
     double va = atof(p);
     p = strchr(p, ',');
     if (!p) return -1;
