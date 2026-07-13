@@ -377,7 +377,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
      * major cause of the dashboard freezing. When idle we keep the connection
      * warm with a lightweight comment heartbeat. */
     uint64_t last_version = 0;
-    int first = 1;
+    bool first = true;
     int ticks_since_send = 0;
     for (int tick = 0; tick < 3000 && ms->running; tick++) {  /* ~5 min max */
         pthread_mutex_lock(&ms->cached_mutex);
@@ -390,7 +390,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
             int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
             if (write(fd, frame, (size_t)fl) <= 0) break;
             last_version = version;
-            first = 0;
+            first = false;
             ticks_since_send = 0;
         } else if (++ticks_since_send >= 20) {  /* ~10s idle → heartbeat */
             if (write(fd, ": keep-alive\n\n", 14) <= 0) break;

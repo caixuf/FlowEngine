@@ -122,6 +122,7 @@ cleanup() {
   done
 
   # 2) Give them up to ~3s to exit gracefully, without blocking indefinitely.
+  #    (6 iterations × 0.5s sleep = 3s grace period.)
   for _ in 1 2 3 4 5 6; do
     still=""
     for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
@@ -152,6 +153,7 @@ cleanup() {
 }
 # On Ctrl+C / TERM we must actually terminate: without an explicit exit the
 # interrupted `sleep` in the monitor loop would resume and keep the demo alive.
+# Exit codes follow the shell convention 128+signal (SIGINT=2 → 130, SIGTERM=15 → 143).
 trap 'cleanup' EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
