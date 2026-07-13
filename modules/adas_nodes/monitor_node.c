@@ -162,6 +162,37 @@ static void json_extract_str(const char* json, const char* key,
     dst[n] = '\0';
 }
 
+/* 从 discovery 拓扑写出 nodes 数组 (多进程模式回退路径)。
+ *
+ * 单进程 (dlopen) 模式下所有节点共享同一个 DiscoveryManager, 拓扑里只有一个
+ * 聚合节点 "flow_launcher"; 此时 flowengine/node_info 广播能覆盖全部节点, 走
+ * 方案B。但多进程模式下每个节点是独立进程 + 独立 discovery, node_info 广播只在
+ * 本进程 bus 内可见 (不跨进程), 于是 monitor 只能看到自己 → 拓扑图只有一个节点。
+ *
+ * discovery 通过 UDP 组播天然跨进程共享全网拓扑, 因此当 node_info 广播数不足以
+ * 覆盖 discovery 已知的节点数时, 改用 discovery 拓扑构建 nodes 数组, 输出与
+ * node_announce_self 相同的 JSON 形状。返回写出的节点数。 */
+static int emit_nodes_from_discovery(FILE* jf, const TopologyGraph* g_topo) {
+    int written = 0;
+    for (uint32_t i = 0; i < g_topo->node_count; i++) {
+        const NodeInfo* n = &g_topo->nodes[i];
+        if (!n->alive) continue;
+        fprintf(jf, "%s{\"name\":\"%s\",\"version\":\"\",\"description\":\"\","
+                    "\"pid\":%u,\"alive\":true,\"topics\":[",
+                written ? "," : "", n->name, n->pid);
+        for (uint32_t j = 0; j < n->topic_count; j++) {
+            bool is_pub = (n->topics[j].capabilities & CAP_PUBLISHER) != 0;
+            bool is_sub = (n->topics[j].capabilities & CAP_SUBSCRIBER) != 0;
+            const char* role = is_pub && is_sub ? "pubsub" : (is_pub ? "pub" : "sub");
+            fprintf(jf, "%s{\"topic\":\"%s\",\"role\":\"%s\",\"caps\":%u}",
+                    j ? "," : "", n->topics[j].topic, role, n->topics[j].capabilities);
+        }
+        fprintf(jf, "]}");
+        written++;
+    }
+    return written;
+}
+
 /* ── 导出 JSON 到 state_file ──────────────────────────────── */
 
 static void export_dashboard_json(void) {
@@ -191,13 +222,40 @@ static void export_dashboard_json(void) {
     FILE* jf = fopen(tmp_path, "w");
     if (!jf) { free(topo_json); return; }
 
-    /* 从 discovery JSON 取 self 字段，用收集到的 node_info 填 nodes 数组
-     * (方案B: nodes 来自各节点广播的 flowengine/node_info，
-     *  而不是 flow_registry / discovery peer，解决静态库全局状态不跨 dlopen 共享的问题) */
+    /* nodes 数组来源:
+     *  - 单进程 (dlopen): 各节点广播的 flowengine/node_info (方案B, 含 version/desc)
+     *  - 多进程 (fork+exec): node_info 不跨进程, 回退到 discovery 跨进程拓扑
+     * 判据: discovery 已知的存活节点数 > 收到的 node_info 广播数, 说明有节点的
+     *       自描述广播没能抵达 monitor (多进程), 改用 discovery 补全拓扑。 */
     const char* self_name = "flow_launcher";
+    const TopologyGraph* topo = g.discovery ? discovery_get_topology(g.discovery) : NULL;
+    int disc_alive = 0;
+    if (topo) {
+        for (uint32_t i = 0; i < topo->node_count; i++)
+            if (topo->nodes[i].alive) disc_alive++;
+    }
+
     fprintf(jf, "{\"self\":\"%s\",\"timestamp\":%.3f,\"nodes\":[", self_name, timestamp);
-    for (int i = 0; i < g.node_info_count; i++) {
-        fprintf(jf, "%s%s", i ? "," : "", g.node_info_json[i]);
+    if (topo && disc_alive > g.node_info_count) {
+        int written = emit_nodes_from_discovery(jf, topo);
+        /* discovery 拓扑不含本节点自身 (self 只广播 my_topics, 不进自己的
+         * topology)。补上 monitor 收到的本地 node_info 广播 (通常就是它自己),
+         * 按 name 去重, 使拓扑图包含 monitor 节点。 */
+        for (int i = 0; i < g.node_info_count; i++) {
+            char nm[64] = "";
+            json_extract_str(g.node_info_json[i], "name", nm, sizeof(nm));
+            bool dup = false;
+            for (uint32_t k = 0; nm[0] && k < topo->node_count; k++) {
+                if (topo->nodes[k].alive && strcmp(topo->nodes[k].name, nm) == 0) {
+                    dup = true; break;
+                }
+            }
+            if (!dup) fprintf(jf, "%s%s", written++ ? "," : "", g.node_info_json[i]);
+        }
+    } else {
+        for (int i = 0; i < g.node_info_count; i++) {
+            fprintf(jf, "%s%s", i ? "," : "", g.node_info_json[i]);
+        }
     }
     fprintf(jf, "]");
 
