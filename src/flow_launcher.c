@@ -222,10 +222,19 @@ static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe,
          * dlopen 自己的 .so 并走 IPC 桥接。复用与单进程模式相同的节点插件,
          * 不再依赖已废弃的 flow_e2e --role 单体 demo。 */
         char host_path[512];
-        snprintf(host_path, sizeof(host_path), "%s", self_exe);
-        char* slash = strrchr(host_path, '/');
-        if (slash) strcpy(slash + 1, "flow_node_host");
-        else       strcpy(host_path, "./flow_node_host");
+        const char* slash = strrchr(self_exe, '/');
+        /* 用 snprintf 从「目录前缀 + 可执行文件名」安全拼接, 避免 strcpy 越界。 */
+        int n;
+        if (slash) {
+            int dir_len = (int)(slash + 1 - self_exe);  /* 含末尾 '/' */
+            n = snprintf(host_path, sizeof(host_path), "%.*sflow_node_host", dir_len, self_exe);
+        } else {
+            n = snprintf(host_path, sizeof(host_path), "./flow_node_host");
+        }
+        if (n < 0 || n >= (int)sizeof(host_path)) {
+            LOG_WARN("launcher", "node_host path too long for %s", nd->name);
+            _exit(1);
+        }
         char* args[] = { host_path, (char*)config_path, (char*)nd->name, dur_str, NULL };
         execv(host_path, args);
         perror("execv"); _exit(1);
