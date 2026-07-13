@@ -180,7 +180,10 @@ elseif(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
     message(STATUS "Eigen found (downloaded) — frenet planner will be built")
 else()
     set(FLOWENGINE_HAVE_EIGEN FALSE)
-    message(STATUS "Eigen not available — building without frenet planner (core + unit tests unaffected)")
+    message(STATUS "Eigen not available — building without frenet planner. "
+        "IMPACT: planning_node falls back to lane-keep-only mode — the ego "
+        "vehicle will NEVER change lanes or overtake. Install libeigen3-dev "
+        "and reconfigure to enable lane changes (core + unit tests unaffected).")
 endif()
 set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 

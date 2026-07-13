@@ -174,6 +174,7 @@ version/ABI macros:
 | GCC | 11+ (C++20 coroutines) |
 | CMake | 3.16+ |
 | libcjson | any (`apt install libcjson-dev`) |
+| libeigen3 | 3.3+ (`apt install libeigen3-dev`) — **required for the Frenet planner** (lane change / overtaking); without it `planning_node` silently falls back to lane-keep-only |
 | Python | 3.8+ (codegen & dashboard) |
 
 ```bash

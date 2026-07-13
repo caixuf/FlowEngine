@@ -93,14 +93,52 @@ if [ ! -f "$LAUNCHER_BIN" ]; then
   echo "  First build, this may take a moment..."
   cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc > /dev/null 2>&1
 fi
-cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host -j$(nproc) 2>/dev/null | tail -1
+set -o pipefail  # scoped to this build block only — restored via `set +o pipefail`
+                 # below once both `cmake --build ... | tail -1` calls are done, so
+                 # a build failure surfaces (pipeline exit = cmake's, not tail's)
+                 # without changing pipe-failure semantics for the rest of the script.
+if ! cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host -j$(nproc) 2>&1 | tail -1; then
+  echo "  ✗ Build failed for flow_launcher/flow_node_host — re-run without the trailing"
+  echo "    'tail -1' filter (cmake --build \"$BUILD_DIR\" --target flow_launcher flow_node_host) to see the full error."
+  exit 1
+fi
 # Also build node plugins. They live in a separate CMake project, so the main
 # flow_launcher target does not automatically rebuild them after node source edits.
 echo "  Building node plugins..."
-cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
-  -DFLOWENGINE_BUILD="$BUILD_DIR" > /dev/null 2>&1
-cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>/dev/null | tail -1
+ADAS_CFG_LOG=$(cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
+  -DFLOWENGINE_BUILD="$BUILD_DIR" 2>&1)
+ADAS_CFG_STATUS=$?
+if [ $ADAS_CFG_STATUS -ne 0 ]; then
+  echo "$ADAS_CFG_LOG"
+  echo "  ✗ Node plugin CMake configuration failed (exit $ADAS_CFG_STATUS)"
+  exit 1
+fi
+# Surface any other configure-time warnings/errors too (not just the Eigen/
+# Frenet fallback case handled separately below) — this log used to be
+# swallowed entirely (> /dev/null), which meant genuine misconfigurations
+# were undebuggable from demo.sh output.
+ADAS_CFG_EXTRA_WARN=$(echo "$ADAS_CFG_LOG" | grep -i "warning\|error" || true)
+if [ -n "$ADAS_CFG_EXTRA_WARN" ]; then
+  echo "  ⚠ Node plugin CMake configuration reported warnings/errors:"
+  echo "$ADAS_CFG_EXTRA_WARN" | sed 's/^/    /'
+fi
+if ! cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>&1 | tail -1; then
+  echo "  ✗ Build failed for node plugins — re-run without the trailing 'tail -1' filter"
+  echo "    (cmake --build \"$BUILD_DIR/modules/adas_nodes\") to see the full error."
+  exit 1
+fi
+set +o pipefail
 echo "  ✓ Build complete"
+# planning_node silently degrades to a lane-keep-only fallback (no overtaking /
+# lane changes) when the Frenet planner isn't linked in (missing Eigen). Make
+# this loud instead of a one-line cmake log nobody reads.
+if echo "$ADAS_CFG_LOG" | grep -q "planning_node: building in fallback mode"; then
+  echo ""
+  echo "  ⚠ WARNING: Frenet planner NOT built (Eigen3 not found) — ego will"
+  echo "    NEVER change lanes or overtake, even with a clear adjacent lane."
+  echo "    Fix: sudo apt install libeigen3-dev, then re-run this script."
+  echo ""
+fi
 
 # ── Cleanup handler ─────────────────────────────────────────
 # Runs on normal exit AND on Ctrl+C (INT) / TERM. It must:

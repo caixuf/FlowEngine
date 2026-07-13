@@ -208,9 +208,19 @@ static void* planning_thread(void* arg) {
         int off;
         if (n_wp > 0) {
             command_speed = spd_out[0];
+            /* Debuggability: report the ACTUAL planner mode instead of always
+             * claiming "frenet". When built without Eigen (HAVE_FRENET undefined),
+             * this path is the simple lane-keep fallback (d=0.0 always, no lane
+             * changes) — that must be visible in the trajectory JSON / dashboard,
+             * not just a one-line startup log that scrolls away. */
+#ifdef HAVE_FRENET
+            const char* traj_type = "frenet";
+#else
+            const char* traj_type = "lane_keep_fallback";
+#endif
             off = snprintf(traj, sizeof(traj),
-                "{\"type\":\"frenet\",\"plan\":%d,\"wp\":%d,",
-                g.plan_count, n_wp);
+                "{\"type\":\"%s\",\"plan\":%d,\"wp\":%d,",
+                traj_type, g.plan_count, n_wp);
             off += snprintf(traj + off, sizeof(traj) - (size_t)off,
                 "\"target_speed\":%.1f,", command_speed);
             off += snprintf(traj + off, sizeof(traj) - (size_t)off, "\"path\":[");
@@ -246,6 +256,18 @@ static void* planning_thread(void* arg) {
                      g.plan_count, g.ego_x, g.ego_y, g.ego_v,
                      command_speed, n_wp);
         }
+#ifndef HAVE_FRENET
+        /* Repeat this loudly and periodically (not just once at init) so it
+         * doesn't get lost in scrollback during a long-running demo — this is
+         * exactly the kind of "why won't it overtake" question that should be
+         * answerable from logs alone. */
+        if (g.plan_count % 200 == 1) {
+            LOG_WARN("planning", "#%d running WITHOUT Frenet planner — "
+                     "lane-keep-only fallback, ego will NEVER change lanes. "
+                     "Install libeigen3-dev and rebuild modules/adas_nodes.",
+                     g.plan_count);
+        }
+#endif
     }
 
     LOG_INFO("planning", "stopped (%d trajectories, state=%s)",
