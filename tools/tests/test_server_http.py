@@ -48,6 +48,15 @@ def _get(port, path):
     return resp.status, body
 
 
+def _post_json(port, path, payload):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp.status, body
+
+
 def test_health_endpoint(demo_server):
     status, body = _get(demo_server, "/api/health")
     assert status == 200
@@ -69,6 +78,29 @@ def test_index_served(demo_server):
     status, body = _get(demo_server, "/")
     assert status == 200
     assert b"FlowBoard" in body
+
+
+def test_index_contains_training_modal(demo_server):
+    status, body = _get(demo_server, "/")
+    assert status == 200
+    assert b"Training Console" in body
+    assert b"/api/training/status" in body
+
+
+def test_training_status_endpoint(demo_server):
+    status, body = _get(demo_server, "/api/training/status")
+    assert status == 200
+    d = json.loads(body)
+    assert d["job"]["running"] is False
+    assert isinstance(d["models"], list)
+
+
+def test_training_start_rejects_unsafe_name(demo_server):
+    status, body = _post_json(demo_server, "/api/training/start", {"backend": "torch", "name": "../bad"})
+    assert status == 400
+    d = json.loads(body)
+    assert d["ok"] is False
+    assert "model name" in d["error"]
 
 
 def test_static_path_traversal_blocked(demo_server):

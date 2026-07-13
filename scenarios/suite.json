@@ -1,0 +1,62 @@
+{
+  "name": "flowengine-regression",
+  "description": "\u4eff\u771f\u5373\u6d4b\u8bd5\uff1a\u573a\u666f\u77e9\u9635\u56de\u5f52\u5957\u4ef6\u3002scenario_regression.py \u9010\u573a\u666f\u8dd1\u5206\u5e76\u4e0e baseline \u5bf9\u6bd4\u3002",
+  "default_duration_s": 30,
+  "scenarios": [
+    {
+      "file": "scenarios/pedestrian_crossing.json",
+      "duration_s": 30,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/highway_overtake.json",
+      "duration_s": 45,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/intersection_unprotected.json",
+      "duration_s": 35,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/congestion_follow.json",
+      "duration_s": 40,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/ghost_pedestrian.json",
+      "duration_s": 25,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/cutin.json",
+      "duration_s": 35,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/multi_pedestrian.json",
+      "duration_s": 35,
+      "enabled": true
+    },
+    {
+      "file": "scenarios/obstacle_avoid.json",
+      "duration_s": 35,
+      "enabled": true
+    }
+  ],
+  "baseline_tolerances": {
+    "_doc": "\u5bf9 baseline summary \u6570\u503c\u7684\u5141\u8bb8\u6f02\u79fb\u3002\u7f3a\u7701\u5b57\u6bb5\u4e0d\u505a\u6570\u503c\u56de\u5f52\uff08\u4ec5 PASS/FAIL \u56de\u5f52\uff09\u3002",
+    "avg_speed_mps": {
+      "min_ratio": 0.8
+    },
+    "x_delta_m": {
+      "min_ratio": 0.8
+    },
+    "max_lane_error_m": {
+      "max_abs_increase": 0.5
+    },
+    "stagnation_duration_s": {
+      "max_abs_increase": 2.0
+    }
+  }
+}

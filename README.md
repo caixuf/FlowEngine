@@ -1,6 +1,11 @@
 # FlowEngine
 
-> Lightweight middleware for autonomous driving & robotics — C kernel + C++20 coroutine shell.
+> Simulation-driven middleware framework for autonomous driving & robotics — C kernel + C++20 coroutine shell.
+>
+> **Scope:** FlowEngine is a *simulation-first, reproducible experiment platform*. It deliberately does **not**
+> target real-vehicle deployment (no automotive mass production, no real ECU/CAN integration, no hard real-time
+> or functional-safety certification). Everything — perception, fusion, planning, control, learning — is
+> exercised, observed, tested, replayed and scored **entirely in simulation**.
 
 [![CI](https://github.com/caixuf/FlowEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/caixuf/FlowEngine/actions)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -11,15 +16,19 @@
 
 ## What is FlowEngine?
 
-A from-scratch middleware framework providing the core abstractions of CyberRT in a lightweight, embeddable package:
+A from-scratch middleware framework providing the core abstractions of CyberRT in a lightweight, embeddable package.
+It is built to be **organizable, observable, testable, replayable and scoreable — all inside simulation**:
 
 | Layer | Modules |
 |-------|---------|
 | **Communication** | Message Bus (pub/sub + req/reply + zero-copy), IPC (SHM), TCP Transport |
 | **Execution** | Coroutine Scheduler (FIFO + CPU affinity + rate limit), Choreo DAG mode, Cancelable Coroutine Primitives (pub/sub · select · timer · req-reply, with timeout & graceful cancel) |
 | **Introspection** | Reflective State Machine, UDP Service Discovery, Topology Tracking |
-| **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion |
+| **Metadata** | FlowRegistry (tasks/topics/types/plugins/schemas), ParamRegistry (int/float/bool/string with hot-reload) |
+| **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, Data Fusion, Schema Validation |
+| **QoS** | Per-topic QoS (depth + drop policy), Topic Stats (frequency, latency p50/p99, subscribers) |
 | **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard, flowmond Monitor Daemon, Stats Bridge (cross-process IPC stats), CI/CD |
+| **Learning** | In-sim learning loop: data recorder → offline trainer → shadow-mode tiny-MLP inference (evaluated against the rule-based controller, never actuated). See [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ## Quick Start
 
@@ -35,6 +44,12 @@ bash scripts/demo.sh
 ./build/bin/flowctl schema LidarFrame
 ./build/bin/flowctl bag info data.bag
 ```
+
+> **Entry points:** `flow_launcher config/pipeline.json` is the canonical,
+> config-driven way to run a pipeline (each node is a `dlopen`-loaded `.so`
+> plugin). `flow_e2e` is a single-binary demo that inlines every node — handy
+> for quick debugging without compiling plugins, but not the recommended
+> production entry point.
 
 ## Demo
 
@@ -121,6 +136,10 @@ Dashboard endpoints:
 | `/api/topology` | Topology JSON |
 | `/api/stream` | SSE real-time push (500 ms interval) |
 
+> **Bind address:** the dashboard listens on `127.0.0.1` (loopback) by default so it
+> is not exposed on every interface. For container or remote access, start it with
+> `flowmond --bind 0.0.0.0` (or set `FLOWMOND_BIND_ADDR=0.0.0.0`).
+
 ## Docker (easiest)
 
 ```bash
@@ -139,6 +158,13 @@ sudo cmake --install build
 # Verify
 pkg-config --cflags --libs flowengine
 flowctl version
+```
+
+Once installed, include the umbrella header to pull in the core public API and
+version/ABI macros:
+
+```c
+#include "flowengine.h"   /* FLOWENGINE_VERSION, NODE_PLUGIN_API_VERSION, bus/transport/... */
 ```
 
 ## Build from Source
@@ -167,6 +193,21 @@ ctest --test-dir build          # Run 7 tests
 | UBSAN | ✅ Undefined Behavior Sanitizer |
 | Coverage | ✅ lcov report |
 | Stress | ✅ 30s e2e at 10Hz |
+
+## Regression Evaluator
+
+```bash
+# Run demo + auto-score: topology, collisions, road departure, stagnation, yaw wobble
+python3 tools/demo_evaluator.py --duration 45
+
+# Analyze last run without re-launching
+python3 tools/demo_evaluator.py --no-run
+```
+
+The evaluator samples `/tmp/flow_topology.json` during a demo run and checks:
+topology edges, topic frequencies, collision events, road departure, vehicle
+stagnation, lane-change count, yaw/steer oscillation, NPC teleport jumps, and
+message drops.  Run it after any change to the pipeline chain.
 
 ## Plugin Example
 
@@ -211,7 +252,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 ```
 
 ```bash
-./build/bin/launcher config/example_scheduling.json
+./build/bin/flow_launcher config/pipeline.json
 ```
 
 ## Documentation
@@ -222,8 +263,9 @@ TaskBase* create_task(const TaskConfig* cfg) {
 | [Project Review](docs/PROJECT_REVIEW.md) | Capability assessment |
 | [Quick Start](docs/QUICK_START.md) | 30-min tutorial |
 | [Technical Design](docs/TECHNICAL_DESIGN.md) | Architecture |
-| [Learning Guide](docs/LEARNING_GUIDE.md) | 2-4 week path |
-| [Task System](docs/TASK_SYSTEM_GUIDE.md) | Plugin development |
+| [API Quick Reference](docs/API_QUICK_REFERENCE.md) | C API reference |
+| [Simulation Guide](docs/SIMULATION_GUIDE.md) | Simulation testing |
+| [Visualization Architecture](docs/VISUALIZATION_ARCHITECTURE.md) | FlowBoard + flowmond |
 | [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
 | [Skills](skills/) | Deep dives (serializer, statem, discovery, fusion, bus, IPC, bag, clock, coroutine) |
 

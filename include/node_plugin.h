@@ -32,14 +32,30 @@
 #include "transport.h"
 #include "discovery.h"
 #include "scheduler.h"
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/**
+ * 节点插件 ABI 版本。
+ *
+ * flow_launcher 加载 .so 后会检查 NodePlugin::api_version：
+ *   - 等于本值        → 兼容，正常加载
+ *   - 为 0            → 旧插件（未声明版本），告警但允许加载（向后兼容）
+ *   - 其它非 0 值     → 不兼容，拒绝加载
+ *
+ * 每次 NodePlugin 结构体布局或生命周期契约发生不兼容变更时，递增此宏。
+ */
+#define NODE_PLUGIN_API_VERSION 1u
+
 /* ── 节点插件描述符 ──────────────────────────────────────────── */
 
 typedef struct NodePlugin {
+    /* ── ABI 版本（必须首字段，供 launcher 校验） ── */
+    uint32_t     api_version;    /**< 置为 NODE_PLUGIN_API_VERSION */
+
     /* ── 元数据 ─────────────────────────────── */
     const char*  name;           /**< 节点名 (如 "fusion") */
     const char*  version;        /**< 版本号 */

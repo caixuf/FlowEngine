@@ -1,0 +1,47 @@
+{
+  "scenario": "pedestrian_crossing",
+  "result": "FAIL",
+  "failures": [
+    "topic fusion/localization freq too low: 19.9 Hz < 20.0 Hz"
+  ],
+  "warnings": [
+    "large lane-center deviation during maneuver: 1.73 m",
+    "npc respawn jump: max_speed=578.8 m/s, max_lateral=0.7 m/s"
+  ],
+  "summary": {
+    "scenario": "pedestrian_crossing",
+    "samples": 151,
+    "duration_s": 32.24199986457825,
+    "x_delta_m": 212.6,
+    "avg_speed_mps": 6.594039735099338,
+    "max_speed_mps": 13.7,
+    "max_lane_error_m": 1.73,
+    "max_lane_error_at_s": 30.10699987411499,
+    "max_lane_error_y": 0.02,
+    "max_lane_error_speed_mps": 12.0,
+    "min_road_margin_m": 0.72,
+    "min_road_margin_at_s": 3.3269999027252197,
+    "steer_saturation_ratio": 0.0,
+    "yaw_rate_rms_radps": 0.044844979404630204,
+    "max_yaw_rate_radps": 0.1519607871553157,
+    "heading_flip_rate_hz": 1.0235097121334122,
+    "low_speed_ratio": 0.3708609271523179,
+    "stagnation_duration_s": -51.920000314712524,
+    "lane_change_count": 1,
+    "steer_rate_rms_per_s": 0.06866515748498911,
+    "max_steer_rate_per_s": 0.3235294178145431,
+    "steer_flip_rate_hz": 0.06203089164444923,
+    "max_npc_speed_mps": 578.7745206267136,
+    "max_npc_lateral_speed_mps": 0.7389168740596863,
+    "collision_topic_pub": 0,
+    "topic_freq_hz": {
+      "vehicle/state": 19.9,
+      "sensor/lidar": 19.9,
+      "sensor/gps": 10.0,
+      "fusion/localization": 19.9,
+      "planning/trajectory": 17.7,
+      "control/raw_cmd": 19.9,
+      "control/cmd": 19.9
+    }
+  }
+}

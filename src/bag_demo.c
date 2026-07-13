@@ -85,7 +85,10 @@ static void on_playback(const Message* msg, void* user_data) {
 
 static void on_replay_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg || msg->data_size < 2) return;
+    /* Only handle JSON text data — binary struct data would cause
+     * strstr to overread the buffer beyond its bounds. */
+    if (msg->data[0] != '{') return;
 
     /* Build dashboard JSON in memory so it can be sent to both
      * /tmp/flow_topology.json (foxglove_bridge.py) and the IPC

@@ -141,6 +141,14 @@ int flow_registry_list_topics(TopicMeta* buf, int max);
 const PluginMeta* flow_registry_get_plugin(const char* name);
 int flow_registry_list_plugins(PluginMeta* buf, int max);
 
+/** 类型元信息（来自 serializer 注册通知的缓存） */
+typedef struct {
+    char     name[64];        /**< C type name */
+    uint32_t type_id;         /**< FNV-1a 类型 ID */
+    size_t   struct_size;     /**< 结构体大小 */
+} FlowTypeMeta;
+
+int flow_registry_list_types(FlowTypeMeta* buf, int max);
 int flow_registry_type_count(void);  /**< 已注册类型数 */
 
 /** 注册中心条目总数 */

@@ -116,19 +116,19 @@ find_library(FRENET_PLANNER
     NAMES frenet_planner
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
+add_library(planning_node SHARED planning_node.c)
 if(FRENET_BRIDGE AND FRENET_PLANNER)
-    add_library(planning_node SHARED planning_node.c)
     target_link_libraries(planning_node ${NODE_LINK_LIBS}
         ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++)
     target_include_directories(planning_node PRIVATE
         ${FLOW_ROOT}/third_party/frenet_planner/src
         ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
     )
+    target_compile_definitions(planning_node PRIVATE HAVE_FRENET)
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")
-    message(STATUS "planning_node: frenet_planner found at ${FRENET_PLANNER}")
-    set(PLANNING_NODE_TARGET planning_node)
 else()
-    message(WARNING "planning_node disabled: missing frenet_bridge/frenet_planner (searched in ${FLOWENGINE_BUILD}/lib and ${FLOW_ROOT}/build-algo/lib)")
+    target_link_libraries(planning_node ${NODE_LINK_LIBS})
+    message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
 # control_node: PID 纵向/横向控制
@@ -144,8 +144,18 @@ target_compile_definitions(safety_control_node PRIVATE FLOWCORO_INTEGRATION)
 add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
+# ── 车端学习闭环节点 (data → train → inference) ───────────────
+
+# inference_node: 内置 tiny-MLP 车端推理（影子模式，零重型依赖）
+add_library(inference_node SHARED inference_node.c)
+target_link_libraries(inference_node ${NODE_LINK_LIBS})
+
+# data_recorder_node: 训练样本采集（模仿学习 JSONL）
+add_library(data_recorder_node SHARED data_recorder_node.c)
+target_link_libraries(data_recorder_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world ${PLANNING_NODE_TARGET} control_node safety_control_node monitor_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

@@ -477,6 +477,11 @@ static int read_record_v2(FILE* fp, uint64_t* ts_out, Message* msg_out) {
     uint8_t tlen;
     if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return ERR_IO;
 
+    /* Clamp tlen to fit buffer — defensive against corrupted files.
+     * Also avoids FORTIFY_SOURCE false-positive stack overflow when
+     * the compiler cannot prove tlen < sizeof(topic). */
+    if (tlen >= MSG_BUS_MAX_TOPIC_LEN) return ERR_IO;
+
     char topic[MSG_BUS_MAX_TOPIC_LEN];
     memset(topic, 0, sizeof(topic));
     if (tlen > 0 && fread(topic, 1, tlen, fp) != tlen) return ERR_IO;
@@ -514,6 +519,11 @@ static int read_record_legacy(FILE* fp, uint64_t* ts_out, Message* msg_out) {
 
     uint8_t tlen;
     if (fread(&tlen, sizeof(tlen), 1, fp) != 1) return ERR_IO;
+
+    /* Clamp tlen to fit buffer — defensive against corrupted files.
+     * Also avoids FORTIFY_SOURCE false-positive stack overflow when
+     * the compiler cannot prove tlen < sizeof(topic). */
+    if (tlen >= MSG_BUS_MAX_TOPIC_LEN) return ERR_IO;
 
     char topic[MSG_BUS_MAX_TOPIC_LEN];
     memset(topic, 0, sizeof(topic));

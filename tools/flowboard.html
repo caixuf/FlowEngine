@@ -59,6 +59,17 @@ input:focus,select:focus{border-color:#58a6ff}
 .mini-stat{background:#0d1117;border-radius:6px;padding:8px 10px;text-align:center}
 .mini-stat .val{font-size:18px;font-weight:800;color:#58a6ff;line-height:1.2}
 .mini-stat .lbl{font-size:9px;color:#8b949e;margin-top:2px;text-transform:uppercase;letter-spacing:.3px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.form-field label{display:block;font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px}
+.log-box{background:#090c10;border:1px solid#1a1f2b;border-radius:6px;padding:8px;min-height:160px;max-height:260px;overflow:auto;font:10px 'JetBrains Mono',monospace;color:#8b949e;white-space:pre-wrap}
+.modal-overlay{position:fixed;inset:0;background:#0009;z-index:80;display:none;align-items:center;justify-content:center;padding:24px}
+.modal-overlay.show{display:flex}
+.modal{width:min(760px,96vw);max-height:90vh;overflow:auto;background:#0b0f16;border:1px solid#252d3a;border-radius:10px;box-shadow:0 18px 60px #000c}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid#1a1f2b;background:#0d1117}
+.modal-header h3{font-size:13px;color:#c9d1d9;letter-spacing:.4px;text-transform:uppercase}
+.modal-body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.model-row{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid#161b22;font-size:11px}
+.model-row button{padding:2px 7px;font-size:9px}
 
 /* ── View toggle (System / Threads) ──────────── */
 .view-toggle{display:flex;gap:4px;margin-bottom:8px}
@@ -149,6 +160,17 @@ input:focus,select:focus{border-color:#58a6ff}
     <button onclick="doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
     <button onclick="clearFrames()" style="flex:1">🗑 Clear</button>
     <button onclick="resetView()" class="sm" title="Reset view (R)">🔲</button>
+  </div>
+
+  <div class="card" id="training-card"><div class="card-header" onclick="toggleCard(this)"><h2>🧠 Training</h2><span class="toggle">▼</span></div>
+    <div class="card-body">
+      <div class="stat-row"><span class="label">Status</span><span class="value" id="train-status" style="font-size:11px">idle</span></div>
+      <div class="stat-row"><span class="label">Model</span><span class="value mono" id="train-model" style="font-size:10px">—</span></div>
+      <div style="display:flex;gap:4px;margin-top:8px">
+        <button onclick="openTrainingModal()" class="primary" style="flex:1">Train</button>
+        <button onclick="refreshTrainingStatus()" class="sm">↻</button>
+      </div>
+    </div>
   </div>
 
   <div class="card" id="bus-card"><div class="card-header" onclick="toggleCard(this)"><h2>📊 Bus Stats</h2><span class="toggle">▼</span></div>
@@ -247,6 +269,29 @@ input:focus,select:focus{border-color:#58a6ff}
   <div id="det-body" style="color:#484f58;font-size:11px">Select a node in the topology graph</div>
 </div>
 
+<div id="training-modal" class="modal-overlay" onclick="if(event.target===this)closeTrainingModal()">
+  <div class="modal">
+    <div class="modal-header"><h3>Training Console</h3><button onclick="closeTrainingModal()" class="sm" style="color:#f85149">✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-field"><label>Backend</label><select id="train-backend" onchange="syncTrainingForm()"><option value="torch">torch</option><option value="tiny">tiny</option></select></div>
+        <div class="form-field"><label>Model name</label><input id="train-name" placeholder="e2e_torch_v002"></div>
+        <div class="form-field"><label>Init from</label><select id="train-init"><option value="">none</option></select></div>
+        <div class="form-field"><label>Run demo seconds</label><input id="train-run-demo" placeholder="blank = use existing samples"></div>
+        <div class="form-field"><label>Epochs</label><input id="train-epochs" placeholder="trainer default"></div>
+        <div class="form-field"><label>Hidden</label><input id="train-hidden" placeholder="trainer default"></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="startTraining()" class="primary" id="train-start-btn">Start</button>
+        <button onclick="refreshTrainingStatus()">Refresh</button>
+        <span class="muted" id="train-hint">PyTorch artifacts run through sidecar; tiny can be promoted to C runtime.</span>
+      </div>
+      <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Models</div><div id="train-models" style="max-height:150px;overflow:auto"><span class="muted">Loading...</span></div></div>
+      <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Log</div><div id="train-log" class="log-box">No training job yet.</div></div>
+    </div>
+  </div>
+</div>
+
 <div id="toast">Copied!</div><script>
 // Load D3 — local copy first (bundled), CDN as fallback.
 (function(){
@@ -276,6 +321,7 @@ var eventSource = null;
 var selectedNode = null;
 var reconnectTimer = null;
 var sseRenewTimer = null;
+var trainingPollTimer = null;
 var COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 
 // Load saved state
@@ -839,6 +885,89 @@ function exportCSV(){
   document.getElementById('export-menu').classList.remove('show');
 }
 function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(function(){t.classList.remove('show');},1500);}
+
+// ════════════════════════════════════════════════════════════
+// Training modal
+// ════════════════════════════════════════════════════════════
+function defaultTrainName(){
+  var b=document.getElementById('train-backend').value||'torch';
+  var d=new Date(),pad=function(n){return String(n).padStart(2,'0')};
+  return 'e2e_'+b+'_'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds());
+}
+function openTrainingModal(){
+  document.getElementById('training-modal').classList.add('show');
+  if(!document.getElementById('train-name').value)document.getElementById('train-name').value=defaultTrainName();
+  refreshTrainingStatus();
+}
+function closeTrainingModal(){document.getElementById('training-modal').classList.remove('show');}
+function syncTrainingForm(){
+  var backend=document.getElementById('train-backend').value;
+  document.getElementById('train-init').disabled=(backend!=='torch');
+  document.getElementById('train-name').value=defaultTrainName();
+}
+async function refreshTrainingStatus(){
+  try{
+    var r=await fetch(serverUrl+'/api/training/status');
+    var d=await r.json();
+    renderTrainingStatus(d);
+  }catch(err){
+    document.getElementById('train-status').textContent='offline';
+    document.getElementById('train-status').style.color='#f85149';
+  }
+}
+function renderTrainingStatus(d){
+  var job=d.job||{},models=d.models||[];
+  var st=document.getElementById('train-status'),modelEl=document.getElementById('train-model');
+  st.textContent=job.running?'running':(job.returncode===0?'done':(job.error?'failed':'idle'));
+  st.style.color=job.running?'#d29922':(job.returncode===0?'#3fb950':(job.error?'#f85149':'#58a6ff'));
+  modelEl.textContent=job.model_name||'—';
+  var log=(job.log_tail||[]).join('\n');
+  var logEl=document.getElementById('train-log');
+  if(logEl){logEl.textContent=log||'No training job yet.';logEl.scrollTop=logEl.scrollHeight;}
+  renderModelList(models);
+  var init=document.getElementById('train-init');
+  if(init){
+    var cur=init.value;
+    init.innerHTML='<option value="">none</option>'+models.filter(function(m){return m.backend==='torch';}).map(function(m){return '<option value="'+m.name+'">'+m.name+'</option>';}).join('');
+    init.value=cur;
+  }
+  if(job.running&&!trainingPollTimer)trainingPollTimer=setInterval(refreshTrainingStatus,1500);
+  if(!job.running&&trainingPollTimer){clearInterval(trainingPollTimer);trainingPollTimer=null;}
+}
+function renderModelList(models){
+  var el=document.getElementById('train-models');if(!el)return;
+  if(!models.length){el.innerHTML='<span class="muted">No model artifacts yet</span>';return;}
+  el.innerHTML=models.slice().sort(function(a,b){return(b.mtime||0)-(a.mtime||0);}).map(function(m){
+    var metric=m.metrics||{},loss=metric.mse!=null?(' mse '+Number(metric.mse).toFixed(4)):(metric.mae!=null?(' mae '+Number(metric.mae).toFixed(4)):'');
+    var promote=m.promotable?'<button onclick="promoteTrainingModel(\''+m.name+'\')">Promote</button>':'';
+    return '<div class="model-row"><span><b style="color:#58a6ff">'+m.name+'</b><br><span class="muted">'+m.backend+' · samples '+(m.sample_count||'?')+loss+'</span></span><span>'+promote+'</span></div>';
+  }).join('');
+}
+function readOptionalInt(id){var v=document.getElementById(id).value.trim();return v?parseInt(v,10):null;}
+async function startTraining(){
+  var payload={
+    backend:document.getElementById('train-backend').value,
+    name:document.getElementById('train-name').value.trim(),
+    init_from:document.getElementById('train-init').value,
+    run_demo_seconds:readOptionalInt('train-run-demo'),
+    epochs:readOptionalInt('train-epochs'),
+    hidden:readOptionalInt('train-hidden')
+  };
+  try{
+    var r=await fetch(serverUrl+'/api/training/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var d=await r.json();
+    if(!d.ok){toast(d.error||'training failed to start');return;}
+    toast('training started');renderTrainingStatus({job:d.job,models:[]});refreshTrainingStatus();
+  }catch(err){toast('training API offline');}
+}
+async function promoteTrainingModel(name){
+  try{
+    var r=await fetch(serverUrl+'/api/training/promote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});
+    var d=await r.json();
+    toast(d.ok?'promoted '+name:(d.output||d.error||'promote failed'));
+    refreshTrainingStatus();
+  }catch(err){toast('promote API offline');}
+}
 
 // ════════════════════════════════════════════════════════════
 // UI helpers
@@ -1593,7 +1722,13 @@ function draw2D(){
       // that may have been set to NaN through a failed lerp in a previous frame.
       if(!cur||isNaN(cur.x)){cur={x:dtx,y:dty,lastDataX:o.x,lastDataY:o.y,lastDataT:_dtNow}; window._obsTargets2d[i]=cur;}
       // Detect data update
-      if(o.x!==cur.lastDataX||o.y!==cur.lastDataY){cur.lastDataX=o.x;cur.lastDataY=o.y;cur.lastDataT=_dtNow;}
+      if(o.x!==cur.lastDataX||o.y!==cur.lastDataY){
+        // Large jump in data space (e.g. sim respawn/teleport of a recycled
+        // obstacle) → snap instead of lerp, so it doesn't slide across the view.
+        var jump=Math.abs((o.x||0)-(cur.lastDataX||0))+Math.abs((o.y||0)-(cur.lastDataY||0));
+        cur.lastDataX=o.x;cur.lastDataY=o.y;cur.lastDataT=_dtNow;
+        if(jump>20){cur.x=dtx;cur.y=dty;}
+      }
       // Extrapolate screen position using relative velocity since last data tick
       var age=Math.min(_dtNow-cur.lastDataT,0.5);
       var ex=carX-(((o.y||0)+relVy*age))*s, ey=carY-(((o.x||0)+relVx*age))*s;

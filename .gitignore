@@ -75,6 +75,10 @@ coverage/
 *.gcno
 lcov.info
 
+# 本地训练产物
+datasets/
+models/
+
 # Valgrind输出
 *.valgrind
 vgcore.*
@@ -128,3 +132,4 @@ data/
 third_party/frenet-optimal-trajectory-planner/
 third_party/tinympc/
 build-*/
+build_*/

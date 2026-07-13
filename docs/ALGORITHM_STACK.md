@@ -1,5 +1,9 @@
 # FlowEngine Algorithm Stack
 
+> **注意：本文档为参考设计。** 引用的 `perception_opencv.cpp`、`fusion_eigen.cpp`、
+> `control_osqp.cpp` 等示例文件尚未实现，仅供学习算法集成模式。实际可运行的算法
+> 栈见 `modules/adas_nodes/` 下的 DBSCAN、EKF、Frenet、PID 实现。
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        FlowBoard Monitor                        │

@@ -19,7 +19,8 @@
 ## 项目评估
 
 - [项目完善度评估](PROJECT_REVIEW.md) - 当前完成度、模块成熟度、短板与下一步路线
-- [项目进化路线图](EVOLUTION_ROADMAP.md) - 从中间件原型进化到可部署框架的阶段规划
+- [项目进化路线图](EVOLUTION_ROADMAP.md) - 从中间件原型进化到仿真驱动框架的阶段规划
+- [落地实施指南](IMPLEMENTATION_GUIDE.md) - 把发展计划拆成"接口已定义、只需补实现"的小任务卡片
 
 ## 可视化 (FlowBoard)
 
@@ -59,13 +60,20 @@ docs/
 ├── PROJECT_REVIEW.md      # 项目完善度评估
 ├── EVOLUTION_ROADMAP.md   # 项目进化路线图
 ├── ALGORITHM_INTEGRATION.md  # 算法集成指南
-├── FLOW_REGISTRY_PLAN.md     # FlowRegistry 设计规划
+├── ALGORITHM_STACK.md        # 算法栈参考（设计稿）
+├── FLOW_REGISTRY_PLAN.md     # FlowRegistry 设计规划（已实现）
+├── FLOWBOARD_CONTRACT.md     # FlowBoard 数据契约
 ├── VISUALIZATION_ARCHITECTURE.md  # 可视化架构
 ├── MONITORING_ARCHITECTURE.md     # 监控架构
 ├── E2E_SIMULATION_DESIGN.md       # E2E 仿真设计
 ├── SIMULATION_GUIDE.md     # 仿真测试指南
 └── API_QUICK_REFERENCE.md  # API 快速参考
 ```
+
+另有：
+- `skills/`（项目根目录）— 11 篇深入教程（OOP in C、插件系统、消息总线、IPC 等）
+- `scenarios/` — JSON 场景定义（行人横穿、高速超车）
+- `tools/demo_evaluator.py` — 回归评估器
 
 ### 阅读建议
 

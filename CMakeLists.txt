@@ -235,6 +235,7 @@ set(CORE_SOURCES
     src/core/mcap_reader.c
     src/core/sysmonitor.c
     src/core/scenario_loader.c
+    src/core/topic_bridge.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
@@ -243,6 +244,7 @@ set(ALGORITHM_SOURCES
     src/algorithms/dbscan_cluster.c
     src/algorithms/kalman_tracker.c
     src/algorithms/nuscenes_loader.c
+    src/algorithms/nmea_parser.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────
@@ -327,6 +329,10 @@ target_link_libraries(flow_ipc flowengine_core rt)
 add_executable(flow_bag src/bag_demo.c)
 target_link_libraries(flow_bag flowengine_core m)
 target_link_options(flow_bag PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+
+# ── Step 3b: Bag 检查工具 ────────────────────────────────
+add_executable(bag_check tools/bag_check.c)
+target_link_libraries(bag_check flowengine_core m)
 
 # ── Step 4: 消息驱动任务插件 ─────────────────────────────
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
@@ -450,10 +456,15 @@ set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
 # 读 config/pipeline.json → 按顺序 fork+exec 各节点进程
 # 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
 add_executable(flow_launcher src/flow_launcher.c)
-target_link_libraries(flow_launcher flowengine_core m dl)
-# net_transport_* 是 flowengine_core 的可选 TCP 组件，launcher 使用 TRANSPORT_LOCAL 不触发它。
-# 允许链接时存在未使用的未定义符号，运行时不会实际调用。
-target_link_options(flow_launcher PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+# --whole-archive: 强制拉入 cJSON 全部符号（否则链接器丢弃未直接引用的 .o）
+# scheduler_cpp: 提供 net_transport_unbridge_topic 等 C++ 符号
+target_link_libraries(flow_launcher
+    flowengine_core scheduler_cpp m dl
+    -Wl,--whole-archive ${CJSON_LIBRARIES} -Wl,--no-whole-archive)
+# --export-dynamic: 让主程序导出 cJSON 等符号，使 dlopen 加载的 .so 能解析它们
+target_link_options(flow_launcher PRIVATE
+    -Wl,--export-dynamic
+    -Wl,--unresolved-symbols=ignore-in-object-files)
 
 # ── Node Host: 单节点插件宿主进程 ──
 # 多进程模式的正确载体: 每个进程 dlopen 一个 NodePlugin .so, 走 IPC 桥接。
@@ -483,7 +494,7 @@ target_link_libraries(flow_nuscenes_demo flowengine_core m)
 add_dependencies(flow_e2e msg_codegen)
 
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -605,6 +616,18 @@ target_include_directories(test_bridges PRIVATE ${GEN_DIR})
 add_test(NAME bridge_tests COMMAND test_bridges)
 set_tests_properties(bridge_tests PROPERTIES TIMEOUT 30)
 
+add_test(NAME e2e_training_tools
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(e2e_training_tools PROPERTIES TIMEOUT 30)
+
+add_test(NAME demo_evaluator_tools
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_demo_evaluator.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(demo_evaluator_tools PROPERTIES TIMEOUT 10)
+
 # ── Smoke test: end-to-end pipeline validates key metrics ──
 add_test(NAME e2e_smoke
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke
@@ -618,6 +641,16 @@ add_test(NAME e2e_stability
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual")
+
+# ── Integration smoke: flow_launcher loads all node plugins & runs pipeline ──
+# Labeled "integration" so the standard build jobs (which don't build the
+# separate adas_nodes .so subproject) skip it; a dedicated CI job runs it.
+add_test(NAME flow_launcher_smoke
+    COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
+            bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+set_tests_properties(flow_launcher_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

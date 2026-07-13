@@ -1,0 +1,37 @@
+{
+  "name": "ghost_pedestrian",
+  "description": "鬼探头：行人从路侧遮挡（停放货车）后突然横穿，考验极限制动/避让",
+  "random_seed": 53,
+  "duration_s": 45.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 9.0,
+    "target_speed": 12.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "truck",
+      "x": 42.0, "y": -4.6,
+      "vx": 0.0, "vy": 0.0,
+      "len": 8.0, "wid": 2.5,
+      "_comment": "路侧停放货车，遮挡视线"
+    },
+    {
+      "id": 1,
+      "type": "pedestrian",
+      "x": 50.0, "y": -4.0,
+      "vx": 0.0, "vy": 1.6,
+      "len": 0.6, "wid": 0.6,
+      "_comment": "从货车后方鬼探头横穿的行人"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 45.0,
+    "min_avg_speed_mps": 2.0,
+    "min_distance_m": 45.0
+  }
+}

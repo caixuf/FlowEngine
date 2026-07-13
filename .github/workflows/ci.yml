@@ -5,10 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly (02:00 UTC) + manual trigger: run the long stability + benchmark
+  # suites and the optional scenario-regression track (B2) that are excluded
+  # from per-PR runs to keep pull-request CI fast.
   schedule:
-    # Nightly (03:17 UTC): run the long stability + benchmark suites that are
-    # excluded from per-PR runs to keep pull-request CI fast.
-    - cron: '17 3 * * *'
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
 # Least-privilege default for GITHUB_TOKEN across all jobs (read-only checkout).
 permissions:
@@ -29,7 +31,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|manual|stability"
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|manual|stability|integration"
 
   # ── Debug build ────────────────────────────────────────────
   build-debug:
@@ -43,7 +45,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|manual|stability"
+        run: ctest --test-dir build --output-on-failure --timeout 60 -LE "benchmark|manual|stability|integration"
 
   # ── ASAN (Address Sanitizer) ───────────────────────────────
   build-asan:
@@ -57,7 +59,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability"
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability|integration"
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=0:log_path=/tmp/asan.log
       - name: Check ASAN log
@@ -100,7 +102,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability"
+        run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability|integration"
 
   # ── Stress test ────────────────────────────────────────────
   stress-test:
@@ -119,6 +121,27 @@ jobs:
       - name: Verify
         run: echo "✓ Stress test completed — no crash"
 
+  # ── Integration test: multi-node pipeline via flow_launcher ─
+  # Builds the separate adas_nodes .so plugin subproject and verifies that
+  # flow_launcher loads every node (dlopen + ABI check) and runs the pipeline.
+  integration-test:
+    runs-on: ubuntu-24.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3 libeigen3-dev
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build framework
+        run: cmake --build build -j$(nproc)
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Run integration smoke (ctest -L integration)
+        run: ctest --test-dir build --output-on-failure -L integration
+
   # ── Coverage ───────────────────────────────────────────────
   coverage:
     runs-on: ubuntu-24.04
@@ -131,7 +154,7 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
       - name: Test
-        run: ctest --test-dir build --output-on-failure --timeout 360 -LE "benchmark|manual|stability"
+        run: ctest --test-dir build --output-on-failure --timeout 360 -LE "benchmark|manual|stability|integration"
       - name: Generate coverage
         run: |
           lcov --capture --directory build --output-file coverage.info --ignore-errors mismatch,empty,unused,negative
@@ -183,3 +206,46 @@ jobs:
       - name: Long-running tests (stability + benchmark)
         run: ctest --test-dir build --output-on-failure --timeout 900 -L "stability|benchmark"
 
+  # ── Algorithm evaluator (regression gate) ─────────────────────
+  # Runs the full plugin pipeline (demo.sh) and scores it against
+  # pass_criteria.  A FAIL blocks the PR — this is the quality gate
+  # for any change touching the ADAS pipeline chain.
+  evaluator:
+    runs-on: ubuntu-24.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3 libeigen3-dev
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build framework
+        run: cmake --build build -j$(nproc)
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Regression evaluator (45s demo)
+        run: python3 tools/demo_evaluator.py --duration 45 --interval 0.5
+
+  # ── Scenario-matrix regression vs baseline (B2 收尾) ────────
+  # Runs the full scenario suite (8 scenarios, one simulation each) and diffs
+  # numeric summaries against scenarios/baseline/.  Expensive (~10 min), so it
+  # only runs on the nightly schedule or when triggered manually.
+  scenario-regression:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3 libeigen3-dev
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build framework
+        run: cmake --build build -j$(nproc)
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Scenario regression vs baseline
+        run: python3 tools/scenario_regression.py --baseline

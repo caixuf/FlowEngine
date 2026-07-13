@@ -9,6 +9,7 @@ and missing topic data into repeatable PASS/FAIL checks.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -23,19 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSON = Path("/tmp/flow_topology.json")
 LAUNCHER_STDERR = Path("/tmp/flow_launcher_stderr.txt")
-
-REQUIRED_EDGES = [
-    ("sim_world", "vehicle/state", "perception"),
-    ("fusion", "fusion/localization", "planning"),
-    ("planning", "planning/trajectory", "control"),
-    ("control", "control/raw_cmd", "safety_control"),
-    ("safety_control", "control/cmd", "sim_world"),
-]
-
-SENSOR_EDGE_OPTIONS = [
-    [("perception", "sensor/lidar", "fusion"), ("sensor_model", "sensor/lidar", "fusion")],
-    [("perception", "sensor/gps", "fusion"), ("sensor_model", "sensor/gps", "fusion")],
-]
+PIPELINE_JSON = ROOT / "config" / "pipeline.json"
 
 TOPIC_MIN_FREQ = {
     "vehicle/state": 15.0,
@@ -47,6 +36,92 @@ TOPIC_MIN_FREQ = {
     "control/cmd": 10.0,
 }
 
+# Minimum expected publish frequency for inference/trajectory when inference_node is active.
+INFERENCE_TOPIC_MIN_FREQ = 5.0
+
+# Shadow inference output files written by torch_sidecar.py / tiny_sidecar.py.
+SHADOW_INFERENCE_FILES = [
+    Path("/tmp/flow_torch_inference.json"),
+    Path("/tmp/flow_tiny_inference.json"),
+]
+
+# Thresholds for shadow_delta = inference_speed - planning_speed (m/s).
+SHADOW_DELTA_WARN = 2.0   # |delta| > this → WARN
+SHADOW_DELTA_FAIL = 5.0   # |delta| > this → FAIL
+
+
+def _load_shadow_delta() -> float | None:
+    """Read the latest shadow_delta value from any active sidecar output file.
+
+    Returns the most recently written shadow_delta, or None if no sidecar file exists.
+    """
+    best_path: Path | None = None
+    best_mtime = -1.0
+    for path in SHADOW_INFERENCE_FILES:
+        try:
+            mtime = path.stat().st_mtime
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best_path = path
+        except FileNotFoundError:
+            pass
+    if best_path is None:
+        return None
+    try:
+        with best_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        delta = data.get("shadow_delta")
+        return float(delta) if delta is not None else None
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def _pipeline_nodes(pipeline: dict) -> list:
+    """Return the node list of a launcher config.
+
+    The launcher schema uses ``processes``; older/simpler configs use ``nodes``.
+    Accept either so scenario tooling works across both.
+    """
+    if not isinstance(pipeline, dict):
+        return []
+    nodes = pipeline.get("processes")
+    if not isinstance(nodes, list):
+        nodes = pipeline.get("nodes")
+    return nodes if isinstance(nodes, list) else []
+
+
+def _topic_name(pub_entry) -> str | None:
+    if isinstance(pub_entry, str):
+        return pub_entry
+    if isinstance(pub_entry, dict) and isinstance(pub_entry.get("topic"), str):
+        return pub_entry["topic"]
+    return None
+
+
+def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
+    publishers: dict[str, list[str]] = {}
+    subscribers: list[tuple[str, str]] = []
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict):
+            continue
+        name = node.get("name")
+        if not isinstance(name, str):
+            continue
+        for pub in node.get("publish", []) or []:
+            topic = _topic_name(pub)
+            if topic:
+                publishers.setdefault(topic, []).append(name)
+        for topic in node.get("subscribe", []) or []:
+            if isinstance(topic, str):
+                subscribers.append((name, topic))
+
+    edges = []
+    for sub_node, topic in subscribers:
+        for pub_node in publishers.get(topic, []):
+            if pub_node != sub_node:
+                edges.append((pub_node, topic, sub_node))
+    return edges
+
 
 def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
     """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
@@ -55,7 +130,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         (criteria_dict, scenario_name)
     """
     pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
-    nodes = pipeline.get("nodes", []) if isinstance(pipeline, dict) else []
+    nodes = _pipeline_nodes(pipeline)
     scenario_file = None
     for node in nodes:
         if not isinstance(node, dict):
@@ -63,6 +138,13 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         if node.get("name") != "sim_world":
             continue
         params = node.get("params", {})
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                print("warning: sim_world.params is not valid JSON; skipping scenario_file lookup",
+                      file=sys.stderr)
+                params = {}
         if isinstance(params, dict):
             scenario_file = params.get("scenario_file")
         break
@@ -85,12 +167,59 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
     return criteria, name
 
 
+def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
+    pipeline = load_json(PIPELINE_JSON) or {}
+    return expected_edges_from_pipeline(pipeline)
+
+
 def load_json(path: Path) -> dict | None:
     try:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+
+
+@contextlib.contextmanager
+def pipeline_scenario_override(scenario_file: str | None):
+    """Temporarily point config/pipeline.json's sim_world node at ``scenario_file``.
+
+    ``sim_world``'s ``params`` is a JSON-encoded string; we patch the embedded
+    ``scenario_file`` key, yield, then restore the original file byte-for-byte.
+    Passing ``None`` is a no-op so callers can use this unconditionally.
+    """
+    if not scenario_file:
+        yield None
+        return
+
+    original_text = PIPELINE_JSON.read_text(encoding="utf-8")
+    pipeline = json.loads(original_text)
+    patched = False
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict) or node.get("name") != "sim_world":
+            continue
+        params = node.get("params")
+        # params may be a JSON string (launcher format) or a plain dict.
+        if isinstance(params, str):
+            params_obj = json.loads(params)
+            params_obj["scenario_file"] = scenario_file
+            node["params"] = json.dumps(params_obj)
+        elif isinstance(params, dict):
+            params["scenario_file"] = scenario_file
+        else:
+            continue
+        patched = True
+        break
+
+    if not patched:
+        raise RuntimeError("sim_world node with params not found in config/pipeline.json")
+
+    try:
+        PIPELINE_JSON.write_text(json.dumps(pipeline, indent=2, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+        yield scenario_file
+    finally:
+        PIPELINE_JSON.write_text(original_text, encoding="utf-8")
 
 
 def topic_map(sample: dict) -> dict:
@@ -242,7 +371,7 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -262,19 +391,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     topics = topic_map(last)
     pubs, subs = node_topic_roles(last)
-    for pub_node, topic, sub_node in REQUIRED_EDGES:
+    expected_edges = expected_edges if expected_edges is not None else load_pipeline_expected_edges()
+    for pub_node, topic, sub_node in expected_edges:
         if (pub_node, topic) not in pubs or (sub_node, topic) not in subs:
             failures.append(f"missing topology edge {pub_node} --{topic}--> {sub_node}")
-
-    for edge_options in SENSOR_EDGE_OPTIONS:
-        matched = False
-        for pub_node, topic, sub_node in edge_options:
-            if (pub_node, topic) in pubs and (sub_node, topic) in subs:
-                matched = True
-                break
-        if not matched:
-            opts = " | ".join(f"{p} --{t}--> {s}" for p, t, s in edge_options)
-            failures.append(f"missing topology edge option: {opts}")
 
     for topic, min_freq in TOPIC_MIN_FREQ.items():
         actual = float(topics.get(topic, {}).get("freq", 0.0) or 0.0)
@@ -345,8 +465,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             f"low-speed stagnation: {low_speed_ratio*100:.0f}% samples below {low_speed_thresh} m/s, "
             f"longest run {stagnation_duration_s:.1f}s"
         )
-    if lane_change_count < 1:
-        failures.append(f"no lane changes detected in {len(ys)} samples")
+    required_lane_changes = int(criteria.get("required_lane_changes", 0) or 0)
+    if lane_change_count < required_lane_changes:
+        failures.append(f"lane changes too few: {lane_change_count} < {required_lane_changes}")
 
     steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:
@@ -401,6 +522,28 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if drops > 0:
         failures.append(f"message drops detected: {drops}")
 
+    # ── inference/trajectory frequency check (only when topic is present in runtime data) ──
+    inference_freq = float(topics.get("inference/trajectory", {}).get("freq", 0.0) or 0.0)
+    inference_topic_active = "inference/trajectory" in topics
+    if inference_topic_active and inference_freq < INFERENCE_TOPIC_MIN_FREQ:
+        failures.append(
+            f"topic inference/trajectory freq too low: {inference_freq:.1f} Hz "
+            f"< {INFERENCE_TOPIC_MIN_FREQ:.1f} Hz"
+        )
+
+    # ── shadow delta check (read latest sidecar output for current-frame validation) ──
+    shadow_delta = _load_shadow_delta()
+    shadow_delta_abs = abs(shadow_delta) if shadow_delta is not None else None
+    if shadow_delta_abs is not None:
+        if shadow_delta_abs > SHADOW_DELTA_FAIL:
+            failures.append(
+                f"shadow_delta too large: {shadow_delta:+.2f} m/s (threshold {SHADOW_DELTA_FAIL:.1f} m/s)"
+            )
+        elif shadow_delta_abs > SHADOW_DELTA_WARN:
+            warnings.append(
+                f"shadow_delta elevated: {shadow_delta:+.2f} m/s (warn threshold {SHADOW_DELTA_WARN:.1f} m/s)"
+            )
+
     summary = {
         "scenario": scenario_name or "(unknown)",
         "samples": len(samples),
@@ -428,6 +571,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "max_npc_lateral_speed_mps": max_npc_lateral_speed,
         "collision_topic_pub": collision_pub,
         "topic_freq_hz": {topic: float(topics.get(topic, {}).get("freq", 0.0) or 0.0) for topic in TOPIC_MIN_FREQ},
+        "inference_topic_active": inference_topic_active,
+        "inference_freq_hz": inference_freq,
+        "shadow_delta_latest": shadow_delta,
     }
     return failures, warnings, summary
 
@@ -438,6 +584,10 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=0.25, help="JSON sample interval in seconds")
     parser.add_argument("--json-file", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--no-run", action="store_true", help="evaluate current JSON/logs without starting demo.sh")
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="scenario JSON path; temporarily overrides sim_world.scenario_file for this run")
+    parser.add_argument("--json-out", type=Path, default=None,
+                        help="write the machine-readable evaluation result to this JSON path")
     args = parser.parse_args()
 
     if args.no_run:
@@ -445,7 +595,8 @@ def main() -> int:
         samples = [sample] if sample else []
         returncode = 0
     else:
-        samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
+        with pipeline_scenario_override(args.scenario):
+            samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
@@ -467,6 +618,20 @@ def main() -> int:
         print("\nWARN:")
         for warning in warnings:
             print(f"  - {warning}")
+
+    result = "FAIL" if failures else "PASS"
+    if args.json_out:
+        payload = {
+            "scenario": summary.get("scenario"),
+            "result": result,
+            "failures": failures,
+            "warnings": warnings,
+            "summary": summary,
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                                 encoding="utf-8")
+        print(f"\nwrote evaluation result to {args.json_out}")
 
     if failures:
         print("\nFAIL:")

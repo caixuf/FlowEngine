@@ -2,7 +2,10 @@
  * flowmond.c — FlowEngine 监控守护进程 (独立进程, cyber_monitor 等价物)
  *
  * 用法:
- *   flowmond [--port 8800] [--config monitor.json]
+ *   flowmond [--port 8800] [--bind 127.0.0.1] [--config monitor.json] [--html-path PATH]
+ *
+ *   --bind  监听地址，默认 127.0.0.1（仅本机）。容器/远程访问用 --bind 0.0.0.0，
+ *           或设置环境变量 FLOWMOND_BIND_ADDR。
  *
  * 功能:
  *   - UDP 发现所有业务节点
@@ -203,6 +206,10 @@ int main(int argc, char** argv) {
             config_file = argv[++i];
         else if (strcmp(argv[i], "--html-path") == 0 && i + 1 < argc) {
             snprintf(html_path, sizeof(html_path), "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
+            /* Consumed by monitor_server via FLOWMOND_BIND_ADDR. */
+            setenv("FLOWMOND_BIND_ADDR", argv[++i], 1);
         }
     }
 

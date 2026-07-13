@@ -21,6 +21,7 @@
 #include "adas_msgs_gen.h"
 #include "clock_service.h"
 #include "scenario_loader.h"
+#include "nmea_parser.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -884,6 +885,133 @@ static void test_scenario_free_null(void) {
     PASS();
 }
 
+/* ══════════════════════════════════════════════════════════ */
+/* NMEA 0183 Parser Tests (real GPS sensor format)             */
+/* ══════════════════════════════════════════════════════════ */
+
+static void test_nmea_checksum(void) {
+    TEST("nmea checksum computation");
+    /* Known GPGGA sentence, checksum 0x47 */
+    uint8_t cs = nmea_checksum("$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,");
+    ASSERT_EQ(cs, 0x47, "checksum mismatch");
+    PASS();
+}
+
+static void test_nmea_gga(void) {
+    TEST("nmea parse GGA (lat/lon/accuracy)");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    GpsData g;
+    int rc = nmea_parse_line(&p,
+        "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47", &g);
+    ASSERT_EQ(rc, NMEA_OK, "GGA parse failed");
+    /* 4807.038 N = 48 + 07.038/60 = 48.1173 deg */
+    ASSERT(fabs(g.latitude - 48.1173) < 1e-3, "lat wrong: %f", g.latitude);
+    /* 01131.000 E = 11 + 31/60 = 11.51667 deg */
+    ASSERT(fabs(g.longitude - 11.51667) < 1e-3, "lon wrong: %f", g.longitude);
+    ASSERT(fabs(g.accuracy_m - 4.5) < 1e-3, "accuracy wrong: %f", g.accuracy_m);
+    PASS();
+}
+
+static void test_nmea_rmc(void) {
+    TEST("nmea parse RMC (speed knots->m/s, heading)");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    GpsData g;
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A", &g);
+    ASSERT_EQ(rc, NMEA_OK, "RMC parse failed");
+    /* 22.4 knots = 22.4 * 0.514444 = 11.52 m/s */
+    ASSERT(fabs(g.speed_mps - 11.52) < 0.05, "speed wrong: %f", g.speed_mps);
+    ASSERT(fabs(g.heading_deg - 84.4) < 1e-3, "heading wrong: %f", g.heading_deg);
+    PASS();
+}
+
+static void test_nmea_southern_western(void) {
+    TEST("nmea S/W quadrant sign");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    GpsData g;
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62", &g);
+    ASSERT_EQ(rc, NMEA_OK, "RMC parse failed");
+    ASSERT(g.latitude < 0.0, "southern lat should be negative: %f", g.latitude);
+    ASSERT(g.longitude > 0.0, "eastern lon should be positive: %f", g.longitude);
+    PASS();
+}
+
+static void test_nmea_bad_checksum(void) {
+    TEST("nmea rejects bad checksum");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    int rc = nmea_parse_line(&p,
+        "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*00", NULL);
+    ASSERT_EQ(rc, NMEA_ERR_CHECKSUM, "should reject bad checksum");
+    ASSERT_EQ(p.sentences_bad, 1, "bad counter not incremented");
+    PASS();
+}
+
+static void test_nmea_no_fix(void) {
+    TEST("nmea RMC void status = no fix");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,V,,,,,,,230394,,*33", NULL);
+    ASSERT_EQ(rc, NMEA_ERR_NO_FIX, "void status should be NO_FIX");
+    ASSERT(!p.has_position, "position should not be set");
+    PASS();
+}
+
+static void test_nmea_gnss_talker(void) {
+    TEST("nmea accepts GN/GL/BD talker ids");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    GpsData g;
+    /* GNRMC (multi-constellation) should be accepted like GPRMC */
+    int rc = nmea_parse_line(&p,
+        "$GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*74", &g);
+    ASSERT_EQ(rc, NMEA_OK, "GNRMC should be parsed");
+    PASS();
+}
+
+static void test_nmea_non_nmea(void) {
+    TEST("nmea rejects non-NMEA line");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    int rc = nmea_parse_line(&p, "hello world", NULL);
+    ASSERT_EQ(rc, NMEA_ERR_FORMAT, "non-NMEA should be FORMAT error");
+    PASS();
+}
+
+static void test_nmea_merge(void) {
+    TEST("nmea merges GGA position + RMC velocity");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    nmea_parse_line(&p,
+        "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47", NULL);
+    GpsData g;
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A", &g);
+    ASSERT_EQ(rc, NMEA_OK, "RMC parse failed");
+    /* position from GGA still present, velocity from RMC now present */
+    ASSERT(fabs(g.latitude - 48.1173) < 1e-3, "lat lost after merge");
+    ASSERT(g.speed_mps > 0.0, "speed not merged");
+    ASSERT(p.has_position && p.has_velocity, "flags not both set");
+    PASS();
+}
+
+static void test_nmea_invalid_coord(void) {
+    TEST("nmea rejects non-numeric coordinate");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    /* valid checksum, garbage coord, empty velocity → nothing valid to update */
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,A,ABCD.EF,N,ABCD.EF,E,,,230394,*03", NULL);
+    ASSERT(rc != NMEA_OK, "garbage coord should not yield OK");
+    ASSERT(!p.has_position, "position must remain unset on bad coord");
+    PASS();
+}
+
 int main(void) {
     printf("\n╔══════════════════════════════════════════╗\n");
     printf("║  FlowEngine Unit Tests                    ║\n");
@@ -944,6 +1072,19 @@ int main(void) {
     test_scenario_load_highway_overtake();
     test_scenario_to_json();
     test_scenario_free_null();
+
+    /* ── NMEA 0183 Parser (real GPS format) ── */
+    printf("\n═══ NMEA 0183 Parser ═══\n");
+    test_nmea_checksum();
+    test_nmea_gga();
+    test_nmea_rmc();
+    test_nmea_southern_western();
+    test_nmea_bad_checksum();
+    test_nmea_no_fix();
+    test_nmea_gnss_talker();
+    test_nmea_non_nmea();
+    test_nmea_merge();
+    test_nmea_invalid_coord();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");

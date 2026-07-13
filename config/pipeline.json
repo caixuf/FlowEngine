@@ -14,8 +14,16 @@
       "library_path": "build/lib/libsim_world.so",
       "auto_start": true,
       "publish": [
-        {"topic": "vehicle/state", "type": "VehicleState",
-         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "best_effort", "deadline_ms": 50}}
+        {
+          "topic": "vehicle/state",
+          "type": "VehicleState",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 50
+          }
+        }
       ],
       "params": "{\"init_speed\":5.0,\"target_speed\":12.0,\"frequency_hz\":50.0,\"random_seed\":42,\"scenario_file\":\"scenarios/pedestrian_crossing.json\"}"
     },
@@ -23,14 +31,39 @@
       "name": "sensor_model",
       "library_path": "build/lib/libsensor_model.so",
       "auto_start": true,
-      "subscribe": ["vehicle/state"],
+      "subscribe": [
+        "vehicle/state"
+      ],
       "publish": [
-        {"topic": "sensor/lidar", "type": "LidarFrame",
-         "qos": {"depth": 2, "policy": "drop_oldest", "reliability": "best_effort", "deadline_ms": 50}},
-        {"topic": "sensor/gps", "type": "GpsFrame",
-         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "best_effort", "deadline_ms": 100}},
-        {"topic": "sensor/camera", "type": "CameraFrame",
-         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "best_effort"}}
+        {
+          "topic": "sensor/lidar",
+          "type": "LidarFrame",
+          "qos": {
+            "depth": 2,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 50
+          }
+        },
+        {
+          "topic": "sensor/gps",
+          "type": "GpsFrame",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 100
+          }
+        },
+        {
+          "topic": "sensor/camera",
+          "type": "CameraFrame",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
       ],
       "params": "{\"lidar_rate_hz\":20,\"lidar_fov_deg\":120.0,\"lidar_max_range_m\":60.0,\"obs_noise_std_m\":0.08,\"enable_simple_occlusion\":1}"
     },
@@ -38,9 +71,14 @@
       "name": "perception",
       "library_path": "build/lib/libperception_node.so",
       "auto_start": true,
-      "subscribe": ["vehicle/state", "sensor/lidar"],
+      "subscribe": [
+        "vehicle/state"
+      ],
       "publish": [
-        {"topic": "perception/obstacles", "type": "ObstacleList"}
+        {
+          "topic": "perception/obstacles",
+          "type": "ObstacleList"
+        }
       ],
       "params": "{\"frequency_hz\":10.0}"
     },
@@ -48,10 +86,22 @@
       "name": "fusion",
       "library_path": "build/lib/libfusion_node.so",
       "auto_start": true,
-      "subscribe": ["sensor/gps", "perception/obstacles"],
+      "subscribe": [
+        "sensor/lidar",
+        "sensor/gps"
+      ],
       "publish": [
-        {"topic": "fusion/localization", "type": "Localization"},
-        {"topic": "fusion/latency", "type": "LatencyReport"}
+        {
+          "topic": "fusion/localization",
+          "type": "Localization",
+          "qos": {
+            "depth": 1
+          }
+        },
+        {
+          "topic": "fusion/latency",
+          "type": "LatencyReport"
+        }
       ],
       "params": "{\"frequency_hz\":20.0}"
     },
@@ -59,9 +109,18 @@
       "name": "planning",
       "library_path": "build/lib/libplanning_node.so",
       "auto_start": true,
-      "subscribe": ["fusion/localization", "vehicle/state"],
+      "subscribe": [
+        "fusion/localization",
+        "vehicle/state"
+      ],
       "publish": [
-        {"topic": "planning/trajectory", "type": "Trajectory"}
+        {
+          "topic": "planning/trajectory",
+          "type": "Trajectory",
+          "qos": {
+            "depth": 1
+          }
+        }
       ],
       "params": "{\"target_speed\":12.0,\"max_speed\":20.0,\"max_accel\":4.0,\"ref_path_length_m\":5000.0}"
     },
@@ -69,10 +128,22 @@
       "name": "control",
       "library_path": "build/lib/libcontrol_node.so",
       "auto_start": true,
-      "subscribe": ["planning/trajectory", "vehicle/state"],
+      "subscribe": [
+        "fusion/localization",
+        "planning/trajectory",
+        "vehicle/state"
+      ],
       "publish": [
-        {"topic": "control/raw_cmd", "type": "ControlRaw",
-         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "reliable", "deadline_ms": 100}}
+        {
+          "topic": "control/raw_cmd",
+          "type": "ControlRaw",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "reliable",
+            "deadline_ms": 100
+          }
+        }
       ],
       "params": "{\"pid_kp\":800.0,\"pid_ki\":50.0,\"pid_kd\":100.0,\"target_speed\":12.0,\"lat_kp\":0.32,\"lat_kd_heading\":1.35,\"lane_change_blocked_timeout_s\":2.0}"
     },
@@ -80,18 +151,69 @@
       "name": "safety_control",
       "library_path": "build/lib/libsafety_control_node.so",
       "auto_start": true,
-      "subscribe": ["control/raw_cmd", "vehicle/state"],
+      "subscribe": [
+        "control/raw_cmd",
+        "vehicle/state"
+      ],
       "publish": [
-        {"topic": "control/cmd", "type": "ControlCmd",
-         "qos": {"depth": 1, "policy": "drop_oldest", "reliability": "reliable", "deadline_ms": 50}}
+        {
+          "topic": "control/cmd",
+          "type": "ControlCmd",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "reliable",
+            "deadline_ms": 50
+          }
+        }
       ],
       "params": "{\"max_throttle\":1.0,\"max_steer\":0.22,\"low_speed_steer\":0.18,\"time_headway\":1.3}"
+    },
+    {
+      "name": "inference",
+      "library_path": "build/lib/libinference_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "control/cmd",
+        "fusion/localization",
+        "perception/obstacles",
+        "planning/trajectory"
+      ],
+      "publish": [
+        {
+          "topic": "inference/trajectory",
+          "type": "Trajectory",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
+      ],
+      "params": "{\"max_speed\":20.0,\"frequency_hz\":20.0,\"model_path\":\"tools/train/model.txt\",\"control_mode\":\"shadow\"}"
+    },
+    {
+      "name": "data_recorder",
+      "library_path": "build/lib/libdata_recorder_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "fusion/localization",
+        "planning/trajectory",
+        "perception/obstacles",
+        "control/cmd"
+      ],
+      "params": "{\"frequency_hz\":20.0,\"output_path\":\"/tmp/flow_train_samples.jsonl\"}"
     },
     {
       "name": "monitor",
       "library_path": "build/lib/libmonitor_node.so",
       "auto_start": true,
-      "subscribe": ["perception/obstacles", "vehicle/state", "fusion/latency"],
+      "subscribe": [
+        "perception/obstacles",
+        "vehicle/state",
+        "fusion/latency",
+        "flowengine/node_info"
+      ],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
     }
   ]

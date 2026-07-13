@@ -9,6 +9,7 @@
 
 #include "node_plugin.h"
 #include "adas_msgs_gen.h"
+#include "nmea_parser.h"
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
@@ -46,7 +47,72 @@ static struct {
     double lidar_max_range_m;
     double obs_noise_std_m;
     int enable_simple_occlusion;
+
+    /* 真实 GPS 传感器格式接入：可选 NMEA 0183 日志回放 */
+    char     gps_nmea_file[256];
+    GpsData* nmea_frames;   /* 从 NMEA 日志解析出的 GPS 帧序列 */
+    int      nmea_count;    /* 帧数量 */
+    int      nmea_idx;      /* 回放游标 */
 } g;
+
+#define SENSOR_NMEA_MAX_FRAMES 8192
+
+/* 提取 JSON 字符串字段值（简易，仅用于节点参数）。成功返回 1。 */
+static int extract_json_string(const char* json, const char* key,
+                               char* out, size_t out_sz) {
+    if (!json || !key || !out || out_sz == 0) return 0;
+    char pat[80];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(json, pat);
+    if (!p) return 0;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return 0;
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
+    out[n] = '\0';
+    return (*p == '"');
+}
+
+/* 从 NMEA 0183 日志文件加载 GPS 帧序列。返回加载帧数（失败返回 0）。 */
+static int load_nmea_gps_log(const char* path, GpsData** out_frames) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        LOG_WARN("sensor_model", "cannot open NMEA file: %s", path);
+        return 0;
+    }
+    GpsData* frames = (GpsData*)calloc(SENSOR_NMEA_MAX_FRAMES, sizeof(GpsData));
+    if (!frames) { fclose(f); return 0; }
+
+    NmeaParser parser;
+    nmea_parser_init(&parser);
+
+    int count = 0;
+    char line[256];
+    while (count < SENSOR_NMEA_MAX_FRAMES && fgets(line, sizeof(line), f)) {
+        GpsData gps;
+        if (nmea_parse_line(&parser, line, &gps) == NMEA_OK) {
+            frames[count++] = gps;
+        }
+    }
+    if (count >= SENSOR_NMEA_MAX_FRAMES && !feof(f)) {
+        LOG_WARN("sensor_model",
+                 "NMEA file truncated at %d frames (SENSOR_NMEA_MAX_FRAMES): %s",
+                 count, path);
+    }
+    fclose(f);
+
+    if (count == 0) {
+        LOG_WARN("sensor_model", "NMEA file had no valid GPS fixes: %s", path);
+        free(frames);
+        return 0;
+    }
+    *out_frames = frames;
+    return count;
+}
 
 static double rand_uniform_signed(double span) {
     return (((double)rand() / (double)RAND_MAX) * 2.0 - 1.0) * span;
@@ -155,15 +221,22 @@ static void* sensor_model_thread(void* arg) {
         transport_publish(g.transport, "sensor/lidar", lmsg.data, lmsg.data_size);
 
         if (g.frame_id % 2 == 0) {
-            double noise_s = rand_uniform_signed(0.25);
-            double noise_h = rand_uniform_signed(0.25);
-            GpsData gps = {
-                .latitude = 39.904 + g.ego_x * 0.00001,
-                .longitude = 116.407 + g.ego_y * 0.00001,
-                .speed_mps = (float)(g.ego_speed + noise_s),
-                .heading_deg = (float)(g.ego_heading * 180.0 / M_PI + noise_h),
-                .accuracy_m = 0.5f,
-            };
+            GpsData gps;
+            if (g.nmea_count > 0) {
+                /* 真实 NMEA 0183 日志回放：循环播放解析出的 GPS 帧 */
+                gps = g.nmea_frames[g.nmea_idx];
+                g.nmea_idx = (g.nmea_idx + 1) % g.nmea_count;
+            } else {
+                double noise_s = rand_uniform_signed(0.25);
+                double noise_h = rand_uniform_signed(0.25);
+                gps = (GpsData){
+                    .latitude = 39.904 + g.ego_x * 0.00001,
+                    .longitude = 116.407 + g.ego_y * 0.00001,
+                    .speed_mps = (float)(g.ego_speed + noise_s),
+                    .heading_deg = (float)(g.ego_heading * 180.0 / M_PI + noise_h),
+                    .accuracy_m = 0.5f,
+                };
+            }
             Message gmsg;
             msg_init_typed(&gmsg, "sensor/gps", "sensor_model",
                            GPSDATA_TYPE_ID, GPSDATA_SCHEMA_VERSION,
@@ -223,6 +296,19 @@ static int sensor_model_init(MessageBus* bus, Transport* transport,
             sscanf(p + 18, "%lf", &g.obs_noise_std_m);
         if ((p = strstr(params_json, "\"enable_simple_occlusion\":")))
             sscanf(p + 26, "%d", &g.enable_simple_occlusion);
+
+        extract_json_string(params_json, "gps_nmea_file",
+                            g.gps_nmea_file, sizeof(g.gps_nmea_file));
+    }
+
+    /* 可选：接入真实 GPS 传感器格式 (NMEA 0183 日志回放) */
+    if (g.gps_nmea_file[0]) {
+        g.nmea_count = load_nmea_gps_log(g.gps_nmea_file, &g.nmea_frames);
+        g.nmea_idx = 0;
+        if (g.nmea_count > 0) {
+            LOG_INFO("sensor_model", "GPS source: NMEA 0183 replay '%s' (%d fixes)",
+                     g.gps_nmea_file, g.nmea_count);
+        }
     }
 
     /* Fixed seed for reproducibility — sim_world drives deterministic time */
@@ -262,12 +348,18 @@ static void sensor_model_cleanup(void) {
         pthread_join(g.thread, NULL);
         g.running = 0;
     }
+    if (g.nmea_frames) {
+        free(g.nmea_frames);
+        g.nmea_frames = NULL;
+        g.nmea_count = 0;
+    }
     LOG_INFO("sensor_model", "cleanup done");
 }
 
 static int sensor_model_health(void) { return 0; }
 
 static NodePlugin s_plugin = {
+    .api_version   = NODE_PLUGIN_API_VERSION,
     .name = "sensor_model",
     .version = "1.0.0",
     .description = "Noisy/FOV/occlusion sensor model",

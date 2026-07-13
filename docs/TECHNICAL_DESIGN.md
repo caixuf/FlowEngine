@@ -219,17 +219,17 @@ FlowBoard Dashboard (浏览器, Three.js 3D + Canvas 2D + D3 拓扑)
 - 桥接层使用 `ThreadingHTTPServer`，不被 SSE 长连接饿死
 - 前端三态显示：LIVE / STALE / OFFLINE
 
-### 10.2 flowmond（部分实现）
+### 10.2 flowmond（IPC 统计聚合）
 
-`flowmond` 创建自己的进程内 `MessageBus`，与 `flow_e2e` 等业务节点的总线**不共享**。跨进程 topic 统计聚合需要 IPC/TCP bridge，当前未实现。
-
-- `flowmond` 能启动 HTTP Dashboard，但只能看到自己总线上的空统计
-- 如需使用 `flowmond`，需先实现跨进程 topic 转发
+`flowmond` 创建自己的进程内 `MessageBus`，与 `flow_e2e` 等业务节点的总线**不共享**。
+跨进程 topic 统计聚合通过 `stats_bridge` IPC 通道实现（`include/stats_bridge.h` / `src/core/stats_bridge.c`）。
+业务进程通过 `stats_bridge_publish()` 每 5 秒发布 TopicStats 快照，flowmond 通过
+`stats_bridge_subscriber_open()` 订阅并聚合。仪表盘 JSON 跨进程传输通过 `dashboard_bridge` IPC 通道实现（`src/core/dashboard_bridge.c`）。
 
 ### 10.3 详细参考
 
-- [可视化架构](../VISUALIZATION_ARCHITECTURE.md) — 文件桥接架构、API 端点、数据结构
-- [监控架构](../MONITORING_ARCHITECTURE.md) — flowmond 设计目标与实现状态
+- [可视化架构](VISUALIZATION_ARCHITECTURE.md) — API 端点、数据契约、鲁棒性设计
+- [监控架构](MONITORING_ARCHITECTURE.md) — flowmond 设计目标与实现
 
 - MessageBus 单进程内使用；跨进程请用 IPC Channel
 - 协程任务需要 GCC 11+ 或 Clang 14+（`-fcoroutines` / `-fcoroutines-ts`）

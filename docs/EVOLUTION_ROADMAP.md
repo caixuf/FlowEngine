@@ -1,8 +1,17 @@
 # FlowEngine 进化路线图
 
-> 日期：2026-07-04
-> 当前定位：自动驾驶/机器人中间件内核原型
-> 目标方向：从“功能原型”进化为“可组织、可观察、可测试、可部署的框架”
+> 日期：2026-07-04（更新 2026-07-10）
+> 当前定位：**仿真驱动的自动驾驶中间件框架 + 可复现实验平台**
+> 目标方向：从"功能原型"进化为"可组织、可观察、可测试、可回放、可评估的仿真框架"
+>
+> **定位说明（2026-07-10 重制）：** FlowEngine 明确**不做实车方向**——不追车规量产、
+> 不接真实 ECU/CAN、不追硬实时/功能安全认证。全部能力（感知/融合/规划/控制/学习）
+> 都在**仿真内闭环**验证。发展重心为两条主线：软件框架质量（主线 A）+ 仿真能力（主线 B）。
+>
+> **实现状态更新 (2026-07-10)：** Phase 1-3 已完成，Phase 4-7 大部分完成。
+> FlowRegistry、ParamRegistry、flow_launcher、flowctl 主要命令、QoS 系统均已实现。
+> 未完成项：跨进程 topic bridge、schema-aware bag 全功能、多进程仿真部署验证。
+> 落地细化见 [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md)。
 
 ---
 
@@ -56,15 +65,15 @@ FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总
 
 ## 2. 推荐路线总览
 
-| 阶段 | 目标 | 关键词 |
-|---|---|---|
-| Phase 1 | 工程收敛 | 测试、脚本、命名、README |
-| Phase 2 | 统一元信息 | `FlowRegistry`、反射、Meta |
-| Phase 3 | Launch 系统 | 配置驱动启动、依赖、参数 |
-| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 |
-| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge |
-| Phase 6 | 数据闭环 | schema-aware bag、bag info、replay |
-| Phase 7 | 真实 ADAS 样例 | perception、fusion、control、monitor |
+| 阶段 | 目标 | 关键词 | 状态 |
+|---|---|---|---|
+| Phase 1 | 工程收敛 | 测试、脚本、命名、README | ✅ 已完成 |
+| Phase 2 | 统一元信息 | `FlowRegistry`、反射、Meta | ✅ 已完成 |
+| Phase 3 | Launch 系统 | 配置驱动启动、依赖、参数 | ✅ 已完成 |
+| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 | ✅ 大部分完成 |
+| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge | ✅ 同机完成 |
+| Phase 6 | 数据闭环 | schema-aware bag、bag info、replay | 🔧 部分完成 |
+| Phase 7 | 真实 ADAS 样例 | perception、fusion、control、monitor | ✅ 已完成 |
 
 ## 3. Phase 1：工程收敛
 
@@ -501,11 +510,12 @@ flowctl param set control_node.max_speed 20
 - 参数可以查询。
 - 支持部分参数热更新。
 
-## 12. Phase 10：真实多进程验证
+## 12. Phase 10：多进程仿真部署验证
 
 ### 12.1 目标
 
 验证 FlowEngine 是否真的具备框架能力，而不是只在单进程 demo 中工作。
+**注意：这里的"部署"指多进程仿真部署，不涉及任何实车 / ECU / CAN。**
 
 ### 12.2 推荐 demo
 

@@ -173,3 +173,30 @@ e2e monitor 任务在状态 JSON 的 `metrics` 下新增 `scene`：
 - e2e 停止后面板显示 `● stale` + 最后真实数据，**不会**静默变成假数据。
 - 状态文件包含结构正确、随时间变化的 `scene`（障碍物移动、自车变道、点云非随机）。
 - 面板 3D 视图显示真实障碍物与点云。
+
+---
+
+## 六、真实传感器格式接入（GPS / NMEA 0183）
+
+`sensor_model` 节点默认合成 GPS，但可切换为回放真实 GNSS 接收机的
+**NMEA 0183** 报文（工业界串口/UDP 事实标准）。
+
+- 解析器：`src/algorithms/nmea_parser.{h,c}`
+  - 支持 `$--GGA`（经纬度/海拔/卫星数/HDOP）与 `$--RMC`（经纬度/地速/航向/有效性）。
+  - 兼容 GP/GN/GL/GA/BD 等 talker id；强制校验 `*HH` 校验和。
+  - `ddmm.mmmm` → 十进制度；地速 knots → m/s；HDOP → 1-sigma 精度(m)。
+  - GGA/RMC 字段互补合并，输出内部 `GpsData`。
+- 启用方式：给 `sensor_model` 传入参数 `gps_nmea_file`，例如：
+
+  ```json
+  {"lidar_rate_hz":20,"gps_nmea_file":"config/sample_gps.nmea"}
+  ```
+
+  节点在 `init` 时把日志中的有效定位帧加载进内存，运行时按帧循环回放到
+  `sensor/gps`；未配置时回退到原合成 GPS。
+- 示例日志：`config/sample_gps.nmea`（8 条带正确校验和的 GGA/RMC）。
+- 单元测试：`tests/test_modules.c` 的 “NMEA 0183 Parser” 小节（校验和/经纬度/
+  南纬西经符号/knots→m/s/无定位/多星座 talker/字段合并）。
+
+> LiDAR 侧的真实格式（nuScenes/KITTI `.bin`）见 `src/algorithms/nuscenes_loader.h`
+> 与 `flow_nuscenes_demo`。
