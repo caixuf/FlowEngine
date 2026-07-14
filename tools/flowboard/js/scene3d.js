@@ -120,9 +120,10 @@ function _buildRoad(scene) {
 }
 
 // ── Curve road using scene road geometry data ──
-// According to road_center_y offset formula:
-//   0 (x < sx), (x - sx) / len * off (ramp), off (full offset)
-// Road mesh -> deform vertices; lane markings/shoulders -> translate position.z (no vertex deform)
+// Matches road_center_y() in include/road_geometry.h:
+//   0 (x < sx), off*(3t²-2t³) (smoothstep), off (x >= sx+len)
+// Road surface + long shoulders/edges -> deform vertices;
+// short lane dashes -> translate position.z (single offset fine for 4m segments).
 // sim_world Y = Three.js Z: positive curve_offset = right turn = positive Z shift.
 // When curve is active, disable road chunking, otherwise chunk movement after deformation
 // destroys the shape.
@@ -130,7 +131,8 @@ function _curveShiftAt(x, sx, len, off) {
   if (len <= 0 || Math.abs(off) < 0.01) return 0;
   if (x <= sx) return 0;
   if (x >= sx + len) return off;
-  return (x - sx) / len * off;
+  var t = (x - sx) / len;
+  return off * (3 * t * t - 2 * t * t * t);
 }
 
 function _applyRoadCurve(roadData) {
@@ -150,14 +152,14 @@ function _applyRoadCurve(roadData) {
   group.position.x = 0;  // reset chunk displacement
   group.traverse(function(child) {
     if (!child.isMesh || !child.geometry) return;
-    // Lane markings / shoulders: translate position.z following curve (no vertex deform)
-    if (child.userData && (child.userData.isLaneMark || child.userData.isEdge)) {
+    // Short lane dashes (4m): single Z offset by center X is accurate enough
+    if (child.userData && child.userData.isLaneMark) {
       var baseZ = child.userData.baseZ || child.position.z;
       var meshX = child.position.x;
       child.position.z = baseZ + _curveShiftAt(meshX, sx, len, off);
       return;
     }
-    // Road surface mesh: deform vertex Z
+    // Road surface, shoulders, edge markings (long meshes): deform vertex Z
     var pos = child.geometry.attributes.position;
     if (!pos) return;
     var arr = pos.array;

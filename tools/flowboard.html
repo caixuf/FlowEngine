@@ -1113,7 +1113,8 @@ function _curveShiftAt(x, sx, len, off){
   if(len<=0||Math.abs(off)<0.01) return 0;
   if(x<=sx) return 0;
   if(x>=sx+len) return off;
-  return (x-sx)/len*off;
+  var t=(x-sx)/len;
+  return off*(3*t*t-2*t*t*t);
 }
 function _applyRoadCurve(roadData){
   if(!roadData) return;
@@ -1132,14 +1133,14 @@ function _applyRoadCurve(roadData){
   group.position.x = 0;  // 重置分块位移
   group.traverse(function(child){
     if(!child.isMesh||!child.geometry) return;
-    // ── 车道线/路肩: 平移 position.z 跟随弯道（不变形顶点）──
-    if(child.userData&&(child.userData.isLaneMark||child.userData.isEdge)){
+    // ── 短车道线(4m): 按中心 X 单点 Z 偏移即可 ──
+    if(child.userData&&child.userData.isLaneMark){
       var baseZ = child.userData.baseZ || child.position.z;
       var meshX = child.position.x;
       child.position.z = baseZ + _curveShiftAt(meshX, sx, len, off);
       return;
     }
-    // ── 路面大网格: 变形顶点 Z ──
+    // ── 路面/路肩/边线(长网格): 变形顶点 Z ──
     var pos=child.geometry.attributes.position;
     if(!pos) return;
     var arr=pos.array;
