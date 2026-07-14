@@ -5,7 +5,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, getColor } from './utils.js';
-import { initDeadReckon, updateDeadReckon, getDeadReckonState, _dr, _animT, _2d } from './deadreckon.js';
+import { initDeadReckon, updateDeadReckon, getDeadReckonState, _dr, _2d } from './deadreckon.js';
 
 const THREE = window.THREE;
 
@@ -38,6 +38,9 @@ let _glLost = false;
 
 /** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
 let _tmpV3 = null, _tmpScale = null;
+
+/** Animation time counter (incremented per frame) */
+let _animT = 0;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
 const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7 };
@@ -389,6 +392,8 @@ function init3DScene() {
   sceneReady = true;
   window.scene3d = scene3d;
   window.sceneReady = true;
+  window._camera3d = camera3d;    // exposed for debugger
+  window._renderer3d = renderer3d; // exposed for debugger
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -430,14 +435,17 @@ function _renderFrame() {
   }
 
   // ── Chase camera: behind + above ego in world space ──
+  // Debug override: window._debugCam lets the debugger page control camera params
+  var dc = window._debugCam;
   var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
-  var back = narrow ? 26 : 22;
-  var height = narrow ? 12 : 11;
-  var side = narrow ? 7 : 6;
+  var back = dc ? dc.back : (narrow ? 26 : 22);
+  var height = dc ? dc.height : (narrow ? 12 : 11);
+  var side = dc ? dc.side : (narrow ? 7 : 6);
+  var camLerp = dc ? dc.lerp : 0.08;
   _camTarget.set(sx - back, height, sz + side);
   _camLookTarget.set(sx + 4, 1.2, sz);
-  _cam.lerp(_camTarget, 0.08);
-  _camLook.lerp(_camLookTarget, 0.08);
+  _cam.lerp(_camTarget, camLerp);
+  _camLook.lerp(_camLookTarget, camLerp);
   camera3d.position.copy(_cam);
   camera3d.lookAt(_camLook);
 
