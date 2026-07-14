@@ -51,14 +51,14 @@ done
 if [ -n "$REPLAY_FILE" ]; then
   echo "═══ Replay Mode: $REPLAY_FILE ═══"
   "$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" > /tmp/flowmond.log 2>&1 &
-  FLOWMOND_PID=$!
+  SERVER_PID=$!
   sleep 1
   echo "  Dashboard: http://localhost:8800"
   if $OPEN_BROWSER; then
     xdg-open http://localhost:8800 2>/dev/null || open http://localhost:8800 2>/dev/null || true
   fi
   "$BUILD_DIR/bin/flow_bag" --replay "$REPLAY_FILE" 2>&1
-  kill $FLOWMOND_PID 2>/dev/null
+  kill $SERVER_PID 2>/dev/null
   exit 0
 fi
 
@@ -155,7 +155,7 @@ cleanup() {
   echo "───[Cleanup] Shutting down..."
 
   # 1) Ask our direct children to stop.
-  for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+  for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
     [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
   done
 
@@ -163,7 +163,7 @@ cleanup() {
   #    (6 iterations × 0.5s sleep = 3s grace period.)
   for _ in 1 2 3 4 5 6; do
     still=""
-    for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+    for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
       [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && still="$still $pid"
     done
     [ -z "$still" ] && break
@@ -172,7 +172,7 @@ cleanup() {
 
   # 3) Force-kill any survivors, then sweep stragglers (multi-process node
   #    hosts, an orphaned bridge, or a previous run's server) by name.
-  for pid in $LAUNCHER_PID $BRIDGE_PID $FLOWMOND_PID; do
+  for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
   done
   { pkill -9 -f flow_node_host; pkill -9 -f flow_launcher; \
@@ -221,17 +221,22 @@ if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
 fi
 echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
-# ── Start dashboard server (flowmond) ──────────────────────
+# ── Start dashboard server (file-based: reads /tmp/flow_topology.json) ──
 echo "───[3/5] Starting dashboard server..."
-"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" \
-  > /tmp/flowmond.log 2>&1 &
-FLOWMOND_PID=$!
-sleep 2
-if kill -0 $FLOWMOND_PID 2>/dev/null; then
+# Wait for monitor node to write first snapshot before starting server
+for _ in $(seq 1 20); do
+  if [ -s "$JSON_FILE" ]; then break; fi
+  sleep 0.5
+done
+python3 "$ROOT/tools/flowboard_server.py" --port 8800 --json-file "$JSON_FILE" \
+  > /tmp/flowboard_server.log 2>&1 &
+SERVER_PID=$!
+sleep 1
+if kill -0 $SERVER_PID 2>/dev/null; then
     echo "  ✓ Dashboard at http://localhost:8800"
 else
-    echo "  ✗ flowmond failed! Check /tmp/flowmond.log"
-    cat /tmp/flowmond.log
+    echo "  ✗ flowboard_server failed! Check /tmp/flowboard_server.log"
+    cat /tmp/flowboard_server.log
 fi
 
 python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \

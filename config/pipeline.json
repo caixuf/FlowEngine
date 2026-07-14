@@ -263,13 +263,6 @@
       "params": "{\"poll_interval_ms\":500,\"status_hz\":1.0,\"ab_ratio\":0.5,\"runtime_model_path\":\"tools/train/model.txt\",\"registry_path\":\"models/registry.json\"}"
     },
     {
-      "name": "flowmond",
-      "library_path": "build/lib/libflowmond_node.so",
-      "auto_start": true,
-      "subscribe": [],
-      "params": "{\"port\":8800,\"bind\":\"127.0.0.1\"}"
-    },
-    {
       "name": "monitor",
       "library_path": "build/lib/libmonitor_node.so",
       "auto_start": true,
