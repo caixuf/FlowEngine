@@ -1128,6 +1128,7 @@ function _applyRoadCurve(roadData){
     return;
   }
   window._curveActive = true;
+  console.log('[flowboard] Applying road curve: start='+sx+'m, len='+len+'m, off='+off+'m');
   var group = window._roadGroup;
   if(!group) return;
   group.position.x = 0;  // 重置分块位移

@@ -147,6 +147,8 @@ function _applyRoadCurve(roadData) {
     return;
   }
   _curveActive = true;
+  console.log('[scene3d] Applying road curve: start=' + sx + 'm, len=' + len + 'm, off=' + off + 'm');
+  reportDiag('scene3d.curve', 'Applying curve: offset=' + off + 'm over X=' + sx + '..' + (sx + len));
   var group = _roadGroup;
   if (!group) return;
   group.position.x = 0;  // reset chunk displacement
