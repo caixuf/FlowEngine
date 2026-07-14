@@ -7,7 +7,7 @@ integrated system.  Change one, verify all.  Never tune parts in isolation.
 
 ## Architecture — think in systems
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │  Scene View (the whole thing)                       │
 │  ┌─ Road system ─────────────────────────────────┐ │
@@ -30,7 +30,8 @@ integrated system.  Change one, verify all.  Never tune parts in isolation.
 ```
 
 **Coordinate mapping:**
-```
+
+```text
 sim_world  →  Three.js
 ────────────────────────
 x          →  X (forward)
@@ -63,6 +64,7 @@ Single long BoxGeometry(width, h, d, XSEG, 1, 1).  Curve adds
 `_curveShiftAt(vertexX)` to each vertex Z.
 
 **Cons that make it unreliable:**
+
 - Asphalt, edge lines, shoulders are **separate meshes**.  Vertex positions
   come from their **local** geometry buffers.  Even with identical XSEG,
   `computeVertexNormals()` after deformation can produce different normals
@@ -102,11 +104,12 @@ Both must never be visible simultaneously.
 
 ## Debugging with debug3d.html
 
-```
+```text
 http://localhost:8800/debug3d.html
 ```
 
 This standalone page loads the SAME `scene3d.js`.  Use it to:
+
 - Tweak camera params via sliders → `window._debugCam`
 - Set ego position manually (X, Y/Lane, speed)
 - Apply test curves (start, length, offset)
@@ -115,6 +118,7 @@ This standalone page loads the SAME `scene3d.js`.  Use it to:
 - Export state as JSON snapshot
 
 **Workflow when you can't see the screen:**
+
 1. Ask user to open `debug3d.html`
 2. Ask them to move ONE slider and describe what changes
 3. Use wireframe mode to verify mesh alignment
