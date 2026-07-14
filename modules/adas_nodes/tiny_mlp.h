@@ -134,4 +134,141 @@ static inline int tiny_mlp_load(TinyMLP* m, const char* path) {
     return 0;
 }
 
+/*
+ * 保存模型权重到文本文件（与 tiny_mlp_load 兼容的格式）。
+ * 成功返回 0，失败返回 -1。
+ */
+static inline int tiny_mlp_save(const TinyMLP* m, const char* path) {
+    if (!m || !path || !m->loaded) return -1;
+    FILE* f = fopen(path, "w");
+    if (!f) return -1;
+
+    fprintf(f, "# flowengine-tinymlp v1\n");
+    fprintf(f, "in %d\n", m->in_dim);
+    fprintf(f, "hidden %d\n", m->hid_dim);
+    fprintf(f, "out %d\n", m->out_dim);
+
+    fprintf(f, "norm_mean");
+    for (int i = 0; i < m->in_dim; i++) fprintf(f, " %g", (double)m->norm_mean[i]);
+    fprintf(f, "\n");
+
+    fprintf(f, "norm_scale");
+    for (int i = 0; i < m->in_dim; i++) fprintf(f, " %g", (double)m->norm_scale[i]);
+    fprintf(f, "\n");
+
+    fprintf(f, "out_mean");
+    for (int i = 0; i < m->out_dim; i++) fprintf(f, " %g", (double)m->out_mean[i]);
+    fprintf(f, "\n");
+
+    fprintf(f, "out_scale");
+    for (int i = 0; i < m->out_dim; i++) fprintf(f, " %g", (double)m->out_scale[i]);
+    fprintf(f, "\n");
+
+    fprintf(f, "w1");
+    for (int j = 0; j < m->hid_dim; j++)
+        for (int i = 0; i < m->in_dim; i++)
+            fprintf(f, " %g", (double)m->w1[j * m->in_dim + i]);
+    fprintf(f, "\n");
+
+    fprintf(f, "b1");
+    for (int j = 0; j < m->hid_dim; j++) fprintf(f, " %g", (double)m->b1[j]);
+    fprintf(f, "\n");
+
+    fprintf(f, "w2");
+    for (int k = 0; k < m->out_dim; k++)
+        for (int j = 0; j < m->hid_dim; j++)
+            fprintf(f, " %g", (double)m->w2[k * m->hid_dim + j]);
+    fprintf(f, "\n");
+
+    fprintf(f, "b2");
+    for (int k = 0; k < m->out_dim; k++) fprintf(f, " %g", (double)m->b2[k]);
+    fprintf(f, "\n");
+
+    fclose(f);
+    return 0;
+}
+
+/*
+ * 单样本 SGD 权重更新。
+ *
+ * 损失函数: L = 0.5 * ||y_pred - y_true||^2  (反归一化空间 MSE)
+ *
+ * full_finetune=0: 仅更新 W2/b2（顶层，保留 W1/b1 backbone，防止灾难性遗忘）
+ * full_finetune=1: 更新全部参数
+ *
+ * 返回本步骤的 MSE loss（反归一化空间）；模型无效时返回 0。
+ */
+static inline float tiny_mlp_sgd_step(TinyMLP* m, const float* x,
+                                       const float* y_true,
+                                       float lr, int full_finetune) {
+    if (!m || !x || !y_true || !m->loaded) return 0.0f;
+    if (m->in_dim <= 0 || m->hid_dim <= 0 || m->out_dim <= 0) return 0.0f;
+
+    /* ── Forward ─────────────────────────────────────── */
+    float xn[TINY_MLP_MAX_IN];
+    for (int i = 0; i < m->in_dim; i++) {
+        float s = m->norm_scale[i] != 0.0f ? m->norm_scale[i] : 1.0f;
+        xn[i] = (x[i] - m->norm_mean[i]) / s;
+    }
+
+    float h[TINY_MLP_MAX_HID];
+    for (int j = 0; j < m->hid_dim; j++) {
+        float acc = m->b1[j];
+        for (int i = 0; i < m->in_dim; i++)
+            acc += m->w1[j * m->in_dim + i] * xn[i];
+        h[j] = tanhf(acc);
+    }
+
+    float y_pred[TINY_MLP_MAX_OUT];
+    for (int k = 0; k < m->out_dim; k++) {
+        float acc = m->b2[k];
+        for (int j = 0; j < m->hid_dim; j++)
+            acc += m->w2[k * m->hid_dim + j] * h[j];
+        y_pred[k] = acc * m->out_scale[k] + m->out_mean[k];
+    }
+
+    /* ── MSE Loss ─────────────────────────────────────── */
+    float loss = 0.0f;
+    for (int k = 0; k < m->out_dim; k++) {
+        float e = y_pred[k] - y_true[k];
+        loss += e * e;
+    }
+    loss *= 0.5f;
+
+    /* ── Backward ─────────────────────────────────────── */
+    /* delta_out[k] = dL/dy_norm[k] = (y_pred[k] - y_true[k]) * out_scale[k] */
+    float delta_out[TINY_MLP_MAX_OUT];
+    for (int k = 0; k < m->out_dim; k++) {
+        float s = m->out_scale[k] != 0.0f ? m->out_scale[k] : 1.0f;
+        delta_out[k] = (y_pred[k] - y_true[k]) * s;
+    }
+
+    /* delta_h[j] = (sum_k delta_out[k]*W2[k,j]) * (1 - h[j]^2) */
+    float delta_h[TINY_MLP_MAX_HID];
+    for (int j = 0; j < m->hid_dim; j++) {
+        float acc = 0.0f;
+        for (int k = 0; k < m->out_dim; k++)
+            acc += delta_out[k] * m->w2[k * m->hid_dim + j];
+        delta_h[j] = acc * (1.0f - h[j] * h[j]);
+    }
+
+    /* ── Weight update: W2, b2 (always) ────────────────── */
+    for (int k = 0; k < m->out_dim; k++) {
+        for (int j = 0; j < m->hid_dim; j++)
+            m->w2[k * m->hid_dim + j] -= lr * delta_out[k] * h[j];
+        m->b2[k] -= lr * delta_out[k];
+    }
+
+    /* ── Weight update: W1, b1 (full_finetune only) ─────── */
+    if (full_finetune) {
+        for (int j = 0; j < m->hid_dim; j++) {
+            for (int i = 0; i < m->in_dim; i++)
+                m->w1[j * m->in_dim + i] -= lr * delta_h[j] * xn[i];
+            m->b1[j] -= lr * delta_h[j];
+        }
+    }
+
+    return loss;
+}
+
 #endif /* FLOWENGINE_TINY_MLP_H */

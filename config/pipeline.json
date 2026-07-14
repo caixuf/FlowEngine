@@ -205,6 +205,64 @@
       "params": "{\"frequency_hz\":20.0,\"output_path\":\"/tmp/flow_train_samples.jsonl\"}"
     },
     {
+      "name": "learner",
+      "library_path": "build/lib/liblearner_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "fusion/localization",
+        "planning/trajectory",
+        "perception/obstacles",
+        "control/cmd"
+      ],
+      "publish": [
+        {
+          "topic": "learner/status",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
+      ],
+      "params": "{\"train_hz\":0.5,\"lr\":0.001,\"batch_size\":32,\"buffer_size\":512,\"full_finetune\":0,\"save_interval\":50,\"model_path\":\"tools/train/model.txt\",\"save_path\":\"/tmp/flow_learner_model.txt\"}"
+    },
+    {
+      "name": "model_ota",
+      "library_path": "build/lib/libmodel_ota_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "model_ota/cmd",
+        "fusion/localization"
+      ],
+      "publish": [
+        {
+          "topic": "model_ota/active",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "reliable"
+          }
+        },
+        {
+          "topic": "model_ota/status",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "model_ota/ab_result",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
+      ],
+      "params": "{\"poll_interval_ms\":500,\"status_hz\":1.0,\"ab_ratio\":0.5,\"runtime_model_path\":\"tools/train/model.txt\",\"registry_path\":\"models/registry.json\"}"
+    },
+    {
       "name": "monitor",
       "library_path": "build/lib/libmonitor_node.so",
       "auto_start": true,

@@ -144,9 +144,9 @@ target_compile_definitions(safety_control_node PRIVATE FLOWCORO_INTEGRATION)
 add_library(monitor_node SHARED monitor_node.c)
 target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
-# ── 车端学习闭环节点 (data → train → inference) ───────────────
+# ── 车端学习闭环节点 (data → train → inference → learner → ota) ─
 
-# inference_node: 内置 tiny-MLP 车端推理（影子模式，零重型依赖）
+# inference_node: 内置 tiny-MLP 车端推理（影子模式，支持 OTA 热重载）
 add_library(inference_node SHARED inference_node.c)
 target_link_libraries(inference_node ${NODE_LINK_LIBS})
 
@@ -154,8 +154,16 @@ target_link_libraries(inference_node ${NODE_LINK_LIBS})
 add_library(data_recorder_node SHARED data_recorder_node.c)
 target_link_libraries(data_recorder_node ${NODE_LINK_LIBS})
 
+# learner_node: 车端增量 SGD 微调（Stage 3）
+add_library(learner_node SHARED learner_node.c)
+target_link_libraries(learner_node ${NODE_LINK_LIBS})
+
+# model_ota_node: 模型 OTA + 版本管理 + A-B 对比（Stage 4）
+add_library(model_ota_node SHARED model_ota_node.c)
+target_link_libraries(model_ota_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
