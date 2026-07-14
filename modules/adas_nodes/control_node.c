@@ -549,9 +549,10 @@ static void* control_thread(void* arg) {
         if (g.lc_state == 2) {
             g.lc_wait += CONTROL_DT_S;
             if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
+                g.lc_state     = 0;  /* 允许后续再次评估变道触发条件 (line 463/486 要求 lc_state==0) */
                 g.lc_attempted = 0;
-                g.lc_cooldown = 3.0;
-                g.lc_wait = 0.0;
+                g.lc_cooldown  = 3.0;
+                g.lc_wait      = 0.0;
             }
         }
 
