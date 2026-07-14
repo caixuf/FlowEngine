@@ -230,12 +230,23 @@ for _ in $(seq 1 30); do
   if [ -s "$JSON_FILE" ]; then break; fi
   sleep 0.5
 done
+if [ ! -s "$JSON_FILE" ]; then
+  echo "  ✗ Timeout waiting for $JSON_FILE — monitor node may have failed"
+fi
 python3 "$ROOT/tools/flowboard_server.py" --port 8800 --json-file "$JSON_FILE" \
   > /tmp/flowboard_server.log 2>&1 &
 SERVER_PID=$!
-sleep 1
+sleep 2
 if kill -0 $SERVER_PID 2>/dev/null; then
-    echo "  ✓ Dashboard at http://localhost:8800"
+    # Self-check: verify the server actually responds
+    CHECK=$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:8800/api/health 2>/dev/null || echo "000")
+    if [ "$CHECK" = "200" ]; then
+        echo "  ✓ Dashboard at http://localhost:8800"
+    else
+        echo "  ✗ Dashboard started but not responding (HTTP $CHECK)"
+        echo "  Server log:"
+        cat /tmp/flowboard_server.log
+    fi
 else
     echo "  ✗ flowboard_server failed! Check /tmp/flowboard_server.log"
     cat /tmp/flowboard_server.log
