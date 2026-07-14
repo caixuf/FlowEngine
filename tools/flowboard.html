@@ -192,6 +192,8 @@ input:focus,select:focus{border-color:#58a6ff}
       <div class="mini-stat"><div class="val" id="v-target" style="color:#58a6ff">--</div><div class="lbl">Target m/s</div></div>
       <div class="mini-stat"><div class="val" id="v-throttle" style="color:#d29922">--</div><div class="lbl">Throttle</div></div>
       <div class="mini-stat"><div class="val" id="v-error" style="color:#f85149">--</div><div class="lbl">Error m/s</div></div>
+      <div class="mini-stat"><div class="val" id="v-mode" style="color:#bc8cff">--</div><div class="lbl">Drive Mode</div></div>
+      <div class="mini-stat"><div class="val" id="v-route" style="color:#484f58">--</div><div class="lbl">NOA Lane</div></div>
     </div></div>
   </div>
 
@@ -539,6 +541,16 @@ function updateMetrics(){
     document.getElementById('v-throttle').textContent=((v.throttle||0)*100).toFixed(0)+'%';
     document.getElementById('v-throttle').style.color=(v.throttle||0)>0.5?'#d29922':'#3fb950';
     document.getElementById('v-error').textContent=(v.error||0).toFixed(1);
+    var driverMode=(topoData.metrics||{}).driver_mode||'NA:READY';
+    var modeColors={NA:'#8b949e',ACC:'#58a6ff',CP:'#d29922',NP:'#3fb950',NOA:'#bc8cff'};
+    var modeTop=driverMode.split(':')[0];
+    var vModeEl=document.getElementById('v-mode');
+    vModeEl.textContent=driverMode;
+    vModeEl.style.color=modeColors[modeTop]||'#bc8cff';
+    var routeLane=(topoData.metrics||{}).route_lane||0;
+    var vRouteEl=document.getElementById('v-route');
+    vRouteEl.textContent=routeLane===0?'--':(routeLane>0?'→ right':'← left');
+    vRouteEl.style.color=routeLane===0?'#484f58':'#f0883e';
   } else { document.getElementById('vehicle-card').style.display='none'; }
   // System resources
   var sm=(topoData.metrics||{}).sysmon;
@@ -590,7 +602,7 @@ function updateFrames(){
   frames.push({ts:now,pub:b.published||0,del:b.delivered||0,drop:b.dropped||0,mode:m.driver_mode||'NA',lat:(m.latency||{}).avg_us||0});
   if(frames.length>200)frames.shift();frameCount++;
   document.getElementById('frames').innerHTML = frames.slice(-60).reverse().map(function(f){
-    return '<div class="frame-line"><span style="color:#484f58;min-width:72px">'+f.ts+'</span><span style="color:#58a6ff;min-width:60px">pub:'+f.pub+'</span><span style="min-width:60px">del:'+f.del+'</span><span style="color:'+(f.drop?'#f85149':'#484f58')+';min-width:50px">drop:'+f.drop+'</span><span style="color:#d29922;min-width:60px">lat:'+f.lat+'µs</span></div>';
+    return '<div class="frame-line"><span style="color:#484f58;min-width:72px">'+f.ts+'</span><span style="color:#58a6ff;min-width:60px">pub:'+f.pub+'</span><span style="min-width:60px">del:'+f.del+'</span><span style="color:'+(f.drop?'#f85149':'#484f58')+';min-width:50px">drop:'+f.drop+'</span><span style="color:#d29922;min-width:60px">lat:'+f.lat+'µs</span><span style="color:#bc8cff;min-width:70px">mode:'+f.mode+'</span></div>';
   }).join('')||'<span style="color:#484f58">Waiting...</span>';
 }
 

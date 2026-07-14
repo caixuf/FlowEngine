@@ -48,6 +48,13 @@ static struct {
     volatile int has_obstacles;
     volatile int has_vehicle_state;
 
+    /* NOA 驾驶模式 (来自 planning/trajectory 的 "mode=" / "route_lane="
+     * 追加字段，见 planning_node.c / control_node.c)。用于仪表盘展示当前
+     * 模式层级 (NA/ACC/CP/NP/NOA) 及 NOA 导航驱动的目标车道。 */
+    char driver_mode[32];
+    int  route_lane;
+    volatile int has_planning;
+
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
     char node_info_json[MAX_TOPO_NODES][512];  /* 每个节点的原始 JSON */
@@ -97,6 +104,26 @@ static void on_node_info(const Message* msg, void* user_data) {
     memcpy(g.node_info_json[g.node_info_count], msg->data, copy);
     g.node_info_json[g.node_info_count][copy] = '\0';
     g.node_info_count++;
+}
+
+/* planning/trajectory 订阅 — 提取驾驶模式 + NOA 导航路线目标车道，供仪表盘展示
+ * (见 planning_node.c 追加的 "mode=" / "route_lane=" 字段，与 control_node.c 的
+ * 解析方式一致，采用宽松的 strstr + sscanf)。 */
+static void on_planning_trajectory(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+
+    const char* p = strstr(d, "mode=");
+    if (p) {
+        char buf[32] = {0};
+        sscanf(p + 5, "%31s", buf);
+        snprintf(g.driver_mode, sizeof(g.driver_mode), "%s", buf);
+    }
+    p = strstr(d, "route_lane=");
+    if (p) sscanf(p + 11, "%d", &g.route_lane);
+
+    g.has_planning = 1;
 }
 
 static void on_fusion_latency(const Message* msg, void* user_data) {
@@ -234,6 +261,10 @@ static void export_dashboard_json(void) {
     /* 融合延迟 */
     fprintf(jf, "\"latency\":{\"avg_us\":%.0f,\"p50_us\":%.0f,\"p99_us\":%.0f},",
             g.fusion_lat_avg_us, g.fusion_lat_p50_us, g.fusion_lat_p99_us);
+
+    /* NOA 驾驶模式 (来自 planning/trajectory)，未收到数据前默认 "NA:READY" */
+    fprintf(jf, "\"driver_mode\":\"%s\",\"route_lane\":%d,",
+            g.driver_mode[0] ? g.driver_mode : "NA:READY", g.route_lane);
 
     /* Topic 统计 */
     TopicStats tstats[16];
@@ -467,7 +498,8 @@ static void* monitor_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
-                                   "fusion/latency", "flowengine/node_info", NULL };
+                                   "fusion/latency", "flowengine/node_info",
+                                   "planning/trajectory", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -520,6 +552,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
     transport_subscribe(transport, "fusion/latency", on_fusion_latency, NULL);
+    transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, "flowengine/node_info", on_node_info, NULL);
     g.node_info_count = 0;

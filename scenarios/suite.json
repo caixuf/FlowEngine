@@ -42,6 +42,11 @@
       "file": "scenarios/obstacle_avoid.json",
       "duration_s": 35,
       "enabled": true
+    },
+    {
+      "file": "scenarios/highway_noa_route.json",
+      "duration_s": 60,
+      "enabled": true
     }
   ],
   "baseline_tolerances": {

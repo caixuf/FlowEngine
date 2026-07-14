@@ -123,11 +123,15 @@ def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
     return edges
 
 
-def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
+def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool]:
     """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
 
     Returns:
-        (criteria_dict, scenario_name)
+        (criteria_dict, scenario_name, has_noa_route)
+
+    ``has_noa_route`` is True when the scenario defines a non-empty ``route``
+    list, meaning the driving-mode state machine is expected to reach NOA
+    and actively change lanes per the navigation route (see skills/08_state_machine.md).
     """
     pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
     nodes = _pipeline_nodes(pipeline)
@@ -150,7 +154,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
         break
 
     if not scenario_file:
-        return {}, None
+        return {}, None, False
 
     scenario_path = Path(scenario_file)
     if not scenario_path.is_absolute():
@@ -158,13 +162,14 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None]:
 
     scenario = load_json(scenario_path)
     if not isinstance(scenario, dict):
-        return {}, None
+        return {}, None, False
 
     criteria = scenario.get("pass_criteria", {})
     if not isinstance(criteria, dict):
         criteria = {}
     name = scenario.get("name") if isinstance(scenario.get("name"), str) else None
-    return criteria, name
+    has_route = bool(scenario.get("route"))
+    return criteria, name, has_route
 
 
 def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
@@ -318,6 +323,8 @@ def sample_metrics(sample: dict) -> dict:
         "min_forward_gap": min_forward_gap,
         "min_abs_gap": min_abs_gap,
         "obs_world": obs_world,
+        "driver_mode": str(metrics.get("driver_mode", "") or ""),
+        "route_lane": int(metrics.get("route_lane", 0) or 0),
     }
 
 
@@ -380,7 +387,7 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -478,6 +485,24 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if lane_change_count < required_lane_changes:
         failures.append(f"lane changes too few: {lane_change_count} < {required_lane_changes}")
 
+    # ── NOA (导航领航辅助) 功能校验 ──
+    # 场景定义了 route[] 时，模式层状态机预期能升级到 NOA 并按导航路线主动变道
+    # (见 skills/08_state_machine.md)。仅靠拓扑/频率检查发现不了"模式没升级"或
+    # "route_lane 从未被消费"这类功能性回归，因此单独校验驾驶模式序列。
+    driver_modes_seen = sorted({m["driver_mode"].split(":")[0] for m in series if m["driver_mode"]})
+    reached_noa = "NOA" in driver_modes_seen
+    route_lane_active = any(m["route_lane"] != 0 for m in series)
+    if has_noa_route:
+        if not reached_noa:
+            failures.append(
+                f"NOA scenario defines a navigation route but driving mode never reached NOA "
+                f"(modes observed: {driver_modes_seen or ['(none)']})"
+            )
+        if not route_lane_active:
+            warnings.append("NOA route defined but route_lane target was never set by planning")
+        if lane_change_count < 1:
+            warnings.append("NOA route defined but no lane change was observed during the run")
+
     steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:
         warnings.append(f"steer saturated often: {steer_saturation_ratio * 100:.0f}% samples")
@@ -573,6 +598,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "low_speed_ratio": low_speed_ratio,
         "stagnation_duration_s": stagnation_duration_s,
         "lane_change_count": lane_change_count,
+        "has_noa_route": has_noa_route,
+        "driver_modes_seen": driver_modes_seen,
+        "reached_noa": reached_noa,
+        "route_lane_active": route_lane_active,
         "steer_rate_rms_per_s": steer_rate_rms,
         "max_steer_rate_per_s": max_steer_rate,
         "steer_flip_rate_hz": steer_flip_rate,
@@ -603,14 +632,18 @@ def main() -> int:
         sample = load_json(args.json_file)
         samples = [sample] if sample else []
         returncode = 0
+        criteria, scenario_name, has_noa_route = load_scenario_criteria_from_pipeline()
     else:
         with pipeline_scenario_override(args.scenario):
             samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
+            # Read pass_criteria/route while the override is still active, otherwise
+            # the context manager's restore-on-exit would make this reflect the
+            # pre-override (default) scenario instead of the one just run.
+            criteria, scenario_name, has_noa_route = load_scenario_criteria_from_pipeline()
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
-    criteria, scenario_name = load_scenario_criteria_from_pipeline()
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name)
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():
