@@ -32,6 +32,7 @@
 #include <inttypes.h>
 
 #define FLOWENGINE_VERSION "1.0.0"
+#define FLOWCTL_MAX_TOPICS 64
 
 /* ── 帮助 ────────────────────────────────────────────────── */
 
@@ -121,8 +122,8 @@ static int cmd_list_topics(void) {
     printf("  %-30s %-8s %-10s %s\n", "─────", "───────", "───", "────");
 
     /* Primary: query FlowRegistry */
-    TopicMeta topics[64];
-    int n = flow_registry_list_topics(topics, 64);
+    TopicMeta topics[FLOWCTL_MAX_TOPICS];
+    int n = flow_registry_list_topics(topics, FLOWCTL_MAX_TOPICS);
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             printf("  %-30s 0x%08x  depth=%-3d %s%.0f Hz\n",
@@ -148,8 +149,8 @@ static int cmd_list_topics(void) {
 
     const char* p = buf;
     int tcount = 0;
-    char seen[64][64];
-    while ((p = strstr(p, "\"topic\":\"")) && tcount < 64) {
+    char seen[FLOWCTL_MAX_TOPICS][64];
+    while ((p = strstr(p, "\"topic\":\"")) && tcount < FLOWCTL_MAX_TOPICS) {
         p += 9; char tname[64] = {0}; int i = 0;
         while (*p && *p != '"' && i < 63) tname[i++] = *p++;
         /* Deduplicate */
