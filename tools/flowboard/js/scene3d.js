@@ -124,6 +124,7 @@ function _buildRoad(scene) {
       roadGroup.add(dash);
     }
   }
+
   scene.add(roadGroup);
   _roadGroup = roadGroup;
 }

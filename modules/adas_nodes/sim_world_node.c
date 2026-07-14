@@ -271,9 +271,15 @@ static void vehicle_tick(void) {
          * 直接走自行车模型积分，不覆盖 steer。 */
     } else {
         /* ── 无外部控制时使用内置车道保持 + 平滑变道轨迹 ── */
-        if (fabs(g.vehicle.lane_target - g.lc_target_y) > 0.1 && !g.lc_active) {
+        /* lane_target 是相对道路中心线的偏移（如 -1.75=左车道），
+         * 弯道时需加上 road_center_y(ego.x) 得到世界横向目标。 */
+        double road_c = road_center_y(g.vehicle.x, g.curve_start_x,
+                                      g.curve_length_m, g.curve_offset_m);
+        double lane_target_world = road_c + g.vehicle.lane_target;
+
+        if (fabs(lane_target_world - g.lc_target_y) > 0.1 && !g.lc_active) {
             g.lc_start_y  = g.vehicle.y;
-            g.lc_target_y = g.vehicle.lane_target;
+            g.lc_target_y = lane_target_world;
             g.lc_elapsed  = 0;
             g.lc_active   = 1;
         }
@@ -290,7 +296,7 @@ static void vehicle_tick(void) {
             double s = sin(t * M_PI / 2.0);
             y_desired = g.lc_start_y + (g.lc_target_y - g.lc_start_y) * s * s;
         } else {
-            y_desired = g.vehicle.lane_target;
+            y_desired = lane_target_world;
         }
 
         double y_err   = y_desired - g.vehicle.y;
