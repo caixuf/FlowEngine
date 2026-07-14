@@ -414,7 +414,9 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.cfg_max_speed         = 20.0;
     g.cfg_max_accel         = 4.0;
     g.cfg_ref_path_length   = 5000.0;
-    g.cfg_highway_speed_mps = 13.0;  /* 对应 pipeline 默认巡航速度附近 */
+    g.cfg_highway_speed_mps = 13.0;  /* 未提供 highway_speed_mps 参数时的兜底默认值，
+                                        需低于当前场景实际巡航速度才能触发 NP 升级；
+                                        pipeline.json 会显式覆盖为更贴近实际场景的值。 */
 
     if (params_json) {
         const char* p;
@@ -452,7 +454,9 @@ static int planning_init(MessageBus* bus, Transport* transport,
         ScenarioConfig* sc = scenario_load(g.scenario_file);
         if (sc) {
             g.route_count = sc->route_count;
-            memcpy(g.route, sc->route, sizeof(g.route));
+            /* sc 由 calloc 分配，未用槽位已清零；这里按实际 route_count 精确
+             * 拷贝，避免依赖 calloc 的清零语义。 */
+            memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
             scenario_free(sc);
             LOG_INFO("planning", "loaded %d NOA route step(s) from '%s'",
                      g.route_count, g.scenario_file);

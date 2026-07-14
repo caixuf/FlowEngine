@@ -428,13 +428,18 @@ extern const TransitionRule SM_TABLE_STANDARD[];
 #define SM_MODE_LP    80
 #define SM_MODE_NOA   84
 
+/** 模式 ID 之间的间距（= 子状态个数），SM_MODE_STATE/SM_MODE_OF/SM_SUB_OF
+ *  以及 state_machine.c 中的 statem_mode_name() 都依赖这个值，修改模式
+ *  常量的间距时务必同步这里。 */
+#define SM_MODE_SPACING 4
+
 /** 模式子状态（偏移量，mode_id + sub = 实际 StateId） */
 #define SM_SUB_READY    0   /**< 就绪：条件满足，等待激活 */
 #define SM_SUB_ACTIVE   1   /**< 激活：正在控制车辆 */
 #define SM_SUB_EXITING  2   /**< 退出中：交还控制权 */
 #define SM_SUB_FAULT    3   /**< 故障：功能不可用 */
 
-/** 构造完整状态 ID（mode 必须是 4 的倍数，见上方常量定义） */
+/** 构造完整状态 ID（mode 必须是 SM_MODE_SPACING 的倍数，见上方常量定义） */
 #define SM_MODE_STATE(mode, sub)  ((mode) + (sub))
 #define SM_MODE_OF(state)         ((state) & ~3)
 #define SM_SUB_OF(state)          ((state) & 3)

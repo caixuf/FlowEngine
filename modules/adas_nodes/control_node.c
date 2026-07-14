@@ -477,7 +477,10 @@ static void* control_thread(void* arg) {
          * planning 节点仅在 NOA 模式下才会下发非零 route_lane（见 planning_node.c
          * 的 "route_lane=" 字段）；这里与被动超车共用同一套安全检查
          * （rear/front gap、行人风险）和执行状态机，区别只是触发原因不是
-         * "前车太慢"而是"导航路线要求换道"（如提前变道以便驶出）。 */
+         * "前车太慢"而是"导航路线要求换道"（如提前变道以便驶出）。
+         * route_lane 与 committed_lane_side 使用相同的符号约定（-1 = y<0 一侧，
+         * +1 = y>0 一侧，见 scenario_loader.h 的 ScenarioRouteStep 注释），
+         * 可以直接比较，无需换算。 */
         int route_triggered = 0;
         if (!blocked && g.route_lane != 0 && g.route_lane != g.committed_lane_side &&
             g.lc_state == 0 && g.lc_cooldown <= 0.0) {

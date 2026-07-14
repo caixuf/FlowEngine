@@ -218,6 +218,10 @@ def pipeline_scenario_override(scenario_file: str | None):
         raise RuntimeError("sim_world node with params not found in config/pipeline.json")
     # planning is optional (older pipeline.json layouts may omit scenario_file support),
     # so only sim_world is required for the override to be considered successful.
+    if "planning" not in patched_nodes:
+        print("warning: planning node not patched with scenario_file (missing/malformed "
+              "params?) — NOA route-driven lane changes will not be exercised this run",
+              file=sys.stderr)
 
     try:
         PIPELINE_JSON.write_text(json.dumps(pipeline, indent=2, ensure_ascii=False) + "\n",
