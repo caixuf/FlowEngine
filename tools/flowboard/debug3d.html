@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FlowBoard — 3D Scene Debugger</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0d1117; color:#c9d1d9; font-family:'JetBrains Mono','SF Mono',monospace; font-size:12px; overflow:hidden; }
+  #layout { display:flex; height:100vh; }
+  #scene3d { flex:1; background:#070a0f; position:relative; overflow:hidden; }
+  #panel { width:340px; background:#161b22; border-left:1px solid #30363d; overflow-y:auto; padding:10px; flex-shrink:0; }
+  h3 { color:#58a6ff; font-size:11px; margin:10px 0 6px; padding-bottom:3px; border-bottom:1px solid #21262d; text-transform:uppercase; letter-spacing:1px; }
+  .row { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  label { min-width:70px; color:#8b949e; font-size:10px; }
+  input[type=range] { flex:1; height:4px; -webkit-appearance:none; background:#21262d; border-radius:2px; outline:none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:#58a6ff; cursor:pointer; }
+  .val { min-width:50px; text-align:right; color:#58a6ff; font-size:10px; }
+  button { background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:4px; padding:4px 10px; font-size:10px; cursor:pointer; font-family:inherit; }
+  button:hover { background:#30363d; }
+  button.primary { background:#1f6feb; border-color:#1f6feb; color:#fff; }
+  button.primary:hover { background:#388bfd; }
+  button.danger { background:#da3633; border-color:#da3633; color:#fff; }
+  .btn-row { display:flex; gap:4px; flex-wrap:wrap; margin:4px 0; }
+  .info { background:#0d1117; border:1px solid #21262d; border-radius:4px; padding:6px 8px; font-size:10px; color:#8b949e; margin:4px 0; line-height:1.6; }
+  .info b { color:#58a6ff; }
+  .info .ok { color:#3fb950; }
+  .info .err { color:#f85149; }
+  #obs-list { max-height:160px; overflow-y:auto; }
+  .obs-item { display:flex; align-items:center; gap:4px; padding:3px 4px; margin:2px 0; background:#0d1117; border-radius:3px; font-size:10px; }
+  .obs-item .type { min-width:36px; font-weight:bold; }
+  .obs-item .pos { color:#8b949e; flex:1; }
+  select { background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:4px; padding:2px 4px; font-size:10px; font-family:inherit; }
+  #fps { position:absolute; top:8px; right:8px; background:rgba(0,0,0,0.7); padding:4px 8px; border-radius:4px; font-size:10px; color:#3fb950; z-index:10; }
+  #diag { position:absolute; bottom:8px; left:8px; right:8px; background:rgba(0,0,0,0.8); padding:4px 8px; border-radius:4px; font-size:10px; color:#f0a0a0; max-height:60px; overflow-y:auto; display:none; }
+</style>
+</head>
+<body>
+<div id="layout">
+  <div id="scene3d">
+    <div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#8b949e">
+      <div style="font-size:32px; margin-bottom:8px">🎬</div>
+      <div>Initializing 3D scene...</div>
+    </div>
+    <div id="fps">FPS: --</div>
+    <div id="diag"></div>
+  </div>
+
+  <div id="panel">
+    <h3>3D Scene Debugger</h3>
+    <div class="info" id="status-info">Status: <span id="scene-status">loading...</span></div>
+
+    <h3>Ego Vehicle</h3>
+    <div class="row">
+      <label>X (m)</label>
+      <input type="range" id="ego-x" min="0" max="500" value="0" step="0.5">
+      <span class="val" id="ego-x-v">0</span>
+    </div>
+    <div class="row">
+      <label>Y/Lane (m)</label>
+      <input type="range" id="ego-y" min="-5" max="5" value="0" step="0.1">
+      <span class="val" id="ego-y-v">0</span>
+    </div>
+    <div class="row">
+      <label>Speed (m/s)</label>
+      <input type="range" id="ego-speed" min="0" max="40" value="15" step="0.5">
+      <span class="val" id="ego-speed-v">15</span>
+    </div>
+    <div class="row">
+      <label>Heading (rad)</label>
+      <input type="range" id="ego-heading" min="-3.14" max="3.14" value="0" step="0.01">
+      <span class="val" id="ego-heading-v">0</span>
+    </div>
+    <div class="btn-row">
+      <button onclick="toggleAutoDrive()" id="drive-btn" class="primary">▶ Auto Drive</button>
+      <button onclick="resetEgo()">Reset</button>
+    </div>
+
+    <h3>Chase Camera</h3>
+    <div class="row">
+      <label>Back (m)</label>
+      <input type="range" id="cam-back" min="10" max="50" value="22" step="1">
+      <span class="val" id="cam-back-v">22</span>
+    </div>
+    <div class="row">
+      <label>Height (m)</label>
+      <input type="range" id="cam-height" min="3" max="30" value="11" step="1">
+      <span class="val" id="cam-height-v">11</span>
+    </div>
+    <div class="row">
+      <label>Side (m)</label>
+      <input type="range" id="cam-side" min="0" max="15" value="6" step="1">
+      <span class="val" id="cam-side-v">6</span>
+    </div>
+    <div class="row">
+      <label>Lerp</label>
+      <input type="range" id="cam-lerp" min="0.02" max="0.5" value="0.08" step="0.01">
+      <span class="val" id="cam-lerp-v">0.08</span>
+    </div>
+    <div class="btn-row">
+      <button onclick="toggleFreeCam()" id="freecam-btn">Free Cam</button>
+      <button onclick="resetCam()">Reset Cam</button>
+    </div>
+
+    <h3>Obstacles</h3>
+    <div class="btn-row">
+      <select id="obs-type">
+        <option value="car">Car</option>
+        <option value="truck">Truck</option>
+        <option value="pedestrian">Pedestrian</option>
+        <option value="cyclist">Cyclist</option>
+      </select>
+      <button onclick="addObstacle()">+ Add</button>
+      <button onclick="clearObstacles()" class="danger">Clear</button>
+    </div>
+    <div id="obs-list"></div>
+
+    <h3>LiDAR Points</h3>
+    <div class="btn-row">
+      <button onclick="addLidar(50)">+50 pts</button>
+      <button onclick="addLidar(200)">+200 pts</button>
+      <button onclick="clearLidar()" class="danger">Clear</button>
+    </div>
+    <div class="info" id="lidar-info">Points: <b id="lidar-count">0</b></div>
+
+    <h3>Road Curve</h3>
+    <div class="row">
+      <label>Start X (m)</label>
+      <input type="range" id="curve-start" min="0" max="500" value="50" step="5">
+      <span class="val" id="curve-start-v">50</span>
+    </div>
+    <div class="row">
+      <label>Length (m)</label>
+      <input type="range" id="curve-len" min="0" max="500" value="100" step="5">
+      <span class="val" id="curve-len-v">100</span>
+    </div>
+    <div class="row">
+      <label>Offset (m)</label>
+      <input type="range" id="curve-off" min="-20" max="20" value="5" step="0.5">
+      <span class="val" id="curve-off-v">5</span>
+    </div>
+    <div class="btn-row">
+      <button onclick="applyCurve()" class="primary">Apply Curve</button>
+      <button onclick="clearCurve()">Clear Curve</button>
+    </div>
+
+    <h3>Render Options</h3>
+    <div class="row">
+      <label>Car Bounce</label>
+      <input type="checkbox" id="opt-bounce" checked>
+    </div>
+    <div class="row">
+      <label>Wireframe</label>
+      <input type="checkbox" id="opt-wire" onchange="toggleWireframe()">
+    </div>
+    <div class="row">
+      <label>Show Axes</label>
+      <input type="checkbox" id="opt-axes" onchange="toggleAxes()">
+    </div>
+    <div class="row">
+      <label>Fog</label>
+      <input type="checkbox" id="opt-fog" checked onchange="toggleFog()">
+    </div>
+
+    <h3>Debug Info</h3>
+    <div class="info" id="debug-info">
+      Ego: <b id="dbg-ego">--</b><br>
+      Camera: <b id="dbg-cam">--</b><br>
+      Obstacles: <b id="dbg-obs">0</b><br>
+      GL: <b id="dbg-gl">--</b>
+    </div>
+
+    <h3>Actions</h3>
+    <div class="btn-row">
+      <button onclick="reloadScene()" class="danger">Rebuild Scene</button>
+      <button onclick="exportState()">Export State</button>
+    </div>
+  </div>
+</div>
+
+<script src="/tools/three.min.js"></script>
+<script type="module">
+  import { init3DScene, resize3D, update3D } from './js/scene3d.js';
+  import { initDeadReckon, _dr } from './js/deadreckon.js';
+  import { safeCall, reportDiag } from './js/utils.js';
+
+  // ── Mock topoData ──
+  window.topoData = {
+    metrics: {
+      vehicle: { speed: 15, x: 0, y: 0, target_speed: 20, throttle: 0.6, brake: 0, error: 0 },
+      scene: {
+        ego: { x: 0, y: 0, heading: 0, speed: 15 },
+        obstacles: [],
+        lidar: [],
+        road: null
+      }
+    }
+  };
+
+  // ── State ──
+  var autoDrive = false;
+  var freeCam = false;
+  var axesHelper = null;
+
+  // ── Camera overrides → window._debugCam (read by scene3d.js _renderFrame) ──
+  var _camOverrides = { back: 22, height: 11, side: 6, lerp: 0.08 };
+  window._debugCam = _camOverrides;
+
+  ['cam-back','cam-height','cam-side','cam-lerp'].forEach(function(id) {
+    var el = document.getElementById(id);
+    var key = id.replace('cam-','');
+    el.addEventListener('input', function() {
+      _camOverrides[key] = parseFloat(el.value);
+      document.getElementById(id + '-v').textContent = parseFloat(el.value).toFixed(2);
+    });
+  });
+
+  // ── Init ──
+  function init() {
+    init3DScene();
+
+    // Start monitor loop (scene3d.js has its own anim3D render loop,
+    // so we only handle autoDrive + debug info here — no _renderFrame call)
+    function loop() {
+      requestAnimationFrame(loop);
+      if (autoDrive) tickAutoDrive();
+      updateFPS();
+      updateDebugInfo();
+    }
+    loop();
+
+    // Start data tick (feeds dead reckon at 10Hz)
+    setInterval(function() {
+      safeCall('debug.update3D', update3D);
+    }, 100);
+
+    document.getElementById('scene-status').textContent = 'ready';
+    document.getElementById('scene-status').className = 'ok';
+  }
+
+  // ── FPS ──
+  var _fpsFrames = 0, _fpsLast = performance.now(), _fpsVal = 0;
+  function updateFPS() {
+    _fpsFrames++;
+    var now = performance.now();
+    if (now - _fpsLast > 500) {
+      _fpsVal = Math.round(_fpsFrames * 1000 / (now - _fpsLast));
+      _fpsFrames = 0; _fpsLast = now;
+      document.getElementById('fps').textContent = 'FPS: ' + _fpsVal;
+    }
+  }
+
+  // ── Sync sliders → topoData ──
+  function syncEgo() {
+    var x = parseFloat(document.getElementById('ego-x').value);
+    var y = parseFloat(document.getElementById('ego-y').value);
+    var speed = parseFloat(document.getElementById('ego-speed').value);
+    var heading = parseFloat(document.getElementById('ego-heading').value);
+
+    document.getElementById('ego-x-v').textContent = x.toFixed(1);
+    document.getElementById('ego-y-v').textContent = y.toFixed(1);
+    document.getElementById('ego-speed-v').textContent = speed.toFixed(1);
+    document.getElementById('ego-heading-v').textContent = heading.toFixed(2);
+
+    window.topoData.metrics.scene.ego = { x: x, y: y, heading: heading, speed: speed };
+    window.topoData.metrics.vehicle.speed = speed;
+    window.topoData.metrics.vehicle.x = x;
+    window.topoData.metrics.vehicle.y = y;
+  }
+
+  ['ego-x','ego-y','ego-speed','ego-heading'].forEach(function(id) {
+    document.getElementById(id).addEventListener('input', syncEgo);
+  });
+
+  // ── Auto drive ──
+  function tickAutoDrive() {
+    var ego = window.topoData.metrics.scene.ego;
+    ego.x += (ego.speed || 0) * 0.016;  // 60fps
+    window.topoData.metrics.vehicle.x = ego.x;
+    // Update slider
+    var sl = document.getElementById('ego-x');
+    if (ego.x > parseFloat(sl.max)) {
+      sl.max = Math.ceil(ego.x / 100) * 100 + 100;
+    }
+    sl.value = ego.x;
+    document.getElementById('ego-x-v').textContent = ego.x.toFixed(1);
+  }
+
+  window.toggleAutoDrive = function() {
+    autoDrive = !autoDrive;
+    var btn = document.getElementById('drive-btn');
+    btn.textContent = autoDrive ? '⏸ Stop Drive' : '▶ Auto Drive';
+    btn.className = autoDrive ? 'danger' : 'primary';
+  };
+
+  window.resetEgo = function() {
+    autoDrive = false;
+    document.getElementById('drive-btn').textContent = '▶ Auto Drive';
+    document.getElementById('drive-btn').className = 'primary';
+    document.getElementById('ego-x').value = 0;
+    document.getElementById('ego-y').value = 0;
+    document.getElementById('ego-heading').value = 0;
+    initDeadReckon();
+    syncEgo();
+  };
+
+  // ── Camera controls (via window._debugCam, read by scene3d.js) ──
+  // Already set up above — sliders write to _camOverrides which is window._debugCam
+
+  window.toggleFreeCam = function() {
+    freeCam = !freeCam;
+    document.getElementById('freecam-btn').textContent = freeCam ? 'Exit Free' : 'Free Cam';
+    // Toggle debug cam: when free, stop chasing (set extreme values)
+    if (freeCam) {
+      window._debugCam = null;  // fall back to scene3d defaults
+    } else {
+      window._debugCam = _camOverrides;
+    }
+  };
+
+  window.resetCam = function() {
+    document.getElementById('cam-back').value = 22;
+    document.getElementById('cam-height').value = 11;
+    document.getElementById('cam-side').value = 6;
+    document.getElementById('cam-lerp').value = 0.08;
+    _camOverrides = { back: 22, height: 11, side: 6, lerp: 0.08 };
+    ['cam-back','cam-height','cam-side','cam-lerp'].forEach(function(id) {
+      var key = id.replace('cam-','');
+      document.getElementById(id + '-v').textContent = _camOverrides[key].toFixed(2);
+    });
+  };
+
+  // ── Obstacles ──
+  var _obsId = 0;
+
+  window.addObstacle = function() {
+    var type = document.getElementById('obs-type').value;
+    var ego = window.topoData.metrics.scene.ego;
+    var obs = window.topoData.metrics.scene.obstacles;
+    var ahead = 20 + Math.random() * 40;
+    var lane = (Math.random() > 0.5 ? 1 : -1) * 1.75;
+    obs.push({
+      x: ahead,
+      y: lane,
+      vx: type === 'pedestrian' ? 0 : (Math.random() - 0.3) * 5,
+      vy: 0,
+      len: type === 'truck' ? 8 : type === 'pedestrian' ? 0.5 : 4,
+      wid: type === 'pedestrian' ? 0.5 : 2,
+      type: type,
+      _id: ++_obsId
+    });
+    renderObsList();
+  };
+
+  window.clearObstacles = function() {
+    window.topoData.metrics.scene.obstacles = [];
+    renderObsList();
+  };
+
+  window.removeObs = function(id) {
+    var obs = window.topoData.metrics.scene.obstacles;
+    var idx = obs.findIndex(function(o) { return o._id === id; });
+    if (idx >= 0) obs.splice(idx, 1);
+    renderObsList();
+  };
+
+  function renderObsList() {
+    var obs = window.topoData.metrics.scene.obstacles;
+    var html = obs.map(function(o) {
+      var col = { car:'#ff9944', truck:'#ff4422', pedestrian:'#44ee88', cyclist:'#44ccff' }[o.type] || '#aaa';
+      return '<div class="obs-item">' +
+        '<span class="type" style="color:' + col + '">' + o.type.toUpperCase() + '</span>' +
+        '<span class="pos">x:' + o.x.toFixed(1) + ' y:' + o.y.toFixed(1) + ' vx:' + (o.vx||0).toFixed(1) + '</span>' +
+        '<button onclick="removeObs(' + o._id + ')" class="danger" style="padding:1px 5px;font-size:9px">✕</button>' +
+        '</div>';
+    }).join('');
+    document.getElementById('obs-list').innerHTML = html || '<div style="color:#484f58;font-size:10px;padding:4px">No obstacles</div>';
+  }
+
+  // ── LiDAR ──
+  window.addLidar = function(n) {
+    var lidar = window.topoData.metrics.scene.lidar;
+    for (var i = 0; i < n; i++) {
+      lidar.push([
+        5 + Math.random() * 60,          // x (forward)
+        (Math.random() - 0.5) * 14,      // y (lateral)
+        Math.random() * 3                // z (height)
+      ]);
+    }
+    if (lidar.length > 300) lidar.splice(0, lidar.length - 300);
+    document.getElementById('lidar-count').textContent = lidar.length;
+  };
+
+  window.clearLidar = function() {
+    window.topoData.metrics.scene.lidar = [];
+    document.getElementById('lidar-count').textContent = '0';
+  };
+
+  // ── Road curve ──
+  // Track whether a curve is currently applied (vertex deformation is destructive)
+  var _curveApplied = false;
+
+  ['curve-start','curve-len','curve-off'].forEach(function(id) {
+    var el = document.getElementById(id);
+    el.addEventListener('input', function() {
+      document.getElementById(id + '-v').textContent = parseFloat(el.value).toFixed(1);
+    });
+  });
+
+  window.applyCurve = function() {
+    var sx = parseFloat(document.getElementById('curve-start').value);
+    var len = parseFloat(document.getElementById('curve-len').value);
+    var off = parseFloat(document.getElementById('curve-off').value);
+    // If a curve was already applied, rebuild first (deformation is cumulative)
+    if (_curveApplied) {
+      window.reloadScene();
+    }
+    window.topoData.metrics.scene.road = {
+      curve_start_x: sx,
+      curve_length_m: len,
+      curve_offset_m: off
+    };
+    _curveApplied = true;
+    console.log('[debug3d] Curve applied: start=' + sx + ' len=' + len + ' off=' + off + (_curveApplied ? ' (rebuilt)' : ''));
+  };
+
+  window.clearCurve = function() {
+    window.topoData.metrics.scene.road = { curve_start_x: 0, curve_length_m: 0, curve_offset_m: 0 };
+    document.getElementById('curve-len').value = 0;
+    document.getElementById('curve-len-v').textContent = '0';
+    // Curve deformation is destructive (vertex-level), must rebuild to undo
+    window.reloadScene();
+    _curveApplied = false;
+    console.log('[debug3d] Curve cleared (scene rebuilt)');
+  };
+
+  // ── Render options ──
+  window.toggleWireframe = function() {
+    var wf = document.getElementById('opt-wire').checked;
+    var sc = window.scene3d;
+    if (!sc) return;
+    sc.traverse(function(child) {
+      if (child.isMesh && child.material) {
+        child.material.wireframe = wf;
+      }
+    });
+  };
+
+  window.toggleAxes = function() {
+    var show = document.getElementById('opt-axes').checked;
+    var sc = window.scene3d;
+    if (show && !axesHelper && sc) {
+      axesHelper = new THREE.AxesHelper(30);
+      sc.add(axesHelper);
+    } else if (!show && axesHelper && sc) {
+      sc.remove(axesHelper);
+      axesHelper = null;
+    }
+  };
+
+  window.toggleFog = function() {
+    var sc = window.scene3d;
+    if (!sc) return;
+    var fogOn = document.getElementById('opt-fog').checked;
+    sc.fog = fogOn ? new THREE.Fog(0x334466, 80, 350) : null;
+  };
+
+  // ── Reload ──
+  window.reloadScene = function() {
+    var el = document.getElementById('scene3d');
+    Array.from(el.querySelectorAll('canvas')).forEach(function(c) { c.remove(); });
+    var msg = document.getElementById('scene3d-msg');
+    if (!msg) {
+      msg = document.createElement('div');
+      msg.id = 'scene3d-msg';
+      msg.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:#8b949e';
+      msg.innerHTML = '<div style="font-size:32px;margin-bottom:8px">🎬</div><div>Rebuilding...</div>';
+      el.appendChild(msg);
+    } else {
+      msg.style.display = '';
+    }
+    initDeadReckon();
+    init3DScene();
+    _curveApplied = false;
+    console.log('[debug3d] Scene rebuilt');
+  };
+
+  window.exportState = function() {
+    var state = {
+      ego: window.topoData.metrics.scene.ego,
+      obstacles: window.topoData.metrics.scene.obstacles,
+      lidar_count: window.topoData.metrics.scene.lidar.length,
+      road: window.topoData.metrics.scene.road,
+      camera: _camOverrides
+    };
+    var json = JSON.stringify(state, null, 2);
+    console.log('[debug3d] State:\n' + json);
+    // Copy to clipboard
+    navigator.clipboard.writeText(json).then(function() {
+      console.log('[debug3d] State copied to clipboard');
+    }).catch(function() {});
+  };
+
+  // ── Debug info ──
+  function updateDebugInfo() {
+    var ego = _dr;
+    document.getElementById('dbg-ego').textContent =
+      'smooth(' + ego.smoothX.toFixed(1) + ', ' + ego.smoothZ.toFixed(1) + ') ' +
+      'target(' + ego.targetX.toFixed(1) + ', ' + ego.targetZ.toFixed(1) + ') ' +
+      'spd=' + ego.lastSpeed.toFixed(1);
+
+    var cam = window._camera3d;
+    if (cam) {
+      document.getElementById('dbg-cam').textContent =
+        'pos(' + cam.position.x.toFixed(1) + ',' + cam.position.y.toFixed(1) + ',' + cam.position.z.toFixed(1) + ')';
+    }
+
+    document.getElementById('dbg-obs').textContent = window.topoData.metrics.scene.obstacles.length;
+
+    var rdr = window._renderer3d;
+    var gl = rdr && rdr.getContext && rdr.getContext();
+    if (gl) {
+      var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      var renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'unknown';
+      document.getElementById('dbg-gl').textContent = renderer.substring(0, 40);
+    }
+  }
+
+  // ── Resize ──
+  window.addEventListener('resize', function() { resize3D(); });
+
+  // ── Keyboard shortcuts ──
+  document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT') return;
+    switch(e.key) {
+      case ' ': e.preventDefault(); window.toggleAutoDrive(); break;
+      case 'r': case 'R': window.resetEgo(); break;
+      case 'o': window.addObstacle(); break;
+      case 'l': window.addLidar(50); break;
+      case 'c': window.clearObstacles(); break;
+      case 'Escape': window.resetCam(); break;
+    }
+  });
+
+  // ── Stub for scene3d.js's init2DFallback call on context loss ──
+  window.init2DFallback = function() {
+    console.warn('[debug3d] WebGL context lost — 2D fallback not available in debugger');
+  };
+
+  // ── Boot ──
+  init();
+</script>
+</body>
+</html>
