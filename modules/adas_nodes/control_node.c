@@ -13,6 +13,8 @@
 #include "logger.h"
 #include "param_registry.h"
 #include "state_machine.h"
+#include "scenario_loader.h"
+#include "road_geometry.h"
 #include "adas_msgs_gen.h"
 
 #include <stdlib.h>
@@ -133,6 +135,12 @@ static struct {
     /* 配置参数 */
     double cfg_kp, cfg_ki, cfg_kd;
     double cfg_cruise_speed;
+
+    /* 场景文件路径 + 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道） */
+    char   scenario_file[256];
+    double curve_start_x;
+    double curve_length_m;
+    double curve_offset_m;
 } g;
 
 static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_mps2) {
@@ -383,39 +391,42 @@ static void* control_thread(void* arg) {
 
         if (g.lc_cooldown > 0.0) g.lc_cooldown -= CONTROL_DT_S;
 
+        /* 道路中心线在当前 ego_x 处的横向偏移（弯道禁用时恒为 0，下面所有
+         * "相对道路中心"的判断与之前的绝对 y 判断完全等价）。 */
+        double road_c = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
         double road_center_limit = g.lane_width - 1.0;
         double half_lane = g.lane_width * 0.5;
 
         /* ── 车道判定加迟滞: 使用"已提交车道", 只有 ego_y 明确越过中心线
          *    ±LANE_HYSTERESIS_M 才切换, 避免 y≈0 处目标车道每帧翻转的抖振 ── */
         if (g.committed_lane_side == 0) {
-            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
-        } else if (g.committed_lane_side < 0 && g.ego_y > LANE_HYSTERESIS_M) {
+            g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
+        } else if (g.committed_lane_side < 0 && g.ego_y - road_c > LANE_HYSTERESIS_M) {
             g.committed_lane_side = 1;
-        } else if (g.committed_lane_side > 0 && g.ego_y < -LANE_HYSTERESIS_M) {
+        } else if (g.committed_lane_side > 0 && g.ego_y - road_c < -LANE_HYSTERESIS_M) {
             g.committed_lane_side = -1;
         }
-        double cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
-        double adjacent_lane_y = -cruise_lane_y;
-        if (fabs(g.ego_y) > road_center_limit - 0.4) {
-            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
-            cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
-            adjacent_lane_y = -cruise_lane_y;
+        double cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
+        double adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
+        if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
+            g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
+            cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
+            adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
             g.lc_state = 2;
             g.lc_timer = 0.0;
         }
 
         /* ── 死锁恢复: 车长时间近乎静止且横向卡在车道线附近 (骑线不动) 时,
          *    强制收敛到最近车道中心并复位变道状态机, 打破 chatter/死锁 ── */
-        if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y) < STUCK_LATERAL_M) {
+        if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y - road_c) < STUCK_LATERAL_M) {
             g.stuck_timer += CONTROL_DT_S;
         } else {
             g.stuck_timer = 0.0;
         }
         if (g.stuck_timer > STUCK_RECOVER_S) {
-            g.committed_lane_side = (g.ego_y < 0.0) ? -1 : 1;
-            cruise_lane_y = (g.committed_lane_side < 0) ? -half_lane : half_lane;
-            adjacent_lane_y = -cruise_lane_y;
+            g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
+            cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
+            adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
             g.lc_state     = 0;
             g.lc_attempted = 0;
             g.lc_cooldown  = 0.0;
@@ -509,12 +520,12 @@ static void* control_thread(void* arg) {
 
         /* ── 自适应变道状态机 ── */
         double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
-        if (fabs(g.ego_y) > road_center_limit - 0.4) {
-            effective_target_y = (g.ego_y < 0.0) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+        if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
+            effective_target_y = (g.ego_y < road_c) ? road_c - g.lane_width * 0.5 : road_c + g.lane_width * 0.5;
             if (acc_target > 6.0) acc_target = 6.0;
         }
-        if (effective_target_y > g.lane_width * 0.5) effective_target_y = g.lane_width * 0.5;
-        if (effective_target_y < -g.lane_width * 0.5) effective_target_y = -g.lane_width * 0.5;
+        if (effective_target_y > road_c + g.lane_width * 0.5) effective_target_y = road_c + g.lane_width * 0.5;
+        if (effective_target_y < road_c - g.lane_width * 0.5) effective_target_y = road_c - g.lane_width * 0.5;
 
         if (blocked && g.lc_state == 0) {
             g.lc_timer += CONTROL_DT_S;
@@ -549,9 +560,10 @@ static void* control_thread(void* arg) {
         if (g.lc_state == 2) {
             g.lc_wait += CONTROL_DT_S;
             if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
+                g.lc_state     = 0;  /* 允许后续再次评估变道触发条件 (line 463/486 要求 lc_state==0) */
                 g.lc_attempted = 0;
-                g.lc_cooldown = 3.0;
-                g.lc_wait = 0.0;
+                g.lc_cooldown  = 3.0;
+                g.lc_wait      = 0.0;
             }
         }
 
@@ -610,7 +622,7 @@ static void* control_thread(void* arg) {
 
         /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。 */
         if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-            fabs(g.ego_y) <= road_center_limit - 0.4) {
+            fabs(g.ego_y - road_c) <= road_center_limit - 0.4) {
             throttle = 0.15;
             brake    = 0.0;
             mode     = "SPEED_ZERO_RECOVERY";
@@ -625,7 +637,7 @@ static void* control_thread(void* arg) {
         /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
         double steer = 0.0;
         double lat_error = effective_target_y - g.ego_y;
-        if (fabs(g.ego_y) > road_center_limit - 0.4) {
+        if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
             double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
             steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
             /* 低速时给少许油门使自行车模型能横向移动回车道中心，
@@ -643,9 +655,14 @@ static void* control_thread(void* arg) {
         } else {
             /* ── Stanley 式横向控制（收敛，不自激） ──
              * cross-track 项: atan2(k*e, v) 随速度自然衰减 → 高速小幅打方向;
-             * heading 项: lat_kd_heading 阻尼抑制航向偏差, 避免极限环振荡。 */
+             * heading 项: lat_kd_heading 阻尼抑制航向偏差, 避免极限环振荡。
+             * 弯道时以道路中心线切线航向为参考 (road_center_heading), 而非
+             * 固定的全局航向 0 —— 否则车辆在弯道中会持续"顶"航向阻尼项,
+             * 无法跟随弯道 (curve_length_m<=0 时该函数恒返回 0，行为不变)。 */
+            double road_heading = road_center_heading(g.ego_x, g.curve_start_x,
+                                                        g.curve_length_m, g.curve_offset_m);
             double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
-            double heading_term = g.lat_kd_heading * g.ego_heading;
+            double heading_term = g.lat_kd_heading * (g.ego_heading - road_heading);
             steer = cte_term - heading_term;
             double steer_limit = steer_limit_for_speed(g.current_speed, g.lc_state == 1 ? 2.8 : 1.4);
             if (steer >  steer_limit) steer =  steer_limit;
@@ -761,7 +778,32 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"lat_kp\":")))          sscanf(p + 9, "%lf", &g.lat_kp);
         if ((p = strstr(params_json, "\"lat_kd_heading\":")))  sscanf(p + 17, "%lf", &g.lat_kd_heading);
         if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":"))) sscanf(p + 32, "%lf", &g.blocked_timeout_s);
+        if ((p = strstr(params_json, "\"scenario_file\":"))) {
+            const char* start = strchr(p + 16, '"');
+            if (start) {
+                start++;
+                const char* end = strchr(start, '"');
+                if (end) {
+                    size_t len = (size_t)(end - start);
+                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
+                    memcpy(g.scenario_file, start, len);
+                    g.scenario_file[len] = '\0';
+                }
+            }
+        }
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
+    }
+
+    /* 道路弯道几何（可选）：从场景文件加载，缺省全为 0 = 直道，
+     * 与 sim_world_node/planning_node 保持一致（三方共享同一份中心线）。 */
+    if (g.scenario_file[0] != '\0') {
+        ScenarioConfig* sc = scenario_load(g.scenario_file);
+        if (sc) {
+            g.curve_start_x  = sc->road.curve_start_x;
+            g.curve_length_m = sc->road.curve_length_m;
+            g.curve_offset_m = sc->road.curve_offset_m;
+            scenario_free(sc);
+        }
     }
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);

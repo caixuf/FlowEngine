@@ -1,0 +1,50 @@
+{
+  "name": "curve_road",
+  "description": "高速公路 S 形弯道：道路中心线在 x=150..410m 区间平滑偏移 9m，考察车道居中/横向控制在弯道下的跟随能力",
+  "random_seed": 91,
+  "duration_s": 70.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 12.0
+  },
+  "road": {
+    "curve_start_x": 150.0,
+    "curve_length_m": 260.0,
+    "curve_offset_m": 9.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "car",
+      "x": 60.0,  "y": -1.75,
+      "vx": 8.0,  "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "弯道前方同车道慢车，跟随弯道行驶（curve-follow）"
+    },
+    {
+      "id": 1,
+      "type": "car",
+      "x": 260.0, "y": 1.75,
+      "vx": 10.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "弯道内邻道车辆，随中心线偏移"
+    },
+    {
+      "id": 2,
+      "type": "car",
+      "x": 420.0, "y": -1.75,
+      "vx": 7.0,  "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "弯道后直道慢车，触发变道"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 70.0,
+    "min_avg_speed_mps": 6.0,
+    "min_distance_m": 250.0
+  }
+}

@@ -18,6 +18,7 @@
 #include "node_plugin.h"
 #include "clock_service.h"
 #include "scenario_loader.h"
+#include "road_geometry.h"
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
@@ -61,6 +62,7 @@ typedef struct {
     double len, wid;
     int    ped_crossed_center;
     int    ped_parked;
+    double lane_offset;  /**< y 相对道路中心线的横向偏移（弯道时用于跟随中心线） */
 } SimObstacle;
 
 /* ── 车辆状态 ────────────────────────────────────────────────── */
@@ -115,6 +117,11 @@ static struct {
     double target_speed;
     double lane_width;
 
+    /* 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道，行为不变） */
+    double curve_start_x;
+    double curve_length_m;
+    double curve_offset_m;
+
     /* P0.1 确定性时钟：固定随机种子 */
     uint32_t random_seed;
 
@@ -157,6 +164,10 @@ static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
         g.obstacles[i].wid = a->wid;
         g.obstacles[i].ped_crossed_center = 0;
         g.obstacles[i].ped_parked = 0;
+        /* 弯道跟随车道偏移：相对当前道路中心线的横向偏移（禁用弯道时中心线
+         * 恒为 0，此值即等于 a->y，与既有行为完全一致）。 */
+        g.obstacles[i].lane_offset = a->y - road_center_y(a->x, g.curve_start_x,
+                                                            g.curve_length_m, g.curve_offset_m);
     }
 }
 
@@ -208,6 +219,14 @@ static void obstacles_tick(void) {
             if (rel >  220.0) o->x = g.vehicle.x + 150.0;
         } else {
             if (rel < -100.0) o->x = g.vehicle.x + 500.0;
+        }
+
+        /* 弯道跟随：仅对沿车道纵向行驶的车辆(vy==0)生效，横穿/路口来车
+         * (vy!=0) 不受影响。curve_length_m<=0 时 road_center_y() 恒为 0，
+         * 该分支对既有直道场景是无操作（o->y 与之前完全一致）。 */
+        if (g.curve_length_m > 0.0 && o->vy == 0.0) {
+            o->y = road_center_y(o->x, g.curve_start_x, g.curve_length_m, g.curve_offset_m)
+                 + o->lane_offset;
         }
     }
 }
@@ -280,12 +299,15 @@ static void vehicle_tick(void) {
                          * tan(g.vehicle.steer) * DT_SEC;
     g.vehicle.x += g.vehicle.speed * DT_SEC * cos(g.vehicle.heading);
     g.vehicle.y += g.vehicle.speed * DT_SEC * sin(g.vehicle.heading);
-    if (g.vehicle.y > ROAD_CENTER_LIMIT_M) {
-        g.vehicle.y = ROAD_CENTER_LIMIT_M;
+    /* 道路边界钳制：相对当前道路中心线（弯道禁用时中心线恒为 0，
+     * 与之前的绝对钳制完全等价）。 */
+    double road_c = road_center_y(g.vehicle.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+    if (g.vehicle.y - road_c > ROAD_CENTER_LIMIT_M) {
+        g.vehicle.y = road_c + ROAD_CENTER_LIMIT_M;
         if (g.vehicle.heading > 0.0) g.vehicle.heading = 0.0;
         if (g.vehicle.speed > 6.0) g.vehicle.speed = 6.0;
-    } else if (g.vehicle.y < -ROAD_CENTER_LIMIT_M) {
-        g.vehicle.y = -ROAD_CENTER_LIMIT_M;
+    } else if (g.vehicle.y - road_c < -ROAD_CENTER_LIMIT_M) {
+        g.vehicle.y = road_c - ROAD_CENTER_LIMIT_M;
         if (g.vehicle.heading < 0.0) g.vehicle.heading = 0.0;
         if (g.vehicle.speed > 6.0) g.vehicle.speed = 6.0;
     }
@@ -306,7 +328,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
             g.vehicle.throttle     = bin.throttle;
             g.vehicle.brake        = bin.brake;
             g.vehicle.steer        = bin.steering;
-            g.vehicle.target_speed = 12.0;  /* default, not in ControlCmd */
+            g.vehicle.target_speed = g.target_speed;  /* use config value, not hardcoded */
             g.has_control_input    = 1;
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             g.last_control_cmd_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
@@ -563,6 +585,10 @@ static int sim_init(MessageBus* bus, Transport* transport,
      * 场景文件的种子优先于 params 里的种子（两者都有时以场景为准） */
     if (scenario) {
         g.random_seed = scenario->random_seed;
+        /* 道路弯道几何（可选）：缺省字段全为 0 = 直道，行为与之前完全一致 */
+        g.curve_start_x  = scenario->road.curve_start_x;
+        g.curve_length_m = scenario->road.curve_length_m;
+        g.curve_offset_m = scenario->road.curve_offset_m;
     }
 
     /* P0.1: 使用固定种子（保证确定性），在所有种子来源确定后只调用一次 */

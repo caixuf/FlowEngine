@@ -10,6 +10,7 @@
 #include "node_plugin.h"
 #include "state_machine.h"
 #include "scenario_loader.h"
+#include "road_geometry.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
 
@@ -78,6 +79,11 @@ static struct {
     double cfg_ref_path_length;
     double ref_path_start_x;
     double cfg_highway_speed_mps; /* CP->NP 升级所需的持续速度阈值 (m/s) */
+
+    /* 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道，行为不变） */
+    double curve_start_x;
+    double curve_length_m;
+    double curve_offset_m;
 
     int tid;  /* scheduler task id */
 } g;
@@ -157,7 +163,9 @@ static void update_reference_path(double start_x) {
     const int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
         wx[i] = start_x + (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
-        wy[i] = -1.75;
+        /* 弯道时参考路径跟随道路中心线；curve_length_m<=0 时 road_center_y()
+         * 恒为 0，与既有直线参考路径完全一致。 */
+        wy[i] = -1.75 + road_center_y(wx[i], g.curve_start_x, g.curve_length_m, g.curve_offset_m);
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
     g.ref_path_start_x = start_x;
@@ -457,6 +465,10 @@ static int planning_init(MessageBus* bus, Transport* transport,
             /* sc 由 calloc 分配，未用槽位已清零；这里按实际 route_count 精确
              * 拷贝，避免依赖 calloc 的清零语义。 */
             memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
+            /* 道路弯道几何（可选）：缺省全为 0 = 直道，行为与之前完全一致 */
+            g.curve_start_x  = sc->road.curve_start_x;
+            g.curve_length_m = sc->road.curve_length_m;
+            g.curve_offset_m = sc->road.curve_offset_m;
             scenario_free(sc);
             LOG_INFO("planning", "loaded %d NOA route step(s) from '%s'",
                      g.route_count, g.scenario_file);

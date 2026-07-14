@@ -28,7 +28,12 @@
  *   "route": [
  *     { "trigger_x": 200.0, "target_lane": 1,  "label": "prepare_exit" },
  *     { "trigger_x": 400.0, "target_lane": -1, "label": "return_main_lane" }
- *   ]
+ *   ],
+ *   "road": {
+ *     "curve_start_x": 300.0,
+ *     "curve_length_m": 200.0,
+ *     "curve_offset_m": 15.0
+ *   }
  * }
  *
  * route（可选）: 导航路线的主动变道指令序列，是 NOA（领航辅助）区别于
@@ -38,6 +43,12 @@
  *   target_lane  目标车道方向: -1 = ego 初始车道一侧 (世界坐标 y<0),
  *                +1 = 对侧相邻车道 (世界坐标 y>0)
  *   label        可读描述（可选，用于日志/可视化）
+ *
+ * road（可选）: 道路中心线弯道定义（见 road_geometry.h）。curve_length_m
+ * 缺省或 <=0 时视为直道（禁用），与不含 "road" 字段的既有场景完全等价。
+ *   curve_start_x   弯道起点（ego x 坐标, m）
+ *   curve_length_m  弯道纵向长度（m），0 = 禁用
+ *   curve_offset_m  弯道终点相对起点的横向偏移（m，可正可负）
  */
 
 #include <stdint.h>
@@ -80,6 +91,14 @@ typedef struct {
     char   label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */
 } ScenarioRouteStep;
 
+/* ── 道路几何（可选弯道定义, 见 road_geometry.h） ───────────── */
+
+typedef struct {
+    double curve_start_x;   /**< 弯道起点 x（m），默认 0 */
+    double curve_length_m;  /**< 弯道长度（m），<=0 = 禁用（直道） */
+    double curve_offset_m;  /**< 弯道终点横向偏移（m），默认 0 */
+} ScenarioRoad;
+
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
 typedef struct {
@@ -102,6 +121,7 @@ typedef struct {
     ScenarioCriteria criteria;
     ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS]; /**< 导航路线变道指令（可选，NOA 用） */
     int               route_count;
+    ScenarioRoad      road;    /**< 道路几何（可选弯道，默认全零 = 直道） */
 } ScenarioConfig;
 
 /**
