@@ -485,17 +485,23 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     low_speed_thresh = 6.0  # m/s, 低于此判为龟速
     low_speed_samples = sum(1 for s in speeds if s < low_speed_thresh)
     low_speed_ratio = low_speed_samples / max(1, len(speeds))
-    # 最长连续龟速区间
-    longest_stagnation = 0
-    current_stagnation = 0
-    for s in speeds:
+    # 最长连续龟速区间（按实际帧间 dt 累加，对非单调/异常 dt 跳过）
+    longest_stagnation = 0.0
+    current_stagnation = 0.0
+    prev_ts = None
+    for i, s in enumerate(speeds):
+        ts = timestamps[i] if i < len(timestamps) else 0.0
         if s < low_speed_thresh:
-            current_stagnation += 1
+            if prev_ts is not None:
+                dt = ts - prev_ts
+                if 0.0 < dt <= 2.0:
+                    current_stagnation += dt
             if current_stagnation > longest_stagnation:
                 longest_stagnation = current_stagnation
         else:
-            current_stagnation = 0
-    stagnation_duration_s = longest_stagnation * (samples[1].get("timestamp", 0) - samples[0].get("timestamp", 0)) if len(samples) >= 2 else 0.0
+            current_stagnation = 0.0
+        prev_ts = ts
+    stagnation_duration_s = longest_stagnation
 
     # ── 变道次数统计（基于 y 显著偏移） ──
     ys = [m["y"] for m in series]
@@ -559,7 +565,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 continue
             dx = obs["x"] - prev["x"]
             dy = obs["y"] - prev["y"]
-            npc_speed_spikes.append(math.hypot(dx, dy) / dt)
+            speed = math.hypot(dx, dy) / dt
+            # NPC respawn 时位置跳变会产生 500+ m/s 假速度，跳过
+            if speed > 50.0:
+                continue
+            npc_speed_spikes.append(speed)
             npc_lateral_spikes.append(abs(dy) / dt)
 
     yaw_rate_rms = math.sqrt(statistics.fmean([r * r for r in yaw_rates])) if yaw_rates else 0.0

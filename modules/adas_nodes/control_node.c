@@ -618,7 +618,7 @@ static void* control_thread(void* arg) {
 
         /* 检测变道完成 (横向偏差 < 0.3m) */
         if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < 0.3) {
-            g.committed_lane_side = (g.lc_target_y < 0.0) ? -1 : 1;
+            g.committed_lane_side = (g.lc_target_y < road_c) ? -1 : 1;
             g.lc_state = 2; g.lc_wait = 0;
             statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
             LOG_INFO("control", ">>> lane change complete");

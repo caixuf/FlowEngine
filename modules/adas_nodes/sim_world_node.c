@@ -45,7 +45,7 @@
 #define FREQUENCY_HZ       20.0
 #define DT_SEC             (1.0 / FREQUENCY_HZ)
 #define DT_US              ((uint64_t)(DT_SEC * 1e6))   /* 逻辑时钟步长（微秒） */
-#define ROAD_CENTER_LIMIT_M 2.5
+#define ROAD_CENTER_LIMIT_M 2.4  /* 路面半宽(3.5) - 车体半宽(1.0) - 安全余量(0.1) */
 
 /* Bytes reserved at the end of the vstate JSON buffer for the closing "}"
  * and any trailing characters.  Each obstacle entry is at most ~100 B;
@@ -164,10 +164,16 @@ static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
         g.obstacles[i].wid = a->wid;
         g.obstacles[i].ped_crossed_center = 0;
         g.obstacles[i].ped_parked = 0;
-        /* 弯道跟随车道偏移：相对当前道路中心线的横向偏移（禁用弯道时中心线
-         * 恒为 0，此值即等于 a->y，与既有行为完全一致）。 */
-        g.obstacles[i].lane_offset = a->y - road_center_y(a->x, g.curve_start_x,
-                                                            g.curve_length_m, g.curve_offset_m);
+        /* 场景文件的 y 是"相对道路中心线的车道偏移"（-1.75=左车道, +1.75=右车道），
+         * 与 ego.y 语义一致。沿车道行驶的车辆(vy==0)需加上当前 x 处的道路中心线
+         * 偏移得到绝对世界坐标；行人(vy!=0)的 y 是绝对坐标（横穿位置），不偏移。
+         * 无弯道时 road_center_y 恒为 0，lane_offset 即等于 a->y，完全向后兼容。 */
+        g.obstacles[i].lane_offset = a->y;
+        if (a->vy == 0.0) {
+            double road_c = road_center_y(a->x, g.curve_start_x,
+                                          g.curve_length_m, g.curve_offset_m);
+            g.obstacles[i].y = road_c + a->y;
+        }
     }
 }
 
@@ -491,7 +497,7 @@ static void* sim_thread(void* arg) {
          * tolerate missing keys (they already do via json_extract_double returning 0). */
         char vstate[2048];
         int voff = snprintf(vstate, sizeof(vstate),
-                 "{\"x\":%.2f,\"y\":%.2f,\"spd\":%.3f,\"hdg\":%.4f,"
+                 "{\"x\":%.4f,\"y\":%.4f,\"spd\":%.3f,\"hdg\":%.4f,"
                  "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
                  "\"t_us\":%" PRIu64 ",\"n_obs\":%d",
                  g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,

@@ -322,7 +322,7 @@ static void export_dashboard_json(void) {
     double steer = json_extract_double(g.latest_vehicle_state, "st");
 
     fprintf(jf, "\"scene\":{");
-    fprintf(jf, "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,"
+    fprintf(jf, "\"ego\":{\"x\":%.4f,\"y\":%.4f,\"heading\":%.3f,"
             "\"speed\":%.2f,\"steer\":%.3f},",
             ego_x, ego_y, hdg, spd, steer);
     fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
