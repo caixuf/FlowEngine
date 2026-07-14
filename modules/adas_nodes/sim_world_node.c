@@ -306,7 +306,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
             g.vehicle.throttle     = bin.throttle;
             g.vehicle.brake        = bin.brake;
             g.vehicle.steer        = bin.steering;
-            g.vehicle.target_speed = 12.0;  /* default, not in ControlCmd */
+            g.vehicle.target_speed = g.target_speed;  /* use config value, not hardcoded */
             g.has_control_input    = 1;
             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
             g.last_control_cmd_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
