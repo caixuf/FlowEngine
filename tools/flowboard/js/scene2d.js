@@ -12,7 +12,7 @@
 // window.switchSceneView, window.update2D, window._2d are set.
 
 import { safeCall, reportDiag } from './utils.js';
-import { _dr, _animT } from './deadreckon.js';
+import { _dr } from './deadreckon.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
 var _2d = {

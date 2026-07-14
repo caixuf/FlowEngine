@@ -5,7 +5,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, getColor } from './utils.js';
-import { initDeadReckon, updateDeadReckon, getDeadReckonState, _dr, _animT, _2d } from './deadreckon.js';
+import { initDeadReckon, updateDeadReckon, getDeadReckonState, _dr, _2d } from './deadreckon.js';
 
 const THREE = window.THREE;
 
@@ -38,6 +38,9 @@ let _glLost = false;
 
 /** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
 let _tmpV3 = null, _tmpScale = null;
+
+/** Animation time counter (incremented per frame) */
+let _animT = 0;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
 const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7 };
