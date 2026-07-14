@@ -12,9 +12,9 @@
 
 #include "transport.h"
 #include "error_codes.h"
+#include "logger.h"
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <arpa/inet.h>
@@ -23,7 +23,7 @@
 
 /* ── Topic 路由条目 ──────────────────────────────────────── */
 
-#define TRANSPORT_MAX_TOPICS 64
+#define TRANSPORT_MAX_TOPICS 128
 
 typedef struct {
     char        topic[MSG_BUS_MAX_TOPIC_LEN];
@@ -65,7 +65,11 @@ static TopicRoute* find_or_create_route(Transport* t, const char* topic) {
         if (strcmp(t->routes[i].topic, topic) == 0)
             return &t->routes[i];
     }
-    if (t->route_count >= TRANSPORT_MAX_TOPICS) return NULL;
+    if (t->route_count >= TRANSPORT_MAX_TOPICS) {
+        LOG_ERROR("transport", "route table full (%d); dropping topic '%s'",
+                  TRANSPORT_MAX_TOPICS, topic);
+        return NULL;
+    }
     TopicRoute* r = &t->routes[t->route_count++];
     memset(r, 0, sizeof(*r));
     snprintf(r->topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
@@ -139,8 +143,8 @@ Transport* transport_create(MessageBus* bus, DiscoveryManager* discovery,
         t->net_transport = net_transport_create("0.0.0.0", 0, bus, discovery);
     }
 
-    printf("[transport] created (policy=%d, bus=%p, discovery=%p)\n",
-           (int)policy, (void*)bus, (void*)discovery);
+    LOG_INFO("transport", "created (policy=%d, bus=%p, discovery=%p)",
+             (int)policy, (void*)bus, (void*)discovery);
     return t;
 }
 
@@ -163,7 +167,7 @@ void transport_destroy(Transport* t) {
 
     pthread_mutex_destroy(&t->mutex);
     free(t);
-    printf("[transport] destroyed\n");
+    LOG_INFO("transport", "destroyed");
 }
 
 int transport_start(Transport* t) {
@@ -178,10 +182,10 @@ int transport_start(Transport* t) {
     /* 自动创建 IPC 通道（根据 discovery 拓扑） */
     if (t->discovery && (t->policy == TRANSPORT_AUTO || t->policy == TRANSPORT_IPC)) {
         int created = discovery_create_ipc_channels(t->discovery, 32);
-        printf("[transport] auto-created %d IPC channels\n", created);
+        LOG_INFO("transport", "auto-created %d IPC channels", created);
     }
 
-    printf("[transport] started (routes=%d)\n", t->route_count);
+    LOG_INFO("transport", "started (routes=%d)", t->route_count);
     return 0;
 }
 
@@ -192,7 +196,7 @@ void transport_stop(Transport* t) {
     if (t->net_transport) {
         net_transport_stop(t->net_transport);
     }
-    printf("[transport] stopped\n");
+    LOG_INFO("transport", "stopped");
 }
 
 int transport_advertise(Transport* t, const char* topic, uint32_t type_id) {
@@ -218,8 +222,8 @@ int transport_advertise(Transport* t, const char* topic, uint32_t type_id) {
         discovery_advertise(t->discovery, topic, type_id, CAP_PUBLISHER, 0);
     }
 
-    printf("[transport] advertise '%s' (route=%d, type_id=0x%08x)\n",
-           topic, (int)r->route, type_id);
+    LOG_INFO("transport", "advertise '%s' (route=%d, type_id=0x%08x)",
+             topic, (int)r->route, type_id);
     return 0;
 }
 
@@ -301,12 +305,12 @@ int transport_subscribe(Transport* t, const char* topic,
             }
             ipc_channel_start(r->ipc_channel);
         } else {
-            printf("[transport] WARNING: IPC channel '%s' not available, falling back to bus\n",
-                   ch_name);
+            LOG_WARN("transport", "IPC channel '%s' not available, falling back to bus",
+                     ch_name);
         }
     }
 
-    printf("[transport] subscribe '%s' (route=%d)\n", topic, (int)r->route);
+    LOG_INFO("transport", "subscribe '%s' (route=%d)", topic, (int)r->route);
     return 0;
 }
 

@@ -84,7 +84,9 @@ static int cmd_list_tasks(void) {
                 int count = 0;
                 while (*p && *p != ']' && count < 20) {
                     const char* nm = strstr(p, "\"name\":\"");
-                    if (!nm || nm > strstr(p, "}]")) break;
+                    const char* end = strstr(p, "}]");
+                    if (!nm) break;
+                    if (end && nm > end) break;
                     nm += 8;
                     char name[64] = {0}, desc[256] = {0};
                     int i = 0; while (*nm && *nm != '"' && i < 63) name[i++] = *nm++;
@@ -146,16 +148,17 @@ static int cmd_list_topics(void) {
 
     const char* p = buf;
     int tcount = 0;
+    char seen[64][64];
     while ((p = strstr(p, "\"topic\":\"")) && tcount < 64) {
         p += 9; char tname[64] = {0}; int i = 0;
         while (*p && *p != '"' && i < 63) tname[i++] = *p++;
         /* Deduplicate */
         int dup = 0;
         for (int j = 0; j < tcount; j++) {
-            const char* prev = NULL;
-            /* Simple check by scanning backwards — just skip duplicates simply */
+            if (strcmp(seen[j], tname) == 0) { dup = 1; break; }
         }
         if (!dup) {
+            snprintf(seen[tcount], 64, "%s", tname);
             const char* fp2 = strstr(p, "\"freq\":");
             double freq = (fp2 && fp2 < p + 100) ? atof(fp2 + 7) : 0.0;
             printf("  %-30s %-8s %-10s %s%.1f Hz\n",
@@ -556,7 +559,9 @@ int main(int argc, char** argv) {
                 tp = strchr(tp, '[') + 1;
                 while (*tp && *tp != ']') {
                     const char* nm = strstr(tp, "\"name\":\"");
-                    if (!nm || nm > strstr(tp, "}]")) break;
+                    const char* end = strstr(tp, "}]");
+                    if (!nm) break;
+                    if (end && nm > end) break;
                     nm += 8; char name[64] = {0}; int i = 0;
                     while (*nm && *nm != '"' && i < 63) name[i++] = *nm++;
                     printf("  \"%s\" [fillcolor=\"#0d1117\", fontcolor=\"#c9d1d9\"];\n", name);

@@ -45,8 +45,8 @@
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
 
-#define MAX_NODES 16
-#define MAX_TOPICS_PER_NODE 8
+#define MAX_NODES 32
+#define MAX_TOPICS_PER_NODE 16
 typedef struct {
     char name[64];
     char library[256];
@@ -82,7 +82,12 @@ static int parse_pipeline(const char* path, int* stagger_ms_out) {
     *stagger_ms_out = 300;  /* default stagger */
 
     g_node_count = 0;
-    for (int i = 0; i < cfg->process_count && g_node_count < MAX_NODES; i++) {
+    for (int i = 0; i < cfg->process_count; i++) {
+        if (g_node_count >= MAX_NODES) {
+            LOG_WARN("launcher", "node limit reached (%d); skipping %d remaining process(es)",
+                     MAX_NODES, cfg->process_count - i);
+            break;
+        }
         ProcessConfig* pc = &cfg->processes[i];
         NodeDesc* nd = &g_nodes[g_node_count];
         memset(nd, 0, sizeof(*nd));
@@ -93,10 +98,22 @@ static int parse_pipeline(const char* path, int* stagger_ms_out) {
         snprintf(nd->library, sizeof(nd->library), "%s", pc->library_path);
 
         /* Map publish → outputs, subscribe → inputs (from node's perspective) */
-        for (int k = 0; k < pc->subscribe_count && nd->input_count < MAX_TOPICS_PER_NODE; k++)
+        for (int k = 0; k < pc->subscribe_count; k++) {
+            if (nd->input_count >= MAX_TOPICS_PER_NODE) {
+                LOG_WARN("launcher", "node '%s': input topic limit (%d) reached; skipping remaining",
+                         nd->name, MAX_TOPICS_PER_NODE);
+                break;
+            }
             snprintf(nd->inputs[nd->input_count++], 64, "%s", pc->subscribe[k].topic);
-        for (int k = 0; k < pc->publish_count && nd->output_count < MAX_TOPICS_PER_NODE; k++)
+        }
+        for (int k = 0; k < pc->publish_count; k++) {
+            if (nd->output_count >= MAX_TOPICS_PER_NODE) {
+                LOG_WARN("launcher", "node '%s': output topic limit (%d) reached; skipping remaining",
+                         nd->name, MAX_TOPICS_PER_NODE);
+                break;
+            }
             snprintf(nd->outputs[nd->output_count++], 64, "%s", pc->publish[k].topic);
+        }
 
         /* Copy params */
         if (pc->params[0])
