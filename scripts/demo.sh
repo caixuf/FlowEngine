@@ -31,7 +31,7 @@ REPLAY_FILE=""
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
-PIPELINE="$ROOT/config/pipeline.json"
+PIPELINE="${FLOW_PIPELINE:-$ROOT/config/pipeline.json}"
 JSON_FILE="/tmp/flow_topology.json"
 BAG_FILE="/tmp/flow_demo_$(date +%Y%m%d_%H%M%S).bag"
 

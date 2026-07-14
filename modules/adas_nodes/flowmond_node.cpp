@@ -45,6 +45,7 @@ static struct {
     int               port;
     char              bind_addr[64];
     char              html_path[512];
+    char              pipeline[512];
 } g;
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
@@ -66,6 +67,7 @@ static int flowmond_init(MessageBus* bus, Transport* transport,
     g.scheduler    = scheduler;
     g.port         = 8800;
     snprintf(g.bind_addr, sizeof(g.bind_addr), "127.0.0.1");
+    g.pipeline[0]  = '\0';
 
     /* 解析参数 */
     if (params_json) {
@@ -82,6 +84,18 @@ static int flowmond_init(MessageBus* bus, Transport* transport,
             } else if (vl > 0) {
                 snprintf(g.bind_addr, sizeof(g.bind_addr), "%s", val);
             }
+        }
+        if ((p = strstr(params_json, "\"pipeline\":"))) {
+            char val[256] = "";
+            sscanf(p + 11, "%255s", val);
+            size_t vl = strlen(val);
+            if (vl > 2 && val[0] == '"' && val[vl-1] == '"') {
+                val[vl-1] = '\0';
+                snprintf(g.pipeline, sizeof(g.pipeline), "%s", val + 1);
+            } else if (vl > 0) {
+                snprintf(g.pipeline, sizeof(g.pipeline), "%s", val);
+            }
+            if (g.pipeline[0]) setenv("FLOW_PIPELINE", g.pipeline, 1);
         }
     }
 
@@ -126,9 +140,11 @@ static int flowmond_init(MessageBus* bus, Transport* transport,
         return -1;
     }
 
-    LOG_INFO("flowmond", "initialized (port=%d, bind=%s, html=%s)",
+    LOG_INFO("flowmond", "initialized (port=%d, bind=%s, html=%s%s%s)",
              g.port, g.bind_addr,
-             g.html_path[0] ? g.html_path : "<embedded>");
+             g.html_path[0] ? g.html_path : "<embedded>",
+             g.pipeline[0] ? ", pipeline=" : "",
+             g.pipeline[0] ? g.pipeline : "");
     return 0;
 }
 

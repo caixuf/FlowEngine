@@ -7,6 +7,7 @@
  * NodePlugin 接口，编译为 libmonitor_node.so。
  */
 
+#define _GNU_SOURCE
 #include "node_plugin.h"
 #include "sysmonitor.h"
 #include "flow_registry.h"
@@ -71,6 +72,8 @@ static struct {
 
     /* 配置 */
     double frequency_hz;
+    double lane_width;
+    int    lane_count;
 } g;
 
 /* ── 订阅回调 ────────────────────────────────────────────────── */
@@ -325,7 +328,7 @@ static void export_dashboard_json(void) {
     fprintf(jf, "\"ego\":{\"x\":%.4f,\"y\":%.4f,\"heading\":%.3f,"
             "\"speed\":%.2f,\"steer\":%.3f},",
             ego_x, ego_y, hdg, spd, steer);
-    fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
+    fprintf(jf, "\"lane\":{\"width\":%.1f,\"count\":%d,\"center\":0.0},", g.lane_width, g.lane_count);
 
     /* 道路弯道几何（可选），从 sim_world_node 发布的 vehicle/state 中读取 */
     {
@@ -548,6 +551,8 @@ static int monitor_init(MessageBus* bus, Transport* transport,
 
     /* 解析参数 */
     g.frequency_hz = 10.0;
+    g.lane_width   = 3.5;
+    g.lane_count   = 2;
     if (params_json) {
         const char* p;
         if ((p = strstr(params_json, "\"state_file\":"))) {
@@ -562,6 +567,14 @@ static int monitor_init(MessageBus* bus, Transport* transport,
         }
         if ((p = strstr(params_json, "\"export_scene\":"))) {
             /* 当前始终导出 */
+        }
+        if ((p = strstr(params_json, "\"lane_width\":"))) {
+            sscanf(p + 13, "%lf", &g.lane_width);
+        }
+        if ((p = strstr(params_json, "\"lane_count\":"))) {
+            int val = 2;
+            sscanf(p + 13, "%d", &val);
+            if (val >= 1 && val <= 8) g.lane_count = val;
         }
     }
 

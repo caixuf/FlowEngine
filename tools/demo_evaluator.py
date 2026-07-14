@@ -138,7 +138,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
     used by score()/sample_metrics() to compute lane_error/road_edge_margin
     relative to the (possibly curved) road centerline instead of a fixed y=0.
     """
-    pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
+    pipeline = load_json(PIPELINE_JSON) or {}
     nodes = _pipeline_nodes(pipeline)
     scenario_file = None
     for node in nodes:
