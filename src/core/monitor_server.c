@@ -589,11 +589,18 @@ static void handle_client(int fd, MonitorServer* ms) {
         const char* base = strrchr(reqpath, '/');
         base = base ? base + 1 : reqpath;
 
-        /* Directory of html_path (the tools/ folder). */
+        /* Directory of html_path (the tools/ folder).
+         * html_path may be tools/flowboard.html (legacy) or
+         * tools/flowboard/index.html (modular) — strip basename,
+         * then strip "flowboard" if present, so dir always ends at
+         * the tools/ directory where three.min.js / d3.v7.min.js live. */
         char dir[512];
         snprintf(dir, sizeof(dir), "%s", ms->html_path);
         char* slash = strrchr(dir, '/');
         if (slash) *slash = '\0'; else dir[0] = '\0';
+        slash = strrchr(dir, '/');
+        if (slash && strcmp(slash + 1, "flowboard") == 0)
+            *slash = '\0';
 
         char filepath[768];
         snprintf(filepath, sizeof(filepath), "%s/%s", dir, base);
