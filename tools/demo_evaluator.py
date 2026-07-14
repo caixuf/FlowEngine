@@ -123,15 +123,20 @@ def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
     return edges
 
 
-def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool]:
+def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict | None]:
     """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
 
     Returns:
-        (criteria_dict, scenario_name, has_noa_route)
+        (criteria_dict, scenario_name, has_noa_route, road)
 
     ``has_noa_route`` is True when the scenario defines a non-empty ``route``
     list, meaning the driving-mode state machine is expected to reach NOA
     and actively change lanes per the navigation route (see skills/08_state_machine.md).
+
+    ``road`` is the scenario's optional "road" object (curve_start_x/
+    curve_length_m/curve_offset_m), or None for straight-road scenarios —
+    used by score()/sample_metrics() to compute lane_error/road_edge_margin
+    relative to the (possibly curved) road centerline instead of a fixed y=0.
     """
     pipeline = load_json(ROOT / "config" / "pipeline.json") or {}
     nodes = _pipeline_nodes(pipeline)
@@ -154,7 +159,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool]:
         break
 
     if not scenario_file:
-        return {}, None, False
+        return {}, None, False, None
 
     scenario_path = Path(scenario_file)
     if not scenario_path.is_absolute():
@@ -162,14 +167,17 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool]:
 
     scenario = load_json(scenario_path)
     if not isinstance(scenario, dict):
-        return {}, None, False
+        return {}, None, False, None
 
     criteria = scenario.get("pass_criteria", {})
     if not isinstance(criteria, dict):
         criteria = {}
     name = scenario.get("name") if isinstance(scenario.get("name"), str) else None
     has_route = bool(scenario.get("route"))
-    return criteria, name, has_route
+    road = scenario.get("road")
+    if not isinstance(road, dict):
+        road = None
+    return criteria, name, has_route, road
 
 
 def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
@@ -205,7 +213,7 @@ def pipeline_scenario_override(scenario_file: str | None):
     pipeline = json.loads(original_text)
     patched_nodes = []
     for node in _pipeline_nodes(pipeline):
-        if not isinstance(node, dict) or node.get("name") not in ("sim_world", "planning"):
+        if not isinstance(node, dict) or node.get("name") not in ("sim_world", "planning", "control"):
             continue
         params = node.get("params")
         # params may be a JSON string (launcher format) or a plain dict.
@@ -258,6 +266,27 @@ def node_topic_roles(sample: dict) -> tuple[set[tuple[str, str]], set[tuple[str,
     return pubs, subs
 
 
+def road_center_y(x: float, road: dict | None) -> float:
+    """Mirror of include/road_geometry.h::road_center_y() — must stay in sync
+    with the C implementation shared by sim_world/planning/control nodes.
+    Returns 0.0 (straight road) when ``road`` is None/absent or the curve is
+    disabled (curve_length_m <= 0 or curve_offset_m == 0), matching every
+    existing scenario file that has no "road" section."""
+    if not road:
+        return 0.0
+    curve_start_x = float(road.get("curve_start_x", 0.0) or 0.0)
+    curve_length_m = float(road.get("curve_length_m", 0.0) or 0.0)
+    curve_offset_m = float(road.get("curve_offset_m", 0.0) or 0.0)
+    if curve_length_m <= 0.0 or curve_offset_m == 0.0:
+        return 0.0
+    if x <= curve_start_x:
+        return 0.0
+    t = (x - curve_start_x) / curve_length_m
+    if t >= 1.0:
+        return curve_offset_m
+    return curve_offset_m * (3.0 * t * t - 2.0 * t * t * t)
+
+
 def nearest_lane_error(y: float, lane_width: float = 3.5) -> float:
     lane_centers = [-lane_width * 0.5, lane_width * 0.5]
     return min(abs(y - center) for center in lane_centers)
@@ -272,7 +301,7 @@ def angle_diff(a: float, b: float) -> float:
     return d
 
 
-def sample_metrics(sample: dict) -> dict:
+def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     metrics = sample.get("metrics", {})
     vehicle = metrics.get("vehicle", {})
     scene = metrics.get("scene", {})
@@ -288,6 +317,11 @@ def sample_metrics(sample: dict) -> dict:
     steer_signed = float(ego.get("steer", 0.0) or 0.0)
     lane_width = float(lane.get("width", 3.5) or 3.5)
     lane_count = int(lane.get("count", 2) or 2)
+
+    # 弯道时车道中心线偏移（road=None 或禁用弯道时恒为 0，与既有直道场景
+    # 完全等价），lane_error/road_edge_margin 均相对该中心线计算。
+    center = road_center_y(x, road)
+    y_rel = y - center
 
     min_forward_gap = math.inf
     min_abs_gap = math.inf
@@ -318,8 +352,8 @@ def sample_metrics(sample: dict) -> dict:
         "heading": heading,
         "steer": steer,
         "steer_signed": steer_signed,
-        "lane_error": nearest_lane_error(y, lane_width),
-        "road_edge_margin": lane_width * lane_count * 0.5 - abs(y) - 1.0,
+        "lane_error": nearest_lane_error(y_rel, lane_width),
+        "road_edge_margin": lane_width * lane_count * 0.5 - abs(y_rel) - 1.0,
         "min_forward_gap": min_forward_gap,
         "min_abs_gap": min_abs_gap,
         "obs_world": obs_world,
@@ -387,7 +421,7 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -395,7 +429,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         return ["no topology samples collected"], warnings, {}
 
     last = samples[-1]
-    series = [sample_metrics(s) for s in samples]
+    series = [sample_metrics(s, road) for s in samples]
     speeds = [m["speed"] for m in series]
     xs = [m["x"] for m in series]
     lane_errors = [m["lane_error"] for m in series]
@@ -632,18 +666,18 @@ def main() -> int:
         sample = load_json(args.json_file)
         samples = [sample] if sample else []
         returncode = 0
-        criteria, scenario_name, has_noa_route = load_scenario_criteria_from_pipeline()
+        criteria, scenario_name, has_noa_route, road = load_scenario_criteria_from_pipeline()
     else:
         with pipeline_scenario_override(args.scenario):
             samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.
-            criteria, scenario_name, has_noa_route = load_scenario_criteria_from_pipeline()
+            criteria, scenario_name, has_noa_route, road = load_scenario_criteria_from_pipeline()
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route)
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():

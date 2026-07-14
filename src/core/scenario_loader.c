@@ -158,6 +158,19 @@ ScenarioConfig* scenario_load(const char* path) {
         }
     }
 
+    /* road（可选）：道路弯道几何。缺省字段/整个 "road" 对象缺失 = 全零 =
+     * 禁用弯道（直道），与既有不含该字段的场景文件完全兼容。 */
+    cJSON* jroad = cJSON_GetObjectItemCaseSensitive(root, "road");
+    if (cJSON_IsObject(jroad)) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(jroad, "curve_start_x");
+        if (cJSON_IsNumber(j)) sc->road.curve_start_x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(jroad, "curve_length_m");
+        if (cJSON_IsNumber(j)) sc->road.curve_length_m = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(jroad, "curve_offset_m");
+        if (cJSON_IsNumber(j)) sc->road.curve_offset_m = j->valuedouble;
+    }
+
     cJSON_Delete(root);
     LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, seed=%u)",
              sc->name, sc->actor_count, sc->route_count, sc->random_seed);
@@ -222,6 +235,13 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         cJSON_AddItemToArray(jroute, jr);
     }
     cJSON_AddItemToObject(root, "route", jroute);
+
+    /* road */
+    cJSON* jroad = cJSON_CreateObject();
+    cJSON_AddNumberToObject(jroad, "curve_start_x",  scenario->road.curve_start_x);
+    cJSON_AddNumberToObject(jroad, "curve_length_m", scenario->road.curve_length_m);
+    cJSON_AddNumberToObject(jroad, "curve_offset_m", scenario->road.curve_offset_m);
+    cJSON_AddItemToObject(root, "road", jroad);
 
     char* out = cJSON_Print(root);
     cJSON_Delete(root);

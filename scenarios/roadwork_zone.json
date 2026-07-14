@@ -1,0 +1,61 @@
+{
+  "name": "roadwork_zone",
+  "description": "道路施工占道：前方一段车道被施工车辆/锥桶封闭，ego 需变道绕行后择机返回原车道",
+  "random_seed": 53,
+  "duration_s": 55.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 12.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "truck",
+      "x": 70.0,  "y": -1.75,
+      "vx": 0.0,  "vy": 0.0,
+      "len": 8.0, "wid": 2.4,
+      "_comment": "施工作业车，静止占用同车道"
+    },
+    {
+      "id": 1,
+      "type": "cone",
+      "x": 58.0,  "y": -1.75,
+      "vx": 0.0,  "vy": 0.0,
+      "len": 0.5, "wid": 0.5,
+      "_comment": "施工区提前预警锥桶"
+    },
+    {
+      "id": 2,
+      "type": "cone",
+      "x": 84.0,  "y": -1.6,
+      "vx": 0.0,  "vy": 0.0,
+      "len": 0.5, "wid": 0.5,
+      "_comment": "施工区末端锥桶（略偏，模拟渐变收窄）"
+    },
+    {
+      "id": 3,
+      "type": "car",
+      "x": 40.0,  "y": 1.75,
+      "vx": 11.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "邻道正常车流，限制绕行变道窗口"
+    },
+    {
+      "id": 4,
+      "type": "car",
+      "x": 200.0, "y": -1.75,
+      "vx": 7.0,  "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "施工区之后同车道慢车，二次触发变道"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 55.0,
+    "min_avg_speed_mps": 5.0,
+    "min_distance_m": 150.0
+  }
+}
