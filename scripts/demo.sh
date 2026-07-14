@@ -176,7 +176,7 @@ cleanup() {
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
   done
   { pkill -9 -f flow_node_host; pkill -9 -f flow_launcher; \
-    pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
+    pkill -9 -f flowmond; pkill -9 -f flowboard_server; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
 
   rm -f "$JSON_FILE"
 
@@ -221,17 +221,24 @@ if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
 fi
 echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
-# ── Start dashboard server (flowmond via IPC dashboard bridge) ──
-echo "───[3/5] Starting dashboard server..."
-"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" \
-  > /tmp/flowmond.log 2>&1 &
+# ── Start dashboard server (file bridge: read /tmp/flow_topology.json) ──
+# 依据 VISUALIZATION_ARCHITECTURE.md: flowmond 拥有独立 MessageBus,
+# 看不到 flow_launcher 进程内的数据, launch 演示必须用文件桥接。
+echo "───[3/5] Starting dashboard..."
+# Wait for monitor node to write first snapshot
+for _ in $(seq 1 30); do
+  if [ -s "$JSON_FILE" ]; then break; fi
+  sleep 0.5
+done
+python3 "$ROOT/tools/flowboard_server.py" --port 8800 --json-file "$JSON_FILE" \
+  > /tmp/flowboard_server.log 2>&1 &
 SERVER_PID=$!
-sleep 2
+sleep 1
 if kill -0 $SERVER_PID 2>/dev/null; then
     echo "  ✓ Dashboard at http://localhost:8800"
 else
-    echo "  ✗ flowmond failed! Check /tmp/flowmond.log"
-    cat /tmp/flowmond.log
+    echo "  ✗ flowboard_server failed! Check /tmp/flowboard_server.log"
+    cat /tmp/flowboard_server.log
 fi
 
 python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \
