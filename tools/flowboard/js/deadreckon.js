@@ -23,9 +23,6 @@ export var _dr = {
   init: false
 };
 
-// ── Animation time counter (incremented per frame) ───────────────
-export var _animT = 0;
-
 // ── 2D canvas state (used by the 2D fallback renderer) ──────────
 export var _2d = {
   canvas: null,
@@ -97,7 +94,6 @@ export function getDeadReckonState() {
 // these variables and functions without an import statement.
 // ═════════════════════════════════════════════════════════════════
 window._dr = _dr;
-window._animT = _animT;
 window._2d = _2d;
 window.initDeadReckon = initDeadReckon;
 window.updateDeadReckon = updateDeadReckon;

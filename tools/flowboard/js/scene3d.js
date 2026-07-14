@@ -4,8 +4,8 @@
 // scene3d.js — Three.js 3D scene module for ADAS visualization
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, getColor } from './utils.js';
-import { initDeadReckon, updateDeadReckon, getDeadReckonState, _dr, _2d } from './deadreckon.js';
+import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle } from './utils.js';
+import { initDeadReckon, _dr } from './deadreckon.js';
 
 const THREE = window.THREE;
 
@@ -36,11 +36,11 @@ let _lastCurveKey = "";
 /** WebGL context-loss flag — render loop skips while true */
 let _glLost = false;
 
-/** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
-let _tmpV3 = null, _tmpScale = null;
-
 /** Animation time counter (incremented per frame) */
 let _animT = 0;
+
+/** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
+let _tmpV3 = null, _tmpScale = null;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
 const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7 };
@@ -58,78 +58,76 @@ function _makeCyl(rTop, rBot, h, segs, color) {
   );
 }
 
-// ── Road builder (4 lanes, 3.5m each) ──
+// ════════════════════════════════════════════════════════════════════
+// Road builder — 2 lanes × 3.5m, split into 2m segment groups.
+// Each group bundles asphalt + 2 edges + 2 shoulders.
+// Curve shifts group.position.z — NO vertex deformation.
+// SEG_LEN=2m → Z step < 7cm across a 260m/9m curve → smooth.
+// ════════════════════════════════════════════════════════════════════
 function _buildRoad(scene) {
   var roadGroup = new THREE.Group();
-  var ROAD_LEN = 3000;     // total road length along X (3000m covers full demo)
-  var ROAD_HALF = 7.5;     // half-width (4 lanes x 3.5m + shoulders)
-  var ASPHALT = 0x333844;
-  var MARKING = 0xddeeff;
-  var YELLOW = 0xddbb55;
+  var ROAD_LEN   = 3000;
+  var LANE_W     = 3.5;
+  var LANE_N     = 2;
+  var ROAD_HALF  = LANE_W * LANE_N / 2;
+  var MARGIN     = 0.5;
+  var ASPHALT_W  = (ROAD_HALF + MARGIN) * 2;
+  var SHLD_W     = 1.5;
+  var shldZ      = ROAD_HALF + MARGIN + SHLD_W / 2;
+  var SEG_LEN    = 2;
+  var nSeg       = Math.floor(ROAD_LEN / SEG_LEN);
 
-  // Asphalt base
-  var asphalt = _makeBox(ROAD_LEN, 0.08, ROAD_HALF * 2, ASPHALT, 0, 0.9);
-  asphalt.position.set(0, 0.01, 0);
-  asphalt.receiveShadow = true;
-  roadGroup.add(asphalt);
+  var aGeo = new THREE.BoxGeometry(SEG_LEN, 0.08, ASPHALT_W, 1, 1, 1);
+  var aMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
+  var eGeo = new THREE.BoxGeometry(SEG_LEN, 0.02, 0.28, 1, 1, 1);
+  var eMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333, roughness: 0.3 });
+  var sGeo = new THREE.BoxGeometry(SEG_LEN, 0.04, SHLD_W, 1, 1, 1);
+  var sMat = new THREE.MeshStandardMaterial({ color: 0x556655, roughness: 1.0 });
 
-  // Shoulders (slightly lighter)
-  var shld = _makeBox(ROAD_LEN, 0.04, 1.5, 0x556655, 0, 1);
-  shld.position.set(0, 0.02, ROAD_HALF + 0.75);
-  shld.receiveShadow = true;
-  shld.userData.isEdge = true; shld.userData.baseZ = ROAD_HALF + 0.75;
-  roadGroup.add(shld);
-  var shld2 = shld.clone();
-  shld2.position.z = -(ROAD_HALF + 0.75);
-  shld2.userData.isEdge = true; shld2.userData.baseZ = -(ROAD_HALF + 0.75);
-  roadGroup.add(shld2);
+  for (var si = -Math.floor(nSeg / 2); si < Math.floor(nSeg / 2); si++) {
+    var cx = si * SEG_LEN + SEG_LEN / 2;
+    var seg = new THREE.Group();
+    seg.position.set(cx, 0, 0);
+    seg.userData.isRoadSeg = true;
+    seg.userData.baseX = cx;
 
-  // Dashed lane dividers at Z = -3.5, 0 (yellow), 3.5
-  // Lane markings tagged with userData for curve reshaping by type
-  var dashLen = 4.0, gap = 6.0, segLen = dashLen + gap;   // fewer segments for perf
-  var nSeg = Math.floor(ROAD_LEN / segLen);
-  for (var zi = 0; zi < 3; zi++) {
-    var zPos = -3.5 + zi * 3.5;
-    var isCenter = (zi === 1);
-    for (var s = -Math.floor(nSeg / 2); s < Math.floor(nSeg / 2); s++) {
-      var dash = _makeBox(dashLen, 0.01, 0.12, isCenter ? YELLOW : MARKING, 0, 0.3);
-      dash.position.set(s * segLen + dashLen / 2, 0.07, zPos);
+    var a = new THREE.Mesh(aGeo, aMat);
+    a.position.y = 0.01; a.receiveShadow = true;
+    seg.add(a);
+
+    for (var ei = -1; ei <= 1; ei += 2) {
+      var e = new THREE.Mesh(eGeo, eMat);
+      e.position.set(0, 0.048, ei * ROAD_HALF);
+      seg.add(e);
+    }
+    for (var si2 = -1; si2 <= 1; si2 += 2) {
+      var s = new THREE.Mesh(sGeo, sMat);
+      s.position.set(0, 0.02, si2 * shldZ);
+      s.receiveShadow = true;
+      seg.add(s);
+    }
+    roadGroup.add(seg);
+  }
+
+  // Centre double yellow dashes
+  var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
+  var nDash = Math.floor(ROAD_LEN / STEP);
+  var dGeo = new THREE.BoxGeometry(DASH, 0.02, 0.22, 1, 1, 1);
+  var dMat = new THREE.MeshStandardMaterial({ color: 0xffcc44, emissive: 0x333333, roughness: 0.3 });
+  for (var d = -Math.floor(nDash / 2); d < Math.floor(nDash / 2); d++) {
+    var dx = d * STEP + DASH / 2;
+    for (var dy = -1; dy <= 1; dy += 2) {
+      var dash = new THREE.Mesh(dGeo, dMat);
+      dash.position.set(dx, 0.043, dy * 0.12);
       dash.userData.isLaneMark = true;
-      dash.userData.baseZ = zPos;
+      dash.userData.baseZ = dy * 0.12;
       roadGroup.add(dash);
     }
-    if (isCenter) {
-      for (var s2 = -Math.floor(nSeg / 2); s2 < Math.floor(nSeg / 2); s2++) {
-        var d2 = _makeBox(dashLen, 0.01, 0.12, YELLOW, 0, 0.3);
-        d2.position.set(s2 * segLen + dashLen / 2, 0.07, zPos + 0.22);
-        d2.userData.isLaneMark = true;
-        d2.userData.baseZ = zPos + 0.22;
-        roadGroup.add(d2);
-      }
-    }
   }
-
-  // Road shoulder edge markings
-  for (var side = -1; side <= 1; side += 2) {
-    var edge = _makeBox(ROAD_LEN, 0.01, 0.15, MARKING, 0, 0.3);
-    edge.position.set(0, 0.07, side * 7.0);
-    edge.userData.isEdge = true;
-    edge.userData.baseZ = side * 7.0;
-    roadGroup.add(edge);
-  }
-
   scene.add(roadGroup);
   _roadGroup = roadGroup;
 }
 
-// ── Curve road using scene road geometry data ──
-// Matches road_center_y() in include/road_geometry.h:
-//   0 (x < sx), off*(3t²-2t³) (smoothstep), off (x >= sx+len)
-// Road surface + long shoulders/edges -> deform vertices;
-// short lane dashes -> translate position.z (single offset fine for 4m segments).
-// sim_world Y = Three.js Z: positive curve_offset = right turn = positive Z shift.
-// When curve is active, disable road chunking, otherwise chunk movement after deformation
-// destroys the shape.
 function _curveShiftAt(x, sx, len, off) {
   if (len <= 0 || Math.abs(off) < 0.01) return 0;
   if (x <= sx) return 0;
@@ -145,35 +143,19 @@ function _applyRoadCurve(roadData) {
   var key = sx + "," + len + "," + off;
   if (key === _lastCurveKey) return;
   _lastCurveKey = key;
-  if (len <= 0 || Math.abs(off) < 0.01) {
-    _curveActive = false;
-    return;
-  }
+  if (len <= 0 || Math.abs(off) < 0.01) { _curveActive = false; return; }
   _curveActive = true;
-  console.log('[scene3d] Applying road curve: start=' + sx + 'm, len=' + len + 'm, off=' + off + 'm');
-  reportDiag('scene3d.curve', 'Applying curve: offset=' + off + 'm over X=' + sx + '..' + (sx + len));
   var group = _roadGroup;
   if (!group) return;
-  group.position.x = 0;  // reset chunk displacement
   group.traverse(function(child) {
-    if (!child.isMesh || !child.geometry) return;
-    // Short lane dashes (4m): single Z offset by center X is accurate enough
-    if (child.userData && child.userData.isLaneMark) {
-      var baseZ = child.userData.baseZ || child.position.z;
-      var meshX = child.position.x;
-      child.position.z = baseZ + _curveShiftAt(meshX, sx, len, off);
+    if (child.userData && child.userData.isRoadSeg) {
+      child.position.z = _curveShiftAt(child.userData.baseX, sx, len, off);
       return;
     }
-    // Road surface, shoulders, edge markings (long meshes): deform vertex Z
-    var pos = child.geometry.attributes.position;
-    if (!pos) return;
-    var arr = pos.array;
-    for (var i = 0; i < arr.length; i += 3) {
-      var vx = arr[i];
-      arr[i + 2] = arr[i + 2] + _curveShiftAt(vx, sx, len, off);
+    if (child.userData && child.userData.isLaneMark) {
+      child.position.z = child.userData.baseZ + _curveShiftAt(child.position.x, sx, len, off);
+      return;
     }
-    pos.needsUpdate = true;
-    child.geometry.computeVertexNormals();
   });
 }
 
@@ -282,8 +264,8 @@ function init3DScene() {
 
   // Scene
   scene3d = new THREE.Scene();
-  scene3d.background = new THREE.Color(0x334466);
-  scene3d.fog = new THREE.Fog(0x334466, 80, 350);
+  scene3d.background = new THREE.Color(0x5588aa);
+  scene3d.fog = new THREE.Fog(0x5588aa, 120, 500);
 
   // Camera — chase cam. Wider FOV keeps the whole car visible on small screens.
   camera3d = new THREE.PerspectiveCamera(60, w / h, 0.2, 500);
@@ -311,16 +293,17 @@ function init3DScene() {
     safeCall('scene3d.restore', function() { init3DScene(); });
   }, false);
 
-  // Lighting
-  scene3d.add(new THREE.AmbientLight(0x8899cc, 0.7));
-  var sun = new THREE.DirectionalLight(0xfff8ee, 2.0);
+  // Lighting — brighter scene so lane markings are clearly visible
+  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.85));
+  var sun = new THREE.DirectionalLight(0xfff8ee, 1.8);
   sun.position.set(30, 40, 15);
+  sun.castShadow = true;
   scene3d.add(sun);
   // Hemisphere (sky/ground ambient)
-  scene3d.add(new THREE.HemisphereLight(0x8899cc, 0x443322, 0.4));
+  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.5));
 
-  // ── Ground (large flat plane) ──
-  var gndGeo = new THREE.PlaneGeometry(400, 400);
+  // ── Ground (large flat plane, matches road length) ──
+  var gndGeo = new THREE.PlaneGeometry(800, 400);
   var gndMat = new THREE.MeshStandardMaterial({ color: 0x3a5a30, roughness: 0.95 });
   var gnd = new THREE.Mesh(gndGeo, gndMat);
   gnd.rotation.x = -Math.PI / 2; gnd.position.y = -0.05;
@@ -365,10 +348,10 @@ function init3DScene() {
   _lidarCloud = lcloud;
 
   // ── Camera state for smooth follow ──
-  _cam = new THREE.Vector3(-22, 11, 6);
-  _camLook = new THREE.Vector3(4, 1.2, -1.75);
-  _camTarget = new THREE.Vector3(-22, 11, 6);
-  _camLookTarget = new THREE.Vector3(4, 1.2, -1.75);
+  _cam = new THREE.Vector3(-15, 5.0, 0);
+  _camLook = new THREE.Vector3(8, 0.5, 0);
+  _camTarget = new THREE.Vector3(-15, 5.0, 0);
+  _camLookTarget = new THREE.Vector3(8, 0.5, 0);
 
   // ── Initialize dead reckoning state ──
   initDeadReckon();
@@ -423,27 +406,22 @@ function _renderFrame() {
   // ── Ego car: world-space position (road is STATIC at origin) ──
   if (ego) { ego.position.set(sx, ego.position.y, sz); ego.rotation.y = -_dr.smoothHeading; }
 
-  // Keep the static road/ground near ego for long-running demos. This avoids
-  // driving beyond the initial mesh and ending up with an empty/dark 3D view.
-  // When curve is active, disable chunking: the deformed road mesh vertices
-  // are bound to local coordinates, and moving the chunk would break the shape.
-  if (!_curveActive) {
-    var chunkX = Math.round(sx / 1000) * 1000;
-    if (_roadGroup) _roadGroup.position.x = chunkX;
-    if (_groundMesh) _groundMesh.position.x = chunkX;
-    if (_envGroup) _envGroup.position.x = chunkX;
-  }
+  // Keep ground + environment near ego (road segments are at fixed world X).
+  var chunkX = Math.round(sx / 200) * 200;
+  if (_groundMesh && Math.abs(_groundMesh.position.x - chunkX) > 100) _groundMesh.position.x = chunkX;
+  if (_envGroup && Math.abs(_envGroup.position.x - chunkX) > 100) _envGroup.position.x = chunkX;
 
-  // ── Chase camera: behind + above ego in world space ──
-  // Debug override: window._debugCam lets the debugger page control camera params
+  // ── Chase camera: behind ego, balanced pitch ──
+  // lookX=8m ahead keeps the road visible stretching into distance
+  // while minimising empty sky above.
   var dc = window._debugCam;
   var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
-  var back = dc ? dc.back : (narrow ? 26 : 22);
-  var height = dc ? dc.height : (narrow ? 12 : 11);
-  var side = dc ? dc.side : (narrow ? 7 : 6);
-  var camLerp = dc ? dc.lerp : 0.08;
+  var back   = dc ? dc.back   : (narrow ? 20 : 15);
+  var height = dc ? dc.height : (narrow ? 6.5 : 5.0);
+  var side   = dc ? (dc.side || 0) : 0;
+  var camLerp= dc ? dc.lerp   : 0.08;
   _camTarget.set(sx - back, height, sz + side);
-  _camLookTarget.set(sx + 4, 1.2, sz);
+  _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
   _cam.lerp(_camTarget, camLerp);
   _camLook.lerp(_camLookTarget, camLerp);
   camera3d.position.copy(_cam);

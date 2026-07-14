@@ -2,7 +2,7 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady, _renderFrame } from './scene3d.js';
+import { init3DScene, resize3D, update3D, sceneReady } from './scene3d.js';
 import { init2D, draw2D } from './scene2d.js';
 import { initCharts, updateCharts } from './charts.js';
 import { safeCall, reportDiag, clearDiag } from './utils.js';
@@ -1025,19 +1025,6 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// Render loop — drives 3D dead-reckoning at 60fps
-// ═══════════════════════════════════════════════════════════════
-
-function renderLoop() {
-  _renderFrame();
-  requestAnimationFrame(renderLoop);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Init — called on DOMContentLoaded
-// ═══════════════════════════════════════════════════════════════
-
 function initAll() {
   // 1. Initialize D3 topology graph
   initTopo();
@@ -1051,10 +1038,7 @@ function initAll() {
   // 4. Initialize charts
   initCharts();
 
-  // 5. Start the render loop (60fps, drives 3D dead-reckoning)
-  requestAnimationFrame(renderLoop);
-
-  // 6. Restore saved UI state
+  // 5. Restore saved UI state
   setTimeout(function() {
     var sel = document.getElementById('chart-range');
     if (chartTopic) document.getElementById('chart-topic').value = chartTopic;
@@ -1093,12 +1077,12 @@ function initAll() {
     } catch(e) {}
   }, 100);
 
-  // 7. Connect to server (with fallback to demo)
+  // 6. Connect to server (with fallback to demo)
   setTimeout(function() {
     doConnect().catch(function() { doSimulate(); });
   }, 100);
 
-  // 8. Background data simulation when not connected
+  // 7. Background data simulation when not connected
   setInterval(function() {
     if (!eventSource && !paused) {
       var m = topoData.metrics||{}, b = m.bus||{}, l = m.latency||{};

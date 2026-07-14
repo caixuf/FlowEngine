@@ -133,3 +133,4 @@ third_party/frenet-optimal-trajectory-planner/
 third_party/tinympc/
 build-*/
 build_*/
+.mcp.json
