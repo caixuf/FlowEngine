@@ -128,6 +128,8 @@ static struct {
     double lc_cooldown_after_return_s; /* 回到原车道后的冷却 (原硬编码 4.0) */
     double min_overtake_gap_base;      /* 触发超车所需最小本车道前车间距基准 (原硬编码 18.0) */
     double min_overtake_gap_cap;       /* min_overtake_gap 上限, 高速时不再无脑扩大 (原硬编码 60.0) */
+    double min_overtake_gap_speed_mult;/* min_overtake_gap 相对速度乘数 (原硬编码 current_speed * 2.0，高速下会导致 gap 过大无法触发超车) */
+    double steer_min_clamp;            /* 高速最小转向钳位 (原硬编码 0.012，高速下变道耗时过长) */
 
     /* 车道迟滞 + 死锁恢复状态 */
     int    committed_lane_side;  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
@@ -154,7 +156,7 @@ static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_m
     double speed = speed_mps;
     if (speed < 2.0) speed = 2.0;
     double limit = atan(max_lateral_accel_mps2 * CONTROL_WHEELBASE_M / (speed * speed));
-    if (limit < 0.012) limit = 0.012;
+    if (limit < g.steer_min_clamp) limit = g.steer_min_clamp;
     if (limit > 0.24) limit = 0.24;
     return limit;
 }
@@ -335,8 +337,10 @@ static int lane_has_pedestrian_risk(double target_lane_y, double same_lane_tol) 
     if (pi < 0 || pi >= MAX_OBS || !g.obs_valid[pi]) return 0;
     double dx = g.obs_x[pi] - g.ego_x;
     if (dx < -8.0 || dx > 90.0) return 0;
-    if (fabs(g.obs_y[pi] - target_lane_y) <= same_lane_tol + 0.8) return 1;
-    return fabs(g.obs_y[pi]) < 9.0 && fabs(target_lane_y) <= g.lane_width * 0.5 + 0.2;
+    /* 路边行人 (|y|>5.0) 不会横穿到目标车道，不构成风险；
+     * 仅当行人实际处于路面范围内 (|y|<=5.0) 且靠近目标车道时才视为风险 */
+    if (fabs(g.obs_y[pi]) > 5.0) return 0;
+    return fabs(g.obs_y[pi] - target_lane_y) <= same_lane_tol + 0.8;
 }
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
@@ -476,7 +480,11 @@ static void* control_thread(void* arg) {
             statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_CLEARED, NULL);
         was_blocked_sm = blocked;
 
-        double min_overtake_gap = g.min_overtake_gap_base + g.current_speed * 2.0;
+        /* 用相对速度 (ego - 前车) 代替绝对速度, 避免高速下 gap 门槛过大而永远无法触发超车。
+         * 若前车比 ego 快 (rel_speed<0), 说明并非"追尾慢车", 只需 base gap 即可, 不额外放大门槛。 */
+        double rel_speed = g.current_speed - lead_speed;
+        if (rel_speed < 0.0) rel_speed = 0.0;
+        double min_overtake_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
         if (min_overtake_gap > g.min_overtake_gap_cap) min_overtake_gap = g.min_overtake_gap_cap;
         if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
             (!g.lc_attempted) &&
@@ -756,6 +764,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.min_overtake_gap_base      = 14.0; /* 原硬编码 18.0 */
     g.min_overtake_gap_cap       = 90.0; /* 原 min_overtake_gap 计算中硬编码的上限 60.0（与 best_gap<90.0 的独立筛选阈值无关），
                                            * 提高上限避免高速场景 min_overtake_gap 被过度收窄导致无法触发超车 */
+    g.min_overtake_gap_speed_mult = 0.7; /* 原硬编码 current_speed * 2.0（绝对速度），改为相对速度乘数，避免高速下 gap 永远无法满足 */
+    g.steer_min_clamp             = 0.016; /* 原硬编码 0.012，提高最小转向钳位以缩短高速变道耗时 */
 
     /* 注册参数到 param_registry (类型安全，可运行时热重载) */
     param_register_float("control.pid_kp", g.cfg_kp, 0.0, 5000.0, "PID proportional gain");
@@ -771,6 +781,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.lc_cooldown_after_return_s", g.lc_cooldown_after_return_s, 0.0, 30.0, "Cooldown after returning to original lane");
     param_register_float("control.min_overtake_gap_base", g.min_overtake_gap_base, 1.0, 100.0, "Base min lead gap to trigger overtake (m)");
     param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
+    param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
+    param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载) */
     g.kp = param_get_float("control.pid_kp");
@@ -786,6 +798,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
     g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
     g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
+    g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
+    g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
@@ -806,6 +820,8 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"lc_cooldown_after_return_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_return_s);
         if ((p = strstr(params_json, "\"min_overtake_gap_base\":")))      sscanf(p + 24, "%lf", &g.min_overtake_gap_base);
         if ((p = strstr(params_json, "\"min_overtake_gap_cap\":")))       sscanf(p + 23, "%lf", &g.min_overtake_gap_cap);
+        if ((p = strstr(params_json, "\"min_overtake_gap_speed_mult\":"))) sscanf(p + 30, "%lf", &g.min_overtake_gap_speed_mult);
+        if ((p = strstr(params_json, "\"steer_min_clamp\":")))            sscanf(p + 18, "%lf", &g.steer_min_clamp);
         if ((p = strstr(params_json, "\"scenario_file\":"))) {
             const char* start = strchr(p + 16, '"');
             if (start) {

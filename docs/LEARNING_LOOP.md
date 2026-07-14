@@ -86,8 +86,10 @@ b2 <OUT floats>
 |------|------|------|------|
 | `data_recorder_node` | `modules/adas_nodes/data_recorder_node.c` | 0 | 订阅 topic，按频率落盘 JSONL 训练样本 |
 | `train.py`           | `tools/train/train.py` | 1 | 读样本训练 tiny-MLP，导出 `model.txt`（纯 Python，无需 PyTorch/numpy）|
-| `inference_node`     | `modules/adas_nodes/inference_node.c` | 2 | 加载模型，影子模式发布 `inference/trajectory` |
-| `tiny_mlp.h`         | `modules/adas_nodes/tiny_mlp.h` | 2 | 零依赖推理内核（后续可替换为 ONNX Runtime / TensorRT）|
+| `inference_node`     | `modules/adas_nodes/inference_node.c` | 2 | 加载模型，影子模式发布 `inference/trajectory`；订阅 `model_ota/active` 支持 OTA 热重载 |
+| `tiny_mlp.h`         | `modules/adas_nodes/tiny_mlp.h` | 2/3 | 零依赖推理 + SGD 微调内核（`tiny_mlp_forward` / `tiny_mlp_sgd_step` / `tiny_mlp_save`）|
+| `learner_node`       | `modules/adas_nodes/learner_node.c` | 3 | 车端增量 SGD 微调，资源受限调度，发布 `learner/status` |
+| `model_ota_node`     | `modules/adas_nodes/model_ota_node.c` | 4 | 模型版本注册表、热加载、回滚、A-B 对比测试 |
 
 ## 模型位置约定
 
@@ -259,13 +261,123 @@ python3 tools/train_e2e/torch_sidecar.py \
 JSON 中输出 `shadow_delta = 推理目标速度 − planning 目标速度`，用于评估模型与
 现有规划器的差异，是安全灰度上车前的关键手段。
 
+## Stage 3: 车端增量微调 (learner_node)
+
+`learner_node` 在 pipeline 运行过程中持续订阅 teacher 信号（`planning/trajectory`），
+对当前 tiny-MLP 做在线 SGD 更新，实现"边跑边学"的持续学习闭环。
+
+### 设计要点
+
+- **资源受限调度**: 采样以 20 Hz 积累（不阻塞控制链路），训练以 `train_hz`（默认 0.5 Hz）
+  低频运行，每次从 ring buffer 中随机抽取 mini-batch，避免抢占算力。
+- **防灾难性遗忘**: 默认 `full_finetune=0` — 仅更新顶层 W2/b2，保留 backbone；
+  通过 `full_finetune=1` 参数开启全参数微调。
+- **持久化**: 每 `save_interval`（默认 50）步将更新权重原子写入 `save_path`，
+  不自动替换 runtime 模型，需显式 `modelctl.py ota push` 激活。
+- **发布 `learner/status`**: 每训练步广播 `{step, loss, lr, buf_count, ...}`。
+
+### 快速上手
+
+```bash
+# pipeline 跑起来后，learner_node 自动开始学习并保存到 /tmp/flow_learner_model.txt
+bash scripts/demo.sh --no-browser 60
+
+# 查看训练状态（从 flow_topology.json 或直接订阅 learner/status topic）
+# 学习收敛后，通过 OTA 激活新模型：
+python3 tools/modelctl.py ota push /tmp/flow_learner_model.txt --id learner_v001
+```
+
+### 配置参数 (pipeline.json params)
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `train_hz` | 0.5 | 训练频率（Hz） |
+| `lr` | 0.001 | SGD 学习率 |
+| `batch_size` | 32 | mini-batch 大小 |
+| `buffer_size` | 512 | 样本 ring buffer 容量 |
+| `full_finetune` | 0 | 0=仅顶层, 1=全参数 |
+| `save_interval` | 50 | 每 N 步保存一次 |
+| `model_path` | `tools/train/model.txt` | 初始模型路径 |
+| `save_path` | `/tmp/flow_learner_model.txt` | 更新权重保存路径 |
+
+## Stage 4: 模型 OTA + 版本管理 (model_ota_node)
+
+`model_ota_node` 管理模型版本注册表，支持热加载、回滚和 A-B 对比推理。
+通过 Transport 总线（`model_ota/active` topic）向 `inference_node` 发送热重载信号。
+
+### 架构
+
+```
+modelctl.py ota push   ─► /tmp/flow_ota_cmd.json ─┐
+model_ota/cmd topic    ─────────────────────────────┤
+                                                    ▼
+                                        model_ota_node
+                                         │   │   │
+                             copy+rename  │   │  A-B 影子推理
+                                         ▼   ▼   ▼
+                               runtime model.txt   model_ota/ab_result
+                                         │
+                               model_ota/active (reload signal)
+                                         │
+                                    inference_node (hot-reload)
+```
+
+### 支持的操作
+
+| 操作 | CLI | Topic 命令 |
+|------|-----|-----------|
+| 激活新版本 | `modelctl.py ota push <path>` | `{"cmd":"load","id":"v002","path":"..."}` |
+| 回滚 | `modelctl.py ota rollback` | `{"cmd":"rollback"}` |
+| A-B 测试 | `modelctl.py ota ab-test --model-b <path>` | `{"cmd":"ab_test","enable":true,...}` |
+| 查看状态 | `modelctl.py ota status` | `{"cmd":"status"}` |
+
+### 典型 OTA 工作流
+
+```bash
+# 1. 采集并训练新版本
+bash scripts/demo.sh --no-browser 30
+python3 tools/train_demo_model.py --backend tiny --name learner_v001
+
+# 2. OTA 激活（无需重启 pipeline）
+python3 tools/modelctl.py ota push models/learner_v001/model.txt --id learner_v001
+
+# 3. inference_node 收到 model_ota/active 信号后热重载新权重，日志：
+#    [INFO] [inference] OTA hot-reload #1 from tools/train/model.txt (in=4 hid=8 out=1)
+
+# 4. 开启 A-B 对比，同时观察新旧模型差异
+python3 tools/modelctl.py ota ab-test --model-b models/learner_v001/model.txt --ratio 0.5
+
+# 5. 如果新模型表现不佳，一键回滚
+python3 tools/modelctl.py ota rollback
+
+# 6. 查看版本注册表和 A-B 统计
+python3 tools/modelctl.py ota status
+```
+
+### 版本注册表
+
+自动维护 `models/registry.json`，记录所有激活历史：
+
+```json
+{
+  "schema": "flowengine-ota-registry v1",
+  "current_id": "learner_v001",
+  "previous_id": "initial",
+  "ab_test": {"enabled": false, "ratio": 0.5},
+  "versions": [
+    {"id": "initial",      "path": "tools/train/model.txt", "active": false},
+    {"id": "learner_v001", "path": "models/learner_v001/model.txt", "active": true}
+  ]
+}
+```
+
 ## 后续路线 (对应前沿技术)
 
-| 阶段 | 方向 | 技术点 |
-|------|------|--------|
-| 3 | `learner_node` 车端增量微调 | 持续学习 / on-device fine-tuning / 资源受限调度 |
-| 4 | 模型 OTA + 版本管理 | 复用 Discovery + Transport 做灰度发布 / 回滚 / A-B 对比 |
-| — | 推理内核升级 | 把 `tiny_mlp_forward()` 替换为 ONNX Runtime / TensorRT，契约不变 |
+| 阶段 | 方向 | 技术点 | 状态 |
+|------|------|--------|------|
+| 3 | `learner_node` 车端增量微调 | 持续学习 / on-device SGD / 资源受限调度 | ✅ 已实现 |
+| 4 | 模型 OTA + 版本管理 | Discovery + Transport 灰度发布 / 回滚 / A-B 对比 | ✅ 已实现 |
+| — | 推理内核升级 | 把 `tiny_mlp_forward()` 替换为 ONNX Runtime / TensorRT，契约不变 | 待实现 |
 
 ## 生产化提示
 

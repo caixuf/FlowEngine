@@ -78,9 +78,13 @@ static struct {
 
     ReflectiveStateMachine sm;
 
-    TinyMLP model;
+    TinyMLP         model;
+    pthread_mutex_t model_mutex;  /* 保护 model 的并发读写 */
     char    model_path[256];
     int     control_mode;  /* enum CtrlMode */
+
+    /* OTA 热重载: model_ota/active 收到 "reload" 信号时置 1 */
+    volatile int reload_flag;
 
     /* v1 特征: 最新 ego 状态（来自 fusion/localization） */
     double ego_x, ego_y, ego_v, ego_heading, ego_yaw_rate;
@@ -112,6 +116,7 @@ static struct {
     int    frame_count; /* 已写入帧数 */
 
     int infer_count;
+    int reload_count;
 } g;
 
 /* ── 订阅回调 ────────────────────────────────────────────────── */
@@ -243,7 +248,23 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     g.has_control = 1;
 }
 
-/* ── 帧特征构建 ──────────────────────────────────────────────── */
+/* ── OTA 热重载回调 ──────────────────────────────────────────── */
+
+/*
+ * model_ota_node 在激活新版本后发布 model_ota/active。
+ * 收到 "reload" 信号时，设置 reload_flag；inference_thread 在下一个周期
+ * 检测到 flag 后加锁重载模型（保证推理线程内原子更新）。
+ */
+static void on_model_ota_active(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    if (strstr(d, "\"reload\"")) {
+        g.reload_flag = 1;
+    }
+}
+
+
 
 /* 将当前时刻 ego + obstacles + control 打包成 16 维帧 */
 static void build_frame(float frame[V2_DIM]) {
@@ -415,7 +436,26 @@ static void* inference_thread(void* arg) {
 
     while (!g.should_stop) {
         usleep(sleep_us);
-        if (g.should_stop || !g.has_fusion) continue;
+        if (g.should_stop) break;
+
+        /* OTA 热重载: 检测 model_ota_node 发来的 reload 信号 */
+        if (g.reload_flag) {
+            g.reload_flag = 0;
+            pthread_mutex_lock(&g.model_mutex);
+            TinyMLP new_model;
+            if (tiny_mlp_load(&new_model, g.model_path) == 0) {
+                g.model = new_model;
+                g.reload_count++;
+                LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
+                         g.reload_count, g.model_path,
+                         g.model.in_dim, g.model.hid_dim, g.model.out_dim);
+            } else {
+                LOG_WARN("inference", "OTA hot-reload failed: %s", g.model_path);
+            }
+            pthread_mutex_unlock(&g.model_mutex);
+        }
+
+        if (!g.has_fusion) continue;
 
         /* 将当前帧压入时序缓冲 */
         push_frame();
@@ -508,6 +548,7 @@ static const char* s_inputs[]  = {
     "planning/trajectory",
     "perception/obstacles",   /* v2 */
     "control/cmd",            /* v2 */
+    "model_ota/active",       /* OTA 热重载信号 */
     NULL
 };
 static const char* s_outputs[] = {
@@ -561,6 +602,8 @@ static int inference_init(MessageBus* bus, Transport* transport,
         }
     }
 
+    pthread_mutex_init(&g.model_mutex, NULL);
+
     /* 尝试加载训练好的模型 */
     if (tiny_mlp_load(&g.model, g.model_path) == 0) {
         LOG_INFO("inference", "model loaded from %s (in=%d hid=%d out=%d)",
@@ -576,6 +619,7 @@ static int inference_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_planning, NULL);
     transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);  /* v2 */
     transport_subscribe(transport, "control/cmd", on_control_cmd, NULL);         /* v2 */
+    transport_subscribe(transport, "model_ota/active", on_model_ota_active, NULL); /* OTA */
     transport_advertise(transport, "inference/trajectory", 0x1F5E2A10u);
     if (g.control_mode >= CTRL_MODE_PLAN_ASSIST)
         transport_advertise(transport, "inference/assist", 0x1F5E2A11u);
@@ -611,7 +655,8 @@ static void inference_stop(void) { g.should_stop = 1; }
 
 static void inference_cleanup(void) {
     if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
-    LOG_INFO("inference", "cleanup done");
+    pthread_mutex_destroy(&g.model_mutex);
+    LOG_INFO("inference", "cleanup done (reloads=%d)", g.reload_count);
 }
 
 static int inference_health(void) { return 0; }
@@ -619,8 +664,8 @@ static int inference_health(void) { return 0; }
 static NodePlugin s_plugin = {
     .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "inference",
-    .version       = "2.0.0",
-    .description   = "On-vehicle MLP inference (v2: 16-dim + direct_ctrl)",
+    .version       = "2.1.0",
+    .description   = "On-vehicle MLP inference (v2: 16-dim + OTA hot-reload)",
     .input_topics  = s_inputs,
     .output_topics = s_outputs,
     .init          = inference_init,

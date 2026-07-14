@@ -221,6 +221,87 @@ def cmd_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─────────────────────────────────────────────────────────────
+#  OTA 子命令 (Stage 4: model_ota_node 交互)
+# ─────────────────────────────────────────────────────────────
+
+OTA_CMD_FILE    = Path("/tmp/flow_ota_cmd.json")
+OTA_STATUS_FILE = Path("/tmp/flow_ota_status.json")
+
+
+def _ota_write_cmd(cmd_json: str) -> None:
+    """将 OTA 命令写入命令文件，model_ota_node 会在下一个轮询周期处理。"""
+    OTA_CMD_FILE.write_text(cmd_json + "\n", encoding="utf-8")
+    print(f"OTA command written to {OTA_CMD_FILE}")
+    print("model_ota_node will process it within poll_interval_ms (default 500 ms)")
+
+
+def cmd_ota_push(args: argparse.Namespace) -> int:
+    """加载并激活一个新模型版本（通过 model_ota_node）。"""
+    path = Path(args.path)
+    if not path.exists():
+        raise SystemExit(f"error: model file not found: {path}")
+    version_id = args.id or path.stem
+    cmd = f'{{"cmd":"load","id":"{version_id}","path":"{path}"}}'
+    _ota_write_cmd(cmd)
+    return 0
+
+
+def cmd_ota_rollback(args: argparse.Namespace) -> int:
+    """回滚到上一个模型版本（通过 model_ota_node）。"""
+    del args  # no arguments needed
+    _ota_write_cmd('{"cmd":"rollback"}')
+    return 0
+
+
+def cmd_ota_ab_test(args: argparse.Namespace) -> int:
+    """开启或关闭 A-B 测试模式（通过 model_ota_node）。"""
+    enable = not args.disable
+    cmd_parts = [f'"cmd":"ab_test"', f'"enable":{str(enable).lower()}']
+    if args.ratio is not None:
+        cmd_parts.append(f'"ratio":{args.ratio}')
+    if args.model_b:
+        mb = Path(args.model_b)
+        if not mb.exists():
+            raise SystemExit(f"error: model_b file not found: {mb}")
+        cmd_parts.append(f'"model_b_path":"{mb}"')
+    _ota_write_cmd("{" + ",".join(cmd_parts) + "}")
+    return 0
+
+
+def cmd_ota_status(args: argparse.Namespace) -> int:
+    """显示 model_ota_node 当前状态（读取 /tmp/flow_ota_status.json）。"""
+    del args  # no arguments needed
+    if not OTA_STATUS_FILE.exists():
+        print("OTA status file not found. Is model_ota_node running?")
+        print(f"  Expected: {OTA_STATUS_FILE}")
+        return 1
+
+    try:
+        status = json.loads(OTA_STATUS_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: invalid status file: {e}") from e
+
+    print("model_ota_node status")
+    for key, value in status.items():
+        print(f"  {key:<24} {value}")
+
+    # 如果注册表存在，也显示
+    registry_path = ROOT / "models" / "registry.json"
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            versions = registry.get("versions", [])
+            if versions:
+                print(f"\n  version registry ({len(versions)} entries):")
+                for v in versions:
+                    active_mark = " ← active" if v.get("active") else ""
+                    print(f"    {v.get('id','?'):<20} {v.get('path','?')}{active_mark}")
+        except json.JSONDecodeError:
+            pass
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="FlowEngine model artifact manager")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -243,6 +324,29 @@ def main() -> int:
     promote_parser.add_argument("artifact", help="Artifact directory containing manifest.json and model.txt")
     promote_parser.add_argument("--runtime-model", default=str(DEFAULT_RUNTIME_MODEL))
     promote_parser.set_defaults(func=cmd_promote)
+
+    # ── OTA 子命令 ────────────────────────────────────────────────
+    ota_sub = sub.add_parser("ota", help="Model OTA operations (requires model_ota_node running)")
+    ota_cmds = ota_sub.add_subparsers(dest="ota_command", required=True)
+
+    ota_push = ota_cmds.add_parser("push", help="Load and activate a new model version via OTA")
+    ota_push.add_argument("path", help="Path to the model file (.txt for tiny-MLP)")
+    ota_push.add_argument("--id", default=None, help="Version ID (defaults to filename stem)")
+    ota_push.set_defaults(func=cmd_ota_push)
+
+    ota_rollback = ota_cmds.add_parser("rollback", help="Rollback to the previous model version")
+    ota_rollback.set_defaults(func=cmd_ota_rollback)
+
+    ota_ab = ota_cmds.add_parser("ab-test", help="Enable or disable A-B model comparison")
+    ota_ab.add_argument("--disable", action="store_true", help="Disable A-B test (default: enable)")
+    ota_ab.add_argument("--ratio", type=float, default=None,
+                        help="Fraction of inferences using model A (0.0–1.0, default 0.5)")
+    ota_ab.add_argument("--model-b", dest="model_b", default=None,
+                        help="Path to model B for comparison")
+    ota_ab.set_defaults(func=cmd_ota_ab_test)
+
+    ota_status = ota_cmds.add_parser("status", help="Show current OTA node status")
+    ota_status.set_defaults(func=cmd_ota_status)
 
     args = parser.parse_args()
     return args.func(args)
