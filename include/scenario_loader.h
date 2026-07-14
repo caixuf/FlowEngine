@@ -24,8 +24,20 @@
  *     "no_collision": true,
  *     "max_duration_s": 60.0,
  *     "min_avg_speed_mps": 5.0
- *   }
+ *   },
+ *   "route": [
+ *     { "trigger_x": 200.0, "target_lane": 1,  "label": "prepare_exit" },
+ *     { "trigger_x": 400.0, "target_lane": -1, "label": "return_main_lane" }
+ *   ]
  * }
+ *
+ * route（可选）: 导航路线的主动变道指令序列，是 NOA（领航辅助）区别于
+ * 单车道居中（LCC）的关键能力——不依赖障碍物触发，而是由导航路线本身
+ * 驱动车辆提前变道（如为出口/匝道做准备）。
+ *   trigger_x    ego 世界坐标 x 越过此值时触发该指令（m）
+ *   target_lane  目标车道方向: -1 = ego 初始车道一侧 (世界坐标 y<0),
+ *                +1 = 对侧相邻车道 (世界坐标 y>0)
+ *   label        可读描述（可选，用于日志/可视化）
  */
 
 #include <stdint.h>
@@ -35,9 +47,11 @@
 extern "C" {
 #endif
 
-#define SCENARIO_MAX_ACTORS  16
-#define SCENARIO_NAME_LEN    64
-#define SCENARIO_DESC_LEN   128
+#define SCENARIO_MAX_ACTORS      16
+#define SCENARIO_NAME_LEN        64
+#define SCENARIO_DESC_LEN       128
+#define SCENARIO_MAX_ROUTE_STEPS  8
+#define SCENARIO_ROUTE_LABEL_LEN 32
 
 /* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
 
@@ -57,6 +71,14 @@ typedef struct {
     double init_speed;     /**< 初始速度（m/s） */
     double target_speed;   /**< 期望巡航速度（m/s） */
 } ScenarioEgo;
+
+/* ── 导航路线变道指令（NOA 主动变道） ───────────────────────── */
+
+typedef struct {
+    double trigger_x;     /**< ego x 越过此值触发（m） */
+    int    target_lane;   /**< 目标车道方向: -1=初始车道一侧(y<0), +1=对侧相邻车道(y>0) */
+    char   label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */
+} ScenarioRouteStep;
 
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
@@ -78,6 +100,8 @@ typedef struct {
     ScenarioActor    actors[SCENARIO_MAX_ACTORS];
     int              actor_count;
     ScenarioCriteria criteria;
+    ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS]; /**< 导航路线变道指令（可选，NOA 用） */
+    int               route_count;
 } ScenarioConfig;
 
 /**

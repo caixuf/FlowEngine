@@ -95,6 +95,26 @@ statem_format_hierarchical(statem_current(&sm), buf, sizeof(buf));
 // buf = "CP:READY"
 ```
 
+### 实车接入：planning_node 中的模式仲裁
+
+`modules/adas_nodes/planning_node.c` 已经把这个状态机接入了真实 pipeline（不再只是
+demo 里的一次性示例）：
+
+- 每 1s 检查一次升级条件（`mode_transition_guard`）：
+  `NA→ACC` 需要有传感器数据；`ACC→CP` 需要融合定位就绪；`CP→NP` 需要车速持续
+  高于 `highway_speed_mps`（`pipeline.json` 参数）达到 3s；`NP→NOA` 需要场景文件
+  (`scenario_file` 参数) 里定义了至少一条 `route` 导航路线。
+- 车速骤降 / 融合数据超时 (`CONDITIONS_LOST`) 会触发降级（`check_mode_downgrade`）。
+- 当前模式通过 `mode=<hier>` 字段附加在 `planning/trajectory` 消息里发布。
+- 进入 NOA 后，场景 `route[]` 里到达 `trigger_x` 的步骤会把目标车道写入
+  `route_lane=<±1>` 字段；`control_node.c` 消费该字段，复用既有的安全变道
+  状态机（`lane_rear_safe`/`lane_has_pedestrian_risk`）主动发起变道
+  （日志标记为 `NOA_ROUTE`），从而实现"导航驱动的主动变道"而非仅有的
+  "障碍物触发的被动超车"。
+- 默认 demo 场景 (`pedestrian_crossing.json`) 没有 `route` 字段，所以模式最高
+  只能到 `NP`（NOA 的 guard 会一直拒绝），行为与升级前保持一致；
+  `scenarios/highway_noa_route.json` 提供了一个演示 NOA 主动变道的示例场景。
+
 ## API 速查
 
 | 函数 | 用途 |

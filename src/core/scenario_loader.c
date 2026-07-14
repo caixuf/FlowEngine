@@ -137,9 +137,30 @@ ScenarioConfig* scenario_load(const char* path) {
         sc->criteria.no_collision = true;
     }
 
+    /* route（可选）：导航路线主动变道指令，按 trigger_x 触发，与障碍物无关 */
+    cJSON* jroute = cJSON_GetObjectItemCaseSensitive(root, "route");
+    if (cJSON_IsArray(jroute)) {
+        int n = cJSON_GetArraySize(jroute);
+        if (n > SCENARIO_MAX_ROUTE_STEPS) n = SCENARIO_MAX_ROUTE_STEPS;
+        sc->route_count = n;
+        for (int i = 0; i < n; i++) {
+            cJSON* jr = cJSON_GetArrayItem(jroute, i);
+            if (!cJSON_IsObject(jr)) continue;
+            ScenarioRouteStep* r = &sc->route[i];
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "trigger_x");
+            if (cJSON_IsNumber(j)) r->trigger_x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "target_lane");
+            if (cJSON_IsNumber(j)) r->target_lane = (int)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "label");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(r->label, j->valuestring, sizeof(r->label) - 1);
+        }
+    }
+
     cJSON_Delete(root);
-    LOG_INFO("scenario", "loaded '%s' (%d actors, seed=%u)",
-             sc->name, sc->actor_count, sc->random_seed);
+    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, seed=%u)",
+             sc->name, sc->actor_count, sc->route_count, sc->random_seed);
     return sc;
 }
 
@@ -189,6 +210,18 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
     cJSON_AddNumberToObject(jcrit, "min_avg_speed_mps",scenario->criteria.min_avg_speed_mps);
     cJSON_AddNumberToObject(jcrit, "min_distance_m",   scenario->criteria.min_distance_m);
     cJSON_AddItemToObject(root, "pass_criteria", jcrit);
+
+    /* route */
+    cJSON* jroute = cJSON_CreateArray();
+    for (int i = 0; i < scenario->route_count; i++) {
+        const ScenarioRouteStep* r = &scenario->route[i];
+        cJSON* jr = cJSON_CreateObject();
+        cJSON_AddNumberToObject(jr, "trigger_x",   r->trigger_x);
+        cJSON_AddNumberToObject(jr, "target_lane", r->target_lane);
+        cJSON_AddStringToObject(jr, "label",       r->label);
+        cJSON_AddItemToArray(jroute, jr);
+    }
+    cJSON_AddItemToObject(root, "route", jroute);
 
     char* out = cJSON_Print(root);
     cJSON_Delete(root);

@@ -416,13 +416,22 @@ extern const TransitionRule SM_TABLE_STANDARD[];
  *    NOA — Navigate on Autopilot（全域导航辅助 L2++）
  *
  * 每个模式有 4 个子状态：READY → ACTIVE → EXITING → (READY or FAULT)
+ * 模式 ID 之间按 4 (子状态个数) 对齐分块，这样 SM_MODE_STATE/SM_MODE_OF/
+ * SM_SUB_OF 才能用简单的位运算安全地组合/拆分 "mode + sub" —— 千万不要把
+ * 这些常量改成连续整数 (64,65,66...)，否则 ACC:ACTIVE (=NA+4+1=69) 这类
+ * 组合状态会与相邻模式的常量互相踩踏。
  */
 #define SM_MODE_NA    64
-#define SM_MODE_ACC   65
-#define SM_MODE_CP    66
-#define SM_MODE_NP    67
-#define SM_MODE_LP    68
-#define SM_MODE_NOA   69
+#define SM_MODE_ACC   68
+#define SM_MODE_CP    72
+#define SM_MODE_NP    76
+#define SM_MODE_LP    80
+#define SM_MODE_NOA   84
+
+/** 模式 ID 之间的间距（= 子状态个数），SM_MODE_STATE/SM_MODE_OF/SM_SUB_OF
+ *  以及 state_machine.c 中的 statem_mode_name() 都依赖这个值，修改模式
+ *  常量的间距时务必同步这里。 */
+#define SM_MODE_SPACING 4
 
 /** 模式子状态（偏移量，mode_id + sub = 实际 StateId） */
 #define SM_SUB_READY    0   /**< 就绪：条件满足，等待激活 */
@@ -430,7 +439,7 @@ extern const TransitionRule SM_TABLE_STANDARD[];
 #define SM_SUB_EXITING  2   /**< 退出中：交还控制权 */
 #define SM_SUB_FAULT    3   /**< 故障：功能不可用 */
 
-/** 构造完整状态 ID */
+/** 构造完整状态 ID（mode 必须是 SM_MODE_SPACING 的倍数，见上方常量定义） */
 #define SM_MODE_STATE(mode, sub)  ((mode) + (sub))
 #define SM_MODE_OF(state)         ((state) & ~3)
 #define SM_SUB_OF(state)          ((state) & 3)

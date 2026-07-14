@@ -190,8 +190,8 @@ static const char* g_sub_names[] = {
 };
 
 const char* statem_mode_name(StateId mode_id) {
-    int idx = mode_id - SM_MODE_NA;
-    if (idx >= 0 && idx < 6 && g_mode_names[idx])
+    int idx = (mode_id - SM_MODE_NA) / SM_MODE_SPACING;
+    if (idx >= 0 && idx < 6 && (mode_id - SM_MODE_NA) % SM_MODE_SPACING == 0 && g_mode_names[idx])
         return g_mode_names[idx];
     return "?";
 }

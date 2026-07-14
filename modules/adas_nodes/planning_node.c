@@ -9,6 +9,7 @@
 
 #include "node_plugin.h"
 #include "state_machine.h"
+#include "scenario_loader.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
 
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
@@ -36,6 +38,21 @@ static struct {
 
     /* 反射式状态机：跟踪生命周期 */
     ReflectiveStateMachine sm;
+
+    /* 驾驶模式状态机（NA/ACC/CP/NP/NOA）：系统级功能仲裁, 由感知/定位/
+     * 路况条件驱动升降级, 是 NOA 相对 LCC 的核心能力入口。 */
+    ReflectiveStateMachine mode_sm;
+    uint64_t mode_last_check_us;
+    uint64_t last_fusion_us;      /* fusion 消息到达的单调时间戳（模式降级用） */
+    int      highway_ready;       /* ego_v 持续高于阈值一段时间 -> 视为高速工况 */
+    double   highway_speed_timer;
+
+    /* 从场景文件加载的导航路线（可选, 仅当 params 提供 scenario_file 时有效） */
+    char              scenario_file[256];
+    ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS];
+    int               route_count;
+    int               route_next_idx;   /* 下一条待触发的路线指令 */
+    int               route_target_lane; /* 当前路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -60,6 +77,7 @@ static struct {
     double cfg_max_accel;
     double cfg_ref_path_length;
     double ref_path_start_x;
+    double cfg_highway_speed_mps; /* CP->NP 升级所需的持续速度阈值 (m/s) */
 
     int tid;  /* scheduler task id */
 } g;
@@ -70,6 +88,68 @@ static struct {
 #define OBS_MAX_ABS_Y_M     6.0   /* 忽略横向距离超出道路范围的障碍物 */
 #define OBSTACLE_WIDTH_M    2.0   /* 默认障碍物宽度 (m) */
 #define OBSTACLE_LENGTH_M   4.6   /* 默认障碍物长度 (m) */
+
+/* 驾驶模式仲裁常量 */
+#define MODE_CHECK_INTERVAL_US   1000000ULL  /* 每 1s 检查一次模式升降级条件 */
+#define FUSION_STALE_TIMEOUT_US  1500000ULL  /* 定位超过此时长未更新 -> 判定条件丢失 */
+#define HIGHWAY_SPEED_HOLD_S     3.0          /* 速度需持续高于阈值这么久才算"高速工况" */
+
+static uint64_t monotonic_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+/**
+ * 驾驶模式转移守卫：把真实感知/定位/路况条件接到状态机上，
+ * 而不是无条件放行——这是把"演示用状态机"变成"真正的模式仲裁器"的关键。
+ *
+ *   NA  -> ACC : 定位与车辆状态均已上线
+ *   ACC -> CP  : 定位持续有效（车道居中所需的姿态/位置可信）
+ *   CP  -> NP  : 达到并保持高速工况（导航加速辅助的 ODD 之一）
+ *   NP  -> NOA : 已加载导航路线（等效 HD 地图/路线规划可用）
+ * 其余转移（降级/故障/退出）默认放行。
+ */
+static bool mode_transition_guard(void* task, StateId from, EventId event, StateId to) {
+    (void)task; (void)from;
+    StateId to_mode = SM_MODE_OF(to);
+    if (event == SM_EVT_CONDITIONS_MET) {
+        return g.has_fusion && g.has_vstate;
+    }
+    if (event == SM_EVT_MODE_UPGRADE) {
+        switch (to_mode) {
+            case SM_MODE_CP:  return g.has_fusion != 0;
+            case SM_MODE_NP:  return g.highway_ready != 0;
+            case SM_MODE_NOA: return g.route_count > 0;
+            default: return true;
+        }
+    }
+    return true;
+}
+
+/** 每个控制周期尝试驱动模式向上一级演进（受 guard 约束，条件不满足时静默保持）。 */
+static void try_mode_progress(void) {
+    StateId cur  = statem_current(&g.mode_sm);
+    StateId mode = SM_MODE_OF(cur);
+    EventId ev   = (mode == SM_MODE_NA) ? SM_EVT_CONDITIONS_MET : SM_EVT_MODE_UPGRADE;
+
+    if (statem_send_event(&g.mode_sm, ev, NULL)) {
+        char buf[32];
+        statem_format_hierarchical(statem_current(&g.mode_sm), buf, sizeof(buf));
+        LOG_INFO("planning", "driving mode -> %s", buf);
+    }
+}
+
+/** 定位/车辆状态长时间未更新 -> 条件丢失，模式退回 NA（安全兜底）。 */
+static void check_mode_downgrade(uint64_t now_us) {
+    if (SM_MODE_OF(statem_current(&g.mode_sm)) == SM_MODE_NA) return;
+    if (g.last_fusion_us != 0 && now_us - g.last_fusion_us > FUSION_STALE_TIMEOUT_US) {
+        if (statem_send_event(&g.mode_sm, SM_EVT_CONDITIONS_LOST, NULL)) {
+            LOG_WARN("planning", "fusion stale (%.1fs) -> driving mode downgraded to NA",
+                     (double)(now_us - g.last_fusion_us) / 1e6);
+        }
+    }
+}
 
 static void update_reference_path(double start_x) {
 #ifdef HAVE_FRENET
@@ -99,6 +179,7 @@ static void on_fusion(const Message* msg, void* user_data) {
             g.ego_v       = loc.v;
             g.ego_heading = loc.heading;
             g.has_fusion  = 1;
+            g.last_fusion_us = monotonic_us();
             return;
         }
     }
@@ -111,6 +192,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"v\":")))       sscanf(p + 4, "%lf", &g.ego_v);
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
     g.has_fusion = 1;
+    g.last_fusion_us = monotonic_us();
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置（世界坐标） ─────────── */
@@ -147,6 +229,34 @@ static void* planning_thread(void* arg) {
     while (!g.should_stop) {
         usleep(50000);  /* 20Hz 检查 */
         if (g.should_stop || !g.has_fusion) continue;
+
+        /* ── 驾驶模式仲裁：周期性检查条件，尝试升级；定位丢失时立即降级 ── */
+        uint64_t now_us = monotonic_us();
+        g.highway_ready = (g.ego_v >= g.cfg_highway_speed_mps) &&
+                           (g.highway_speed_timer >= HIGHWAY_SPEED_HOLD_S);
+        if (g.ego_v >= g.cfg_highway_speed_mps) g.highway_speed_timer += 0.05;
+        else                                    g.highway_speed_timer = 0.0;
+
+        check_mode_downgrade(now_us);
+        if (now_us - g.mode_last_check_us >= MODE_CHECK_INTERVAL_US) {
+            try_mode_progress();
+            g.mode_last_check_us = now_us;
+        }
+
+        /* ── 路线驱动的主动变道（仅 NOA 生效）：不依赖障碍物，由导航路线
+         * 提前决定车道，是 NOA 区别于被动跟车/超车（LCC/NP）的核心行为。
+         * route_target_lane 一经触发即持续下发，直到下一条路线指令覆盖它，
+         * 供 control 节点在其既有安全变道状态机上执行（rear/front gap 检查）。 ── */
+        if (SM_MODE_OF(statem_current(&g.mode_sm)) == SM_MODE_NOA &&
+            g.route_next_idx < g.route_count &&
+            g.ego_x >= g.route[g.route_next_idx].trigger_x) {
+            g.route_target_lane = g.route[g.route_next_idx].target_lane;
+            const char* label = g.route[g.route_next_idx].label;
+            LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
+                     g.route_next_idx, g.ego_x, g.route_target_lane,
+                     label && label[0] ? label : "-");
+            g.route_next_idx++;
+        }
 
         if (g.ego_x > g.ref_path_start_x + g.cfg_ref_path_length * 0.8) {
             double new_start = g.ego_x - 50.0;
@@ -241,10 +351,14 @@ static void* planning_thread(void* arg) {
                 failsafe, g.plan_count, 0.0);  /* Frenet d=0 → 保持在参考线上 */
         }
 
-        /* 后向兼容: PID 也读取 speed= 字段 */
-        char traj_final[1100];
-        snprintf(traj_final, sizeof(traj_final), "%s speed=%.1f",
-                 traj, command_speed);
+        /* 后向兼容: PID 也读取 speed= 字段。附加 mode/route_lane 供 control 消费
+         * (NOA 主动变道) 及仪表盘展示驾驶模式，采用与 speed= 相同的宽松追加格式,
+         * 不影响既有基于 strstr 的解析。 */
+        char mode_buf[32];
+        statem_format_hierarchical(statem_current(&g.mode_sm), mode_buf, sizeof(mode_buf));
+        char traj_final[1200];
+        snprintf(traj_final, sizeof(traj_final), "%s speed=%.1f mode=%s route_lane=%d",
+                 traj, command_speed, mode_buf, g.route_target_lane);
 
         transport_publish(g.transport, "planning/trajectory",
                           (const uint8_t*)traj_final,
@@ -296,10 +410,13 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.has_fusion   = 0;
 
     /* 默认参数 */
-    g.cfg_target_speed     = 15.0;
-    g.cfg_max_speed        = 20.0;
-    g.cfg_max_accel        = 4.0;
-    g.cfg_ref_path_length  = 5000.0;
+    g.cfg_target_speed      = 15.0;
+    g.cfg_max_speed         = 20.0;
+    g.cfg_max_accel         = 4.0;
+    g.cfg_ref_path_length   = 5000.0;
+    g.cfg_highway_speed_mps = 13.0;  /* 未提供 highway_speed_mps 参数时的兜底默认值，
+                                        需低于当前场景实际巡航速度才能触发 NP 升级；
+                                        pipeline.json 会显式覆盖为更贴近实际场景的值。 */
 
     if (params_json) {
         const char* p;
@@ -311,9 +428,43 @@ static int planning_init(MessageBus* bus, Transport* transport,
             sscanf(p + 12, "%lf", &g.cfg_max_accel);
         if ((p = strstr(params_json, "\"ref_path_length_m\":")))
             sscanf(p + 20, "%lf", &g.cfg_ref_path_length);
+        if ((p = strstr(params_json, "\"highway_speed_mps\":")))
+            sscanf(p + 20, "%lf", &g.cfg_highway_speed_mps);
+        if ((p = strstr(params_json, "\"scenario_file\":"))) {
+            const char* start = strchr(p + 16, '"');
+            if (start) {
+                start++;
+                const char* end = strchr(start, '"');
+                if (end) {
+                    size_t len = (size_t)(end - start);
+                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
+                    memcpy(g.scenario_file, start, len);
+                    g.scenario_file[len] = '\0';
+                }
+            }
+        }
     }
 
     g.target_speed = g.cfg_target_speed;
+
+    /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
+     * 找不到文件或未配置 scenario_file 时静默保留 route_count=0，此时模式
+     * 状态机最高只能升到 NP（guard 会持续拒绝 NP->NOA 的升级）。 */
+    if (g.scenario_file[0] != '\0') {
+        ScenarioConfig* sc = scenario_load(g.scenario_file);
+        if (sc) {
+            g.route_count = sc->route_count;
+            /* sc 由 calloc 分配，未用槽位已清零；这里按实际 route_count 精确
+             * 拷贝，避免依赖 calloc 的清零语义。 */
+            memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
+            scenario_free(sc);
+            LOG_INFO("planning", "loaded %d NOA route step(s) from '%s'",
+                     g.route_count, g.scenario_file);
+        } else {
+            LOG_WARN("planning", "scenario_file '%s' not loadable — NOA route disabled",
+                     g.scenario_file);
+        }
+    }
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -342,6 +493,10 @@ static int planning_init(MessageBus* bus, Transport* transport,
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "planning");
     statem_send_event(&g.sm, SM_EVENT_START, NULL);
 
+    /* 初始化驾驶模式状态机（NA/ACC/CP/NP/NOA）：真实条件驱动升降级 */
+    statem_init(&g.mode_sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "driving_mode");
+    statem_set_guard(&g.mode_sm, mode_transition_guard);
+
     LOG_INFO("planning", "initialized (Frenet, target=%.0f m/s, max=%.0f m/s)",
              g.cfg_target_speed, g.cfg_max_speed);
     return 0;
@@ -363,6 +518,8 @@ static void planning_cleanup(void) {
 #else
     g.frenet = NULL;
 #endif
+    statem_cleanup(&g.sm);
+    statem_cleanup(&g.mode_sm);
     LOG_INFO("planning", "cleanup done");
 }
 static int  planning_health(void)     { return 0; }
