@@ -1057,19 +1057,15 @@ function _buildRoad(scene){
   var shld = _makeBox(ROAD_LEN, 0.04, 1.5, 0x556655, 0, 1);
   shld.position.set(0, 0.02, ROAD_HALF+0.75);
   shld.receiveShadow = true;
+  shld.userData.isEdge = true; shld.userData.baseZ = ROAD_HALF+0.75;
   roadGroup.add(shld);
   var shld2 = shld.clone();
   shld2.position.z = -(ROAD_HALF+0.75);
+  shld2.userData.isEdge = true; shld2.userData.baseZ = -(ROAD_HALF+0.75);
   roadGroup.add(shld2);
 
-  // Lane edge lines (solid white, Z = ±7.0)
-  for(var side = -1; side <= 1; side += 2){
-    var edge = _makeBox(ROAD_LEN, 0.01, 0.15, MARKING, 0, 0.3);
-    edge.position.set(0, 0.07, side * 7.0);
-    roadGroup.add(edge);
-  }
-
   // Dashed lane dividers at Z = -3.5, 0 (yellow), 3.5
+  // 车道线标记为 userData 供弯道变形时按类型分别处理
   var dashLen = 4.0, gap = 6.0, segLen = dashLen + gap;   // fewer segments for perf
   var nSeg = Math.floor(ROAD_LEN / segLen);
   for(var zi = 0; zi < 3; zi++){
@@ -1078,19 +1074,82 @@ function _buildRoad(scene){
     for(var s = -Math.floor(nSeg/2); s < Math.floor(nSeg/2); s++){
       var dash = _makeBox(dashLen, 0.01, 0.12, isCenter ? YELLOW : MARKING, 0, 0.3);
       dash.position.set(s * segLen + dashLen/2, 0.07, zPos);
+      dash.userData.isLaneMark = true;
+      dash.userData.baseZ = zPos;
       roadGroup.add(dash);
     }
     if(isCenter){
       for(var s2 = -Math.floor(nSeg/2); s2 < Math.floor(nSeg/2); s2++){
         var d2 = _makeBox(dashLen, 0.01, 0.12, YELLOW, 0, 0.3);
         d2.position.set(s2 * segLen + dashLen/2, 0.07, zPos + 0.22);
+        d2.userData.isLaneMark = true;
+        d2.userData.baseZ = zPos + 0.22;
         roadGroup.add(d2);
       }
     }
   }
 
+  // 路肩边线标记
+  for(var side = -1; side <= 1; side += 2){
+    var edge = _makeBox(ROAD_LEN, 0.01, 0.15, MARKING, 0, 0.3);
+    edge.position.set(0, 0.07, side * 7.0);
+    edge.userData.isEdge = true;
+    edge.userData.baseZ = side * 7.0;
+    roadGroup.add(edge);
+  }
+
   scene.add(roadGroup);
   window._roadGroup = roadGroup;
+}
+
+// ── Curve road using scene road geometry data ──
+// 根据 road_center_y 偏移公式: 0 (x<sx), (x-sx)/len*off (渐变), off (全偏移)
+// 路面大网格 → 变形顶点; 车道线/路肩小方块 → 平移 position.z（不变形顶点）
+// sim_world Y = Three.js Z: pos curve_offset = 右弯 = 正 Z 偏移。
+// 弯道激活后禁用道路分块(chunking)，否则变形后分块移动破坏形状。
+var _lastCurveKey = "";
+window._curveActive = false;
+function _curveShiftAt(x, sx, len, off){
+  if(len<=0||Math.abs(off)<0.01) return 0;
+  if(x<=sx) return 0;
+  if(x>=sx+len) return off;
+  return (x-sx)/len*off;
+}
+function _applyRoadCurve(roadData){
+  if(!roadData) return;
+  var sx=roadData.curve_start_x||0, len=roadData.curve_length_m||0;
+  var off=roadData.curve_offset_m||0;
+  var key = sx+","+len+","+off;
+  if(key===_lastCurveKey) return;
+  _lastCurveKey = key;
+  if(len<=0||Math.abs(off)<0.01){
+    window._curveActive = false;
+    return;
+  }
+  window._curveActive = true;
+  var group = window._roadGroup;
+  if(!group) return;
+  group.position.x = 0;  // 重置分块位移
+  group.traverse(function(child){
+    if(!child.isMesh||!child.geometry) return;
+    // ── 车道线/路肩: 平移 position.z 跟随弯道（不变形顶点）──
+    if(child.userData&&(child.userData.isLaneMark||child.userData.isEdge)){
+      var baseZ = child.userData.baseZ || child.position.z;
+      var meshX = child.position.x;
+      child.position.z = baseZ + _curveShiftAt(meshX, sx, len, off);
+      return;
+    }
+    // ── 路面大网格: 变形顶点 Z ──
+    var pos=child.geometry.attributes.position;
+    if(!pos) return;
+    var arr=pos.array;
+    for(var i=0;i<arr.length;i+=3){
+      var vx=arr[i];
+      arr[i+2]=arr[i+2]+_curveShiftAt(vx, sx, len, off);
+    }
+    pos.needsUpdate=true;
+    child.geometry.computeVertexNormals();
+  });
 }
 
 // ── Environment: buildings + trees ──
@@ -1329,6 +1388,7 @@ function init3DScene(){
 
   // ── Road ──
   _buildRoad(scene3d);
+  _applyRoadCurve(null);  // prime curve key (no data yet, will apply when scene data arrives)
 
   // ── Environment ──
   _buildEnvironment(scene3d);
@@ -1432,10 +1492,13 @@ function _renderFrame(){
 
   // Keep the static road/ground near ego for long-running demos. This avoids
   // driving beyond the initial mesh and ending up with an empty/dark 3D view.
-  var chunkX = Math.round(sx / 1000) * 1000;
-  if(window._roadGroup) window._roadGroup.position.x = chunkX;
-  if(window._groundMesh) window._groundMesh.position.x = sx;
-  if(window._envGroup) window._envGroup.position.x = chunkX;
+  // 弯道激活时禁用分块移动：变形后的路网顶点与局部坐标绑定，移动分块会破坏弯道形状。
+  if(!window._curveActive){
+    var chunkX = Math.round(sx / 1000) * 1000;
+    if(window._roadGroup) window._roadGroup.position.x = chunkX;
+    if(window._groundMesh) window._groundMesh.position.x = chunkX;
+    if(window._envGroup) window._envGroup.position.x = chunkX;
+  }
 
   // ── Chase camera: behind+above ego in world space ──
   var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
@@ -1517,10 +1580,13 @@ function update3D(){
   var m=topoData.metrics||{},scn=m.scene,v=m.vehicle||{};
   var now=performance.now()/1000;
 
+  // Road curve geometry: apply once when scene road data arrives
+  if(scn&&scn.road) _applyRoadCurve(scn.road);
+
   // Ego position from scene data
   if(scn&&scn.ego){
     var newX=scn.ego.x||0;
-    var newZ=-(scn.ego.y||0); // ego.y in meters, negate for 3D right-hand Z
+    var newZ=(scn.ego.y||0);   // ego.y (m): -1.75=左车道中心, +1.75=右车道中心
     var newSpeed=scn.ego.speed||v.speed||0;
     var newHeading=scn.ego.heading||0;
     if(!_dr.init || Math.abs(newX - _dr.lastX) > 0.01 || Math.abs(newZ - _dr.lastZ) > 0.01 || Math.abs(newSpeed - _dr.lastSpeed) > 0.1){
@@ -1532,7 +1598,7 @@ function update3D(){
       _dr.init = true;
     }
   }else if(v){
-    var nx=v.x||0, ns=v.speed||0, nz=-(v.y||0); // v.y is meters, map to 3D Z
+    var nx=v.x||0, ns=v.speed||0, nz=(v.y||0);   // v.y (m)
     if(!_dr.init || Math.abs(nx - _dr.lastX) > 0.01 || Math.abs(nz - _dr.lastZ) > 0.01){
       _dr.lastX = nx;
       _dr.lastZ = nz;
@@ -1552,10 +1618,10 @@ function update3D(){
       var om=window._obsPool[oi];
       if(oi<obs.length){
         var o=obs[oi];
-        var wx=_dr.lastX+(o.x||0), wz=_dr.lastZ-(o.y||0);
+        var wx=_dr.lastX+(o.x||0), wz=_dr.lastZ+(o.y||0);
         // 存基准位置 + 世界速度 + 基准时刻 → _renderFrame 按速度外推,
         // 避免 10Hz 数据下快速障碍物(对向车 -9m/s)一格一格跳(卡顿)。
-        window._obsWorld[oi]={x:wx, z:wz, vx:(o.vx||0), vz:-(o.vy||0),
+        window._obsWorld[oi]={x:wx, z:wz, vx:(o.vx||0), vz:(o.vy||0),
                              t0:now, len:o.len||4, wid:o.wid||2, type:o.type};
         om.visible=true;
       }else{om.visible=false; window._obsWorld[oi]=null;}
@@ -1569,7 +1635,7 @@ function update3D(){
     for(var i=0;i<300&&i*3<pos.length;i++){
       if(i<n){
         var pt=scn.lidar[i];
-        var lx=_dr.lastX+(pt[0]||0), ly=(pt[2]||0)+0.15, lz=_dr.lastZ-(pt[1]||0);
+        var lx=_dr.lastX+(pt[0]||0), ly=(pt[2]||0)+0.15, lz=_dr.lastZ+(pt[1]||0);
         pos[i*3]=lx; pos[i*3+1]=ly; pos[i*3+2]=lz;
         if(i<window._lidarWorld.length){window._lidarWorld[i]={x:lx,y:ly,z:lz};}
         else{window._lidarWorld.push({x:lx,y:ly,z:lz});}

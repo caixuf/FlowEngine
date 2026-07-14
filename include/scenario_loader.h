@@ -88,6 +88,7 @@ typedef struct {
 typedef struct {
     double trigger_x;     /**< ego x 越过此值触发（m） */
     int    target_lane;   /**< 目标车道方向: -1=初始车道一侧(y<0), +1=对侧相邻车道(y>0) */
+    double target_speed;  /**< 目标速度（m/s），0 = 不改变当前目标速度（可选项，用于出口匝道减速等） */
     char   label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */
 } ScenarioRouteStep;
 

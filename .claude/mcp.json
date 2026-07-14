@@ -1,0 +1,9 @@
+{
+  "browser": {
+    "command": "npx",
+    "args": [
+      "@playwright/mcp",
+      "--allowed-hosts=localhost"
+    ]
+  }
+}

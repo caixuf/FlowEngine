@@ -353,8 +353,8 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                 pass  # client disconnected
 
         elif self.path == '/' or self.path == '/index.html':
-            # Serve the dashboard HTML
-            html_path = os.path.join(os.path.dirname(__file__), 'flowboard.html')
+            # Serve the dashboard HTML (new modular structure)
+            html_path = os.path.join(os.path.dirname(__file__), 'flowboard', 'index.html')
             if os.path.exists(html_path):
                 with open(html_path) as f:
                     content = f.read()
@@ -364,21 +364,51 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content.encode())
             else:
+                # Fallback: serve legacy monolithic flowboard.html
+                fallback = os.path.join(os.path.dirname(__file__), 'flowboard.html')
+                if os.path.exists(fallback):
+                    with open(fallback) as f:
+                        content = f.read()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                    self.end_headers()
+                    self.wfile.write(content.encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+                    self.wfile.write(b"flowboard index not found")
+
+        elif self.path.startswith('/js/') or self.path.startswith('/css/'):
+            # Serve JS/CSS from the flowboard/ subdirectory
+            rel = self.path.lstrip('/')
+            fpath = os.path.join(os.path.dirname(__file__), 'flowboard', rel)
+            fpath = os.path.normpath(fpath)
+            flowboard_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), 'flowboard'))
+            if not fpath.startswith(flowboard_dir):
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"forbidden")
+                return
+            if os.path.isfile(fpath):
+                ctype = 'text/javascript' if fpath.endswith('.js') else 'text/css'
+                self.send_response(200)
+                self.send_header('Content-Type', ctype + '; charset=utf-8')
+                self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                self.end_headers()
+                with open(fpath, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(b"flowboard.html not found")
 
         elif self.path.startswith('/tools/') or self.path.startswith('/static/'):
             # Serve static assets (Three.js, CSS, etc.) from the tools/ directory.
-            # Strip leading /tools/ or /static/ to get the relative filename.
             rel = self.path.lstrip('/')
-            # /tools/three.min.js → tools/three.min.js
-            # /static/foo.js       → tools/foo.js (mapped to tools/ for simplicity)
             if rel.startswith('static/'):
                 rel = 'tools/' + rel[len('static/'):]
             fpath = os.path.join(os.path.dirname(__file__), '..', rel)
             fpath = os.path.normpath(fpath)
-            # Security: only serve files directly inside tools/
             tools_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'tools'))
             if not fpath.startswith(tools_dir):
                 self.send_response(403)

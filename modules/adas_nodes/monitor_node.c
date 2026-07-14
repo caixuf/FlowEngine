@@ -57,7 +57,7 @@ static struct {
 
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
-    char node_info_json[MAX_TOPO_NODES][512];  /* 每个节点的原始 JSON */
+    char node_info_json[MAX_TOPO_NODES][2048];  /* 每个节点的原始 JSON（需能容纳最长节点的 self-description JSON） */
     int  node_info_count;
 
     /* 导出路径 */
@@ -99,9 +99,26 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 static void on_node_info(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data || g.node_info_count >= MAX_TOPO_NODES) return;
-    size_t copy = msg->data_size < sizeof(g.node_info_json[0]) - 1
-                  ? msg->data_size : sizeof(g.node_info_json[0]) - 1;
+    size_t copy = msg->data_size < sizeof(g.node_info_json[0]) - 3
+                  ? msg->data_size : sizeof(g.node_info_json[0]) - 3;
     memcpy(g.node_info_json[g.node_info_count], msg->data, copy);
+    /* 截断保护: 若原始 JSON 被截断（msg->data_size > 缓冲区容量）, 确保闭括号完整,
+     * 避免生成非法 JSON 导致整个 state file 解析失败（scene 等数据丢失）。 */
+    if (msg->data_size >= sizeof(g.node_info_json[0]) - 3) {
+        size_t end = copy;
+        while (end > 0 && g.node_info_json[g.node_info_count][end - 1] != '}') end--;
+        if (end > 0) {
+            /* 确保末尾有 ]} 或至少 } */
+            if (end >= 2 && g.node_info_json[g.node_info_count][end - 2] == ']') {
+                copy = end;
+            } else if (end >= 1) {
+                /* 在截断处补上 ]} */
+                copy = end;
+                g.node_info_json[g.node_info_count][copy++] = ']';
+                g.node_info_json[g.node_info_count][copy++] = '}';
+            }
+        }
+    }
     g.node_info_json[g.node_info_count][copy] = '\0';
     g.node_info_count++;
 }
@@ -309,6 +326,17 @@ static void export_dashboard_json(void) {
             "\"speed\":%.2f,\"steer\":%.3f},",
             ego_x, ego_y, hdg, spd, steer);
     fprintf(jf, "\"lane\":{\"width\":3.5,\"count\":2},");
+
+    /* 道路弯道几何（可选），从 sim_world_node 发布的 vehicle/state 中读取 */
+    {
+        double rc_sx  = json_extract_double(g.latest_vehicle_state, "road_curve_sx");
+        double rc_len = json_extract_double(g.latest_vehicle_state, "road_curve_len");
+        double rc_off = json_extract_double(g.latest_vehicle_state, "road_curve_off");
+        if (rc_len > 0.0) {
+            fprintf(jf, "\"road\":{\"curve_start_x\":%.2f,\"curve_length_m\":%.2f,"
+                    "\"curve_offset_m\":%.2f},", rc_sx, rc_len, rc_off);
+        }
+    }
 
     /* 障碍物（从 vehicle/state 动态读取，障碍物数量由 n_obs 决定） */
     int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");

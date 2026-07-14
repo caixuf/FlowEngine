@@ -570,15 +570,49 @@ static void* control_thread(void* arg) {
             g.lc_timer = 0;
         }
 
-        /* 超车后先稳定巡航，不强制回原车道，避免回切与慢车重叠。
-         * 通过重置 lc_attempted 允许后续再次发起变道。 */
+        /* 超车后稳定巡航 + 主动评估回原车道。
+         * 不强制回原车道（避免回切与慢车重叠），但主动检查原始车道前方是否已清空，
+         * 若清空则安全返回，比被动等待 lc_stable_wait_s 秒 + 冷却是更自然的驾驶行为。
+         * NOA 路线驱动时（route_triggered 历史），回原车道可能由下一条路线步骤触发，
+         * 此处只处理无路线步骤时的自主回切。 */
+        double original_lane_y = 2.0 * road_c - cruise_lane_y;
         if (g.lc_state == 2) {
             g.lc_wait += CONTROL_DT_S;
             if (g.lc_wait > g.lc_stable_wait_s && g.lc_cooldown <= 0.0) {
-                g.lc_state     = 0;  /* 允许后续再次评估变道触发条件 (line 463/486 要求 lc_state==0) */
-                g.lc_attempted = 0;
-                g.lc_cooldown  = g.lc_cooldown_after_stable_s;
-                g.lc_wait      = 0.0;
+                /* NOA 模式中（driving_mode 以 "NOA" 开头），路线步骤会接管变道决策，
+                 * 主动回切逻辑不应干预，避免在出口路段提前返回原车道。 */
+                int in_noa_mode = (strncmp(g.driving_mode, "NOA", 3) == 0);
+                if (!in_noa_mode && (g.route_lane == 0 || g.route_lane == g.committed_lane_side)) {
+                    /* 无 NOA 路线约束：评估是否可安全返回原始车道。
+                     * 条件：原始车道前车间距 > 安全间距的 1.5 倍（说明已清空），
+                     * 且后方无风险、无行人风险。 */
+                    double orig_gap = lane_lead_gap(original_lane_y, same_lane_tol);
+                    double orig_safe = min_gap + g.current_speed * time_headway;
+                    int    can_return = (orig_gap > orig_safe * 1.5) &&
+                                        !lane_has_pedestrian_risk(original_lane_y, same_lane_tol) &&
+                                        lane_rear_safe(original_lane_y, same_lane_tol);
+                    if (can_return) {
+                        /* 发起回切：设置 lc_state=3 (right return) */
+                        g.lc_origin_y = cruise_lane_y;
+                        g.lc_target_y = original_lane_y;
+                        effective_target_y = g.lc_target_y;
+                        g.lc_state = 3;
+                        g.lc_wait = 0.0;
+                        LOG_INFO("control", ">>> RETURN to original lane (orig_gap=%.1f safe=%.1f)", orig_gap, orig_safe);
+                    } else {
+                        /* 还不安全：重置允许后续超车评估但不回切 */
+                        g.lc_state     = 0;
+                        g.lc_attempted = 0;
+                        g.lc_cooldown  = g.lc_cooldown_after_stable_s;
+                        g.lc_wait      = 0.0;
+                    }
+                } else {
+                    /* NOA 路线要求保留在当前车道（如正在出口车道上），不回切 */
+                    g.lc_state     = 0;
+                    g.lc_attempted = 0;
+                    g.lc_cooldown  = g.lc_cooldown_after_stable_s;
+                    g.lc_wait      = 0.0;
+                }
             }
         }
 
@@ -668,22 +702,38 @@ static void* control_thread(void* arg) {
             g.prev_steer = steer;
             mode = "ROAD_GUARD";
         } else {
-            /* ── Stanley 式横向控制（收敛，不自激） ──
+            /* ── Stanley 式横向控制（高速自适应阻尼） ──
              * cross-track 项: atan2(k*e, v) 随速度自然衰减 → 高速小幅打方向;
              * heading 项: lat_kd_heading 阻尼抑制航向偏差, 避免极限环振荡。
-             * 弯道时以道路中心线切线航向为参考 (road_center_heading), 而非
-             * 固定的全局航向 0 —— 否则车辆在弯道中会持续"顶"航向阻尼项,
-             * 无法跟随弯道 (curve_length_m<=0 时该函数恒返回 0，行为不变)。 */
+             * 弯道时以道路中心线切线航向为参考 (road_center_heading)。
+             *
+             * 高速变道时 (>12m/s) 动态调节：
+             *   1) heading 阻尼增益降低到 1.2，避免过阻尼导致蛇行
+             *   2) lateral accel 限幅从 2.8 → 2.2 (m/s²) 减少横向冲击
+             *   3) 低通滤波权重从 0.7/0.3 → 0.5/0.5 更激进平滑 */
+            double lc_lat_kd = g.lat_kd_heading;
+            double lc_lat_accel_max = 1.4;
+            double filter_new = STEER_FILTER_NEW;
+            if (g.lc_state == 1) {
+                if (g.current_speed > 12.0) {
+                    lc_lat_kd = 1.2;                     /* 低阻尼防蛇行 */
+                    lc_lat_accel_max = 2.2;               /* 减少横向冲击 */
+                } else {
+                    lc_lat_kd = g.lat_kd_heading * 1.2;   /* 低速可稍强 */
+                    lc_lat_accel_max = 2.8;
+                }
+                filter_new = 0.5;                          /* 更激进滤波 */
+            }
             double road_heading = road_center_heading(g.ego_x, g.curve_start_x,
                                                         g.curve_length_m, g.curve_offset_m);
             double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
-            double heading_term = g.lat_kd_heading * (g.ego_heading - road_heading);
+            double heading_term = lc_lat_kd * (g.ego_heading - road_heading);
             steer = cte_term - heading_term;
-            double steer_limit = steer_limit_for_speed(g.current_speed, g.lc_state == 1 ? 2.8 : 1.4);
+            double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
             if (steer >  steer_limit) steer =  steer_limit;
             if (steer < -steer_limit) steer = -steer_limit;
-            /* 一阶低通滤波，防止跳变 */
-            steer = STEER_FILTER_NEW * steer + STEER_FILTER_PREV * g.prev_steer;
+            /* 一阶低通滤波（高速变道时更激进） */
+            steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
             g.prev_steer = steer;
         }
 

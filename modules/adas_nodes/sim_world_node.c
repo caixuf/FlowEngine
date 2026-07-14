@@ -509,6 +509,12 @@ static void* sim_thread(void* arg) {
                              i, g.obstacles[i].len,
                              i, g.obstacles[i].wid);
         }
+        /* 道路弯道几何（可选），前端 3D 据此渲染弯道路面 */
+        if (g.curve_length_m > 0.0) {
+            voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
+                             ",\"road_curve_sx\":%.2f,\"road_curve_len\":%.2f,\"road_curve_off\":%.2f",
+                             g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        }
         voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff, "}");
         transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
                           (uint32_t)voff + 1);

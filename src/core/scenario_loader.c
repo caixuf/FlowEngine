@@ -152,6 +152,8 @@ ScenarioConfig* scenario_load(const char* path) {
             if (cJSON_IsNumber(j)) r->trigger_x = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jr, "target_lane");
             if (cJSON_IsNumber(j)) r->target_lane = (int)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "target_speed");
+            if (cJSON_IsNumber(j)) r->target_speed = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jr, "label");
             if (cJSON_IsString(j) && j->valuestring)
                 strncpy(r->label, j->valuestring, sizeof(r->label) - 1);
@@ -231,6 +233,8 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         cJSON* jr = cJSON_CreateObject();
         cJSON_AddNumberToObject(jr, "trigger_x",   r->trigger_x);
         cJSON_AddNumberToObject(jr, "target_lane", r->target_lane);
+        if (r->target_speed > 0.0)
+            cJSON_AddNumberToObject(jr, "target_speed", r->target_speed);
         cJSON_AddStringToObject(jr, "label",       r->label);
         cJSON_AddItemToArray(jroute, jr);
     }

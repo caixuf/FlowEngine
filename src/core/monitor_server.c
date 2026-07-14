@@ -491,11 +491,10 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
-    /* Route: / → flowboard.html (from disk) or embedded fallback */
+    /* Route: / → flowboard/index.html or flowboard.html (from --html-path) */
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         char* html = NULL;
         size_t html_len = 0;
-        /* Try reading from disk first */
         if (ms->html_path[0]) {
             html = read_file(ms->html_path, &html_len);
         }
@@ -515,6 +514,52 @@ static void handle_client(int fd, MonitorServer* ms) {
                 "</body></html>";
             send_response(fd, "200 OK", "text/html; charset=utf-8",
                           fallback, (int)strlen(fallback));
+        }
+        close(fd);
+        return;
+    }
+
+    /* Route: /js/<file> or /css/<file> → modular frontend from flowboard/ subdir.
+     * Maps /js/foo.js → tools/flowboard/js/foo.js, /css/style.css → tools/flowboard/css/style.css */
+    if ((strncmp(path, "/js/", 4) == 0 || strncmp(path, "/css/", 5) == 0) && ms->html_path[0]) {
+        char reqpath[256];
+        snprintf(reqpath, sizeof(reqpath), "%s", path);
+        if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
+            const char* forbidden = "{\"error\":\"forbidden\"}";
+            send_response(fd, "403 Forbidden", "application/json", forbidden, (int)strlen(forbidden));
+            close(fd); return;
+        }
+        /* Derive parent dir from html_path, then go up once more to reach
+         * tools/ (since html_path is tools/flowboard/index.html, we strip
+         * "flowboard/index.html" → tools/). Then append flowboard/<rel>.
+         * e.g. /js/app.js → <tools>/flowboard/js/app.js */
+        char parent[512];
+        snprintf(parent, sizeof(parent), "%s", ms->html_path);
+        /* Strip basename (index.html) */
+        char* slash = strrchr(parent, '/');
+        if (slash) *slash = '\0';
+        /* Strip flowboard/ */
+        slash = strrchr(parent, '/');
+        if (slash) *slash = '\0'; else parent[0] = '\0';
+        char filepath[768];
+        const char* rel = path + 1;  /* "/js/app.js" → "js/app.js" */
+        snprintf(filepath, sizeof(filepath), "%s/flowboard/%s", parent, rel);
+        size_t flen = 0;
+        char* fbuf = read_file(filepath, &flen);
+        if (fbuf) {
+            const char* ctype = "application/octet-stream";
+            const char* dot = strrchr(filepath, '.');
+            if (dot) {
+                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
+                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
+                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
+                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
+            }
+            send_response(fd, "200 OK", ctype, fbuf, (int)flen);
+            free(fbuf);
+        } else {
+            const char* notfound = "{\"error\":\"not found\"}";
+            send_response(fd, "404 Not Found", "application/json", notfound, (int)strlen(notfound));
         }
         close(fd);
         return;

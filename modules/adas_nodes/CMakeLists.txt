@@ -162,8 +162,12 @@ target_link_libraries(learner_node ${NODE_LINK_LIBS})
 add_library(model_ota_node SHARED model_ota_node.c)
 target_link_libraries(model_ota_node ${NODE_LINK_LIBS})
 
+# flowmond_node: HTTP 监控仪表盘服务（C++ NodePlugin）
+add_library(flowmond_node SHARED flowmond_node.cpp)
+target_link_libraries(flowmond_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

@@ -54,6 +54,7 @@ static struct {
     int               route_count;
     int               route_next_idx;   /* 下一条待触发的路线指令 */
     int               route_target_lane; /* 当前路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
+    double            route_target_speed;/* 当前路线步骤要求的目标速度（0 = 无改变） */
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -254,15 +255,24 @@ static void* planning_thread(void* arg) {
         /* ── 路线驱动的主动变道（仅 NOA 生效）：不依赖障碍物，由导航路线
          * 提前决定车道，是 NOA 区别于被动跟车/超车（LCC/NP）的核心行为。
          * route_target_lane 一经触发即持续下发，直到下一条路线指令覆盖它，
-         * 供 control 节点在其既有安全变道状态机上执行（rear/front gap 检查）。 ── */
+         * 供 control 节点在其既有安全变道状态机上执行（rear/front gap 检查）。
+         * 若路线步骤指定了 target_speed，则同时调整巡航速度（用于出口匝道减速等）。 ── */
         if (SM_MODE_OF(statem_current(&g.mode_sm)) == SM_MODE_NOA &&
             g.route_next_idx < g.route_count &&
             g.ego_x >= g.route[g.route_next_idx].trigger_x) {
-            g.route_target_lane = g.route[g.route_next_idx].target_lane;
-            const char* label = g.route[g.route_next_idx].label;
-            LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
-                     g.route_next_idx, g.ego_x, g.route_target_lane,
-                     label && label[0] ? label : "-");
+            const ScenarioRouteStep* step = &g.route[g.route_next_idx];
+            g.route_target_lane = step->target_lane;
+            if (step->target_speed > 0.0) {
+                g.route_target_speed = step->target_speed;
+                LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
+                         g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
+                         step->label[0] ? step->label : "-");
+            } else {
+                g.route_target_speed = 0.0;
+                LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
+                         g.route_next_idx, g.ego_x, step->target_lane,
+                         step->label[0] ? step->label : "-");
+            }
             g.route_next_idx++;
         }
 
@@ -274,7 +284,9 @@ static void* planning_thread(void* arg) {
                      g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
         }
 
-        double command_speed = g.target_speed;
+        /* NOA 路线步骤可能指定目标速度（如出口匝道减速），覆盖纯粹的巡航速度。
+         * 叠加关系：route_target_speed > 0 时作为最终目标，否则用默认 target_speed。 */
+        double command_speed = (g.route_target_speed > 0.0) ? g.route_target_speed : g.target_speed;
 
         /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
 #ifdef HAVE_FRENET
@@ -454,6 +466,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     }
 
     g.target_speed = g.cfg_target_speed;
+    g.route_target_speed = 0.0;
 
     /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
      * 找不到文件或未配置 scenario_file 时静默保留 route_count=0，此时模式

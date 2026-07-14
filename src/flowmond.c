@@ -223,8 +223,13 @@ int main(int argc, char** argv) {
             char dir_buf[1024];
             snprintf(dir_buf, sizeof(dir_buf), "%s", self_path);
             char* dir = dirname(dir_buf);
+            /* Try modular frontend (flowboard/index.html) first. */
             snprintf(html_path, sizeof(html_path),
-                     "%s/../../tools/flowboard.html", dir);
+                     "%s/../../tools/flowboard/index.html", dir);
+            if (access(html_path, F_OK) != 0) {
+                snprintf(html_path, sizeof(html_path),
+                         "%s/../../tools/flowboard.html", dir);
+            }
         }
     }
 
