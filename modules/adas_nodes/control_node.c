@@ -122,6 +122,13 @@ static struct {
     double lane_width;
     double blocked_timeout_s;
 
+    /* NOA 超车调优参数（原硬编码，现可配置 + pipeline.json 即时生效） */
+    double lc_stable_wait_s;           /* 变道后稳定巡航多久允许再次评估变道 (原硬编码 8.0) */
+    double lc_cooldown_after_stable_s; /* 稳定期结束后的冷却 (原硬编码 3.0) */
+    double lc_cooldown_after_return_s; /* 回到原车道后的冷却 (原硬编码 4.0) */
+    double min_overtake_gap_base;      /* 触发超车所需最小本车道前车间距基准 (原硬编码 18.0) */
+    double min_overtake_gap_cap;       /* min_overtake_gap 上限, 高速时不再无脑扩大 (原硬编码 60.0) */
+
     /* 车道迟滞 + 死锁恢复状态 */
     int    committed_lane_side;  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
     double stuck_timer;          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
@@ -469,8 +476,8 @@ static void* control_thread(void* arg) {
             statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_CLEARED, NULL);
         was_blocked_sm = blocked;
 
-        double min_overtake_gap = 18.0 + g.current_speed * 2.0;
-        if (min_overtake_gap > 60.0) min_overtake_gap = 60.0;
+        double min_overtake_gap = g.min_overtake_gap_base + g.current_speed * 2.0;
+        if (min_overtake_gap > g.min_overtake_gap_cap) min_overtake_gap = g.min_overtake_gap_cap;
         if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
             (!g.lc_attempted) &&
             best_gap > min_overtake_gap && best_gap < 90.0) {
@@ -559,10 +566,10 @@ static void* control_thread(void* arg) {
          * 通过重置 lc_attempted 允许后续再次发起变道。 */
         if (g.lc_state == 2) {
             g.lc_wait += CONTROL_DT_S;
-            if (g.lc_wait > 8.0 && g.lc_cooldown <= 0.0) {
+            if (g.lc_wait > g.lc_stable_wait_s && g.lc_cooldown <= 0.0) {
                 g.lc_state     = 0;  /* 允许后续再次评估变道触发条件 (line 463/486 要求 lc_state==0) */
                 g.lc_attempted = 0;
-                g.lc_cooldown  = 3.0;
+                g.lc_cooldown  = g.lc_cooldown_after_stable_s;
                 g.lc_wait      = 0.0;
             }
         }
@@ -577,7 +584,7 @@ static void* control_thread(void* arg) {
         if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < 0.3) {
             g.lc_state = 0;
             g.lc_attempted = 0;
-            g.lc_cooldown = 4.0;
+            g.lc_cooldown = g.lc_cooldown_after_return_s;
             g.lc_timer = 0.0;
             LOG_INFO("control", ">>> returned to original lane");
         }
@@ -742,7 +749,13 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
     g.lane_width = 3.5;
-    g.blocked_timeout_s = 2.0;
+    g.blocked_timeout_s = 1.2;   /* 原 2.0s，缩短阻塞判定等待，更快评估超车可行性 */
+    g.lc_stable_wait_s           = 4.0;  /* 原硬编码 8.0，缩短变道后稳定巡航期 */
+    g.lc_cooldown_after_stable_s = 1.5;  /* 原硬编码 3.0 */
+    g.lc_cooldown_after_return_s = 2.0;  /* 原硬编码 4.0 */
+    g.min_overtake_gap_base      = 14.0; /* 原硬编码 18.0 */
+    g.min_overtake_gap_cap       = 90.0; /* 原 min_overtake_gap 计算中硬编码的上限 60.0（与 best_gap<90.0 的独立筛选阈值无关），
+                                           * 提高上限避免高速场景 min_overtake_gap 被过度收窄导致无法触发超车 */
 
     /* 注册参数到 param_registry (类型安全，可运行时热重载) */
     param_register_float("control.pid_kp", g.cfg_kp, 0.0, 5000.0, "PID proportional gain");
@@ -753,6 +766,11 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
     param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
     param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
+    param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
+    param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
+    param_register_float("control.lc_cooldown_after_return_s", g.lc_cooldown_after_return_s, 0.0, 30.0, "Cooldown after returning to original lane");
+    param_register_float("control.min_overtake_gap_base", g.min_overtake_gap_base, 1.0, 100.0, "Base min lead gap to trigger overtake (m)");
+    param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载) */
     g.kp = param_get_float("control.pid_kp");
@@ -763,6 +781,11 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lat_kp           = param_get_float("control.lat_kp");
     g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
     g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
+    g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
+    g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
+    g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
+    g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
+    g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
@@ -778,6 +801,11 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"lat_kp\":")))          sscanf(p + 9, "%lf", &g.lat_kp);
         if ((p = strstr(params_json, "\"lat_kd_heading\":")))  sscanf(p + 17, "%lf", &g.lat_kd_heading);
         if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":"))) sscanf(p + 32, "%lf", &g.blocked_timeout_s);
+        if ((p = strstr(params_json, "\"lc_stable_wait_s\":")))           sscanf(p + 19, "%lf", &g.lc_stable_wait_s);
+        if ((p = strstr(params_json, "\"lc_cooldown_after_stable_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_stable_s);
+        if ((p = strstr(params_json, "\"lc_cooldown_after_return_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_return_s);
+        if ((p = strstr(params_json, "\"min_overtake_gap_base\":")))      sscanf(p + 24, "%lf", &g.min_overtake_gap_base);
+        if ((p = strstr(params_json, "\"min_overtake_gap_cap\":")))       sscanf(p + 23, "%lf", &g.min_overtake_gap_cap);
         if ((p = strstr(params_json, "\"scenario_file\":"))) {
             const char* start = strchr(p + 16, '"');
             if (start) {

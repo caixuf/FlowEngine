@@ -145,7 +145,7 @@
           }
         }
       ],
-      "params": "{\"pid_kp\":800.0,\"pid_ki\":50.0,\"pid_kd\":100.0,\"target_speed\":12.0,\"lat_kp\":0.32,\"lat_kd_heading\":1.35,\"lane_change_blocked_timeout_s\":2.0,\"scenario_file\":\"scenarios/pedestrian_crossing.json\"}"
+      "params": "{\"pid_kp\":800.0,\"pid_ki\":50.0,\"pid_kd\":100.0,\"target_speed\":12.0,\"lat_kp\":0.5,\"lat_kd_heading\":1.35,\"lane_change_blocked_timeout_s\":1.2,\"lc_stable_wait_s\":4.0,\"lc_cooldown_after_stable_s\":1.5,\"lc_cooldown_after_return_s\":2.0,\"min_overtake_gap_base\":14.0,\"min_overtake_gap_cap\":90.0,\"scenario_file\":\"scenarios/pedestrian_crossing.json\"}"
     },
     {
       "name": "safety_control",
