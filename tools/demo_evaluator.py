@@ -182,11 +182,15 @@ def load_json(path: Path) -> dict | None:
 
 @contextlib.contextmanager
 def pipeline_scenario_override(scenario_file: str | None):
-    """Temporarily point config/pipeline.json's sim_world node at ``scenario_file``.
+    """Temporarily point config/pipeline.json's sim_world (and planning, if present)
+    node(s) at ``scenario_file``.
 
-    ``sim_world``'s ``params`` is a JSON-encoded string; we patch the embedded
+    Node ``params`` is a JSON-encoded string; we patch the embedded
     ``scenario_file`` key, yield, then restore the original file byte-for-byte.
     Passing ``None`` is a no-op so callers can use this unconditionally.
+    planning also reading scenario_file lets NOA route-driven lane changes
+    (defined in the scenario's optional "route" array) take effect during
+    evaluator runs, not just sim_world's actor/ego placement.
     """
     if not scenario_file:
         yield None
@@ -194,9 +198,9 @@ def pipeline_scenario_override(scenario_file: str | None):
 
     original_text = PIPELINE_JSON.read_text(encoding="utf-8")
     pipeline = json.loads(original_text)
-    patched = False
+    patched_nodes = []
     for node in _pipeline_nodes(pipeline):
-        if not isinstance(node, dict) or node.get("name") != "sim_world":
+        if not isinstance(node, dict) or node.get("name") not in ("sim_world", "planning"):
             continue
         params = node.get("params")
         # params may be a JSON string (launcher format) or a plain dict.
@@ -208,11 +212,12 @@ def pipeline_scenario_override(scenario_file: str | None):
             params["scenario_file"] = scenario_file
         else:
             continue
-        patched = True
-        break
+        patched_nodes.append(node["name"])
 
-    if not patched:
+    if "sim_world" not in patched_nodes:
         raise RuntimeError("sim_world node with params not found in config/pipeline.json")
+    # planning is optional (older pipeline.json layouts may omit scenario_file support),
+    # so only sim_world is required for the override to be considered successful.
 
     try:
         PIPELINE_JSON.write_text(json.dumps(pipeline, indent=2, ensure_ascii=False) + "\n",

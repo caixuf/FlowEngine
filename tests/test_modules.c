@@ -384,6 +384,93 @@ static void test_sm_guard_runtime_swap(void) {
     PASS();
 }
 
+/* ── 驾驶模式状态机 (NA/ACC/CP/NP/NOA) ─────────────────────── */
+/* 模拟 planning_node.c 里真实使用的 guard 风格：升级需要满足条件，
+ * 否则静默拒绝（不改变状态）——这是 NOA 与 LCC 的关键区别所在。 */
+struct ModeConds {
+    bool sensors_online;
+    bool highway;
+    bool route_loaded;
+};
+
+static bool mode_guard_for_test(void* task, StateId /*from*/, EventId event, StateId to) {
+    ModeConds* c = static_cast<ModeConds*>(task);
+    StateId to_mode = SM_MODE_OF(to);
+    if (event == SM_EVT_CONDITIONS_MET) return c->sensors_online;
+    if (event == SM_EVT_MODE_UPGRADE) {
+        if (to_mode == SM_MODE_CP)  return c->sensors_online;
+        if (to_mode == SM_MODE_NP)  return c->highway;
+        if (to_mode == SM_MODE_NOA) return c->route_loaded;
+    }
+    return true;
+}
+
+static void test_sm_mode_switching_upgrade_chain(void) {
+    TEST("mode sm NA->ACC->CP->NP->NOA full upgrade with all conditions met");
+    ReflectiveStateMachine sm;
+    ModeConds conds = { true, true, true };
+    statem_init(&sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "mode");
+    statem_set_guard(&sm, mode_guard_for_test);
+
+    ASSERT(statem_send_event(&sm, SM_EVT_CONDITIONS_MET, &conds), "NA->ACC should succeed");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_ACC, "should be in ACC");
+    ASSERT(statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds), "ACC->CP should succeed");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_CP, "should be in CP");
+    ASSERT(statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds), "CP->NP should succeed");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NP, "should be in NP");
+    ASSERT(statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds), "NP->NOA should succeed");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NOA, "should be in NOA");
+
+    PASS();
+}
+
+static void test_sm_mode_switching_guard_blocks_noa_without_route(void) {
+    TEST("mode sm guard rejects NP->NOA without route loaded");
+    ReflectiveStateMachine sm;
+    ModeConds conds = { true, true, false };  /* no route -> HD map/nav unavailable */
+    statem_init(&sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "mode");
+    statem_set_guard(&sm, mode_guard_for_test);
+
+    statem_send_event(&sm, SM_EVT_CONDITIONS_MET, &conds);
+    statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds);  /* -> CP */
+    statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds);  /* -> NP */
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NP, "should be stuck at NP");
+
+    ASSERT(!statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds),
+           "NP->NOA should be rejected without route");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NP,
+           "mode should remain NP after guard rejection");
+
+    /* route becomes available -> upgrade now succeeds */
+    conds.route_loaded = true;
+    ASSERT(statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds),
+           "NP->NOA should succeed once route is loaded");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NOA, "should now be in NOA");
+
+    PASS();
+}
+
+static void test_sm_mode_switching_downgrade_on_conditions_lost(void) {
+    TEST("mode sm downgrades to NA on CONDITIONS_LOST from any mode");
+    ReflectiveStateMachine sm;
+    ModeConds conds = { true, true, true };
+    statem_init(&sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "mode");
+    statem_set_guard(&sm, mode_guard_for_test);
+
+    statem_send_event(&sm, SM_EVT_CONDITIONS_MET, &conds);
+    statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds);  /* -> CP */
+    statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds);  /* -> NP */
+    statem_send_event(&sm, SM_EVT_MODE_UPGRADE, &conds);  /* -> NOA */
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NOA, "precondition: should be in NOA");
+
+    ASSERT(statem_send_event(&sm, SM_EVT_CONDITIONS_LOST, &conds),
+           "NOA + CONDITIONS_LOST should transition");
+    ASSERT(SM_MODE_OF(statem_current(&sm)) == SM_MODE_NA,
+           "should safely fall back to NA (ODD boundary lost)");
+
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════ */
 /* Scheduler Tests                                           */
 /* ══════════════════════════════════════════════════════════ */
@@ -846,6 +933,31 @@ static void test_scenario_load_highway_overtake(void) {
     TEST("scenario highway_overtake has actors");
     ASSERT(sc->actor_count > 0, "actor_count should be > 0 (got %d)", sc->actor_count);
 
+    TEST("scenario highway_overtake has no route (backward compatible)");
+    ASSERT(sc->route_count == 0, "route_count should default to 0 (got %d)", sc->route_count);
+
+    scenario_free(sc);
+    PASS();
+}
+
+static void test_scenario_load_noa_route(void) {
+    char path[512];
+    make_scenario_path(path, sizeof(path), "highway_noa_route.json");
+
+    TEST("scenario_load highway_noa_route.json succeeds");
+    ScenarioConfig* sc = scenario_load(path);
+    ASSERT(sc != NULL, "scenario_load should succeed for highway_noa_route.json");
+
+    TEST("scenario noa_route has 2 route steps");
+    ASSERT_EQ(sc->route_count, 2, "route_count wrong");
+
+    TEST("scenario noa_route step[0] trigger_x/target_lane");
+    ASSERT(sc->route[0].trigger_x == 60.0, "trigger_x mismatch (got %.1f)", sc->route[0].trigger_x);
+    ASSERT_EQ(sc->route[0].target_lane, 1, "target_lane mismatch");
+
+    TEST("scenario noa_route step[1] returns to origin lane");
+    ASSERT_EQ(sc->route[1].target_lane, -1, "target_lane mismatch");
+
     scenario_free(sc);
     PASS();
 }
@@ -1038,6 +1150,12 @@ int main(void) {
     test_sm_dynamic_rules();
     test_sm_guard_runtime_swap();
 
+    /* ── 驾驶模式状态机 (NA/ACC/CP/NP/NOA) ──── */
+    printf("\n═══ Driving Mode State Machine (NOA) ═══\n");
+    test_sm_mode_switching_upgrade_chain();
+    test_sm_mode_switching_guard_blocks_noa_without_route();
+    test_sm_mode_switching_downgrade_on_conditions_lost();
+
     /* ── Scheduler ──────────────────────────── */
     printf("\n═══ Scheduler ═══\n");
     test_rate_control();
@@ -1070,6 +1188,7 @@ int main(void) {
     test_scenario_load_null();
     test_scenario_load_pedestrian_crossing();
     test_scenario_load_highway_overtake();
+    test_scenario_load_noa_route();
     test_scenario_to_json();
     test_scenario_free_null();
 

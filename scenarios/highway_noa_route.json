@@ -1,0 +1,33 @@
+{
+  "name": "highway_noa_route",
+  "description": "NOA 领航辅助：无慢车/行人阻挡，纯导航路线驱动的主动变道（提前变道备份出口后再返回主车道）",
+  "random_seed": 7,
+  "duration_s": 60.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 10.0,
+    "target_speed": 16.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "car",
+      "x": 300.0, "y": 1.75,
+      "vx": 15.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "远处邻道背景车，不构成阻挡"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 60.0,
+    "min_avg_speed_mps": 8.0,
+    "min_distance_m": 150.0
+  },
+  "route": [
+    { "trigger_x": 60.0,  "target_lane": 1,  "label": "prepare_exit_move_left" },
+    { "trigger_x": 220.0, "target_lane": -1, "label": "return_main_lane" }
+  ]
+}

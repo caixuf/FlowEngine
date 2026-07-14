@@ -95,6 +95,8 @@ static struct {
     double target_speed;
     double ego_x, ego_y;
     double lane_d;          /* 从 trajectory 解析的横向偏移（Frenet d） */
+    char   driving_mode[32];/* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
+    int    route_lane;      /* NOA 导航路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
 
     /* 障碍物数据 (从 vehicle/state 解析) */
     double obs_x[MAX_OBS], obs_y[MAX_OBS], obs_vx[MAX_OBS];
@@ -204,6 +206,21 @@ static void on_trajectory(const Message* msg, void* user_data) {
             if (sscanf(p + 14, "%lf", &keep_d) >= 1)
                 g.lane_d = keep_d;
         }
+    }
+
+    /* NOA: planning 广播的驾驶模式 + 导航路线目标车道（见 planning_node.c 的
+     * "mode=" / "route_lane=" 追加字段，格式与既有的 "speed=" 一致）。 */
+    {
+        const char* p = strstr(d, "mode=");
+        if (p) {
+            char buf[32] = {0};
+            sscanf(p + 5, "%31s", buf);
+            snprintf(g.driving_mode, sizeof(g.driving_mode), "%s", buf);
+        }
+    }
+    {
+        const char* p = strstr(d, "route_lane=");
+        if (p) sscanf(p + 11, "%d", &g.route_lane);
     }
 
     g.has_planning = 1;
@@ -456,6 +473,22 @@ static void* control_thread(void* arg) {
             }
         }
 
+        /* ── NOA: 导航路线驱动的主动变道 ──
+         * planning 节点仅在 NOA 模式下才会下发非零 route_lane（见 planning_node.c
+         * 的 "route_lane=" 字段）；这里与被动超车共用同一套安全检查
+         * （rear/front gap、行人风险）和执行状态机，区别只是触发原因不是
+         * "前车太慢"而是"导航路线要求换道"（如提前变道以便驶出）。 */
+        int route_triggered = 0;
+        if (!blocked && g.route_lane != 0 && g.route_lane != g.committed_lane_side &&
+            g.lc_state == 0 && g.lc_cooldown <= 0.0) {
+            if (!lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
+                lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
+                overtake_worthwhile = 1;
+                blocked = 1;
+                route_triggered = 1;
+            }
+        }
+
         /* ── 变道等待期: 不减速，维持当前速度准备变道 ── */
         if (blocked && overtake_worthwhile && g.lc_state == 0) {
             if (acc_target < g.current_speed) acc_target = g.current_speed + 0.5;
@@ -494,10 +527,11 @@ static void* control_thread(void* arg) {
                     if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
                     g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
                     statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_START, NULL);
-                    LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f)",
-                             overtake_worthwhile ? "OVERTAKE" : "BLOCKED",
+                    LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f mode=%s)",
+                             route_triggered ? "NOA_ROUTE" : (overtake_worthwhile ? "OVERTAKE" : "BLOCKED"),
                              need_accel ? "+ACCEL" : "+CRUISE",
-                             best_gap, adjacent_gap, lead_speed, g.ego_x, g.ego_y, effective_target_y);
+                             best_gap, adjacent_gap, lead_speed, g.ego_x, g.ego_y, effective_target_y,
+                             g.driving_mode[0] ? g.driving_mode : "?");
                 } else {
                     LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
                     g.lc_timer = g.blocked_timeout_s;
