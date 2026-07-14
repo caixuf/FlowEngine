@@ -344,7 +344,6 @@ int main(int argc, char** argv) {
             }
             for (int j = 0; j < no; j++) {
                 flow_registry_register_topic(nd->outputs[j], 0, NULL);
-            flow_registry_register_topic(nd->outputs[j], 0, NULL);
             }
             /* 注册 plugin: 关联此节点的 task name */
             const char* tasks[2] = { nd->name, NULL };
@@ -419,9 +418,3 @@ int main(int argc, char** argv) {
     log_shutdown();
     return 0;
 }
-
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
