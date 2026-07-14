@@ -45,11 +45,9 @@ bash scripts/demo.sh
 ./build/bin/flowctl bag info data.bag
 ```
 
-> **Entry points:** `flow_launcher config/pipeline.json` is the canonical,
+> **Entry point:** `flow_launcher config/pipeline.json` is the canonical,
 > config-driven way to run a pipeline (each node is a `dlopen`-loaded `.so`
-> plugin). `flow_e2e` is a single-binary demo that inlines every node — handy
-> for quick debugging without compiling plugins, but not the recommended
-> production entry point.
+> plugin).
 
 ## Demo
 
@@ -121,7 +119,7 @@ flowctl version                 # Build info
 ./build/bin/flowmond --port 8800
 
 # Terminal 2: run the business process (publishes stats every 5 s)
-./build/bin/flow_e2e 60
+./build/bin/flow_launcher config/pipeline.json --duration 60
 
 # Open dashboard in browser (~5 s after both processes are up)
 open http://localhost:8800

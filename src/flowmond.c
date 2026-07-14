@@ -11,7 +11,7 @@
  *   - UDP 发现所有业务节点
  *   - HTTP Dashboard (:8800) — 实时 topic 监控表（本地 + 远程进程统计）
  *   - JSON API — /api/topology /api/topics /api/stream
- *   - IPC stats bridge — 聚合 flow_e2e 等进程的 bus 统计数据
+ *   - IPC stats bridge — 聚合 flow_launcher 等进程的 bus 统计数据
  *   - 告警规则引擎
  *   - 独立进程，不影响业务节点性能
  *
@@ -63,7 +63,7 @@ typedef struct {
 
 /**
  * Background thread: keep trying to connect to the stats IPC channel
- * published by business processes (e.g., flow_e2e).
+ * published by business processes (e.g., flow_launcher).
  *
  * Same reconnect-on-idle logic as the dashboard bridge: when the publisher
  * restarts it creates new shm/sem, so the subscriber must detect the silence
@@ -223,13 +223,9 @@ int main(int argc, char** argv) {
             char dir_buf[1024];
             snprintf(dir_buf, sizeof(dir_buf), "%s", self_path);
             char* dir = dirname(dir_buf);
-            /* Try modular frontend (flowboard/index.html) first. */
+            /* Use modular frontend (flowboard/index.html). */
             snprintf(html_path, sizeof(html_path),
                      "%s/../../tools/flowboard/index.html", dir);
-            if (access(html_path, F_OK) != 0) {
-                snprintf(html_path, sizeof(html_path),
-                         "%s/../../tools/flowboard.html", dir);
-            }
         }
     }
 

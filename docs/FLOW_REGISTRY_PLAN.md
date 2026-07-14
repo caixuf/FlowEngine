@@ -283,7 +283,7 @@ char* flow_registry_dump_topology_json(FlowRegistry* reg);
 
 | 步骤 | 文件 | 内容 |
 |------|------|------|
-| 5.1 | `src/e2e_demo.c` | 启动时调用 `flow_registry_dump_json()` 打印注册中心状态 |
+| 5.1 | `src/core/flow_registry.c` | 启动时调用 `flow_registry_dump_json()` 打印注册中心状态 |
 | 5.2 | `tools/topology_viewer.html` | 验证能消费 registry JSON |
 
 ## 5. 文件清单
@@ -299,7 +299,7 @@ char* flow_registry_dump_topology_json(FlowRegistry* reg);
 - `src/core/serializer.c` — 委托给 registry
 - `src/core/task_manager.c` — 委托给 registry
 - `src/core/process_manager.c` — 委托给 registry
-- `src/e2e_demo.c` — 集成验证
+- `src/flow_launcher.c` — 集成验证
 
 ## 6. 容量与约束
 

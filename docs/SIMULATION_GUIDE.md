@@ -1,7 +1,7 @@
 # 仿真测试指南
 
 > **注意：** 本文档中 `scenario_runner` 二进制尚未加入构建（源码在 `tools/scenario_runner.c`）。
-> 当前可用的仿真入口是 `flow_e2e`（单进程全链路）和 `flow_launcher config/pipeline.json`（配置驱动）。
+> 当前可用的仿真入口是 `flow_launcher config/pipeline.json`（配置驱动，dlopen 加载插件节点）。
 > Carla 集成桥接 `carla_bridge.py` 尚未实现，此处保留为设计参考。
 
 ## 三层仿真体系
@@ -21,14 +21,14 @@ Layer 3: Carla/Gazebo (真实传感器, 完整闭环) — 待实现
 
 ```bash
 # 1. 录制场景数据
-./build/bin/flow_e2e 30 &
+./build/bin/flow_launcher config/pipeline.json --duration 30 &
 # 数据自动写入 /tmp/flow_topology.json + bus stats
 
 # 2. 录制到 bag
 # (FlowEngine 自动通过 bag_writer_attach 录制)
 
 # 3. 回放 + 校验
-./build/bin/flow_e2e --replay scenario.bag
+./build/bin/flow_launcher config/pipeline.json --replay scenario.bag
 ```
 
 ## Layer 2: 2D 模拟器
@@ -72,8 +72,8 @@ grep "timeout\|miss" scenario.log   # 超时/丢帧
 bash scripts/demo.sh
 
 # 2. Bag 回放 (需要预先录制的 bag)
-./build/bin/flow_e2e 10          # 先录制
-./build/bin/flow_e2e --replay /tmp/test.bag  # 再回放
+./build/bin/flow_launcher config/pipeline.json --duration 10          # 先录制
+./build/bin/flow_launcher config/pipeline.json --replay /tmp/test.bag  # 再回放
 
 # 3. 接入算法测试
 ./build/bin/flow_launcher config/pipeline.json
@@ -81,7 +81,7 @@ bash scripts/demo.sh
 
 ## e2e 内置 3D 场景仿真
 
-`flow_e2e` 的 monitor 任务会导出真实 3D 场景到 `/tmp/flow_topology.json`
+`flow_launcher` 的 monitor 任务会导出真实 3D 场景到 `/tmp/flow_topology.json`
 的 `metrics.scene` 字段，FlowBoard 仪表盘据此渲染真实三维场景（自车、
 障碍物包围盒、LiDAR 点云），而非随机占位点。
 
@@ -99,9 +99,9 @@ bash scripts/demo.sh
 一键运行（业务节点 + HTTP 桥接 + 浏览器）：
 
 ```bash
-./scripts/demo_sim.sh
+./scripts/demo.sh
 # 或手动:
-./build/bin/flow_e2e 3600 &
+./build/bin/flow_launcher config/pipeline.json --duration 3600 &
 python3 tools/flowboard_server.py &
 open http://localhost:8800
 ```

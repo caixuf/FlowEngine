@@ -8,7 +8,7 @@
  *     - 单进程 (dlopen): 所有 .so 加载进同一进程, 共享 MessageBus, 进程内零拷贝
  *     - 多进程 (fork+exec): 每个节点一个独立进程, 通过 discovery + IPC 桥接通信
  *
- *   历史上多进程模式 exec 的是已废弃的 `flow_e2e --role <name>` 单体 demo,
+ *   历史上多进程模式 exec 的是 `flow_e2e --role <name>` 单体 demo (已移除),
  *   导致节点逻辑在 e2e_demo.c 和 modules/adas_nodes/*.c 里各存一份 (copy-paste 债)。
  *
  *   flow_node_host 是「进程模式」的正确载体: 它只做一件事 —— 在自己的进程里

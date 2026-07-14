@@ -10,7 +10,7 @@ FULL_MODE=0
 [[ "$*" == *"--full"* ]] && FULL_MODE=1
 
 BIN_DIR="$(cd "$(dirname "$0")/../build/bin" && pwd)"
-E2E="$BIN_DIR/flow_e2e"
+E2E="$BIN_DIR/flow_launcher"
 BUS="$BIN_DIR/flow_bus"
 IPC="$BIN_DIR/flow_ipc"
 BAG="$BIN_DIR/flow_bag"
@@ -30,10 +30,10 @@ e2e_stress() {
     for i in $(seq 1 $ITERS); do
         echo "  Iteration $i/$ITERS..."
         START=$(date +%s)
-        if timeout $((DURATION+5)) "$E2E" "$DURATION" > /tmp/stress_e2e_$i.log 2>&1; then
+        if timeout $((DURATION+5)) "$E2E" config/pipeline.json --duration "$DURATION" > /tmp/stress_launcher_$i.log 2>&1; then
             END=$(date +%s)
             ELAPSED=$((END - START))
-            ERRORS=$(grep -c "ILLEGAL\|ERROR\|FATAL\|CRASH\|SIGSEGV" /tmp/stress_e2e_$i.log 2>/dev/null || echo 0)
+            ERRORS=$(grep -c "ILLEGAL\|ERROR\|FATAL\|CRASH\|SIGSEGV" /tmp/stress_launcher_$i.log 2>/dev/null || echo 0)
             echo "    Time: ${ELAPSED}s | Errors: $ERRORS"
             if [ "$ERRORS" -gt 2 ]; then
                 echo "    ❌ FAIL: $ERRORS errors"
@@ -109,11 +109,12 @@ bag_stress() {
     rm -f "$bagfile"
 }
 
-# ── E2E Smoke quick test ─────────────────────────────────────
+# ── Launcher Smoke quick test ─────────────────────────────────
 smoke_test() {
     echo ""
-    echo "─── E2E Smoke Test ───"
-    if timeout 15 "$E2E" --smoke > /tmp/smoke.log 2>&1; then
+    echo "─── Launcher Smoke Test ───"
+    local ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+    if bash "$ROOT/scripts/launcher_smoke.sh" 3 > /tmp/smoke.log 2>&1; then
         echo "  ✅ PASS"
         PASS=$((PASS+1))
     else
@@ -141,7 +142,7 @@ if command -v valgrind &> /dev/null; then
     echo ""
     echo "─── Valgrind Memory Check ───"
     if valgrind --leak-check=full --error-exitcode=1 \
-        "$E2E" 5 > /tmp/valgrind.log 2>&1; then
+        "$E2E" config/pipeline.json --duration 5 > /tmp/valgrind.log 2>&1; then
         echo "  ✅ No memory leaks"
         PASS=$((PASS+1))
     else

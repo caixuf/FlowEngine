@@ -9,7 +9,7 @@
  *
  * 示例:
  *   # 先录制
- *   ./flow_e2e 10          # 生成 demo.mcap
+ *   ./flow_launcher config/pipeline.json --duration 10  # 生成 demo.mcap
  *   # 再回放（2倍速）
  *   ./flow_mcap_replay demo.mcap 2.0
  *   # 循环回放（调参用）

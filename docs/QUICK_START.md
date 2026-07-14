@@ -25,7 +25,7 @@ bash build.sh release
 
 ```bash
 # 端到端全链路演示（感知→融合→控制，15秒）
-./build/bin/flow_e2e 15
+./build/bin/flow_launcher config/pipeline.json --duration 15
 
 # 消息总线演示（发布/订阅）
 ./build/bin/flow_bus
@@ -173,4 +173,4 @@ A: 检查网络访问 GitHub 是否正常；或将 flowcoro 源码放入 `third_
 A: 是的，这样才能在基类指针和派生类指针之间安全转换。
 
 **Q: 如何调试插件？**
-A: `gdb ./build/bin/flow_e2e`，设置 `LD_LIBRARY_PATH=./build/lib`。
+A: `gdb ./build/bin/flow_launcher`，设置 `LD_LIBRARY_PATH=./build/lib`。

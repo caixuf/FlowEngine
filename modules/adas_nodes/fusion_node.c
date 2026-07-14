@@ -12,7 +12,7 @@
  *   LiDAR 观测: (x, y)
  *   GPS 观测:   (speed, heading)
  *
- * 与 e2e_demo.c 的区别:
+ * 与 e2e_demo.c 的区别（e2e_demo.c 已移除）:
  *   旧: 使用全局 g_transport/g_bus/g_scheduler/g_running
  *   新: 所有基础设施通过 init() 注入，节点完全独立
  */

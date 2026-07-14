@@ -151,7 +151,7 @@ def _empty_model() -> Dict[str, Any]:
 
 
 def normalize_live_data(raw: Any) -> Dict[str, Any]:
-    """把 flow_e2e 状态文件、monitor_server JSON、discovery JSON 统一成 FlowBoard 模型。
+    """把 pipeline 状态文件、monitor_server JSON、discovery JSON 统一成 FlowBoard 模型。
 
     契约校验失败或输入非 dict 时，返回明确的空模型（降级），绝不抛异常。
     """

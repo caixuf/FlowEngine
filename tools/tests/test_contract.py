@@ -2,7 +2,7 @@
 
 A single schema (tools/schema/flowboard.schema.json) must validate:
   - the Python server's built-in sample/demo data,
-  - the frontend demo data embedded in flowboard.html,
+  - the frontend demo data embedded in flowboard/js/app.js,
   - the normalized /api/topology output.
 
 This catches any single end silently changing the payload format.
@@ -20,7 +20,7 @@ import flowboard_normalize as N
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SCHEMA_PATH = os.path.join(ROOT, "tools", "schema", "flowboard.schema.json")
-HTML_PATH = os.path.join(ROOT, "tools", "flowboard.html")
+APP_JS_PATH = os.path.join(ROOT, "tools", "flowboard", "js", "app.js")
 
 
 @pytest.fixture(scope="module")
@@ -67,12 +67,12 @@ def test_monitor_style_payload_normalizes_and_matches_schema(schema):
     jsonschema.validate(instance=normalized, schema=schema)
 
 
-def _extract_frontend_demo(html):
-    """Pull the doSimulate() topoData object literal out of flowboard.html and
+def _extract_frontend_demo(js_source):
+    """Pull the doSimulate() topoData object literal out of flowboard/js/app.js and
     parse the endpoints array (a strict-JSON-compatible subset) to validate
     against the schema. We validate the endpoints array specifically because it
     is pure JSON (no JS expressions)."""
-    m = re.search(r"endpoints:\s*(\[[\s\S]*?\])\s*\n\s*\};", html)
+    m = re.search(r"endpoints:\s*(\[[\s\S]*?\])\s*\n\s*\};", js_source)
     assert m, "could not locate frontend demo endpoints array"
     raw = m.group(1)
     # keys are unquoted JS identifiers → quote them for json.loads
@@ -81,9 +81,9 @@ def _extract_frontend_demo(html):
 
 
 def test_frontend_demo_endpoints_match_schema(schema):
-    with open(HTML_PATH) as f:
-        html = f.read()
-    endpoints = _extract_frontend_demo(html)
+    with open(APP_JS_PATH) as f:
+        js_source = f.read()
+    endpoints = _extract_frontend_demo(js_source)
     payload = {"endpoints": endpoints}
     jsonschema.validate(instance=payload, schema=schema)
     # each endpoint must carry the required contract fields

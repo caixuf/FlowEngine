@@ -6,15 +6,15 @@
  * @brief Cross-process MessageBus stats IPC bridge
  *
  * Enables flowmond to aggregate topic statistics from other processes
- * (e.g., flow_e2e) running on the same machine via a POSIX shared-memory
+ * (e.g., flow_launcher) running on the same machine via a POSIX shared-memory
  * IPC channel.
  *
  * Architecture:
- *   flow_e2e  ── StatsPacket ──► IPC shm channel ──► flowmond ──► dashboard
+ *   flow_launcher  ── StatsPacket ──► IPC shm channel ──► flowmond ──► dashboard
  *
- * Publisher side (e.g., flow_e2e):
+ * Publisher side (e.g., flow_launcher):
  *   IpcChannel* ch = stats_bridge_publisher_open();
- *   stats_bridge_publish(ch, g_bus, "flow_e2e");
+ *   stats_bridge_publish(ch, g_bus, "flow_launcher");
  *   ipc_channel_close(ch);
  *
  * Subscriber side (e.g., flowmond):
@@ -25,7 +25,7 @@
  *
  * Notes:
  *   - The publisher must open the channel before the subscriber.
- *   - flowmond should retry stats_bridge_subscriber_open() until flow_e2e starts.
+ *   - flowmond should retry stats_bridge_subscriber_open() until flow_launcher starts.
  *   - StatsPacket fits within MSG_BUS_MAX_DATA_SIZE (< 2 KB for 16 topics).
  */
 
@@ -69,7 +69,7 @@ typedef struct {
 /* ── Stats packet sent over IPC ─────────────────────────── */
 
 typedef struct {
-    char            source_name[64]; /**< Sending process name (e.g., "flow_e2e") */
+    char            source_name[64]; /**< Sending process name (e.g., "flow_launcher") */
     uint32_t        topic_count;     /**< Number of valid entries in topics[] */
     uint32_t        _reserved;
     uint64_t        bus_pub;         /**< Total published messages on that bus */

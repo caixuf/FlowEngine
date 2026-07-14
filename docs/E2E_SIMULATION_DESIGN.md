@@ -12,7 +12,7 @@
 ### 1.1 现有数据链路
 
 ```
-flow_e2e (业务进程)
+flow_launcher (业务进程)
   └─ monitor 任务每 1s 原子写入 /tmp/flow_topology.json
         │  (discovery + bus/latency/topic 统计 + vehicle 遥测)
         ▼
@@ -22,7 +22,7 @@ flowboard_server.py (HTTP 桥接)
   └─ GET /api/stream    SSE，每 1s 推一帧
         │
         ▼
-flowboard.html (浏览器)
+flowboard/ (浏览器)
   ├─ doConnect(): fetch /api/topology → startSSE()
   └─ 连接失败重试 3 次 → setConnStatus('dead','● offline') → doSimulate()
 ```
@@ -57,7 +57,7 @@ flowboard.html (浏览器)
 | 失败后**静默**切换到 `doSimulate()` 假数据 | 掩盖真实故障，误导排查 |
 | 文档（VISUALIZATION_ARCHITECTURE）写的是 `flowmond` 守护进程，实际脚本用的是 `flowboard_server.py` | 两套设计并存、互相矛盾 |
 
-> 关于 `flowmond`：它创建自己的**进程内** `message_bus`，与 `flow_e2e` 不共享总线，
+> 关于 `flowmond`：它创建自己的**进程内** `message_bus`，与 `flow_launcher` 不共享总线，
 > 因此拿不到业务节点的 topic 统计。跨进程聚合需要 IPC/TCP 桥接，当前未实现。
 > 所以**实际可用**的可视化链路是"状态文件 + flowboard_server.py"。本设计以此为准，
 > 并在文档中消除矛盾。
@@ -151,7 +151,7 @@ e2e monitor 任务在状态 JSON 的 `metrics` 下新增 `scene`：
 
 ### 3.5 渲染
 
-`flowboard.html` 的 Three.js 视图改为：自车按 `ego` 位姿摆放，`obstacles` 渲染为
+`flowboard/` 的 Three.js 视图改为：自车按 `ego` 位姿摆放，`obstacles` 渲染为
 彩色包围盒（车=蓝、对向=橙、行人=绿），`lidar` 用真实点坐标绘制点云；无 `scene`
 时保留旧的随机点行为。2D BEV 兜底视图同理优先用真实数据。
 
@@ -161,8 +161,8 @@ e2e monitor 任务在状态 JSON 的 `metrics` 下新增 `scene`：
 
 1. 文档（本文件）。
 2. offline 根因修复：`flowboard_server.py` 多线程化 + 新鲜度/health。
-3. 前端三态化：`flowboard.html`。
-4. e2e 真实场景：`e2e_demo.c` 障碍物/横向/ACC/LiDAR + 导出 `scene`。
+3. 前端三态化：`flowboard/`（ES modules）。
+4. e2e 真实场景：`flow_launcher` 障碍物/横向/ACC/LiDAR + 导出 `scene`。
 5. 3D 视图渲染真实 `scene`。
 6. 更新 `VISUALIZATION_ARCHITECTURE.md` / `SIMULATION_GUIDE.md`。
 7. 构建 + 无头冒烟验证（并发请求不再超时、`scene` 正确落盘）。

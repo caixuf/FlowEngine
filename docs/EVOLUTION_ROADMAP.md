@@ -24,7 +24,7 @@
 >
 > **进程/线程启动已统一**：新增 `flow_node_host`，让「多进程（fork+exec）」与
 > 「单进程（dlopen 多线程）」复用同一份 NodePlugin `.so`。多进程模式不再依赖已废弃的
-> `flow_e2e --role` 单体 demo。
+> `flow_launcher --multi` 多进程启动。
 >
 > **下一阶段优先级（取代下方旧 Phase 1–2）**：
 > 1. 质量收敛：为传输/可视化桥接栈（transport / stats_bridge / dashboard_bridge）补单元测试
@@ -97,12 +97,12 @@ FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总
 2. ✅ 给所有 `add_test()` 设置 `TIMEOUT` — 已完成。
 3. ✅ 整理 scripts 目录 — 已清理过期脚本。
 4. ✅ 统一构建、测试、demo 入口 — `demo.sh` 已统一。
-5. 给 `flow_e2e` 增加 `--smoke` 模式纳入 CI（待完成）。
+5. 给 `flow_launcher` 增加 `--smoke` 模式纳入 CI（待完成）。
 
 推荐 demo 参数：
 
 ```text
-flow_e2e 15
+flow_launcher config/pipeline.json --duration 15
 flow_bus --test
 flow_coro --test
 ```

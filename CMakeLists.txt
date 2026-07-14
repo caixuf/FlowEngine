@@ -445,17 +445,6 @@ add_executable(coro_correctness_test test/coro_correctness_test.cpp)
 target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers flowcoro_net)
 target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
-# ── End-to-end demo (all components: serializer+scheduler+statem+discovery+fusion+transport) ──
-add_executable(flow_e2e src/e2e_demo.c)
-if(FLOWENGINE_HAVE_EIGEN)
-target_link_libraries(flow_e2e flowengine_core scheduler_cpp frenet_bridge frenet_planner m)
-else()
-target_link_libraries(flow_e2e flowengine_core scheduler_cpp m)
-target_compile_definitions(flow_e2e PRIVATE NO_FRENET)
-endif()
-# e2e_demo is C but links C++ Frenet libraries — ensure C++ runtime is linked
-set_target_properties(flow_e2e PROPERTIES LINKER_LANGUAGE CXX)
-
 # ── Config-driven Launcher ──
 # 读 config/pipeline.json → 按顺序 fork+exec 各节点进程
 # 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
@@ -495,10 +484,8 @@ set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
 # ── nuScenes Demo ──
 add_executable(flow_nuscenes_demo src/nuscenes_demo.c)
 target_link_libraries(flow_nuscenes_demo flowengine_core m)
-add_dependencies(flow_e2e msg_codegen)
-
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_e2e flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
+install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -534,7 +521,6 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/flowengine.pc"
 install(PROGRAMS
     scripts/demo.sh
     scripts/stress_test.sh
-    scripts/view_topology.sh
     tools/flowboard_server.py
     DESTINATION share/flowengine/scripts
 )
@@ -632,19 +618,21 @@ add_test(NAME demo_evaluator_tools
 )
 set_tests_properties(demo_evaluator_tools PROPERTIES TIMEOUT 10)
 
-# ── Smoke test: end-to-end pipeline validates key metrics ──
+# ── Smoke test: flow_launcher short integration run ──
 add_test(NAME e2e_smoke
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e --smoke
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
+            bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 30)
+set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
 
 # ── Stability test: long-running pipeline (10 min, optional/manual) ──
 add_test(NAME e2e_stability
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_e2e 600
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_launcher
+            ${CMAKE_CURRENT_SOURCE_DIR}/config/pipeline.json --duration 600
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
-set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual")
+set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual;integration")
 
 # ── Integration smoke: flow_launcher loads all node plugins & runs pipeline ──
 # Labeled "integration" so the standard build jobs (which don't build the
@@ -663,7 +651,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher flow_bus flow_coro flow_e2e benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+add_custom_target(dev DEPENDS launcher flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

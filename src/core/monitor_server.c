@@ -51,7 +51,7 @@ typedef struct {
     int               listen_fd;
     volatile bool     running;
     pthread_t         server_thread;
-    char              html_path[512];  /**< Path to flowboard.html (empty = embedded) */
+    char              html_path[512];  /**< Path to flowboard/index.html (empty = embedded) */
     /* Remote stats injected via IPC bridge */
     RemoteSource      remote[MONITOR_MAX_REMOTE_SRCS];
     int               remote_count;
@@ -90,7 +90,7 @@ static char* read_file(const char* path, size_t* out_len) {
     return buf;
 }
 
-/* ── SSE 数据生成 (flowboard.html 兼容格式) ────────────────── */
+/* ── SSE 数据生成 (flowboard 兼容格式) ────────────────── */
 
 /**
  * Return current monotonic time in microseconds.
@@ -491,7 +491,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
-    /* Route: / → flowboard/index.html or flowboard.html (from --html-path) */
+    /* Route: / → flowboard/index.html (from --html-path) */
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         char* html = NULL;
         size_t html_len = 0;
@@ -566,7 +566,7 @@ static void handle_client(int fd, MonitorServer* ms) {
     }
 
     /* Route: /tools/<file> → static asset served from the directory that
-     * contains flowboard.html (i.e. the repo's tools/ folder). The dashboard
+     * contains flowboard/index.html (i.e. the repo's tools/ folder). The dashboard
      * loads three.min.js / d3.v7.min.js from here so the 3D view and topology
      * graph work offline without relying on external CDNs. */
     if (strncmp(path, "/tools/", 7) == 0 && ms->html_path[0]) {

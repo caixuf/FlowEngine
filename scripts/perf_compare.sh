@@ -25,10 +25,10 @@ run_config() {
     cmake -S "$ROOT" -B "$build_dir" \
         -DCMAKE_BUILD_TYPE="$build_type" $extra_flags \
         > /dev/null 2>&1
-    cmake --build "$build_dir" --target flow_e2e -j$(nproc) 2>/dev/null
+    cmake --build "$build_dir" --target flow_launcher -j$(nproc) 2>/dev/null
 
     local log="/tmp/perf_${name}_$$.log"
-    timeout $((DURATION + 5)) "$build_dir/bin/flow_e2e" "$DURATION" > "$log" 2>&1 || true
+    timeout $((DURATION + 5)) "$build_dir/bin/flow_launcher" config/pipeline.json --duration "$DURATION" > "$log" 2>&1 || true
 
     local fused=$(grep -c "fusion #" "$log" 2>/dev/null || echo 0)
     local frames=$(grep "stopped.*frames" "$log" 2>/dev/null | grep -o "[0-9]* frames" | head -1 | grep -o "[0-9]*" || echo 0)

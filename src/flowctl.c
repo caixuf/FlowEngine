@@ -139,7 +139,7 @@ static int cmd_list_topics(void) {
     /* Fallback: parse state file for live stats */
     FILE* f = fopen(flowengine_state_file(), "r");
     if (!f) {
-        printf("  (no data — start flow_e2e or flow_launcher first)\n");
+        printf("  (no data — start flow_launcher first)\n");
         return 0;
     }
     char buf[8192];
@@ -374,7 +374,7 @@ static int cmd_topic_stats(const char* topic) {
 
     message_bus_destroy(bus);
     printf("Topic: %s\n\n", topic);
-    printf("  (no data source — start flow_e2e first)\n");
+    printf("  (no data source — start flow_launcher first)\n");
     return 0;
 }
 
@@ -486,7 +486,7 @@ static int cmd_dashboard(void) {
     printf("  Server: http://localhost:8800\n");
     printf("  API:    /api/topology  /api/stream\n\n");
     printf("Run in another terminal:\n");
-    printf("  ./build/bin/flow_e2e 30 &\n");
+    printf("  ./build/bin/flow_launcher config/pipeline.json --duration 30 &\n");
     printf("  python3 tools/flowboard_server.py --json-file $FLOWENGINE_STATE_FILE\n");
     printf("  (default: %s)\n", FLOWENGINE_DEFAULT_STATE_FILE);
     printf("\nThen open http://localhost:8800 in browser.\n");

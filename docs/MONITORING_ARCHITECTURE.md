@@ -4,7 +4,7 @@
 >
 > **主链路（文件桥接）：**
 > ```
-> flow_e2e → 写 /tmp/flow_topology.json → flowboard_server.py (Python HTTP) → 浏览器
+> flow_launcher → 写 /tmp/flow_topology.json → flowboard_server.py (Python HTTP) → 浏览器
 > ```
 >
 > **辅助链路（flowmond IPC 桥接）：**
@@ -28,13 +28,13 @@
 
 ## 跨进程监控架构
 
-每个业务进程（如 `flow_e2e`）和监控守护进程（`flowmond`）各自拥有独立的
+每个业务进程（如 `flow_launcher`）和监控守护进程（`flowmond`）各自拥有独立的
 `MessageBus`，**进程间的 bus 实例不共享**。跨进程聚合通过
 `stats_bridge` IPC 通道实现：
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Business Process (flow_e2e)                                  │
+│  Business Process (flow_launcher)                                  │
 │                                                               │
 │  PerceptionTask → FusionTask → ControlTask                   │
 │       ↓                ↓             ↓                        │
@@ -66,7 +66,7 @@
 | `src/core/stats_bridge.c` | 序列化 TopicStats → StatsPacket，IPC 发布/订阅 |
 | `src/core/monitor_server.c` | HTTP 服务器，合并本地 + 远程 stats |
 | `src/flowmond.c` | 订阅 IPC stats channel，注入 MonitorServer |
-| `src/e2e_demo.c` | 发布 bus stats 到 IPC channel（后台线程，5秒周期）|
+| `src/flow_launcher.c` | 发布 bus stats 到 IPC channel（后台线程，5秒周期）|
 
 ## 组件详解
 
@@ -76,7 +76,7 @@
 
 ```c
 IpcChannel* ch = stats_bridge_publisher_open();
-stats_bridge_publish(ch, g_bus, "flow_e2e");  // 每 5 秒调用一次
+stats_bridge_publish(ch, g_bus, "flow_launcher");  // 每 5 秒调用一次
 ```
 
 监控进程订阅端（带自动重连）：
@@ -94,7 +94,7 @@ while (g_running) {
 
 ```c
 typedef struct {
-    char            source_name[64];  /* e.g., "flow_e2e" */
+    char            source_name[64];  /* e.g., "flow_launcher" */
     uint32_t        topic_count;
     uint64_t        bus_pub, bus_del, bus_drop;
     RemoteTopicStat topics[STATS_BRIDGE_MAX_TOPICS];  /* 16 topics */
@@ -117,8 +117,8 @@ flowmond
 启动:
 ```bash
 ./build/bin/flowmond --port 8800          # 先启动
-./build/bin/flow_e2e 60                   # 再启动业务进程
-# 约 5 秒后，flowmond dashboard 将显示来自 flow_e2e 的 topic 统计
+./build/bin/flow_launcher config/pipeline.json --duration 60                   # 再启动业务进程
+# 约 5 秒后，flowmond dashboard 将显示来自 flow_launcher 的 topic 统计
 ```
 
 ### flowrec — 数据采集守护进程（计划中）
@@ -210,15 +210,15 @@ collectors:
 
 ```bash
 # 1. 构建
-cmake -B build && cmake --build build --target flowmond flow_e2e
+cmake -B build && cmake --build build --target flowmond flow_launcher
 
 # 2. 启动监控守护进程（先启动，stats bridge 会自动等待业务进程）
 ./build/bin/flowmond --port 8800 &
 
-# 3. 启动业务进程（flow_e2e 会自动开始发布 stats 到 IPC channel）
-./build/bin/flow_e2e 60
+# 3. 启动业务进程（flow_launcher 会自动开始发布 stats 到 IPC channel）
+./build/bin/flow_launcher config/pipeline.json --duration 60
 
-# 4. 约 5 秒后，浏览器查看（本地 + flow_e2e 的 topic 统计均可见）
+# 4. 约 5 秒后，浏览器查看（本地 + flow_launcher 的 topic 统计均可见）
 open http://localhost:8800
 ```
 

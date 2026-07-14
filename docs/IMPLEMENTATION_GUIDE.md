@@ -28,15 +28,15 @@
 
 **目标：** CI 能自动跑 e2e 冒烟 + 长稳（ASAN/TSAN）轨道，单测覆盖 QoS/param/registry。
 
-**现状：** `ctest` 全绿；`build-tsan/` 已存在；`flow_e2e` 支持带时长运行；`test_modules` 已覆盖 serializer/statem/scheduler/fusion。
+**现状：** `ctest` 全绿；`build-tsan/` 已存在；`flow_launcher` 支持命令行参数运行；`test_modules` 已覆盖 serializer/statem/scheduler/fusion。
 
 **接口/契约：**
-- `flow_e2e` 已可接收运行时长参数（见 `src/e2e_demo.c`）。需新增 `--smoke` 短时自检模式（几秒内退出、返回非零即失败）。
+- `flow_launcher` 已可接收 `--duration` 参数运行指定时长。短时自检模式通过 `scripts/launcher_smoke.sh` 提供。
 - 单测框架沿用 `test/`、`tests/` 现有风格（见 `tests/` 里的 `new_module_tests`）。
 
 **待实现：**
-1. ✅ `src/e2e_demo.c`：`--smoke` 已实现（跑 ~5s 最小链路后自检关键 topic 频率，返回非零表示失败）。
-2. ✅ `CMakeLists.txt`：已有 `add_test(NAME e2e_smoke COMMAND flow_e2e --smoke)`，`TIMEOUT 30`。
+1. ✅ `scripts/launcher_smoke.sh`：短时自检模式（跑 ~5s 最小链路后自检关键 topic 频率，返回非零表示失败）。
+2. ✅ `CMakeLists.txt`：已有 `add_test(NAME e2e_smoke COMMAND flow_launcher --smoke)`，`TIMEOUT 30`。
 3. ✅ `tests/`：`message_bus` QoS（depth + drop policy）在 `test_modules.c`；`param_registry` 范围校验
    与 `flow_registry_export_json()`（含 params/types 断言）在 `test_new_modules.c`。
 4. CI：新增可选 job 调用 `build-tsan` 跑 1 小时压力（可用现有 `benchmark` / `flow_bus --test` 循环）。
@@ -161,7 +161,7 @@ remap 回放后目标 topic 在 bus 上出现。
 同一场景可在三层间切换。
 
 **现状：** 数据契约见 [FLOWBOARD_CONTRACT.md](FLOWBOARD_CONTRACT.md)（`/tmp/flow_topology.json` + `scene`）；
-可视化见 `tools/flowboard.html`、`tools/foxglove_bridge.py`；仿真设计见 [E2E_SIMULATION_DESIGN.md](E2E_SIMULATION_DESIGN.md)。
+可视化见 `tools/flowboard/`、`tools/foxglove_bridge.py`；仿真设计见 [E2E_SIMULATION_DESIGN.md](E2E_SIMULATION_DESIGN.md)。
 
 **接口/契约：** `/tmp/flow_topology.json` 的 `scene` 字段是唯一契约。三层都读/写它。
 

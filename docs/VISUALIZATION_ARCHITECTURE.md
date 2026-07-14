@@ -10,18 +10,18 @@ FlowEngine 提供两种可视化链路，二者互补：
 
 | 链路 | 采集方式 | 适用场景 | 状态 |
 |------|----------|----------|------|
-| **文件桥接** (`flowboard_server.py`) | 读取业务进程写出的状态 JSON (`/tmp/flow_topology.json`) | e2e 仿真 / 演示 / 单机 | **当前默认，demo 脚本使用** |
+| **文件桥接** (`flowboard_server.py`) | 读取业务进程写出的状态 JSON (`/tmp/flow_topology.json`) | launch 仿真 / 演示 / 单机 | **当前默认，demo 脚本使用** |
 | **监控守护进程** (`flowmond`) | 通过 UDP 发现 + 内置总线聚合多节点 | 分布式多节点部署 | 可选 / 演进中 |
 
-> 重要：`flowmond` 拥有自己的进程内 Message Bus，**看不到** `flow_e2e`
-> 进程内部的 topic 与仿真状态。因此 e2e 演示必须使用文件桥接链路。
+> 重要：`flowmond` 拥有自己的进程内 Message Bus，**看不到** `flow_launcher`
+> 进程内部的 topic 与仿真状态。因此 launch 演示必须使用文件桥接链路。
 > 之前将 `flowboard_server.py` 标记为"已废弃"是错误的，已在本次修订中纠正。
 
 ## 组件（文件桥接链路，默认）
 
 ```
 ┌────────────────────┐   写状态文件    ┌──────────────────────────┐
-│   flow_e2e         │ ───────────────▶│  /tmp/flow_topology.json  │
+│   flow_launcher config/pipeline.json │ ───────────────▶│  /tmp/flow_topology.json  │
 │   (业务/仿真节点)   │  monitor 任务   │  (原子 tmp+rename, ~1Hz)  │
 │                     │   10Hz 采集     └──────────────────────────┘
 │  Message Bus        │                              │ 文件监听
@@ -45,7 +45,7 @@ FlowEngine 提供两种可视化链路，二者互补：
 
 ```bash
 # 1. 启动业务/仿真节点（写状态文件）
-./build/bin/flow_e2e 3600 &
+./build/bin/flow_launcher config/pipeline.json --duration 3600 &
 
 # 2. 启动 HTTP 桥接（读状态文件, 多线程）
 python3 tools/flowboard_server.py &
@@ -54,7 +54,7 @@ python3 tools/flowboard_server.py &
 open http://localhost:8800
 
 # 或直接使用一键脚本
-./scripts/demo_sim.sh
+./scripts/demo.sh
 ```
 
 ## 使用方式（可选 flowmond 多节点）
@@ -62,7 +62,7 @@ open http://localhost:8800
 ```bash
 # 分布式部署时, 由 flowmond 通过 UDP 发现聚合多个节点
 ./build/bin/flowmond --port 8800 &
-./build/bin/flow_e2e 3600 &        # 需要节点对外广播 topic 统计
+./build/bin/flow_launcher config/pipeline.json --duration 3600 &        # 需要节点对外广播 topic 统计
 open http://localhost:8800
 ```
 
@@ -97,7 +97,7 @@ GET /api/health    → 探活: {status, source, age_sec}
 ## 数据流
 
 ```
-flow_e2e (业务/仿真节点)
+flow_launcher config/pipeline.json (业务/仿真节点)
   │  monitor 任务 (10Hz)
   ├─ 采集 bus/transport/scheduler/latency/topics 统计
   ├─ 采集车辆闭环遥测 (PID: speed/target/throttle/brake)

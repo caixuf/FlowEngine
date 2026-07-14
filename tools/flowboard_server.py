@@ -364,8 +364,8 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content.encode())
             else:
-                # Fallback: serve legacy monolithic flowboard.html
-                fallback = os.path.join(os.path.dirname(__file__), 'flowboard.html')
+                # Fallback: serve modular flowboard/index.html
+                fallback = os.path.join(os.path.dirname(__file__), 'flowboard', 'index.html')
                 if os.path.exists(fallback):
                     with open(fallback) as f:
                         content = f.read()

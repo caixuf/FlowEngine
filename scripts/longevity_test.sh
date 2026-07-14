@@ -17,7 +17,7 @@ USE_VALGRIND=false
 [[ "$2" == "--valgrind" ]] && USE_VALGRIND=true
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/build/bin/flow_e2e"
+BIN="$ROOT/build/bin/flow_launcher"
 
 echo "╔══════════════════════════════════════════╗"
 echo "║  FlowEngine Longevity Test               ║"
@@ -29,7 +29,7 @@ echo "╚═══════════════════════�
 if [ ! -x "$BIN" ]; then
     echo "[build] Building..."
     cmake -S "$ROOT" -B "$ROOT/build" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-    cmake --build "$ROOT/build" --target flow_e2e -j$(nproc) 2>/dev/null
+    cmake --build "$ROOT/build" --target flow_launcher -j$(nproc) 2>/dev/null
 fi
 
 LOGFILE="/tmp/flowengine_longevity_$$.log"
@@ -43,9 +43,9 @@ START_TS=$(date +%s)
 if $USE_VALGRIND; then
     valgrind --leak-check=full --show-leak-kinds=all \
         --log-file=/tmp/valgrind_$$.log \
-        "$BIN" "$DURATION" > "$LOGFILE" 2>&1 &
+        "$BIN" config/pipeline.json --duration "$DURATION" > "$LOGFILE" 2>&1 &
 else
-    "$BIN" "$DURATION" > "$LOGFILE" 2>&1 &
+    "$BIN" config/pipeline.json --duration "$DURATION" > "$LOGFILE" 2>&1 &
 fi
 PID=$!
 

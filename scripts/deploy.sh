@@ -10,7 +10,7 @@
 #
 # 部署后目标目录结构:
 #   /mnt/m/
-#   ├── bin/           # flowctl, flow_e2e, launcher, ...
+#   ├── bin/           # flowctl, flow_launcher, launcher, ...
 #   ├── lib/           # libflowengine_core.a, plugins/
 #   ├── include/       # 头文件
 #   ├── share/         # scripts, tools

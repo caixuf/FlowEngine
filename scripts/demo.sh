@@ -50,7 +50,7 @@ done
 # ── Replay fast path: no pipeline, just flowmond + flow_launcher --replay ──
 if [ -n "$REPLAY_FILE" ]; then
   echo "═══ Replay Mode: $REPLAY_FILE ═══"
-  "$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard.html" > /tmp/flowmond.log 2>&1 &
+  "$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" > /tmp/flowmond.log 2>&1 &
   FLOWMOND_PID=$!
   sleep 1
   echo "  Dashboard: http://localhost:8800"
@@ -223,7 +223,7 @@ echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 
 # ── Start dashboard server (flowmond) ──────────────────────
 echo "───[3/5] Starting dashboard server..."
-"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard.html" \
+"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" \
   > /tmp/flowmond.log 2>&1 &
 FLOWMOND_PID=$!
 sleep 2

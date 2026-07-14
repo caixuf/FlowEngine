@@ -23,7 +23,7 @@
  *   p->cleanup();
  *   dlclose(lib);
  *
- * 对比旧方式 (e2e_demo.c --role):
+ * 对比旧方式 (e2e_demo.c --role，已移除):
  *   旧: ROLE_MATCH("fusion") → 所有节点代码共享一个进程/文件
  *   新: dlopen("libfusion_node.so") → 节点完全独立，改算法不重编译主程序
  */

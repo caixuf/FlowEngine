@@ -159,7 +159,7 @@ param_enable_hot_reload("control.max_speed");
 IpcChannel* ch = stats_bridge_publisher_open();
 
 // Serialize MessageBus stats and send to flowmond (call periodically, e.g. every 5 s)
-stats_bridge_publish(ch, bus, "flow_e2e");
+stats_bridge_publish(ch, bus, "flow_launcher");
 
 // Subscriber side — call in flowmond; returns NULL until publisher opens the channel
 IpcChannel* sub = stats_bridge_subscriber_open(on_stats_callback, user_data);
@@ -175,7 +175,7 @@ Callback signature:
 ```c
 void on_stats_callback(const Message* msg, void* user_data) {
     const StatsPacket* pkt = (const StatsPacket*)msg->data;
-    // pkt->source_name — sending process (e.g. "flow_e2e")
+    // pkt->source_name — sending process (e.g. "flow_launcher")
     // pkt->topic_count — number of entries in pkt->topics[]
     // pkt->bus_pub / bus_del / bus_drop — aggregate bus counters
 }

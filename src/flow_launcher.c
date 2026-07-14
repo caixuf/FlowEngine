@@ -254,7 +254,7 @@ static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe,
         snprintf(dur_str, sizeof(dur_str), "%d", duration);
         /* exec flow_node_host (与 launcher 同目录): 每个节点在独立进程内
          * dlopen 自己的 .so 并走 IPC 桥接。复用与单进程模式相同的节点插件,
-         * 不再依赖已废弃的 flow_e2e --role 单体 demo。 */
+         * 不再依赖已移除的 flow_e2e --role 单体 demo。 */
         char host_path[512];
         const char* slash = strrchr(self_exe, '/');
         /* 用 snprintf 从「目录前缀 + 可执行文件名」安全拼接, 避免 strcpy 越界。 */

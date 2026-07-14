@@ -1,6 +1,6 @@
 # FlowBoard 数据契约 (Data Contract)
 
-> 可视化链路 `monitor_node.c → /tmp/flow_topology.json → flowboard_server.py → /api/topology → flowboard.html` 的**唯一事实来源**。
+> 可视化链路 `monitor_node.c → /tmp/flow_topology.json → flowboard_server.py → /api/topology → flowboard/index.html` 的**唯一事实来源**。
 > 机器可读定义见 [`tools/schema/flowboard.schema.json`](../tools/schema/flowboard.schema.json)。
 
 ## 为什么需要契约
