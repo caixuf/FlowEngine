@@ -105,6 +105,10 @@ jobs:
         run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability|integration"
 
   # ── Stress test ────────────────────────────────────────────
+  # TODO: migrate to flow_launcher once the plugin pipeline is confirmed
+  # equivalent in throughput. For now this uses the legacy all-in-one binary
+  # (flow_e2e / e2e_demo.c, marked @deprecated) which is still the fastest
+  # way to stress the core bus + scheduler without external .so dependencies.
   stress-test:
     runs-on: ubuntu-24.04
     needs: build-release
