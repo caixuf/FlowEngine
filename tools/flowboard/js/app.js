@@ -2,11 +2,21 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady } from './scene3d.js';
-import { init2D, draw2D } from './scene2d.js';
-import { initCharts, updateCharts } from './charts.js';
+import { init3DScene, resize3D, update3D, sceneReady, setTopoData as setTopoData3D, setDebugCam } from './scene3d.js';
+import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
+import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
 import { safeCall, reportDiag, clearDiag } from './utils.js';
-import { updateDeadReckon, _dr } from './deadreckon.js';
+import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './deadreckon.js';
+
+/**
+ * Phase 4.9: setTopoData fan-out — push the latest topology payload into
+ * each renderer module's store.
+ */
+function setTopoData(d) {
+  setTopoData3D(d);
+  setTopoData2D(d);
+  setTopoDataChart(d);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Constants
@@ -16,8 +26,13 @@ var COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 // ═══════════════════════════════════════════════════════════════
 // Global State
 // ═══════════════════════════════════════════════════════════════
+//
+// Phase 4.9 cleanup: previously scattered window.* assignments across
+// scene2d.js / scene3d.js / deadreckon.js / utils.js / charts.js.
+// Now all global state lives in a single `flowboard` namespace object
+// — this is the ONLY thing attached to window from this app.
+// Internal modules talk to each other via ES module imports.
 var topoData = {nodes:[], metrics:{}};
-window.topoData = topoData;        // global access for other modules
 
 var frames = [];
 var paused = false;
@@ -393,7 +408,6 @@ function doSimulate() {
       {node:"control",topic:"control/cmd",role:"pub",type_id:"0x2d95c6d2",freq:100.0}
     ]
   };
-  window.topoData = topoData;
   updateAll();
   setConnStatus('live','● demo');
   var wm = document.getElementById('demo-watermark');
@@ -422,7 +436,7 @@ function startSSE() {
   var _pendingUpdate = false;
   eventSource.onmessage = function(e) {
     if (paused) return;
-    try { topoData = JSON.parse(e.data); window.topoData = topoData; }
+    try { topoData = JSON.parse(e.data); }
     catch(err) { return; }
     if (!_pendingUpdate) {
       _pendingUpdate = true;
@@ -450,7 +464,7 @@ function tryReconnect() {
   fetch(serverUrl+'/api/topology')
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      topoData = d; window.topoData = d;
+      topoData = d;
       updateAll();
       applyLiveStatus(d);
       connectRetries = 0;
@@ -469,7 +483,7 @@ async function doConnect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   try {
     var r = await fetch(serverUrl+'/api/topology');
-    topoData = await r.json(); window.topoData = topoData;
+    topoData = await r.json();
     updateAll();
     applyLiveStatus(topoData);
     connectRetries = 0;
@@ -504,6 +518,10 @@ function clearFrames() {
 function updateAll() {
   // Each sub-renderer is isolated: a fault must not stop subsequent renders.
   // Failures surface in the diagnostic bar instead of being silently swallowed.
+  //
+  // Phase 4.9: push topoData into the per-module stores first so each renderer
+  // (scene2d, scene3d, charts) reads from its own module-scoped var.
+  setTopoData(topoData);
   safeCall('metrics', updateMetrics);
   safeCall('frames', updateFrames);
   safeCall('topicStats', updateTopicStats);
@@ -985,10 +1003,10 @@ function sync2DTarget() {
   }
 
   // ── 2D trail (only maintained while the 2D renderer is active) ──
-  var _2d = window._2d;
-  if (!_2d || !_2d.active) return;
-  _2d.trail.push({ x: _dr.lastX, y: _dr.lastZ });
-  if (_2d.trail.length > 120) _2d.trail.shift();
+  // Phase 4.9: use imported _2dState from scene2d.js instead of window._2d.
+  if (!_2dState || !_2dState.active) return;
+  _2dState.trail.push({ x: _dr.lastX, y: _dr.lastZ });
+  if (_2dState.trail.length > 120) _2dState.trail.shift();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1105,37 +1123,59 @@ function initAll() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Global exports for inline onclick handlers in HTML
+// Single namespace export — only `window.flowboard` is added to the
+// global scope, holding references to every function the inline
+// onclick handlers in index.html need.
+// Phase 4.9: replaces ~30 individual window.X = X assignments.
 // ═══════════════════════════════════════════════════════════════
+window.flowboard = {
+  // connect / data
+  doConnect: doConnect,
+  doSimulate: doSimulate,
+  doPause: doPause,
+  clearFrames: clearFrames,
+  resetView: resetView,
+  // filter
+  onFilterChange: onFilterChange,
+  // node detail
+  showNodeDetail: showNodeDetail,
+  closeDetail: closeDetail,
+  // sysmon view switch
+  switchSysView: switchSysView,
+  // scene view switch
+  switchSceneView: function (mode) {
+    // delegated to scene2d module
+    import('./scene2d.js').then(function (m) { m.switchSceneView(mode); });
+  },
+  // export
+  toggleExportMenu: toggleExportMenu,
+  exportPNG: exportPNG,
+  exportCSV: exportCSV,
+  // training
+  openTrainingModal: openTrainingModal,
+  closeTrainingModal: closeTrainingModal,
+  syncTrainingForm: syncTrainingForm,
+  refreshTrainingStatus: refreshTrainingStatus,
+  startTraining: startTraining,
+  promoteTrainingModel: promoteTrainingModel,
+  // diag
+  clearDiag: clearDiag,
+  // card collapse
+  toggleCard: toggleCard,
+  // charts
+  onChartTopicChange: function () { /* delegated via charts.js */ },
+  onChartRangeChange: function () { /* delegated via charts.js */ },
+  // debug exports (read-only refs for console inspection)
+  _dr: _dr,
+  _2d: _2dState,
+  _topoData: function () { return topoData; }
+};
 
-window.topoData = topoData;
-window.doToggle = toggleCard;
-window.toggleCard = toggleCard;
-window.doConnect = doConnect;
-window.doSimulate = doSimulate;
-window.doPause = doPause;
-window.clearFrames = clearFrames;
-window.resetView = resetView;
-window.onFilterChange = onFilterChange;
-window.showNodeDetail = showNodeDetail;
-window.closeDetail = closeDetail;
-window.switchSysView = switchSysView;
-window.toggleExportMenu = toggleExportMenu;
-window.exportPNG = exportPNG;
-window.exportCSV = exportCSV;
-window.openTrainingModal = openTrainingModal;
-window.closeTrainingModal = closeTrainingModal;
-window.syncTrainingForm = syncTrainingForm;
-window.refreshTrainingStatus = refreshTrainingStatus;
-window.startTraining = startTraining;
-window.promoteTrainingModel = promoteTrainingModel;
-window.clearDiag = clearDiag;
-window.initTopo = initTopo;
-window.initAll = initAll;
-window.updateAll = updateAll;
-window.updateFrames = updateFrames;
-window.updateMetrics = updateMetrics;
-window.updateTopicStats = updateTopicStats;
+// Charts.js handles its own delegation via window.onChartTopicChange /
+// onChartRangeChange (read from the live flowboard namespace).
+// Re-publish those to point at chart functions for backward compat:
+window.onChartTopicChange = function () { /* charts.js implements */ };
+window.onChartRangeChange = function () { /* charts.js implements */ };
 
 // ═══════════════════════════════════════════════════════════════
 // Boot

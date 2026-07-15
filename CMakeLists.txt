@@ -240,6 +240,7 @@ set(CORE_SOURCES
     src/core/scenario_loader.c
     src/core/topic_bridge.c
     src/core/json_extract.c
+    src/core/json_schema.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
@@ -605,6 +606,13 @@ target_include_directories(test_bridges PRIVATE ${GEN_DIR})
 
 add_test(NAME bridge_tests COMMAND test_bridges)
 set_tests_properties(bridge_tests PROPERTIES TIMEOUT 30)
+
+# ── JSON Schema 严格校验单元测试 ──
+add_executable(test_json_schema tests/test_json_schema.c)
+target_link_libraries(test_json_schema flowengine_core)
+
+add_test(NAME json_schema_tests COMMAND test_json_schema)
+set_tests_properties(json_schema_tests PROPERTIES TIMEOUT 10)
 
 add_test(NAME e2e_training_tools
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py

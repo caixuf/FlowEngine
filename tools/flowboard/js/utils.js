@@ -66,11 +66,12 @@ export function safeCall(where, fn) {
  */
 export function toggleCard(hdr) {
   hdr.parentElement.classList.toggle('collapsed');
-  if (window.saveState) window.saveState();
+  // Phase 4.9: call saveState via the flowboard namespace (no global pollute)
+  if (window.flowboard && window.flowboard.saveState) window.flowboard.saveState();
   // Let the 3D renderer know it may need to resize after expanding
   setTimeout(function () {
     if (!hdr.parentElement.classList.contains('collapsed')) {
-      if (window.resize3D) window.resize3D();
+      if (window.flowboard && window.flowboard.resize3D) window.flowboard.resize3D();
     }
   }, 50);
 }
@@ -306,21 +307,8 @@ export function doSimulate() {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Global references — so inline HTML onclick handlers and the
-// monolithic <script> block can still resolve these names.
+// Phase 4.9: removed all `window.X = X` assignments here.
+// app.js re-publishes the names used by inline-onclick handlers under
+// a single `window.flowboard` namespace object. Internal modules
+// communicate via ES module imports only.
 // ═════════════════════════════════════════════════════════════════
-window.safeCall = safeCall;
-window.reportDiag = reportDiag;
-window.clearDiag = clearDiag;
-window.toggleCard = toggleCard;
-window._makeBox = _makeBox;
-window._makeRect = _makeRect;
-window._buildSedan = _buildSedan;
-window._buildObstacle = _buildObstacle;
-window.getColor = getColor;
-window.initCarMesh = initCarMesh;
-window.toggleExportMenu = toggleExportMenu;
-window.exportPNG = exportPNG;
-window.exportCSV = exportCSV;
-window.doConnect = doConnect;
-window.doSimulate = doSimulate;

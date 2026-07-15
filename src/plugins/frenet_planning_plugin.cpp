@@ -20,11 +20,13 @@
 #include "transport.h"
 #include "scheduler.h"
 #include "logger.h"
+#include "json_schema.h"   /* Phase 4.5: json_get_*_strict + dsl_get_*_strict 替换 strstr+sscanf */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>      /* isdigit — 解析 pos=(x,y) 中 x */
 #include <unistd.h>
 #include <vector>
 
@@ -74,12 +76,27 @@ static void on_fusion(const Message* msg, void* user_data) {
     FrenetPlanningTask* pt = (FrenetPlanningTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
+    /* Phase 4.5: 替换 strstr+sscanf 为严格 schema 提取。
+     * - JSON 路径：使用 json_get_double_strict（接受 x/y/v/heading 字段）
+     * - DSL 路径：使用 dsl_find_value 解析 pos=(x,y) 元组，dsl_get_double_strict 解析 speed= */
     double x = 0, y = 0, v = 10.0, heading = 0;
-    if (strstr(data, "\"x\":"))
-        sscanf(data, "{\"x\":%lf,\"y\":%lf,\"v\":%lf,\"heading\":%lf", &x, &y, &v, &heading);
-    else if (strstr(data, "pos=(")) {
-        sscanf(data, "pos=(%lf,%lf", &x, &y);
-        if (strstr(data, "speed=")) sscanf(data, "speed=%lf", &v);
+    bool ok = false;
+    if (strchr(data, '{')) {
+        /* Try JSON first (EKF fusion publishes {x,y,v,heading}) */
+        ok |= json_get_double_strict(data, "x", &x);
+        ok |= json_get_double_strict(data, "y", &y);
+        ok |= json_get_double_strict(data, "v", &v);
+        json_get_double_strict(data, "heading", &heading);
+    }
+    if (!ok) {
+        /* Fallback to DSL: "pos=(x,y) ... speed=v ..." */
+        const char* pos_val = dsl_find_value(data, "pos");
+        if (pos_val && *pos_val == '(') {
+            const char* num = pos_val + 1;
+            if (*num == '-' || *num == '+') num++;
+            if (isdigit((unsigned char)*num)) x = strtod(num, NULL);
+        }
+        dsl_get_double_strict(data, "speed", &v);
     }
     pt->ego_x = x; pt->ego_y = y;
     pt->ego_speed = v; pt->ego_heading = heading;

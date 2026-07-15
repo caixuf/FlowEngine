@@ -13,6 +13,7 @@
  */
 
 #include "algorithm_plugin.h"
+#include "json_schema.h"   /* Phase 4.5: json_get_double_strict 替换 strstr+atof */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,15 +53,13 @@ static void* pid_init(MessageBus* bus, const char* config, const char** params) 
     s->output_min = -1.0; /* 全力刹车 */
     s->output_max =  1.0; /* 全力油门 */
     if (config) {
-        /* Parse JSON: {"kp":0.5, "ki":0.05, ...} — simplified parsing */
-        const char* p = config;
-        #define PARSE_FIELD(name, target) \
-            p = strstr(config, "\"" name "\":"); \
-            if (p) s->target = atof(p + strlen("\"" name "\":") + 1)
-        PARSE_FIELD("kp", kp);
-        PARSE_FIELD("ki", ki);
-        PARSE_FIELD("kd", kd);
-        PARSE_FIELD("setpoint", setpoint);
+        /* Phase 4.5: 替换 PARSE_FIELD 宏 (strstr+atof) 为 json_get_double_strict。
+         * 字段缺失/类型错误现在会 LOG_WARN（json_schema.h 内部走 fprintf）
+         * 且不修改 *out — 不再静默默认 0。 */
+        json_get_double_strict(config, "kp",       &s->kp);
+        json_get_double_strict(config, "ki",       &s->ki);
+        json_get_double_strict(config, "kd",       &s->kd);
+        json_get_double_strict(config, "setpoint", &s->setpoint);
     }
     return s;
 }
@@ -71,10 +70,10 @@ static int pid_process(void* handle, const void* input_data) {
     if (!data) return -1;
 
     /* Extract current speed from fusion output:
-     * Format: "pos=(x,y) gps=(lat,lon) speed=33.0 dt=XXus" */
+     * Format: "pos=(x,y) gps=(lat,lon) speed=33.0 dt=XXus"
+     * Phase 4.5: 用 dsl_get_double_strict 替换 strstr("speed=")+atof。 */
     double current_speed = 0;
-    const char* sp = strstr(data, "speed=");
-    if (sp) current_speed = atof(sp + 6);
+    dsl_get_double_strict(data, "speed", &current_speed);
 
     /* PID 计算 */
     double error = s->setpoint - current_speed;

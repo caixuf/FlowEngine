@@ -162,13 +162,8 @@ export function getDeadReckonState() {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Global references — so legacy inline <script> blocks can access
-// these without an import statement.
+// Phase 4.9: removed all `window.X = X` assignments here.
+// All entry points are reached via ES module imports. app.js re-publishes
+// the names used by inline-onclick handlers under a single
+// `window.flowboard` namespace object.
 // ═════════════════════════════════════════════════════════════════
-window._dr = _dr;
-window.LAMBDA_POS = LAMBDA_POS;
-window.LAMBDA_HEADING = LAMBDA_HEADING;
-window.initDeadReckon = initDeadReckon;
-window.updateDeadReckon = updateDeadReckon;
-window.tickDeadReckon = tickDeadReckon;
-window.getDeadReckonState = getDeadReckonState;

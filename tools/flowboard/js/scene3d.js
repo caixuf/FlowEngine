@@ -6,6 +6,7 @@
 
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
+import { init2DFallback } from './scene2d.js';
 
 const THREE = window.THREE;
 
@@ -16,6 +17,15 @@ const THREE = window.THREE;
 /** Main scene, camera, renderer */
 let scene3d = null, camera3d = null, renderer3d = null;
 let sceneReady = false;
+// Phase 4.9: debug-cam state lives module-scoped, debug3d.html sets it
+// via the exposed setDebugCam() function (see bottom of file).
+let _debugCam = null;
+export function setDebugCam(v) { _debugCam = v; }
+
+// Live topology data (Phase 4.9: no longer read from window.topoData).
+// app.js calls setTopoData() from updateAll() / sync2DTarget().
+let _topoData = { nodes: [], metrics: {} };
+export function setTopoData(d) { _topoData = d || _topoData; }
 
 /** Camera chase-cam state vectors */
 let _cam = null, _camLook = null, _camTarget = null, _camLookTarget = null;
@@ -287,7 +297,7 @@ function init3DScene() {
     ev.preventDefault();               // required so 'restored' can fire later
     reportDiag('scene3d', 'WebGL context lost — using 2D fallback');
     _glLost = true;
-    try { window.init2DFallback(); } catch (_) { }
+    try { init2DFallback(); } catch (_) { }
   }, false);
   renderer3d.domElement.addEventListener("webglcontextrestored", function() {
     _glLost = false;
@@ -374,10 +384,8 @@ function init3DScene() {
   }
   anim3D();
   sceneReady = true;
-  window.scene3d = scene3d;
-  window.sceneReady = true;
-  window._camera3d = camera3d;    // exposed for debugger
-  window._renderer3d = renderer3d; // exposed for debugger
+  // Phase 4.9: scene3d / camera3d / renderer3d stay module-scoped;
+  // debug access flows through app.js -> window.flowboard._scene3d etc.
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -409,7 +417,7 @@ function _renderFrame() {
   // ── Chase camera: behind ego, balanced pitch ──
   // lookX=8m ahead keeps the road visible stretching into distance
   // while minimising empty sky above.
-  var dc = window._debugCam;
+  var dc = _debugCam;
   var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
   var back   = dc ? dc.back   : (narrow ? 20 : 15);
   var height = dc ? dc.height : (narrow ? 6.5 : 5.0);
@@ -476,7 +484,7 @@ function _renderFrame() {
   }
 
   // ── Car bounce ──
-  var v = (window.topoData.metrics || {}).vehicle || {};
+  var v = (_topoData.metrics || {}).vehicle || {};
   if (ego && v.speed > 0.5) {
     ego.position.y = 0.05 + Math.sin(_animT * 6.5) * 0.008 * Math.min(1, v.speed * 0.12);
   }
@@ -489,7 +497,7 @@ function _renderFrame() {
 
 function update3D() {
   if (!sceneReady) return;
-  var scn = (window.topoData.metrics || {}).scene;
+  var scn = (_topoData.metrics || {}).scene;
   var now = performance.now() / 1000;
 
   // Road curve geometry: apply once when scene road data arrives

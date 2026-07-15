@@ -6,9 +6,11 @@
 #include "transport.h"
 #include "scheduler.h"
 #include "logger.h"
+#include "json_schema.h"   /* Phase 4.4: dsl_get_double_strict 替换 strstr+sscanf */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>      /* isdigit — 解析 pos=(x,y) 中 x */
 #include <unistd.h>
 
 typedef struct {
@@ -19,9 +21,23 @@ typedef struct {
 static void on_fusion(const Message* msg, void* u) {
     PlanningPlugin* p = (PlanningPlugin*)u;
     const char* data = (const char*)msg->data; if(!data)return;
-    float x=0,speed=10.0f;
-    if(strstr(data,"pos=(")) sscanf(data,"pos=(%f",&x);
-    if(strstr(data,"speed=")) sscanf(data,"speed=%f",&speed);
+    /* Phase 4.4: 用 dsl_get_double_strict + dsl_find_value 替换 strstr+sscanf。
+     * - pos=(x,y) 是元组格式：用 dsl_find_value 定位，然后解析括号内数字。
+     * - speed=5.0 走严格 DSL 提取，字段缺失时 speed 保持默认 10.0。 */
+    float x = 0;
+    const char* pos_val = dsl_find_value(data, "pos");
+    if (pos_val && *pos_val == '(') {
+        const char* num = pos_val + 1;
+        if (*num == '-' || *num == '+') num++;
+        if (isdigit((unsigned char)*num)) {
+            x = strtof(num, NULL);
+        }
+    }
+    float speed = 10.0f;
+    double speed_d = 0;
+    if (dsl_get_double_strict(data, "speed", &speed_d)) {
+        speed = (float)speed_d;
+    }
     float ts = 15.0f;  /* 固定巡航目标 15 m/s，不随当前速度变化 */
     char traj[256];
     snprintf(traj,sizeof(traj),"traj=(%.1f,0.0) speed=%.1f lane=center",x+2.0f,ts);

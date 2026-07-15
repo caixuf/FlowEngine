@@ -1,8 +1,15 @@
 // charts.js — Chart rendering module for FlowBoard
 // Handles: speed chart, latency chart, topic frequency bars, status indicators.
-// Data is read from window.topoData (global, set by SSE/file updates).
+//
+// Phase 4.9: data flows via setTopoData() (set by app.js) instead of
+// window.topoData. Event handlers onChartTopicChange / onChartRangeChange
+// are now ES module exports; HTML calls them through window.flowboard.
 
 import { safeCall, reportDiag } from './utils.js';
+
+// Live topology data (Phase 4.9: no longer read from window.topoData).
+let _topoData = { nodes: [], metrics: {} };
+export function setTopoData(d) { _topoData = d || _topoData; }
 
 // ════════════════════════════════════════════════════════════════
 // State
@@ -38,8 +45,8 @@ export function initCharts() {
 
 export function updateCharts(data) {
   // data param lets the caller pass the topology payload;
-  // fallback to window.topoData for backward compatibility.
-  var topoData = data || window.topoData;
+  // fallback to module-scoped _topoData (set by app.js via setTopoData()).
+  var topoData = data || _topoData;
   if (!topoData) return;
 
   populateTopicSelector();
@@ -220,7 +227,7 @@ function populateTopicSelector() {
   var sel = document.getElementById('chart-topic');
   if (!sel) return;
   var cur = sel.value;
-  var topics = ((window.topoData && window.topoData.metrics) || {}).topics || [];
+  var topics = ((_topoData && _topoData.metrics) || {}).topics || [];
   topics = topics.map(function(t) { return t.topic || t.name || ''; }).filter(Boolean).sort();
   var exist = [];
   for (var i = 1; i < sel.options.length; i++) exist.push(sel.options[i].value);
@@ -236,10 +243,11 @@ function populateTopicSelector() {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Event handlers (exposed on window for inline onclick)
+// Event handlers (Phase 4.9: ES module exports; app.js publishes them
+// under window.flowboard for inline-onclick handlers)
 // ════════════════════════════════════════════════════════════════
 
-window.onChartTopicChange = function onChartTopicChange() {
+export function onChartTopicChange() {
   chartTopic = document.getElementById('chart-topic').value;
   chartPrevPub = -1;
   chartPrevDel = -1;
@@ -247,12 +255,12 @@ window.onChartTopicChange = function onChartTopicChange() {
   chartLastSampleMs = 0;
   chartHistory = { rate: [], latency: [], frames: [], maxLen: chartHistory.maxLen };
   _saveChartState();
-};
+}
 
-window.onChartRangeChange = function onChartRangeChange() {
+export function onChartRangeChange() {
   chartHistory.maxLen = parseInt(document.getElementById('chart-range').value) || 60;
   chartHistory = { rate: [], latency: [], frames: [], maxLen: chartHistory.maxLen };
-};
+}
 
 function _saveChartState() {
   try {
@@ -263,8 +271,8 @@ function _saveChartState() {
 }
 
 // ════════════════════════════════════════════════════════════════
-// Module-global exports + window compatibility
+// Phase 4.9: removed all `window.X = X` assignments here.
+// All entry points are reached via ES module exports. app.js re-publishes
+// the names used by inline-onclick handlers under the `window.flowboard`
+// namespace object.
 // ════════════════════════════════════════════════════════════════
-
-window.initCharts = initCharts;
-window.updateCharts = updateCharts;

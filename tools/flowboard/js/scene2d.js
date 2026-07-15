@@ -10,8 +10,9 @@
 // Ego smoothing is owned by deadreckon.js (_dr.smooth*). The 2D renderer
 // reads those values in draw2D() via tickDeadReckon() in the anim loop.
 //
-// Inline-onclick compatibility: window.draw2D, window.init2DFallback,
-// window.switchSceneView, window._2d are set.
+// Phase 4.9 cleanup: no `window.X = X` exports — all entry points are
+// reached via ES module imports.  app.js re-publishes them under the
+// single `window.flowboard` namespace for inline-onclick handlers.
 
 import { safeCall, reportDiag } from './utils.js';
 import { _dr, tickDeadReckon } from './deadreckon.js';
@@ -24,6 +25,16 @@ var _2d = {
   trail: [],                                               // last N positions
   scale: 8                                                 // px per meter
 };
+
+// Module-internal obstacle target buffers (Phase 4.9: no longer on window)
+var _obsTargets2d = [];
+var _obsVelBuf = [];
+
+// Live topology data (Phase 4.9: no longer read from window.topoData).
+// app.js calls setTopoData() from sync2DTarget()/updateAll() with the
+// latest snapshot; draw2D() reads it from this module-scoped variable.
+var _topoData = { nodes: [], metrics: {} };
+export function setTopoData(d) { _topoData = d || _topoData; }
 
 // Utility: "#rrggbb" → "r,g,b" string for rgba()
 function hexToRgb(hex) {
@@ -221,7 +232,7 @@ export function draw2D() {
   }
 
   // ── LiDAR point cloud ──
-  var scn = (topoData.metrics || {}).scene;
+  var scn = (_topoData.metrics || {}).scene;
   if (scn && scn.lidar && scn.lidar.length) {
     scn.lidar.forEach(function (pt) {
       var rx = pt[0] || 0, ry = pt[1] || 0;
@@ -239,8 +250,8 @@ export function draw2D() {
   }
 
   // ── Obstacles (ADAS-HMI bounding-box style) ──
-  window._obsTargets2d = window._obsTargets2d || [];
-  window._obsVelBuf = window._obsVelBuf || [];
+  if (!_obsTargets2d) _obsTargets2d = [];
+  if (!_obsVelBuf) _obsVelBuf = [];
   var _dtNow = performance.now() / 1000;
   if (scn && scn.obstacles && scn.obstacles.length) {
     scn.obstacles.forEach(function (o, i) {
@@ -249,11 +260,11 @@ export function draw2D() {
       var relVx = (o.vx || 0) - egVx, relVy = (o.vy || 0) - egVy;
       // Data target in screen coords (data updates ~10Hz)
       var dtx = carX - (o.y || 0) * s, dty = carY - (o.x || 0) * s;
-      var cur = window._obsTargets2d[i];
+      var cur = _obsTargets2d[i];
       // isNaN guard: handles stale entries after obstacle count changes
       if (!cur || isNaN(cur.x)) {
         cur = { x: dtx, y: dty, lastDataX: o.x, lastDataY: o.y, lastDataT: _dtNow };
-        window._obsTargets2d[i] = cur;
+        _obsTargets2d[i] = cur;
       }
       // Detect data update
       if (o.x !== cur.lastDataX || o.y !== cur.lastDataY) {
@@ -448,7 +459,7 @@ export function draw2D() {
   ctx.fillText('m/s', 86, hudY + hudH / 2 - 3);
   ctx.fillText((e.speed * 3.6 || 0).toFixed(0) + ' km/h', 86, hudY + hudH / 2 + 12);
   // TARGET
-  var v = (topoData.metrics || {}).vehicle || {};
+  var v = (_topoData.metrics || {}).vehicle || {};
   ctx.fillStyle = '#8b949e';
   ctx.font = "10px 'Inter',system-ui,sans-serif";
   ctx.textAlign = 'left';
@@ -530,9 +541,9 @@ export function switchSceneView(mode) {
   }
 }
 
-// Expose for inline onclick compatibility (HTML onclick="switchSceneView('2d')" etc.)
-window._2d = _2d;
-window.draw2D = draw2D;
-window.init2DFallback = init2DFallback;
-window.switchSceneView = switchSceneView;
-window.init2D = init2D;
+// All public functions are declared with `export function ...` at their
+// definition site (Phase 4.9: replaces all window.* assignments).
+//
+// _2d is the only non-function module export — used by app.js for the
+// 2D trail. Exported explicitly because it's a `var` (mutable state).
+export { _2d };

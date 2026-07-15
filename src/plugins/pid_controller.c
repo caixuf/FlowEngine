@@ -22,6 +22,7 @@
 #include "transport.h"
 #include "scheduler.h"
 #include "logger.h"
+#include "json_schema.h"   /* dsl_get_*_strict — 严格 DSL 解析，字段缺失返回 false */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,16 +91,16 @@ static void on_fusion(const Message* msg, void* user_data) {
     PidControlTask* pt = (PidControlTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
-    if (strstr(data, "speed="))
-        sscanf(data, "speed=%lf", &pt->current_speed);
+    /* Phase 4.2: 替换 strstr+sscanf 为 dsl_get_double_strict。
+     * 字段缺失/类型不符不再静默默认 0；返回 false 时 *out 保持不变。 */
+    dsl_get_double_strict(data, "speed", &pt->current_speed);
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
     PidControlTask* pt = (PidControlTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
-    if (strstr(data, "speed="))
-        sscanf(data, "speed=%lf", &pt->target_speed);
+    dsl_get_double_strict(data, "speed", &pt->target_speed);
 }
 
 /* ── 初始化 ──────────────────────────────────────────────── */
