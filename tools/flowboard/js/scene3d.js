@@ -37,7 +37,7 @@ let _obsPool = [], _obsWorld = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 
 /** Obstacle type → colour lookup (defined once, shared) */
-const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cyclist: 0x33ddff };
+const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cyclist: 0x33ddff, cone: 0xff6600 };
 
 /** Road curve state */
 let _curveActive = false;
@@ -53,7 +53,7 @@ let _animT = 0;
 let _tmpV3 = null, _tmpScale = null;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
-const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7 };
+const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7, cone: 0.8 };
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 3D ADAS scene builder — road, cars, environment
@@ -352,7 +352,8 @@ function init3DScene() {
   // ── Obstacle pool ──
   _obsPool = [];
   for (var oi = 0; oi < 8; oi++) {
-    var obs = _buildObstacle(0xff9944);
+    var obs = _buildObstacle('car', 0xff9944);
+    obs.userData.obsType = 'car';  /* track current mesh type for rebuild-on-change */
     obs.visible = false;
     scene3d.add(obs);
     _obsPool.push(obs);
@@ -479,6 +480,14 @@ function _renderFrame() {
         }
         _tmpScale.set(L, H, W); om.scale.lerp(_tmpScale, 0.18);
         var c = (_obsColors[ow.type]) || 0xff9944;
+        // Defect 5: 障碍物类型变化时重建外形（轿车 ↔ 胶囊行人 ↔ 圆锥路障），
+        // 复用同一 group 槽位，只替换 children，保留 position/scale/visible。
+        if (om.userData.obsType !== ow.type) {
+          var nm = _buildObstacle(ow.type, c);
+          while (om.children.length) om.remove(om.children[0]);
+          while (nm.children.length) om.add(nm.children[0]);
+          om.userData.obsType = ow.type;
+        }
         if (om.children.length > 0 && om.children[0].material && om.children[0].material.color) {
           om.children[0].material.color.setHex(c);
         }

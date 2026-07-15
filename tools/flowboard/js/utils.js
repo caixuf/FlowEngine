@@ -232,13 +232,52 @@ export function _buildSedan(color, secondaryColor) {
 
 // ── Obstacle model ───────────────────────────────────────────────
 /**
- * _buildObstacle — build a simple unit-normalised obstacle mesh
+ * _buildObstacle — build a unit-normalised obstacle mesh shaped by type
  * (bounding box ≈ 1×1×1; scale with .set(L, H, W) at render time).
+ * @param {string} type   obstacle type: 'car'/'truck' (sedan), 'pedestrian'
+ *                        (capsule), 'cone' (traffic cone); defaults to sedan.
+ * @param {number} color  body colour (e.g. 0xff9944). Legacy call signature
+ *                        _buildObstacle(colorNumber) is accepted → treated as car.
+ * @returns {THREE.Group}
  */
-export function _buildObstacle(color) {
+export function _buildObstacle(type, color) {
   const T = window.THREE;
+  // Backward-compat: _buildObstacle(number) → sedan of that colour.
+  if (typeof type === 'number') { color = type; type = 'car'; }
+  color = color || 0xff9944;
   var g = new T.Group();
 
+  if (type === 'pedestrian') {
+    // 胶囊形行人：圆柱身体 + 球形头部（区别于车辆轿车外形）
+    var pBody = new T.Mesh(
+      new T.CylinderGeometry(0.18, 0.18, 0.7, 12),
+      new T.MeshStandardMaterial({ color: color, metalness: 0.1, roughness: 0.6 })
+    );
+    pBody.position.y = 0.35; pBody.castShadow = true; g.add(pBody);
+    var head = new T.Mesh(
+      new T.SphereGeometry(0.18, 12, 12),
+      new T.MeshStandardMaterial({ color: 0xffd9a0, metalness: 0.1, roughness: 0.5 })
+    );
+    head.position.y = 0.85; g.add(head);
+    return g;
+  }
+
+  if (type === 'cone') {
+    // 圆锥形路障 + 方形底座
+    var cone = new T.Mesh(
+      new T.ConeGeometry(0.25, 0.7, 16),
+      new T.MeshStandardMaterial({ color: color, metalness: 0.1, roughness: 0.5 })
+    );
+    cone.position.y = 0.35; cone.castShadow = true; g.add(cone);
+    var base = new T.Mesh(
+      new T.BoxGeometry(0.5, 0.06, 0.5),
+      new T.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 })
+    );
+    base.position.y = 0.03; g.add(base);
+    return g;
+  }
+
+  // 默认：轿车形（car/truck/cyclist）
   var body = new T.Mesh(
     new T.BoxGeometry(1, 0.6, 1),
     new T.MeshStandardMaterial({ color: color, metalness: 0.35, roughness: 0.3 })
@@ -269,7 +308,8 @@ const _obsColors = {
   car: 0xff9944,
   truck: 0xff4422,
   pedestrian: 0x33ff88,
-  cyclist: 0x33ddff
+  cyclist: 0x33ddff,
+  cone: 0xff6600
 };
 
 /**

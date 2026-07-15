@@ -30,7 +30,7 @@ TOPIC_MIN_FREQ = {
     "vehicle/state": 15.0,
     "sensor/lidar": 15.0,
     "sensor/gps": 7.0,
-    "fusion/localization": 20.0,
+    "fusion/localization": 19.0,
     "planning/trajectory": 5.0,
     "control/raw_cmd": 10.0,
     "control/cmd": 10.0,

@@ -63,6 +63,8 @@ typedef struct {
     int    ped_crossed_center;
     int    ped_parked;
     double lane_offset;  /**< y 相对道路中心线的横向偏移（弯道时用于跟随中心线） */
+    double cross_start_y; /**< 切入车横向运动起点 Y（用于判断变道是否完成） */
+    double ped_wait_timer; /**< 行人到达对侧后的等待计时器（秒） */
 } SimObstacle;
 
 /* ── 车辆状态 ────────────────────────────────────────────────── */
@@ -164,6 +166,11 @@ static void init_obstacles_from_scenario(const ScenarioConfig* sc) {
         g.obstacles[i].wid = a->wid;
         g.obstacles[i].ped_crossed_center = 0;
         g.obstacles[i].ped_parked = 0;
+        g.obstacles[i].ped_wait_timer = 0.0;
+        /* cross_start_y: 横向运动起点世界 Y（切入车变道完成判定用）。
+         * 沿车道行驶车(vy==0)的 y 在下方 if 分支被弯道中心线修正，此处先记
+         * a->y；横穿/切入车(vy!=0)的 y 不修正，a->y 即世界 Y，记录正确。 */
+        g.obstacles[i].cross_start_y = a->y;
         /* 场景文件的 y 是"相对道路中心线的车道偏移"（-1.75=左车道, +1.75=右车道），
          * 与 ego.y 语义一致。沿车道行驶的车辆(vy==0)需加上当前 x 处的道路中心线
          * 偏移得到绝对世界坐标；行人(vy!=0)的 y 是绝对坐标（横穿位置），不偏移。
@@ -183,9 +190,24 @@ static void obstacles_tick(void) {
     for (int i = 0; i < g.obstacle_count; i++) {
         SimObstacle* o = &g.obstacles[i];
 
+        /* Defect 6: 行人周期性往返 — 到达对侧路沿后等待 3s 再反向横穿，
+         * 而非永久停放。vy 不归零（保留幅值供反向使用），故此处只累计
+         * 计时器，到点后翻转 vy 方向并清除停放标记。 */
         if (strcmp(o->type, "pedestrian") == 0 && o->ped_parked) {
+            o->ped_wait_timer += DT_SEC;
+            if (o->ped_wait_timer >= 3.0) {
+                o->ped_wait_timer = 0.0;
+                o->ped_parked = 0;
+                o->ped_crossed_center = 0;
+                o->vy = -o->vy;
+            }
             continue;
         }
+
+        /* Defect 1: 完全静止的障碍物（vx==0 && vy==0，如停放故障车、锥桶）
+         * 跳过 X 循环瞬移与弯道跟随，保持原地——否则 ego 越过 100m 后会被
+         * 瞬移到前方 150m，3D 场景里出现"障碍物突然跳到车前"的异常。 */
+        if (o->vx == 0.0 && o->vy == 0.0) continue;
 
         o->x += o->vx * DT_SEC;
         o->y += o->vy * DT_SEC;
@@ -193,7 +215,7 @@ static void obstacles_tick(void) {
             /* One-shot crossing behavior:
              * - enter road once
              * - after crossing centerline, stop at opposite curb
-             * - no periodic back-and-forth oscillation */
+             * - 到达路沿后由上方 ped_parked 分支计时 3s 再反向（Defect 6） */
             if (o->y >= 7.8 && o->vy > 0.0) o->vy = -fabs(o->vy);
             if (o->y <= -7.8 && o->vy < 0.0) o->vy = fabs(o->vy);
 
@@ -204,17 +226,26 @@ static void obstacles_tick(void) {
             if (o->ped_crossed_center) {
                 if (o->vy < 0.0 && o->y <= -7.2) {
                     o->y = -7.2;
-                    o->vy = 0.0;
                     o->ped_parked = 1;
                 } else if (o->vy > 0.0 && o->y >= 7.2) {
                     o->y = 7.2;
-                    o->vy = 0.0;
                     o->ped_parked = 1;
                 }
             }
 
             /* Pedestrian should not respawn/teleport with traffic flow. */
             continue;
+        }
+
+        /* Defect 2: 横向运动 Y 边界。带 vy 的非行人车辆若不设边界会沿 Y 无限
+         * 漂移，3D 里飞出场景。切入车（|vy| 较小）变道一个车道宽度后停 vy；
+         * 横穿车（|vy| 较大）驶离路面（|y|>10m）后停 vy。 */
+        if (o->vy != 0.0) {
+            if (fabs(o->vy) >= 4.0) {
+                if (fabs(o->y) > 10.0) o->vy = 0.0;
+            } else {
+                if (fabs(o->y - o->cross_start_y) >= g.lane_width) o->vy = 0.0;
+            }
         }
 
         double rel = o->x - g.vehicle.x;
@@ -454,8 +485,13 @@ static void* sim_thread(void* arg) {
                 double dy_tol = is_pedestrian ? PEDESTRIAN_LATERAL_TOL_M : SAME_LANE_TOL_M;
                 if (dy > dy_tol) continue;
                 double frontal_gap = dx - (o->len * 0.5 + EGO_LEN_M * 0.5);
-                double ped_safe_gap = fmax(10.0, g.vehicle.speed * 2.0);
-                if (frontal_gap < ped_safe_gap) {
+                /* 阈值分离（缺陷4修复）：行人保留 max(10, speed*2) 保守距离；
+                 * 车辆类障碍物改用 AEB_GAP_RATIO*(6+speed*2)，避免拥堵跟车
+                 * 时 10m 平台阈值导致"急刹—停—急刹"剧烈抖动。 */
+                double safe_gap = is_pedestrian
+                    ? fmax(10.0, g.vehicle.speed * 2.0)
+                    : AEB_GAP_RATIO * (6.0 + g.vehicle.speed * 2.0);
+                if (frontal_gap < safe_gap) {
                     g.vehicle.throttle = 0;
                     g.vehicle.brake    = 1.0;
                     break;
