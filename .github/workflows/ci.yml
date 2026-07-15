@@ -105,23 +105,28 @@ jobs:
         run: ctest --test-dir build --output-on-failure --timeout 120 -LE "benchmark|manual|stability|integration"
 
   # ── Stress test ────────────────────────────────────────────
-  # TODO: migrate to flow_launcher once the plugin pipeline is confirmed
-  # equivalent in throughput. For now this uses the legacy all-in-one binary
-  # (flow_e2e / e2e_demo.c, marked @deprecated) which is still the fastest
-  # way to stress the core bus + scheduler without external .so dependencies.
+  # Runs the full plugin pipeline (flow_launcher + config/pipeline.json) under
+  # a 15-second time budget to stress the core bus + scheduler + transport at
+  # realistic ADAS rates.  Equivalent to the integration-test job but with a
+  # shorter duration and no ctest assertions — purely a "does it survive 15s
+  # of high-rate pipeline traffic without crashing" gate.
   stress-test:
     runs-on: ubuntu-24.04
     needs: build-release
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libcjson-dev python3 libeigen3-dev
       - name: Configure (Release)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
+      - name: Build framework
         run: cmake --build build -j$(nproc)
-      - name: Stress test (15s at high rate)
-        run: timeout 35 ./build/bin/flow_e2e 15
+      - name: Build node plugins
+        run: |
+          cmake -B build/modules/adas_nodes -S modules/adas_nodes -DFLOWENGINE_BUILD="$PWD/build"
+          cmake --build build/modules/adas_nodes -j$(nproc)
+      - name: Stress test (15s pipeline run)
+        run: timeout 35 ./build/bin/flow_launcher config/pipeline.json --duration 15
       - name: Verify
         run: echo "✓ Stress test completed — no crash"
 
