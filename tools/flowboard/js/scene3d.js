@@ -548,6 +548,3 @@ function update3D() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 export { init3DScene, resize3D, update3D, sceneReady, scene3d, _renderFrame, _applyRoadCurve };
-
-// Expose init3DScene globally so inline onclick handlers work
-window.init3DScene = init3DScene;

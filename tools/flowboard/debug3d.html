@@ -179,7 +179,7 @@
 
 <script src="/tools/three.min.js"></script>
 <script type="module">
-  import { init3DScene, resize3D, update3D } from './js/scene3d.js';
+  import { init3DScene, resize3D, update3D, setDebugCam } from './js/scene3d.js';
   import { initDeadReckon, _dr } from './js/deadreckon.js';
   import { safeCall, reportDiag } from './js/utils.js';
 
@@ -201,9 +201,9 @@
   var freeCam = false;
   var axesHelper = null;
 
-  // ── Camera overrides → window._debugCam (read by scene3d.js _renderFrame) ──
+  // ── Camera overrides → setDebugCam() (Phase 4.9: replaces window._debugCam) ──
   var _camOverrides = { back: 22, height: 11, side: 6, lerp: 0.08 };
-  window._debugCam = _camOverrides;
+  setDebugCam(_camOverrides);
 
   ['cam-back','cam-height','cam-side','cam-lerp'].forEach(function(id) {
     var el = document.getElementById(id);
@@ -303,17 +303,17 @@
     syncEgo();
   };
 
-  // ── Camera controls (via window._debugCam, read by scene3d.js) ──
-  // Already set up above — sliders write to _camOverrides which is window._debugCam
+  // ── Camera controls (via setDebugCam, read by scene3d.js) ──
+  // Already set up above — sliders write to _camOverrides which is forwarded to setDebugCam
 
   window.toggleFreeCam = function() {
     freeCam = !freeCam;
     document.getElementById('freecam-btn').textContent = freeCam ? 'Exit Free' : 'Free Cam';
     // Toggle debug cam: when free, stop chasing (set extreme values)
     if (freeCam) {
-      window._debugCam = null;  // fall back to scene3d defaults
+      setDebugCam(null);  // fall back to scene3d defaults
     } else {
-      window._debugCam = _camOverrides;
+      setDebugCam(_camOverrides);
     }
   };
 

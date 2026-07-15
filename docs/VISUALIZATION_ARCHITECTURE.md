@@ -215,3 +215,52 @@ app.js sync2DTarget()
 3. **单一馈入点** — `app.js sync2DTarget()` 是唯一调用 `updateDeadReckon()` 的地方。`scene3d.js update3D()` 不再直接修改 `_dr`，只负责障碍物/LiDAR 世界锚定。
 4. **首帧 snap** — `init=false` 时 `_dr.smooth*` 直接设为 ground-truth，避免从 (0,0) lerp 入场。
 5. **heading 最短路径** — `while (dh > π) dh -= 2π; while (dh < -π) dh += 2π;`
+
+## 单一 `window.flowboard` 命名空间（Phase 4 — 已落地）
+
+`flowboard.html` 此前在每个模块文件底部做 `window.X = X` 一连串 monkey-patch（30+ 个全局），导致：
+
+| 问题 | 位置 | 后果 |
+|------|------|------|
+| 全局变量污染 | `utils.js` / `deadreckon.js` / `charts.js` / `scene2d.js` / `scene3d.js` / `app.js` | 与浏览器原生 / 第三方 lib 命名冲突、Node.js 加载时 `window is not defined` |
+| `window.topoData` 跨模块隐式共享 | `charts.js` / `scene3d.js` / `scene2d.js` | setter 无任何封装，多处同时写、谁最后写谁赢 |
+| `debug3d.html` 直接 `window._debugCam = _camOverrides` | `debug3d.html:316` | 跨文件耦合，IDE 无法追踪 |
+| HTML `onclick="toggleCard(this)"` 依赖 `window.toggleCard` | `index.html` | 重构时易漏，inline handler 实际指向 undefined → 静默失败 |
+
+**修复方案 — 单一 `window.flowboard` 命名空间 + ES Module 内部通信：**
+
+```text
+app.js 顶部
+   │   import { init3DScene, resize3D, update3D, setTopoData as setTopoData3D, setDebugCam } from './scene3d.js';
+   │   import { init2D, init2DFallback, draw2D, switchSceneView, _2d, setTopoData as setTopoData2D } from './scene2d.js';
+   │   import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
+   │   import { safeCall, reportDiag, clearDiag } from './utils.js';
+   │   import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './deadreckon.js';
+   │
+   │   function setTopoData(d) {           ← fan-out 模式
+   │     setTopoData3D(d);                  ← scene3d 内部 _topoData
+   │     setTopoData2D(d);                  ← scene2d 内部 _topoData
+   │     setTopoDataChart(d);               ← charts 内部 _topoData
+   │   }
+   │
+   │   updateAll() 顶部 setTopoData(topoData);  ← 单一馈入
+   │
+   ▼
+window.flowboard = {  ← 唯一全局导出（HTML onclick 全部走它）
+    initAll, doConnect, doSimulate, doPause, clearDiag, clearFrames,
+    toggleExportMenu, exportPNG, exportCSV, onFilterChange, resetView,
+    openTrainingModal, closeTrainingModal, refreshTrainingStatus,
+    startTraining, syncTrainingForm, switchSysView, switchSceneView,
+    onChartTopicChange, onChartRangeChange, closeDetail,
+    saveState, resize3D, _2d: _2dState, _topoData: () => topoData,
+};
+```
+
+**关键设计决策：**
+
+1. **`window.topoData` → 模块内 `let _topoData` + `setTopoData(d)` setter** — 写时序明确，杜绝 race。
+2. **`window._debugCam` → `setDebugCam(v)`** — `debug3d.html` 也走 ES module 导出，不再写 `window.*`。
+3. **HTML inline `onclick` 全部改 `flowboard.X()`** — 集中式重命名安全。
+4. **Node.js `smoke.mjs`** — mock `global.window` / `document` 后 `import('./app.js')`，5 个模块加载链全通过；保证重构不会因某个 `window.X` 漏删而破坏 SSR / 测试。
+5. **`var _2d` 显式 `export { _2d }`** — `var` 不能用 `export function`，需在文件底部 `export { _2d }` 单独列出（`scene2d.js:550`）。
+6. **`onChartTopicChange` / `onChartRangeChange` 在 `charts.js` 内是 `export function`** — 不能再用 `export { onChartTopicChange }` 重复声明。

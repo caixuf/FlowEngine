@@ -1,6 +1,6 @@
 # FlowEngine 进化路线图
 
-> 日期：2026-07-04（更新 2026-07-10）
+> 日期：2026-07-04（更新 2026-07-15）
 > 当前定位：**仿真驱动的自动驾驶中间件框架 + 可复现实验平台**
 > 目标方向：从"功能原型"进化为"可组织、可观察、可测试、可回放、可评估的仿真框架"
 >
@@ -38,25 +38,36 @@
 >
 > 下面的原始 Phase 描述保留作历史参考。
 
-> ## ⚠️ 现状更新（2026-07-14）— Phase 2+3 已完成 ✅
+> ## ⚠️ 现状更新（2026-07-15）— Phase 4+5 已完成 ✅
 >
-> 本轮**跳过小修小补，直接做架构大改**，解决系统性缺陷：
+> 本轮在 2026-07-14 的 Phase 2+3 基础上继续做架构性收敛，**三件一起做 + 不留技术债**：
 >
 > | 架构矛盾 | 修复方案 | 状态 |
 > |---------|---------|------|
-> | 共享道路几何无共享机制 | 新增 `road/geometry` topic，`sim_world` 唯一发布，三节点统一订阅 | ✅ 已落地 |
-> | 消息总线订阅者溢出（`MSG_BUS_MAX_SUBSCRIBERS=32`） | 上调至 128，dlopen 单进程模式不再静默丢订阅 | ✅ 已落地 |
-> | 前端航位推算职责分散 + monkey-patch | `deadreckon.js` 成为唯一引擎，帧率无关 lerp + 角度环绕修复 | ✅ 已落地 |
-> | 3D/2D lerp 参数不一致 | 统一 `LAMBDA_POS=8.0` / `LAMBDA_HEADING=6.0` | ✅ 已落地 |
-> | `scene3d.js` 直接修改 `_dr.last*` | `app.js sync2DTarget()` 成为唯一馈入点 | ✅ 已落地 |
+> | 消息总线无 Schema 强制校验（plugin 用 strstr+sscanf 裸解析） | 新增 `json_schema.h` 严格 JSON/DSL 校验 API（`json_get_*_strict` / `dsl_get_*_strict` / `dsl_validate`），4 个 plugin 文件全量替换为严格解析；新增 20 个 DSL 单测，48/48 通过 | ✅ 已落地 |
+> | flowboard 前端用 `<script>` 直接做 monkey-patching (`window.X = X` × 30+) | 全部迁移到 `window.flowboard` 单一命名空间；`scene3d/scene2d/charts` 模块内部 state 化（`setTopoData` setter），HTML 所有 `onclick` 改走 `flowboard.X()`；`debug3d.html` 用 `setDebugCam` API；Node.js `smoke.mjs` 验证模块加载链 | ✅ 已落地 |
+> | `DATA_TIMEOUT` fallback 把 `target` 钉死在 `0.0`，弯道中 `road_center_y` ≠ 0 → 车辆沿直线冲出行车道 | fallback 改为 Stanley 风格横向控制：以 `road_center_y(ego_x)` 为目标、`road_center_heading` 为参考、复用 `lat_kp`/`lat_kd_heading`/一阶低通（与主控制器完全一致），steer 受 `steer_limit_for_speed` 限幅；新增 9 个 Python 单测覆盖直道 / 弯道 / 双向偏移 / 限幅 / 滤波；`scenarios/curve_road.json` 跳一轮，最大车道偏差 1.74m（基线 1.67m） | ✅ 已落地 |
 >
-> **待解决（Phase 4+5）：**
+> **全量验证（2026-07-15）**
 >
-> | 问题 | 影响 | 预计修复 |
-> |------|------|---------|
-> | 消息总线无 Schema 强制校验 | control/planning 解析 JSON 容错差，字段缺失不报错 | Phase 4 |
-> | 模块耦合通过全局变量 monkey-patching | `flowboard.html` 的 `<script>` 标签仍在污染全局空间 | Phase 4 |
-> | 控制回退横向策略与主控制器不同 | `FALLBACK_SPEED_KEEP` 直线行驶，在弯道中会冲出车道 | Phase 5 |
+> | 套件 | 状态 |
+> |------|------|
+> | `tests/test_json_schema` (48/48) | ✅ |
+> | `tests/test_modules` (50/50) | ✅ |
+> | `tests/test_new_modules` (36/36) | ✅ |
+> | `tests/test_bridges` (8/8) | ✅ |
+> | `tools/tests/test_normalize.py` (32/32) | ✅ |
+> | `tools/tests/test_server_http.py` (13/13) | ✅ |
+> | `tools/tests/test_phase5_curve_fallback.py` (9/9) | ✅ **新增** |
+> | `tools/flowboard/js/smoke.mjs` (模块加载链) | ✅ |
+> | `python3 tools/demo_evaluator.py --scenario curve_road` (12s 跳) | ✅ |
+>
+> **下一阶段优先级（2026-07-15 更新）**
+> 1. 重新启用 TSAN（配 suppression），覆盖 phase 2+3+4+5 后的并发面（transport / bridge / coroutine）。
+> 2. Performance regression baseline: per-topic P50/P99 latency 端到端。
+> 3. Schema-aware Bag（topic → msg schema 元信息 + bag info）补全。
+> 4. 真实数据集回放闭环（nuScenes mini 端到端 + 影子驾驶对比）。
+> 5. 扩充场景库（cutin/pedestrian/overtake/roadwork）+ NOA 高速匝道出入口。
 
 ---
 
@@ -90,8 +101,8 @@ FlowEngine 现在已经有很多核心零件：任务系统、插件、消息总
 | Phase 1 | 工程收敛 | 测试、脚本、命名、README | ✅ 已完成 |
 | Phase 2 | 统一元信息 | `FlowRegistry`、反射、Meta | ✅ 已完成 |
 | Phase 3 | Launch 系统 | 配置驱动启动、依赖、参数 | ✅ 已完成 |
-| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 | ✅ 大部分完成 |
-| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge | ✅ 同机完成 |
+| Phase 4 | 可观测性 | `flowctl`、状态、topic、拓扑 + JSON/DSL 严格校验 + flowboard 单一命名空间 | ✅ 已完成 |
+| Phase 5 | 通信增强 | QoS、latency、drop policy、IPC bridge + DATA_TIMEOUT 弯道跟随 | ✅ 已完成 |
 | Phase 6 | 数据闭环 | schema-aware bag、bag info、replay | 🔧 部分完成 |
 | Phase 7 | 真实 ADAS 样例 | perception、fusion、control、monitor | ✅ 已完成 |
 

@@ -19,39 +19,39 @@
   <div style="margin-top:4px">
     <input id="url" value="http://localhost:8800" placeholder="Monitor server URL">
     <div style="display:flex;gap:4px;margin-top:4px">
-      <button onclick="doConnect()" class="primary" style="flex:1">🔗 Connect</button>
-      <button onclick="doSimulate()" style="flex:1">📋 Demo</button>
+      <button onclick="flowboard.doConnect()" class="primary" style="flex:1">🔗 Connect</button>
+      <button onclick="flowboard.doSimulate()" style="flex:1">📋 Demo</button>
       <div class="dropdown">
-        <button onclick="toggleExportMenu()" class="sm" title="Export">⬇</button>
+        <button onclick="flowboard.toggleExportMenu()" class="sm" title="Export">⬇</button>
         <div class="dropdown-menu" id="export-menu">
-          <button onclick="exportPNG()">📸 Topology PNG</button>
-          <button onclick="exportCSV()">📊 QoS CSV</button>
+          <button onclick="flowboard.exportPNG()">📸 Topology PNG</button>
+          <button onclick="flowboard.exportCSV()">📊 QoS CSV</button>
         </div>
       </div>
     </div>
   </div>
 
-  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="onFilterChange()" style="width:calc(100% - 28px)">
-  <span onclick="document.getElementById('topic-filter').value='';onFilterChange()" title="Clear filter" style="cursor:pointer;color:#8b949e;font-size:14px;padding:2px 6px">✕</span>
+  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="flowboard.onFilterChange()" style="width:calc(100% - 28px)">
+  <span onclick="document.getElementById('topic-filter').value='';flowboard.onFilterChange()" title="Clear filter" style="cursor:pointer;color:#8b949e;font-size:14px;padding:2px 6px">✕</span>
 
   <div style="display:flex;gap:4px">
-    <button onclick="doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
-    <button onclick="clearFrames()" style="flex:1">🗑 Clear</button>
-    <button onclick="resetView()" class="sm" title="Reset view (R)">🔲</button>
+    <button onclick="flowboard.doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
+    <button onclick="flowboard.clearFrames()" style="flex:1">🗑 Clear</button>
+    <button onclick="flowboard.resetView()" class="sm" title="Reset view (R)">🔲</button>
   </div>
 
-  <div class="card" id="training-card"><div class="card-header" onclick="toggleCard(this)"><h2>🧠 Training</h2><span class="toggle">▼</span></div>
+  <div class="card" id="training-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🧠 Training</h2><span class="toggle">▼</span></div>
     <div class="card-body">
       <div class="stat-row"><span class="label">Status</span><span class="value" id="train-status" style="font-size:11px">idle</span></div>
       <div class="stat-row"><span class="label">Model</span><span class="value mono" id="train-model" style="font-size:10px">—</span></div>
       <div style="display:flex;gap:4px;margin-top:8px">
-        <button onclick="openTrainingModal()" class="primary" style="flex:1">Train</button>
-        <button onclick="refreshTrainingStatus()" class="sm">↻</button>
+        <button onclick="flowboard.openTrainingModal()" class="primary" style="flex:1">Train</button>
+        <button onclick="flowboard.refreshTrainingStatus()" class="sm">↻</button>
       </div>
     </div>
   </div>
 
-  <div class="card" id="bus-card"><div class="card-header" onclick="toggleCard(this)"><h2>📊 Bus Stats</h2><span class="toggle">▼</span></div>
+  <div class="card" id="bus-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>📊 Bus Stats</h2><span class="toggle">▼</span></div>
     <div class="card-body"><div class="metric-grid">
       <div class="mini-stat"><div class="val" id="m-pub">0</div><div class="lbl">Published</div></div>
       <div class="mini-stat"><div class="val" id="m-del">0</div><div class="lbl">Delivered</div></div>
@@ -60,11 +60,11 @@
     </div></div>
   </div>
 
-  <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2>🟢 Nodes</h2><span class="toggle">▼</span></div>
+  <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🟢 Nodes</h2><span class="toggle">▼</span></div>
     <div class="card-body"><div id="node-status"><span style="color:#484f58">No data</span></div></div>
   </div>
 
-  <div class="card" id="vehicle-card" style="display:none"><div class="card-header" onclick="toggleCard(this)"><h2>🚗 Vehicle</h2><span class="toggle">▼</span></div>
+  <div class="card" id="vehicle-card" style="display:none"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🚗 Vehicle</h2><span class="toggle">▼</span></div>
     <div class="card-body"><div class="metric-grid">
       <div class="mini-stat"><div class="val" id="v-speed" style="color:#3fb950">--</div><div class="lbl">Speed m/s</div></div>
       <div class="mini-stat"><div class="val" id="v-target" style="color:#58a6ff">--</div><div class="lbl">Target m/s</div></div>
@@ -75,11 +75,11 @@
     </div></div>
   </div>
 
-  <div class="card" id="sysmon-card" style="display:none"><div class="card-header" onclick="toggleCard(this)"><h2>🖥️ System</h2><span class="toggle">▼</span></div>
+  <div class="card" id="sysmon-card" style="display:none"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🖥️ System</h2><span class="toggle">▼</span></div>
     <div class="card-body">
       <div class="view-toggle" id="sys-view-toggle">
-        <button class="toggle-btn active" data-view="system" onclick="switchSysView('system')">📊 System</button>
-        <button class="toggle-btn" data-view="threads" onclick="switchSysView('threads')">🧵 Threads</button>
+        <button class="toggle-btn active" data-view="system" onclick="flowboard.switchSysView('system')">📊 System</button>
+        <button class="toggle-btn" data-view="threads" onclick="flowboard.switchSysView('threads')">🧵 Threads</button>
       </div>
       <div id="sys-view-system"><div class="metric-grid">
       <div class="mini-stat"><div class="val" id="s-cpu" style="color:#58a6ff">--</div><div class="lbl">CPU %</div></div>
@@ -104,29 +104,29 @@
 <div id="main">
   <div class="row" style="display:flex;gap:12px">
     <div style="flex:3;min-width:500px">
-      <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2><span class="toggle">▼</span></div>
+      <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2><span class="toggle">▼</span></div>
         <div id="topo"><div id="msg">Press Connect or Demo to load</div></div></div>
     </div>
     <div style="flex:2;min-width:350px;display:flex;flex-direction:column;gap:12px">
-      <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2><span class="toggle">▼</span></div>
+      <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2><span class="toggle">▼</span></div>
         <div class="card-body" id="topic-stats" style="max-height:200px;overflow-y:auto"><span style="color:#484f58">No data</span></div></div>
-      <div class="card" style="flex:1"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2><span class="toggle">▼</span></div>
+      <div class="card" style="flex:1"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2><span class="toggle">▼</span></div>
         <div id="frames" style="max-height:180px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
     </div>
   </div>
 
-  <div class="card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
+  <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div class="card" id="scene3d-card"><div class="card-header" onclick="toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Scene View</h2><div style="display:flex;align-items:center;gap:6px" id="scene-view-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-view="3d" onclick="switchSceneView('3d')" style="padding:3px 10px;font-size:10px">3D</button><button class="toggle-btn" data-view="2d" onclick="switchSceneView('2d')" style="padding:3px 10px;font-size:10px">2D</button></div><span class="toggle">▼</span></div>
+  <div class="card" id="scene3d-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Scene View</h2><div style="display:flex;align-items:center;gap:6px" id="scene-view-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-view="3d" onclick="flowboard.switchSceneView('3d')" style="padding:3px 10px;font-size:10px">3D</button><button class="toggle-btn" data-view="2d" onclick="flowboard.switchSceneView('2d')" style="padding:3px 10px;font-size:10px">2D</button></div><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="display:none;width:100%;height:100%;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:100%;background:#5588aa;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px"><div style="font-size:40px;margin-bottom:10px">🗺</div><div style="color:#c9d1d9;font-size:15px;font-weight:600;margin-bottom:6px">3D Visualization</div><div style="color:#8b949e;font-size:12px;line-height:1.7">Open <b style="color:#58a6ff">demo.mcap</b> in Foxglove Studio<br>Drag & drop the file → instant 3D scene<br><br><a href="https://foxglove.dev/download" style="color:#3fb950" target="_blank">Download Foxglove Studio (free)</a><br><br><small style="color:#484f58">MCAP is the industry standard for robotics data<br>LiDAR point clouds · trajectories · vehicle state</small></div></div></div></div>
   </div>
 
-  <div class="card"><div class="card-header" onclick="toggleCard(this)">
+  <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
     <div style="display:flex;align-items:center;gap:6px">
-      <select id="chart-topic" onchange="onChartTopicChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 8px;border-radius:4px;font-size:10px"><option value="">All Topics</option></select>
-      <select id="chart-range" onchange="onChartRangeChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 6px;border-radius:4px;font-size:10px">
+      <select id="chart-topic" onchange="flowboard.onChartTopicChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 8px;border-radius:4px;font-size:10px"><option value="">All Topics</option></select>
+      <select id="chart-range" onchange="flowboard.onChartRangeChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 6px;border-radius:4px;font-size:10px">
         <option value="30">30s</option><option value="60" selected>1m</option><option value="180">3m</option><option value="300">5m</option>
       </select>
       <span class="toggle">▼</span>
@@ -140,21 +140,21 @@
 </div>
 
 <!-- Node detail panel -->
-<div id="detail-overlay" onclick="closeDetail()"></div>
+<div id="detail-overlay" onclick="flowboard.closeDetail()"></div>
 <div id="detail-panel">
   <div style="display:flex;justify-content:space-between;align-items:center">
     <h3 style="color:#58a6ff;font-size:14px" id="det-name">—</h3>
-    <button onclick="closeDetail()" class="sm" style="color:#f85149">✕</button>
+    <button onclick="flowboard.closeDetail()" class="sm" style="color:#f85149">✕</button>
   </div>
   <div id="det-body" style="color:#484f58;font-size:11px">Select a node in the topology graph</div>
 </div>
 
-<div id="training-modal" class="modal-overlay" onclick="if(event.target===this)closeTrainingModal()">
-  <div class="modal">
-    <div class="modal-header"><h3>Training Console</h3><button onclick="closeTrainingModal()" class="sm" style="color:#f85149">✕</button></div>
+<div id="training-modal" class="modal-overlay" onclick="if(event.target===this)flowboard.closeTrainingModal()">
+  <div class="modal" data-status-endpoint="/api/training/status">
+    <div class="modal-header"><h3>Training Console</h3><button onclick="flowboard.closeTrainingModal()" class="sm" style="color:#f85149">✕</button></div>
     <div class="modal-body">
       <div class="form-grid">
-        <div class="form-field"><label>Backend</label><select id="train-backend" onchange="syncTrainingForm()"><option value="torch">torch</option><option value="tiny">tiny</option></select></div>
+        <div class="form-field"><label>Backend</label><select id="train-backend" onchange="flowboard.syncTrainingForm()"><option value="torch">torch</option><option value="tiny">tiny</option></select></div>
         <div class="form-field"><label>Model name</label><input id="train-name" placeholder="e2e_torch_v002"></div>
         <div class="form-field"><label>Init from</label><select id="train-init"><option value="">none</option></select></div>
         <div class="form-field"><label>Run demo seconds</label><input id="train-run-demo" placeholder="blank = use existing samples"></div>
@@ -162,8 +162,8 @@
         <div class="form-field"><label>Hidden</label><input id="train-hidden" placeholder="trainer default"></div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
-        <button onclick="startTraining()" class="primary" id="train-start-btn">Start</button>
-        <button onclick="refreshTrainingStatus()">Refresh</button>
+        <button onclick="flowboard.startTraining()" class="primary" id="train-start-btn">Start</button>
+        <button onclick="flowboard.refreshTrainingStatus()">Refresh</button>
         <span class="muted" id="train-hint">PyTorch artifacts run through sidecar; tiny can be promoted to C runtime.</span>
       </div>
       <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Models</div><div id="train-models" style="max-height:150px;overflow:auto"><span class="muted">Loading...</span></div></div>

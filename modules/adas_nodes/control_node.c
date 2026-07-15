@@ -380,14 +380,33 @@ static void* control_thread(void* arg) {
 
         /* 数据陈旧时不跳过输出——发布安全减速指令，保持下游流水线畅通 */
         if (!g.has_fusion || !g.has_planning) {
+            /* Phase 5: 弯道跟随。原始 fallback 把 target 钉死在 0.0，遇到弯道
+             * （road_center_y != 0）会让车辆直线冲出行车道。现改为：先按
+             * 道路中心线算一个 Stanley 风格转向指令，再做轻刹车保持车流连续。
+             * 该指令沿用主控制器相同的 lat_kp / lat_kd_heading / 一阶低通，
+             * 保证 fallback 与主控制输出在弯道中行为一致。 */
+            double fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
+                                              g.curve_length_m, g.curve_offset_m);
+            double fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
+                                                          g.curve_length_m, g.curve_offset_m);
+            double fb_lat_error = fb_road_c - g.ego_y;
+            double fb_cte_term  = atan2(g.lat_kp * fb_lat_error, fmax(g.current_speed, 3.0));
+            double fb_heading_term = g.lat_kd_heading * (g.ego_heading - fb_road_heading);
+            double fb_steer = fb_cte_term - fb_heading_term;
+            double fb_steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+            if (fb_steer >  fb_steer_limit) fb_steer =  fb_steer_limit;
+            if (fb_steer < -fb_steer_limit) fb_steer = -fb_steer_limit;
+            fb_steer = STEER_FILTER_NEW * fb_steer + STEER_FILTER_PREV * g.prev_steer;
+            g.prev_steer = fb_steer;
+
             ControlRaw raw;
             raw.seq      = g.cycle;
             raw.throttle = 0.0f;
             raw.brake    = 0.25f;  /* 温和减速，防止无人加速撞前车 */
-            raw.steering = (float)g.prev_steer;
+            raw.steering = (float)fb_steer;
             raw.speed    = (float)g.current_speed;
-            raw.target   = 0.0f;
-            raw.error    = 0.0f;
+            raw.target   = (float)fb_road_c;  /* 跟随道路中心线 (弯道时≠0) */
+            raw.error    = (float)fb_lat_error;
             memset(raw.mode, 0, sizeof(raw.mode));
             snprintf(raw.mode, sizeof(raw.mode), "DATA_TIMEOUT");
 
@@ -400,14 +419,15 @@ static void* control_thread(void* arg) {
             char cmd_text[256];
             snprintf(cmd_text, sizeof(cmd_text),
                      "throttle=0.00 brake=0.25 steer=%.4f "
-                     "speed=%.1f target=0.0 error=0.0 mode=DATA_TIMEOUT",
-                     g.prev_steer, g.current_speed);
+                     "speed=%.1f target=%.1f error=%.1f mode=DATA_TIMEOUT",
+                     fb_steer, g.current_speed, fb_road_c, fb_lat_error);
             transport_publish(g.transport, "control/raw_cmd/text",
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
             if (g.cycle % 20 == 1) {
-                LOG_WARN("control", "#%d DATA_TIMEOUT — publishing safe brake (spd=%.1f, steer=%.4f)",
-                         g.cycle, g.current_speed, g.prev_steer);
+                LOG_WARN("control", "#%d DATA_TIMEOUT — curve-following fallback "
+                         "(spd=%.1f, steer=%.4f, road_c=%.2f, err=%.2f)",
+                         g.cycle, g.current_speed, fb_steer, fb_road_c, fb_lat_error);
             }
             continue;
         }

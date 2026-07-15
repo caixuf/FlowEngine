@@ -1171,11 +1171,9 @@ window.flowboard = {
   _topoData: function () { return topoData; }
 };
 
-// Charts.js handles its own delegation via window.onChartTopicChange /
-// onChartRangeChange (read from the live flowboard namespace).
-// Re-publish those to point at chart functions for backward compat:
-window.onChartTopicChange = function () { /* charts.js implements */ };
-window.onChartRangeChange = function () { /* charts.js implements */ };
+// Chart delegation now lives entirely inside charts.js (onChartTopicChange /
+// onChartRangeChange are ES module exports) and is exposed via the
+// window.flowboard namespace above. No more window.* assignments here.
 
 // ═══════════════════════════════════════════════════════════════
 // Boot
