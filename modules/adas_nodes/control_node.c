@@ -30,8 +30,10 @@
 
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
-#define STEER_FILTER_NEW   0.7     /* 低通滤波新值权重 */
-#define STEER_FILTER_PREV  0.3     /* 低通滤波旧值权重 */
+#define STEER_FILTER_NEW   0.8     /* 低通滤波新值权重 (0.8: -3dB@2.8Hz, 减少相位滞后防蛇行) */
+#define STEER_FILTER_PREV  0.2     /* 低通滤波旧值权重 */
+#define LC_STABILIZE_S     1.0     /* 变道完成后保持变道增益的稳定期 (s) */
+#define LC_COMPLETE_THRESH 0.15    /* 变道完成横向偏差阈值 (m) — 收紧防振荡 */
 #define CONTROL_WHEELBASE_M 2.7
 /* 控制环周期: 20Hz → 50ms。所有计时器累加步长使用此常量, 与实际循环频率保持一致。 */
 #define CONTROL_DT_S       0.05
@@ -520,7 +522,7 @@ static void* control_thread(void* arg) {
         if (min_overtake_gap > g.min_overtake_gap_cap) min_overtake_gap = g.min_overtake_gap_cap;
         if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
             (!g.lc_attempted) &&
-            best_gap > min_overtake_gap && best_gap < 90.0) {
+            best_gap > min_overtake_gap && best_gap < g.min_overtake_gap_cap) {
             int lead_is_slow = lead_speed < boost_target - 2.0;
             int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &overtake_need_accel);
             if (lead_is_slow && !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
@@ -648,14 +650,14 @@ static void* control_thread(void* arg) {
             }
         }
 
-        /* 检测变道完成 (横向偏差 < 0.3m) */
-        if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < 0.3) {
+        /* 检测变道完成 (横向偏差 < LC_COMPLETE_THRESH, 收紧防完成后振荡) */
+        if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
             g.committed_lane_side = (g.lc_target_y < road_c) ? -1 : 1;
             g.lc_state = 2; g.lc_wait = 0;
             statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
             LOG_INFO("control", ">>> lane change complete");
         }
-        if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < 0.3) {
+        if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
             g.lc_state = 0;
             g.lc_attempted = 0;
             g.lc_cooldown = g.lc_cooldown_after_return_s;
@@ -740,15 +742,19 @@ static void* control_thread(void* arg) {
              * 弯道时以道路中心线切线航向为参考 (road_center_heading)。
              *
              * 高速变道时 (>12m/s) 动态调节：
-             *   1) heading 阻尼增益降低到 1.2，避免过阻尼导致蛇行
+             *   1) heading 阻尼增益基于配置 lat_kd_heading 缩放 (×0.9), 避免过阻尼
+             *      但仍保持足够阻尼防止蛇行 (之前的硬编码 1.2 低于配置值 1.35, 阻尼不足)
              *   2) lateral accel 限幅从 2.8 → 2.2 (m/s²) 减少横向冲击
-             *   3) 低通滤波权重从 0.7/0.3 → 0.5/0.5 更激进平滑 */
+             *   3) 低通滤波权重从 0.8/0.2 → 0.5/0.5 更激进平滑 */
             double lc_lat_kd = g.lat_kd_heading;
             double lc_lat_accel_max = 1.4;
             double filter_new = STEER_FILTER_NEW;
-            if (g.lc_state == 1) {
+            /* 变道中或变道后稳定期内使用变道增益 */
+            int lc_active = (g.lc_state == 1) ||
+                            (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
+            if (lc_active) {
                 if (g.current_speed > 12.0) {
-                    lc_lat_kd = 1.2;                     /* 低阻尼防蛇行 */
+                    lc_lat_kd = g.lat_kd_heading * 0.9;   /* 基于配置缩放, 可调 */
                     lc_lat_accel_max = 2.2;               /* 减少横向冲击 */
                 } else {
                     lc_lat_kd = g.lat_kd_heading * 1.2;   /* 低速可稍强 */

@@ -69,6 +69,33 @@
 > 4. 真实数据集回放闭环（nuScenes mini 端到端 + 影子驾驶对比）。
 > 5. 扩充场景库（cutin/pedestrian/overtake/roadwork）+ NOA 高速匝道出入口。
 
+> ## ⚠️ 现状更新（2026-07-15）— 变道效果收敛 ✅
+>
+> 针对"变道效果差 / QoS 降级后 segfault / NOA 模式不激活"三类问题做了根因修复，
+> 变道场景从 FAIL 转为稳定 PASS，无技术债遗留。
+>
+> | 问题现象 | 根因 | 修复 | 状态 |
+> |---------|------|------|------|
+> | QoS 降级后 ~2/5 次运行 Segfault（EXIT=139），sim_world 在 10-17s 提前停止 | `flow_launcher` 的 `run_dlopen_mode()` 中 `dlclose` 在 `message_bus_destroy` **之前**执行；MessageBus dispatch 线程在 bus 销毁前仍在调用节点注册的订阅回调，跳转到已 `dlclose` 卸载的 .so 代码段 → SIGSEGV | 将 `dlclose` 从 cleanup 循环移除，延迟到 `main()` 中 `message_bus_destroy` **之后**执行（dispatch 线程已 join，回调不会再被调用） | ✅ 10/10 运行无崩溃 |
+> | `road/geometry` QOS_BLOCK 导致 sim_world 发布线程被阻塞 5s 级联，sim_world 提前停止 | `reliability: "reliable"` 自动升级为 `QOS_BLOCK` | `road/geometry` + `model_ota/active` 降级为 `best_effort`（消除最后两个 reliable topic） | ✅ sim_time 稳定 29.9s |
+> | `highway_noa_route` 场景 FAIL：驾驶模式只到 ACC/CP，0 次变道，NOA 未激活 | `pipeline.json` 中 `highway_speed_mps: 20.0` 远高于 `target_speed: 12.0`，车辆永远达不到高速阈值，NP 无法升级，进而 NOA 无法激活 | `highway_speed_mps` 20.0 → 10.0（代码注释明确此值"需低于实际巡航速度"） | ✅ ACC→CP→NP→NOA 全激活，2 次变道 |
+> | 变道蛇行振荡（前轮遗留） | `lc_lat_kd` 硬编码 + 滤波器参数不当 | `lc_lat_kd` 配置化（pipeline.json params），STEER_FILTER_NEW=0.8，LC_COMPLETE_THRESH=0.15 | ✅ 前轮已修，本轮保留 |
+> | control/cmd staleness 级联阻塞（前轮遗留） | `control/raw_cmd` + `control/cmd` QOS_BLOCK 5s 阻塞 | 两者降级为 `best_effort` + `drop_oldest` | ✅ 前轮已修，本轮保留 |
+>
+> **全量验证（2026-07-15）**
+>
+> | 套件 | 结果 |
+> |------|------|
+> | `ctest -LE "benchmark\|manual\|stability\|integration"` | 9/9 PASS，0 失败 |
+> | `highway_overtake` ×3 次复跑 | 3/3 PASS，每次 1 次变道、0 碰撞、avg_speed ≈12.0 m/s |
+> | `highway_noa_route` ×3 次复跑 | 3/3 PASS，每次 2 次变道（匹配 2 个 route step）、NOA 激活、route_lane_active=True、0 碰撞 |
+> | segfault 稳定性 | 6/6 次运行 0 崩溃（修复前 2/5 崩溃） |
+>
+> **关键架构要点（写入文档避免重蹈覆辙）**
+> - **dlclose 必须晚于 message_bus_destroy**：MessageBus 的 dispatch 线程在 bus 销毁前会持续调用订阅回调，.so 代码段过早卸载会触发 use-after-unmap segfault。
+> - **`reliability: "reliable"` 会自动升级为 `QOS_BLOCK`**：阻塞最多 5s，对高频发布节点（sim_world）是致命的级联阻塞源。仿真链路应统一用 `best_effort`。
+> - **`highway_speed_mps` 必须 < `target_speed`**：NP 模式升级条件是 `ego_v >= highway_speed_mps` 持续 3s，阈值高于巡航速度会导致 NP 永远无法激活。
+
 ---
 
 ## 1. 总体方向

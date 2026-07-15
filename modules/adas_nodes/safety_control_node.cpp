@@ -272,16 +272,16 @@ double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out
     return best;
 }
 
-class SafetyControlTask : public FlowCoroTask {
+class SafetyControlTask : public CoroutineTask {
 public:
     SafetyControlTask(MessageBus* bus, Transport* transport, const SafetyParams& params)
-        : FlowCoroTask(bus), transport_(transport), params_(params) {}
+        : CoroutineTask(bus), transport_(transport), params_(params) {}
 
 protected:
     Task run() override {
         uint32_t cycle = 0;
 
-        LOG_INFO("safety_control", "FlowCoro safety gate started");
+        LOG_INFO("safety_control", "safety gate started (synchronous resume)");
         while (!should_stop()) {
             Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "inference/raw_cmd"}, &cancel_token_);
             if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
@@ -304,7 +304,7 @@ protected:
                          intervened ? "INTERVENED" : "pass");
             }
         }
-        LOG_INFO("safety_control", "FlowCoro safety gate stopped");
+        LOG_INFO("safety_control", "safety gate stopped");
     }
 
 private:

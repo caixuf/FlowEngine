@@ -238,7 +238,10 @@ static int run_dlopen_mode(int duration, int stagger_ms,
             g_nodes[i].plugin->cleanup();
             LOG_INFO("launcher", "  stopped %s", g_nodes[i].name);
         }
-        if (g_nodes[i].lib_handle) { dlclose(g_nodes[i].lib_handle); }
+        /* NOTE: dlclose 延迟到 message_bus_destroy 之后执行。
+         * MessageBus 的 dispatch 线程在 bus 销毁前仍在运行，可能调用
+         * 节点注册的订阅回调；若提前 dlclose 卸载了 .so 代码段，
+         * dispatch 线程就会跳转到已解除映射的内存 → SIGSEGV。 */
     }
     return 0;
 }
@@ -430,6 +433,12 @@ int main(int argc, char** argv) {
         transport_stop(transport);  transport_destroy(transport);
         discovery_stop(discovery);  discovery_destroy(discovery);
         message_bus_destroy(bus);
+
+        /* dlclose 必须在 message_bus_destroy 之后：dispatch 线程已停止，
+         * 不会再调用任何节点回调，此时卸载 .so 代码段是安全的。 */
+        for (int i = 0; i < g_node_count; i++) {
+            if (g_nodes[i].lib_handle) { dlclose(g_nodes[i].lib_handle); g_nodes[i].lib_handle = NULL; }
+        }
     }
 
     log_shutdown();

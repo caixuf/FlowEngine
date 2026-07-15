@@ -135,10 +135,12 @@ endif()
 add_library(control_node SHARED control_node.c)
 target_link_libraries(control_node ${NODE_LINK_LIBS})
 
-# safety_control_node: FlowCoro 安全控制限幅/兜底
+# safety_control_node: safety envelope for control commands
+# Uses CoroutineTask (synchronous resume on bus delivery thread) instead of
+# FlowCoroTask — the safety check is lightweight (<10us) and synchronous resume
+# avoids thread-pool starvation that caused control/cmd staleness.
 add_library(safety_control_node SHARED safety_control_node.cpp)
 target_link_libraries(safety_control_node ${NODE_LINK_LIBS} stdc++)
-target_compile_definitions(safety_control_node PRIVATE FLOWCORO_INTEGRATION)
 
 # monitor_node: 系统监控 + 仪表盘 JSON 导出
 add_library(monitor_node SHARED monitor_node.c)
