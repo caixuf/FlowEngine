@@ -6,6 +6,7 @@ import { init3DScene, resize3D, update3D, sceneReady } from './scene3d.js';
 import { init2D, draw2D } from './scene2d.js';
 import { initCharts, updateCharts } from './charts.js';
 import { safeCall, reportDiag, clearDiag } from './utils.js';
+import { updateDeadReckon, _dr } from './deadreckon.js';
 
 // ═══════════════════════════════════════════════════════════════
 // Constants
@@ -507,8 +508,10 @@ function updateAll() {
   safeCall('frames', updateFrames);
   safeCall('topicStats', updateTopicStats);
   safeCall('processTopics', updateProcessTopics);
+  // Feed dead reckoning FIRST so update3D reads fresh _dr.lastX/Z for
+  // obstacle / LiDAR world-anchoring without a one-frame lag.
+  safeCall('deadreckon', sync2DTarget);
   safeCall('scene3d', update3D);
-  safeCall('scene2d', sync2DTarget);    // update 2D target data from topoData
   safeCall('topology', function() {
     var nn = (topoData.nodes||[]).map(function(n){ return n.name; }).sort().join(',');
     if (nn !== lastNodeNames) { lastNodeNames = nn; updateTopo(topoData); }
@@ -947,39 +950,44 @@ async function promoteTrainingModel(name) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 2D target sync — runs inside updateAll() when data arrives
+// Dead-reckoning feed + 2D trail sync — runs inside updateAll() on
+// every SSE data tick. This is the SINGLE feed point for the
+// dead-reckoning engine, so it works whether 3D, 2D, or the 2D
+// fallback is the active renderer.
 // ═══════════════════════════════════════════════════════════════
 
 var gpsHistory = [];
 
 function sync2DTarget() {
-  var m = (topoData.metrics||{}), scn = m.scene, v = m.vehicle||{};
-  // Access the 2D state object managed by scene2d.js
-  var _2d = window._2d;
-  if (!_2d || !_2d.active) return;
+  var m = (topoData.metrics || {}), scn = m.scene, v = m.vehicle || {};
 
-  // Update target from scene.ego or vehicle telemetry
+  // ── Feed ground-truth into the central dead-reckoning engine ──
+  // updateDeadReckon() dedups heartbeat frames and snaps the first
+  // sample, so calling it every tick is safe.
   if (scn && scn.ego) {
-    _2d.egoT.x = scn.ego.x||0;
-    _2d.egoT.y = scn.ego.y||0;
-    _2d.egoT.heading = scn.ego.heading||0;
-    _2d.egoT.speed = scn.ego.speed||0;
+    updateDeadReckon(
+      scn.ego.x || 0,
+      scn.ego.y || 0,
+      scn.ego.speed || v.speed || 0,
+      scn.ego.heading || 0
+    );
   } else if (v) {
-    _2d.egoT.x = v.x||0;
-    _2d.egoT.y = v.y||0;
-    _2d.egoT.speed = v.speed||0;
-    // Derive heading from GPS history
-    gpsHistory.push({x:v.x||0, z:(v.y||0)*5});
+    // Vehicle-only payload has no heading → derive from GPS history.
+    var heading = _dr.lastHeading;
+    gpsHistory.push({ x: v.x || 0, z: (v.y || 0) * 5 });
     if (gpsHistory.length > 60) gpsHistory.shift();
     if (gpsHistory.length > 1) {
-      var l = gpsHistory[gpsHistory.length-1];
-      var p = gpsHistory[gpsHistory.length-2];
-      _2d.egoT.heading = Math.atan2(l.x - p.x, l.z - p.z);
+      var l = gpsHistory[gpsHistory.length - 1];
+      var p = gpsHistory[gpsHistory.length - 2];
+      heading = Math.atan2(l.x - p.x, l.z - p.z);
     }
+    updateDeadReckon(v.x || 0, v.y || 0, v.speed || 0, heading);
   }
 
-  // Trail
-  _2d.trail.push({x:_2d.egoT.x, y:_2d.egoT.y});
+  // ── 2D trail (only maintained while the 2D renderer is active) ──
+  var _2d = window._2d;
+  if (!_2d || !_2d.active) return;
+  _2d.trail.push({ x: _dr.lastX, y: _dr.lastZ });
   if (_2d.trail.length > 120) _2d.trail.shift();
 }
 

@@ -5,7 +5,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle } from './utils.js';
-import { initDeadReckon, _dr } from './deadreckon.js';
+import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 
 const THREE = window.THREE;
 
@@ -391,17 +391,11 @@ function _renderFrame() {
   var ego = _carGroup; if (!ego) return;
   var now = performance.now() / 1000;
 
-  // ── Dead reckoning ──
-  if (_dr.init && _dr.lastTime > 0) {
-    var dt = Math.min(now - _dr.lastTime, 2.0);
-    _dr.targetX = _dr.lastX + _dr.lastSpeed * dt;
-    _dr.targetZ = _dr.lastZ;
-  }
-  var lerpF = 0.15;
-  _dr.smoothX += (_dr.targetX - _dr.smoothX) * lerpF;
-  _dr.smoothZ += (_dr.targetZ - _dr.smoothZ) * lerpF;
-  _dr.smoothHeading += (_dr.lastHeading - _dr.smoothHeading) * lerpF;
-
+  // ── Dead reckoning: advance the central smoothing engine ──
+  // tickDeadReckon() performs speed-based extrapolation +
+  // frame-rate-independent exponential lerp + heading wrap-around.
+  // The renderer only reads the smoothed result below.
+  tickDeadReckon();
   var sx = _dr.smoothX, sz = _dr.smoothZ;
 
   // ── Ego car: world-space position (road is STATIC at origin) ──
@@ -490,41 +484,20 @@ function _renderFrame() {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // update3D — called from updateAll() on every SSE data tick.
-// Feeds fresh ground-truth into the dead-reckoning state.
+// World-anchors obstacles & LiDAR using _dr.lastX/Z (fed by sync2DTarget).
 // ══════════════════════════════════════════════════════════════════════════════
 
 function update3D() {
   if (!sceneReady) return;
-  var m = window.topoData.metrics || {}, scn = m.scene, v = m.vehicle || {};
+  var scn = (window.topoData.metrics || {}).scene;
   var now = performance.now() / 1000;
 
   // Road curve geometry: apply once when scene road data arrives
   if (scn && scn.road) _applyRoadCurve(scn.road);
 
-  // Ego position from scene data
-  if (scn && scn.ego) {
-    var newX = scn.ego.x || 0;
-    var newZ = (scn.ego.y || 0);   // ego.y (m): -1.75=left lane center, +1.75=right lane center
-    var newSpeed = scn.ego.speed || v.speed || 0;
-    var newHeading = scn.ego.heading || 0;
-    if (!_dr.init || Math.abs(newX - _dr.lastX) > 0.01 || Math.abs(newZ - _dr.lastZ) > 0.01 || Math.abs(newSpeed - _dr.lastSpeed) > 0.1) {
-      _dr.lastX = newX;
-      _dr.lastZ = newZ;
-      _dr.lastSpeed = newSpeed;
-      _dr.lastHeading = newHeading;
-      _dr.lastTime = now;
-      _dr.init = true;
-    }
-  } else if (v) {
-    var nx = v.x || 0, ns = v.speed || 0, nz = (v.y || 0);   // v.y (m)
-    if (!_dr.init || Math.abs(nx - _dr.lastX) > 0.01 || Math.abs(nz - _dr.lastZ) > 0.01) {
-      _dr.lastX = nx;
-      _dr.lastZ = nz;
-      _dr.lastSpeed = ns;
-      _dr.lastTime = now;
-      _dr.init = true;
-    }
-  }
+  // Ego ground-truth is fed into the dead-reckoning engine by app.js
+  // sync2DTarget() (called just before update3D in updateAll). Here we
+  // only read _dr.lastX / lastZ to world-anchor obstacles & LiDAR.
 
   // Obstacles: convert ego-relative → WORLD coords once, store as targets.
   // This prevents obstacles from drifting when ego moves laterally between

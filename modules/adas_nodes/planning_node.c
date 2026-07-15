@@ -224,6 +224,20 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     g.has_vstate = 1;
 }
 
+/* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
+/* 从 sim_world 发布的 road/geometry topic 获取弯道参数，
+ * 替代此前从 scenario_load() 读取弯道的冗余方式。
+ * NOA route steps 仍从场景文件读取（planning 独有需求）。 */
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    const char* p;
+    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.curve_start_x);
+    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.curve_length_m);
+    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.curve_offset_m);
+}
+
 /* ── 任务线程 ────────────────────────────────────────────────── */
 
 static void* planning_thread(void* arg) {
@@ -413,7 +427,7 @@ static void* planning_thread(void* arg) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", NULL };
 static const char* s_outputs[] = { "planning/trajectory", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
@@ -469,8 +483,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.route_target_speed = 0.0;
 
     /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
-     * 找不到文件或未配置 scenario_file 时静默保留 route_count=0，此时模式
-     * 状态机最高只能升到 NP（guard 会持续拒绝 NP->NOA 的升级）。 */
+     * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（sim_world 发布）。
+     * 此处仅加载 NOA route steps。 */
     if (g.scenario_file[0] != '\0') {
         ScenarioConfig* sc = scenario_load(g.scenario_file);
         if (sc) {
@@ -478,10 +492,6 @@ static int planning_init(MessageBus* bus, Transport* transport,
             /* sc 由 calloc 分配，未用槽位已清零；这里按实际 route_count 精确
              * 拷贝，避免依赖 calloc 的清零语义。 */
             memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
-            /* 道路弯道几何（可选）：缺省全为 0 = 直道，行为与之前完全一致 */
-            g.curve_start_x  = sc->road.curve_start_x;
-            g.curve_length_m = sc->road.curve_length_m;
-            g.curve_offset_m = sc->road.curve_offset_m;
             scenario_free(sc);
             LOG_INFO("planning", "loaded %d NOA route step(s) from '%s'",
                      g.route_count, g.scenario_file);
@@ -505,11 +515,14 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
+    transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
     transport_advertise(transport, "planning/trajectory", 0x3A7B1C2Du);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);

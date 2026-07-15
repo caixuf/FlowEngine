@@ -56,6 +56,12 @@ static struct {
     int  route_lane;
     volatile int has_planning;
 
+    /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，sim_world 发布） */
+    double road_curve_start_x;
+    double road_curve_length_m;
+    double road_curve_offset_m;
+    volatile int has_road_geometry;
+
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
     char node_info_json[MAX_TOPO_NODES][2048];  /* 每个节点的原始 JSON（需能容纳最长节点的 self-description JSON） */
@@ -144,6 +150,21 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
     if (p) sscanf(p + 11, "%d", &g.route_lane);
 
     g.has_planning = 1;
+}
+
+/* Phase 2: road/geometry 订阅 — 从 sim_world 获取弯道参数，
+ * 替代此前从 vehicle/state 间接读取 road_curve_sx/len/off 的方式。 */
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    const char* p;
+    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.road_curve_start_x);
+    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.road_curve_length_m);
+    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.road_curve_offset_m);
+    if ((p = strstr(d, "\"lane_width\":")))     sscanf(p + 13, "%lf", &g.lane_width);
+    if ((p = strstr(d, "\"lane_count\":")))     sscanf(p + 13, "%d",  &g.lane_count);
+    g.has_road_geometry = 1;
 }
 
 static void on_fusion_latency(const Message* msg, void* user_data) {
@@ -330,15 +351,11 @@ static void export_dashboard_json(void) {
             ego_x, ego_y, hdg, spd, steer);
     fprintf(jf, "\"lane\":{\"width\":%.1f,\"count\":%d,\"center\":0.0},", g.lane_width, g.lane_count);
 
-    /* 道路弯道几何（可选），从 sim_world_node 发布的 vehicle/state 中读取 */
-    {
-        double rc_sx  = json_extract_double(g.latest_vehicle_state, "road_curve_sx");
-        double rc_len = json_extract_double(g.latest_vehicle_state, "road_curve_len");
-        double rc_off = json_extract_double(g.latest_vehicle_state, "road_curve_off");
-        if (rc_len > 0.0) {
-            fprintf(jf, "\"road\":{\"curve_start_x\":%.2f,\"curve_length_m\":%.2f,"
-                    "\"curve_offset_m\":%.2f},", rc_sx, rc_len, rc_off);
-        }
+    /* Phase 2: 道路弯道几何从 road/geometry topic 获取（不再从 vehicle/state 间接读取） */
+    if (g.road_curve_length_m > 0.0) {
+        fprintf(jf, "\"road\":{\"curve_start_x\":%.4f,\"curve_length_m\":%.4f,"
+                "\"curve_offset_m\":%.4f},",
+                g.road_curve_start_x, g.road_curve_length_m, g.road_curve_offset_m);
     }
 
     /* 障碍物（从 vehicle/state 动态读取，障碍物数量由 n_obs 决定） */
@@ -530,7 +547,7 @@ static void* monitor_thread(void* arg) {
 
 static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
                                    "fusion/latency", "flowengine/node_info",
-                                   "planning/trajectory", NULL };
+                                   "planning/trajectory", "road/geometry", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -594,6 +611,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
     transport_subscribe(transport, "fusion/latency", on_fusion_latency, NULL);
     transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
+    transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, "flowengine/node_info", on_node_info, NULL);
     g.node_info_count = 0;
@@ -601,6 +619,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "perception/obstacles", 0x0B5A010Eu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "vehicle/state",        0x1C0E5A7Eu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
     /* Open IPC stats bridge for flowmond */

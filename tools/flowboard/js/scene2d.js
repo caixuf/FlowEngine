@@ -12,12 +12,15 @@
 // window.switchSceneView, window.update2D, window._2d are set.
 
 import { safeCall, reportDiag } from './utils.js';
-import { _dr } from './deadreckon.js';
+import { _dr, tickDeadReckon } from './deadreckon.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
+// Note: ego smoothing no longer lives here — it is owned by deadreckon.js
+// (_dr.smoothX / smoothZ / smoothHeading / smoothSpeed). The 2D renderer
+// reads those values in draw2D(). Only the data target (egoT) and the
+// trail buffer remain here.
 var _2d = {
   canvas: null, ctx: null, active: false, animId: 0, frame: 0, w: 0, h: 0,
-  ego: { x: 0, y: 0, heading: 0, speed: 0 },             // smoothed (lerp)
   egoT: { x: 0, y: 0, heading: 0, speed: 0 },            // target (from data)
   trail: [],                                               // last N positions
   scale: 8                                                 // px per meter
@@ -39,14 +42,9 @@ var OBS_LBL = { car: 'CAR', truck: 'TRUCK', pedestrian: 'PED', cyclist: 'CYC', v
 // ── Public API ──────────────────────────────────────────────────────────────
 
 export function init2D() {
-  // Patch updateAll to sync 2D target after each data tick
-  if (typeof updateAll !== 'undefined') {
-    var ua = updateAll;
-    updateAll = function () {
-      ua();
-      if (_2d.active) update2D();
-    };
-  }
+  // No monkey-patching of updateAll() — the 2D target (egoT) is now
+  // synced by app.js sync2DTarget() inside the normal updateAll()
+  // pipeline, and ego smoothing is owned by deadreckon.js.
   // If no Three.js at all, go straight to 2D fallback
   if (typeof THREE === 'undefined') {
     init2DFallback(true);
@@ -78,54 +76,29 @@ export function init2DFallback(force) {
   _2dAnimLoop();
 }
 
-// ── Internal: animation loop (lerp + draw) ──
+// ── Internal: animation loop ──
+// Smoothing is centralised in deadreckon.js — this loop just ticks the
+// engine and redraws. 3D and 2D now share identical smoothing behaviour.
 function _2dAnimLoop() {
   if (!_2d.active) return;
   _2d.animId = requestAnimationFrame(_2dAnimLoop);
   _2d.frame++;
-  // Lerp ego toward target for buttery-smooth movement between data ticks
-  var e = _2d.ego, t = _2d.egoT, f = 0.18;
-  e.x += (t.x - e.x) * f;
-  e.y += (t.y - e.y) * f;
-  e.speed += (t.speed - e.speed) * f;
-  // Heading: shortest-path angular lerp
-  var dh = t.heading - e.heading;
-  while (dh > Math.PI) dh -= 2 * Math.PI;
-  while (dh < -Math.PI) dh += 2 * Math.PI;
-  e.heading += dh * f;
+  tickDeadReckon();
   draw2D();
-}
-
-export function update2D() {
-  var m = (topoData.metrics || {}), scn = m.scene, v = m.vehicle || {};
-  // Update target from scene.ego or vehicle telemetry
-  if (scn && scn.ego) {
-    _2d.egoT.x = scn.ego.x || 0;
-    _2d.egoT.y = scn.ego.y || 0;
-    _2d.egoT.heading = scn.ego.heading || 0;
-    _2d.egoT.speed = scn.ego.speed || 0;
-  } else if (v) {
-    _2d.egoT.x = v.x || 0;
-    _2d.egoT.y = v.y || 0;
-    _2d.egoT.speed = v.speed || 0;
-    // Derive heading from GPS history
-    gpsHistory.push({ x: v.x || 0, z: (v.y || 0) * 5 });
-    if (gpsHistory.length > 60) gpsHistory.shift();
-    if (gpsHistory.length > 1) {
-      var l = gpsHistory[gpsHistory.length - 1],
-          p = gpsHistory[gpsHistory.length - 2];
-      _2d.egoT.heading = Math.atan2(l.x - p.x, l.z - p.z);
-    }
-  }
-  // Trail (world-frame → relative in draw2D)
-  _2d.trail.push({ x: _2d.egoT.x, y: _2d.egoT.y });
-  if (_2d.trail.length > 120) _2d.trail.shift();
 }
 
 export function draw2D() {
   if (!_2d.active || !_2d.ctx) return;
   var ctx = _2d.ctx, W = _2d.w, H = _2d.h;
-  var carX = W / 2, carY = H * 0.65, s = _2d.scale, e = _2d.ego;
+  var carX = W / 2, carY = H * 0.65, s = _2d.scale;
+  // Read smoothed ego state from the central dead-reckoning engine.
+  // 2D uses (x=forward, y=lateral) which maps to _dr (smoothX, smoothZ).
+  var e = {
+    x: _dr.smoothX,
+    y: _dr.smoothZ,
+    heading: _dr.smoothHeading,
+    speed: _dr.smoothSpeed
+  };
 
   // ── Background (dark ADAS display) ──
   ctx.fillStyle = '#060a0f';

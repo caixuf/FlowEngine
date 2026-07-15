@@ -13,7 +13,6 @@
 #include "logger.h"
 #include "param_registry.h"
 #include "state_machine.h"
-#include "scenario_loader.h"
 #include "road_geometry.h"
 #include "adas_msgs_gen.h"
 
@@ -145,8 +144,7 @@ static struct {
     double cfg_kp, cfg_ki, cfg_kd;
     double cfg_cruise_speed;
 
-    /* 场景文件路径 + 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道） */
-    char   scenario_file[256];
+    /* 道路几何（Phase 2: 从 road/geometry topic 获取，全零 = 直道） */
     double curve_start_x;
     double curve_length_m;
     double curve_offset_m;
@@ -305,6 +303,20 @@ static double lane_lead_speed(double lane_y, double same_lane_tol) {
         }
     }
     return speed;
+}
+
+/* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
+/* 从 sim_world 发布的 road/geometry topic 获取弯道参数 + 车道宽度，
+ * 替代此前各自 scenario_load() 的冗余方式。 */
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    const char* p;
+    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.curve_start_x);
+    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.curve_length_m);
+    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.curve_offset_m);
+    if ((p = strstr(d, "\"lane_width\":")))     sscanf(p + 13, "%lf", &g.lane_width);
 }
 
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
@@ -784,7 +796,7 @@ static void* control_thread(void* arg) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", NULL };
 static const char* s_outputs[] = { "control/raw_cmd", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
@@ -872,37 +884,16 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"min_overtake_gap_cap\":")))       sscanf(p + 23, "%lf", &g.min_overtake_gap_cap);
         if ((p = strstr(params_json, "\"min_overtake_gap_speed_mult\":"))) sscanf(p + 30, "%lf", &g.min_overtake_gap_speed_mult);
         if ((p = strstr(params_json, "\"steer_min_clamp\":")))            sscanf(p + 18, "%lf", &g.steer_min_clamp);
-        if ((p = strstr(params_json, "\"scenario_file\":"))) {
-            const char* start = strchr(p + 16, '"');
-            if (start) {
-                start++;
-                const char* end = strchr(start, '"');
-                if (end) {
-                    size_t len = (size_t)(end - start);
-                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
-                    memcpy(g.scenario_file, start, len);
-                    g.scenario_file[len] = '\0';
-                }
-            }
-        }
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     }
 
-    /* 道路弯道几何（可选）：从场景文件加载，缺省全为 0 = 直道，
-     * 与 sim_world_node/planning_node 保持一致（三方共享同一份中心线）。 */
-    if (g.scenario_file[0] != '\0') {
-        ScenarioConfig* sc = scenario_load(g.scenario_file);
-        if (sc) {
-            g.curve_start_x  = sc->road.curve_start_x;
-            g.curve_length_m = sc->road.curve_length_m;
-            g.curve_offset_m = sc->road.curve_offset_m;
-            scenario_free(sc);
-        }
-    }
+    /* Phase 2: 道路几何从 road/geometry topic 获取（sim_world 发布），
+     * 不再独立 scenario_load。 */
 
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "planning/trajectory", on_trajectory, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
+    transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
     transport_advertise(transport, "control/raw_cmd", 0x2D95C6D3u);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
@@ -910,6 +901,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "control/raw_cmd", 0x2D95C6D3u,
                         CAP_PUBLISHER, 100.0);

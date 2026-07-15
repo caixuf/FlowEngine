@@ -327,6 +327,24 @@ static void vehicle_tick(void) {
     obstacles_tick();
 }
 
+/* ── 发布道路几何（road/geometry topic） ────────────────────── */
+/* Phase 2 统一道路几何：sim_world 作为道路几何的唯一权威发布者，
+ * control/planning/monitor 通过订阅本 topic 获取弯道参数，
+ * 消除三节点各自 scenario_load 的冗余。
+ * init() 时发布一次 + sim_thread 中每 ~1s 重发，确保后启动的订阅者也能收到。 */
+#define ROAD_GEOMETRY_TYPE_ID          0x80AD5C12u
+#define ROAD_GEOMETRY_REPUBLISH_CYCLES 50  /* 50 cycle ≈ 1s @ 50Hz */
+
+static void publish_road_geometry(void) {
+    char geo[256];
+    int off = snprintf(geo, sizeof(geo),
+             "{\"curve_start_x\":%.4f,\"curve_length_m\":%.4f,"
+             "\"curve_offset_m\":%.4f,\"lane_width\":%.2f,\"lane_count\":2}",
+             g.curve_start_x, g.curve_length_m, g.curve_offset_m, g.lane_width);
+    transport_publish(g.transport, "road/geometry",
+                      (const uint8_t*)geo, (uint32_t)off + 1);
+}
+
 /* ── control/cmd 订阅回调 ──────────────────────────────────── */
 
 static void on_control_cmd(const Message* msg, void* user_data) {
@@ -495,12 +513,18 @@ static void* sim_thread(void* arg) {
         transport_publish(g.transport, "sim/tick",
                           (const uint8_t*)tick_buf, (uint32_t)strlen(tick_buf) + 1);
 
+        /* Phase 2: 定期重发 road/geometry（~1Hz），确保后启动的订阅者收到 */
+        if (g.cycle % ROAD_GEOMETRY_REPUBLISH_CYCLES == 0) {
+            publish_road_geometry();
+        }
+
         /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
         /* Buffer sizing: fixed header ~150 B + per-obstacle ~100 B (worst: "pedestrian")
          * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient.
          * The loop guard (voff < sizeof - 128) ensures the closing "}" always fits;
          * if the estimate is wrong the tail of the JSON is truncated — receivers must
-         * tolerate missing keys (they already do via json_extract_double returning 0). */
+         * tolerate missing keys (they already do via json_extract_double returning 0).
+         * Phase 2: 弯道几何不再附在 vehicle/state 中，改由 road/geometry topic 独立发布。 */
         char vstate[2048];
         int voff = snprintf(vstate, sizeof(vstate),
                  "{\"x\":%.4f,\"y\":%.4f,\"spd\":%.3f,\"hdg\":%.4f,"
@@ -521,12 +545,6 @@ static void* sim_thread(void* arg) {
                              i, g.obstacles[i].len,
                              i, g.obstacles[i].wid);
         }
-        /* 道路弯道几何（可选），前端 3D 据此渲染弯道路面 */
-        if (g.curve_length_m > 0.0) {
-            voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
-                             ",\"road_curve_sx\":%.2f,\"road_curve_len\":%.2f,\"road_curve_off\":%.2f",
-                             g.curve_start_x, g.curve_length_m, g.curve_offset_m);
-        }
         voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff, "}");
         transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
                           (uint32_t)voff + 1);
@@ -545,7 +563,7 @@ static void* sim_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
-static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", NULL };
+static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", "road/geometry", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
@@ -660,6 +678,12 @@ static int sim_init(MessageBus* bus, Transport* transport,
     /* P0.1: 发布 sim/tick（每步逻辑时钟心跳） */
     transport_advertise(transport, "sim/tick", 0x51C7710Cu);
     discovery_advertise(discovery, "sim/tick", 0x51C7710Cu, CAP_PUBLISHER, FREQUENCY_HZ);
+
+    /* Phase 2: 发布 road/geometry — 道路几何的唯一权威来源。
+     * control/planning/monitor 订阅此 topic 获取弯道参数，不再各自 scenario_load。 */
+    transport_advertise(transport, "road/geometry", ROAD_GEOMETRY_TYPE_ID);
+    discovery_advertise(discovery, "road/geometry", ROAD_GEOMETRY_TYPE_ID, CAP_PUBLISHER, 1.0);
+    publish_road_geometry();  /* init 时立即发布一次，确保订阅者启动时即有数据 */
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "sim_world");

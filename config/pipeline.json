@@ -23,6 +23,15 @@
             "reliability": "best_effort",
             "deadline_ms": 50
           }
+        },
+        {
+          "topic": "road/geometry",
+          "type": "RoadGeometry",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "reliable"
+          }
         }
       ],
       "params": "{\"init_speed\": 5.0, \"target_speed\": 12.0, \"frequency_hz\": 50.0, \"random_seed\": 42, \"scenario_file\": \"scenarios/curve_road.json\"}"
@@ -111,7 +120,8 @@
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
-        "vehicle/state"
+        "vehicle/state",
+        "road/geometry"
       ],
       "publish": [
         {
@@ -131,7 +141,8 @@
       "subscribe": [
         "fusion/localization",
         "planning/trajectory",
-        "vehicle/state"
+        "vehicle/state",
+        "road/geometry"
       ],
       "publish": [
         {
@@ -145,7 +156,7 @@
           }
         }
       ],
-      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 12.0, \"lat_kp\": 0.5, \"lat_kd_heading\": 1.35, \"lane_change_blocked_timeout_s\": 0.6, \"lc_stable_wait_s\": 4.0, \"lc_cooldown_after_stable_s\": 1.5, \"lc_cooldown_after_return_s\": 2.0, \"min_overtake_gap_base\": 14.0, \"min_overtake_gap_cap\": 90.0, \"min_overtake_gap_speed_mult\": 0.7, \"steer_min_clamp\": 0.016, \"scenario_file\": \"scenarios/curve_road.json\"}"
+      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 12.0, \"lat_kp\": 0.5, \"lat_kd_heading\": 1.35, \"lane_change_blocked_timeout_s\": 0.6, \"lc_stable_wait_s\": 4.0, \"lc_cooldown_after_stable_s\": 1.5, \"lc_cooldown_after_return_s\": 2.0, \"min_overtake_gap_base\": 14.0, \"min_overtake_gap_cap\": 90.0, \"min_overtake_gap_speed_mult\": 0.7, \"steer_min_clamp\": 0.016}"
     },
     {
       "name": "safety_control",
@@ -271,7 +282,8 @@
         "vehicle/state",
         "fusion/latency",
         "flowengine/node_info",
-        "planning/trajectory"
+        "planning/trajectory",
+        "road/geometry"
       ],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
     }
