@@ -8,8 +8,9 @@
 # 用法:
 #   bash scripts/demo.sh              # 默认 15 秒，dlopen 单进程模式
 #   bash scripts/demo.sh 30           # 30 秒演示
-#   bash scripts/demo.sh --multi      # fork+exec 多进程模式（各节点独立 PID，经 flow_node_host 加载同一份 .so）
+#   bash scripts/demo.sh --multi      # fork+exec 多进程模式
 #   bash scripts/demo.sh --no-browser # 不打开浏览器
+#   bash scripts/demo.sh --scenario scenarios/highway_overtake.json  # 指定场景
 # =============================================================================
 set -e
 
@@ -28,6 +29,7 @@ OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
 REPLAY_FILE=""
+SCENARIO=""
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -41,11 +43,29 @@ for arg in "$@"; do
     --multi) MULTI_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
+    --scenario) SCENARIO="$2"; shift ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$arg" ;;
   esac
   shift 2>/dev/null || true
 done
+
+# ── Scenario override: patch pipeline.json's scenario_file in sim_world/planning/control ──
+PIPELINE_ORIG="$ROOT/config/pipeline.json"
+PIPELINE_TMP=""
+cleanup_pipeline_tmp() {
+  [ -n "$PIPELINE_TMP" ] && rm -f "$PIPELINE_TMP"
+}
+if [ -n "$SCENARIO" ]; then
+  PIPELINE_TMP=$(mktemp /tmp/pipeline_XXXX.json)
+  trap 'cleanup_pipeline_tmp' EXIT
+  SCENARIO_ABS="$([ -f "$SCENARIO" ] && echo "$(cd "$(dirname "$SCENARIO")" && pwd)/$(basename "$SCENARIO")" || echo "$SCENARIO")"
+  # Escape for JSON string-in-string (scenario_file embedded in params JSON)
+  ESCAPED=$(echo "$SCENARIO_ABS" | sed 's|/|\\/|g')
+  sed "s/\"scenario_file\": \"[^\"]*\"/\"scenario_file\": \"$ESCAPED\"/g" "$PIPELINE_ORIG" > "$PIPELINE_TMP"
+  PIPELINE="$PIPELINE_TMP"
+  echo "  Scenario: $SCENARIO_ABS"
+fi
 
 # ── Replay fast path: no pipeline, just flowmond + flow_launcher --replay ──
 if [ -n "$REPLAY_FILE" ]; then
@@ -84,7 +104,7 @@ cat << 'BANNER'
 
 BANNER
 
-   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")"
+   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO:-$(grep -oP 'scenario_file\": \"[^\"]+' "$PIPELINE_ORIG" | head -1 | sed 's/scenario_file": "//')}"
 echo ""
 
 # ── Build ───────────────────────────────────────────────────
