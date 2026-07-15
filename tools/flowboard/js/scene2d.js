@@ -4,28 +4,26 @@
 //   init2D()         — Initialize 2D canvas & state; fallback if no Three.js
 //   init2DFallback() — Direct 2D fallback when WebGL/Three.js unavailable
 //   draw2D()         — Main 2D top-down draw (road, cars, obstacles, HUD)
-//   update2D()       — Sync _2d.egoT from topoData (called after each data tick)
 //   switchSceneView(view) — Switch between '3d' and '2d' scene modes
 //   _2d              — 2D state object
 //
+// Ego smoothing is owned by deadreckon.js (_dr.smooth*). The 2D renderer
+// reads those values in draw2D() via tickDeadReckon() in the anim loop.
+//
 // Inline-onclick compatibility: window.draw2D, window.init2DFallback,
-// window.switchSceneView, window.update2D, window._2d are set.
+// window.switchSceneView, window._2d are set.
 
 import { safeCall, reportDiag } from './utils.js';
 import { _dr, tickDeadReckon } from './deadreckon.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
-// Note: ego smoothing no longer lives here — it is owned by deadreckon.js
-// (_dr.smoothX / smoothZ / smoothHeading / smoothSpeed). The 2D renderer
-// reads those values in draw2D(). Only the data target (egoT) and the
-// trail buffer remain here.
+// egoT / gpsHistory were removed: dead-reckoning state (last*/smooth*) is
+// now owned by deadreckon.js and fed by app.js sync2DTarget().
 var _2d = {
   canvas: null, ctx: null, active: false, animId: 0, frame: 0, w: 0, h: 0,
-  egoT: { x: 0, y: 0, heading: 0, speed: 0 },            // target (from data)
   trail: [],                                               // last N positions
   scale: 8                                                 // px per meter
 };
-var gpsHistory = [];       // track ego positions for heading estimation
 
 // Utility: "#rrggbb" → "r,g,b" string for rgba()
 function hexToRgb(hex) {
@@ -537,5 +535,4 @@ window._2d = _2d;
 window.draw2D = draw2D;
 window.init2DFallback = init2DFallback;
 window.switchSceneView = switchSceneView;
-window.update2D = update2D;
 window.init2D = init2D;
