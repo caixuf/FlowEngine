@@ -527,8 +527,12 @@ static void* control_thread(void* arg) {
             int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &overtake_need_accel);
             if (lead_is_slow && !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
                 lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
-                if (!front_allows_merge) overtake_need_accel = 1;
-                overtake_worthwhile = 1;
+                /* 只在目标车道间距足够时立即发起变道（overtake_worthwhile=1）；
+                 * 间距不足时让 lc_timer 计时，超时后（blocked_timeout_s）重新评估，
+                 * 届时如果目标车道已清空仍能变道。 */
+                if (front_allows_merge) {
+                    overtake_worthwhile = 1;
+                }
                 blocked = 1;
             }
         }
@@ -581,9 +585,9 @@ static void* control_thread(void* arg) {
             if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
                 int need_accel = 0;
                 int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &need_accel);
-                if (!lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
+                if (front_allows_merge &&
+                    !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
                     lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
-                    if (!front_allows_merge) need_accel = 1;
                     g.lc_origin_y = cruise_lane_y;
                     g.lc_target_y = adjacent_lane_y;
                     effective_target_y = g.lc_target_y;

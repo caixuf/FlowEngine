@@ -328,7 +328,10 @@ static void* planning_thread(void* arg) {
 
 #ifdef HAVE_FRENET
         {
-            double ego_d = g.ego_y + 1.75;  /* 相对 y=-1.75 的偏移 */
+            /* 弯道参考路径在 y=-1.75 + road_center_y，所以 Frenet d 应是
+             * ego_y - (-1.75 + road_center_y(ego_x)) = ego_y + 1.75 - road_center_y(ego_x) */
+            double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+            double ego_d = g.ego_y + 1.75 - rc_y;  /* 相对 y=-1.75 的偏移（弯道修正） */
             n_wp = frenet_plan(g.frenet,
                 g.ego_x, ego_d, g.ego_v,
                 command_speed,

@@ -366,9 +366,16 @@ private:
                     steer_guard = 0.03;
                 }
 
-                /* Force steering away from nearest risk vehicle during lane crossing. */
-                double safe_steer = (cross_dy_signed < 0.0) ? steer_guard : -steer_guard;
-                set_changed(cmd.steer, safe_steer);
+                /* 转向安全约束：只在风险车仍在前方时限制转向方向
+                 * （防止变道过半后回正方向被错误覆盖——此时风险车已到侧后方，
+                 * 自然的回正转向看似"朝向风险车"但实为正确的变道收尾动作）。 */
+                if (cross_dx > 0.0) {
+                    if (cross_dy_signed < 0.0) {
+                        cmd.steer = std::max(cmd.steer, steer_guard);
+                    } else {
+                        cmd.steer = std::min(cmd.steer, -steer_guard);
+                    }
+                }
             }
 
             double ped_gap = pedestrian_collision_gap(state);
