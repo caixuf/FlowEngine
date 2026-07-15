@@ -113,9 +113,14 @@ flowboard_server.py (HTTP 桥接, 多线程)
         ▼
 FlowBoard (浏览器)
   ├─ fetch /api/topology  → 初始加载
-  ├─ EventSource /api/stream → 实时更新
+  ├─ EventSource /api/stream → 实时更新 (~10Hz)
   ├─ applyLiveStatus → LIVE/STALE/OFFLINE 三态
-  └─ Three.js 渲染 scene (ego 车 + 障碍物包围盒 + LiDAR 点云)
+  ├─ deadreckon.js   → 统一航位推算引擎 (60fps 平滑)
+  │   ├─ updateDeadReckon(x,z,speed,heading) ← SSE 数据到达时调用
+  │   ├─ tickDeadReckon()                     ← 每帧 rAF 调用
+  │   └─ getDeadReckonState()                 → scene3d.js / scene2d.js 读取
+  ├─ scene3d.js (Three.js) → 3D 渲染
+  └─ scene2d.js (Canvas 2D) → 2D 俯视图渲染
 ```
 
 ## `scene` 数据结构（真实 3D 仿真）
@@ -128,7 +133,8 @@ FlowBoard (浏览器)
 {
   "scene": {
     "ego":       { "x": 45.1, "y": 0.0, "heading": 0.0, "speed": 10.1, "steer": 0.03 },
-    "lane":      { "width": 3.5, "count": 2 },
+    "lane":      { "width": 3.5, "count": 2, "center": 0.0 },
+    "road":      { "curve_start_x": 150.0, "curve_length_m": 260.0, "curve_offset_m": 9.0 },
     "obstacles": [
       { "id": 0, "type": "car",        "x": 21.7, "y": 0.0,  "vx": 6.0,  "len": 4.6, "wid": 2.0 },
       { "id": 1, "type": "car",        "x": 60.0, "y": -3.5, "vx": -9.0, "len": 4.6, "wid": 2.0 },
@@ -141,5 +147,71 @@ FlowBoard (浏览器)
 
 - `obstacles` 中的坐标已转换到**自车系**（相对自车的前向/横向距离）。
 - `lidar` 为对障碍物表面 + 地面环带做光线投射后的下采样点云（自车系）。
+- `road` 弯道几何由 `sim_world_node` 通过 `road/geometry` topic 统一发布，
+  `control` / `planning` / `monitor` 三节点均**订阅**该 topic，不再各自独立加载场景文件。
+  前端据此将道路分段 group 做 Z 向偏移渲染弯道。
 - 自车运动含横向自行车模型（转向 P 控制向目标车道），并具备 ACC
   （依据同车道前车间距动态限制目标速度）与变道演示。
+
+## 共享道路几何（Phase 2 — 已落地）
+
+此前 `control` / `planning` / `monitor` 三个节点各自调用 `scenario_load()` 读取弯道参数，导致：
+
+1. **数据不一致** — 修改场景文件后，三节点可能读到不同版本（缓存、路径差异）。
+2. **字段名冲突** — vehicle/state JSON 中混入 `road_curve_sx/len/off`，污染车辆遥测。
+3. **启动顺序依赖** — 后启动的节点可能错过初始弯道参数。
+
+**修复方案：**
+
+- 新增 `road/geometry` topic（Type ID `0x80AD5C12u`），JSON 格式：
+  ```json
+  {"curve_start_x":150.0,"curve_length_m":260.0,"curve_offset_m":9.0,
+   "lane_width":3.5,"lane_count":2}
+  ```
+- `sim_world_node` 为**唯一发布者** — init 时立即发布一次，之后每 50 cycle（≈1Hz）重发。
+- `control` / `planning` / `monitor` 移除 `scenario_load()` 中的弯道读取，改为订阅 `road/geometry`。
+- `vehicle/state` 中移除弯道字段，字段名统一为 `curve_start_x` / `curve_length_m` / `curve_offset_m`。
+
+**关键教训：** dlopen 单进程模式下所有节点共享同一个 `MessageBus`，订阅者总数受 `MSG_BUS_MAX_SUBSCRIBERS`（默认 32）限制。本轮重构中 monitor 的 `road/geometry` 订阅因总订阅数（33）溢出而静默失败，已上调至 128。
+
+## 统一航位推算（Phase 3 — 已落地）
+
+前端以 ~10Hz 接收 SSE 数据，但渲染以 60fps 运行。如果每帧直接渲染最新数据，车辆会在数据帧之间**冻结**，视觉体验极差。此前的航位推算状态分散在三个模块中，存在严重架构缺陷：
+
+| 问题 | 位置 | 后果 |
+|------|------|------|
+| lerp 逻辑复制 | `scene3d.js _renderFrame()` + `scene2d.js _2dAnimLoop()` | 3D/2D 平滑参数不一致（0.15 vs 0.18） |
+| heading 无角度环绕 | `scene3d.js` line 403 | 跨 ±π 时车辆整圈旋转 |
+| 帧率相关 | 固定 lerp 因子 0.15 | 30fps 和 144fps 表现完全不同 |
+| monkey-patch | `scene2d.js init2D()` | 污染 `updateAll()` 全局函数 |
+| 职责分散 | 各模块直接修改 `_dr.last*` | 无单一 truth source，数据竞争风险 |
+
+**修复方案 — 单一引擎 `deadreckon.js`：**
+
+```text
+数据到达 (SSE ~10Hz)
+    │
+    ▼
+app.js sync2DTarget()
+    ├─ updateDeadReckon(x, z, speed, heading)   ← 写入 ground-truth
+    │   (dedup + first-sample snap)
+    │
+    └─ 每帧 rAF (3D 和 2D 各自调用)
+        │
+        ▼
+    tickDeadReckon()
+        ├─ 速度外推: targetX = lastX + speed * elapsed
+        ├─ 帧率无关平滑: smooth += (target - smooth) * (1 - exp(-λ·dt))
+        └─ 角度环绕: dh 归一化到 [-π, π]
+        │
+        ▼
+    scene3d.js / scene2d.js 读取 _dr.smoothX / smoothZ / smoothHeading
+```
+
+**关键设计决策：**
+
+1. **帧率无关平滑公式** — `α = 1 - exp(-λ·dt)`，λ=8（位置）、λ=6（heading）。30fps 和 144fps 下的收敛时间常数完全相同。
+2. **dt 钳位 0.1s** — 浏览器 tab 后台 10s 后切回，不会把车弹飞 100m。
+3. **单一馈入点** — `app.js sync2DTarget()` 是唯一调用 `updateDeadReckon()` 的地方。`scene3d.js update3D()` 不再直接修改 `_dr`，只负责障碍物/LiDAR 世界锚定。
+4. **首帧 snap** — `init=false` 时 `_dr.smooth*` 直接设为 ground-truth，避免从 (0,0) lerp 入场。
+5. **heading 最短路径** — `while (dh > π) dh -= 2π; while (dh < -π) dh += 2π;`

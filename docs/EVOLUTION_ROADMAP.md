@@ -38,6 +38,26 @@
 >
 > 下面的原始 Phase 描述保留作历史参考。
 
+> ## ⚠️ 现状更新（2026-07-14）— Phase 2+3 已完成 ✅
+>
+> 本轮**跳过小修小补，直接做架构大改**，解决系统性缺陷：
+>
+> | 架构矛盾 | 修复方案 | 状态 |
+> |---------|---------|------|
+> | 共享道路几何无共享机制 | 新增 `road/geometry` topic，`sim_world` 唯一发布，三节点统一订阅 | ✅ 已落地 |
+> | 消息总线订阅者溢出（`MSG_BUS_MAX_SUBSCRIBERS=32`） | 上调至 128，dlopen 单进程模式不再静默丢订阅 | ✅ 已落地 |
+> | 前端航位推算职责分散 + monkey-patch | `deadreckon.js` 成为唯一引擎，帧率无关 lerp + 角度环绕修复 | ✅ 已落地 |
+> | 3D/2D lerp 参数不一致 | 统一 `LAMBDA_POS=8.0` / `LAMBDA_HEADING=6.0` | ✅ 已落地 |
+> | `scene3d.js` 直接修改 `_dr.last*` | `app.js sync2DTarget()` 成为唯一馈入点 | ✅ 已落地 |
+>
+> **待解决（Phase 4+5）：**
+>
+> | 问题 | 影响 | 预计修复 |
+> |------|------|---------|
+> | 消息总线无 Schema 强制校验 | control/planning 解析 JSON 容错差，字段缺失不报错 | Phase 4 |
+> | 模块耦合通过全局变量 monkey-patching | `flowboard.html` 的 `<script>` 标签仍在污染全局空间 | Phase 4 |
+> | 控制回退横向策略与主控制器不同 | `FALLBACK_SPEED_KEEP` 直线行驶，在弯道中会冲出车道 | Phase 5 |
+
 ---
 
 ## 1. 总体方向

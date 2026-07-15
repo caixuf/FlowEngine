@@ -15,8 +15,11 @@ integrated system.  Change one, verify all.  Never tune parts in isolation.
 │  │  → Must move as ONE unit during curves        │ │
 │  └───────────────────────────────────────────────┘ │
 │  ┌─ Ego vehicle ─────────────────────────────────┐ │
-│  │  Position from sim_world data (scn.ego.x/y)   │ │
-│  │  Dead reckoning fills 60fps between ticks      │ │
+│  │  Position from deadreckon.js (smoothX/Z/Hdg)  │ │
+│  │  deadreckon.js is the SINGLE engine:           │ │
+│  │    updateDeadReckon() ← SSE data arrives       │ │
+│  │    tickDeadReckon()   ← every rAF frame        │ │
+│  │  scene3d.js is a PURE consumer — never writes  │ │
 │  └───────────────────────────────────────────────┘ │
 │  ┌─ Obstacles ───────────────────────────────────┐ │
 │  │  World-space positions from update3D()        │ │
@@ -133,5 +136,10 @@ This standalone page loads the SAME `scene3d.js`.  Use it to:
 - [ ] `#scene2d` has `display:none` by default
 - [ ] Only ONE rAF loop exists (check `grep -r 'requestAnimationFrame\|_renderFrame'`)
 - [ ] `_animT` is local to scene3d.js
+- [ ] `deadreckon.js` is the ONLY module with lerp logic — no local lerp in scene3d.js or scene2d.js
+- [ ] `scene3d.js` NEVER calls `updateDeadReckon()` or writes `_dr.last*` — only reads `getDeadReckonState()`
+- [ ] `scene2d.js` has NO monkey-patch on `updateAll()`
+- [ ] Heading lerp uses angle wrapping (`while (dh > Math.PI) dh -= 2*Math.PI`)
+- [ ] dt is clamped (`dt > 0.1 ? 0.1 : dt`) in tickDeadReckon()
 - [ ] Camera defaults tested with debug3d.html sliders
 - [ ] Tested: straight road → curve → post-curve (all three phases)
