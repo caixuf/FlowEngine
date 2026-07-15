@@ -147,6 +147,16 @@ function _curveShiftAt(x, sx, len, off) {
   return off * (3 * t * t - 2 * t * t * t);
 }
 
+/** Road centerline tangent heading at x (radians), mirror of road_center_heading() in C. */
+function _curveHeadingAt(x, sx, len, off) {
+  if (len <= 0 || Math.abs(off) < 0.01 || x <= sx) return 0;
+  if (x >= sx + len) return 0;
+  var t = (x - sx) / len;
+  // smoothstep derivative: d/dt (3t² - 2t³) = 6t - 6t²
+  var dy = off * (6 * t - 6 * t * t) / len;
+  return Math.atan(dy);
+}
+
 function _applyRoadCurve(roadData) {
   if (!roadData) return;
   var sx = roadData.curve_start_x || 0, len = roadData.curve_length_m || 0;
@@ -160,7 +170,10 @@ function _applyRoadCurve(roadData) {
   if (!group) return;
   group.traverse(function(child) {
     if (child.userData && child.userData.isRoadSeg) {
-      child.position.z = _curveShiftAt(child.userData.baseX, sx, len, off);
+      var bx = child.userData.baseX;
+      child.position.z = _curveShiftAt(bx, sx, len, off);
+      // 绕 Y 轴旋转使 segment 跟随道路切线方向，消除折线感
+      child.rotation.y = _curveHeadingAt(bx, sx, len, off);
       return;
     }
     if (child.userData && child.userData.isLaneMark) {

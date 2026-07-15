@@ -68,6 +68,7 @@
 > 3. Schema-aware Bag（topic → msg schema 元信息 + bag info）补全。
 > 4. 真实数据集回放闭环（nuScenes mini 端到端 + 影子驾驶对比）。
 > 5. 扩充场景库（cutin/pedestrian/overtake/roadwork）+ NOA 高速匝道出入口。
+> 6. **全场景 3D 可视化适配** — 13 个场景逐一调试 Three.js 前端渲染（道路几何/障碍物/自车姿态），解决 scene3d.js 中硬编码假设与新场景不匹配的问题，确保所有场景的 3D 桥接链路（文件桥接 + Foxglove WS）都能真实显示。
 
 > ## ⚠️ 现状更新（2026-07-15）— 变道效果收敛 ✅
 >
