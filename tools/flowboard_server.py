@@ -290,6 +290,10 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             return data, source
 
     def _handle(self):
+        # Strip query string (e.g. /js/app.js?v=20260716 → /js/app.js).
+        # Browsers append cache-busting params to static asset URLs; without
+        # this the server looks for a file literally named "app.js?v=20260716" → 404.
+        self.path = self.path.split('?', 1)[0]
         if self.path == '/api/health':
             with g_lock:
                 source = "demo" if g_simulate else ("stale" if _is_stale() else "live")
@@ -443,6 +447,7 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def _handle_post(self):
+        self.path = self.path.split('?', 1)[0]
         if self.path == '/api/training/start':
             try:
                 payload = self._read_json_body()

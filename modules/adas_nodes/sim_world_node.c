@@ -48,6 +48,20 @@
 #define DT_US              ((uint64_t)(DT_SEC * 1e6))   /* 逻辑时钟步长（微秒） */
 #define ROAD_CENTER_LIMIT_M 2.4  /* 路面半宽(3.5) - 车体半宽(1.0) - 安全余量(0.1) */
 
+/* ── 双目相机仿真常量(Phase 0 Track A) ────────────────────── */
+/* sim_world 直接扮演双目相机驱动角色,发布 sensor/stereo topic(StereoFrame
+ * 二进制),让 stereo_vision → traversability 链路在仿真里跑起来。
+ * 渲染采用几何路线 B:对 80×60 深度图每像素发射一条相机射线,与场景中
+ * 所有 actor 的 3D AABB + 地面平面求交,取最近交点距离作为深度值。
+ * 射线模型与 traversability_node.c 的反投影公式严格对偶,确保 sim_world
+ * 渲染的深度经 traversability 反投影后能正确还原 3D 位置。 */
+#define STEREO_DEPTH_W       80
+#define STEREO_DEPTH_H       60
+#define STEREO_DEPTH_COUNT   (STEREO_DEPTH_W * STEREO_DEPTH_H)  /* 4800 */
+#define STEREO_PUBLISH_DIV   2    /* 每 2 个 sim tick 发布(20Hz/2=10Hz) */
+#define STEREO_MIN_RANGE_M   0.3
+#define STEREO_MAX_RANGE_M   8.0
+
 /* Bytes reserved at the end of the vstate JSON buffer for the closing "}"
  * and any trailing characters.  Each obstacle entry is at most ~100 B;
  * 2 B for the closing brace is well within this margin. */
@@ -132,6 +146,16 @@ static struct {
 
     /* P0.1 确定性时钟：固定随机种子 */
     uint32_t random_seed;
+
+    /* 双目相机仿真配置(Phase 0 Track A)。
+     * sim_world 直接渲染场景到 StereoFrame.depth_data[4800],发布 sensor/stereo。
+     * 参数与 stereo_camera_node / traversability_node 的标定参数对齐。 */
+    int    stereo_enabled;
+    double stereo_baseline_m;       /* 双目基线(米),OAK-D 标准基线 */
+    double stereo_fov_deg;          /* 水平视场角(度) */
+    double stereo_v_fov_deg;        /* 垂直视场角(度) */
+    double stereo_camera_height_m;  /* 相机离地高度(米) */
+    double stereo_camera_tilt_deg;  /* 相机下倾角(度,+=向下看) */
 
     /* P0.2 场景文件路径（空字符串表示使用内置默认值） */
     char scenario_file[256];
@@ -415,6 +439,145 @@ static void publish_traffic_lights(void) {
                       (const uint8_t*)buf, (uint32_t)off + 1);
 }
 
+/* ── 双目深度图几何渲染(Phase 0 Track A) ──────────────────── */
+/* 对 80×60 深度图每像素发射射线,与场景 actor AABB + 地面求交。
+ * 射线模型与 traversability_node.c 的反投影公式严格对偶:
+ *   theta = ((i+0.5)/80 - 0.5) * h_fov_rad   (水平角,左+)
+ *   phi   = -((j+0.5)/60 - 0.5) * v_fov_rad   (俯仰角,上+;j=0上,j=59下)
+ *   相机系射线: (cos(theta)cos(phi), sin(theta)cos(phi), sin(phi))
+ *   绕 Y 轴反旋转 tilt: Xb=Xc*cos(t)-Zc*sin(t), Zb=Xc*sin(t)+Zc*cos(t)
+ * actor 高度按 type 推断(car=1.5m, pedestrian=1.7m, truck=3.0m)。 */
+
+static double actor_height_by_type(const char* type) {
+    if (!type) return 1.5;
+    if (strcmp(type, "pedestrian") == 0) return 1.7;
+    if (strcmp(type, "truck") == 0)      return 3.0;
+    return 1.5;  /* car / default */
+}
+
+static void render_stereo_depth(StereoFrame* frame) {
+    const int DW = STEREO_DEPTH_W, DH = STEREO_DEPTH_H;
+    const double h_fov_rad = g.stereo_fov_deg    * M_PI / 180.0;
+    const double v_fov_rad = g.stereo_v_fov_deg  * M_PI / 180.0;
+    const double tilt_rad  = g.stereo_camera_tilt_deg * M_PI / 180.0;
+    const double cos_t = cos(tilt_rad);
+    const double sin_t = sin(tilt_rad);
+
+    /* 相机世界坐标:ego 车体正上方 camera_height_m 处 */
+    const double cam_x = g.vehicle.x;
+    const double cam_y = g.vehicle.y;
+    const double cam_z = g.stereo_camera_height_m;
+
+    for (int j = 0; j < DH; j++) {
+        for (int i = 0; i < DW; i++) {
+            /* 像素 → 相机系射线方向(与 traversability 反投影对偶) */
+            double theta = ((double)(i + 0.5) / (double)DW - 0.5) * h_fov_rad;
+            double phi   = -((double)(j + 0.5) / (double)DH - 0.5) * v_fov_rad;
+            double cp = cos(phi);
+            double dx_cam = cos(theta) * cp;   /* 前 */
+            double dy_cam = sin(theta) * cp;   /* 左 */
+            double dz_cam = sin(phi);          /* 上 */
+
+            /* 相机下倾角补偿(绕 Y 轴旋转,与 traversability 一致) */
+            double dx = dx_cam * cos_t - dz_cam * sin_t;
+            double dy = dy_cam;
+            double dz = dx_cam * sin_t + dz_cam * cos_t;
+
+            double min_t = 1e9;
+
+            /* 1. 地面平面 Z=0 交点 */
+            if (fabs(dz) > 1e-9) {
+                double t_ground = -cam_z / dz;
+                if (t_ground > 0.0 && t_ground < min_t)
+                    min_t = t_ground;
+            }
+
+            /* 2. 与每个 actor 的 3D AABB 求交(slab method) */
+            for (int k = 0; k < g.obstacle_count; k++) {
+                const SimObstacle* o = &g.obstacles[k];
+                double height = actor_height_by_type(o->type);
+                double xmin = o->x - o->len * 0.5, xmax = o->x + o->len * 0.5;
+                double ymin = o->y - o->wid * 0.5, ymax = o->y + o->wid * 0.5;
+                double zmin = 0.0,                zmax = height;
+
+                double tmin = 0.0, tmax = 1e9;
+                int hit = 1;
+                /* X slab */
+                if (fabs(dx) < 1e-9) {
+                    if (cam_x < xmin || cam_x > xmax) hit = 0;
+                } else {
+                    double t1 = (xmin - cam_x) / dx, t2 = (xmax - cam_x) / dx;
+                    if (t1 > t2) { double tmp = t1; t1 = t2; t2 = tmp; }
+                    if (t1 > tmin) tmin = t1;
+                    if (t2 < tmax) tmax = t2;
+                }
+                /* Y slab */
+                if (hit) {
+                    if (fabs(dy) < 1e-9) {
+                        if (cam_y < ymin || cam_y > ymax) hit = 0;
+                    } else {
+                        double t1 = (ymin - cam_y) / dy, t2 = (ymax - cam_y) / dy;
+                        if (t1 > t2) { double tmp = t1; t1 = t2; t2 = tmp; }
+                        if (t1 > tmin) tmin = t1;
+                        if (t2 < tmax) tmax = t2;
+                    }
+                }
+                /* Z slab */
+                if (hit) {
+                    if (fabs(dz) < 1e-9) {
+                        if (cam_z < zmin || cam_z > zmax) hit = 0;
+                    } else {
+                        double t1 = (zmin - cam_z) / dz, t2 = (zmax - cam_z) / dz;
+                        if (t1 > t2) { double tmp = t1; t1 = t2; t2 = tmp; }
+                        if (t1 > tmin) tmin = t1;
+                        if (t2 < tmax) tmax = t2;
+                    }
+                }
+                if (hit && tmin <= tmax) {
+                    double t_hit = (tmin > 0.0) ? tmin : tmax;
+                    if (t_hit > 0.0 && t_hit < min_t)
+                        min_t = t_hit;
+                }
+            }
+
+            /* 写入深度(米),无效区域填 0(下游自动滤除) */
+            if (min_t < 1e9 && min_t >= STEREO_MIN_RANGE_M && min_t <= STEREO_MAX_RANGE_M)
+                frame->depth_data[j * DW + i] = (float)min_t;
+            else
+                frame->depth_data[j * DW + i] = 0.0f;
+        }
+    }
+    frame->depth_count = (uint32_t)STEREO_DEPTH_COUNT;
+}
+
+static void publish_stereo_frame(void) {
+    if (!g.stereo_enabled) return;
+
+    StereoFrame frame;
+    memset(&frame, 0, sizeof(frame));
+
+    frame.width      = 320;
+    frame.height     = 240;
+    frame.baseline_m = (float)g.stereo_baseline_m;
+    frame.fov_deg    = (float)g.stereo_fov_deg;
+    frame.timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
+
+    /* 伪 JPEG:仅 SOI+EOI 标记,下游 stereo_vision 不解码只检查 size>0 */
+    frame.left_jpeg[0] = 0xFF; frame.left_jpeg[1] = 0xD8;  /* SOI */
+    frame.left_jpeg[2] = 0xFF; frame.left_jpeg[3] = 0xD9;  /* EOI */
+    frame.left_jpeg_size = 4;
+
+    /* 几何渲染深度图(核心数据) */
+    render_stereo_depth(&frame);
+
+    /* 序列化 + 发布(StereoFrame 固定 44828 字节) */
+    uint8_t buf[44828];
+    size_t len = 0;
+    if (StereoFrame_serialize(&frame, buf, &len) == 0 && len > 0) {
+        transport_publish(g.transport, "sensor/stereo", buf, (uint32_t)len);
+    }
+}
+
 /* ── control/cmd 订阅回调 ──────────────────────────────────── */
 
 static void on_control_cmd(const Message* msg, void* user_data) {
@@ -598,6 +761,13 @@ static void* sim_thread(void* arg) {
          * 无红绿灯时 publish_traffic_lights 内部直接 return，零开销。 */
         publish_traffic_lights();
 
+        /* Phase 0 (Track A): 发布 sensor/stereo(双目深度图,~10Hz)。
+         * sim_world 直接扮演双目相机角色,几何渲染场景到 80×60 深度图。
+         * 下游 stereo_vision/traversability 订阅此 topic,实现仿真闭环验证。 */
+        if (g.stereo_enabled && (g.cycle % STEREO_PUBLISH_DIV) == 0) {
+            publish_stereo_frame();
+        }
+
         /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
         /* Buffer sizing: fixed header ~150 B + per-obstacle ~100 B (worst: "pedestrian")
          * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient.
@@ -643,7 +813,7 @@ static void* sim_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
-static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", "road/geometry", "road/traffic_lights", NULL };
+static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", "road/geometry", "road/traffic_lights", "sensor/stereo", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
@@ -661,6 +831,17 @@ static int sim_init(MessageBus* bus, Transport* transport,
     g.target_speed  = 10.0;
     g.lane_width    = 3.5;
     g.random_seed   = 42;   /* P0.1: 固定默认种子 */
+
+    /* 双目相机仿真默认参数(Phase 0 Track A)。
+     * 标定值与 stereo_camera_node / traversability_node 默认值对齐,
+     * 确保 sim_world 渲染的深度经下游反投影后坐标一致。
+     * camera_tilt_deg=10:向下倾 10°,让地面覆盖 1-7m(traversability x_range)。 */
+    g.stereo_enabled         = 1;
+    g.stereo_baseline_m      = 0.075;   /* OAK-D 标准基线 */
+    g.stereo_fov_deg         = 65.0;    /* 水平 FOV */
+    g.stereo_v_fov_deg       = 50.0;    /* 垂直 FOV */
+    g.stereo_camera_height_m = 0.30;    /* 相机离地高度 */
+    g.stereo_camera_tilt_deg = 10.0;    /* 相机下倾角 */
 
     if (params_json) {
         const char* p;
@@ -689,6 +870,17 @@ static int sim_init(MessageBus* bus, Transport* transport,
                 }
             }
         }
+        /* Phase 0 (Track A): 双目相机仿真参数(可覆盖默认值) */
+        if ((p = strstr(params_json, "\"stereo_enabled\":")))
+            sscanf(p + 17, "%d", &g.stereo_enabled);
+        if ((p = strstr(params_json, "\"stereo_fov_deg\":")))
+            sscanf(p + 16, "%lf", &g.stereo_fov_deg);
+        if ((p = strstr(params_json, "\"stereo_v_fov_deg\":")))
+            sscanf(p + 18, "%lf", &g.stereo_v_fov_deg);
+        if ((p = strstr(params_json, "\"stereo_camera_height_m\":")))
+            sscanf(p + 25, "%lf", &g.stereo_camera_height_m);
+        if ((p = strstr(params_json, "\"stereo_camera_tilt_deg\":")))
+            sscanf(p + 25, "%lf", &g.stereo_camera_tilt_deg);
     }
 
     /* P0.2: 优先从场景文件加载 actors；否则使用内置默认 */
@@ -779,6 +971,15 @@ static int sim_init(MessageBus* bus, Transport* transport,
                         ROAD_TRAFFIC_LIGHTS_TYPE_ID, CAP_PUBLISHER, FREQUENCY_HZ);
     g.sim_start_us = clock_now_us();  /* 记录启动时刻，供相位计算用 */
     publish_traffic_lights();  /* init 时立即发布一次 */
+
+    /* Phase 0 (Track A): 发布 sensor/stereo — 双目深度图仿真输出。
+     * sim_world 直接扮演双目相机角色,几何渲染场景到 StereoFrame。
+     * 下游 stereo_vision_node/traversability_node 订阅此 topic。
+     * stereo_enabled=0 时仍注册 advertise(让 discovery 知道本节点是潜在发布者),
+     * 但 publish_stereo_frame 内部 return,不实际发布。 */
+    transport_advertise(transport, "sensor/stereo", STEREOFRAME_TYPE_ID);
+    discovery_advertise(discovery, "sensor/stereo",
+                        STEREOFRAME_TYPE_ID, CAP_PUBLISHER, 10.0);
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "sim_world");
