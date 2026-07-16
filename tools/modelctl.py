@@ -263,12 +263,15 @@ def _write_status(status: dict) -> None:
 
 
 def _load_status() -> dict:
+    """Load training status, always returns a dict with at least {"running": False}."""
     if TRAINING_STATUS_FILE.exists():
         try:
-            return json.loads(TRAINING_STATUS_FILE.read_text(encoding="utf-8"))
+            s = json.loads(TRAINING_STATUS_FILE.read_text(encoding="utf-8"))
+            s.setdefault("running", False)
+            return s
         except json.JSONDecodeError:
-            return {}
-    return {}
+            pass
+    return {"running": False}
 
 
 def _is_pid_alive(pid: int) -> bool:
