@@ -86,16 +86,21 @@ export function updateCharts(data) {
   var dp = chartPrevPub >= 0 ? Math.max(0, (nowPub - chartPrevPub) / elapsed) : 0;
   var dd = chartPrevDel >= 0 ? Math.max(0, (nowDel - chartPrevDel) / elapsed) : 0;
 
-  chartHistory.rate.push({ v: dp, raw: nowPub });
-  chartHistory.latency.push({ v: nowLat, p99: p99Lat });
-  chartHistory.frames.push({ v: dd, raw: nowDel });
+  // 只在数据变化时 push，前 2 次强制推送保证 ≥2 个点不显示 "Waiting for data"。
+  // updateCharts 挂在 requestAnimationFrame（~60fps）下，但 SSE 数据每秒只到 ~10 次。
+  // 无条件 push 会让 60fps * 90s = 5400 个点里只有 ~900 个非零点，图表被 0 淹没。
+  if (chartHistory.rate.length < 2 || nowPub !== chartPrevPub || nowDel !== chartPrevDel) {
+    chartHistory.rate.push({ v: dp, raw: nowPub });
+    chartHistory.latency.push({ v: nowLat, p99: p99Lat });
+    chartHistory.frames.push({ v: dd, raw: nowDel });
 
-  chartPrevPub = nowPub;
-  chartPrevDel = nowDel;
+    chartPrevPub = nowPub;
+    chartPrevDel = nowDel;
 
-  ['rate', 'latency', 'frames'].forEach(function(a) {
-    while (chartHistory[a].length > chartHistory.maxLen) chartHistory[a].shift();
-  });
+    ['rate', 'latency', 'frames'].forEach(function(a) {
+      while (chartHistory[a].length > chartHistory.maxLen) chartHistory[a].shift();
+    });
+  }
 
   drawChart('ch-rate', 'tt-rate', chartHistory.rate, '#58a6ff', 'Pub Rate' + suf, 'msg/s');
   drawChart('ch-lat', 'tt-lat', chartHistory.latency, '#d29922', 'Latency' + suf, 'µs');

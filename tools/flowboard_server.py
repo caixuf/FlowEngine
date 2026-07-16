@@ -433,6 +433,8 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(data)))
             # Cache static assets for 1 hour (they don't change at runtime)
             self.send_header('Cache-Control', 'public, max-age=3600')
+            self.send_header('Expires', '0')
+            self.send_header('Pragma', 'no-cache')
             self.end_headers()
             self.wfile.write(data)
 
