@@ -1,11 +1,10 @@
 # FlowEngine
 
-> Simulation-first middleware framework for autonomous driving & robotics — C11 kernel, C++20 coroutine shell, plugin architecture.
+> 面向自动驾驶与机器人的仿真优先中间件框架 —— C11 内核、C++20 协程外壳、插件化架构。
 >
-> **Scope:** FlowEngine is a *simulation-first, reproducible experiment platform*. It deliberately does **not**
-> target real-vehicle deployment (no automotive mass production, no real ECU/CAN integration, no hard real-time
-> or functional-safety certification). Everything — perception, fusion, planning, control, learning — is
-> exercised, observed, tested, replayed and scored **entirely in simulation**.
+> **定位：** FlowEngine 是一个*仿真优先、可复现的实验平台*。它明确**不**面向实车部署（不追车规量产、
+> 不接真实 ECU/CAN、不追硬实时或功能安全认证）。所有能力——感知、融合、规划、控制、学习——
+> 都在**仿真内**被运行、观察、测试、回放与评分。
 
 [![CI](https://github.com/caixuf/FlowEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/caixuf/FlowEngine/actions)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -14,28 +13,28 @@
 
 ---
 
-## What is FlowEngine?
+## FlowEngine 是什么
 
-A from-scratch middleware framework inspired by Apollo CyberRT, providing the core abstractions in a lightweight,
-embeddable package. Built to be **organizable, observable, testable, replayable and scoreable — all inside simulation**:
+一个从零搭建的中间件框架，灵感来自 Apollo CyberRT，以轻量、可嵌入的包提供核心抽象。
+目标是**可组织、可观察、可测试、可回放、可评估——全部在仿真内**：
 
-| Layer | Modules |
+| 层 | 模块 |
 |-------|---------|
-| **Communication** | Message Bus (pub/sub + req/reply + zero-copy), IPC (SHM), TCP Transport, Network Transport |
-| **Execution** | Coroutine Scheduler (FIFO + CPU affinity + rate limit), Choreo DAG mode, Cancelable Coroutine Primitives (pub/sub · select · timer · req-reply, with timeout & graceful cancel) |
-| **Introspection** | Reflective State Machine, UDP Service Discovery, Topology Tracking, SysMonitor |
-| **Metadata** | FlowRegistry (tasks/topics/types/plugins/schemas), ParamRegistry (int/float/bool/string with hot-reload) |
-| **Data** | Type-safe Serialization (IDL + codegen), Bag v2 Record/Replay, MCAP format, Data Fusion (EKF), Schema Validation |
-| **QoS** | Per-topic QoS (depth + drop policy + deadline + reliability), Topic Stats (frequency, latency p50/p99, subscribers) |
-| **Perception** | DBSCAN LiDAR clustering, Kalman tracking, EKF sensor fusion, NMEA GPS parser, nuScenes dataset loader |
-| **Planning** | Frenet Optimal Trajectory (lane change / overtake), PID control (longitudinal + lateral) |
-| **Safety** | FlowCoro coroutine-based safety envelope (TTC / lateral cross / pedestrian guard) |
-| **Operations** | Unified Logger (ms timestamps), flowctl CLI, FlowBoard Dashboard (Three.js 3D + 2D), file-bridge or flowmond monitor server, Cross-process IPC Stats Bridge + Topic Bridge, CI/CD |
-| **Learning** | In-sim learning loop: data recorder → offline trainer (scikit-learn MLP / PyTorch) → shadow-mode tiny-MLP inference + onboard SGD fine-tuning + model OTA with A-B comparison. See [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
+| **通信** | Message Bus（发布/订阅 + 请求/应答 + 零拷贝）、IPC（SHM）、TCP Transport、Network Transport |
+| **执行** | Coroutine Scheduler（FIFO + CPU 亲和 + 限频）、Choreo DAG 模式、可取消协程原语（发布/订阅 · select · timer · req-reply，含超时与优雅取消） |
+| **内省** | 反射式状态机、UDP 服务发现、拓扑追踪、SysMonitor |
+| **元信息** | FlowRegistry（tasks/topics/types/plugins/schemas）、ParamRegistry（int/float/bool/string，支持热重载） |
+| **数据** | 类型安全序列化（IDL + 代码生成）、Bag v2 录制/回放、MCAP 格式、数据融合（EKF）、Schema 校验 |
+| **QoS** | Per-topic QoS（深度 + 丢弃策略 + deadline + reliability）、Topic 统计（频率、延迟 p50/p99、订阅者） |
+| **感知** | DBSCAN LiDAR 聚类、Kalman 跟踪、EKF 传感器融合、NMEA GPS 解析器、nuScenes 数据集加载器 |
+| **规划** | Frenet 最优轨迹（变道/超车）、PID 控制（纵向 + 横向） |
+| **安全** | 基于 FlowCoro 协程的安全包络（TTC / 横向交叉 / 行人保护） |
+| **运维** | 统一日志器（毫秒时间戳）、flowctl CLI、FlowBoard Dashboard（Three.js 3D + 2D）、文件桥接或 flowmond 监控服务器、跨进程 IPC Stats Bridge + Topic Bridge、CI/CD |
+| **学习** | 仿真内学习闭环：数据采集 → 离线训练（scikit-learn MLP / PyTorch）→ 影子模式 tiny-MLP 推理 + 车端 SGD 微调 + 模型 OTA 与 A-B 对比。详见 [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ---
 
-## Architecture
+## 架构
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -77,30 +76,29 @@ embeddable package. Built to be **organizable, observable, testable, replayable 
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
 git clone https://github.com/caixuf/FlowEngine.git && cd FlowEngine
 
-# One-click demo (build + run, default 15s)
+# 一键演示（构建 + 运行，默认 15s）
 bash scripts/demo.sh
 
-# Or build manually
+# 或手动构建
 bash build.sh release
 ```
 
-> **Entry point:** `flow_launcher config/pipeline.json` is the canonical,
-> config-driven way to run a pipeline (each node is a `dlopen`-loaded `.so`
-> plugin).
+> **入口：** `flow_launcher config/pipeline.json` 是运行 pipeline 的标准、
+> 配置驱动方式（每个节点都是 `dlopen` 加载的 `.so` 插件）。
 
 ---
 
-## Demo
+## 演示
 
 ```bash
-bash scripts/demo.sh 30     # 30-second demo
+bash scripts/demo.sh 30     # 30 秒演示
 
-# Other modes
+# 其他模式
 bash scripts/demo.sh --multi      # 多进程模式（各节点独立 fork+exec）
 bash scripts/demo.sh --record     # 录制 Bag 文件
 bash scripts/demo.sh --no-browser # 不打开浏览器
@@ -117,7 +115,7 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
   ║   ╚═╝     ╚══════╝ ╚═════╝  ╚══╝╚══╝                   ║
   ║                                                          ║
   ║   E N G I N E                                           ║
-  ║   Lightweight Middleware for Autonomous Driving          ║
+  ║   面向自动驾驶的轻量级中间件                              ║
   ║                                                          ║
   ╚══════════════════════════════════════════════════════════╝
 
@@ -129,7 +127,7 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
 ```
 
 ![Dashboard](docs/dashboard.png)
-> *FlowBoard real-time dashboard — topology graph, 3D scene, frame monitor, latency charts. Open `http://localhost:8800` during demo.*
+> *FlowBoard 实时仪表盘 —— 拓扑图、3D 场景、帧监控、延迟图表。演示期间打开 `http://localhost:8800`。*
 
 **实时服务：**
 | 服务 | 端口 | 说明 |
@@ -189,44 +187,44 @@ flowctl param get <name>        # 获取参数
 
 ---
 
-## Visualization
+## 可视化
 
 **主链路（文件桥接，默认）：**
 
 ```bash
-# Terminal 1: run the pipeline (writes /tmp/flow_topology.json)
+# 终端 1：运行 pipeline（写入 /tmp/flow_topology.json）
 ./build/bin/flow_launcher config/pipeline.json --duration 3600
 
-# Terminal 2: start the dashboard server
+# 终端 2：启动仪表盘服务器
 python3 tools/flowboard_server.py --port 8800 --json-file /tmp/flow_topology.json
 
-# Open browser
+# 打开浏览器
 open http://localhost:8800
 ```
 
 **辅助链路（flowmond IPC 桥接）：**
 
 ```bash
-# Terminal 1: monitor daemon
+# 终端 1：监控守护进程
 ./build/bin/flowmond --port 8800 --html-path tools/flowboard/index.html
 
-# Terminal 2: pipeline (publishes stats via IPC SHM)
+# 终端 2：pipeline（通过 IPC SHM 发布统计）
 ./build/bin/flow_launcher config/pipeline.json --duration 60
 ```
 
-Dashboard endpoints:
+仪表盘端点：
 
-| Path | Description |
+| 路径 | 说明 |
 |------|-------------|
-| `/` | Live FlowBoard UI (3D scene + topology + charts) |
-| `/api/topics` | Per-topic stats (频率/延迟/订阅者) |
-| `/api/topology` | Topology JSON (nodes + edges + metrics) |
-| `/api/stream` | SSE real-time push (500 ms interval) |
-| `/api/health` | Health check |
+| `/` | 实时 FlowBoard UI（3D 场景 + 拓扑 + 图表）|
+| `/api/topics` | Per-topic 统计（频率/延迟/订阅者） |
+| `/api/topology` | 拓扑 JSON（节点 + 边 + 指标）|
+| `/api/stream` | SSE 实时推送（500 ms 间隔）|
+| `/api/health` | 健康检查 |
 
-> **Bind address:** `flowboard_server.py` listens on `0.0.0.0` by default.
-> `flowmond` listens on `127.0.0.1` (loopback) by default. For remote access,
-> use `flowmond --bind 0.0.0.0` (or set `FLOWMOND_BIND_ADDR=0.0.0.0`).
+> **绑定地址：** `flowboard_server.py` 默认监听 `0.0.0.0`。
+> `flowmond` 默认监听 `127.0.0.1`（回环）。如需远程访问，
+> 使用 `flowmond --bind 0.0.0.0`（或设置 `FLOWMOND_BIND_ADDR=0.0.0.0`）。
 
 ---
 
@@ -234,64 +232,64 @@ Dashboard endpoints:
 
 ```bash
 docker build -t flowengine .
-docker run --rm flowengine          # Run e2e demo
-docker run --rm flowengine demo 30  # 30-second demo
+docker run --rm flowengine          # 运行 e2e 演示
+docker run --rm flowengine demo 30  # 30 秒演示
 ```
 
 ---
 
-## Build from Source
+## 从源码构建
 
-| Requirement | Version |
+| 依赖 | 版本 |
 |-------------|---------|
-| GCC | 11+ (C++20 coroutines) |
+| GCC | 11+（C++20 协程）|
 | CMake | 3.16+ |
-| libcjson | any (`apt install libcjson-dev`) |
-| libeigen3 | 3.3+ (`apt install libeigen3-dev`) — **required for Frenet planner** (lane change / overtaking); without it `planning_node` silently falls back to lane-keep-only |
-| Python | 3.8+ (codegen & dashboard) |
-| libprotobuf-c (optional) | for protobuf support |
+| libcjson | 任意版本（`apt install libcjson-dev`）|
+| libeigen3 | 3.3+（`apt install libeigen3-dev`）—— **Frenet 规划器必需**（变道/超车）；缺失时 `planning_node` 会静默回退到仅车道保持 |
+| Python | 3.8+（代码生成与仪表盘）|
+| libprotobuf-c（可选）| 用于 protobuf 支持 |
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 
-# Or one-click
+# 或一键构建
 bash build.sh release
 ```
 
-### Install
+### 安装
 
 ```bash
 sudo cmake --install build
 
-# Verify
+# 验证
 pkg-config --cflags --libs flowengine
 flowctl version
 ```
 
-Once installed, include the umbrella header:
+安装完成后，引入 umbrella header：
 
 ```c
-#include "flowengine.h"   /* FLOWENGINE_VERSION, NODE_PLUGIN_API_VERSION, bus/transport/... */
+#include "flowengine.h"   /* FLOWENGINE_VERSION、NODE_PLUGIN_API_VERSION、bus/transport/... */
 ```
 
 ---
 
-## Plugin System
+## 插件系统
 
-FlowEngine uses a `dlopen`-based plugin architecture. Each pipeline node is a shared library (`.so`)
-loaded at runtime by `flow_launcher`. Nodes communicate exclusively through the Message Bus —
-no direct function calls between nodes.
+FlowEngine 采用基于 `dlopen` 的插件架构。每个 pipeline 节点是一个共享库（`.so`），
+由 `flow_launcher` 在运行时加载。节点之间仅通过 Message Bus 通信——
+节点之间没有直接函数调用。
 
 ```c
-// C plugin — dlopen compatible ABI
+// C 插件 —— dlopen 兼容 ABI
 #include "task_interface.h"
 
 typedef struct { TaskBase base; int param; } MyTask;
 
 static int my_execute(TaskBase* base) {
     while (!base->should_stop) {
-        /* business logic */
+        /* 业务逻辑 */
         sleep(1);
     }
     return 0;
@@ -308,7 +306,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 ---
 
-## Configuration-Driven Launch
+## 配置驱动启动
 
 ```json
 {
@@ -330,7 +328,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 ---
 
-## Scenario Suite
+## 场景套件
 
 13 JSON 场景定义，覆盖典型自动驾驶场景：
 
@@ -354,7 +352,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 ---
 
-## Learning Loop
+## 学习闭环
 
 FlowEngine 实现了完整的车端学习闭环：
 
@@ -382,50 +380,49 @@ FlowEngine 实现了完整的车端学习闭环：
 
 ---
 
-## Regression Evaluator
+## 回归评估器
 
 ```bash
-# Run demo + auto-score: topology, collisions, road departure, stagnation, yaw wobble
+# 运行演示 + 自动评分：拓扑、碰撞、冲出路面、停滞、yaw 抖动
 python3 tools/demo_evaluator.py --duration 45
 
-# Analyze last run without re-launching
+# 分析上次运行（不重新启动）
 python3 tools/demo_evaluator.py --no-run
 
-# Full scenario suite vs baseline
+# 全场景套件与基线对比
 python3 tools/scenario_regression.py --baseline
 ```
 
-The evaluator samples `/tmp/flow_topology.json` during a demo run and checks:
-topology edges, topic frequencies, collision events, road departure, vehicle
-stagnation, lane-change count, yaw/steer oscillation, NPC teleport jumps, and
-message drops.  Run it after any change to the pipeline chain.
+评估器在演示运行期间采样 `/tmp/flow_topology.json` 并检查：
+拓扑边、topic 频率、碰撞事件、冲出路面、车辆停滞、变道次数、yaw/steer 振荡、
+NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应运行它。
 
 ---
 
-## Tests & CI
+## 测试与 CI
 
-| Job | Status | Description |
+| 任务 | 状态 | 说明 |
 |-----|--------|-------------|
-| Release | ✅ | gcc -O2, unit tests |
-| Debug | ✅ | gcc -g, unit tests |
+| Release | ✅ | gcc -O2，单元测试 |
+| Debug | ✅ | gcc -g，单元测试 |
 | ASAN | ✅ | Address Sanitizer |
 | UBSAN | ✅ | Undefined Behavior Sanitizer |
-| Stress | ✅ | 15s pipeline at full rate |
-| Integration | ✅ | Multi-node pipeline + ctest |
-| Coverage | ✅ | lcov report |
-| Viz | ✅ | FlowBoard Python tests + server smoke test |
-| Evaluator | ✅ | 45s regression evaluator (PR gate) |
-| Scenario Regression | 🌙 | Full scenario suite vs baseline (nightly/manual) |
-| Nightly Stability | 🌙 | Long-running (schedule only) |
+| Stress | ✅ | 15s 全速率 pipeline |
+| Integration | ✅ | 多节点 pipeline + ctest |
+| Coverage | ✅ | lcov 报告 |
+| Viz | ✅ | FlowBoard Python 测试 + 服务器冒烟测试 |
+| Evaluator | ✅ | 45s 回归评估器（PR 门禁）|
+| Scenario Regression | 🌙 | 全场景套件与基线对比（nightly/手动）|
+| Nightly Stability | 🌙 | 长时间运行（仅调度）|
 
 > **TSAN 当前禁用** — 协程 + 无锁内存池的跨线程同步模式对 TSAN 产生大量假阳性，
 > 待协程生命周期稳定后重新启用。
 
 ---
 
-## Skills (深度教程)
+## Skills（深度教程）
 
-| Skill | Topic |
+| Skill | 主题 |
 |-------|-------|
 | [01 — OOP in C](skills/01_oop_in_c.md) | C 语言面向对象编程 |
 | [02 — Plugin System](skills/02_plugin_system.md) | dlopen 插件架构设计 |
@@ -444,29 +441,29 @@ message drops.  Run it after any change to the pipeline chain.
 
 ---
 
-## Documentation
+## 文档
 
-| Doc | Topic |
+| 文档 | 主题 |
 |-----|-------|
-| [Evolution Roadmap](docs/EVOLUTION_ROADMAP.md) | Future phases |
-| [Project Review](docs/PROJECT_REVIEW.md) | Capability assessment |
-| [Quick Start](docs/QUICK_START.md) | 30-min tutorial |
-| [Technical Design](docs/TECHNICAL_DESIGN.md) | Architecture design |
-| [API Quick Reference](docs/API_QUICK_REFERENCE.md) | C API reference |
-| [Simulation Guide](docs/SIMULATION_GUIDE.md) | Simulation testing guide |
+| [Evolution Roadmap](docs/EVOLUTION_ROADMAP.md) | 未来阶段 |
+| [Project Review](docs/PROJECT_REVIEW.md) | 能力评估 |
+| [Quick Start](docs/QUICK_START.md) | 30 分钟教程 |
+| [Technical Design](docs/TECHNICAL_DESIGN.md) | 架构设计 |
+| [API Quick Reference](docs/API_QUICK_REFERENCE.md) | C API 参考 |
+| [Simulation Guide](docs/SIMULATION_GUIDE.md) | 仿真测试指南 |
 | [Visualization Architecture](docs/VISUALIZATION_ARCHITECTURE.md) | FlowBoard + flowmond |
 | [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
-| [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) | Pipeline design |
-| [Algorithm Stack](docs/ALGORITHM_STACK.md) | Algorithm overview |
-| [Algorithm Integration](docs/ALGORITHM_INTEGRATION.md) | Algorithm integration guide |
-| [E2E Simulation Design](docs/E2E_SIMULATION_DESIGN.md) | End-to-end simulation design |
-| [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | Dashboard data contract |
-| [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) | Implementation guide |
-| [Flow Registry Plan](docs/FLOW_REGISTRY_PLAN.md) | Flow Registry design |
-| [Learning Loop](docs/LEARNING_LOOP.md) | In-sim learning loop |
+| [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
+| [Algorithm Stack](docs/ALGORITHM_STACK.md) | 算法总览 |
+| [Algorithm Integration](docs/ALGORITHM_INTEGRATION.md) | 算法集成指南 |
+| [E2E Simulation Design](docs/E2E_SIMULATION_DESIGN.md) | 端到端仿真设计 |
+| [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | 仪表盘数据契约 |
+| [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) | 落地实施指南 |
+| [Flow Registry Plan](docs/FLOW_REGISTRY_PLAN.md) | Flow Registry 设计 |
+| [Learning Loop](docs/LEARNING_LOOP.md) | 仿真内学习闭环 |
 
 ---
 
-## License
+## 许可证
 
 MIT

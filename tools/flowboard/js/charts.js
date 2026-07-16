@@ -17,7 +17,7 @@ export function setTopoData(d) { _topoData = d || _topoData; }
 
 var chartHistory = { rate: [], latency: [], frames: [], maxLen: 90 };
 var chartPrevPub = -1, chartPrevDel = -1, chartTopic = '';
-var chartLastTs = -1, chartLastSampleMs = 0;
+var chartLastSampleMs = 0;
 
 // ════════════════════════════════════════════════════════════════
 // Initialization
@@ -76,11 +76,11 @@ export function updateCharts(data) {
 
   var suf = chartTopic ? ' (' + chartTopic.split('/').pop() + ')' : '';
 
-  // SSE pushes at 10Hz, but the state file refreshes slower — adjacent frames
-  // often carry duplicate data. If every frame is recorded, the delta is zero
-  // and the chart appears flat. Dedup by server timestamp.
-  var dataTs = topoData.timestamp || 0;
-  if (chartLastTs >= 0 && dataTs === chartLastTs) {
+  // Dedup: if published/delivered counters haven't changed since last sample,
+  // the delta would be zero — just redraw with existing history (no new push).
+  // Previously used topoData.timestamp, but backend never sends that field,
+  // causing dataTs to always be 0 and freezing the chart after the first frame.
+  if (chartPrevPub >= 0 && nowPub === chartPrevPub && nowDel === chartPrevDel) {
     drawChart('ch-rate', 'tt-rate', chartHistory.rate, '#58a6ff', 'Pub Rate' + suf, 'msg/s');
     drawChart('ch-lat', 'tt-lat', chartHistory.latency, '#d29922', 'Latency' + suf, 'µs');
     drawChart('ch-frames', 'tt-frames', chartHistory.frames, '#3fb950', 'Deliveries' + suf, 'msg/s');
@@ -89,7 +89,6 @@ export function updateCharts(data) {
 
   var nowMs = Date.now();
   var elapsed = (chartLastSampleMs > 0) ? Math.max(0.05, (nowMs - chartLastSampleMs) / 1000) : 1;
-  chartLastTs = dataTs;
   chartLastSampleMs = nowMs;
 
   var dp = chartPrevPub >= 0 ? Math.max(0, (nowPub - chartPrevPub) / elapsed) : 0;
@@ -251,7 +250,6 @@ export function onChartTopicChange() {
   chartTopic = document.getElementById('chart-topic').value;
   chartPrevPub = -1;
   chartPrevDel = -1;
-  chartLastTs = -1;
   chartLastSampleMs = 0;
   chartHistory = { rate: [], latency: [], frames: [], maxLen: chartHistory.maxLen };
   _saveChartState();

@@ -100,8 +100,12 @@ target_compile_options(fusion_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines
 target_link_libraries(fusion_node ${NODE_LINK_LIBS} stdc++ atomic)
 
 # perception_node: DBSCAN 感知 + 传感器仿真 (FlowCoro 协程版)
+# 采用 FlowCoroTask（线程池 resume）：DBSCAN 点云聚类为重计算，同步 resume 会阻塞
+# 消息总线分发线程导致 drops，故改用线程池 resume。
 add_library(perception_node SHARED perception_node.cpp)
-target_link_libraries(perception_node ${NODE_LINK_LIBS} stdc++)
+target_compile_definitions(perception_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(perception_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_link_libraries(perception_node ${NODE_LINK_LIBS} stdc++ atomic)
 
 # sensor_model_node: 噪声/FOV/遮挡传感器模型
 add_library(sensor_model SHARED sensor_model_node.c)
@@ -114,8 +118,8 @@ add_library(sim_world SHARED sim_world_node.c)
 target_link_libraries(sim_world ${NODE_LINK_LIBS})
 
 # planning_node: Frenet 轨迹规划 (FlowCoro 协程版)
-# 采用 CoroutineTask 同步 resume，与 fusion/perception/safety_control 一致；
-# 仅需 stdc++（子项目已 include flowcoro 头文件目录）。
+# 采用 FlowCoroTask（线程池 resume）：Frenet 轨迹规划为重计算，同步 resume 会阻塞
+# 消息总线分发线程导致 drops，故改用线程池 resume。
 find_library(FRENET_BRIDGE
     NAMES frenet_bridge
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
@@ -125,9 +129,11 @@ find_library(FRENET_PLANNER
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
 add_library(planning_node SHARED planning_node.cpp)
+target_compile_definitions(planning_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(planning_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_link_libraries(planning_node ${NODE_LINK_LIBS}
-        ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++)
+        ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++ atomic)
     target_include_directories(planning_node PRIVATE
         ${FLOW_ROOT}/third_party/frenet_planner/src
         ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
@@ -135,13 +141,17 @@ if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_compile_definitions(planning_node PRIVATE HAVE_FRENET)
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")
 else()
-    target_link_libraries(planning_node ${NODE_LINK_LIBS} stdc++)
+    target_link_libraries(planning_node ${NODE_LINK_LIBS} stdc++ atomic)
     message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
 # control_node: PID 纵向/横向控制 (FlowCoro 协程版)
+# 采用 FlowCoroTask（线程池 resume）：PID+Stanley 控制为重计算，同步 resume 会阻塞
+# 消息总线分发线程导致 drops，故改用线程池 resume。
 add_library(control_node SHARED control_node.cpp)
-target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++)
+target_compile_definitions(control_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(control_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++ atomic)
 
 # safety_control_node: safety envelope for control commands
 # Uses CoroutineTask (synchronous resume on bus delivery thread) instead of
@@ -157,10 +167,12 @@ target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 # ── 车端学习闭环节点 (data → train → inference → learner → ota) ─
 
 # inference_node: 内置 tiny-MLP 车端推理（影子模式，支持 OTA 热重载，FlowCoro 协程版）
-# 采用 CoroutineTask 同步 resume，与 fusion/perception/planning/control/safety_control 一致；
-# 仅需 stdc++（子项目已 include flowcoro 头文件目录）。
+# 采用 FlowCoroTask（线程池 resume）：MLP 推理为重计算，同步 resume 会阻塞
+# 消息总线分发线程导致 drops，故改用线程池 resume。
 add_library(inference_node SHARED inference_node.cpp)
-target_link_libraries(inference_node ${NODE_LINK_LIBS} stdc++)
+target_compile_definitions(inference_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(inference_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_link_libraries(inference_node ${NODE_LINK_LIBS} stdc++ atomic)
 
 # data_recorder_node: 训练样本采集（模仿学习 JSONL）
 add_library(data_recorder_node SHARED data_recorder_node.c)

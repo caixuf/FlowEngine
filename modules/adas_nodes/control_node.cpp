@@ -1,14 +1,16 @@
 /**
  * control_node.cpp — PID 纵向/横向控制节点插件 (FlowCoro 协程版)
  *
- * 从 control_node.c 迁移而来，采用 CoroutineTask 协程框架：
+ * 从 control_node.c 迁移而来，采用 FlowCoroTask 协程框架：
  *   - co_await sleep_us(50000) 替代 usleep 20Hz 轮询（可被 stop 取消）
  *   - 保留 on_fusion / on_trajectory / on_vehicle_state / on_road_geometry 回调
  *   - PID + ACC + 变道状态机逻辑原样搬入 run()
  *   - was_blocked_sm 从函数 static 改为 Task 成员（语义等价）
  *
- * 采用同步 resume（CoroutineTask），与 safety_control 一致——
- * 控制环轻量且延迟敏感，线程池 resume 会引入不必要的调度抖动。
+ * 采用 FlowCoroTask（线程池 resume）：节点做重计算（PID+Stanley 控制），同步 resume 会阻塞
+ * 消息总线分发线程导致 drops，故改用线程池 resume。
+ * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
+ * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
  *
  * 订阅 fusion/localization, planning/trajectory → 发布 control/raw_cmd
  *
@@ -16,12 +18,18 @@
  */
 
 #include "node_plugin.h"
-#include "logger.h"
 #include "param_registry.h"
 #include "state_machine.h"
 #include "road_geometry.h"
 #include "adas_msgs_gen.h"
 #include "coroutine_task.h"
+#undef LOG_TRACE
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARN
+#undef LOG_ERROR
+#undef LOG_FATAL
+#include "logger.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -376,10 +384,10 @@ static int lane_has_pedestrian_risk(double target_lane_y, double same_lane_tol) 
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class ControlTask : public CoroutineTask {
+class ControlTask : public FlowCoroTask {
 public:
     ControlTask(MessageBus* bus, Transport* transport)
-        : CoroutineTask(bus), transport_(transport) {}
+        : FlowCoroTask(bus), transport_(transport) {}
 
 protected:
     Task run() override {

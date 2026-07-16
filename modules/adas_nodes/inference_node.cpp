@@ -1,7 +1,7 @@
 /**
  * inference_node.cpp — 车端模型推理节点 (车端学习闭环 · Stage 2, FlowCoro 协程版)
  *
- * 从 inference_node.c 迁移而来，采用 CoroutineTask 协程框架：
+ * 从 inference_node.c 迁移而来，采用 FlowCoroTask 协程框架：
  *   - co_await sleep_us(period_us) 替代 usleep 定频轮询（可被 stop 取消）
  *   - 保留 on_fusion / on_planning / on_obstacles / on_control_cmd / on_model_ota_active 回调
  *   - MLP 推理 + OTA 热重载 + 影子模式逻辑原样搬入 run()
@@ -23,12 +23,23 @@
  *      - shadow:   只发布 inference/trajectory 供监控对比（默认安全模式）
  *      - plan_assist: 影子轨迹附带额外字段，planning_node 可选择性消费
  *      - direct_ctrl: 额外发布 inference/raw_cmd，安全由 safety_control 兜底
+ *
+ * 采用 FlowCoroTask（线程池 resume）：节点做重计算（MLP 推理），同步 resume 会阻塞
+ * 消息总线分发线程导致 drops，故改用线程池 resume。
+ * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
+ * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
  */
 
 #include "node_plugin.h"
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "coroutine_task.h"
+#undef LOG_TRACE
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARN
+#undef LOG_ERROR
+#undef LOG_FATAL
 #include "logger.h"
 #include "tiny_mlp.h"
 
@@ -429,10 +440,10 @@ static void build_control_raw(double pred_speed, double pred_d,
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class InferenceTask : public CoroutineTask {
+class InferenceTask : public FlowCoroTask {
 public:
     InferenceTask(MessageBus* bus, Transport* transport, double frequency_hz)
-        : CoroutineTask(bus), transport_(transport),
+        : FlowCoroTask(bus), transport_(transport),
           period_us_((long)(1e6 / (frequency_hz > 0.0 ? frequency_hz : 20.0))) {}
 
 protected:

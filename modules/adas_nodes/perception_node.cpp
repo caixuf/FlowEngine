@@ -1,7 +1,7 @@
 /**
  * perception_node.cpp — 感知节点插件 (FlowCoro 协程版)
  *
- * 从 perception_node.c 迁移而来，采用 CoroutineTask 协程框架：
+ * 从 perception_node.c 迁移而来，采用 FlowCoroTask 协程框架：
  *   - co_await sleep_us(period_us) 替代 usleep 定频轮询（可被 stop 取消）
  *   - 保留 on_vehicle_state 持久回调更新 ego 状态
  *   - DBSCAN 聚类逻辑原样搬入 run()
@@ -13,6 +13,11 @@
  *   - DBSCAN 点云聚类 (dbscan_cluster.c) — eps=2m, min_pts=4
  *   - RANSAC 地面移除
  *   - 基于真值的障碍物聚类仿真
+ *
+ * 采用 FlowCoroTask（线程池 resume）：节点做重计算（DBSCAN 点云聚类），同步 resume 会阻塞
+ * 消息总线分发线程导致 drops，故改用线程池 resume。
+ * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
+ * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
  */
 
 #include "node_plugin.h"
@@ -21,6 +26,12 @@
 #include "transport.h"
 #include "discovery.h"
 #include "coroutine_task.h"
+#undef LOG_TRACE
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARN
+#undef LOG_ERROR
+#undef LOG_FATAL
 #include "logger.h"
 
 #include <stdlib.h>
@@ -117,10 +128,10 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class PerceptionTask : public CoroutineTask {
+class PerceptionTask : public FlowCoroTask {
 public:
     PerceptionTask(MessageBus* bus, Transport* transport, int lidar_rate_hz)
-        : CoroutineTask(bus), transport_(transport),
+        : FlowCoroTask(bus), transport_(transport),
           period_us_(1000000L / (lidar_rate_hz > 0 ? lidar_rate_hz : 20)) {}
 
 protected:
