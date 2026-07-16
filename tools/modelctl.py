@@ -209,6 +209,21 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
+    # --json: read params from stdin (HTTP bridge path)
+    if args.json:
+        try:
+            payload = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            print(json.dumps({"ok": False, "error": f"invalid JSON: {e}"}))
+            return 1
+        name = str(payload.get("name", "")).strip()
+        if not name or not all(c.isalnum() or c in "._-" for c in name):
+            print(json.dumps({"ok": False, "error": "invalid model name"}))
+            return 1
+        args.artifact = name
+        if payload.get("runtime_model"):
+            args.runtime_model = str(payload["runtime_model"])
+
     artifact_path = Path(args.artifact)
     runtime_model = Path(args.runtime_model)
 
@@ -330,6 +345,28 @@ def _safe_int(value, param_name: str, min_val: int, max_val: int) -> int | None:
 
 
 def cmd_train_start(args: argparse.Namespace) -> int:
+    # --json: read params from stdin (HTTP bridge path)
+    if args.json:
+        try:
+            payload = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            print(json.dumps({"ok": False, "error": f"invalid JSON: {e}"}))
+            return 1
+        args.backend = str(payload.get("backend", "torch"))
+        name = str(payload.get("name", "")).strip()
+        if not name or not all(c.isalnum() or c in "._-" for c in name):
+            print(json.dumps({"ok": False, "error": "invalid model name"}))
+            return 1
+        args.name = name
+        if payload.get("epochs") is not None:
+            args.epochs = int(payload["epochs"])
+        if payload.get("hidden") is not None:
+            args.hidden = int(payload["hidden"])
+        if payload.get("run_demo_seconds") is not None:
+            args.run_demo_seconds = int(payload["run_demo_seconds"])
+        if payload.get("init_from"):
+            args.init_from = str(payload["init_from"])
+
     backend = args.backend
     if backend not in ("torch", "tiny"):
         raise ValueError("backend must be torch or tiny")
@@ -513,12 +550,14 @@ def main() -> int:
 
     train_start_parser = sub.add_parser("train-start", help="Start a background training job")
     train_start_parser.add_argument("--backend", choices=["torch", "tiny"], default="torch")
-    train_start_parser.add_argument("--name", required=True, help="Model name")
+    train_start_parser.add_argument("--name", help="Model name (required unless --json)")
     train_start_parser.add_argument("--epochs", type=int, default=None)
     train_start_parser.add_argument("--hidden", type=int, default=None)
     train_start_parser.add_argument("--run-demo-seconds", type=int, default=None)
     train_start_parser.add_argument("--init-from", default=None)
     train_start_parser.add_argument("--input", default=None)
+    train_start_parser.add_argument("--json", action="store_true",
+                                     help="Read params from stdin as JSON (for HTTP bridge)")
     train_start_parser.set_defaults(func=cmd_train_start)
 
     train_status_parser = sub.add_parser("train-status", help="Query training job status and artifacts")
@@ -535,8 +574,10 @@ def main() -> int:
     diff_parser.set_defaults(func=cmd_diff)
 
     promote_parser = sub.add_parser("promote", help="Promote a tiny-MLP artifact to the C runtime model")
-    promote_parser.add_argument("artifact", help="Artifact directory containing manifest.json and model.txt")
+    promote_parser.add_argument("artifact", nargs="?", help="Artifact name or directory (required unless --json)")
     promote_parser.add_argument("--runtime-model", default=str(DEFAULT_RUNTIME_MODEL))
+    promote_parser.add_argument("--json", action="store_true",
+                                help="Read params from stdin as JSON (for HTTP bridge)")
     promote_parser.set_defaults(func=cmd_promote)
 
     # ── OTA 子命令 ────────────────────────────────────────────────

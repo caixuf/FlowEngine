@@ -30,7 +30,6 @@
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
-#include <fcntl.h>
 #include <sys/wait.h>
 
 #define MONITOR_MAX_CLIENTS       8
@@ -429,20 +428,18 @@ static char* read_post_body(int fd, const char* headers, size_t max_size) {
     return body;
 }
 
-/* ── 执行训练命令通过 training_bridge.py ──────────────────
+/* ── 执行 modelctl.py 子命令（训练管理的统一入口） ──────────
  *
- * 用双管道 fork/exec training_bridge.py:
- *   stdin_pipe:  父进程写入 JSON 请求体 → 子进程 stdin
- *   stdout_pipe: 子进程 stdout → 父进程读取 JSON 响应
- *
- * 父进程读取完整输出后，包装 HTTP 200 + Content-Type + CORS 头再发送，
- * 不再把子进程 stdout 直接 dup 到客户端 socket（那样会导致缺少 HTTP 头）。
+ * 架构原则: C++ 服务器只做实时数据+静态文件; 训练管理归 modelctl.py CLI。
+ * 本函数是两者间的最薄桥接层:
+ *   fork → pipe stdin(JSON body) → exec modelctl.py <cmd> --json
+ * 不再需要 training_bridge.py 中间层。
  */
 
-static void exec_training_command(int fd, const char* cmd_type,
-                                  const char* json_body, MonitorServer* ms) {
-    int stdin_pipe[2];   /* parent→child: JSON body */
-    int stdout_pipe[2];  /* child→parent: JSON result */
+static void exec_modelctl(int fd, const char* cmd, const char* json_body,
+                          MonitorServer* ms) {
+    int stdin_pipe[2];
+    int stdout_pipe[2];
 
     if (pipe(stdin_pipe) == -1 || pipe(stdout_pipe) == -1) {
         if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
@@ -463,52 +460,45 @@ static void exec_training_command(int fd, const char* cmd_type,
     }
 
     if (pid == 0) {
-        /* ── 子进程: 执行 training_bridge.py ──────────────── */
-        close(stdin_pipe[1]);   /* 关闭 stdin 写端 */
-        close(stdout_pipe[0]);  /* 关闭 stdout 读端 */
-
+        /* 子进程: exec modelctl.py <cmd> --json */
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
         dup2(stdin_pipe[0], STDIN_FILENO);
         dup2(stdout_pipe[1], STDOUT_FILENO);
         dup2(stdout_pipe[1], STDERR_FILENO);
-
         close(stdin_pipe[0]);
         close(stdout_pipe[1]);
 
-        /* 从 html_path 推导 tools/ 目录的绝对路径 */
-        char bridge_path[768];
+        /* 从 html_path 推导 tools/ 目录路径 */
+        char script[768];
         if (ms && ms->html_path[0]) {
-            /* html_path 如 tools/flowboard/index.html → 向上两级得 tools/ */
             char dir[512];
             snprintf(dir, sizeof(dir), "%s", ms->html_path);
             char* slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';          /* 去掉 index.html */
+            if (slash) *slash = '\0';
             slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';          /* 去掉 flowboard/ → tools/ */
-            snprintf(bridge_path, sizeof(bridge_path),
-                     "%s/training_bridge.py", dir);
+            if (slash) *slash = '\0';
+            snprintf(script, sizeof(script), "%s/modelctl.py", dir);
         } else {
-            snprintf(bridge_path, sizeof(bridge_path),
-                     "tools/training_bridge.py");
+            snprintf(script, sizeof(script), "tools/modelctl.py");
         }
 
-        const char* argv[] = {"python3", bridge_path, cmd_type, NULL};
+        const char* argv[] = {"python3", script, cmd, "--json", NULL};
         execvp("python3", (char* const*)argv);
         _exit(1);
     }
 
-    /* ── 父进程: 写 stdin → 读 stdout → 发 HTTP 响应 ────── */
+    /* 父进程: 写 stdin → 读 stdout → 发 HTTP 响应 */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
 
-    /* 写入 JSON 请求体到子进程 stdin */
     if (json_body) {
         size_t len = strlen(json_body);
         ssize_t w = write(stdin_pipe[1], json_body, len);
         (void)w;
     }
-    close(stdin_pipe[1]);  /* 关闭写端 → 子进程 stdin 收到 EOF */
+    close(stdin_pipe[1]);
 
-    /* 读取子进程 stdout 的全部输出 */
     char result[8192];
     size_t total = 0;
     ssize_t nread;
@@ -519,16 +509,13 @@ static void exec_training_command(int fd, const char* cmd_type,
     }
     result[total] = '\0';
     close(stdout_pipe[0]);
-
     waitpid(pid, NULL, 0);
 
-    /* 发送完整的 HTTP 响应（含状态行 + 头 + JSON 体） */
     if (total > 0) {
         send_response(fd, "200 OK", "application/json", result, (int)total);
     } else {
         send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"no output from training bridge\"}",
-                      54);
+                      "{\"ok\":false,\"error\":\"no output\"}", 36);
     }
     close(fd);
 }
@@ -588,24 +575,32 @@ static void handle_client(int fd, MonitorServer* ms) {
         return;
     }
 
-    /* POST handling for training API */
+    /* POST: /api/training/start|promote → fork+exec modelctl.py */
     if (strcmp(method, "POST") == 0) {
-        if (strcmp(path, "/api/training/start") == 0 || strcmp(path, "/api/training/promote") == 0) {
+        if (strcmp(path, "/api/training/start") == 0 ||
+            strcmp(path, "/api/training/promote") == 0) {
             char* body = read_post_body(fd, req, 8192);
             if (body) {
-                const char* cmd_type = (strcmp(path, "/api/training/start") == 0) ? "train-start" : "promote";
-                exec_training_command(fd, cmd_type, body, ms);
+                const char* cmd = (strcmp(path, "/api/training/start") == 0)
+                                  ? "train-start" : "promote";
+                exec_modelctl(fd, cmd, body, ms);
                 free(body);
             } else {
-                send_response(fd, "400 Bad Request", "application/json", "{\"ok\": false, \"error\": \"failed to read body\"}", 48);
+                send_response(fd, "400 Bad Request", "application/json",
+                              "{\"ok\":false,\"error\":\"failed to read body\"}", 48);
                 close(fd);
             }
             return;
-        } else {
-            send_response(fd, "404 Not Found", "text/plain", "not found", 9);
-            close(fd);
-            return;
         }
+        send_response(fd, "404 Not Found", "text/plain", "not found", 9);
+        close(fd);
+        return;
+    }
+
+    /* GET: /api/training/status → modelctl.py train-status (无 JSON body) */
+    if (strcmp(path, "/api/training/status") == 0) {
+        exec_modelctl(fd, "train-status", "{}", ms);
+        return;
     }
 
     /* Route: /api/stream → SSE */
