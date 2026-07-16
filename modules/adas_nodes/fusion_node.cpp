@@ -14,8 +14,11 @@
  *   LiDAR 观测: (x, y)
  *   GPS 观测:   (speed, heading)
  *
- * 采用同步 resume (CoroutineTask，非 FlowCoroTask)，与 safety_control_node 一致：
- * EKF 计算轻量 (<100us)，同步 resume 避免线程池开销与总线分发阻塞。
+ * 采用 FlowCoroTask（线程池 resume），而非 CoroutineTask（同步 resume）：
+ * EKF 计算 + 序列化 + transport_publish 单次 ~50-100μs，同步 resume 会在
+ * 消息总线分发线程上执行完整协程体，阻塞后续消息分发，累积导致 drops。
+ * FlowCoroTask 将 resume 交给 flowcoro 无锁线程池，总线分发线程只触发不阻塞。
+ * 与 safety_control_node 不同——后者纯限幅 <10μs，同步 resume 无阻塞风险。
  */
 
 #include "node_plugin.h"
@@ -26,6 +29,12 @@
 #include "transport.h"
 #include "discovery.h"
 #include "coroutine_task.h"
+#undef LOG_TRACE
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARN
+#undef LOG_ERROR
+#undef LOG_FATAL
 #include "logger.h"
 
 #include <stdlib.h>
@@ -89,18 +98,18 @@ static void on_gps(const Message* msg, void* user_data) {
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class FusionTask : public CoroutineTask {
+class FusionTask : public FlowCoroTask {
 public:
     FusionTask(MessageBus* bus, Transport* transport,
                MessageBuffer* lidar_buf, MessageBuffer* gps_buf,
                EkfFusion* ekf, LatencyTracker* lat_tracker)
-        : CoroutineTask(bus), transport_(transport),
+        : FlowCoroTask(bus), transport_(transport),
           lidar_buf_(lidar_buf), gps_buf_(gps_buf),
           ekf_(ekf), lat_tracker_(lat_tracker) {}
 
 protected:
     Task run() override {
-        LOG_INFO("fusion", "FlowCoro fusion started (synchronous resume)");
+        LOG_INFO("fusion", "FlowCoro fusion started (thread-pool resume)");
 
         while (!should_stop()) {
             /* 替代 pthread_cond_timedwait(100ms)：100ms 超时作 watchdog，
