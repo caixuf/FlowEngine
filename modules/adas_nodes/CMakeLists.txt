@@ -152,9 +152,11 @@ target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 
 # ── 车端学习闭环节点 (data → train → inference → learner → ota) ─
 
-# inference_node: 内置 tiny-MLP 车端推理（影子模式，支持 OTA 热重载）
-add_library(inference_node SHARED inference_node.c)
-target_link_libraries(inference_node ${NODE_LINK_LIBS})
+# inference_node: 内置 tiny-MLP 车端推理（影子模式，支持 OTA 热重载，FlowCoro 协程版）
+# 采用 CoroutineTask 同步 resume，与 fusion/perception/planning/control/safety_control 一致；
+# 仅需 stdc++（子项目已 include flowcoro 头文件目录）。
+add_library(inference_node SHARED inference_node.cpp)
+target_link_libraries(inference_node ${NODE_LINK_LIBS} stdc++)
 
 # data_recorder_node: 训练样本采集（模仿学习 JSONL）
 add_library(data_recorder_node SHARED data_recorder_node.c)

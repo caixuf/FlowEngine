@@ -1,5 +1,10 @@
 /**
- * inference_node.c — 车端模型推理节点 (车端学习闭环 · Stage 2)
+ * inference_node.cpp — 车端模型推理节点 (车端学习闭环 · Stage 2, FlowCoro 协程版)
+ *
+ * 从 inference_node.c 迁移而来，采用 CoroutineTask 协程框架：
+ *   - co_await sleep_us(period_us) 替代 usleep 定频轮询（可被 stop 取消）
+ *   - 保留 on_fusion / on_planning / on_obstacles / on_control_cmd / on_model_ota_active 回调
+ *   - MLP 推理 + OTA 热重载 + 影子模式逻辑原样搬入 run()
  *
  * 订阅 fusion/localization → 用内置 tiny-MLP 推理 → 影子模式发布 inference/trajectory。
  * v2 升级: 支持 16 维特征（含障碍物 + 控制状态），支持直接控制模式。
@@ -18,24 +23,12 @@
  *      - shadow:   只发布 inference/trajectory 供监控对比（默认安全模式）
  *      - plan_assist: 影子轨迹附带额外字段，planning_node 可选择性消费
  *      - direct_ctrl: 额外发布 inference/raw_cmd，安全由 safety_control 兜底
- *
- * 数据契约 (v2，16 维特征):
- *   输入 x[16] = {
- *       ego_v, ego_y, ego_heading, ego_yaw_rate,        // 0-3: 自车状态
- *       front0_x, front0_y, front0_vx,                   // 4-6: 前车 0
- *       front0_type(0/1/2), front0_confidence,            // 7-8
- *       front1_x, front1_y, front1_vx,                   // 9-11: 前车 1
- *       front1_type(0/1/2), front1_confidence,            // 12-13
- *       ctrl_brake, ctrl_emergency_stop(0/1)              // 14-15: 控制状态
- *   }
- *   输出 y[1..4] = { target_speed, lateral_d, throttle, steer }
- *     影子模式只用前 2 维（target_speed + lateral_d）；
- *     direct_ctrl 模式需要 4 维输出（含 throttle/steer）。
  */
 
 #include "node_plugin.h"
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
+#include "coroutine_task.h"
 #include "logger.h"
 #include "tiny_mlp.h"
 
@@ -45,6 +38,11 @@
 #include <math.h>
 #include <pthread.h>
 #include <unistd.h>
+
+#include <memory>
+#include <atomic>
+
+namespace {
 
 /* ── 控制模式枚举 ──────────────────────────────────────────────── */
 
@@ -67,57 +65,62 @@ enum CtrlMode {
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
-static struct {
-    Transport*        transport;
-    DiscoveryManager* discovery;
-    Scheduler*        scheduler;
+struct InferenceContext {
+    Transport*        transport{nullptr};
+    DiscoveryManager* discovery{nullptr};
+    Scheduler*        scheduler{nullptr};
 
-    pthread_t    thread;
-    volatile int running;
-    volatile int should_stop;
+    pthread_t         thread{};
+    bool              running{false};
+    std::atomic<bool> should_stop{false};
 
-    ReflectiveStateMachine sm;
+    ReflectiveStateMachine sm{};
 
-    TinyMLP         model;
-    pthread_mutex_t model_mutex;  /* 保护 model 的并发读写 */
-    char    model_path[256];
-    int     control_mode;  /* enum CtrlMode */
+    TinyMLP         model{};
+    pthread_mutex_t model_mutex{};  /* 保护 model 的并发读写 */
+    char    model_path[256]{};
+    int     control_mode{CTRL_MODE_SHADOW};  /* enum CtrlMode */
 
     /* OTA 热重载: model_ota/active 收到 "reload" 信号时置 1 */
-    volatile int reload_flag;
+    volatile int reload_flag{0};
 
     /* v1 特征: 最新 ego 状态（来自 fusion/localization） */
-    double ego_x, ego_y, ego_v, ego_heading, ego_yaw_rate;
-    volatile int has_fusion;
+    double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0}, ego_yaw_rate{0};
+    volatile int has_fusion{0};
 
     /* v2 特征: 前向障碍物（来自 perception/obstacles） */
-    double front0_x, front0_y, front0_vx;
-    double front0_type, front0_confidence;
-    double front1_x, front1_y, front1_vx;
-    double front1_type, front1_confidence;
-    volatile int has_obstacles;
+    double front0_x{0}, front0_y{0}, front0_vx{0};
+    double front0_type{0}, front0_confidence{0};
+    double front1_x{0}, front1_y{0}, front1_vx{0};
+    double front1_type{0}, front1_confidence{0};
+    volatile int has_obstacles{0};
 
     /* v2 特征: 控制状态（来自 control/cmd） */
-    double ctrl_brake;
-    int    ctrl_emergency_stop;
-    volatile int has_control;
+    double ctrl_brake{0};
+    int    ctrl_emergency_stop{0};
+    volatile int has_control{0};
 
     /* 影子对比: planning 发布的 target_speed（若存在） */
-    double planning_target_speed;
-    volatile int has_planning;
+    double planning_target_speed{0};
+    volatile int has_planning{0};
 
     /* 配置 */
-    double cfg_max_speed;
-    double cfg_frequency_hz;
+    double cfg_max_speed{20.0};
+    double cfg_frequency_hz{20.0};
 
     /* 时序滑窗缓冲: 保存最近 TEMPORAL_WINDOW 帧的 16 维特征 */
     float  frame_buf[TEMPORAL_WINDOW][V2_DIM];
-    int    frame_head;  /* 当前写入位置（环形） */
-    int    frame_count; /* 已写入帧数 */
+    int    frame_head{0};  /* 当前写入位置（环形） */
+    int    frame_count{0}; /* 已写入帧数 */
 
-    int infer_count;
-    int reload_count;
-} g;
+    int infer_count{0};
+    int reload_count{0};
+
+    /* 协程任务 */
+    std::unique_ptr<class InferenceTask> task;
+};
+
+InferenceContext g;
 
 /* ── 订阅回调 ────────────────────────────────────────────────── */
 
@@ -252,7 +255,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
 
 /*
  * model_ota_node 在激活新版本后发布 model_ota/active。
- * 收到 "reload" 信号时，设置 reload_flag；inference_thread 在下一个周期
+ * 收到 "reload" 信号时，设置 reload_flag；inference 协程在下一个周期
  * 检测到 flag 后加锁重载模型（保证推理线程内原子更新）。
  */
 static void on_model_ota_active(const Message* msg, void* user_data) {
@@ -263,8 +266,6 @@ static void on_model_ota_active(const Message* msg, void* user_data) {
         g.reload_flag = 1;
     }
 }
-
-
 
 /* 将当前时刻 ego + obstacles + control 打包成 16 维帧 */
 static void build_frame(float frame[V2_DIM]) {
@@ -391,6 +392,7 @@ static void build_control_raw(double pred_speed, double pred_d,
                               double pred_throttle, double pred_brake,
                               double pred_steer, double pred_lc, double pred_conf,
                               uint8_t* buf, size_t* len, char* mode_tag) {
+    (void)pred_lc; (void)pred_conf;
     double throttle = pred_throttle, brake = pred_brake, steer = pred_steer;
 
     /* 模型未输出有效控制时回退到 PD 推算 */
@@ -425,120 +427,139 @@ static void build_control_raw(double pred_speed, double pred_d,
     ControlRaw_serialize(&raw, buf, len);
 }
 
-/* ── 任务线程 ────────────────────────────────────────────────── */
+/* ── 协程任务 ────────────────────────────────────────────────── */
 
-static void* inference_thread(void* arg) {
-    (void)arg;
-    pthread_setname_np(pthread_self(), "inference");
+class InferenceTask : public CoroutineTask {
+public:
+    InferenceTask(MessageBus* bus, Transport* transport, double frequency_hz)
+        : CoroutineTask(bus), transport_(transport),
+          period_us_((long)(1e6 / (frequency_hz > 0.0 ? frequency_hz : 20.0))) {}
 
-    double period = g.cfg_frequency_hz > 0.0 ? 1.0 / g.cfg_frequency_hz : 0.1;
-    useconds_t sleep_us = (useconds_t)(period * 1e6);
+protected:
+    Task run() override {
+        pthread_setname_np(pthread_self(), "inference");
 
-    while (!g.should_stop) {
-        usleep(sleep_us);
-        if (g.should_stop) break;
+        while (!should_stop()) {
+            /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
+            co_await sleep_us(period_us_);
+            if (should_stop()) break;
 
-        /* OTA 热重载: 检测 model_ota_node 发来的 reload 信号 */
-        if (g.reload_flag) {
-            g.reload_flag = 0;
-            pthread_mutex_lock(&g.model_mutex);
-            TinyMLP new_model;
-            if (tiny_mlp_load(&new_model, g.model_path) == 0) {
-                g.model = new_model;
-                g.reload_count++;
-                LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
-                         g.reload_count, g.model_path,
-                         g.model.in_dim, g.model.hid_dim, g.model.out_dim);
-            } else {
-                LOG_WARN("inference", "OTA hot-reload failed: %s", g.model_path);
+            /* OTA 热重载: 检测 model_ota_node 发来的 reload 信号 */
+            if (g.reload_flag) {
+                g.reload_flag = 0;
+                pthread_mutex_lock(&g.model_mutex);
+                TinyMLP new_model;
+                if (tiny_mlp_load(&new_model, g.model_path) == 0) {
+                    g.model = new_model;
+                    g.reload_count++;
+                    LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
+                             g.reload_count, g.model_path,
+                             g.model.in_dim, g.model.hid_dim, g.model.out_dim);
+                } else {
+                    LOG_WARN("inference", "OTA hot-reload failed: %s", g.model_path);
+                }
+                pthread_mutex_unlock(&g.model_mutex);
             }
-            pthread_mutex_unlock(&g.model_mutex);
-        }
 
-        if (!g.has_fusion) continue;
+            if (!g.has_fusion) continue;
 
-        /* 将当前帧压入时序缓冲 */
-        push_frame();
+            /* 将当前帧压入时序缓冲 */
+            push_frame();
 
-        double pred_speed = 0.0, pred_d = 0.0;
-        double pred_throttle = 0.0, pred_brake = 0.0, pred_steer = 0.0;
-        double pred_lc = 0.0, pred_conf = 0.0;
-        run_inference(&pred_speed, &pred_d,
-                      &pred_throttle, &pred_brake, &pred_steer,
-                      &pred_lc, &pred_conf);
+            double pred_speed = 0.0, pred_d = 0.0;
+            double pred_throttle = 0.0, pred_brake = 0.0, pred_steer = 0.0;
+            double pred_lc = 0.0, pred_conf = 0.0;
+            run_inference(&pred_speed, &pred_d,
+                          &pred_throttle, &pred_brake, &pred_steer,
+                          &pred_lc, &pred_conf);
 
-        /* 影子对比: 与 planning 输出的目标速度差 */
-        double shadow_delta = g.has_planning
-            ? (pred_speed - g.planning_target_speed) : 0.0;
+            /* 影子对比: 与 planning 输出的目标速度差 */
+            double shadow_delta = g.has_planning
+                ? (pred_speed - g.planning_target_speed) : 0.0;
 
-        const char* model_name = g.model.loaded ? "tiny-mlp" : "heuristic";
+            const char* model_name = g.model.loaded ? "tiny-mlp" : "heuristic";
 
-        /* 所有模式下都发布 inference/trajectory 供监控 */
-        {
-            char traj[1280];
-            int off = snprintf(traj, sizeof(traj),
-                "{\"type\":\"inference\",\"model\":\"%s\",\"infer\":%d,"
-                "\"shadow\":true,\"target_speed\":%.2f,\"lateral_d\":%.2f,"
-                "\"shadow_delta\":%.2f,\"throttle\":%.3f,\"brake\":%.3f,"
-                "\"steer\":%.4f,\"lane_change\":%.1f,\"confidence\":%.2f,"
-                "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"v\":%.2f}",
-                model_name, g.infer_count,
-                pred_speed, pred_d, shadow_delta,
-                pred_throttle, pred_brake, pred_steer, pred_lc, pred_conf,
-                g.ego_x, g.ego_y, g.ego_v);
+            /* 所有模式下都发布 inference/trajectory 供监控 */
+            {
+                char traj[1280];
+                int off = snprintf(traj, sizeof(traj),
+                    "{\"type\":\"inference\",\"model\":\"%s\",\"infer\":%d,"
+                    "\"shadow\":true,\"target_speed\":%.2f,\"lateral_d\":%.2f,"
+                    "\"shadow_delta\":%.2f,\"throttle\":%.3f,\"brake\":%.3f,"
+                    "\"steer\":%.4f,\"lane_change\":%.1f,\"confidence\":%.2f,"
+                    "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"v\":%.2f}",
+                    model_name, g.infer_count,
+                    pred_speed, pred_d, shadow_delta,
+                    pred_throttle, pred_brake, pred_steer, pred_lc, pred_conf,
+                    g.ego_x, g.ego_y, g.ego_v);
 
-            if (g.has_obstacles) {
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                    ",\"front0\":{\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"type\":%.0f}",
-                    g.front0_x, g.front0_y, g.front0_vx, g.front0_type);
+                if (g.has_obstacles) {
+                    off += snprintf(traj + off, sizeof(traj) - (size_t)off,
+                        ",\"front0\":{\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"type\":%.0f}",
+                        g.front0_x, g.front0_y, g.front0_vx, g.front0_type);
+                }
+                off += snprintf(traj + off, sizeof(traj) - (size_t)off, "}");
+
+                transport_publish(transport_, "inference/trajectory",
+                                  (const uint8_t*)traj, (uint32_t)off + 1);
             }
-            off += snprintf(traj + off, sizeof(traj) - (size_t)off, "}");
 
-            transport_publish(g.transport, "inference/trajectory",
-                              (const uint8_t*)traj, (uint32_t)off + 1);
+            /* plan_assist 模式: 额外发布结构化轨迹供 planning 消费 */
+            if (g.control_mode == CTRL_MODE_PLAN_ASSIST) {
+                char assist[512];
+                snprintf(assist, sizeof(assist),
+                    "{\"type\":\"assist\",\"speed\":%.2f,\"d\":%.2f,"
+                    "\"throttle\":%.3f,\"steer\":%.4f,\"infer\":%d}",
+                    pred_speed, pred_d, pred_throttle, pred_steer, g.infer_count);
+                transport_publish(transport_, "inference/assist",
+                                  (const uint8_t*)assist, (uint32_t)strlen(assist) + 1);
+            }
+
+            /* direct_ctrl 模式: 发布推理控制指令（safety_control 兜底） */
+            if (g.control_mode == CTRL_MODE_DIRECT) {
+                uint8_t raw_buf[64];
+                size_t  raw_len = sizeof(raw_buf);
+                build_control_raw(pred_speed, pred_d,
+                                  pred_throttle, pred_brake, pred_steer,
+                                  pred_lc, pred_conf,
+                                  raw_buf, &raw_len, "INFER");
+                transport_publish(transport_, "inference/raw_cmd",
+                                  raw_buf, (uint32_t)raw_len);
+            }
+
+            g.infer_count++;
+
+            if (g.infer_count % 25 == 1) {
+                const char* mode_str = "shadow";
+                if (g.control_mode == CTRL_MODE_PLAN_ASSIST) mode_str = "plan_assist";
+                else if (g.control_mode == CTRL_MODE_DIRECT) mode_str = "direct_ctrl";
+                LOG_INFO("inference",
+                    "#%d [%s] mode=%s ego_v=%.1f → speed=%.1f d=%.2f (shadow Δ=%.2f vs planning)",
+                    g.infer_count, model_name, mode_str,
+                    g.ego_v, pred_speed, pred_d, shadow_delta);
+            }
         }
 
-        /* plan_assist 模式: 额外发布结构化轨迹供 planning 消费 */
-        if (g.control_mode == CTRL_MODE_PLAN_ASSIST) {
-            char assist[512];
-            snprintf(assist, sizeof(assist),
-                "{\"type\":\"assist\",\"speed\":%.2f,\"d\":%.2f,"
-                "\"throttle\":%.3f,\"steer\":%.4f,\"infer\":%d}",
-                pred_speed, pred_d, pred_throttle, pred_steer, g.infer_count);
-            transport_publish(g.transport, "inference/assist",
-                              (const uint8_t*)assist, (uint32_t)strlen(assist) + 1);
-        }
-
-        /* direct_ctrl 模式: 发布推理控制指令（safety_control 兜底） */
-        if (g.control_mode == CTRL_MODE_DIRECT) {
-            uint8_t raw_buf[64];
-            size_t  raw_len = sizeof(raw_buf);
-            build_control_raw(pred_speed, pred_d,
-                              pred_throttle, pred_brake, pred_steer,
-                              pred_lc, pred_conf,
-                              raw_buf, &raw_len, "INFER");
-            transport_publish(g.transport, "inference/raw_cmd",
-                              raw_buf, (uint32_t)raw_len);
-        }
-
-        g.infer_count++;
-
-        if (g.infer_count % 25 == 1) {
-            const char* mode_str = "shadow";
-            if (g.control_mode == CTRL_MODE_PLAN_ASSIST) mode_str = "plan_assist";
-            else if (g.control_mode == CTRL_MODE_DIRECT) mode_str = "direct_ctrl";
-            LOG_INFO("inference",
-                "#%d [%s] mode=%s ego_v=%.1f → speed=%.1f d=%.2f (shadow Δ=%.2f vs planning)",
-                g.infer_count, model_name, mode_str,
-                g.ego_v, pred_speed, pred_d, shadow_delta);
-        }
+        LOG_INFO("inference", "stopped (%d inferences, state=%s)",
+                 g.infer_count, statem_state_name(&g.sm, g.sm.current));
+        statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
+        statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
     }
 
-    LOG_INFO("inference", "stopped (%d inferences, state=%s)",
-             g.infer_count, statem_state_name(&g.sm, g.sm.current));
-    statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
-    statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+private:
+    Transport* transport_;
+    long       period_us_;
+};
+
+/* ── 协程宿主线程 ─────────────────────────────────────────────── */
+
+void* inference_thread(void*) {
+    try {
+        g.task->execute();
+    } catch (...) {
+        LOG_ERROR("inference", "FlowCoro task failed");
+    }
+    return nullptr;
 }
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
@@ -549,28 +570,51 @@ static const char* s_inputs[]  = {
     "perception/obstacles",   /* v2 */
     "control/cmd",            /* v2 */
     "model_ota/active",       /* OTA 热重载信号 */
-    NULL
+    nullptr
 };
 static const char* s_outputs[] = {
     "inference/trajectory",
     "inference/assist",       /* plan_assist 模式 */
     "inference/raw_cmd",      /* direct_ctrl 模式 */
-    NULL
+    nullptr
 };
 
-static NodePlugin s_plugin;  /* forward decl */
+extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 
 static int inference_init(MessageBus* bus, Transport* transport,
                           DiscoveryManager* discovery, Scheduler* scheduler,
                           const char* params_json) {
-    (void)bus;
-
-    memset(&g, 0, sizeof(g));
+    /* 清零并重新初始化（atomic/unique_ptr 不可拷贝，逐字段赋值） */
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
+    g.should_stop = false;
     g.control_mode = CTRL_MODE_SHADOW;  /* 默认安全模式 */
+
+    g.reload_flag = 0;
+
+    g.ego_x = g.ego_y = g.ego_v = g.ego_heading = g.ego_yaw_rate = 0.0;
+    g.has_fusion = 0;
+
+    g.front0_x = g.front0_y = g.front0_vx = 0.0;
+    g.front0_type = g.front0_confidence = 0.0;
+    g.front1_x = g.front1_y = g.front1_vx = 0.0;
+    g.front1_type = g.front1_confidence = 0.0;
+    g.has_obstacles = 0;
+
+    g.ctrl_brake = 0.0;
+    g.ctrl_emergency_stop = 0;
+    g.has_control = 0;
+
+    g.planning_target_speed = 0.0;
+    g.has_planning = 0;
+
+    g.frame_head = 0;
+    g.frame_count = 0;
+    memset(g.frame_buf, 0, sizeof(g.frame_buf));
+
+    g.infer_count = 0;
+    g.reload_count = 0;
 
     /* 默认参数 */
     g.cfg_max_speed    = 20.0;
@@ -602,7 +646,7 @@ static int inference_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    pthread_mutex_init(&g.model_mutex, NULL);
+    pthread_mutex_init(&g.model_mutex, nullptr);
 
     /* 尝试加载训练好的模型 */
     if (tiny_mlp_load(&g.model, g.model_path) == 0) {
@@ -615,11 +659,11 @@ static int inference_init(MessageBus* bus, Transport* transport,
                  g.model_path);
     }
 
-    transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
-    transport_subscribe(transport, "planning/trajectory", on_planning, NULL);
-    transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);  /* v2 */
-    transport_subscribe(transport, "control/cmd", on_control_cmd, NULL);         /* v2 */
-    transport_subscribe(transport, "model_ota/active", on_model_ota_active, NULL); /* OTA */
+    transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
+    transport_subscribe(transport, "planning/trajectory", on_planning, nullptr);
+    transport_subscribe(transport, "perception/obstacles", on_obstacles, nullptr);  /* v2 */
+    transport_subscribe(transport, "control/cmd", on_control_cmd, nullptr);         /* v2 */
+    transport_subscribe(transport, "model_ota/active", on_model_ota_active, nullptr); /* OTA */
     transport_advertise(transport, "inference/trajectory", 0x1F5E2A10u);
     if (g.control_mode >= CTRL_MODE_PLAN_ASSIST)
         transport_advertise(transport, "inference/assist", 0x1F5E2A11u);
@@ -631,48 +675,65 @@ static int inference_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "inference/trajectory", 0x1F5E2A10u,
                         CAP_PUBLISHER, g.cfg_frequency_hz);
 
-    statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "inference");
-    statem_send_event(&g.sm, SM_EVENT_START, NULL);
+    statem_init(&g.sm, nullptr, SM_STATE_INITIALIZED, "inference");
+    statem_send_event(&g.sm, SM_EVENT_START, nullptr);
+
+    g.task = std::make_unique<InferenceTask>(bus, transport, g.cfg_frequency_hz);
 
     const char* mode_str = "shadow";
     if (g.control_mode == CTRL_MODE_PLAN_ASSIST) mode_str = "plan_assist";
     else if (g.control_mode == CTRL_MODE_DIRECT) mode_str = "direct_ctrl";
-    LOG_INFO("inference", "initialized (mode=%s, %.0f Hz, max=%.0f m/s, %s)",
+    LOG_INFO("inference", "initialized (FlowCoro, mode=%s, %.0f Hz, max=%.0f m/s, %s)",
              mode_str, g.cfg_frequency_hz, g.cfg_max_speed,
              g.model.loaded ? "model loaded" : "heuristic fallback");
     return 0;
 }
 
 static int inference_start(void) {
-    g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, inference_thread, NULL) != 0) return -1;
+    if (!g.task) return -1;
+    g.should_stop = false;
+    if (pthread_create(&g.thread, nullptr, inference_thread, nullptr) != 0) return -1;
+    g.running = true;
     LOG_INFO("inference", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
-static void inference_stop(void) { g.should_stop = 1; }
+static void inference_stop(void) {
+    g.should_stop = true;
+    if (g.task) g.task->stop();
+}
 
 static void inference_cleanup(void) {
-    if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+    inference_stop();
+    if (g.running) {
+        pthread_join(g.thread, nullptr);
+        g.running = false;
+    }
+    g.task.reset();
     pthread_mutex_destroy(&g.model_mutex);
+    statem_cleanup(&g.sm);
     LOG_INFO("inference", "cleanup done (reloads=%d)", g.reload_count);
 }
 
 static int inference_health(void) { return 0; }
 
-static NodePlugin s_plugin = {
-    .api_version   = NODE_PLUGIN_API_VERSION,
-    .name          = "inference",
-    .version       = "2.1.0",
-    .description   = "On-vehicle MLP inference (v2: 16-dim + OTA hot-reload)",
-    .input_topics  = s_inputs,
-    .output_topics = s_outputs,
-    .init          = inference_init,
-    .start         = inference_start,
-    .stop          = inference_stop,
-    .cleanup       = inference_cleanup,
-    .health        = inference_health,
+/* ── 导出入口 ────────────────────────────────────────────────── */
+
+NodePlugin s_plugin = {
+    NODE_PLUGIN_API_VERSION,
+    "inference",
+    "2.1.0",
+    "On-vehicle MLP inference (v2: 16-dim + OTA hot-reload) [FlowCoro]",
+    s_inputs,
+    s_outputs,
+    inference_init,
+    inference_start,
+    inference_stop,
+    inference_cleanup,
+    inference_health,
 };
 
-NodePlugin* node_get_plugin(void) { return &s_plugin; }
+} // namespace
+
+extern "C" NodePlugin* node_get_plugin(void) { return &s_plugin; }
