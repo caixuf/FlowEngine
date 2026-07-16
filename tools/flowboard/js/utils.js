@@ -155,10 +155,10 @@ export function _buildSedan(color, secondaryColor) {
   cabin.castShadow = true;
   g.add(cabin);
 
-  // Windshield
+  // Windshield — 深色高反射玻璃，配合 PMREM 环境贴图反射天空/地面
   var ws = new T.Mesh(
     _carGeom.windshield,
-    new T.MeshStandardMaterial({ color: 0x334455, metalness: 0.6, roughness: 0.1 })
+    new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.05 })
   );
   ws.position.set(1.45, 1.3, 0);
   ws.rotation.z = -0.45;
@@ -167,7 +167,7 @@ export function _buildSedan(color, secondaryColor) {
   // Rear window
   var rw = new T.Mesh(
     _carGeom.rearWindow,
-    new T.MeshStandardMaterial({ color: 0x334455, metalness: 0.6, roughness: 0.1 })
+    new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.05 })
   );
   rw.position.set(-0.55, 1.25, 0);
   rw.rotation.z = 0.45;
@@ -213,10 +213,10 @@ export function _buildSedan(color, secondaryColor) {
   g.add(frontWheels);
   g.userData.frontWheels = frontWheels;
 
-  // Headlights
+  // Headlights — emissive 触发 Bloom 光晕（threshold=0.85，亮区才发光）
   var hl = new T.Mesh(
     _carGeom.headlight,
-    new T.MeshStandardMaterial({ color: 0xffffcc, roughness: 0.2 })
+    new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.2 })
   );
   hl.position.set(2.25, 0.65, 0.5);
   g.add(hl);
@@ -224,10 +224,10 @@ export function _buildSedan(color, secondaryColor) {
   hl2.position.z = -0.5;
   g.add(hl2);
 
-  // Taillights
+  // Taillights — 红色 emissive，Bloom 会产生红色光晕
   var tl = new T.Mesh(
     _carGeom.taillight,
-    new T.MeshStandardMaterial({ color: 0xff2222, roughness: 0.2 })
+    new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.2, roughness: 0.2 })
   );
   tl.position.set(-2.25, 0.65, 0.5);
   g.add(tl);

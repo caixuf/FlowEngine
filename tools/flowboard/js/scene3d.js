@@ -35,6 +35,8 @@ let _lidarCloud = null;
 let _lidarWorld = [];
 let _obsPool = [], _obsWorld = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
+let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
+let _composer = null;  /* EffectComposer 引用（Bloom 后处理），为 null 时直渲 */
 
 /** Obstacle type → colour lookup (defined once, shared) */
 const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cyclist: 0x33ddff, cone: 0xff6600 };
@@ -246,6 +248,9 @@ function resize3D() {
   renderer3d.setSize(w, h);
   camera3d.aspect = w / h;
   camera3d.updateProjectionMatrix();
+  // Bloom 后处理 composer 需同步尺寸，否则 resize 后渲染分辨率与 canvas 不匹配，
+  // 导致 Bloom pass 按旧尺寸绘制被缩放、画面糊或边缘错位。
+  if (_composer) _composer.setSize(w, h);
 }
 
 function init3DScene() {
@@ -300,8 +305,44 @@ function init3DScene() {
   renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
   renderer3d.toneMappingExposure = 1.1;
+  // 开启阴影渲染：物体 castShadow/receiveShadow 才会真正产生阴影，
+  // 之前 sun.castShadow=true 但 renderer 未启用 shadowMap，阴影被静默丢弃。
+  renderer3d.shadowMap.enabled = true;
+  renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
   el.appendChild(renderer3d.domElement);
   document.getElementById("scene3d-msg").style.display = "none";
+
+  // ── 程序化环境贴图：PMREMGenerator 从自建简单场景生成 ──
+  // MeshStandardMaterial 需 envMap 才能让 metalness/roughness 产生反射。
+  // RoomEnvironment 在 examples（核心库无），这里自建几个发光面片模拟
+  // 环境光照，PMREM 预滤波后作为 scene.environment，车漆立刻有反射质感。
+  try {
+    var pmrem = new THREE.PMREMGenerator(renderer3d);
+    var envScene = new THREE.Scene();
+    // 模拟天窗/侧窗的发光面片，给金属表面提供反射参考
+    var envFaces = [
+      { pos: [0, 20, 0], col: 0xffffff, opa: 1.0 },   // 顶光（天窗）
+      { pos: [20, 5, 0], col: 0x88aaff, opa: 0.6 },   // 右侧冷光
+      { pos: [-20, 5, 0], col: 0xffddaa, opa: 0.5 },  // 左侧暖光
+      { pos: [0, 5, 20], col: 0xaaccff, opa: 0.4 },   // 前方天光
+      { pos: [0, 5, -20], col: 0x556677, opa: 0.3 }   // 后方阴影
+    ];
+    for (var fi = 0; fi < envFaces.length; fi++) {
+      var ef = envFaces[fi];
+      var em = new THREE.Mesh(
+        new THREE.PlaneGeometry(30, 30),
+        new THREE.MeshBasicMaterial({ color: ef.col, transparent: ef.opa < 1, opacity: ef.opa, side: THREE.DoubleSide })
+      );
+      em.position.set(ef.pos[0], ef.pos[1], ef.pos[2]);
+      em.lookAt(0, 0, 0);
+      envScene.add(em);
+    }
+    var envTex = pmrem.fromScene(envScene, 0.04).texture;
+    scene3d.environment = envTex;
+    pmrem.dispose();
+  } catch (envErr) {
+    console.warn('[scene3d] PMREM environment setup failed, falling back to no env:', envErr);
+  }
 
   // WebGL context loss (GPU reset, tab backgrounded, driver hiccup) must not
   // crash the render loop. Suspend cleanly on loss, rebuild on restore; fall
@@ -318,13 +359,27 @@ function init3DScene() {
   }, false);
 
   // Lighting — brighter scene so lane markings are clearly visible
-  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.85));
+  // 环境贴图已提供基础反射，降低 ambient 避免过曝，让阴影更立体
+  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.45));
   var sun = new THREE.DirectionalLight(0xfff8ee, 1.8);
   sun.position.set(30, 40, 15);
   sun.castShadow = true;
+  // 阴影相机参数：默认 frustum 太大导致阴影分辨率低（糊），收窄到跟随区域
+  sun.shadow.mapSize.width = 2048;
+  sun.shadow.mapSize.height = 2048;
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 120;
+  sun.shadow.camera.left = -40;
+  sun.shadow.camera.right = 40;
+  sun.shadow.camera.top = 40;
+  sun.shadow.camera.bottom = -40;
+  sun.shadow.bias = -0.0005;  // 消除 peter-panning
   scene3d.add(sun);
+  _sunLight = sun;  /* 供 _renderFrame 跟随 ego 更新 */
+  // sun 目标点跟随 ego（在 _renderFrame 里更新 sun.target.position）
+  scene3d.add(sun.target);
   // Hemisphere (sky/ground ambient)
-  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.5));
+  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.4));
 
   // ── Ground (large flat plane, matches road length) ──
   var gndGeo = new THREE.PlaneGeometry(800, 400);
@@ -385,6 +440,34 @@ function init3DScene() {
   _tmpV3 = new THREE.Vector3();
   _tmpScale = new THREE.Vector3(1, 1, 1);
 
+  // ── Bloom 后处理：EffectComposer + UnrealBloomPass ──
+  // 依赖 examples/js 后处理脚本（index.html CDN 引入）。加载失败或版本不匹配
+  // 时 window._bloomUnavailable=true，降级为 renderer 直接渲染。
+  _composer = null;
+  if (!window._bloomUnavailable && THREE.EffectComposer && THREE.RenderPass &&
+      THREE.UnrealBloomPass && THREE.ShaderPass) {
+    try {
+      _composer = new THREE.EffectComposer(renderer3d);
+      _composer.addPass(new THREE.RenderPass(scene3d, camera3d));
+      var bloomPass = new THREE.UnrealBloomPass(
+        new THREE.Vector2(w, h),
+        0.6,   // strength：车灯/反光的光晕强度
+        0.4,   // radius：光晕扩散半径
+        0.85   // threshold：只让高亮区域（车灯/emissive）发光，避免整屏泛白
+      );
+      _composer.addPass(bloomPass);
+      var copyPass = new THREE.ShaderPass(THREE.CopyShader);
+      copyPass.renderToScreen = true;
+      _composer.addPass(copyPass);
+    } catch (bloomErr) {
+      console.warn('[scene3d] Bloom setup failed, falling back to direct render:', bloomErr);
+      _composer = null;
+    }
+  } else if (!window._bloomUnavailable) {
+    // 脚本可能异步未加载完，但通常同步 script 标签已执行；兜底降级
+    window._bloomUnavailable = true;
+  }
+
   // ── Animation loop ──
   function anim3D() {
     requestAnimationFrame(anim3D);
@@ -393,7 +476,11 @@ function init3DScene() {
     if (!renderer3d || !scene3d || !camera3d) return;
     safeCall('scene3d.frame', function() {
       _renderFrame();
-      renderer3d.render(scene3d, camera3d);
+      if (_composer) {
+        _composer.render();
+      } else {
+        renderer3d.render(scene3d, camera3d);
+      }
     });
   }
   anim3D();
@@ -434,6 +521,13 @@ function _renderFrame() {
 
   // Keep ground + environment near ego (road segments are at fixed world X).
   var chunkX = Math.round(sx / 200) * 200;
+
+  // ── 阴影光源跟随 ego：sun 相对 ego 保持固定偏移，阴影 frustum 始终覆盖 ego 周围 ──
+  if (_sunLight) {
+    _sunLight.position.set(sx + 30, 40, 15);
+    _sunLight.target.position.set(sx, 0, 0);
+    _sunLight.target.updateMatrixWorld();
+  }
   if (_groundMesh && Math.abs(_groundMesh.position.x - chunkX) > 100) _groundMesh.position.x = chunkX;
   if (_envGroup && Math.abs(_envGroup.position.x - chunkX) > 100) _envGroup.position.x = chunkX;
 
