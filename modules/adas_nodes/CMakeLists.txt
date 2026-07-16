@@ -213,8 +213,26 @@ target_link_libraries(lidar_driver_node ${NODE_LINK_LIBS})
 add_library(gps_driver_node SHARED gps_driver_node.c)
 target_link_libraries(gps_driver_node ${NODE_LINK_LIBS})
 
+# imu_driver_node: 真实 IMU 串口驱动节点（6-axis IMU → ImuData → sensor/imu）
+# 高频惯性输入入口，为 fusion EKF 提供 predict 增量、为 SLAM 提供运动先验。
+# 从串口读 ASCII IMU 行 → parse_imu_line 解析 → ImuData 序列化发布。无硬件时自动降级
+# 为 dry-run（生成静止模拟 IMU 走完整链路）。parse_imu_line() 是硬件适配点，社区用户
+# 按自己 IMU 协议（MPU6050/ICM-42688/Xsens MTi-300/WIT-Motion）改它即可。
+# 依赖 serial_port.h (POSIX termios)，随 libflowengine_core 提供。
+add_library(imu_driver_node SHARED imu_driver_node.c)
+target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
+
+# slam_node: SLAM 适配层节点（LiDAR + IMU → Pose2D → sensor/pose）
+# 为 GPS 丢失场景（室内/隧道）提供定位。默认 dead reckoning 占位，真实算法
+# （FAST-LIO2/LIO-SAM）作为外部库通过 slam_update() 钩子接入。无传感器时
+# 自动降级为 dry-run（生成圆形轨迹模拟位姿）。slam_update() 是算法替换点，
+# 社区用户按自己 SLAM 库替换该函数实现即可，订阅/发布/线程框架无需改动。
+# 编译依赖: adas_msgs_gen.h (LidarFrame/ImuData/Pose2D 序列化)，随构建生成。
+add_library(slam_node SHARED slam_node.c)
+target_link_libraries(slam_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

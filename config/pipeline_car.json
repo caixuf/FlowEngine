@@ -29,6 +29,46 @@
       "params": "{\"serial_port\":\"/dev/ttyUSB0\",\"baud_rate\":9600,\"enable\":1,\"publish_hz\":10,\"dry_run\":0}"
     },
     {
+      "name": "imu_driver",
+      "library_path": "build/lib/libimu_driver_node.so",
+      "auto_start": true,
+      "publish": [
+        {
+          "topic": "sensor/imu",
+          "type": "ImuData",
+          "qos": {
+            "depth": 4,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 20
+          }
+        }
+      ],
+      "params": "{\"serial_port\":\"/dev/ttyUSB2\",\"baud_rate\":115200,\"enable\":1,\"sample_hz\":100,\"gravity\":9.80665,\"dry_run\":0}"
+    },
+    {
+      "name": "slam",
+      "library_path": "build/lib/libslam_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "sensor/lidar",
+        "sensor/imu"
+      ],
+      "publish": [
+        {
+          "topic": "sensor/pose",
+          "type": "Pose2D",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 50
+          }
+        }
+      ],
+      "params": "{\"enable\":1,\"publish_hz\":20,\"dry_run\":0,\"use_lidar\":1,\"use_imu\":1,\"algo\":\"dead_reckon\",\"initial_x\":0.0,\"initial_y\":0.0,\"initial_heading\":0.0}"
+    },
+    {
       "name": "lidar_driver",
       "library_path": "build/lib/liblidar_driver_node.so",
       "auto_start": true,

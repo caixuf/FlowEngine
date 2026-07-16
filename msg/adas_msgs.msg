@@ -53,6 +53,34 @@ struct GpsData {
     float    accuracy_m     # 定位精度（米，1-sigma）
 }
 
+# IMU 原始数据（6 轴：加速度 + 陀螺仪）
+# 用于 fusion EKF 的 predict 增量，或 SLAM（FAST-LIO2/LIO-SAM）的输入。
+# 常见模块：MPU6050(6轴)、ICM-42688、BMI088、Xsens MTi-300。
+struct ImuData {
+    float    accel_x        # 加速度 X 轴（m/s²）
+    float    accel_y        # 加速度 Y 轴（m/s²）
+    float    accel_z        # 加速度 Z 轴（m/s²，含重力）
+    float    gyro_x         # 陀螺仪 X 轴（rad/s）
+    float    gyro_y         # 陀螺仪 Y 轴（rad/s）
+    float    gyro_z         # 陀螺仪 Z 轴（rad/s，即 yaw_rate）
+    uint32   timestamp_us   # 采样时间戳（CLOCK_MONOTONIC，微秒）
+    float    temperature    # 温度（℃，部分模块提供，用于温漂补偿）
+}
+
+# 2D 位姿（SLAM 或里程计输出）
+# 用于 fusion 多源融合，或在 GPS 丢失时作为定位来源。
+# 坐标系：局部笛卡尔（米），X=forward, Y=left, heading 弧度。
+struct Pose2D {
+    float    x              # X 坐标（米）
+    float    y              # Y 坐标（米）
+    float    heading        # 航向角（弧度）
+    float    cov_xx         # 位置 X 协方差
+    float    cov_yy         # 位置 Y 协方差
+    float    cov_hh         # 航向协方差
+    bool     converged      # SLAM 是否收敛
+    uint32   source         # 来源标志：0=UNKNOWN, 1=GPS, 2=SLAM, 3=ODOMETRY
+}
+
 # ── 感知输出 ─────────────────────────────────────────────────
 
 # 嵌套结构体 — 被 ObstacleList 引用
