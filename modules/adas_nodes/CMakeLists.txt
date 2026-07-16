@@ -311,8 +311,28 @@ target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS})
 add_library(traversability_node SHARED traversability_node.c)
 target_link_libraries(traversability_node ${NODE_LINK_LIBS})
 
+# lane_detection_node: Lane boundary detection (sandbox: from road_geometry)
+add_library(lane_detection_node SHARED lane_detection_node.c)
+target_link_libraries(lane_detection_node ${NODE_LINK_LIBS})
+
+# traffic_light_recognition_node: Traffic light perception (sandbox: from sim_world)
+add_library(traffic_light_recognition_node SHARED traffic_light_recognition_node.c)
+target_link_libraries(traffic_light_recognition_node ${NODE_LINK_LIBS})
+
+# object_tracker_node: Multi-object Kalman tracker
+add_library(object_tracker_node SHARED object_tracker_node.c)
+target_link_libraries(object_tracker_node ${NODE_LINK_LIBS})
+
+# prediction_node: Multi-trajectory motion prediction
+add_library(prediction_node SHARED prediction_node.c)
+target_link_libraries(prediction_node ${NODE_LINK_LIBS} m)
+
+# scene_assembler_node: Aggregate all perception into unified EnvironmentModel
+add_library(scene_assembler_node SHARED scene_assembler_node.c)
+target_link_libraries(scene_assembler_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

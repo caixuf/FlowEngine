@@ -71,6 +71,111 @@ typedef struct {
     Obstacle obstacles[ADAS_MAX_OBSTACLES];
 } ObstacleList;
 
+/* ── 场景理解输出 (v0.3 — 6层认知 + 5维环境模型) ──────────── */
+
+/** 跟踪目标 — 发布到 perception/tracked_objects
+ *
+ *  比 Obstacle 多了3D框、加速度、朝向、车道归属、静态/动态分类 */
+typedef struct {
+    uint32_t      id;            /**< 跨帧持久 ID（object_tracker 分配） */
+    uint32_t      track_age;     /**< 持续跟踪帧数（判断稳定性） */
+    ObstacleType  type;          /**< UNKNOWN/VEHICLE/PEDESTRIAN/CYCLIST */
+    float         x, y, z;       /**< 3D 位置（车体坐标系，z=地面以上高度） */
+    float         vx, vy, vz;    /**< 速度（m/s） */
+    float         ax, ay;         /**< 加速度（m/s²） */
+    float         heading;       /**< 运动朝向（rad） */
+    float         width, length, height; /**< 3D 边框 */
+    float         confidence;    /**< 检测置信度 [0,1] */
+    int32_t       lane_id;       /**< 所属车道 ID（-1=未知） */
+    uint8_t       is_static : 1; /**< 静止目标 */
+    uint8_t       is_on_road : 1;/**< 在道路上 */
+    uint8_t       _reserved : 6;
+} TrackedObject;
+
+/** 跟踪目标列表 — 发布到 perception/tracked_objects */
+#define ADAS_MAX_TRACKED 32
+typedef struct {
+    uint32_t      frame_id;
+    uint64_t      timestamp_us;
+    uint32_t      count;
+    TrackedObject objects[ADAS_MAX_TRACKED];
+} TrackedObjectList;
+
+/** 预测轨迹 — 发布到 prediction/tracks
+ *
+ *  对每个 TrackedObject 生成 1-3 条未来轨迹，带概率 */
+#define PRED_MAX_WAYPOINTS 10
+typedef struct {
+    uint32_t object_id;            /**< 关联 TrackedObject.id */
+    float    confidence;           /**< 轨迹置信度 [0,1] */
+    float    horizon_s;            /**< 预测时长（如 5.0s） */
+    uint8_t  trajectory_count;     /**< 轨迹条数（通常 1-3） */
+    struct {
+        float prob;                         /**< 该轨迹概率 */
+        float waypoints[PRED_MAX_WAYPOINTS][3]; /**< [step][x, y, v] */
+        uint8_t waypoint_count;
+    } trajectories[3];               /**< 最多3条轨迹 */
+} PredictionTrack;
+
+/** 预测列表 — 发布到 prediction/tracks */
+#define PRED_MAX_TRACKS 32
+typedef struct {
+    uint32_t        frame_id;
+    uint64_t        timestamp_us;
+    uint32_t        count;
+    PredictionTrack  tracks[PRED_MAX_TRACKS];
+} PredictionList;
+
+/** 车道线 — 发布到 perception/lanes
+ *
+ *  3次多项式: y = c0 + c1*x + c2*x² + c3*x³ (车体坐标系) */
+typedef enum {
+    LANE_SOLID   = 0,
+    LANE_DASHED  = 1,
+    LANE_CURB    = 2,
+    LANE_VIRTUAL = 3
+} LaneType;
+
+typedef struct {
+    int32_t  lane_id;
+    LaneType type;
+    float    coeffs[4];        /**< 多项式系数 c0..c3 */
+    float    visible_range_m;  /**< 可见距离（m） */
+    float    confidence;       /**< 检测置信度 [0,1] */
+} LaneBoundary;
+
+/** 车道线列表 — 发布到 perception/lanes */
+#define LANE_MAX_BOUNDARIES 8
+typedef struct {
+    uint32_t      frame_id;
+    uint64_t      timestamp_us;
+    uint32_t      count;
+    LaneBoundary  boundaries[LANE_MAX_BOUNDARIES];
+} LaneBoundaryList;
+
+/* ── 雷达目标 (预留) ───────────────────────────────────── */
+
+/** 毫米波雷达目标 */
+typedef struct {
+    uint32_t id;
+    float    range;            /**< 径向距离（m） */
+    float    azimuth;          /**< 方位角（rad） */
+    float    elevation;        /**< 俯仰角（rad，0=水平） */
+    float    range_rate;       /**< 径向速度（m/s，正=远离） */
+    float    rcs;              /**< 雷达散射截面（dBsm） */
+    float    confidence;       /**< 检测置信度 [0,1] */
+} RadarTarget;
+
+#define RADAR_MAX_TARGETS 64
+typedef struct {
+    uint32_t     frame_id;
+    uint64_t     timestamp_us;
+    uint32_t     count;
+    RadarTarget  targets[RADAR_MAX_TARGETS];
+} RadarTargetList;
+
+/* ── 自车状态 — 发布到 perception/ego_state ──────────────── */
+
 /** 自车状态 — 发布到 perception/ego_state */
 typedef struct {
     double latitude;         /**< 纬度（度） */
