@@ -76,17 +76,9 @@ export function updateCharts(data) {
 
   var suf = chartTopic ? ' (' + chartTopic.split('/').pop() + ')' : '';
 
-  // Dedup: if published/delivered counters haven't changed since last sample,
-  // the delta would be zero — just redraw with existing history (no new push).
-  // Previously used topoData.timestamp, but backend never sends that field,
-  // causing dataTs to always be 0 and freezing the chart after the first frame.
-  if (chartPrevPub >= 0 && nowPub === chartPrevPub && nowDel === chartPrevDel) {
-    drawChart('ch-rate', 'tt-rate', chartHistory.rate, '#58a6ff', 'Pub Rate' + suf, 'msg/s');
-    drawChart('ch-lat', 'tt-lat', chartHistory.latency, '#d29922', 'Latency' + suf, 'µs');
-    drawChart('ch-frames', 'tt-frames', chartHistory.frames, '#3fb950', 'Deliveries' + suf, 'msg/s');
-    return;
-  }
-
+  // 计数器没变化时 delta=0，push 一个 0 速率点让图表持续滚动（显示 0 平线），
+  // 而非冻结。之前这里用 early return 跳过 push，导致 history 永远 < 2 条，
+  // 图表永久显示 "Waiting for data..."（误把"无流量"当成"无数据"）。
   var nowMs = Date.now();
   var elapsed = (chartLastSampleMs > 0) ? Math.max(0.05, (nowMs - chartLastSampleMs) / 1000) : 1;
   chartLastSampleMs = nowMs;
