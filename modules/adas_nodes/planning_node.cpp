@@ -30,6 +30,8 @@
 #undef LOG_ERROR
 #undef LOG_FATAL
 #include "logger.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #ifdef HAVE_FRENET
 #include "frenet_bridge.h"
@@ -139,12 +141,6 @@ PlanningContext g;
 #define FUSION_STALE_TIMEOUT_US  1500000ULL  /* 定位超过此时长未更新 -> 判定条件丢失 */
 #define HIGHWAY_SPEED_HOLD_S     3.0          /* 速度需持续高于阈值这么久才算"高速工况" */
 
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
 /**
  * 驾驶模式转移守卫：把真实感知/定位/路况条件接到状态机上，
  * 而不是无条件放行——这是把"演示用状态机"变成"真正的模式仲裁器"的关键。
@@ -228,20 +224,24 @@ static void on_fusion(const Message* msg, void* user_data) {
             g.ego_v       = loc.v;
             g.ego_heading = loc.heading;
             g.has_fusion  = 1;
-            g.last_fusion_us = monotonic_us();
+            g.last_fusion_us = clock_now_us();
             return;
         }
     }
 
     /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"x\":")))       sscanf(p + 4, "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4, "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"v\":")))       sscanf(p + 4, "%lf", &g.ego_v);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(root, "x")))       g.ego_x = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "y")))       g.ego_y = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "v")))       g.ego_v = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "heading"))) g.ego_heading = item->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_fusion = 1;
-    g.last_fusion_us = monotonic_us();
+    g.last_fusion_us = clock_now_us();
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置（世界坐标） ─────────── */
@@ -250,19 +250,24 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-    for (int i = 0; i < 4; i++) {
-        char key[16];
-        int klen;
-        klen = snprintf(key, sizeof(key), "\"ox%d\":", i);
-        const char* p = strstr(d, key);
-        if (p) sscanf(p + klen, "%lf", &g.obs_x[i]);
-        klen = snprintf(key, sizeof(key), "\"oy%d\":", i);
-        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_y[i]);
-        klen = snprintf(key, sizeof(key), "\"ov%d\":", i);
-        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vx[i]);
-        /* Phase 3: parse vy (obstacle lateral velocity in world frame) */
-        klen = snprintf(key, sizeof(key), "\"ovy%d\":", i);
-        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vy[i]);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        for (int i = 0; i < 4; i++) {
+            char key[16];
+            snprintf(key, sizeof(key), "ox%d", i);
+            cJSON* item = cJSON_GetObjectItem(root, key);
+            if (item) g.obs_x[i] = item->valuedouble;
+            snprintf(key, sizeof(key), "oy%d", i);
+            item = cJSON_GetObjectItem(root, key);
+            if (item) g.obs_y[i] = item->valuedouble;
+            snprintf(key, sizeof(key), "ov%d", i);
+            item = cJSON_GetObjectItem(root, key);
+            if (item) g.obs_vx[i] = item->valuedouble;
+            snprintf(key, sizeof(key), "ovy%d", i);
+            item = cJSON_GetObjectItem(root, key);
+            if (item) g.obs_vy[i] = item->valuedouble;
+        }
+        cJSON_Delete(root);
     }
     g.has_vstate = 1;
 }
@@ -275,10 +280,14 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.curve_start_x);
-    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.curve_length_m);
-    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.curve_offset_m);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(root, "curve_start_x")))  g.curve_start_x = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "curve_length_m"))) g.curve_length_m = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "curve_offset_m"))) g.curve_offset_m = item->valuedouble;
+        cJSON_Delete(root);
+    }
 }
 
 /* ── road/traffic_lights 订阅回调（Phase 2 红绿灯） ────────── */
@@ -291,53 +300,37 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-
-    /* 查找 "lights":[ 数组 */
-    const char* arr = strstr(d, "\"lights\"");
-    if (!arr) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
-    arr = strchr(arr, '[');
-    if (!arr) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
-
-    /* 逐个解析 {"id":..,"x":..,"y_lane":..,"state":"..",...} */
-    int n = 0;
-    const char* p = arr;
-    while (n < TL_CACHE_MAX) {
-        p = strchr(p, '{');
-        if (!p) break;
-        const char* close = strchr(p, '}');
-        if (!close) break;
-
-        /* x: 停止线位置 */
-        double x = 0.0;
-        const char* px = strstr(p, "\"x\":");
-        if (px && px < close) sscanf(px + 4, "%lf", &x);
-
-        /* y_lane: 车道横向位置 */
-        double y_lane = -1.75;
-        const char* py = strstr(p, "\"y_lane\":");
-        if (py && py < close) sscanf(py + 9, "%lf", &y_lane);
-
-        /* state: green/yellow/red */
-        int state = 0;  /* default green */
-        const char* ps = strstr(p, "\"state\":");
-        if (ps && ps < close) {
-            const char* q = strchr(ps + 8, '"');
-            if (q) {
-                if (strncmp(q + 1, "red", 3) == 0) state = 2;
-                else if (strncmp(q + 1, "yellow", 6) == 0) state = 1;
-                /* green or unknown → 0 */
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* lights = cJSON_GetObjectItem(root, "lights");
+        if (lights && cJSON_IsArray(lights)) {
+            int n = 0;
+            cJSON* light;
+            cJSON_ArrayForEach(light, lights) {
+                if (n >= TL_CACHE_MAX) break;
+                cJSON* item;
+                g.tl_x[n] = 0.0;
+                g.tl_y_lane[n] = -1.75;
+                g.tl_state[n] = 0; /* default green */
+                if ((item = cJSON_GetObjectItem(light, "x")))       g.tl_x[n] = item->valuedouble;
+                if ((item = cJSON_GetObjectItem(light, "y_lane")))  g.tl_y_lane[n] = item->valuedouble;
+                if ((item = cJSON_GetObjectItem(light, "state")) && cJSON_IsString(item)) {
+                    if (strcmp(item->valuestring, "red") == 0)    g.tl_state[n] = 2;
+                    else if (strcmp(item->valuestring, "yellow") == 0) g.tl_state[n] = 1;
+                }
+                n++;
             }
+            g.tl_count = n;
+            g.has_traffic_lights = (n > 0) ? 1 : 0;
+        } else {
+            g.tl_count = 0;
+            g.has_traffic_lights = 0;
         }
-
-        g.tl_x[n] = x;
-        g.tl_y_lane[n] = y_lane;
-        g.tl_state[n] = state;
-        n++;
-
-        p = close + 1;
+        cJSON_Delete(root);
+    } else {
+        g.tl_count = 0;
+        g.has_traffic_lights = 0;
     }
-    g.tl_count = n;
-    g.has_traffic_lights = (n > 0) ? 1 : 0;
 }
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
@@ -362,7 +355,7 @@ protected:
             if (should_stop() || !g.has_fusion) continue;
 
             /* ── 驾驶模式仲裁：周期性检查条件，尝试升级；定位丢失时立即降级 ── */
-            uint64_t now_us = monotonic_us();
+            uint64_t now_us = clock_now_us();
             g.highway_ready = (g.ego_v >= g.cfg_highway_speed_mps) &&
                                (g.highway_speed_timer >= HIGHWAY_SPEED_HOLD_S);
             if (g.ego_v >= g.cfg_highway_speed_mps) g.highway_speed_timer += 0.05;
@@ -560,7 +553,6 @@ protected:
 #endif
 
             char traj[1024];
-            int off;
             if (n_wp > 0) {
                 command_speed = spd_out[0];
                 /* Debuggability: report the ACTUAL planner mode instead of always
@@ -573,27 +565,37 @@ protected:
 #else
                 const char* traj_type = "lane_keep_fallback";
 #endif
-                off = snprintf(traj, sizeof(traj),
-                    "{\"type\":\"%s\",\"plan\":%d,\"wp\":%d,",
-                    traj_type, g.plan_count, n_wp);
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                    "\"target_speed\":%.1f,", command_speed);
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off, "\"path\":[");
-                for (int i = 0; i < n_wp && off < (int)sizeof(traj) - 50; i++) {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "type", traj_type);
+                cJSON_AddNumberToObject(root, "plan", g.plan_count);
+                cJSON_AddNumberToObject(root, "wp", n_wp);
+                cJSON_AddNumberToObject(root, "target_speed", command_speed);
+                cJSON* path = cJSON_AddArrayToObject(root, "path");
+                for (int i = 0; i < n_wp; i++) {
                     if (i % 3 != 0 && i > 0 && i < n_wp - 1) continue;
-                    off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                        "%s[%.1f,%.1f,%.1f]",
-                        i > 0 ? "," : "", s_out[i], d_out[i], spd_out[i]);
+                    cJSON* pt = cJSON_CreateArray();
+                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(s_out[i]));
+                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(d_out[i]));
+                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(spd_out[i]));
+                    cJSON_AddItemToArray(path, pt);
                 }
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off, "]}");
+                char* json_part = cJSON_PrintUnformatted(root);
+                cJSON_Delete(root);
+                snprintf(traj, sizeof(traj), "%s", json_part);
+                cJSON_free(json_part);
             } else {
                 double failsafe = command_speed;
                 if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
                 if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
-                off = snprintf(traj, sizeof(traj),
-                    "{\"type\":\"failsafe\",\"target_speed\":%.1f,\"plan\":%d,"
-                    "\"lane_keep_d\":%.2f}",
-                    failsafe, g.plan_count, 0.0);  /* Frenet d=0 → 保持在参考线上 */
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "type", "failsafe");
+                cJSON_AddNumberToObject(root, "target_speed", failsafe);
+                cJSON_AddNumberToObject(root, "plan", g.plan_count);
+                cJSON_AddNumberToObject(root, "lane_keep_d", 0.0);
+                char* json_part = cJSON_PrintUnformatted(root);
+                cJSON_Delete(root);
+                snprintf(traj, sizeof(traj), "%s", json_part);
+                cJSON_free(json_part);
             }
 
             /* 后向兼容: PID 也读取 speed= 字段。附加 mode/route_lane 供 control 消费
@@ -698,29 +700,26 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.scenario_file[0] = '\0';
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"target_speed\":")))
-            sscanf(p + 15, "%lf", &g.cfg_target_speed);
-        if ((p = strstr(params_json, "\"max_speed\":")))
-            sscanf(p + 12, "%lf", &g.cfg_max_speed);
-        if ((p = strstr(params_json, "\"max_accel\":")))
-            sscanf(p + 12, "%lf", &g.cfg_max_accel);
-        if ((p = strstr(params_json, "\"ref_path_length_m\":")))
-            sscanf(p + 20, "%lf", &g.cfg_ref_path_length);
-        if ((p = strstr(params_json, "\"highway_speed_mps\":")))
-            sscanf(p + 20, "%lf", &g.cfg_highway_speed_mps);
-        if ((p = strstr(params_json, "\"scenario_file\":"))) {
-            const char* start = strchr(p + 16, '"');
-            if (start) {
-                start++;
-                const char* end = strchr(start, '"');
-                if (end) {
-                    size_t len = (size_t)(end - start);
-                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
-                    memcpy(g.scenario_file, start, len);
-                    g.scenario_file[len] = '\0';
-                }
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* item;
+            if ((item = cJSON_GetObjectItem(root, "target_speed")))
+                g.cfg_target_speed = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(root, "max_speed")))
+                g.cfg_max_speed = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(root, "max_accel")))
+                g.cfg_max_accel = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(root, "ref_path_length_m")))
+                g.cfg_ref_path_length = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(root, "highway_speed_mps")))
+                g.cfg_highway_speed_mps = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(root, "scenario_file")) && cJSON_IsString(item)) {
+                size_t len = strlen(item->valuestring);
+                if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
+                memcpy(g.scenario_file, item->valuestring, len);
+                g.scenario_file[len] = '\0';
             }
+            cJSON_Delete(root);
         }
     }
 

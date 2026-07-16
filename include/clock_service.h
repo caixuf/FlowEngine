@@ -29,8 +29,16 @@ extern "C" {
 /**
  * 获取当前时间（微秒）
  * 仿真模式下返回 clock_set_sim_time() 最后设置的值。
+ * 正常模式返回 CLOCK_MONOTONIC 单调时间。
  */
 uint64_t clock_now_us(void);
+
+/**
+ * 获取当前绝对时间（微秒，CLOCK_REALTIME）
+ * 不受仿真模式影响，始终返回真实墙钟时间。
+ * 用于训练样本时间戳、仪表盘时间戳等需要绝对时间的场景。
+ */
+uint64_t clock_now_realtime_us(void);
 
 /**
  * 启用/禁用仿真时间模式

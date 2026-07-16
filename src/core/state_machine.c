@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "error_codes.h"
 #include "logger.h"
+#include "clock_service.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -44,14 +45,6 @@ static const char* event_name_str(EventId e) {
     if (e >= 0 && e < 9 && g_builtin_event_names[e])
         return g_builtin_event_names[e];
     return "UNKNOWN";
-}
-
-/* ── 单调时钟 ────────────────────────────────────────────── */
-
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -224,7 +217,7 @@ void statem_init(ReflectiveStateMachine* sm, const TransitionRule* table,
     sm->current        = initial_state;
     sm->previous       = SM_STATE_UNKNOWN;
     sm->last_event     = SM_EVENT_NONE;
-    sm->entered_at_us  = monotonic_us();
+    sm->entered_at_us  = clock_now_us();
     sm->static_table   = table;
     sm->task_name      = task_name;
     sm->trace_enabled  = false;
@@ -309,7 +302,7 @@ int statem_send_event_ex(ReflectiveStateMachine* sm, EventId event, void* task) 
                     sm->previous      = from;
                     sm->current       = SM_STATE_ERROR;
                     sm->last_event    = event;
-                    sm->entered_at_us = monotonic_us();
+                    sm->entered_at_us = clock_now_us();
                     if (sm->on_entry) sm->on_entry(task, SM_STATE_ERROR, event);
                 }
                 if (sm->debug_hook) {
@@ -366,7 +359,7 @@ int statem_send_event_ex(ReflectiveStateMachine* sm, EventId event, void* task) 
     sm->history[idx].from         = from;
     sm->history[idx].event        = event;
     sm->history[idx].to           = rule->to;
-    sm->history[idx].timestamp_us = monotonic_us();
+    sm->history[idx].timestamp_us = clock_now_us();
     sm->history_head = (idx + 1) % SM_HISTORY_DEPTH;
     if (sm->history_count < SM_HISTORY_DEPTH) sm->history_count++;
 
@@ -374,7 +367,7 @@ int statem_send_event_ex(ReflectiveStateMachine* sm, EventId event, void* task) 
     sm->previous       = from;
     sm->current        = rule->to;
     sm->last_event     = event;
-    sm->entered_at_us  = monotonic_us();
+    sm->entered_at_us  = clock_now_us();
 
     /* Entry action */
     if (sm->on_entry) sm->on_entry(task, rule->to, event);
@@ -559,7 +552,7 @@ void statem_dump_table(const ReflectiveStateMachine* sm) {
 void statem_print_status(const ReflectiveStateMachine* sm) {
     if (!sm) return;
 
-    uint64_t elapsed_ms = (monotonic_us() - sm->entered_at_us) / 1000;
+    uint64_t elapsed_ms = (clock_now_us() - sm->entered_at_us) / 1000;
 
     printf("[%s] state=%s", sm->task_name ? sm->task_name : "?",
            state_name_str(sm->current));

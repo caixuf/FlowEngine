@@ -37,17 +37,17 @@ PIPELINE="${FLOW_PIPELINE:-$ROOT/config/pipeline.json}"
 JSON_FILE="/tmp/flow_topology.json"
 BAG_FILE="/tmp/flow_demo_$(date +%Y%m%d_%H%M%S).bag"
 
-for arg in "$@"; do
-  case "$arg" in
+while [ $# -gt 0 ]; do
+  case "$1" in
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
     --scenario) SCENARIO="$2"; shift ;;
     ''|*[!0-9]*) ;;
-    *) DURATION="$arg" ;;
+    *) DURATION="$1" ;;
   esac
-  shift 2>/dev/null || true
+  shift
 done
 
 # ── Scenario override: patch pipeline.json's scenario_file in sim_world/planning/control ──
@@ -60,9 +60,9 @@ if [ -n "$SCENARIO" ]; then
   PIPELINE_TMP=$(mktemp /tmp/pipeline_XXXX.json)
   trap 'cleanup_pipeline_tmp' EXIT
   SCENARIO_ABS="$([ -f "$SCENARIO" ] && echo "$(cd "$(dirname "$SCENARIO")" && pwd)/$(basename "$SCENARIO")" || echo "$SCENARIO")"
-  # Escape for JSON string-in-string (scenario_file embedded in params JSON)
-  ESCAPED=$(echo "$SCENARIO_ABS" | sed 's|/|\\/|g')
-  sed "s/\"scenario_file\": \"[^\"]*\"/\"scenario_file\": \"$ESCAPED\"/g" "$PIPELINE_ORIG" > "$PIPELINE_TMP"
+  # Pipeline JSON 中 params 是 JSON 字符串，scenario_file 前的引号为 \" 转义形式。
+  # 必须用 \\" 匹配（sed 中 \\\\ 匹配字面量 \\），单引号防止 bash 二次转义。
+  sed 's|\\"scenario_file\\": \\"[^\\"]*\\"|\\"scenario_file\\": \\"'$SCENARIO_ABS'\\"|g' "$PIPELINE_ORIG" > "$PIPELINE_TMP"
   PIPELINE="$PIPELINE_TMP"
   echo "  Scenario: $SCENARIO_ABS"
 fi

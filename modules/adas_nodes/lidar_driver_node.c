@@ -56,6 +56,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -107,22 +108,6 @@ static struct {
     volatile int thread_running;
     volatile int should_stop;
 } g;
-
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-/* 当前单调/墙上时间（微秒），用于 ObstacleList.timestamp_us。 */
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
-/* 当前墙上时间（毫秒），用于帧读取预算。 */
-static long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
-}
 
 /* [lo, hi] 均匀随机浮点。 */
 static float frand(float lo, float hi) {
@@ -219,10 +204,10 @@ static int read_lidar_frame(Point3D* points, int max_points, int frame_budget_ms
     if (per_line_to > frame_budget_ms && frame_budget_ms > 0) {
         per_line_to = frame_budget_ms;
     }
-    long deadline_ms = now_ms() + frame_budget_ms;
+    long deadline_ms = (long)(clock_now_realtime_us()/1000) + frame_budget_ms;
 
     while (n < max_points) {
-        long now = now_ms();
+        long now = (long)(clock_now_realtime_us()/1000);
         if (n > 0 && now >= deadline_ms) break;  /* 已有部分点 + 超预算，返回 */
 
         int to = per_line_to;
@@ -278,13 +263,13 @@ static void* lidar_thread(void* arg) {
             continue;
         }
 
-        long t0 = now_ms();
+        long t0 = (long)(clock_now_realtime_us()/1000);
 
         /* a. 读取一帧点云 */
         int n = read_lidar_frame(g.point_buf, g.point_buf_cap, (int)period_ms);
         if (n <= 0) {
             /* 本帧无数据（串口超时且未凑到点），按周期重试 */
-            long elapsed = now_ms() - t0;
+            long elapsed = (long)(clock_now_realtime_us()/1000) - t0;
             long remain = period_ms - elapsed;
             if (remain > 0) usleep((unsigned long)remain * 1000UL);
             continue;
@@ -300,7 +285,7 @@ static void* lidar_thread(void* arg) {
         ObstacleList obs_list;
         memset(&obs_list, 0, sizeof(obs_list));
         obs_list.frame_id     = g.frame_id++;
-        obs_list.timestamp_us = now_us();
+        obs_list.timestamp_us = clock_now_us();
 
         int cnt = 0;
         for (int i = 0; i < n_clusters && cnt < 8; i++) {
@@ -337,7 +322,7 @@ static void* lidar_thread(void* arg) {
         }
 
         /* 按周期定频：睡剩余时间 */
-        long elapsed = now_ms() - t0;
+        long elapsed = (long)(clock_now_realtime_us()/1000) - t0;
         long remain = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }

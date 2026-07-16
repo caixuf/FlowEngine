@@ -35,6 +35,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -124,14 +125,6 @@ static struct {
     volatile int should_stop;
 } g;
 
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
 /* ── 参数解析 ─────────────────────────────────────────────── */
 
 static double parse_double(const char* json, const char* key, double default_val) {
@@ -180,7 +173,7 @@ static void on_input_a(const Message* msg, void* user_data) {
     }
     pthread_mutex_lock(&g.a_lock);
     g.a_list = list;
-    g.a_ts_us = now_us();
+    g.a_ts_us = clock_now_us();
     g.a_ready = 1;
     g.frames_in_a++;
     pthread_mutex_unlock(&g.a_lock);
@@ -196,7 +189,7 @@ static void on_input_b(const Message* msg, void* user_data) {
     }
     pthread_mutex_lock(&g.b_lock);
     g.b_list = list;
-    g.b_ts_us = now_us();
+    g.b_ts_us = clock_now_us();
     g.b_ready = 1;
     g.frames_in_b++;
     pthread_mutex_unlock(&g.b_lock);
@@ -486,7 +479,7 @@ static void* fusion_thread(void* arg) {
         usleep((useconds_t)period_us);
         if (g.should_stop || !g.enabled) break;
 
-        uint64_t now = now_us();
+        uint64_t now = clock_now_us();
         uint64_t max_age_us = (uint64_t)g.max_age_ms * 1000ULL;
 
         /* 拷贝两路缓存（加锁，快拷贝） */

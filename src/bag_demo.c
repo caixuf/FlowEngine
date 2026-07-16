@@ -12,6 +12,7 @@
 #include "msg_schema.h"
 #include "dashboard_bridge.h"
 #include "ipc_channel.h"
+#include <cjson/cJSON.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,63 +91,120 @@ static void on_replay_state(const Message* msg, void* user_data) {
      * strstr to overread the buffer beyond its bounds. */
     if (msg->data[0] != '{') return;
 
-    /* Build dashboard JSON in memory so it can be sent to both
-     * /tmp/flow_topology.json (foxglove_bridge.py) and the IPC
-     * dashboard bridge (flowmond — makes the browser visualization update). */
-    char dash_buf[8192];
-    int off = 0;
-
-#define RBUF_APPEND(fmt, ...) \
-    do { \
-        if (off >= 0 && (size_t)off < sizeof(dash_buf)) \
-            off += snprintf(dash_buf + off, sizeof(dash_buf) - (size_t)off, \
-                            fmt, ##__VA_ARGS__); \
-    } while (0)
-
-    const char* d = (const char*)msg->data;
-    const char* p;
-    p = strstr(d, "\"spd\":");   double spd = p ? atof(p + 6) : 0;
-    p = strstr(d, "\"tgt\":");   double tgt = p ? atof(p + 6) : 0;
-    p = strstr(d, "\"x\":");     double x   = p ? atof(p + 4) : 0;
-    p = strstr(d, "\"y\":");     double ey  = p ? atof(p + 5) : -1.75;
-    p = strstr(d, "\"hdg\":");   double hdg = p ? atof(p + 7) : 0.0;
-    p = strstr(d, "\"st\":");    double st  = p ? atof(p + 6) : 0.0;
-    p = strstr(d, "\"n_obs\":"); int n_obs  = p ? atoi(p + 8) : 0;
-
-    RBUF_APPEND("{\"self\":\"replay\",\"timestamp\":0,\"nodes\":[],"
-        "\"metrics\":{"
-        "\"bus\":{\"published\":0,\"delivered\":0,\"dropped\":0},"
-        "\"transport\":{\"local_pub\":0,\"remote_pub\":0},"
-        "\"scheduler\":{\"tasks\":0,\"mode\":\"REPLAY\"},"
-        "\"latency\":{\"avg_us\":0,\"p50_us\":0,\"p99_us\":0},"
-        "\"topics\":[]},"
-        "\"vehicle\":{\"speed\":%.1f,\"target_speed\":%.1f,\"x\":%.1f},"
-        "\"scene\":{\"ego\":{"
-        "\"x\":%.2f,\"y\":%.2f,\"heading\":%.3f,\"speed\":%.2f,\"steer\":%.3f},"
-        "\"lane\":{\"width\":3.5,\"count\":2},\"obstacles\":[",
-        spd, tgt, x, x, ey, hdg, spd, st);
-
-    for (int i = 0; i < n_obs && i < 16; i++) {
-        char kx[16]; snprintf(kx, 16, "\"ox%d\":", i);
-        char ky[16]; snprintf(ky, 16, "\"oy%d\":", i);
-        double ox = 0, oy = 0;
-        const char* pp = strstr(d, kx); if (pp) ox = atof(pp + strlen(kx));
-        pp = strstr(d, ky); if (pp) oy = atof(pp + strlen(ky));
-        RBUF_APPEND("%s{\"x\":%.2f,\"y\":%.2f}", i > 0 ? "," : "", ox, oy);
+    /* Parse the vehicle/state JSON to extract values */
+    cJSON* vehicle_state = cJSON_Parse((const char*)msg->data);
+    double spd = 0, tgt = 0, x = 0, ey = -1.75, hdg = 0, st = 0;
+    int n_obs = 0;
+    if (vehicle_state) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "spd");
+        if (cJSON_IsNumber(j)) spd = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "tgt");
+        if (cJSON_IsNumber(j)) tgt = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "x");
+        if (cJSON_IsNumber(j)) x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "y");
+        if (cJSON_IsNumber(j)) ey = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "hdg");
+        if (cJSON_IsNumber(j)) hdg = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "st");
+        if (cJSON_IsNumber(j)) st = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(vehicle_state, "n_obs");
+        if (cJSON_IsNumber(j)) n_obs = (int)j->valuedouble;
     }
 
-    RBUF_APPEND("]}}");
-#undef RBUF_APPEND
+    /* Build dashboard JSON using cJSON */
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "self", "replay");
+    cJSON_AddNumberToObject(root, "timestamp", 0);
+    cJSON_AddItemToObject(root, "nodes", cJSON_CreateArray());
+
+    /* Metrics */
+    cJSON* metrics = cJSON_CreateObject();
+    cJSON* mbus = cJSON_CreateObject();
+    cJSON_AddNumberToObject(mbus, "published", 0);
+    cJSON_AddNumberToObject(mbus, "delivered", 0);
+    cJSON_AddNumberToObject(mbus, "dropped", 0);
+    cJSON_AddItemToObject(metrics, "bus", mbus);
+
+    cJSON* transport = cJSON_CreateObject();
+    cJSON_AddNumberToObject(transport, "local_pub", 0);
+    cJSON_AddNumberToObject(transport, "remote_pub", 0);
+    cJSON_AddItemToObject(metrics, "transport", transport);
+
+    cJSON* scheduler = cJSON_CreateObject();
+    cJSON_AddNumberToObject(scheduler, "tasks", 0);
+    cJSON_AddStringToObject(scheduler, "mode", "REPLAY");
+    cJSON_AddItemToObject(metrics, "scheduler", scheduler);
+
+    cJSON* latency = cJSON_CreateObject();
+    cJSON_AddNumberToObject(latency, "avg_us", 0);
+    cJSON_AddNumberToObject(latency, "p50_us", 0);
+    cJSON_AddNumberToObject(latency, "p99_us", 0);
+    cJSON_AddItemToObject(metrics, "latency", latency);
+
+    cJSON_AddItemToObject(metrics, "topics", cJSON_CreateArray());
+    cJSON_AddItemToObject(root, "metrics", metrics);
+
+    /* Vehicle */
+    cJSON* vehicle = cJSON_CreateObject();
+    cJSON_AddNumberToObject(vehicle, "speed", spd);
+    cJSON_AddNumberToObject(vehicle, "target_speed", tgt);
+    cJSON_AddNumberToObject(vehicle, "x", x);
+    cJSON_AddItemToObject(root, "vehicle", vehicle);
+
+    /* Scene */
+    cJSON* scene = cJSON_CreateObject();
+    cJSON* ego = cJSON_CreateObject();
+    cJSON_AddNumberToObject(ego, "x", x);
+    cJSON_AddNumberToObject(ego, "y", ey);
+    cJSON_AddNumberToObject(ego, "heading", hdg);
+    cJSON_AddNumberToObject(ego, "speed", spd);
+    cJSON_AddNumberToObject(ego, "steer", st);
+    cJSON_AddItemToObject(scene, "ego", ego);
+
+    cJSON* lane = cJSON_CreateObject();
+    cJSON_AddNumberToObject(lane, "width", 3.5);
+    cJSON_AddNumberToObject(lane, "count", 2);
+    cJSON_AddItemToObject(scene, "lane", lane);
+
+    cJSON* obstacles = cJSON_CreateArray();
+    if (vehicle_state) {
+        for (int i = 0; i < n_obs && i < 16; i++) {
+            char kx[16], ky[16];
+            snprintf(kx, sizeof(kx), "ox%d", i);
+            snprintf(ky, sizeof(ky), "oy%d", i);
+            cJSON* jox = cJSON_GetObjectItemCaseSensitive(vehicle_state, kx);
+            cJSON* joy = cJSON_GetObjectItemCaseSensitive(vehicle_state, ky);
+            if (cJSON_IsNumber(jox) && cJSON_IsNumber(joy)) {
+                cJSON* ob = cJSON_CreateObject();
+                cJSON_AddNumberToObject(ob, "x", jox->valuedouble);
+                cJSON_AddNumberToObject(ob, "y", joy->valuedouble);
+                cJSON_AddItemToArray(obstacles, ob);
+            }
+        }
+    }
+    cJSON_AddItemToObject(scene, "obstacles", obstacles);
+    cJSON_AddItemToObject(root, "scene", scene);
+
+    if (vehicle_state) cJSON_Delete(vehicle_state);
+
+    char* dash_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!dash_str) return;
+
+    size_t dash_len = strlen(dash_str);
 
     /* Write to state file for foxglove_bridge.py */
     const char* jf_path = "/tmp/flow_topology.json";
     FILE* jf = fopen(jf_path, "w");
-    if (jf) { fputs(dash_buf, jf); fclose(jf); }
+    if (jf) { fputs(dash_str, jf); fclose(jf); }
 
-    /* Publish via IPC dashboard bridge so flowmond updates the browser.
-     * Skip if JSON was truncated due to buffer overflow. */
-    if (g_replay_dashboard_ch && off > 0 && off < (int)sizeof(dash_buf))
-        dashboard_bridge_publish(g_replay_dashboard_ch, dash_buf, (size_t)off);
+    /* Publish via IPC dashboard bridge so flowmond updates the browser. */
+    if (g_replay_dashboard_ch && dash_len > 0)
+        dashboard_bridge_publish(g_replay_dashboard_ch, dash_str, dash_len);
+
+    free(dash_str);
 }
 
 /* ── Record mode ─────────────────────────────────────── */

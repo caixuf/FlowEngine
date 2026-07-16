@@ -100,6 +100,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -177,19 +178,6 @@ static void parse_string(const char* json, const char* key, char* out, size_t ou
     out[n] = '\0';
 }
 
-/* ── 单调时钟 → 微秒时间戳 ───────────────────────────────────
- *
- * 用 clock_gettime(CLOCK_MONOTONIC) 填充 StereoFrame.timestamp_us。
- * timestamp_us 为 uint32，约 71.6 分钟回绕一次；作为帧间相对时间戳足够，
- * 下游 perception/fusion 用相邻帧差分计算 dt，回绕不敏感。
- */
-static uint32_t now_us_monotonic(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-    return (uint32_t)(us & 0xFFFFFFFFu);
-}
-
 /* ── 硬件适配点：读取一帧立体数据（左图 + 深度图） ───────────
  *
  * ⚠ 这是硬件适配点。社区用户按自己双目硬件方案改本函数即可，无需动其它代码。
@@ -216,7 +204,7 @@ static uint32_t now_us_monotonic(void) {
  *   - left_jpeg/left_jpeg_size：左图 JPEG 压缩数据 + 有效字节数
  *   - depth_data/depth_count：80×60=4800 个 float 深度（米），depth_count=4800
  *   - baseline_m/fov_deg：相机标定参数
- *   - timestamp_us：由调用处用 now_us_monotonic() 填充
+ *   - timestamp_us：由调用处用 (uint32_t)(clock_now_us() & 0xFFFFFFFFu) 填充
  *
  * @param out  输出 StereoFrame（调用前已 memset=0）
  * @return 0 成功，-1 失败（硬件错误/无数据）
@@ -264,7 +252,7 @@ static int read_stereo_frame(StereoFrame* out) {
         return -1;
     }
     /* 桥接函数已填好图像/深度字段，补时间戳与标定参数 */
-    out->timestamp_us = now_us_monotonic();
+    out->timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
     out->baseline_m = (float)g.baseline_m;
     out->fov_deg = (float)g.fov_deg;
     return 0;
@@ -320,7 +308,7 @@ static int read_stereo_frame(StereoFrame* out) {
         out->depth_count = (uint32_t)(DW * DH);  /* 4800 */
     }
 
-    out->timestamp_us = now_us_monotonic();
+    out->timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
     return 0;
 #endif
 }

@@ -26,6 +26,8 @@
 #include "adas_msgs_gen.h"
 #include "coroutine_task.h"
 #include "logger.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -209,26 +211,31 @@ static void on_fusion(const Message* msg, void* user_data) {
             g.ego_heading   = loc.heading;
             g.ego_yaw_rate  = loc.yaw_rate;
             g.has_fusion    = 1;
-            struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
-            g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
+            g.last_fusion_us = clock_now_us();
             return;
         }
     }
 
     /* Fallback: text JSON parsing */
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"v\":")))
-        sscanf(p + 4, "%lf", &g.current_speed);
-    else if ((p = strstr(d, "speed=")))
-        sscanf(p + 6, "%lf", &g.current_speed);
-    if ((p = strstr(d, "\"x\":")))       sscanf(p + 4,  "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
-    if ((p = strstr(d, "\"yaw_rate\":"))) sscanf(p + 11, "%lf", &g.ego_yaw_rate);
-    g.has_fusion = 1;
-    struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
-    g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
+    {
+        cJSON* root = cJSON_Parse((const char*)msg->data);
+        if (root) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(root, "v");
+            if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(root, "x");
+            if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(root, "y");
+            if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+            if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
+            if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+            cJSON_Delete(root);
+        }
+        g.has_fusion = 1;
+        g.last_fusion_us = clock_now_us();
+    }
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
@@ -236,31 +243,30 @@ static void on_trajectory(const Message* msg, void* user_data) {
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
 
-    if (strstr(d, "speed="))
-        sscanf(strstr(d, "speed=") + 6, "%lf", &g.target_speed);
-    const char* target_speed_json = strstr(d, "\"target_speed\":");
-    if (target_speed_json)
-        sscanf(target_speed_json + 15, "%lf", &g.target_speed);
-
-    /* 解析第一个路径点的 d 值（横向偏移），格式: [s,d,spd] */
-    const char* bracket = strchr(d, '[');
-    if (bracket) {
-        double s, d_lat, spd;
-        if (sscanf(bracket, "[%lf,%lf,%lf]", &s, &d_lat, &spd) >= 2)
-            g.lane_d = d_lat;
-    }
-    /* 无路径点时，读取 failsafe 的 lane_keep_d 作为降级 */
-    if (!bracket) {
-        const char* p = strstr(d, "\"lane_keep_d\":");
-        if (p) {
-            double keep_d = 0.0;
-            if (sscanf(p + 14, "%lf", &keep_d) >= 1)
-                g.lane_d = keep_d;
+    /* 解析 JSON 部分（cJSON 会忽略尾部附加文本） */
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
+        if (cJSON_IsNumber(j)) g.target_speed = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "lane_keep_d");
+        if (cJSON_IsNumber(j)) g.lane_d = j->valuedouble;
+        /* 解析路径数组 first element: [s,d,spd] */
+        cJSON* path = cJSON_GetObjectItemCaseSensitive(root, "path");
+        if (cJSON_IsArray(path) && cJSON_GetArraySize(path) > 0) {
+            cJSON* first = cJSON_GetArrayItem(path, 0);
+            if (cJSON_IsArray(first) && cJSON_GetArraySize(first) >= 2) {
+                cJSON* d_item = cJSON_GetArrayItem(first, 1);
+                if (cJSON_IsNumber(d_item)) g.lane_d = d_item->valuedouble;
+            }
         }
+        cJSON_Delete(root);
+    } else {
+        /* cJSON parse failed, try text fallback for target_speed */
+        const char* r = strstr(d, "speed=");
+        if (r) sscanf(r + 6, "%lf", &g.target_speed);
     }
 
-    /* NOA: planning 广播的驾驶模式 + 导航路线目标车道（见 planning_node.cpp 的
-     * "mode=" / "route_lane=" 追加字段，格式与既有的 "speed=" 一致）。 */
+    /* 尾部附加文本字段：mode=, route_lane= */
     {
         const char* p = strstr(d, "mode=");
         if (p) {
@@ -275,42 +281,42 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
 
     g.has_planning = 1;
-    struct timespec ts_plan; clock_gettime(CLOCK_MONOTONIC, &ts_plan);
-    g.last_planning_us = (uint64_t)ts_plan.tv_sec * 1000000ULL + (uint64_t)ts_plan.tv_nsec / 1000ULL;
+    g.last_planning_us = clock_now_us();
 }
 
 /* ── vehicle/state 订阅 — 解析障碍物位置 ─────────────────────── */
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
     g.ped_index = -1;
-    for (int i = 0; i < MAX_OBS; i++) {
-        char key[16];
-        int klen = snprintf(key, sizeof(key), "\"ox%d\":", i);
-        const char* p = strstr(d, key);
-        if (p) {
-            g.obs_valid[i] = 1;
-            sscanf(p + klen, "%lf", &g.obs_x[i]);
-        } else { g.obs_valid[i] = 0; continue; }
-        klen = snprintf(key, sizeof(key), "\"oy%d\":", i);
-        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_y[i]);
-        klen = snprintf(key, sizeof(key), "\"ov%d\":", i);
-        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vx[i]);
-        /* parse obstacle type to detect pedestrian dynamically */
-        klen = snprintf(key, sizeof(key), "\"ot%d\":\"", i);
-        if ((p = strstr(d, key))) {
-            p += klen;
-            const char* end = strchr(p, '"');
-            if (end) {
-                size_t tlen = (size_t)(end - p);
+    if (root) {
+        for (int i = 0; i < MAX_OBS; i++) {
+            char key[16];
+            snprintf(key, sizeof(key), "ox%d", i);
+            cJSON* j = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsNumber(j)) {
+                g.obs_valid[i] = 1;
+                g.obs_x[i] = j->valuedouble;
+            } else { g.obs_valid[i] = 0; continue; }
+            snprintf(key, sizeof(key), "oy%d", i);
+            j = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsNumber(j)) g.obs_y[i] = j->valuedouble;
+            snprintf(key, sizeof(key), "ov%d", i);
+            j = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsNumber(j)) g.obs_vx[i] = j->valuedouble;
+            snprintf(key, sizeof(key), "ot%d", i);
+            j = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsString(j) && j->valuestring) {
+                size_t tlen = strlen(j->valuestring);
                 if (tlen >= sizeof(g.obs_type[i])) tlen = sizeof(g.obs_type[i]) - 1;
-                memcpy(g.obs_type[i], p, tlen);
+                memcpy(g.obs_type[i], j->valuestring, tlen);
                 g.obs_type[i][tlen] = '\0';
                 if (strcmp(g.obs_type[i], "pedestrian") == 0 && g.ped_index < 0)
                     g.ped_index = i;
             }
         }
+        cJSON_Delete(root);
     }
 }
 
@@ -347,12 +353,19 @@ static double lane_lead_speed(double lane_y, double same_lane_tol) {
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.curve_start_x);
-    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.curve_length_m);
-    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.curve_offset_m);
-    if ((p = strstr(d, "\"lane_width\":")))     sscanf(p + 13, "%lf", &g.lane_width);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "curve_start_x");
+        if (cJSON_IsNumber(j)) g.curve_start_x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "curve_length_m");
+        if (cJSON_IsNumber(j)) g.curve_length_m = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "curve_offset_m");
+        if (cJSON_IsNumber(j)) g.curve_offset_m = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "lane_width");
+        if (cJSON_IsNumber(j)) g.lane_width = j->valuedouble;
+        cJSON_Delete(root);
+    }
 }
 
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
@@ -415,8 +428,7 @@ protected:
             g.cycle++;
 
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
-            struct timespec now_ts; clock_gettime(CLOCK_MONOTONIC, &now_ts);
-            uint64_t now_us = (uint64_t)now_ts.tv_sec * 1000000ULL + (uint64_t)now_ts.tv_nsec / 1000ULL;
+            uint64_t now_us = clock_now_us();
             if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;
             if (g.has_planning && now_us - g.last_planning_us > 1000000ULL) g.has_planning = 0;
 
@@ -850,28 +862,36 @@ protected:
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
             /* 发布 CTE（横向误差）供 LDW/监控/数据记录用 */
-            char cte_text[128];
-            snprintf(cte_text, sizeof(cte_text),
-                     "{\"cte\":%.3f,\"speed\":%.2f,\"seq\":%u}",
-                     lat_error, g.current_speed, g.cycle);
-            transport_publish(transport_, "control/cte",
-                              (const uint8_t*)cte_text, (uint32_t)strlen(cte_text) + 1);
+            {
+                cJSON* cte_root = cJSON_CreateObject();
+                cJSON_AddNumberToObject(cte_root, "cte", lat_error);
+                cJSON_AddNumberToObject(cte_root, "speed", g.current_speed);
+                cJSON_AddNumberToObject(cte_root, "seq", g.cycle);
+                char* cte_s = cJSON_PrintUnformatted(cte_root);
+                transport_publish(transport_, "control/cte",
+                                  (const uint8_t*)cte_s, (uint32_t)strlen(cte_s) + 1);
+                free(cte_s);
+                cJSON_Delete(cte_root);
+            }
 
             /* LDW 车道偏离预警：|cte| 超阈值且速度足够高时告警（带冷却期防刷屏） */
             if (g.current_speed > g.ldw_min_speed && fabs(lat_error) > g.ldw_threshold) {
-                struct timespec ldw_ts; clock_gettime(CLOCK_MONOTONIC, &ldw_ts);
-                double now_s = (double)ldw_ts.tv_sec + (double)ldw_ts.tv_nsec / 1e9;
+                double now_s = (double)clock_now_us() * 1e-6;
                 if (now_s - g.ldw_last_warn_time > g.ldw_cooldown) {
                     g.ldw_last_warn_time = now_s;
                     const char* side = lat_error > 0 ? "left" : "right";
                     LOG_WARN("control", "LDW: lane departure! cte=%.3fm (threshold=%.3fm) speed=%.1f side=%s",
                              lat_error, g.ldw_threshold, g.current_speed, side);
-                    char ldw_text[128];
-                    snprintf(ldw_text, sizeof(ldw_text),
-                             "{\"warn\":1,\"cte\":%.3f,\"threshold\":%.3f,\"side\":\"%s\"}",
-                             lat_error, g.ldw_threshold, side);
+                    cJSON* ldw_root = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(ldw_root, "warn", 1);
+                    cJSON_AddNumberToObject(ldw_root, "cte", lat_error);
+                    cJSON_AddNumberToObject(ldw_root, "threshold", g.ldw_threshold);
+                    cJSON_AddStringToObject(ldw_root, "side", side);
+                    char* ldw_s = cJSON_PrintUnformatted(ldw_root);
                     transport_publish(transport_, "control/ldw",
-                                      (const uint8_t*)ldw_text, (uint32_t)strlen(ldw_text) + 1);
+                                      (const uint8_t*)ldw_s, (uint32_t)strlen(ldw_s) + 1);
+                    free(ldw_s);
+                    cJSON_Delete(ldw_root);
                 }
             }
 
@@ -1030,28 +1050,50 @@ static int control_init(MessageBus* bus, Transport* transport,
     statem_send_event(&g.sm, SM_EVENT_START, nullptr);  /* INITIALIZED → RUNNING */
 
     if (params_json) {
-        /* Fallback: override with JSON params if provided (backward compat) */
-        const char* p;
-        if ((p = strstr(params_json, "\"pid_kp\":")))          sscanf(p + 9, "%lf", &g.cfg_kp);
-        if ((p = strstr(params_json, "\"pid_ki\":")))          sscanf(p + 9, "%lf", &g.cfg_ki);
-        if ((p = strstr(params_json, "\"pid_kd\":")))          sscanf(p + 9, "%lf", &g.cfg_kd);
-        if ((p = strstr(params_json, "\"target_speed\":")))    sscanf(p + 15, "%lf", &g.cfg_cruise_speed);
-        if ((p = strstr(params_json, "\"lat_kp\":")))          sscanf(p + 9, "%lf", &g.lat_kp);
-        if ((p = strstr(params_json, "\"lat_kd_heading\":")))  sscanf(p + 17, "%lf", &g.lat_kd_heading);
-        if ((p = strstr(params_json, "\"yaw_damping\":")))     sscanf(p + 13, "%lf", &g.yaw_damping);
-        if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":"))) sscanf(p + 32, "%lf", &g.blocked_timeout_s);
-        if ((p = strstr(params_json, "\"lc_stable_wait_s\":")))           sscanf(p + 19, "%lf", &g.lc_stable_wait_s);
-        if ((p = strstr(params_json, "\"lc_cooldown_after_stable_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_stable_s);
-        if ((p = strstr(params_json, "\"lc_cooldown_after_return_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_return_s);
-        if ((p = strstr(params_json, "\"min_overtake_gap_base\":")))      sscanf(p + 24, "%lf", &g.min_overtake_gap_base);
-        if ((p = strstr(params_json, "\"min_overtake_gap_cap\":")))       sscanf(p + 23, "%lf", &g.min_overtake_gap_cap);
-        if ((p = strstr(params_json, "\"min_overtake_gap_speed_mult\":"))) sscanf(p + 30, "%lf", &g.min_overtake_gap_speed_mult);
-        if ((p = strstr(params_json, "\"steer_min_clamp\":")))            sscanf(p + 18, "%lf", &g.steer_min_clamp);
-        if ((p = strstr(params_json, "\"wheelbase\":")))                  sscanf(p + 12, "%lf", &g.wheelbase);
-        if ((p = strstr(params_json, "\"ldw_threshold\":")))              sscanf(p + 15, "%lf", &g.ldw_threshold);
-        if ((p = strstr(params_json, "\"ldw_min_speed\":")))              sscanf(p + 15, "%lf", &g.ldw_min_speed);
-        if ((p = strstr(params_json, "\"ldw_cooldown\":")))               sscanf(p + 14, "%lf", &g.ldw_cooldown);
-        g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "pid_kp");
+            if (cJSON_IsNumber(j)) g.cfg_kp = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "pid_ki");
+            if (cJSON_IsNumber(j)) g.cfg_ki = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "pid_kd");
+            if (cJSON_IsNumber(j)) g.cfg_kd = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "target_speed");
+            if (cJSON_IsNumber(j)) g.cfg_cruise_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lat_kp");
+            if (cJSON_IsNumber(j)) g.lat_kp = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lat_kd_heading");
+            if (cJSON_IsNumber(j)) g.lat_kd_heading = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "yaw_damping");
+            if (cJSON_IsNumber(j)) g.yaw_damping = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lane_change_blocked_timeout_s");
+            if (cJSON_IsNumber(j)) g.blocked_timeout_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_stable_wait_s");
+            if (cJSON_IsNumber(j)) g.lc_stable_wait_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_cooldown_after_stable_s");
+            if (cJSON_IsNumber(j)) g.lc_cooldown_after_stable_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_cooldown_after_return_s");
+            if (cJSON_IsNumber(j)) g.lc_cooldown_after_return_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_base");
+            if (cJSON_IsNumber(j)) g.min_overtake_gap_base = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_cap");
+            if (cJSON_IsNumber(j)) g.min_overtake_gap_cap = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_speed_mult");
+            if (cJSON_IsNumber(j)) g.min_overtake_gap_speed_mult = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "steer_min_clamp");
+            if (cJSON_IsNumber(j)) g.steer_min_clamp = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "wheelbase");
+            if (cJSON_IsNumber(j)) g.wheelbase = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ldw_threshold");
+            if (cJSON_IsNumber(j)) g.ldw_threshold = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ldw_min_speed");
+            if (cJSON_IsNumber(j)) g.ldw_min_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ldw_cooldown");
+            if (cJSON_IsNumber(j)) g.ldw_cooldown = j->valuedouble;
+            cJSON_Delete(p);
+            g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
+        }
     }
 
     /* Phase 2: 道路几何从 road/geometry topic 获取（sim_world 发布），

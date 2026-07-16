@@ -8,6 +8,7 @@
 #include "flow_registry.h"
 #include "param_registry.h"
 #include "error_codes.h"
+#include <cjson/cJSON.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -428,83 +429,112 @@ int flow_registry_total_count(void) {
 char* flow_registry_export_json(void) {
     pthread_mutex_lock(&g_mutex);
 
-    size_t sz = 16384;
-    char* buf = (char*)malloc(sz);
-    if (!buf) { pthread_mutex_unlock(&g_mutex); return NULL; }
+    cJSON* root = cJSON_CreateObject();
+    if (!root) { pthread_mutex_unlock(&g_mutex); return NULL; }
 
-    int off = snprintf(buf, sz,
-        "{\"tasks\":[");
+    /* Tasks */
+    cJSON* tasks = cJSON_CreateArray();
     for (int i = 0; i < g_task_count; i++) {
         TaskMeta* t = &g_tasks[i];
-        if ((size_t)off + 512 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"name\":\"%s\",\"desc\":\"%s\",\"plugin\":\"%s\","
-            "\"inputs\":[",
-            i > 0 ? "," : "", t->name, t->description, t->plugin);
+        cJSON* task = cJSON_CreateObject();
+        cJSON_AddStringToObject(task, "name", t->name);
+        cJSON_AddStringToObject(task, "desc", t->description);
+        cJSON_AddStringToObject(task, "plugin", t->plugin);
+
+        cJSON* inputs = cJSON_CreateArray();
         for (int j = 0; j < t->input_count; j++)
-            off += snprintf(buf + off, sz - (size_t)off, "%s\"%s\"", j>0?",":"", t->inputs[j]);
-        off += snprintf(buf + off, sz - (size_t)off, "],\"outputs\":[");
+            cJSON_AddItemToArray(inputs, cJSON_CreateString(t->inputs[j]));
+        cJSON_AddItemToObject(task, "inputs", inputs);
+
+        cJSON* outputs = cJSON_CreateArray();
         for (int j = 0; j < t->output_count; j++)
-            off += snprintf(buf + off, sz - (size_t)off, "%s\"%s\"", j>0?",":"", t->outputs[j]);
-        off += snprintf(buf + off, sz - (size_t)off, "]}");
-    }
+            cJSON_AddItemToArray(outputs, cJSON_CreateString(t->outputs[j]));
+        cJSON_AddItemToObject(task, "outputs", outputs);
 
-    off += snprintf(buf + off, sz - (size_t)off, "],\"topics\":[");
+        cJSON_AddItemToArray(tasks, task);
+    }
+    cJSON_AddItemToObject(root, "tasks", tasks);
+
+    /* Topics */
+    cJSON* topics = cJSON_CreateArray();
     for (int i = 0; i < g_topic_count; i++) {
-        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"name\":\"%s\",\"type_id\":\"0x%08x\"}",
-            i > 0 ? "," : "", g_topics[i].name, g_topics[i].type_id);
+        cJSON* topic = cJSON_CreateObject();
+        cJSON_AddStringToObject(topic, "name", g_topics[i].name);
+        char type_id_str[16];
+        snprintf(type_id_str, sizeof(type_id_str), "0x%08x", g_topics[i].type_id);
+        cJSON_AddStringToObject(topic, "type_id", type_id_str);
+        cJSON_AddItemToArray(topics, topic);
     }
+    cJSON_AddItemToObject(root, "topics", topics);
 
-    off += snprintf(buf + off, sz - (size_t)off, "],\"plugins\":[");
+    /* Plugins */
+    cJSON* plugins = cJSON_CreateArray();
     for (int i = 0; i < g_plugin_count; i++) {
-        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"name\":\"%s\",\"path\":\"%s\",\"tasks\":%d,\"types\":%d}",
-            i > 0 ? "," : "", g_plugins[i].name, g_plugins[i].path,
-            g_plugins[i].task_count, g_plugins[i].type_count);
+        cJSON* plugin = cJSON_CreateObject();
+        cJSON_AddStringToObject(plugin, "name", g_plugins[i].name);
+        cJSON_AddStringToObject(plugin, "path", g_plugins[i].path);
+        cJSON_AddNumberToObject(plugin, "tasks", g_plugins[i].task_count);
+        cJSON_AddNumberToObject(plugin, "types", g_plugins[i].type_count);
+        cJSON_AddItemToArray(plugins, plugin);
     }
+    cJSON_AddItemToObject(root, "plugins", plugins);
 
-    off += snprintf(buf + off, sz - (size_t)off, "],\"schemas\":[");
+    /* Schemas */
+    cJSON* schemas = cJSON_CreateArray();
     for (int i = 0; i < g_schema_count; i++) {
-        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"topic\":\"%s\",\"type\":\"%s\",\"size\":%zu}",
-            i > 0 ? "," : "", g_schemas[i].topic, g_schemas[i].type_name,
-            g_schemas[i].struct_size);
+        cJSON* schema = cJSON_CreateObject();
+        cJSON_AddStringToObject(schema, "topic", g_schemas[i].topic);
+        cJSON_AddStringToObject(schema, "type", g_schemas[i].type_name);
+        cJSON_AddNumberToObject(schema, "size", (double)g_schemas[i].struct_size);
+        cJSON_AddItemToArray(schemas, schema);
     }
+    cJSON_AddItemToObject(root, "schemas", schemas);
 
-    off += snprintf(buf + off, sz - (size_t)off, "],\"params\":[");
+    /* Params */
+    cJSON* params = cJSON_CreateArray();
     {
         FlowParamMeta pm[64];
         int pn = flow_registry_list_params(pm, 64);
         for (int i = 0; i < pn; i++) {
-            if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+            cJSON* param = cJSON_CreateObject();
+            cJSON_AddStringToObject(param, "name", pm[i].name);
             const char* type_str = pm[i].type == 0 ? "int" :
                                    pm[i].type == 1 ? "float" :
                                    pm[i].type == 2 ? "bool" : "string";
-            off += snprintf(buf + off, sz - (size_t)off,
-                "%s{\"name\":\"%s\",\"type\":\"%s\",\"value\":\"%s\",\"hot_reload\":%s}",
-                i > 0 ? "," : "", pm[i].name, type_str, pm[i].value_str,
-                pm[i].hot_reload ? "true" : "false");
+            cJSON_AddStringToObject(param, "type", type_str);
+            cJSON_AddStringToObject(param, "value", pm[i].value_str);
+            cJSON_AddBoolToObject(param, "hot_reload", pm[i].hot_reload);
+            cJSON_AddItemToArray(params, param);
         }
     }
+    cJSON_AddItemToObject(root, "params", params);
 
-    off += snprintf(buf + off, sz - (size_t)off, "],\"types\":[");
+    /* Types */
+    cJSON* types = cJSON_CreateArray();
     for (int i = 0; i < g_type_cache_count; i++) {
-        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - (size_t)off,
-            "%s{\"name\":\"%s\",\"type_id\":\"0x%08x\",\"size\":%zu}",
-            i > 0 ? "," : "", g_type_cache[i].type_name,
-            g_type_cache[i].type_id, g_type_cache[i].struct_size);
+        cJSON* type = cJSON_CreateObject();
+        cJSON_AddStringToObject(type, "name", g_type_cache[i].type_name);
+        char type_id_str[16];
+        snprintf(type_id_str, sizeof(type_id_str), "0x%08x", g_type_cache[i].type_id);
+        cJSON_AddStringToObject(type, "type_id", type_id_str);
+        cJSON_AddNumberToObject(type, "size", (double)g_type_cache[i].struct_size);
+        cJSON_AddItemToArray(types, type);
     }
+    cJSON_AddItemToObject(root, "types", types);
 
-    off += snprintf(buf + off, sz - (size_t)off,
-        "],\"summary\":{\"tasks\":%d,\"topics\":%d,\"plugins\":%d,\"schemas\":%d,\"params\":%d,\"types\":%d}}",
-        g_task_count, g_topic_count, g_plugin_count, g_schema_count,
-        flow_registry_param_count(), flow_registry_type_count());
+    /* Summary */
+    cJSON* summary = cJSON_CreateObject();
+    cJSON_AddNumberToObject(summary, "tasks", g_task_count);
+    cJSON_AddNumberToObject(summary, "topics", g_topic_count);
+    cJSON_AddNumberToObject(summary, "plugins", g_plugin_count);
+    cJSON_AddNumberToObject(summary, "schemas", g_schema_count);
+    cJSON_AddNumberToObject(summary, "params", flow_registry_param_count());
+    cJSON_AddNumberToObject(summary, "types", flow_registry_type_count());
+    cJSON_AddItemToObject(root, "summary", summary);
+
+    char* out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
 
     pthread_mutex_unlock(&g_mutex);
-    return buf;
+    return out;
 }

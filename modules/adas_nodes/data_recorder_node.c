@@ -22,6 +22,8 @@
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -78,11 +80,14 @@ static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"target_speed\":")))
-        sscanf(p + 15, "%lf", &g.planning_target_speed);
-    else if ((p = strstr(d, "speed=")))
-        sscanf(p + 6, "%lf", &g.planning_target_speed);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
+        if (cJSON_IsNumber(j)) {
+            g.planning_target_speed = j->valuedouble;
+        }
+        cJSON_Delete(root);
+    }
     g.has_planning = 1;
 }
 
@@ -123,20 +128,26 @@ static void select_front_obstacles(const ObstacleList* src, const Obstacle** fir
     }
 }
 
-static void print_obstacle_json(FILE* out, const Obstacle* obs) {
-    if (!obs) {
-        fprintf(out, "{\"id\":0,\"x\":0.000,\"y\":0.000,\"vx\":0.000,\"vy\":0.000,\"type\":0,\"confidence\":0.000}");
-        return;
+static cJSON* build_obstacle_json(const Obstacle* obs) {
+    cJSON* obj = cJSON_CreateObject();
+    if (obs) {
+        cJSON_AddNumberToObject(obj, "id", (double)obs->id);
+        cJSON_AddNumberToObject(obj, "x", (double)obs->x);
+        cJSON_AddNumberToObject(obj, "y", (double)obs->y);
+        cJSON_AddNumberToObject(obj, "vx", (double)obs->vx);
+        cJSON_AddNumberToObject(obj, "vy", (double)obs->vy);
+        cJSON_AddNumberToObject(obj, "type", (int)obs->type);
+        cJSON_AddNumberToObject(obj, "confidence", (double)obs->confidence);
+    } else {
+        cJSON_AddNumberToObject(obj, "id", 0);
+        cJSON_AddNumberToObject(obj, "x", 0.0);
+        cJSON_AddNumberToObject(obj, "y", 0.0);
+        cJSON_AddNumberToObject(obj, "vx", 0.0);
+        cJSON_AddNumberToObject(obj, "vy", 0.0);
+        cJSON_AddNumberToObject(obj, "type", 0);
+        cJSON_AddNumberToObject(obj, "confidence", 0.0);
     }
-    fprintf(out,
-            "{\"id\":%u,\"x\":%.3f,\"y\":%.3f,\"vx\":%.3f,\"vy\":%.3f,\"type\":%d,\"confidence\":%.3f}",
-            obs->id, obs->x, obs->y, obs->vx, obs->vy, (int)obs->type, obs->confidence);
-}
-
-static long long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return obj;
 }
 
 static void* recorder_thread(void* arg) {
@@ -158,30 +169,51 @@ static void* recorder_thread(void* arg) {
         double control_brake = g.has_control ? g.control.brake : 0.0;
         int control_emergency_stop = g.has_control ? (g.control.emergency_stop ? 1 : 0) : 0;
 
-        fprintf(g.out,
-            "{\"schema_version\":\"flowengine.e2e_sample.v2\",\"t\":%lld,"
-            "\"features\":[%.4f,%.4f,%.4f,%.4f],"
-            "\"features_v2\":[%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%d,%.3f,%.0f],"
-            "\"label\":%.4f,\"ego\":{\"x\":%.3f,\"y\":%.3f,\"v\":%.3f,\"heading\":%.4f,\"yaw_rate\":%.4f},"
-            "\"planning\":{\"target_speed\":%.4f},\"control\":{\"throttle\":%.3f,\"brake\":%.3f,\"steering\":%.3f,\"emergency_stop\":%s},\"obstacles\":[",
-            now_ms(),
-            g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
-            g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
-            front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
-            front0 ? (int)front0->type : 0, front0 ? front0->confidence : 0.0,
-            front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
-            front1 ? (int)front1->type : 0, control_brake, (double)control_emergency_stop,
-            g.planning_target_speed,
-            g.ego_x, g.ego_y, g.ego_v, g.ego_heading, g.ego_yaw_rate,
-            g.planning_target_speed,
-            g.has_control ? g.control.throttle : 0.0,
-            control_brake,
-            g.has_control ? g.control.steering : 0.0,
-            control_emergency_stop ? "true" : "false");
-        print_obstacle_json(g.out, front0);
-        fprintf(g.out, ",");
-        print_obstacle_json(g.out, front1);
-        fprintf(g.out, "]}\n");
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "schema_version", "flowengine.e2e_sample.v2");
+        cJSON_AddNumberToObject(root, "t", (double)(clock_now_realtime_us() / 1000));
+
+        {   double arr[] = {g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate};
+            cJSON_AddItemToObject(root, "features", cJSON_CreateDoubleArray(arr, 4)); }
+
+        {   double arr[] = {
+                g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
+                front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
+                (double)(front0 ? (int)front0->type : 0), front0 ? front0->confidence : 0.0,
+                front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
+                (double)(front1 ? (int)front1->type : 0), control_brake, (double)control_emergency_stop };
+            cJSON_AddItemToObject(root, "features_v2", cJSON_CreateDoubleArray(arr, 15)); }
+
+        cJSON_AddNumberToObject(root, "label", g.planning_target_speed);
+
+        cJSON* ego = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ego, "x", g.ego_x);
+        cJSON_AddNumberToObject(ego, "y", g.ego_y);
+        cJSON_AddNumberToObject(ego, "v", g.ego_v);
+        cJSON_AddNumberToObject(ego, "heading", g.ego_heading);
+        cJSON_AddNumberToObject(ego, "yaw_rate", g.ego_yaw_rate);
+        cJSON_AddItemToObject(root, "ego", ego);
+
+        cJSON* planning = cJSON_CreateObject();
+        cJSON_AddNumberToObject(planning, "target_speed", g.planning_target_speed);
+        cJSON_AddItemToObject(root, "planning", planning);
+
+        cJSON* control = cJSON_CreateObject();
+        cJSON_AddNumberToObject(control, "throttle", g.has_control ? g.control.throttle : 0.0);
+        cJSON_AddNumberToObject(control, "brake", control_brake);
+        cJSON_AddNumberToObject(control, "steering", g.has_control ? g.control.steering : 0.0);
+        cJSON_AddBoolToObject(control, "emergency_stop", control_emergency_stop ? 1 : 0);
+        cJSON_AddItemToObject(root, "control", control);
+
+        cJSON* obstacles = cJSON_CreateArray();
+        cJSON_AddItemToArray(obstacles, build_obstacle_json(front0));
+        cJSON_AddItemToArray(obstacles, build_obstacle_json(front1));
+        cJSON_AddItemToObject(root, "obstacles", obstacles);
+
+        char* s = cJSON_PrintUnformatted(root);
+        fprintf(g.out, "%s\n", s);
+        free(s);
+        cJSON_Delete(root);
         fflush(g.out);
         g.sample_count++;
 
@@ -217,17 +249,14 @@ static int recorder_init(MessageBus* bus, Transport* transport,
     strncpy(g.out_path, "/tmp/flow_train_samples.jsonl", sizeof(g.out_path) - 1);
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"frequency_hz\":")))
-            sscanf(p + 15, "%lf", &g.cfg_frequency_hz);
-        if ((p = strstr(params_json, "\"output_path\":\""))) {
-            const char* start = p + 15;
-            const char* end = strchr(start, '"');
-            if (end && (size_t)(end - start) < sizeof(g.out_path)) {
-                size_t len = (size_t)(end - start);
-                memcpy(g.out_path, start, len);
-                g.out_path[len] = '\0';
-            }
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "frequency_hz")) && cJSON_IsNumber(j))
+                g.cfg_frequency_hz = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "output_path")) && cJSON_IsString(j))
+                strncpy(g.out_path, j->valuestring, sizeof(g.out_path) - 1);
+            cJSON_Delete(p);
         }
     }
 

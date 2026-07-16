@@ -27,6 +27,8 @@
 #include "adas_msgs_gen.h"
 #include "logger.h"
 #include "tiny_mlp.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -113,24 +115,33 @@ static void registry_save(void) {
     FILE* f = fopen(g.registry_path, "w");
     if (!f) return;
 
-    fprintf(f, "{\n  \"schema\":\"flowengine-ota-registry v1\",\n");
-    fprintf(f, "  \"current_id\":\"%s\",\n",
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "schema", "flowengine-ota-registry v1");
+    cJSON_AddStringToObject(root, "current_id",
             g.current_idx >= 0 ? g.versions[g.current_idx].id : "");
-    fprintf(f, "  \"previous_id\":\"%s\",\n",
+    cJSON_AddStringToObject(root, "previous_id",
             g.previous_idx >= 0 ? g.versions[g.previous_idx].id : "");
-    fprintf(f, "  \"ab_test\":{\"enabled\":%s,\"ratio\":%.2f,\"model_b_path\":\"%s\"},\n",
-            g.ab_enabled ? "true" : "false",
-            (double)g.ab_ratio, g.model_b_path);
-    fprintf(f, "  \"versions\":[\n");
+
+    cJSON* ab = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ab, "enabled", g.ab_enabled);
+    cJSON_AddNumberToObject(ab, "ratio", g.ab_ratio);
+    cJSON_AddStringToObject(ab, "model_b_path", g.model_b_path);
+    cJSON_AddItemToObject(root, "ab_test", ab);
+
+    cJSON* versions = cJSON_CreateArray();
     for (int i = 0; i < g.version_count; i++) {
-        fprintf(f, "    {\"id\":\"%s\",\"path\":\"%s\",\"loaded_at\":%ld,\"active\":%s}%s\n",
-                g.versions[i].id,
-                g.versions[i].path,
-                g.versions[i].loaded_at,
-                g.versions[i].active ? "true" : "false",
-                (i + 1 < g.version_count) ? "," : "");
+        cJSON* v = cJSON_CreateObject();
+        cJSON_AddStringToObject(v, "id", g.versions[i].id);
+        cJSON_AddStringToObject(v, "path", g.versions[i].path);
+        cJSON_AddNumberToObject(v, "loaded_at", g.versions[i].loaded_at);
+        cJSON_AddBoolToObject(v, "active", g.versions[i].active);
+        cJSON_AddItemToArray(versions, v);
     }
-    fprintf(f, "  ]\n}\n");
+    cJSON_AddItemToObject(root, "versions", versions);
+
+    char* s = cJSON_Print(root);
+    if (s) { fprintf(f, "%s\n", s); free(s); }
+    cJSON_Delete(root);
     fclose(f);
 }
 
@@ -138,62 +149,71 @@ static void registry_load(void) {
     FILE* f = fopen(g.registry_path, "r");
     if (!f) return;
 
-    /* 简单文本扫描，提取 versions 数组 */
-    char line[512];
+    /* 读取整个文件到缓冲 */
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    if (fsize <= 0) { fclose(f); return; }
+    rewind(f);
+    char* buf = (char*)malloc((size_t)fsize + 1);
+    if (!buf) { fclose(f); return; }
+    size_t nread = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    buf[nread] = '\0';
+
     g.version_count = 0;
     g.current_idx   = -1;
     g.previous_idx  = -1;
 
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return;
+
     char cur_id[OTA_ID_LEN] = {0};
     char prev_id[OTA_ID_LEN] = {0};
 
-    while (fgets(line, sizeof(line), f) && g.version_count < OTA_MAX_VERSIONS) {
-        const char* p;
+    cJSON* j;
+    j = cJSON_GetObjectItemCaseSensitive(root, "current_id");
+    if (cJSON_IsString(j) && j->valuestring)
+        strncpy(cur_id, j->valuestring, OTA_ID_LEN - 1);
+    j = cJSON_GetObjectItemCaseSensitive(root, "previous_id");
+    if (cJSON_IsString(j) && j->valuestring)
+        strncpy(prev_id, j->valuestring, OTA_ID_LEN - 1);
 
-        /* 顶层字段 */
-        if ((p = strstr(line, "\"current_id\":\""))) {
-            const char* s = p + 14; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_ID_LEN-1 ? (size_t)(e-s) : OTA_ID_LEN-1;
-                     memcpy(cur_id, s, l); cur_id[l] = '\0'; }
-        }
-        if ((p = strstr(line, "\"previous_id\":\""))) {
-            const char* s = p + 15; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_ID_LEN-1 ? (size_t)(e-s) : OTA_ID_LEN-1;
-                     memcpy(prev_id, s, l); prev_id[l] = '\0'; }
-        }
-        if ((p = strstr(line, "\"enabled\":")))
-            g.ab_enabled = (strstr(p + 10, "true") != NULL) ? 1 : 0;
-        if ((p = strstr(line, "\"ratio\":")))
-            sscanf(p + 8, "%f", &g.ab_ratio);
-        if ((p = strstr(line, "\"model_b_path\":\""))) {
-            const char* s = p + 16; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                     memcpy(g.model_b_path, s, l); g.model_b_path[l] = '\0'; }
-        }
+    cJSON* ab = cJSON_GetObjectItemCaseSensitive(root, "ab_test");
+    if (cJSON_IsObject(ab)) {
+        j = cJSON_GetObjectItemCaseSensitive(ab, "enabled");
+        if (cJSON_IsBool(j)) g.ab_enabled = cJSON_IsTrue(j) ? 1 : 0;
+        j = cJSON_GetObjectItemCaseSensitive(ab, "ratio");
+        if (cJSON_IsNumber(j)) g.ab_ratio = (float)j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(ab, "model_b_path");
+        if (cJSON_IsString(j) && j->valuestring)
+            strncpy(g.model_b_path, j->valuestring, OTA_PATH_LEN - 1);
+    }
 
-        /* 版本条目: {"id":"...", "path":"...", "loaded_at":..., "active":...} */
-        if (strstr(line, "\"id\":") && strstr(line, "\"path\":") &&
-            strstr(line, "\"loaded_at\":") && g.version_count < OTA_MAX_VERSIONS) {
-            OtaVersion* v = &g.versions[g.version_count];
-            memset(v, 0, sizeof(*v));
-            if ((p = strstr(line, "\"id\":\""))) {
-                const char* s = p + 6; const char* e = strchr(s, '"');
-                if (e) { size_t l = (size_t)(e-s) < OTA_ID_LEN-1 ? (size_t)(e-s) : OTA_ID_LEN-1;
-                         memcpy(v->id, s, l); v->id[l] = '\0'; }
-            }
-            if ((p = strstr(line, "\"path\":\""))) {
-                const char* s = p + 8; const char* e = strchr(s, '"');
-                if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                         memcpy(v->path, s, l); v->path[l] = '\0'; }
-            }
-            if ((p = strstr(line, "\"loaded_at\":")))
-                sscanf(p + 12, "%ld", &v->loaded_at);
-            if ((p = strstr(line, "\"active\":")))
-                v->active = (strstr(p + 9, "true") != NULL) ? 1 : 0;
-            if (v->id[0] != '\0') g.version_count++;
+    cJSON* versions = cJSON_GetObjectItemCaseSensitive(root, "versions");
+    if (cJSON_IsArray(versions)) {
+        int nv = cJSON_GetArraySize(versions);
+        if (nv > OTA_MAX_VERSIONS) nv = OTA_MAX_VERSIONS;
+        for (int i = 0; i < nv; i++) {
+            cJSON* v = cJSON_GetArrayItem(versions, i);
+            if (!cJSON_IsObject(v)) continue;
+            OtaVersion* ov = &g.versions[g.version_count];
+            memset(ov, 0, sizeof(*ov));
+            j = cJSON_GetObjectItemCaseSensitive(v, "id");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(ov->id, j->valuestring, OTA_ID_LEN - 1);
+            j = cJSON_GetObjectItemCaseSensitive(v, "path");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(ov->path, j->valuestring, OTA_PATH_LEN - 1);
+            j = cJSON_GetObjectItemCaseSensitive(v, "loaded_at");
+            if (cJSON_IsNumber(j)) ov->loaded_at = (long)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(v, "active");
+            if (cJSON_IsBool(j)) ov->active = cJSON_IsTrue(j) ? 1 : 0;
+            if (ov->id[0] != '\0') g.version_count++;
         }
     }
-    fclose(f);
+
+    cJSON_Delete(root);
 
     /* 重建 current/previous 索引 */
     for (int i = 0; i < g.version_count; i++) {
@@ -229,25 +249,28 @@ static int copy_file(const char* src, const char* dst) {
 /* ─────────────────────────────────────────────────────────── */
 
 static void publish_status(void) {
-    char status[1024];
-    const char* cur_id   = (g.current_idx  >= 0) ? g.versions[g.current_idx].id  : "";
-    const char* prev_id  = (g.previous_idx >= 0) ? g.versions[g.previous_idx].id : "";
-    int n = snprintf(status, sizeof(status),
-        "{\"current_id\":\"%s\",\"previous_id\":\"%s\","
-        "\"version_count\":%d,\"reload_count\":%d,\"rollback_count\":%d,"
-        "\"ab_enabled\":%s,\"ab_ratio\":%.2f,"
-        "\"ab_count_a\":%ld,\"ab_count_b\":%ld}",
-        cur_id, prev_id,
-        g.version_count, g.reload_count, g.rollback_count,
-        g.ab_enabled ? "true" : "false", (double)g.ab_ratio,
-        g.ab_count_a, g.ab_count_b);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "current_id",
+            g.current_idx >= 0 ? g.versions[g.current_idx].id : "");
+    cJSON_AddStringToObject(root, "previous_id",
+            g.previous_idx >= 0 ? g.versions[g.previous_idx].id : "");
+    cJSON_AddNumberToObject(root, "version_count", g.version_count);
+    cJSON_AddNumberToObject(root, "reload_count", g.reload_count);
+    cJSON_AddNumberToObject(root, "rollback_count", g.rollback_count);
+    cJSON_AddBoolToObject(root, "ab_enabled", g.ab_enabled);
+    cJSON_AddNumberToObject(root, "ab_ratio", g.ab_ratio);
+    cJSON_AddNumberToObject(root, "ab_count_a", g.ab_count_a);
+    cJSON_AddNumberToObject(root, "ab_count_b", g.ab_count_b);
 
+    char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, "model_ota/status",
-                      (const uint8_t*)status, (uint32_t)(n + 1));
+                      (const uint8_t*)s, (uint32_t)strlen(s) + 1);
 
     /* 同时写入状态文件供 modelctl.py ota status 读取 */
     FILE* f = fopen(OTA_STATUS_FILE, "w");
-    if (f) { fprintf(f, "%s\n", status); fclose(f); }
+    if (f) { fprintf(f, "%s\n", s); fclose(f); }
+    free(s);
+    cJSON_Delete(root);
 }
 
 /* ─────────────────────────────────────────────────────────── */
@@ -311,12 +334,15 @@ static int activate_version(const char* id, const char* path) {
     }
 
     /* 发布 model_ota/active 信号（通知 inference_node 热重载） */
-    char sig[512];
-    int n = snprintf(sig, sizeof(sig),
-        "{\"cmd\":\"reload\",\"id\":\"%s\",\"path\":\"%s\"}",
-        id, g.runtime_model_path);
+    cJSON* sig_root = cJSON_CreateObject();
+    cJSON_AddStringToObject(sig_root, "cmd", "reload");
+    cJSON_AddStringToObject(sig_root, "id", id);
+    cJSON_AddStringToObject(sig_root, "path", g.runtime_model_path);
+    char* sig_s = cJSON_PrintUnformatted(sig_root);
     transport_publish(g.transport, "model_ota/active",
-                      (const uint8_t*)sig, (uint32_t)(n + 1));
+                      (const uint8_t*)sig_s, (uint32_t)strlen(sig_s) + 1);
+    free(sig_s);
+    cJSON_Delete(sig_root);
 
     /* 持久化注册表 */
     registry_save();
@@ -330,31 +356,41 @@ static int activate_version(const char* id, const char* path) {
 static void handle_cmd(const char* json) {
     if (!json || json[0] == '\0') return;
 
-    const char* p;
+    cJSON* root = cJSON_Parse(json);
+    if (!root) {
+        LOG_WARN("model_ota", "invalid JSON command: %.80s", json);
+        return;
+    }
+
+    cJSON* j_cmd = cJSON_GetObjectItemCaseSensitive(root, "cmd");
+    if (!cJSON_IsString(j_cmd) || !j_cmd->valuestring) {
+        cJSON_Delete(root);
+        return;
+    }
+    const char* cmd = j_cmd->valuestring;
 
     /* "cmd":"load" */
-    if (strstr(json, "\"load\"")) {
-        char id[OTA_ID_LEN]    = "unknown";
+    if (strcmp(cmd, "load") == 0) {
+        char id[OTA_ID_LEN] = "unknown";
         char path[OTA_PATH_LEN] = {0};
-        if ((p = strstr(json, "\"id\":\""))) {
-            const char* s = p + 6; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_ID_LEN-1 ? (size_t)(e-s) : OTA_ID_LEN-1;
-                     memcpy(id, s, l); id[l] = '\0'; }
-        }
-        if ((p = strstr(json, "\"path\":\""))) {
-            const char* s = p + 8; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                     memcpy(path, s, l); path[l] = '\0'; }
-        }
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "id");
+        if (cJSON_IsString(j) && j->valuestring)
+            strncpy(id, j->valuestring, OTA_ID_LEN - 1);
+        j = cJSON_GetObjectItemCaseSensitive(root, "path");
+        if (cJSON_IsString(j) && j->valuestring)
+            strncpy(path, j->valuestring, OTA_PATH_LEN - 1);
         if (path[0] != '\0')
             activate_version(id, path);
         else
             LOG_WARN("model_ota", "load command missing path");
+        cJSON_Delete(root);
         return;
     }
 
     /* "cmd":"rollback" */
-    if (strstr(json, "\"rollback\"")) {
+    if (strcmp(cmd, "rollback") == 0) {
+        cJSON_Delete(root);
         pthread_mutex_lock(&g.reg_mutex);
         int prev = g.previous_idx;
         pthread_mutex_unlock(&g.reg_mutex);
@@ -375,17 +411,17 @@ static void handle_cmd(const char* json) {
     }
 
     /* "cmd":"ab_test" */
-    if (strstr(json, "\"ab_test\"")) {
-        int enable = strstr(json, "\"enable\":true") ? 1 : 0;
+    if (strcmp(cmd, "ab_test") == 0) {
         float ratio = g.ab_ratio;
-        if ((p = strstr(json, "\"ratio\":")))
-            sscanf(p + 8, "%f", &ratio);
         char mb_path[OTA_PATH_LEN] = {0};
-        if ((p = strstr(json, "\"model_b_path\":\""))) {
-            const char* s = p + 16; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                     memcpy(mb_path, s, l); mb_path[l] = '\0'; }
-        }
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "enable");
+        int enable = cJSON_IsTrue(j) ? 1 : 0;
+        j = cJSON_GetObjectItemCaseSensitive(root, "ratio");
+        if (cJSON_IsNumber(j)) ratio = (float)j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "model_b_path");
+        if (cJSON_IsString(j) && j->valuestring)
+            strncpy(mb_path, j->valuestring, OTA_PATH_LEN - 1);
 
         pthread_mutex_lock(&g.reg_mutex);
         g.ab_enabled = enable;
@@ -401,16 +437,19 @@ static void handle_cmd(const char* json) {
         LOG_INFO("model_ota", "ab_test %s ratio=%.2f model_b=%s",
                  enable ? "on" : "off", (double)ratio,
                  mb_path[0] ? mb_path : "(unchanged)");
+        cJSON_Delete(root);
         return;
     }
 
     /* "cmd":"status" */
-    if (strstr(json, "\"status\"")) {
+    if (strcmp(cmd, "status") == 0) {
+        cJSON_Delete(root);
         publish_status();
         return;
     }
 
     LOG_WARN("model_ota", "unknown command: %.80s", json);
+    cJSON_Delete(root);
 }
 
 /* ─────────────────────────────────────────────────────────── */
@@ -433,11 +472,17 @@ static void on_fusion(const Message* msg, void* user_data) {
         g.has_fusion = 1;
         return;
     }
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"v\":")))       sscanf(p + 4,  "%lf", &g.ego_v);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "v");
+        if (cJSON_IsNumber(j)) g.ego_v = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "y");
+        if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+        if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_fusion = 1;
 }
 
@@ -507,18 +552,24 @@ static void run_ab_inference(void) {
 
     /* 发布对比结果 */
     const char* cur_id = (g.current_idx >= 0) ? g.versions[g.current_idx].id : "a";
-    char result[512];
-    int n = snprintf(result, sizeof(result),
-        "{\"step\":%ld,\"use\":\"%s\","
-        "\"a\":{\"id\":\"%s\",\"speed\":%.2f},"
-        "\"b\":{\"path\":\"%s\",\"speed\":%.2f},"
-        "\"delta\":%.3f}",
-        g.ab_step, use_a ? "A" : "B",
-        cur_id,      na >= 1 ? (double)ya[0] : 0.0,
-        g.model_b_path, nb >= 1 ? (double)yb[0] : 0.0,
-        (na >= 1 && nb >= 1) ? (double)(ya[0] - yb[0]) : 0.0);
+    cJSON* ar_root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(ar_root, "step", g.ab_step);
+    cJSON_AddStringToObject(ar_root, "use", use_a ? "A" : "B");
+    cJSON* a_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(a_obj, "id", cur_id);
+    cJSON_AddNumberToObject(a_obj, "speed", na >= 1 ? (double)ya[0] : 0.0);
+    cJSON_AddItemToObject(ar_root, "a", a_obj);
+    cJSON* b_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(b_obj, "path", g.model_b_path);
+    cJSON_AddNumberToObject(b_obj, "speed", nb >= 1 ? (double)yb[0] : 0.0);
+    cJSON_AddItemToObject(ar_root, "b", b_obj);
+    cJSON_AddNumberToObject(ar_root, "delta",
+            (na >= 1 && nb >= 1) ? (double)(ya[0] - yb[0]) : 0.0);
+    char* ar_s = cJSON_PrintUnformatted(ar_root);
     transport_publish(g.transport, "model_ota/ab_result",
-                      (const uint8_t*)result, (uint32_t)(n + 1));
+                      (const uint8_t*)ar_s, (uint32_t)strlen(ar_s) + 1);
+    free(ar_s);
+    cJSON_Delete(ar_root);
 }
 
 /* ─────────────────────────────────────────────────────────── */
@@ -535,17 +586,15 @@ static void* ota_thread(void* arg) {
     double accum_status = 0.0;
     double accum_ab     = 0.0;
 
-    struct timespec t_last, t_now;
-    clock_gettime(CLOCK_MONOTONIC, &t_last);
+    uint64_t t_last_us = clock_now_us();
 
     while (!g.should_stop) {
         usleep(poll_us);
         if (g.should_stop) break;
 
-        clock_gettime(CLOCK_MONOTONIC, &t_now);
-        double dt = (double)(t_now.tv_sec  - t_last.tv_sec)
-                  + (double)(t_now.tv_nsec - t_last.tv_nsec) * 1e-9;
-        t_last = t_now;
+        uint64_t t_now_us = clock_now_us();
+        double dt = (double)(t_now_us - t_last_us) * 1e-6;
+        t_last_us = t_now_us;
         accum_status += dt;
         accum_ab     += dt;
 
@@ -612,23 +661,22 @@ static int ota_init(MessageBus* bus, Transport* transport,
     strncpy(g.watch_dir,          "models",                 OTA_PATH_LEN - 1);
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"poll_interval_ms\":")))
-            sscanf(p + 19, "%d", &g.poll_interval_ms);
-        if ((p = strstr(params_json, "\"status_hz\":")))
-            sscanf(p + 12, "%lf", &g.cfg_status_hz);
-        if ((p = strstr(params_json, "\"ab_ratio\":"))) {
-            float r; if (sscanf(p + 11, "%f", &r) == 1) g.ab_ratio = r;
-        }
-        if ((p = strstr(params_json, "\"runtime_model_path\":\""))) {
-            const char* s = p + 22; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                     memcpy(g.runtime_model_path, s, l); g.runtime_model_path[l] = '\0'; }
-        }
-        if ((p = strstr(params_json, "\"registry_path\":\""))) {
-            const char* s = p + 17; const char* e = strchr(s, '"');
-            if (e) { size_t l = (size_t)(e-s) < OTA_PATH_LEN-1 ? (size_t)(e-s) : OTA_PATH_LEN-1;
-                     memcpy(g.registry_path, s, l); g.registry_path[l] = '\0'; }
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "poll_interval_ms");
+            if (cJSON_IsNumber(j)) g.poll_interval_ms = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "status_hz");
+            if (cJSON_IsNumber(j)) g.cfg_status_hz = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ab_ratio");
+            if (cJSON_IsNumber(j)) g.ab_ratio = (float)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "runtime_model_path");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(g.runtime_model_path, j->valuestring, OTA_PATH_LEN - 1);
+            j = cJSON_GetObjectItemCaseSensitive(p, "registry_path");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(g.registry_path, j->valuestring, OTA_PATH_LEN - 1);
+            cJSON_Delete(p);
         }
     }
 

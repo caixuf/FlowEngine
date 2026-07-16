@@ -64,6 +64,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 #include "serial_port.h"
 
 #include <math.h>
@@ -137,19 +138,6 @@ static void parse_string(const char* json, const char* key, char* out, size_t ou
     size_t n = 0;
     while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
     out[n] = '\0';
-}
-
-/* ── 单调时钟 → 微秒时间戳 ───────────────────────────────────
- *
- * 用 clock_gettime(CLOCK_MONOTONIC) 填充 ImuData.timestamp_us。
- * timestamp_us 为 uint32，约 71.6 分钟回绕一次；作为帧间相对时间戳足够，
- * 下游 fusion/SLAM 用相邻帧差分计算 dt，回绕不敏感。
- */
-static uint32_t now_us_monotonic(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-    return (uint32_t)(us & 0xFFFFFFFFu);
 }
 
 /* ── 硬件适配点：解析一行 IMU 数据 ───────────────────────────
@@ -281,7 +269,7 @@ static void* imu_reader_thread(void* arg) {
         if (!ok) continue;
 
         /* 填充时间戳 + 序列化 + 发布到 sensor/imu */
-        imu.timestamp_us = now_us_monotonic();
+        imu.timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
         uint8_t buf[64];
         size_t  len = 0;
         if (ImuData_serialize(&imu, buf, &len) == 0 && len > 0) {

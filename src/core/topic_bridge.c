@@ -13,6 +13,7 @@
 #include "ipc_channel.h"
 #include "error_codes.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -47,14 +48,6 @@ struct TopicBridge {
     volatile int should_stop;
 };
 
-/* ── 辅助: 单调时钟微秒 ────────────────────────────────────── */
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
 /* ── PUB 方向: 本地 bus 回调 → IPC 转发 ─────────────────────
  * user_data 指向对应的 BridgeEntry（含所属 bridge 引用）。       */
 
@@ -83,7 +76,7 @@ static void pub_on_topic(const Message* msg, void* user_data) {
     if (rc == 0) {
         entry->stats.forwarded++;
         entry->stats.bytes        += msg->data_size;
-        entry->stats.last_ts_us    = now_us();
+        entry->stats.last_ts_us    = clock_now_us();
     } else {
         entry->stats.dropped++;
         LOG_WARN("topic_bridge", "[PUB] drop on '%s' (ipc full)", msg->topic);
@@ -116,7 +109,7 @@ static void sub_on_ipc(const Message* msg, void* user_data) {
     if (rc == 0) {
         entry->stats.forwarded++;
         entry->stats.bytes        += msg->data_size;
-        entry->stats.last_ts_us    = now_us();
+        entry->stats.last_ts_us    = clock_now_us();
     } else {
         entry->stats.dropped++;
         LOG_WARN("topic_bridge", "[SUB] publish failed on '%s'", msg->topic);

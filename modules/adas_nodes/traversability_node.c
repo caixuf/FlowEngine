@@ -66,6 +66,8 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -134,50 +136,6 @@ static struct {
     volatile int thread_running;
     volatile int should_stop;
 } g;
-
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
-/* ── 参数解析（与 stereo_vision/perception_fusion 一致的极简 JSON 提取） ── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
 
 /* ── 订阅回调：收到 sensor/stereo ─────────────────────────── */
 static void on_stereo(const Message* msg, void* user_data) {
@@ -442,28 +400,29 @@ static void* traversability_thread(void* arg) {
         double nearest_obs = nearest_obstacle_x(grid_w, grid_h, g.cell_size_m);
 
         /* 5. 发布 JSON 摘要到 perception/traversability */
-        char text[512];
-        int len = snprintf(text, sizeof(text),
-            "{\"frame_id\":%u,\"timestamp_us\":%llu,"
-            "\"grid_w\":%d,\"grid_h\":%d,\"cell_size_m\":%.3f,"
-            "\"x_range_m\":%.2f,\"y_range_m\":%.2f,"
-            "\"free_cells\":%d,\"occupied_cells\":%d,\"unknown_cells\":%d,"
-            "\"nearest_obstacle_x\":%.2f,"
-            "\"corridor_left_y\":%.2f,\"corridor_right_y\":%.2f,"
-            "\"corridor_width_m\":%.2f,\"blocked\":%d}",
-            g.frame_id,
-            (unsigned long long)now_us(),
-            grid_w, grid_h, g.cell_size_m,
-            g.x_range_m, g.y_range_m,
-            free_cnt, occ_cnt, unknown_cnt,
-            nearest_obs,
-            cor_left_y, cor_right_y, cor_width, blocked);
-        if (len > 0 && (size_t)len < sizeof(text)) {
-            transport_publish(g.transport, g.output_topic,
-                              (const uint8_t*)text, (uint32_t)len + 1);
-            g.grids_published++;
-            g.frame_id++;
-        }
+        cJSON* t_root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(t_root, "frame_id", g.frame_id);
+        cJSON_AddNumberToObject(t_root, "timestamp_us", (double)clock_now_us());
+        cJSON_AddNumberToObject(t_root, "grid_w", grid_w);
+        cJSON_AddNumberToObject(t_root, "grid_h", grid_h);
+        cJSON_AddNumberToObject(t_root, "cell_size_m", g.cell_size_m);
+        cJSON_AddNumberToObject(t_root, "x_range_m", g.x_range_m);
+        cJSON_AddNumberToObject(t_root, "y_range_m", g.y_range_m);
+        cJSON_AddNumberToObject(t_root, "free_cells", free_cnt);
+        cJSON_AddNumberToObject(t_root, "occupied_cells", occ_cnt);
+        cJSON_AddNumberToObject(t_root, "unknown_cells", unknown_cnt);
+        cJSON_AddNumberToObject(t_root, "nearest_obstacle_x", nearest_obs);
+        cJSON_AddNumberToObject(t_root, "corridor_left_y", cor_left_y);
+        cJSON_AddNumberToObject(t_root, "corridor_right_y", cor_right_y);
+        cJSON_AddNumberToObject(t_root, "corridor_width_m", cor_width);
+        cJSON_AddNumberToObject(t_root, "blocked", blocked);
+        char* text = cJSON_PrintUnformatted(t_root);
+        transport_publish(g.transport, g.output_topic,
+                          (const uint8_t*)text, (uint32_t)strlen(text) + 1);
+        free(text);
+        cJSON_Delete(t_root);
+        g.grids_published++;
+        g.frame_id++;
 
         /* 周期性日志 */
         if (g.grids_published % 30 == 1) {
@@ -511,22 +470,44 @@ static int traversability_init(MessageBus* bus, Transport* transport,
     snprintf(g.output_topic, sizeof(g.output_topic), "perception/traversability");
 
     if (params_json) {
-        g.enabled              = parse_int(params_json, "enable", 1);
-        g.min_range            = parse_double(params_json, "min_range", 0.5);
-        g.max_range            = parse_double(params_json, "max_range", 6.0);
-        g.stride               = parse_int(params_json, "stride", 2);
-        g.camera_height_m      = parse_double(params_json, "camera_height_m", 0.30);
-        g.camera_tilt_deg      = parse_double(params_json, "camera_tilt_deg", 0.0);
-        g.ground_tol_m         = parse_double(params_json, "ground_tol_m", 0.08);
-        g.obstacle_height_m    = parse_double(params_json, "obstacle_height_m", 0.10);
-        g.cell_size_m          = parse_double(params_json, "cell_size_m", 0.20);
-        g.x_range_m            = parse_double(params_json, "x_range_m", 6.0);
-        g.y_range_m            = parse_double(params_json, "y_range_m", 3.0);
-        g.v_fov_deg            = parse_double(params_json, "v_fov_deg", 50.0);
-        g.min_corridor_width_m = parse_double(params_json, "min_corridor_width_m", 0.6);
-        g.publish_hz           = parse_int(params_json, "publish_hz", 10);
-        parse_string(params_json, "output_topic", g.output_topic,
-                     sizeof(g.output_topic), "perception/traversability");
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "enable");
+            if (cJSON_IsNumber(j)) g.enabled = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "min_range");
+            if (cJSON_IsNumber(j)) g.min_range = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "max_range");
+            if (cJSON_IsNumber(j)) g.max_range = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "stride");
+            if (cJSON_IsNumber(j)) g.stride = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "camera_height_m");
+            if (cJSON_IsNumber(j)) g.camera_height_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "camera_tilt_deg");
+            if (cJSON_IsNumber(j)) g.camera_tilt_deg = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ground_tol_m");
+            if (cJSON_IsNumber(j)) g.ground_tol_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "obstacle_height_m");
+            if (cJSON_IsNumber(j)) g.obstacle_height_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "cell_size_m");
+            if (cJSON_IsNumber(j)) g.cell_size_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "x_range_m");
+            if (cJSON_IsNumber(j)) g.x_range_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "y_range_m");
+            if (cJSON_IsNumber(j)) g.y_range_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "v_fov_deg");
+            if (cJSON_IsNumber(j)) g.v_fov_deg = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "min_corridor_width_m");
+            if (cJSON_IsNumber(j)) g.min_corridor_width_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "publish_hz");
+            if (cJSON_IsNumber(j)) g.publish_hz = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "output_topic");
+            if (cJSON_IsString(j) && j->valuestring) {
+                strncpy(g.output_topic, j->valuestring, sizeof(g.output_topic) - 1);
+                g.output_topic[sizeof(g.output_topic) - 1] = '\0';
+            }
+            cJSON_Delete(p);
+        }
     }
 
     if (!g.enabled) {

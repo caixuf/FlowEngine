@@ -58,6 +58,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -126,14 +127,6 @@ static struct {
     volatile int thread_running;
     volatile int should_stop;
 } g;
-
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
 
 /* ── 参数解析 ─────────────────────────────────────────────── */
 
@@ -356,7 +349,7 @@ static void* stereo_thread(void* arg) {
         ObstacleList obs_list;
         memset(&obs_list, 0, sizeof(obs_list));
         obs_list.frame_id     = g.frame_id++;
-        obs_list.timestamp_us = now_us();
+        obs_list.timestamp_us = clock_now_us();
 
         int cnt = 0;
         for (int i = 0; i < n_clusters && cnt < 8; i++) {

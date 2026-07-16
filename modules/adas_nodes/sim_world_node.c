@@ -23,6 +23,7 @@
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,11 +62,6 @@
 #define STEREO_PUBLISH_DIV   2    /* 每 2 个 sim tick 发布(20Hz/2=10Hz) */
 #define STEREO_MIN_RANGE_M   0.3
 #define STEREO_MAX_RANGE_M   8.0
-
-/* Bytes reserved at the end of the vstate JSON buffer for the closing "}"
- * and any trailing characters.  Each obstacle entry is at most ~100 B;
- * 2 B for the closing brace is well within this margin. */
-#define VSTATE_JSON_FOOTER_RESERVE 128
 
 /* ── 仿真障碍物 ────────────────────────────────────────────────── */
 
@@ -397,13 +393,17 @@ static void vehicle_tick(void) {
 #define ROAD_GEOMETRY_REPUBLISH_CYCLES 50  /* 50 cycle ≈ 1s @ 50Hz */
 
 static void publish_road_geometry(void) {
-    char geo[256];
-    int off = snprintf(geo, sizeof(geo),
-             "{\"curve_start_x\":%.4f,\"curve_length_m\":%.4f,"
-             "\"curve_offset_m\":%.4f,\"lane_width\":%.2f,\"lane_count\":2}",
-             g.curve_start_x, g.curve_length_m, g.curve_offset_m, g.lane_width);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "curve_start_x", g.curve_start_x);
+    cJSON_AddNumberToObject(root, "curve_length_m", g.curve_length_m);
+    cJSON_AddNumberToObject(root, "curve_offset_m", g.curve_offset_m);
+    cJSON_AddNumberToObject(root, "lane_width", g.lane_width);
+    cJSON_AddNumberToObject(root, "lane_count", 2);
+    char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, "road/geometry",
-                      (const uint8_t*)geo, (uint32_t)off + 1);
+                      (const uint8_t*)s, (uint32_t)strlen(s) + 1);
+    free(s);
+    cJSON_Delete(root);
 }
 
 /* ── 发布红绿灯状态（road/traffic_lights topic） ───────────── */
@@ -419,24 +419,27 @@ static void publish_traffic_lights(void) {
     /* 仿真时间（秒），从场景启动起算 */
     double t = (double)(clock_now_us() - g.sim_start_us) / 1e6;
 
-    char buf[512];
-    int off = snprintf(buf, sizeof(buf), "{\"lights\":[");
+    cJSON* root = cJSON_CreateObject();
+    cJSON* lights = cJSON_CreateArray();
     for (int i = 0; i < g.traffic_light_count; i++) {
         const ScenarioTrafficLight* tl = &g.traffic_lights[i];
         TrafficLightPhase ph = traffic_light_phase_at(t, tl->green_s,
                                                        tl->yellow_s, tl->red_s,
                                                        tl->phase_offset_s);
-        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
-                        "%s{\"id\":%d,\"x\":%.2f,\"y_lane\":%.2f,"
-                        "\"state\":\"%s\",\"remain_s\":%.1f}",
-                        i > 0 ? "," : "",
-                        tl->id, tl->x, tl->y_lane,
-                        traffic_light_state_str(ph.state), ph.remain_s);
-        if (off >= (int)sizeof(buf) - 32) break;  /* 防溢出 */
+        cJSON* light = cJSON_CreateObject();
+        cJSON_AddNumberToObject(light, "id", tl->id);
+        cJSON_AddNumberToObject(light, "x", tl->x);
+        cJSON_AddNumberToObject(light, "y_lane", tl->y_lane);
+        cJSON_AddStringToObject(light, "state", traffic_light_state_str(ph.state));
+        cJSON_AddNumberToObject(light, "remain_s", ph.remain_s);
+        cJSON_AddItemToArray(lights, light);
     }
-    off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]}");
+    cJSON_AddItemToObject(root, "lights", lights);
+    char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, "road/traffic_lights",
-                      (const uint8_t*)buf, (uint32_t)off + 1);
+                      (const uint8_t*)s, (uint32_t)strlen(s) + 1);
+    free(s);
+    cJSON_Delete(root);
 }
 
 /* ── 双目深度图几何渲染(Phase 0 Track A) ──────────────────── */
@@ -593,22 +596,28 @@ static void on_control_cmd(const Message* msg, void* user_data) {
             g.vehicle.steer        = bin.steering;
             g.vehicle.target_speed = g.target_speed;  /* use config value, not hardcoded */
             g.has_control_input    = 1;
-            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-            g.last_control_cmd_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+            g.last_control_cmd_us = clock_now_us();
             return;
         }
     }
 
-    /* Fallback: text format parsing */
+    /* Fallback: JSON format parsing */
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "throttle="))) sscanf(p + 9, "%lf", &g.vehicle.throttle);
-    if ((p = strstr(d, "brake=")))    sscanf(p + 6,  "%lf", &g.vehicle.brake);
-    if ((p = strstr(d, "steer=")))    sscanf(p + 6,  "%lf", &g.vehicle.steer);
-    if ((p = strstr(d, "target=")))   sscanf(p + 7,  "%lf", &g.vehicle.target_speed);
+    cJSON* root_fb = cJSON_Parse(d);
+    if (root_fb) {
+        cJSON* j;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root_fb, "throttle")) && cJSON_IsNumber(j))
+            g.vehicle.throttle = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root_fb, "brake")) && cJSON_IsNumber(j))
+            g.vehicle.brake = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root_fb, "steer")) && cJSON_IsNumber(j))
+            g.vehicle.steer = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root_fb, "target")) && cJSON_IsNumber(j))
+            g.vehicle.target_speed = j->valuedouble;
+        cJSON_Delete(root_fb);
+    }
     g.has_control_input = 1;
-    struct timespec ts_fb; clock_gettime(CLOCK_MONOTONIC, &ts_fb);
-    g.last_control_cmd_us = (uint64_t)ts_fb.tv_sec * 1000000ULL + (uint64_t)ts_fb.tv_nsec / 1000ULL;
+    g.last_control_cmd_us = clock_now_us();
 }
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
@@ -629,8 +638,7 @@ static void* sim_thread(void* arg) {
 
         /* 控制指令陈旧超时: 500ms 未收到则回退到内置巡航 */
         if (g.has_control_input) {
-            struct timespec now_ts; clock_gettime(CLOCK_MONOTONIC, &now_ts);
-            uint64_t now_us = (uint64_t)now_ts.tv_sec * 1000000ULL + (uint64_t)now_ts.tv_nsec / 1000ULL;
+            uint64_t now_us = clock_now_us();
             if (now_us - g.last_control_cmd_us > 500000ULL) {
                 g.has_control_input = 0;
                 LOG_WARN("sim_world", "control/cmd stale >500ms — fallback to internal cruise");
@@ -714,12 +722,17 @@ static void* sim_thread(void* arg) {
                 if (g.collision_cooldown[i] <= 0) {
                     LOG_ERROR("sim_world", "COLLISION ego(%.1f,%.1f) ↔ obs%d(%.1f,%.1f) ovlp(%.2f,%.2f)",
                               g.vehicle.x, g.vehicle.y, i, o->x, o->y, overlap_x, overlap_y);
-                    char col[128];
-                    snprintf(col, sizeof(col),
-                             "{\"ego_x\":%.1f,\"ego_y\":%.1f,\"obs_id\":%d,\"overlap_x\":%.2f,\"overlap_y\":%.2f}",
-                             g.vehicle.x, g.vehicle.y, i, overlap_x, overlap_y);
+                    cJSON* col = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(col, "ego_x", g.vehicle.x);
+                    cJSON_AddNumberToObject(col, "ego_y", g.vehicle.y);
+                    cJSON_AddNumberToObject(col, "obs_id", i);
+                    cJSON_AddNumberToObject(col, "overlap_x", overlap_x);
+                    cJSON_AddNumberToObject(col, "overlap_y", overlap_y);
+                    char* s_col = cJSON_PrintUnformatted(col);
                     transport_publish(g.transport, "sim/collision",
-                                      (const uint8_t*)col, (uint32_t)strlen(col) + 1);
+                                      (const uint8_t*)s_col, (uint32_t)strlen(s_col) + 1);
+                    free(s_col);
+                    cJSON_Delete(col);
                     g.collision_cooldown[i] = (int)FREQUENCY_HZ * 3;  /* 3 秒冷却，防止恢复后立即重判 */
                     g.collision_recovery_ticks = (int)(FREQUENCY_HZ * 3);  /* 3 秒碰撞冻结 */
                 }
@@ -745,11 +758,14 @@ static void* sim_thread(void* arg) {
         /* ── P0.1: 推进逻辑时钟并发布 sim/tick ── */
         clock_advance_us(DT_US);
         uint64_t sim_time_us = clock_now_us();
-        char tick_buf[64];
-        snprintf(tick_buf, sizeof(tick_buf),
-                 "{\"t_us\":%" PRIu64 ",\"cycle\":%u}", sim_time_us, g.cycle);
+        cJSON* tick = cJSON_CreateObject();
+        cJSON_AddNumberToObject(tick, "t_us", (double)sim_time_us);
+        cJSON_AddNumberToObject(tick, "cycle", g.cycle);
+        char* s_tick = cJSON_PrintUnformatted(tick);
         transport_publish(g.transport, "sim/tick",
-                          (const uint8_t*)tick_buf, (uint32_t)strlen(tick_buf) + 1);
+                          (const uint8_t*)s_tick, (uint32_t)strlen(s_tick) + 1);
+        free(s_tick);
+        cJSON_Delete(tick);
 
         /* Phase 2: 定期重发 road/geometry（~1Hz），确保后启动的订阅者收到 */
         if (g.cycle % ROAD_GEOMETRY_REPUBLISH_CYCLES == 0) {
@@ -775,29 +791,39 @@ static void* sim_thread(void* arg) {
          * if the estimate is wrong the tail of the JSON is truncated — receivers must
          * tolerate missing keys (they already do via json_extract_double returning 0).
          * Phase 2: 弯道几何不再附在 vehicle/state 中，改由 road/geometry topic 独立发布。 */
-        char vstate[2048];
-        int voff = snprintf(vstate, sizeof(vstate),
-                 "{\"x\":%.4f,\"y\":%.4f,\"spd\":%.3f,\"hdg\":%.4f,"
-                 "\"thr\":%.3f,\"brk\":%.3f,\"tgt\":%.2f,\"st\":%.4f,"
-                 "\"t_us\":%" PRIu64 ",\"n_obs\":%d",
-                 g.vehicle.x, g.vehicle.y, g.vehicle.speed, g.vehicle.heading,
-                 g.vehicle.throttle, g.vehicle.brake, g.vehicle.target_speed, g.vehicle.steer,
-                 sim_time_us, g.obstacle_count);
-        for (int i = 0; i < g.obstacle_count && voff < (int)sizeof(vstate) - VSTATE_JSON_FOOTER_RESERVE; i++) {
-            voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff,
-                             ",\"ox%d\":%.2f,\"oy%d\":%.2f,\"ov%d\":%.3f"
-                             ",\"ovy%d\":%.3f,\"ot%d\":\"%s\",\"ol%d\":%.2f,\"ow%d\":%.2f",
-                             i, g.obstacles[i].x,
-                             i, g.obstacles[i].y,
-                             i, g.obstacles[i].vx,
-                             i, g.obstacles[i].vy,
-                             i, g.obstacles[i].type,
-                             i, g.obstacles[i].len,
-                             i, g.obstacles[i].wid);
+        cJSON* vstate = cJSON_CreateObject();
+        cJSON_AddNumberToObject(vstate, "x", g.vehicle.x);
+        cJSON_AddNumberToObject(vstate, "y", g.vehicle.y);
+        cJSON_AddNumberToObject(vstate, "spd", g.vehicle.speed);
+        cJSON_AddNumberToObject(vstate, "hdg", g.vehicle.heading);
+        cJSON_AddNumberToObject(vstate, "thr", g.vehicle.throttle);
+        cJSON_AddNumberToObject(vstate, "brk", g.vehicle.brake);
+        cJSON_AddNumberToObject(vstate, "tgt", g.vehicle.target_speed);
+        cJSON_AddNumberToObject(vstate, "st", g.vehicle.steer);
+        cJSON_AddNumberToObject(vstate, "t_us", (double)sim_time_us);
+        cJSON_AddNumberToObject(vstate, "n_obs", g.obstacle_count);
+        for (int i = 0; i < g.obstacle_count; i++) {
+            char key[20];
+            snprintf(key, sizeof(key), "ox%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].x);
+            snprintf(key, sizeof(key), "oy%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].y);
+            snprintf(key, sizeof(key), "ov%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].vx);
+            snprintf(key, sizeof(key), "ovy%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].vy);
+            snprintf(key, sizeof(key), "ot%d", i);
+            cJSON_AddStringToObject(vstate, key, g.obstacles[i].type);
+            snprintf(key, sizeof(key), "ol%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].len);
+            snprintf(key, sizeof(key), "ow%d", i);
+            cJSON_AddNumberToObject(vstate, key, g.obstacles[i].wid);
         }
-        voff += snprintf(vstate + voff, sizeof(vstate) - (size_t)voff, "}");
-        transport_publish(g.transport, "vehicle/state", (const uint8_t*)vstate,
-                          (uint32_t)voff + 1);
+        char* s_vstate = cJSON_PrintUnformatted(vstate);
+        transport_publish(g.transport, "vehicle/state",
+                          (const uint8_t*)s_vstate, (uint32_t)strlen(s_vstate) + 1);
+        free(s_vstate);
+        cJSON_Delete(vstate);
 
         g.cycle++;
     }
@@ -844,43 +870,33 @@ static int sim_init(MessageBus* bus, Transport* transport,
     g.stereo_camera_tilt_deg = 10.0;    /* 相机下倾角 */
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"init_speed\":")))
-            sscanf(p + 13, "%lf", &g.init_speed);
-        if ((p = strstr(params_json, "\"target_speed\":")))
-            sscanf(p + 14, "%lf", &g.target_speed);
-        if ((p = strstr(params_json, "\"lane_width\":")))
-            sscanf(p + 12, "%lf", &g.lane_width);
-        if ((p = strstr(params_json, "\"lane_target\":")))
-            sscanf(p + 13, "%lf", &g.vehicle.lane_target);
-        /* P0.1: 固定随机种子 */
-        if ((p = strstr(params_json, "\"random_seed\":")))
-            sscanf(p + 14, "%u", &g.random_seed);
-        /* P0.2: 场景文件 */
-        if ((p = strstr(params_json, "\"scenario_file\":"))) {
-            const char* start = strchr(p + 16, '"');
-            if (start) {
-                start++;
-                const char* end = strchr(start, '"');
-                if (end) {
-                    size_t len = (size_t)(end - start);
-                    if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
-                    memcpy(g.scenario_file, start, len);
-                    g.scenario_file[len] = '\0';
-                }
-            }
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "init_speed")) && cJSON_IsNumber(j))
+                g.init_speed = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "target_speed")) && cJSON_IsNumber(j))
+                g.target_speed = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lane_width")) && cJSON_IsNumber(j))
+                g.lane_width = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lane_target")) && cJSON_IsNumber(j))
+                g.vehicle.lane_target = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "random_seed")) && cJSON_IsNumber(j))
+                g.random_seed = (uint32_t)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "scenario_file")) && cJSON_IsString(j))
+                strncpy(g.scenario_file, j->valuestring, sizeof(g.scenario_file) - 1);
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "stereo_enabled")) && cJSON_IsNumber(j))
+                g.stereo_enabled = (int)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "stereo_fov_deg")) && cJSON_IsNumber(j))
+                g.stereo_fov_deg = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "stereo_v_fov_deg")) && cJSON_IsNumber(j))
+                g.stereo_v_fov_deg = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "stereo_camera_height_m")) && cJSON_IsNumber(j))
+                g.stereo_camera_height_m = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "stereo_camera_tilt_deg")) && cJSON_IsNumber(j))
+                g.stereo_camera_tilt_deg = j->valuedouble;
+            cJSON_Delete(p);
         }
-        /* Phase 0 (Track A): 双目相机仿真参数(可覆盖默认值) */
-        if ((p = strstr(params_json, "\"stereo_enabled\":")))
-            sscanf(p + 17, "%d", &g.stereo_enabled);
-        if ((p = strstr(params_json, "\"stereo_fov_deg\":")))
-            sscanf(p + 16, "%lf", &g.stereo_fov_deg);
-        if ((p = strstr(params_json, "\"stereo_v_fov_deg\":")))
-            sscanf(p + 18, "%lf", &g.stereo_v_fov_deg);
-        if ((p = strstr(params_json, "\"stereo_camera_height_m\":")))
-            sscanf(p + 25, "%lf", &g.stereo_camera_height_m);
-        if ((p = strstr(params_json, "\"stereo_camera_tilt_deg\":")))
-            sscanf(p + 25, "%lf", &g.stereo_camera_tilt_deg);
     }
 
     /* P0.2: 优先从场景文件加载 actors；否则使用内置默认 */

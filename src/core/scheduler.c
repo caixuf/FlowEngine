@@ -11,20 +11,13 @@
 #include "scheduler.h"
 #include "message_bus.h"
 #include "error_codes.h"
+#include "clock_service.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sched.h>
 #include <errno.h>
-
-/* ── Monotonic clock helper ───────────────────────────────── */
-
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
 
 /* ══════════════════════════════════════════════════════════ */
 /* RateControl                                                */
@@ -44,7 +37,7 @@ void rate_control_init(RateControl* rc, double max_hz) {
 bool rate_control_acquire(RateControl* rc) {
     if (!rc || rc->period_us == 0) return true;  /* no limit */
 
-    uint64_t now = monotonic_us();
+    uint64_t now = clock_now_us();
     /* Simple check: if enough time has passed, allow */
     if (rc->last_run_us == 0 || (now - rc->last_run_us) >= rc->period_us) {
         /* Use atomic swap/comparison — here we just update */

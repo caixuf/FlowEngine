@@ -16,6 +16,8 @@
 #include "dashboard_bridge.h"
 #include "adas_msgs_gen.h"
 #include "json_extract.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -210,12 +212,16 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"curve_start_x\":")))  sscanf(p + 16, "%lf", &g.road_curve_start_x);
-    if ((p = strstr(d, "\"curve_length_m\":"))) sscanf(p + 17, "%lf", &g.road_curve_length_m);
-    if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.road_curve_offset_m);
-    if ((p = strstr(d, "\"lane_width\":")))     sscanf(p + 13, "%lf", &g.lane_width);
-    if ((p = strstr(d, "\"lane_count\":")))     sscanf(p + 13, "%d",  &g.lane_count);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(root, "curve_start_x")))  g.road_curve_start_x = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "curve_length_m"))) g.road_curve_length_m = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "curve_offset_m"))) g.road_curve_offset_m = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "lane_width")))     g.lane_width = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "lane_count")))     g.lane_count = (int)item->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_road_geometry = 1;
 }
 
@@ -251,10 +257,14 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
 
     /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"avg_us\":")))  sscanf(p + 9, "%lf", &g.fusion_lat_avg_us);
-    if ((p = strstr(d, "\"p50_us\":")))  sscanf(p + 9, "%lf", &g.fusion_lat_p50_us);
-    if ((p = strstr(d, "\"p99_us\":")))  sscanf(p + 9, "%lf", &g.fusion_lat_p99_us);
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* item;
+        if ((item = cJSON_GetObjectItem(root, "avg_us"))) g.fusion_lat_avg_us = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "p50_us"))) g.fusion_lat_p50_us = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "p99_us"))) g.fusion_lat_p99_us = item->valuedouble;
+        cJSON_Delete(root);
+    }
 }
 
 /* JSON 标量提取辅助（json_extract_double / json_extract_int / json_extract_string）
@@ -271,22 +281,29 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
  * discovery 通过 UDP 组播天然跨进程共享全网拓扑, 因此当 node_info 广播数不足以
  * 覆盖 discovery 已知的节点数时, 改用 discovery 拓扑构建 nodes 数组, 输出与
  * node_announce_self 相同的 JSON 形状。返回写出的节点数。 */
-static int emit_nodes_from_discovery(FILE* jf, const TopologyGraph* g_topo) {
+static int emit_nodes_from_discovery(cJSON* nodes_arr, const TopologyGraph* g_topo) {
     int written = 0;
     for (uint32_t i = 0; i < g_topo->node_count; i++) {
         const NodeInfo* n = &g_topo->nodes[i];
         if (!n->alive) continue;
-        fprintf(jf, "%s{\"name\":\"%s\",\"version\":\"\",\"description\":\"\","
-                    "\"pid\":%u,\"alive\":true,\"topics\":[",
-                written ? "," : "", n->name, n->pid);
+        cJSON* node = cJSON_CreateObject();
+        cJSON_AddStringToObject(node, "name", n->name);
+        cJSON_AddStringToObject(node, "version", "");
+        cJSON_AddStringToObject(node, "description", "");
+        cJSON_AddNumberToObject(node, "pid", (double)n->pid);
+        cJSON_AddTrueToObject(node, "alive");
+        cJSON* topics = cJSON_AddArrayToObject(node, "topics");
         for (uint32_t j = 0; j < n->topic_count; j++) {
             bool is_pub = (n->topics[j].capabilities & CAP_PUBLISHER) != 0;
             bool is_sub = (n->topics[j].capabilities & CAP_SUBSCRIBER) != 0;
             const char* role = is_pub && is_sub ? "pubsub" : (is_pub ? "pub" : "sub");
-            fprintf(jf, "%s{\"topic\":\"%s\",\"role\":\"%s\",\"caps\":%u}",
-                    j ? "," : "", n->topics[j].topic, role, n->topics[j].capabilities);
+            cJSON* t = cJSON_CreateObject();
+            cJSON_AddStringToObject(t, "topic", n->topics[j].topic);
+            cJSON_AddStringToObject(t, "role", role);
+            cJSON_AddNumberToObject(t, "caps", (double)n->topics[j].capabilities);
+            cJSON_AddItemToArray(topics, t);
         }
-        fprintf(jf, "]}");
+        cJSON_AddItemToArray(nodes_arr, node);
         written++;
     }
     return written;
@@ -295,9 +312,9 @@ static int emit_nodes_from_discovery(FILE* jf, const TopologyGraph* g_topo) {
 /* ── 导出 JSON 到 state_file ──────────────────────────────── */
 
 static void export_dashboard_json(void) {
-    struct timespec now_ts;
-    clock_gettime(CLOCK_REALTIME, &now_ts);
-    double timestamp = (double)now_ts.tv_sec + (double)now_ts.tv_nsec / 1000000000.0;
+    uint64_t now_realtime_us = clock_now_realtime_us();
+    double timestamp = (double)(now_realtime_us / 1000000ULL)
+                     + (double)(now_realtime_us % 1000000ULL) / 1000000.0;
 
     /* 收集指标：本进程 bus stats + 跨进程聚合（stats bridge）。
      * 多进程部署下，monitor_node 自己的 bus 几乎无业务消息，bus stats ≈ 0；
@@ -329,17 +346,16 @@ static void export_dashboard_json(void) {
 
     char* topo_json = g.discovery ? discovery_export_json(g.discovery) : NULL;
 
-    char tmp_path[512];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g.state_file);
-    FILE* jf = fopen(tmp_path, "w");
-    if (!jf) { free(topo_json); return; }
+    /* ── Build cJSON tree ── */
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "self", "flow_launcher");
+    cJSON_AddNumberToObject(root, "timestamp", timestamp);
 
     /* nodes 数组来源:
      *  - 单进程 (dlopen): 各节点广播的 flowengine/node_info (方案B, 含 version/desc)
      *  - 多进程 (fork+exec): node_info 不跨进程, 回退到 discovery 跨进程拓扑
      * 判据: discovery 已知的存活节点数 > 收到的 node_info 广播数, 说明有节点的
      *       自描述广播没能抵达 monitor (多进程), 改用 discovery 补全拓扑。 */
-    const char* self_name = "flow_launcher";
     const TopologyGraph* topo = g.discovery ? discovery_get_topology(g.discovery) : NULL;
     int disc_alive = 0;
     if (topo) {
@@ -347,9 +363,9 @@ static void export_dashboard_json(void) {
             if (topo->nodes[i].alive) disc_alive++;
     }
 
-    fprintf(jf, "{\"self\":\"%s\",\"timestamp\":%.3f,\"nodes\":[", self_name, timestamp);
+    cJSON* nodes = cJSON_AddArrayToObject(root, "nodes");
     if (topo && disc_alive > g.node_info_count) {
-        int written = emit_nodes_from_discovery(jf, topo);
+        emit_nodes_from_discovery(nodes, topo);
         /* discovery 拓扑不含本节点自身 (self 只广播 my_topics, 不进自己的
          * topology)。补上 monitor 收到的本地 node_info 广播 (通常就是它自己),
          * 按 name 去重, 使拓扑图包含 monitor 节点。 */
@@ -362,30 +378,44 @@ static void export_dashboard_json(void) {
                     dup = true; break;
                 }
             }
-            if (!dup) fprintf(jf, "%s%s", written++ ? "," : "", g.node_info_json[i]);
+            if (!dup) {
+                cJSON* ni = cJSON_Parse(g.node_info_json[i]);
+                if (ni) cJSON_AddItemToArray(nodes, ni);
+            }
         }
     } else {
         for (int i = 0; i < g.node_info_count; i++) {
-            fprintf(jf, "%s%s", i ? "," : "", g.node_info_json[i]);
+            cJSON* ni = cJSON_Parse(g.node_info_json[i]);
+            if (ni) cJSON_AddItemToArray(nodes, ni);
         }
     }
-    fprintf(jf, "]");
 
-    fprintf(jf, ",\"metrics\":{"
-            "\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},"
-            "\"transport\":{\"local_pub\":%lu,\"remote_pub\":%lu},"
-            "\"scheduler\":{\"tasks\":%d,\"mode\":\"CHOREO\"},",
-            (unsigned long)pub, (unsigned long)del, (unsigned long)drop,
-            (unsigned long)ts.local_published, (unsigned long)ts.remote_published,
-            task_count);
+    /* ── metrics sub-object ── */
+    cJSON* metrics = cJSON_AddObjectToObject(root, "metrics");
+
+    cJSON* bus_o = cJSON_AddObjectToObject(metrics, "bus");
+    cJSON_AddNumberToObject(bus_o, "published", (double)pub);
+    cJSON_AddNumberToObject(bus_o, "delivered", (double)del);
+    cJSON_AddNumberToObject(bus_o, "dropped", (double)drop);
+
+    cJSON* transport_o = cJSON_AddObjectToObject(metrics, "transport");
+    cJSON_AddNumberToObject(transport_o, "local_pub", (double)ts.local_published);
+    cJSON_AddNumberToObject(transport_o, "remote_pub", (double)ts.remote_published);
+
+    cJSON* sched_o = cJSON_AddObjectToObject(metrics, "scheduler");
+    cJSON_AddNumberToObject(sched_o, "tasks", task_count);
+    cJSON_AddStringToObject(sched_o, "mode", "CHOREO");
 
     /* 融合延迟 */
-    fprintf(jf, "\"latency\":{\"avg_us\":%.0f,\"p50_us\":%.0f,\"p99_us\":%.0f},",
-            g.fusion_lat_avg_us, g.fusion_lat_p50_us, g.fusion_lat_p99_us);
+    cJSON* lat_o = cJSON_AddObjectToObject(metrics, "latency");
+    cJSON_AddNumberToObject(lat_o, "avg_us", g.fusion_lat_avg_us);
+    cJSON_AddNumberToObject(lat_o, "p50_us", g.fusion_lat_p50_us);
+    cJSON_AddNumberToObject(lat_o, "p99_us", g.fusion_lat_p99_us);
 
     /* NOA 驾驶模式 (来自 planning/trajectory)，未收到数据前默认 "NA:READY" */
-    fprintf(jf, "\"driver_mode\":\"%s\",\"route_lane\":%d,",
-            g.driver_mode[0] ? g.driver_mode : "NA:READY", g.route_lane);
+    cJSON_AddStringToObject(metrics, "driver_mode",
+                            g.driver_mode[0] ? g.driver_mode : "NA:READY");
+    cJSON_AddNumberToObject(metrics, "route_lane", g.route_lane);
 
     /* Topic 统计：合并本进程 + 跨进程（stats bridge）。
      * 同名 topic 跨进程累加 pub/del/drop，freq 取最大值（代表发布频率），
@@ -416,7 +446,6 @@ static void export_dashboard_json(void) {
         const StatsPacket* rp = &g.remote_stats[ri].pkt;
         for (uint32_t rti = 0; rti < rp->topic_count && rti < STATS_BRIDGE_MAX_TOPICS; rti++) {
             const RemoteTopicStat* rt = &rp->topics[rti];
-            /* 查找已合并表里是否已有同名 topic */
             int found = -1;
             for (int mi = 0; mi < merged_n; mi++) {
                 if (strcmp(merged[mi].topic, rt->topic) == 0) { found = mi; break; }
@@ -427,7 +456,6 @@ static void export_dashboard_json(void) {
                 merged[found].drop += rt->drop_count;
                 if (rt->frequency_hz > merged[found].freq) merged[found].freq = rt->frequency_hz;
                 if (rt->subscriber_count > merged[found].subs) merged[found].subs = rt->subscriber_count;
-                /* 延迟取非零值优先（本进程有就用本进程的） */
             } else if (merged_n < 64) {
                 snprintf(merged[merged_n].topic, sizeof(merged[merged_n].topic), "%s", rt->topic);
                 merged[merged_n].pub  = rt->publish_count;
@@ -443,20 +471,18 @@ static void export_dashboard_json(void) {
     }
     pthread_mutex_unlock(&g.remote_stats_mutex);
 
-    fprintf(jf, "\"topics\":[");
+    cJSON* topics_arr = cJSON_AddArrayToObject(metrics, "topics");
     for (int mi = 0; mi < merged_n; mi++) {
-        fprintf(jf, "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
-                mi > 0 ? "," : "",
-                merged[mi].topic,
-                (unsigned long)merged[mi].pub,
-                (unsigned long)merged[mi].del,
-                (unsigned long)merged[mi].drop,
-                (unsigned long)merged[mi].lat_us,
-                merged[mi].freq,
-                merged[mi].subs);
+        cJSON* t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "topic", merged[mi].topic);
+        cJSON_AddNumberToObject(t, "pub", (double)merged[mi].pub);
+        cJSON_AddNumberToObject(t, "del", (double)merged[mi].del);
+        cJSON_AddNumberToObject(t, "drop", (double)merged[mi].drop);
+        cJSON_AddNumberToObject(t, "lat_us", (double)merged[mi].lat_us);
+        cJSON_AddNumberToObject(t, "freq", merged[mi].freq);
+        cJSON_AddNumberToObject(t, "subs", (double)merged[mi].subs);
+        cJSON_AddItemToArray(topics_arr, t);
     }
-    fprintf(jf, "],");
 
     /* 车辆状态 */
     double spd = json_extract_double(g.latest_vehicle_state, "spd");
@@ -464,11 +490,13 @@ static void export_dashboard_json(void) {
     double thr = json_extract_double(g.latest_vehicle_state, "thr");
     double brk = json_extract_double(g.latest_vehicle_state, "brk");
     double vx  = json_extract_double(g.latest_vehicle_state, "x");
-    fprintf(jf, "\"vehicle\":{"
-            "\"speed\":%.1f,\"target_speed\":%.1f,"
-            "\"throttle\":%.3f,\"brake\":%.3f,"
-            "\"x\":%.1f,\"error\":%.1f},",
-            spd, tgt, thr, brk, vx, tgt - spd);
+    cJSON* vehicle_o = cJSON_AddObjectToObject(metrics, "vehicle");
+    cJSON_AddNumberToObject(vehicle_o, "speed", spd);
+    cJSON_AddNumberToObject(vehicle_o, "target_speed", tgt);
+    cJSON_AddNumberToObject(vehicle_o, "throttle", thr);
+    cJSON_AddNumberToObject(vehicle_o, "brake", brk);
+    cJSON_AddNumberToObject(vehicle_o, "x", vx);
+    cJSON_AddNumberToObject(vehicle_o, "error", tgt - spd);
 
     /* 3D 场景（从 vehicle/state 提取） */
     double ego_x = json_extract_double(g.latest_vehicle_state, "x");
@@ -476,42 +504,44 @@ static void export_dashboard_json(void) {
     double hdg   = json_extract_double(g.latest_vehicle_state, "hdg");
     double steer = json_extract_double(g.latest_vehicle_state, "st");
 
-    fprintf(jf, "\"scene\":{");
-    fprintf(jf, "\"ego\":{\"x\":%.4f,\"y\":%.4f,\"heading\":%.3f,"
-            "\"speed\":%.2f,\"steer\":%.3f},",
-            ego_x, ego_y, hdg, spd, steer);
-    fprintf(jf, "\"lane\":{\"width\":%.1f,\"count\":%d,\"center\":0.0},", g.lane_width, g.lane_count);
+    cJSON* scene = cJSON_AddObjectToObject(metrics, "scene");
+    cJSON* ego_o = cJSON_AddObjectToObject(scene, "ego");
+    cJSON_AddNumberToObject(ego_o, "x", ego_x);
+    cJSON_AddNumberToObject(ego_o, "y", ego_y);
+    cJSON_AddNumberToObject(ego_o, "heading", hdg);
+    cJSON_AddNumberToObject(ego_o, "speed", spd);
+    cJSON_AddNumberToObject(ego_o, "steer", steer);
 
-    /* Phase 2: 道路弯道几何从 road/geometry topic 获取（不再从 vehicle/state 间接读取） */
+    cJSON* lane_o = cJSON_AddObjectToObject(scene, "lane");
+    cJSON_AddNumberToObject(lane_o, "width", g.lane_width);
+    cJSON_AddNumberToObject(lane_o, "count", g.lane_count);
+    cJSON_AddNumberToObject(lane_o, "center", 0.0);
+
+    /* Phase 2: 道路弯道几何从 road/geometry topic 获取 */
     if (g.road_curve_length_m > 0.0) {
-        fprintf(jf, "\"road\":{\"curve_start_x\":%.4f,\"curve_length_m\":%.4f,"
-                "\"curve_offset_m\":%.4f},",
-                g.road_curve_start_x, g.road_curve_length_m, g.road_curve_offset_m);
+        cJSON* road_o = cJSON_AddObjectToObject(scene, "road");
+        cJSON_AddNumberToObject(road_o, "curve_start_x", g.road_curve_start_x);
+        cJSON_AddNumberToObject(road_o, "curve_length_m", g.road_curve_length_m);
+        cJSON_AddNumberToObject(road_o, "curve_offset_m", g.road_curve_offset_m);
     }
 
-    /* Phase 2: 红绿灯状态从 road/traffic_lights topic 获取，透传给 FlowBoard 3D。
-     * 缓存的 JSON 格式为 {"lights":[...]}，这里提取 [...] 数组部分输出为
-     * "traffic_lights":[...]，供 scene3d.js 直接迭代。 */
+    /* Phase 2: 红绿灯状态从 road/traffic_lights topic 获取，透传给 FlowBoard 3D */
     if (g.has_traffic_lights && g.traffic_lights_json[0] != '\0') {
-        const char* arr_start = strchr(g.traffic_lights_json, '[');
-        const char* arr_end   = strrchr(g.traffic_lights_json, ']');
-        if (arr_start && arr_end && arr_end > arr_start) {
-            fprintf(jf, "\"traffic_lights\":");
-            /* 直接写出原始数组内容（含方括号），保持 sim_world 发布的精度 */
-            size_t arr_len = (size_t)(arr_end - arr_start) + 1;
-            fwrite(arr_start, 1, arr_len, jf);
-            fprintf(jf, ",");
+        cJSON* tl_root = cJSON_Parse(g.traffic_lights_json);
+        if (tl_root) {
+            cJSON* tl_arr = cJSON_GetObjectItem(tl_root, "lights");
+            if (tl_arr && cJSON_IsArray(tl_arr)) {
+                cJSON_AddItemToObject(scene, "traffic_lights", cJSON_Duplicate(tl_arr, 1));
+            }
+            cJSON_Delete(tl_root);
         }
     }
 
-    /* 障碍物（从 vehicle/state 动态读取，障碍物数量由 n_obs 决定） */
+    /* 障碍物（从 vehicle/state 动态读取） */
     int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");
     if (n_obs < 0 || n_obs > 16) n_obs = 0;
 
-    /* Must match SIM_OBSTACLE_COUNT in sim_world_node.c */
 #define MAX_OBS_SCENE 16
-    /* Default dimensions used as fallback for legacy vehicle/state messages that
-     * pre-date the ot%d/ol%d/ow%d fields (matches scenario_loader defaults). */
 #define OBS_FALLBACK_CAR_LEN   4.6
 #define OBS_FALLBACK_CAR_WID   2.0
 #define OBS_FALLBACK_PED_SIZE  0.6
@@ -531,7 +561,6 @@ static void export_dashboard_json(void) {
         snprintf(kn, sizeof(kn), "ot%d", i);
         json_extract_string(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
         if (otype[i][0] == '\0') {
-            /* Legacy messages without type field: default to car */
             snprintf(otype[i], sizeof(otype[i]), "car");
         }
         int is_ped = strcmp(otype[i], "pedestrian") == 0;
@@ -542,97 +571,106 @@ static void export_dashboard_json(void) {
         owid[i] = json_extract_double(g.latest_vehicle_state, kn);
         if (owid[i] < 0.1) owid[i] = is_ped ? OBS_FALLBACK_PED_SIZE : OBS_FALLBACK_CAR_WID;
     }
-    fprintf(jf, "\"obstacles\":[");
+    cJSON* obs_arr = cJSON_AddArrayToObject(scene, "obstacles");
     for (int i = 0; i < n_obs; i++) {
         double rx = ox[i] - ego_x;
         double ry = oy[i] - ego_y;
-        fprintf(jf, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,"
-            "\"vx\":%.2f,\"vy\":%.2f,\"len\":%.2f,\"wid\":%.2f}",
-            i > 0 ? "," : "", i, otype[i], rx, ry, ovx[i], ovy[i], olen[i], owid[i]);
+        cJSON* ob = cJSON_CreateObject();
+        cJSON_AddNumberToObject(ob, "id", i);
+        cJSON_AddStringToObject(ob, "type", otype[i]);
+        cJSON_AddNumberToObject(ob, "x", rx);
+        cJSON_AddNumberToObject(ob, "y", ry);
+        cJSON_AddNumberToObject(ob, "vx", ovx[i]);
+        cJSON_AddNumberToObject(ob, "vy", ovy[i]);
+        cJSON_AddNumberToObject(ob, "len", olen[i]);
+        cJSON_AddNumberToObject(ob, "wid", owid[i]);
+        cJSON_AddItemToArray(obs_arr, ob);
     }
-    fprintf(jf, "],");
 
     /* LiDAR 点云（对每个障碍物生成环形点，加地面环带） */
-    fprintf(jf, "\"lidar\":[");
-    int lp = 0;
+    cJSON* lidar_arr = cJSON_AddArrayToObject(scene, "lidar");
     for (int oi = 0; oi < n_obs; oi++) {
         double rx = ox[oi] - ego_x;
         double ry = oy[oi] - ego_y;
         if (rx < -20 || rx > 60) continue;
         for (int k = 0; k < 6; k++) {
             double a = (double)k / 6.0 * (2.0 * M_PI);
-            fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
-                    rx + cos(a) * 1.0, ry + sin(a) * 2.3, 0.4);
+            cJSON* pt = cJSON_CreateArray();
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(rx + cos(a) * 1.0));
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(ry + sin(a) * 2.3));
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(0.4));
+            cJSON_AddItemToArray(lidar_arr, pt);
         }
     }
     for (int k = 0; k < 12; k++) {
         double a = (double)k / 12.0 * (2.0 * M_PI);
-        fprintf(jf, "%s[%.2f,%.2f,%.2f]", lp++ ? "," : "",
-                cos(a) * (10.0 + (k % 3) * 4.0),
-                sin(a) * (10.0 + (k % 3) * 4.0), 0.0);
+        cJSON* pt = cJSON_CreateArray();
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(cos(a) * (10.0 + (k % 3) * 4.0)));
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(sin(a) * (10.0 + (k % 3) * 4.0)));
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(0.0));
+        cJSON_AddItemToArray(lidar_arr, pt);
     }
-    fprintf(jf, "]},");
 
     /* Registry */
     char* reg_json = flow_registry_export_json();
     if (reg_json) {
-        fprintf(jf, "\"registry\":%s,", reg_json);
+        cJSON* reg = cJSON_Parse(reg_json);
+        if (reg) {
+            cJSON_AddItemToObject(metrics, "registry", reg);
+        }
         free(reg_json);
     }
 
     /* Sysmon */
-    fprintf(jf, "\"sysmon\":{"
-            "\"cpu_total_pct\":%.1f,"
-            "\"cpu_user_pct\":%.1f,"
-            "\"cpu_sys_pct\":%.1f,"
-            "\"cpu_iowait_pct\":%.1f,"
-            "\"cpu_idle_pct\":%.1f,"
-            "\"cpu_count\":%d,"
-            "\"mem_total_kb\":%llu,"
-            "\"mem_used_kb\":%llu,"
-            "\"mem_used_pct\":%.1f,"
-            "\"mem_available_kb\":%llu,"
-            "\"proc_rss_kb\":%llu,"
-            "\"proc_vms_kb\":%llu,"
-            "\"disk_read_bps\":%.0f,"
-            "\"disk_write_bps\":%.0f,"
-            "\"load1\":%.2f,"
-            "\"load5\":%.2f,"
-            "\"load15\":%.2f,"
-            "\"uptime_sec\":%.0f,"
-            "\"thread_count\":%d",
-            ssnap.cpu_total_pct, ssnap.cpu_user_pct,
-            ssnap.cpu_sys_pct, ssnap.cpu_iowait_pct,
-            ssnap.cpu_idle_pct, ssnap.cpu_count,
-            (unsigned long long)ssnap.mem_total_kb,
-            (unsigned long long)ssnap.mem_used_kb,
-            ssnap.mem_used_pct,
-            (unsigned long long)ssnap.mem_available_kb,
-            (unsigned long long)ssnap.proc_rss_kb,
-            (unsigned long long)ssnap.proc_vms_kb,
-            ssnap.disk_read_bps, ssnap.disk_write_bps,
-            ssnap.load1, ssnap.load5, ssnap.load15,
-            ssnap.uptime_sec,
-            ssnap.thread_count);
+    cJSON* sysmon_o = cJSON_AddObjectToObject(metrics, "sysmon");
+    cJSON_AddNumberToObject(sysmon_o, "cpu_total_pct", ssnap.cpu_total_pct);
+    cJSON_AddNumberToObject(sysmon_o, "cpu_user_pct", ssnap.cpu_user_pct);
+    cJSON_AddNumberToObject(sysmon_o, "cpu_sys_pct", ssnap.cpu_sys_pct);
+    cJSON_AddNumberToObject(sysmon_o, "cpu_iowait_pct", ssnap.cpu_iowait_pct);
+    cJSON_AddNumberToObject(sysmon_o, "cpu_idle_pct", ssnap.cpu_idle_pct);
+    cJSON_AddNumberToObject(sysmon_o, "cpu_count", ssnap.cpu_count);
+    cJSON_AddNumberToObject(sysmon_o, "mem_total_kb", (double)ssnap.mem_total_kb);
+    cJSON_AddNumberToObject(sysmon_o, "mem_used_kb", (double)ssnap.mem_used_kb);
+    cJSON_AddNumberToObject(sysmon_o, "mem_used_pct", ssnap.mem_used_pct);
+    cJSON_AddNumberToObject(sysmon_o, "mem_available_kb", (double)ssnap.mem_available_kb);
+    cJSON_AddNumberToObject(sysmon_o, "proc_rss_kb", (double)ssnap.proc_rss_kb);
+    cJSON_AddNumberToObject(sysmon_o, "proc_vms_kb", (double)ssnap.proc_vms_kb);
+    cJSON_AddNumberToObject(sysmon_o, "disk_read_bps", ssnap.disk_read_bps);
+    cJSON_AddNumberToObject(sysmon_o, "disk_write_bps", ssnap.disk_write_bps);
+    cJSON_AddNumberToObject(sysmon_o, "load1", ssnap.load1);
+    cJSON_AddNumberToObject(sysmon_o, "load5", ssnap.load5);
+    cJSON_AddNumberToObject(sysmon_o, "load15", ssnap.load15);
+    cJSON_AddNumberToObject(sysmon_o, "uptime_sec", ssnap.uptime_sec);
+    cJSON_AddNumberToObject(sysmon_o, "thread_count", ssnap.thread_count);
 
-    fprintf(jf, ",\"threads\":[");
+    cJSON* threads_arr = cJSON_AddArrayToObject(sysmon_o, "threads");
     for (int ti = 0; ti < ssnap.thread_count && ti < 16; ti++) {
         SysMonitorThreadSnapshot* th = &ssnap.threads[ti];
-        fprintf(jf, "%s{\"tid\":%d,\"name\":\"%s\","
-                "\"cpu_pct\":%.1f,\"state\":\"%c\"}",
-                ti > 0 ? "," : "",
-                (int)th->tid, th->name,
-                th->cpu_pct, th->state);
+        cJSON* thr = cJSON_CreateObject();
+        cJSON_AddNumberToObject(thr, "tid", (double)(int)th->tid);
+        cJSON_AddStringToObject(thr, "name", th->name);
+        cJSON_AddNumberToObject(thr, "cpu_pct", th->cpu_pct);
+        char state_str[2] = { th->state, '\0' };
+        cJSON_AddStringToObject(thr, "state", state_str);
+        cJSON_AddItemToArray(threads_arr, thr);
     }
-    fprintf(jf, "]}");
 
-    fprintf(jf, "}}");  /* close metrics + close top-level */
-    fclose(jf);
-    rename(tmp_path, g.state_file);
+    /* ── Print to string and write to file ── */
+    char* json_str = cJSON_Print(root);
+    cJSON_Delete(root);
+
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g.state_file);
+    FILE* jf = fopen(tmp_path, "w");
+    if (jf) {
+        fprintf(jf, "%s", json_str);
+        fclose(jf);
+        rename(tmp_path, g.state_file);
+    }
+    cJSON_free(json_str);
 
     /* Publish the same JSON via IPC dashboard bridge for flowmond */
     if (g.dashboard_ch) {
-        /* Read the file back and publish */
         size_t json_len;
         char* json_buf = NULL;
         FILE* rf = fopen(g.state_file, "rb");
@@ -731,27 +769,20 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.lane_width   = 3.5;
     g.lane_count   = 2;
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"state_file\":"))) {
-            char val[256] = "";
-            sscanf(p + 13, "%255s", val);
-            /* strip quotes */
-            size_t vl = strlen(val);
-            if (vl > 2 && val[0] == '"' && val[vl-1] == '"') {
-                val[vl-1] = '\0';
-                snprintf(g.state_file, sizeof(g.state_file), "%s", val + 1);
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* item;
+            if ((item = cJSON_GetObjectItem(root, "state_file")) && cJSON_IsString(item)) {
+                snprintf(g.state_file, sizeof(g.state_file), "%s", item->valuestring);
             }
-        }
-        if ((p = strstr(params_json, "\"export_scene\":"))) {
-            /* 当前始终导出 */
-        }
-        if ((p = strstr(params_json, "\"lane_width\":"))) {
-            sscanf(p + 13, "%lf", &g.lane_width);
-        }
-        if ((p = strstr(params_json, "\"lane_count\":"))) {
-            int val = 2;
-            sscanf(p + 13, "%d", &val);
-            if (val >= 1 && val <= 8) g.lane_count = val;
+            if ((item = cJSON_GetObjectItem(root, "lane_width"))) {
+                g.lane_width = item->valuedouble;
+            }
+            if ((item = cJSON_GetObjectItem(root, "lane_count"))) {
+                int val = (int)item->valuedouble;
+                if (val >= 1 && val <= 8) g.lane_count = val;
+            }
+            cJSON_Delete(root);
         }
     }
 

@@ -60,6 +60,8 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -129,53 +131,6 @@ static struct {
     volatile int should_stop;
 } g;
 
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-static long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
-}
-
-/* ── 参数解析 ─────────────────────────────────────────────── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) {
-        if (default_val) snprintf(out, out_sz, "%s", default_val);
-        return;
-    }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
-
 /* ── 加载航点文件 ───────────────────────────────────────────
  * 简易 JSON 解析：扫描 {"x":...,"y":...} 对。
  * 文件格式见文件头注释。
@@ -202,64 +157,46 @@ static int load_waypoints(const char* path) {
     buf[n] = '\0';
     fclose(f);
 
-    /* 扫描顶层参数 */
-    {
-        const char* p;
-        if ((p = strstr(buf, "\"lookahead_m\":"))) {
-            double v;
-            if (sscanf(p + 14, "%lf", &v) == 1 && v > 0.1) g.lookahead_m = v;
-        }
-        if ((p = strstr(buf, "\"cruise_speed\":"))) {
-            double v;
-            if (sscanf(p + 15, "%lf", &v) == 1 && v > 0.1) g.cruise_speed = v;
-        }
-    }
-
-    /* 扫描 "waypoints":[...] 里的 {"x":..,"y":..} */
-    g.wp_count = 0;
-    const char* wp_start = strstr(buf, "\"waypoints\"");
-    if (!wp_start) {
-        LOG_WARN("waypoint_follower", "航点文件缺 waypoints 字段");
-        free(buf);
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        LOG_WARN("waypoint_follower", "航点文件 JSON 解析失败: %s", path);
         return -1;
     }
-    const char* arr = strchr(wp_start, '[');
-    if (!arr) { free(buf); return -1; }
 
-    const char* p = arr + 1;
-    while (g.wp_count < WF_MAX_WAYPOINTS) {
-        /* 找下一个 { */
-        const char* obj = strchr(p, '{');
-        if (!obj) break;
-        const char* obj_end = strchr(obj, '}');
-        if (!obj_end) break;
-
-        /* 在 {} 内找 x 和 y */
-        double x = 0, y = 0;
-        int found = 0;
-        const char* q = obj + 1;
-        while (q < obj_end) {
-            const char* kx = strstr(q, "\"x\":");
-            const char* ky = strstr(q, "\"y\":");
-            if (kx && kx < obj_end) {
-                if (sscanf(kx + 4, "%lf", &x) == 1) found++;
-                q = kx + 4;
-            } else if (ky && ky < obj_end) {
-                if (sscanf(ky + 4, "%lf", &y) == 1) found++;
-                q = ky + 4;
-            } else {
-                break;
-            }
-        }
-        if (found >= 2) {
-            g.wpx[g.wp_count] = x;
-            g.wpy[g.wp_count] = y;
-            g.wp_count++;
-        }
-        p = obj_end + 1;
+    /* 扫描顶层参数 */
+    {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "lookahead_m");
+        if (cJSON_IsNumber(j) && j->valuedouble > 0.1) g.lookahead_m = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "cruise_speed");
+        if (cJSON_IsNumber(j) && j->valuedouble > 0.1) g.cruise_speed = j->valuedouble;
     }
 
-    free(buf);
+    /* 扫描 waypoints 数组 */
+    g.wp_count = 0;
+    cJSON* wps = cJSON_GetObjectItemCaseSensitive(root, "waypoints");
+    if (!cJSON_IsArray(wps)) {
+        LOG_WARN("waypoint_follower", "航点文件缺 waypoints 字段");
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    int nw = cJSON_GetArraySize(wps);
+    if (nw > WF_MAX_WAYPOINTS) nw = WF_MAX_WAYPOINTS;
+    for (int i = 0; i < nw; i++) {
+        cJSON* wp = cJSON_GetArrayItem(wps, i);
+        if (!cJSON_IsObject(wp)) continue;
+        cJSON* jx = cJSON_GetObjectItemCaseSensitive(wp, "x");
+        cJSON* jy = cJSON_GetObjectItemCaseSensitive(wp, "y");
+        if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
+            g.wpx[g.wp_count] = jx->valuedouble;
+            g.wpy[g.wp_count] = jy->valuedouble;
+            g.wp_count++;
+        }
+    }
+
+    cJSON_Delete(root);
 
     if (g.wp_count < 2) {
         LOG_WARN("waypoint_follower", "航点文件有效航点不足 2 个 (解析到 %d)", g.wp_count);
@@ -291,13 +228,20 @@ static void on_fusion(const Message* msg, void* user_data) {
     }
 
     /* 回退到 JSON 文本解析 */
-    const char* d = (const char*)msg->data;
-    const char* p;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
     double x = 0, y = 0, v = 0, h = 0;
-    if ((p = strstr(d, "\"x\":")))       sscanf(p + 4, "%lf", &x);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4, "%lf", &y);
-    if ((p = strstr(d, "\"v\":")))       sscanf(p + 4, "%lf", &v);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &h);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "x");
+        if (cJSON_IsNumber(j)) x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "y");
+        if (cJSON_IsNumber(j)) y = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "v");
+        if (cJSON_IsNumber(j)) v = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+        if (cJSON_IsNumber(j)) h = j->valuedouble;
+        cJSON_Delete(root);
+    }
 
     pthread_mutex_lock(&g.lock);
     g.ego_x = x; g.ego_y = y; g.ego_v = v; g.ego_heading = h;
@@ -342,17 +286,19 @@ static void on_traversability(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    const char* d = (const char*)msg->data;
-    const char* p;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
     double near_obs = -1.0, cor_w = 0.0;
     int blocked = 0;
-
-    if ((p = strstr(d, "\"nearest_obstacle_x\":")))
-        sscanf(p + 21, "%lf", &near_obs);
-    if ((p = strstr(d, "\"corridor_width_m\":")))
-        sscanf(p + 19, "%lf", &cor_w);
-    if ((p = strstr(d, "\"blocked\":")))
-        blocked = (strncmp(p + 10, "true", 4) == 0 || strncmp(p + 10, "1", 1) == 0);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "nearest_obstacle_x");
+        if (cJSON_IsNumber(j)) near_obs = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "corridor_width_m");
+        if (cJSON_IsNumber(j)) cor_w = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "blocked");
+        if (cJSON_IsBool(j)) blocked = cJSON_IsTrue(j) ? 1 : 0;
+        cJSON_Delete(root);
+    }
 
     pthread_mutex_lock(&g.lock);
     g.traversability_nearest_obs = near_obs;
@@ -514,7 +460,7 @@ static void* wp_thread(void* arg) {
     long period_ms = 1000L / (g.plan_hz > 0 ? g.plan_hz : 10);
 
     while (g.thread_running && !g.should_stop) {
-        long t0 = now_ms();
+        long t0 = (long)(clock_now_us() / 1000);
 
         if (!g.has_fusion) {
             usleep((unsigned long)period_ms * 1000UL);
@@ -539,24 +485,29 @@ static void* wp_thread(void* arg) {
         }
 
         /* 序列化 trajectory JSON（与 planning_node 兼容格式） */
-        char traj[WF_TRAJ_JSON_LEN];
-        int off = snprintf(traj, sizeof(traj),
-            "{\"type\":\"pure_pursuit\",\"plan\":%lu,\"wp_idx\":%d,\"lap\":%d,",
-            (unsigned long)g.plans_published, g.wp_current, g.lap_count);
-        off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-            "\"target_speed\":%.2f,\"path\":[", target_speed);
-        for (int i = 0; i < path_n && off < (int)sizeof(traj) - 50; i++) {
-            off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                "%s[%.2f,%.2f,%.2f]",
-                i > 0 ? "," : "",
-                path_x[i], path_y[i], target_speed);
+        cJSON* tj_root = cJSON_CreateObject();
+        cJSON_AddStringToObject(tj_root, "type", "pure_pursuit");
+        cJSON_AddNumberToObject(tj_root, "plan", (double)g.plans_published);
+        cJSON_AddNumberToObject(tj_root, "wp_idx", g.wp_current);
+        cJSON_AddNumberToObject(tj_root, "lap", g.lap_count);
+        cJSON_AddNumberToObject(tj_root, "target_speed", target_speed);
+        cJSON* path_arr = cJSON_CreateArray();
+        for (int i = 0; i < path_n; i++) {
+            cJSON* pt = cJSON_CreateArray();
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(path_x[i]));
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(path_y[i]));
+            cJSON_AddItemToArray(pt, cJSON_CreateNumber(target_speed));
+            cJSON_AddItemToArray(path_arr, pt);
         }
-        off += snprintf(traj + off, sizeof(traj) - (size_t)off, "]}");
+        cJSON_AddItemToObject(tj_root, "path", path_arr);
 
+        char* traj = cJSON_PrintUnformatted(tj_root);
         /* 追加 speed= 字段（control_node 用 strstr 解析这个） */
         char traj_final[WF_TRAJ_JSON_LEN + 64];
         snprintf(traj_final, sizeof(traj_final), "%s speed=%.2f mode=WAYPOINT_FOLLOW",
                  traj, target_speed);
+        free(traj);
+        cJSON_Delete(tj_root);
 
         transport_publish(g.transport, "planning/trajectory",
                           (const uint8_t*)traj_final, (uint32_t)(strlen(traj_final) + 1));
@@ -576,7 +527,7 @@ static void* wp_thread(void* arg) {
                      g.lap_count);
         }
 
-        long elapsed = now_ms() - t0;
+        long elapsed = (long)(clock_now_us() / 1000) - t0;
         long remain = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }
@@ -612,14 +563,27 @@ static int wp_init(MessageBus* bus, Transport* transport,
     g.obstacle_stop_dist = 0.8;
 
     if (params_json) {
-        parse_string(params_json, "waypoints_file", g.waypoints_file,
-                     sizeof(g.waypoints_file), "/tmp/waypoints.json");
-        g.loop = parse_int(params_json, "loop", 1);
-        g.cruise_speed = parse_double(params_json, "cruise_speed", 2.0);
-        g.lookahead_m = parse_double(params_json, "lookahead_m", 1.5);
-        g.plan_hz = parse_int(params_json, "plan_hz", 10);
-        g.obstacle_slow_dist = parse_double(params_json, "obstacle_slow_dist", 3.0);
-        g.obstacle_stop_dist = parse_double(params_json, "obstacle_stop_dist", 0.8);
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "waypoints_file");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(g.waypoints_file, j->valuestring, sizeof(g.waypoints_file) - 1);
+            j = cJSON_GetObjectItemCaseSensitive(p, "loop");
+            if (cJSON_IsBool(j)) g.loop = cJSON_IsTrue(j) ? 1 : 0;
+            else if (cJSON_IsNumber(j)) g.loop = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "cruise_speed");
+            if (cJSON_IsNumber(j)) g.cruise_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lookahead_m");
+            if (cJSON_IsNumber(j)) g.lookahead_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "plan_hz");
+            if (cJSON_IsNumber(j)) g.plan_hz = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "obstacle_slow_dist");
+            if (cJSON_IsNumber(j)) g.obstacle_slow_dist = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "obstacle_stop_dist");
+            if (cJSON_IsNumber(j)) g.obstacle_stop_dist = j->valuedouble;
+            cJSON_Delete(p);
+        }
     }
 
     /* 加载航点文件 */

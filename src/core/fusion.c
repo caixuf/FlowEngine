@@ -4,19 +4,12 @@
 
 #include "fusion.h"
 #include "error_codes.h"
+#include "clock_service.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
-
-/* ── 单调时钟 ────────────────────────────────────────────── */
-
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
 
 /* ══════════════════════════════════════════════════════════ */
 /* MessageBuffer                                              */
@@ -51,7 +44,7 @@ int message_buffer_push(MessageBuffer* mb, const Message* msg) {
     if (mb->count < mb->capacity) mb->count++;
 
     /* Evict messages older than window_us */
-    uint64_t cutoff = monotonic_us() - mb->window_us;
+    uint64_t cutoff = clock_now_us() - mb->window_us;
     for (uint32_t i = 0; i < mb->count; i++) {
         uint32_t idx = (mb->head + mb->capacity - mb->count + i) % mb->capacity;
         if (mb->buffer[idx].timestamp_us < cutoff) {
@@ -78,7 +71,7 @@ const Message* message_buffer_find_nearest(MessageBuffer* mb, uint64_t target_us
         const Message* m = &mb->buffer[idx];
 
         /* Check window */
-        uint64_t now = monotonic_us();
+        uint64_t now = clock_now_us();
         if (now - m->timestamp_us > mb->window_us) continue;
 
         /* Find closest */

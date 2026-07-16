@@ -73,6 +73,74 @@ python3 tools/demo_evaluator.py --no-run
 
 评估器采样 `/tmp/flow_topology.json`，自动检查：拓扑完整性、topic 频率、碰撞、路沿偏离、停滞、变道次数、偏航抖动、NPC 瞬移。WARN 是已知问题可忽略，FAIL 必须修复。
 
+## 编码规范（统一 API — 2026-07 重构后强制执行）
+
+> 以下 API 是本项目的**唯一合法入口**。禁止绕过它们直接调用底层函数。
+
+### JSON 序列化/反序列化 → `cjson/cJSON.h`
+
+```c
+#include <cjson/cJSON.h>
+
+// 序列化（替代手拼 snprintf）
+cJSON* root = cJSON_CreateObject();
+cJSON_AddNumberToObject(root, "speed", v);
+cJSON_AddStringToObject(root, "mode", "highway");
+char* s = cJSON_PrintUnformatted(root);   // topic publish 用 compact
+// char* s = cJSON_Print(root);           // 文件写入用 formatted
+transport_publish(t, "topic", (const uint8_t*)s, (uint32_t)strlen(s) + 1);
+free(s);
+cJSON_Delete(root);
+
+// 反序列化（替代 strstr + sscanf）
+cJSON* root = cJSON_Parse((const char*)msg->data);
+if (root) {
+    cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "speed");
+    if (cJSON_IsNumber(j)) double v = j->valuedouble;
+    cJSON_Delete(root);
+}
+```
+
+- ❌ **禁止** `snprintf("{\"key\":%d}", ...)` 手拼 JSON
+- ❌ **禁止** `strstr(msg, "\"key\":")` + `sscanf` 手写解析
+- ✅ **必须** 用 cJSON 序列化/反序列化所有 topic 消息和文件
+- 参考：`src/core/scenario_loader.c`（已有成熟 pattern）
+
+### 时间 → `clock_service.h`
+
+```c
+#include "clock_service.h"
+
+uint64_t now = clock_now_us();               // CLOCK_MONOTONIC，仿真/回放模式下可注入
+uint64_t real = clock_now_realtime_us();     // CLOCK_REALTIME，始终真实墙钟（训练样本、仪表盘）
+```
+
+- ❌ **禁止** `static uint64_t monotonic_us(void) { clock_gettime(...); }` 重复造轮子
+- ❌ **禁止** `clock_gettime(CLOCK_MONOTONIC, &ts)` 裸调用
+- ✅ **必须** 用 `clock_now_us()`；需绝对时间用 `clock_now_realtime_us()`
+
+### 参数解析 → cJSON_Parse
+
+```c
+// 替代 strstr(params_json, "\"target_speed\":")
+cJSON* p = cJSON_Parse(params_json);
+cJSON* j = cJSON_GetObjectItemCaseSensitive(p, "target_speed");
+if (cJSON_IsNumber(j)) cfg.target_speed = j->valuedouble;
+cJSON_Delete(p);
+```
+
+- ❌ **禁止** `strstr(params_json, "\"param_name\":")` + `sscanf` 手写参数解析
+- ✅ **必须** 用 `cJSON_Parse(params_json)` 解析所有节点参数
+
+### 错误码 → `error_codes.h`（modules 中待推广）
+
+```c
+#include "error_codes.h"
+return ERR_INVALID_PARAM;  // 替代 return -1
+```
+
+### 违反以上规范的代码不会被合并。
+
 ## 常见故障模式
 
 | 现象 | 根因 | 位置 |

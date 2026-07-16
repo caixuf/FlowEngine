@@ -19,6 +19,7 @@
 #include "discovery.h"
 #include "serializer.h"
 #include "stats_bridge.h"
+#include "clock_service.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,20 +95,6 @@ static char* read_file(const char* path, size_t* out_len) {
 /* ── SSE 数据生成 (flowboard 兼容格式) ────────────────── */
 
 /**
- * Return current monotonic time in microseconds.
- */
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
-}
-
-/**
- * Include <time.h> for clock_gettime if not already included.
- * It's already included above.
- */
-
-/**
  * Build dashboard JSON from cached data (from monitor_node).
  * Wraps the cached JSON with source/stale/age_sec fields.
  * @return Length written to buf, or 0 if no cache available.
@@ -118,7 +105,7 @@ static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) 
     pthread_mutex_lock(&ms->cached_mutex);
     int ret = 0;
     if (ms->cached_json && ms->cached_json_len > 1) {
-        uint64_t now_us = monotonic_us();
+        uint64_t now_us = clock_now_us();
         uint64_t age_us = (now_us > ms->cached_json_time_us)
                           ? now_us - ms->cached_json_time_us : 0;
         double age_sec = (double)age_us / 1000000.0;
@@ -980,7 +967,7 @@ void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pk
 
     /* Update freshness timestamp for IPC reconnect detection */
     pthread_mutex_lock(&ms->freshness_mutex);
-    ms->last_stats_data_us = monotonic_us();
+    ms->last_stats_data_us = clock_now_us();
     pthread_mutex_unlock(&ms->freshness_mutex);
 }
 
@@ -999,7 +986,7 @@ void monitor_server_inject_dashboard_json(MonitorServer* ms,
         memcpy(ms->cached_json, json, len);
         ms->cached_json[len] = '\0';
         ms->cached_json_len = len;
-        ms->cached_json_time_us = monotonic_us();
+        ms->cached_json_time_us = clock_now_us();
         ms->cached_json_version++;
     }
 
@@ -1007,7 +994,7 @@ void monitor_server_inject_dashboard_json(MonitorServer* ms,
 
     /* Update freshness timestamp for IPC reconnect detection */
     pthread_mutex_lock(&ms->freshness_mutex);
-    ms->last_dashboard_data_us = monotonic_us();
+    ms->last_dashboard_data_us = clock_now_us();
     pthread_mutex_unlock(&ms->freshness_mutex);
 }
 
@@ -1017,7 +1004,7 @@ double monitor_server_dashboard_age_sec(MonitorServer* ms) {
     uint64_t last = ms->last_dashboard_data_us;
     pthread_mutex_unlock(&ms->freshness_mutex);
     if (last == 0) return 1e9;  /* never received data */
-    uint64_t now = monotonic_us();
+    uint64_t now = clock_now_us();
     return (double)(now - last) / 1000000.0;
 }
 
@@ -1027,6 +1014,6 @@ double monitor_server_stats_age_sec(MonitorServer* ms) {
     uint64_t last = ms->last_stats_data_us;
     pthread_mutex_unlock(&ms->freshness_mutex);
     if (last == 0) return 1e9;  /* never received data */
-    uint64_t now = monotonic_us();
+    uint64_t now = clock_now_us();
     return (double)(now - last) / 1000000.0;
 }

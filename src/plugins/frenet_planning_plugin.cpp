@@ -20,7 +20,7 @@
 #include "transport.h"
 #include "scheduler.h"
 #include "logger.h"
-#include "json_schema.h"   /* Phase 4.5: json_get_*_strict + dsl_get_*_strict 替换 strstr+sscanf */
+#include <cjson/cJSON.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,27 +76,47 @@ static void on_fusion(const Message* msg, void* user_data) {
     FrenetPlanningTask* pt = (FrenetPlanningTask*)user_data;
     const char* data = (const char*)msg->data;
     if (!data) return;
-    /* Phase 4.5: 替换 strstr+sscanf 为严格 schema 提取。
-     * - JSON 路径：使用 json_get_double_strict（接受 x/y/v/heading 字段）
-     * - DSL 路径：使用 dsl_find_value 解析 pos=(x,y) 元组，dsl_get_double_strict 解析 speed= */
     double x = 0, y = 0, v = 10.0, heading = 0;
     bool ok = false;
     if (strchr(data, '{')) {
         /* Try JSON first (EKF fusion publishes {x,y,v,heading}) */
-        ok |= json_get_double_strict(data, "x", &x);
-        ok |= json_get_double_strict(data, "y", &y);
-        ok |= json_get_double_strict(data, "v", &v);
-        json_get_double_strict(data, "heading", &heading);
+        cJSON* root = cJSON_Parse(data);
+        if (root) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(root, "x");
+            if (cJSON_IsNumber(j)) { x = j->valuedouble; ok = true; }
+            j = cJSON_GetObjectItemCaseSensitive(root, "y");
+            if (cJSON_IsNumber(j)) { y = j->valuedouble; ok = true; }
+            j = cJSON_GetObjectItemCaseSensitive(root, "v");
+            if (cJSON_IsNumber(j)) { v = j->valuedouble; ok = true; }
+            j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+            if (cJSON_IsNumber(j)) heading = j->valuedouble;
+            cJSON_Delete(root);
+        }
     }
     if (!ok) {
         /* Fallback to DSL: "pos=(x,y) ... speed=v ..." */
-        const char* pos_val = dsl_find_value(data, "pos");
-        if (pos_val && *pos_val == '(') {
-            const char* num = pos_val + 1;
+        const char* pos_val = strstr(data, "pos=");
+        if (pos_val) {
+            const char* num = pos_val + 4;
+            while (*num == ' ') num++;
+            if (*num == '(') num++;
             if (*num == '-' || *num == '+') num++;
-            if (isdigit((unsigned char)*num)) x = strtod(num, NULL);
+            if (isdigit((unsigned char)*num)) {
+                x = strtod(num, NULL);
+                const char* comma = strchr(num, ',');
+                if (comma) {
+                    comma++;
+                    while (*comma == ' ') comma++;
+                    y = strtod(comma, NULL);
+                }
+            }
         }
-        dsl_get_double_strict(data, "speed", &v);
+        const char* sp = strstr(data, "speed=");
+        if (sp) {
+            double sv;
+            if (sscanf(sp + 6, "%lf", &sv) == 1) v = sv;
+        }
     }
     pt->ego_x = x; pt->ego_y = y;
     pt->ego_speed = v; pt->ego_heading = heading;
@@ -170,29 +190,42 @@ static int frenet_planning_execute(TaskBase* base) {
         run_fot(&fot_ic, &fot_hp, &fot_rv);
 
         /* 发布轨迹 */
-        char traj[4096];
+        char* traj_s = NULL;
         if (fot_rv.success) {
-            int off = snprintf(traj, sizeof(traj),
-                "{\"type\":\"frenet\",\"plan\":%d,\"cost\":%.2f,\"wp\":[",
-                pt->plan_count, fot_rv.costs[11]);
+            cJSON* tj_root = cJSON_CreateObject();
+            cJSON_AddStringToObject(tj_root, "type", "frenet");
+            cJSON_AddNumberToObject(tj_root, "plan", pt->plan_count);
+            cJSON_AddNumberToObject(tj_root, "cost", fot_rv.costs[11]);
+            cJSON* wp = cJSON_CreateArray();
             int wp_count = 0;
             for (int i = 0; i < MAX_PATH_LENGTH && wp_count < 20; i++) {
                 if (isnan(fot_rv.x_path[i])) break;
                 if (i % 5 != 0 && i > 0) continue;
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                    "%s[%.1f,%.1f,%.1f]", wp_count > 0 ? "," : "",
-                    fot_rv.x_path[i], fot_rv.y_path[i], fot_rv.speeds[i]);
+                cJSON* pt_arr = cJSON_CreateArray();
+                cJSON_AddItemToArray(pt_arr, cJSON_CreateNumber(fot_rv.x_path[i]));
+                cJSON_AddItemToArray(pt_arr, cJSON_CreateNumber(fot_rv.y_path[i]));
+                cJSON_AddItemToArray(pt_arr, cJSON_CreateNumber(fot_rv.speeds[i]));
+                cJSON_AddItemToArray(wp, pt_arr);
                 wp_count++;
             }
-            off += snprintf(traj + off, sizeof(traj) - (size_t)off, "]}");
+            cJSON_AddItemToObject(tj_root, "wp", wp);
+            traj_s = cJSON_PrintUnformatted(tj_root);
+            cJSON_Delete(tj_root);
         } else {
-            snprintf(traj, sizeof(traj), "{\"type\":\"failsafe\",\"v\":%.1f}", pt->ego_speed);
+            cJSON* fs_root = cJSON_CreateObject();
+            cJSON_AddStringToObject(fs_root, "type", "failsafe");
+            cJSON_AddNumberToObject(fs_root, "v", pt->ego_speed);
+            traj_s = cJSON_PrintUnformatted(fs_root);
+            cJSON_Delete(fs_root);
         }
 
-        Message pmsg;
-        msg_init_typed(&pmsg, "planning/trajectory", "frenet_planning",
-                       0x3A7B1C2Du, 2, traj, (uint32_t)strlen(traj) + 1);
-        transport_publish(pt->transport, "planning/trajectory", pmsg.data, pmsg.data_size);
+        if (traj_s) {
+            Message pmsg;
+            msg_init_typed(&pmsg, "planning/trajectory", "frenet_planning",
+                           0x3A7B1C2Du, 2, traj_s, (uint32_t)strlen(traj_s) + 1);
+            transport_publish(pt->transport, "planning/trajectory", pmsg.data, pmsg.data_size);
+            free(traj_s);
+        }
 
         if (pt->plan_count % 50 == 0) {
             LOG_INFO("frenet_planning", "#%d cost=%.1f ego@(%.0f,%.1f) v=%.1f %s",

@@ -42,6 +42,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "tiny_mlp.h"
+#include <cjson/cJSON.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -151,24 +152,34 @@ static void on_fusion(const Message* msg, void* user_data) {
     }
 
     /* Fallback: 文本 JSON */
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"x\":")))       sscanf(p + 4, "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4, "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"v\":")))       sscanf(p + 4, "%lf", &g.ego_v);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "x");
+        if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "y");
+        if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "v");
+        if (cJSON_IsNumber(j)) g.ego_v = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+        if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_fusion = 1;
 }
 
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"target_speed\":")))
-        sscanf(p + 15, "%lf", &g.planning_target_speed);
-    else if ((p = strstr(d, "speed=")))
-        sscanf(p + 6, "%lf", &g.planning_target_speed);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
+        if (!cJSON_IsNumber(j))
+            j = cJSON_GetObjectItemCaseSensitive(root, "speed");
+        if (cJSON_IsNumber(j))
+            g.planning_target_speed = j->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_planning = 1;
 }
 
@@ -252,12 +263,15 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     }
 
     /* 文本回退 */
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "brake="))) sscanf(p + 6, "%lf", &g.ctrl_brake);
-    if ((p = strstr(d, "mode="))) {
-        g.ctrl_emergency_stop = (strstr(p, "AEB") != NULL
-                                 || strstr(p, "BRAKE") != NULL) ? 1 : 0;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "brake");
+        if (cJSON_IsNumber(j)) g.ctrl_brake = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        if (cJSON_IsString(j) && j->valuestring)
+            g.ctrl_emergency_stop = (strstr(j->valuestring, "AEB") != NULL
+                                     || strstr(j->valuestring, "BRAKE") != NULL) ? 1 : 0;
+        cJSON_Delete(root);
     }
     g.has_control = 1;
 }
@@ -272,9 +286,12 @@ static void on_control_cmd(const Message* msg, void* user_data) {
 static void on_model_ota_active(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    if (strstr(d, "\"reload\"")) {
-        g.reload_flag = 1;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "reload");
+        if (cJSON_IsBool(j) && cJSON_IsTrue(j))
+            g.reload_flag = 1;
+        cJSON_Delete(root);
     }
 }
 
@@ -492,38 +509,55 @@ protected:
 
             /* 所有模式下都发布 inference/trajectory 供监控 */
             {
-                char traj[1280];
-                int off = snprintf(traj, sizeof(traj),
-                    "{\"type\":\"inference\",\"model\":\"%s\",\"infer\":%d,"
-                    "\"shadow\":true,\"target_speed\":%.2f,\"lateral_d\":%.2f,"
-                    "\"shadow_delta\":%.2f,\"throttle\":%.3f,\"brake\":%.3f,"
-                    "\"steer\":%.4f,\"lane_change\":%.1f,\"confidence\":%.2f,"
-                    "\"ego\":{\"x\":%.2f,\"y\":%.2f,\"v\":%.2f}",
-                    model_name, g.infer_count,
-                    pred_speed, pred_d, shadow_delta,
-                    pred_throttle, pred_brake, pred_steer, pred_lc, pred_conf,
-                    g.ego_x, g.ego_y, g.ego_v);
+                cJSON* tj_root = cJSON_CreateObject();
+                cJSON_AddStringToObject(tj_root, "type", "inference");
+                cJSON_AddStringToObject(tj_root, "model", model_name);
+                cJSON_AddNumberToObject(tj_root, "infer", g.infer_count);
+                cJSON_AddTrueToObject(tj_root, "shadow");
+                cJSON_AddNumberToObject(tj_root, "target_speed", pred_speed);
+                cJSON_AddNumberToObject(tj_root, "lateral_d", pred_d);
+                cJSON_AddNumberToObject(tj_root, "shadow_delta", shadow_delta);
+                cJSON_AddNumberToObject(tj_root, "throttle", pred_throttle);
+                cJSON_AddNumberToObject(tj_root, "brake", pred_brake);
+                cJSON_AddNumberToObject(tj_root, "steer", pred_steer);
+                cJSON_AddNumberToObject(tj_root, "lane_change", pred_lc);
+                cJSON_AddNumberToObject(tj_root, "confidence", pred_conf);
+                cJSON* ego_obj = cJSON_CreateObject();
+                cJSON_AddNumberToObject(ego_obj, "x", g.ego_x);
+                cJSON_AddNumberToObject(ego_obj, "y", g.ego_y);
+                cJSON_AddNumberToObject(ego_obj, "v", g.ego_v);
+                cJSON_AddItemToObject(tj_root, "ego", ego_obj);
 
                 if (g.has_obstacles) {
-                    off += snprintf(traj + off, sizeof(traj) - (size_t)off,
-                        ",\"front0\":{\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"type\":%.0f}",
-                        g.front0_x, g.front0_y, g.front0_vx, g.front0_type);
+                    cJSON* front0_obj = cJSON_CreateObject();
+                    cJSON_AddNumberToObject(front0_obj, "x", g.front0_x);
+                    cJSON_AddNumberToObject(front0_obj, "y", g.front0_y);
+                    cJSON_AddNumberToObject(front0_obj, "vx", g.front0_vx);
+                    cJSON_AddNumberToObject(front0_obj, "type", g.front0_type);
+                    cJSON_AddItemToObject(tj_root, "front0", front0_obj);
                 }
-                off += snprintf(traj + off, sizeof(traj) - (size_t)off, "}");
 
+                char* tj_s = cJSON_PrintUnformatted(tj_root);
                 transport_publish(transport_, "inference/trajectory",
-                                  (const uint8_t*)traj, (uint32_t)off + 1);
+                                  (const uint8_t*)tj_s, (uint32_t)strlen(tj_s) + 1);
+                free(tj_s);
+                cJSON_Delete(tj_root);
             }
 
             /* plan_assist 模式: 额外发布结构化轨迹供 planning 消费 */
             if (g.control_mode == CTRL_MODE_PLAN_ASSIST) {
-                char assist[512];
-                snprintf(assist, sizeof(assist),
-                    "{\"type\":\"assist\",\"speed\":%.2f,\"d\":%.2f,"
-                    "\"throttle\":%.3f,\"steer\":%.4f,\"infer\":%d}",
-                    pred_speed, pred_d, pred_throttle, pred_steer, g.infer_count);
+                cJSON* as_root = cJSON_CreateObject();
+                cJSON_AddStringToObject(as_root, "type", "assist");
+                cJSON_AddNumberToObject(as_root, "speed", pred_speed);
+                cJSON_AddNumberToObject(as_root, "d", pred_d);
+                cJSON_AddNumberToObject(as_root, "throttle", pred_throttle);
+                cJSON_AddNumberToObject(as_root, "steer", pred_steer);
+                cJSON_AddNumberToObject(as_root, "infer", g.infer_count);
+                char* as_s = cJSON_PrintUnformatted(as_root);
                 transport_publish(transport_, "inference/assist",
-                                  (const uint8_t*)assist, (uint32_t)strlen(assist) + 1);
+                                  (const uint8_t*)as_s, (uint32_t)strlen(as_s) + 1);
+                free(as_s);
+                cJSON_Delete(as_root);
             }
 
             /* direct_ctrl 模式: 发布推理控制指令（safety_control 兜底） */
@@ -633,27 +667,26 @@ static int inference_init(MessageBus* bus, Transport* transport,
     strncpy(g.model_path, "tools/train/model.txt", sizeof(g.model_path) - 1);
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"max_speed\":")))
-            sscanf(p + 12, "%lf", &g.cfg_max_speed);
-        if ((p = strstr(params_json, "\"frequency_hz\":")))
-            sscanf(p + 15, "%lf", &g.cfg_frequency_hz);
-        if ((p = strstr(params_json, "\"model_path\":\""))) {
-            const char* start = p + 14;
-            const char* end = strchr(start, '"');
-            if (end && (size_t)(end - start) < sizeof(g.model_path)) {
-                size_t len = (size_t)(end - start);
-                memcpy(g.model_path, start, len);
-                g.model_path[len] = '\0';
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "max_speed");
+            if (cJSON_IsNumber(j)) g.cfg_max_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "frequency_hz");
+            if (cJSON_IsNumber(j)) g.cfg_frequency_hz = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "model_path");
+            if (cJSON_IsString(j) && j->valuestring) {
+                strncpy(g.model_path, j->valuestring, sizeof(g.model_path) - 1);
+                g.model_path[sizeof(g.model_path) - 1] = '\0';
             }
-        }
-        /* v2: 控制模式 */
-        if ((p = strstr(params_json, "\"control_mode\":\""))) {
-            const char* mode_start = p + 16;
-            if (strncmp(mode_start, "plan_assist", 11) == 0)
-                g.control_mode = CTRL_MODE_PLAN_ASSIST;
-            else if (strncmp(mode_start, "direct_ctrl", 11) == 0)
-                g.control_mode = CTRL_MODE_DIRECT;
+            j = cJSON_GetObjectItemCaseSensitive(p, "control_mode");
+            if (cJSON_IsString(j) && j->valuestring) {
+                if (strcmp(j->valuestring, "plan_assist") == 0)
+                    g.control_mode = CTRL_MODE_PLAN_ASSIST;
+                else if (strcmp(j->valuestring, "direct_ctrl") == 0)
+                    g.control_mode = CTRL_MODE_DIRECT;
+            }
+            cJSON_Delete(p);
         }
     }
 

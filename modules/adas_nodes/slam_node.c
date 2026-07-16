@@ -73,6 +73,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -141,22 +142,6 @@ static struct {
     volatile int should_stop;
 } g;
 
-/* ── 时间工具 ─────────────────────────────────────────────── */
-
-/* 当前单调/墙上时间（微秒），用于 IMU 积分 dt 与位姿时间戳。 */
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
-/* 当前墙上时间（毫秒），用于线程周期定频。 */
-static long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
-}
-
 /* ── 参数解析（复用 lidar_driver_node.c / actuator_node.c 的模式） ──── */
 
 static double parse_double(const char* json, const char* key, double default_val) {
@@ -214,7 +199,7 @@ static void on_lidar(const Message* msg, void* user_data) {
 
     pthread_mutex_lock(&g.lock);
     g.last_lidar    = frame;
-    g.last_lidar_us = now_us();
+    g.last_lidar_us = clock_now_us();
     g.have_lidar    = 1;
     g.lidar_frames_received++;
     pthread_mutex_unlock(&g.lock);
@@ -239,7 +224,7 @@ static void on_imu(const Message* msg, void* user_data) {
         return;
     }
 
-    uint64_t now = now_us();
+    uint64_t now = clock_now_us();
 
     pthread_mutex_lock(&g.lock);
     /* 用陀螺仪 gyro_z 积分 heading（逐 IMU 样本，精度高于按 publish_hz 积分） */
@@ -351,7 +336,7 @@ static void slam_update_fast_lio2(Pose2D* pose) {
 
 /* ── dead reckoning 实现（默认，总是编译） ─────────────────── */
 static void slam_update_dead_reckon(Pose2D* pose) {
-    uint64_t now = now_us();
+    uint64_t now = clock_now_us();
     float dt = 0.0f;
     if (g.last_slam_update_us == 0) {
         g.last_slam_update_us = now;  /* 首次：只记录时刻，不积分 */
@@ -428,7 +413,7 @@ static void* slam_thread(void* arg) {
             continue;
         }
 
-        long t0 = now_ms();
+        long t0 = (long)(clock_now_realtime_us()/1000);
 
         Pose2D pose;
         memset(&pose, 0, sizeof(pose));
@@ -470,7 +455,7 @@ static void* slam_thread(void* arg) {
         }
 
         /* 按周期定频：睡剩余时间 */
-        long elapsed = now_ms() - t0;
+        long elapsed = (long)(clock_now_realtime_us()/1000) - t0;
         long remain  = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }

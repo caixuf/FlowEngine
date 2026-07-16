@@ -42,6 +42,9 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include "clock_service.h"
+
+#include <cjson/cJSON.h>
 #include <memory>
 
 namespace {
@@ -105,25 +108,35 @@ static int obstacle_in_fov(double rx, double ry, double max_range_m, double fov_
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"x\":")))   sscanf(p + 4, "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":")))   sscanf(p + 4, "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"hdg\":"))) sscanf(p + 6, "%lf", &g.ego_heading);
-    if ((p = strstr(d, "\"spd\":"))) sscanf(p + 6, "%lf", &g.ego_speed);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
+        g.ego_x = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
+        g.ego_y = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "hdg")) && cJSON_IsNumber(j))
+        g.ego_heading = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "spd")) && cJSON_IsNumber(j))
+        g.ego_speed = j->valuedouble;
     int n = 0;
-    if ((p = strstr(d, "\"n_obs\":"))) sscanf(p + 8, "%d", &n);
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
+        n = (int)j->valuedouble;
     if (n < 1 || n > 16) n = 3;
     g.n_obs = n;
     for (int i = 0; i < n; i++) {
-        char kx[16], ky[16], kvx[16];
-        snprintf(kx,  sizeof(kx),  "\"ox%d\":", i);
-        snprintf(ky,  sizeof(ky),  "\"oy%d\":", i);
-        snprintf(kvx, sizeof(kvx), "\"ov%d\":", i);
-        if ((p = strstr(d, kx)))  sscanf(p + strlen(kx),  "%lf", &g.obs_x[i]);
-        if ((p = strstr(d, ky)))  sscanf(p + strlen(ky),  "%lf", &g.obs_y[i]);
-        if ((p = strstr(d, kvx))) sscanf(p + strlen(kvx), "%lf", &g.obs_vx[i]);
+        char key[16];
+        snprintf(key, sizeof(key), "ox%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_x[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "oy%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_y[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "ov%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_vx[i] = j->valuedouble;
     }
+    cJSON_Delete(root);
 }
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
@@ -209,19 +222,12 @@ protected:
                 }
 
                 /* ── DBSCAN 时间预算保护 ── */
-                struct timespec t_dbscan_start, t_dbscan_end;
-                clock_gettime(CLOCK_MONOTONIC, &t_dbscan_start);
+                uint64_t t_dbscan_start = clock_now_us();
 
                 int n_clusters = dbscan_run(&g.dbscan, pts, np);
 
-                clock_gettime(CLOCK_MONOTONIC, &t_dbscan_end);
-                long dbscan_us;
-                {
-                    long sec_diff = (long)(t_dbscan_end.tv_sec  - t_dbscan_start.tv_sec);
-                    long ns_diff  = (long)(t_dbscan_end.tv_nsec - t_dbscan_start.tv_nsec);
-                    if (ns_diff < 0) { sec_diff--; ns_diff += 1000000000L; }
-                    dbscan_us = sec_diff * 1000000L + ns_diff / 1000L;
-                }
+                uint64_t t_dbscan_end = clock_now_us();
+                long dbscan_us = (long)(t_dbscan_end - t_dbscan_start);
                 long budget_warn_us = (long)(period_us_ * 8 / 10);
 
                 if (dbscan_us > period_us_) {
@@ -317,19 +323,23 @@ static int perception_init(MessageBus* bus, Transport* transport,
 
     /* 解析参数 */
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"dbscan_eps\":")))
-            sscanf(p + 13, "%lf", &g.dbscan_eps);
-        if ((p = strstr(params_json, "\"lidar_rate_hz\":")))
-            sscanf(p + 16, "%d", &g.lidar_rate_hz);
-        if ((p = strstr(params_json, "\"lidar_fov_deg\":")))
-            sscanf(p + 16, "%lf", &g.lidar_fov_deg);
-        if ((p = strstr(params_json, "\"lidar_max_range_m\":")))
-            sscanf(p + 20, "%lf", &g.lidar_max_range_m);
-        if ((p = strstr(params_json, "\"obs_noise_std_m\":")))
-            sscanf(p + 18, "%lf", &g.obs_noise_std_m);
-        if ((p = strstr(params_json, "\"enable_simple_occlusion\":")))
-            sscanf(p + 26, "%d", &g.enable_simple_occlusion);
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "dbscan_eps")) && cJSON_IsNumber(j))
+                g.dbscan_eps = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_rate_hz")) && cJSON_IsNumber(j))
+                g.lidar_rate_hz = (int)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_fov_deg")) && cJSON_IsNumber(j))
+                g.lidar_fov_deg = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_max_range_m")) && cJSON_IsNumber(j))
+                g.lidar_max_range_m = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "obs_noise_std_m")) && cJSON_IsNumber(j))
+                g.obs_noise_std_m = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "enable_simple_occlusion")) && cJSON_IsNumber(j))
+                g.enable_simple_occlusion = (int)j->valuedouble;
+            cJSON_Delete(p);
+        }
     }
 
     /* Fixed seed for reproducibility — sim_world drives deterministic time */

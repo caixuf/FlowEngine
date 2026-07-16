@@ -66,10 +66,16 @@ if(NOT CJSON_FOUND)
         set(CJSON_FOUND TRUE)
     endif()
 endif()
-# 节点插件本身不包含 cJSON 头文件，只需链接库以解析 scenario_loader.o 引入的符号
+# 节点插件现在直接使用 cJSON API（JSON 序列化/反序列化迁移），需要头文件路径。
 if(CJSON_FOUND)
     list(APPEND NODE_LINK_LIBS ${CJSON_LIBRARIES})
     message(STATUS "cJSON found for node plugins: ${CJSON_LIBRARIES}")
+    # 头文件路径（兼容系统安装的 pkg-config 和 FetchContent 构建两种来源）
+    if(CJSON_INCLUDE_DIRS)
+        include_directories(${CJSON_INCLUDE_DIRS})
+    elseif(EXISTS "${FLOWENGINE_BUILD}/_cjson_include/cjson/cJSON.h")
+        include_directories("${FLOWENGINE_BUILD}/_cjson_include")
+    endif()
 else()
     message(WARNING "cJSON not found — node plugins may fail at dlopen due to undefined cJSON symbols")
 endif()

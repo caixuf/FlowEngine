@@ -22,6 +22,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <cjson/cJSON.h>
 
 static struct {
     Transport* transport;
@@ -56,26 +57,6 @@ static struct {
 } g;
 
 #define SENSOR_NMEA_MAX_FRAMES 8192
-
-/* 提取 JSON 字符串字段值（简易，仅用于节点参数）。成功返回 1。 */
-static int extract_json_string(const char* json, const char* key,
-                               char* out, size_t out_sz) {
-    if (!json || !key || !out || out_sz == 0) return 0;
-    char pat[80];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return 0;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return 0;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') return 0;
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-    return (*p == '"');
-}
 
 /* 从 NMEA 0183 日志文件加载 GPS 帧序列。返回加载帧数（失败返回 0）。 */
 static int load_nmea_gps_log(const char* path, GpsData** out_frames) {
@@ -130,25 +111,34 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"x\":"))) sscanf(p + 4, "%lf", &g.ego_x);
-    if ((p = strstr(d, "\"y\":"))) sscanf(p + 4, "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"hdg\":"))) sscanf(p + 6, "%lf", &g.ego_heading);
-    if ((p = strstr(d, "\"spd\":"))) sscanf(p + 6, "%lf", &g.ego_speed);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
+        g.ego_x = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
+        g.ego_y = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "hdg")) && cJSON_IsNumber(j))
+        g.ego_heading = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "spd")) && cJSON_IsNumber(j))
+        g.ego_speed = j->valuedouble;
 
     int n = 0;
-    if ((p = strstr(d, "\"n_obs\":"))) sscanf(p + 8, "%d", &n);
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
+        n = (int)j->valuedouble;
     if (n < 1 || n > 16) n = 3;
     g.n_obs = n;
 
     for (int i = 0; i < n; i++) {
-        char kx[16], ky[16];
-        snprintf(kx, sizeof(kx), "\"ox%d\":", i);
-        snprintf(ky, sizeof(ky), "\"oy%d\":", i);
-        if ((p = strstr(d, kx))) sscanf(p + (int)strlen(kx), "%lf", &g.obs_x[i]);
-        if ((p = strstr(d, ky))) sscanf(p + (int)strlen(ky), "%lf", &g.obs_y[i]);
+        char key[16];
+        snprintf(key, sizeof(key), "ox%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_x[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "oy%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_y[i] = j->valuedouble;
     }
+    cJSON_Delete(root);
 }
 
 static uint32_t estimate_visible_point_count(void) {
@@ -285,20 +275,23 @@ static int sensor_model_init(MessageBus* bus, Transport* transport,
     g.enable_simple_occlusion = 1;
 
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"lidar_rate_hz\":")))
-            sscanf(p + 16, "%d", &g.lidar_rate_hz);
-        if ((p = strstr(params_json, "\"lidar_fov_deg\":")))
-            sscanf(p + 16, "%lf", &g.lidar_fov_deg);
-        if ((p = strstr(params_json, "\"lidar_max_range_m\":")))
-            sscanf(p + 20, "%lf", &g.lidar_max_range_m);
-        if ((p = strstr(params_json, "\"obs_noise_std_m\":")))
-            sscanf(p + 18, "%lf", &g.obs_noise_std_m);
-        if ((p = strstr(params_json, "\"enable_simple_occlusion\":")))
-            sscanf(p + 26, "%d", &g.enable_simple_occlusion);
-
-        extract_json_string(params_json, "gps_nmea_file",
-                            g.gps_nmea_file, sizeof(g.gps_nmea_file));
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_rate_hz")) && cJSON_IsNumber(j))
+                g.lidar_rate_hz = (int)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_fov_deg")) && cJSON_IsNumber(j))
+                g.lidar_fov_deg = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "lidar_max_range_m")) && cJSON_IsNumber(j))
+                g.lidar_max_range_m = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "obs_noise_std_m")) && cJSON_IsNumber(j))
+                g.obs_noise_std_m = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "enable_simple_occlusion")) && cJSON_IsNumber(j))
+                g.enable_simple_occlusion = (int)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "gps_nmea_file")) && cJSON_IsString(j))
+                strncpy(g.gps_nmea_file, j->valuestring, sizeof(g.gps_nmea_file) - 1);
+            cJSON_Delete(p);
+        }
     }
 
     /* 可选：接入真实 GPS 传感器格式 (NMEA 0183 日志回放) */

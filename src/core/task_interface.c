@@ -1,6 +1,7 @@
 #include "task_interface.h"
 #include "message_bus.h"
 #include "error_codes.h"
+#include "clock_service.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -9,12 +10,6 @@
 #include <errno.h>
 
 /* ── helpers ─────────────────────────────────────────── */
-
-static uint64_t now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
 
 /* Map TaskState to StateMachine event for state transitions */
 static EventId task_state_to_event(TaskState old, TaskState new) {
@@ -65,7 +60,7 @@ static void* task_thread_fn(void* arg) {
 
     set_state(task, TASK_STATE_RUNNING);
     pthread_mutex_lock(&task->mutex);
-    task->stats.start_time = now_us();
+    task->stats.start_time = clock_now_us();
     task->stats.execution_count++;
     pthread_mutex_unlock(&task->mutex);
 
@@ -86,7 +81,7 @@ static void* task_thread_fn(void* arg) {
     }
 
     pthread_mutex_lock(&task->mutex);
-    uint64_t end = now_us();
+    uint64_t end = clock_now_us();
     if (task->stats.start_time > 0 && end > task->stats.start_time)
         task->stats.total_run_time += end - task->stats.start_time;
     TaskState cur = task->state;
@@ -242,7 +237,7 @@ const TaskStats* task_get_stats(TaskBase* task) {
 void task_update_heartbeat(TaskBase* task) {
     if (!task) return;
     pthread_mutex_lock(&task->mutex);
-    task->stats.last_heartbeat = now_us();
+    task->stats.last_heartbeat = clock_now_us();
     pthread_mutex_unlock(&task->mutex);
 }
 

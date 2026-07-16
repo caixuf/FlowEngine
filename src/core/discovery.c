@@ -5,6 +5,8 @@
 #include "discovery.h"
 #include "ipc_channel.h"
 #include "error_codes.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,14 +25,6 @@
 #define DISC_MSG_HEARTBEAT  1
 #define DISC_MSG_GOODBYE    2
 #define DISC_MSG_QUERY      3
-
-/* ── 单调时钟 ────────────────────────────────────────────── */
-
-static uint64_t monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
-}
 
 /* ── 简易 CRC32 ──────────────────────────────────────────── */
 
@@ -189,7 +183,7 @@ static void topology_update(DiscoveryManager* dm, const NodeInfo* node,
     }
 
     dm->topology.nodes[idx] = *node;
-    dm->topology.nodes[idx].last_heartbeat_us = monotonic_ms();
+    dm->topology.nodes[idx].last_heartbeat_us = clock_now_us() / 1000ULL;
 
     /* Update relations: mark pub/sub matches between nodes */
     for (uint32_t i = 0; i < dm->topology.node_count; i++) {
@@ -216,7 +210,7 @@ static void topology_update(DiscoveryManager* dm, const NodeInfo* node,
 /* ══════════════════════════════════════════════════════════ */
 
 static void check_timeouts(DiscoveryManager* dm) {
-    uint64_t now = monotonic_ms();
+    uint64_t now = clock_now_us() / 1000ULL;
     pthread_mutex_lock(&dm->topo_mutex);
 
     for (uint32_t i = 0; i < dm->topology.node_count; i++) {
@@ -475,42 +469,51 @@ void discovery_set_change_callback(DiscoveryManager* dm,
 char* discovery_export_json(DiscoveryManager* dm) {
     if (!dm) return strdup("{}");
 
-    size_t sz = 8192;
-    char* buf = (char*)malloc(sz);
-    if (!buf) return NULL;
-
     pthread_mutex_lock(&dm->topo_mutex);
-    int off = snprintf(buf, sz,
-        "{\"self\":\"%s\",\"nodes\":[", dm->my_name);
 
+    cJSON* root = cJSON_CreateObject();
+    if (!root) { pthread_mutex_unlock(&dm->topo_mutex); return NULL; }
+
+    cJSON_AddStringToObject(root, "self", dm->my_name);
+
+    cJSON* nodes = cJSON_CreateArray();
     for (uint32_t i = 0; i < dm->topology.node_count; i++) {
         NodeInfo* n = &dm->topology.nodes[i];
-        if ((size_t)off + 512 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
-        off += snprintf(buf + off, sz - off,
-            "%s{\"name\":\"%s\",\"pid\":%u,\"alive\":%s,\"caps\":%u,\"topics\":[",
-            i > 0 ? "," : "", n->name, n->pid, n->alive ? "true" : "false",
-            n->capabilities);
+        cJSON* node = cJSON_CreateObject();
+        cJSON_AddStringToObject(node, "name", n->name);
+        cJSON_AddNumberToObject(node, "pid", (double)n->pid);
+        cJSON_AddBoolToObject(node, "alive", n->alive);
+        cJSON_AddNumberToObject(node, "caps", n->capabilities);
 
+        cJSON* topics = cJSON_CreateArray();
         for (uint32_t j = 0; j < n->topic_count; j++) {
-            if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+            cJSON* topic = cJSON_CreateObject();
+            cJSON_AddStringToObject(topic, "topic", n->topics[j].topic);
+            char type_id_str[16];
+            snprintf(type_id_str, sizeof(type_id_str), "0x%08x", n->topics[j].type_id);
+            cJSON_AddStringToObject(topic, "type_id", type_id_str);
+            cJSON_AddNumberToObject(topic, "freq", n->topics[j].frequency_hz);
+            cJSON_AddNumberToObject(topic, "caps", n->topics[j].capabilities);
             const char* role = "unknown";
             bool is_pub = (n->topics[j].capabilities & CAP_PUBLISHER) != 0;
             bool is_sub = (n->topics[j].capabilities & CAP_SUBSCRIBER) != 0;
             if (is_pub && is_sub) role = "pubsub";
             else if (is_pub) role = "pub";
             else if (is_sub) role = "sub";
-            off += snprintf(buf + off, sz - off,
-                "%s{\"topic\":\"%s\",\"type_id\":\"0x%08x\",\"freq\":%.1f,\"caps\":%u,\"role\":\"%s\"}",
-                j > 0 ? "," : "",
-                n->topics[j].topic, n->topics[j].type_id, n->topics[j].frequency_hz,
-                n->topics[j].capabilities, role);
+            cJSON_AddStringToObject(topic, "role", role);
+            cJSON_AddItemToArray(topics, topic);
         }
-        off += snprintf(buf + off, sz - off, "]}");
-    }
-    off += snprintf(buf + off, sz - off, "]}");
-    pthread_mutex_unlock(&dm->topo_mutex);
+        cJSON_AddItemToObject(node, "topics", topics);
 
-    return buf;
+        cJSON_AddItemToArray(nodes, node);
+    }
+    cJSON_AddItemToObject(root, "nodes", nodes);
+
+    char* out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    pthread_mutex_unlock(&dm->topo_mutex);
+    return out;
 }
 
 void discovery_print_graph(DiscoveryManager* dm) {
@@ -557,9 +560,9 @@ int discovery_wait_for_deps(DiscoveryManager* dm, const char** deps,
                             int dep_count, uint32_t timeout_ms) {
     if (!dm || !deps || dep_count <= 0) return 0;
 
-    uint64_t deadline = monotonic_ms() + timeout_ms;
+    uint64_t deadline = clock_now_us() / 1000ULL + timeout_ms;
 
-    while (monotonic_ms() < deadline) {
+    while (clock_now_us() / 1000ULL < deadline) {
         int found = 0;
         pthread_mutex_lock(&dm->topo_mutex);
         for (int d = 0; d < dep_count; d++) {

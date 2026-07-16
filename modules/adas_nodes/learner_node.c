@@ -30,13 +30,14 @@
 #include "logger.h"
 #include "tiny_mlp.h"
 
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <time.h>
 
 #define LEARNER_FEAT_DIM     16   /* 最大特征维度 (v2) */
 #define LEARNER_BUF_DEFAULT  512  /* 样本环形缓冲默认大小 */
@@ -115,24 +116,37 @@ static void on_fusion(const Message* msg, void* user_data) {
         return;
     }
     /* Fallback: 文本 JSON */
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"v\":")))       sscanf(p + 4,  "%lf", &g.ego_v);
-    if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
-    if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
-    if ((p = strstr(d, "\"yaw_rate\":")))sscanf(p + 11, "%lf", &g.ego_yaw_rate);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "v");
+        if (cJSON_IsNumber(j)) g.ego_v = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "y");
+        if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+        if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
+        if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+        cJSON_Delete(root);
+    }
     g.has_fusion = 1;
 }
 
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "\"target_speed\":")))
-        sscanf(p + 15, "%lf", &g.planning_target_speed);
-    else if ((p = strstr(d, "speed=")))
-        sscanf(p + 6, "%lf", &g.planning_target_speed);
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
+        if (cJSON_IsNumber(j))
+            g.planning_target_speed = j->valuedouble;
+        else {
+            j = cJSON_GetObjectItemCaseSensitive(root, "speed");
+            if (cJSON_IsNumber(j))
+                g.planning_target_speed = j->valuedouble;
+        }
+        cJSON_Delete(root);
+    }
     g.has_planning = 1;
 }
 
@@ -186,11 +200,15 @@ static void on_control_cmd(const Message* msg, void* user_data) {
         g.has_control = 1;
         return;
     }
-    const char* d = (const char*)msg->data;
-    const char* p;
-    if ((p = strstr(d, "brake="))) sscanf(p + 6, "%lf", &g.ctrl_brake);
-    if ((p = strstr(d, "mode=")))
-        g.ctrl_emergency_stop = (strstr(p, "AEB") || strstr(p, "BRAKE")) ? 1 : 0;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "brake");
+        if (cJSON_IsNumber(j)) g.ctrl_brake = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "mode");
+        if (cJSON_IsString(j) && j->valuestring)
+            g.ctrl_emergency_stop = (strstr(j->valuestring, "AEB") || strstr(j->valuestring, "BRAKE")) ? 1 : 0;
+        cJSON_Delete(root);
+    }
     g.has_control = 1;
 }
 
@@ -293,8 +311,7 @@ static void* learner_thread(void* arg) {
                                     ? 1.0 / g.cfg_train_hz : 2.0;
 
     double accum = 0.0;
-    struct timespec t_last, t_now;
-    clock_gettime(CLOCK_MONOTONIC, &t_last);
+    uint64_t t_last_us = clock_now_us();
 
     while (!g.should_stop) {
         usleep(sample_us);
@@ -304,11 +321,10 @@ static void* learner_thread(void* arg) {
         push_sample();
 
         /* 2. 检查是否到达训练时刻 */
-        clock_gettime(CLOCK_MONOTONIC, &t_now);
-        double dt = (double)(t_now.tv_sec  - t_last.tv_sec)
-                  + (double)(t_now.tv_nsec - t_last.tv_nsec) * 1e-9;
+        uint64_t t_now_us = clock_now_us();
+        double dt = (double)(t_now_us - t_last_us) * 1e-6;
         accum += dt;
-        t_last = t_now;
+        t_last_us = t_now_us;
         if (accum < train_period) continue;
         accum = 0.0;
 
@@ -342,18 +358,20 @@ static void* learner_thread(void* arg) {
             int buf_cnt = g.buf_count;
             pthread_mutex_unlock(&g.buf_mutex);
 
-            char status[512];
-            int n = snprintf(status, sizeof(status),
-                "{\"step\":%d,\"loss\":%.6f,\"lr\":%.6f,"
-                "\"buf_count\":%d,\"buf_size\":%d,"
-                "\"full_finetune\":%d,\"model_loaded\":%d,"
-                "\"save_path\":\"%s\"}",
-                g.train_step, (double)g.running_loss, (double)g.cfg_lr,
-                buf_cnt, g.buf_size,
-                g.cfg_full_finetune, g.model.loaded ? 1 : 0,
-                g.save_path);
+            cJSON* s_root = cJSON_CreateObject();
+            cJSON_AddNumberToObject(s_root, "step", g.train_step);
+            cJSON_AddNumberToObject(s_root, "loss", g.running_loss);
+            cJSON_AddNumberToObject(s_root, "lr", g.cfg_lr);
+            cJSON_AddNumberToObject(s_root, "buf_count", buf_cnt);
+            cJSON_AddNumberToObject(s_root, "buf_size", g.buf_size);
+            cJSON_AddNumberToObject(s_root, "full_finetune", g.cfg_full_finetune);
+            cJSON_AddNumberToObject(s_root, "model_loaded", g.model.loaded ? 1 : 0);
+            cJSON_AddStringToObject(s_root, "save_path", g.save_path);
+            char* s = cJSON_PrintUnformatted(s_root);
             transport_publish(g.transport, "learner/status",
-                              (const uint8_t*)status, (uint32_t)(n + 1));
+                              (const uint8_t*)s, (uint32_t)strlen(s) + 1);
+            free(s);
+            cJSON_Delete(s_root);
         }
 
         if (g.train_step % 20 == 1) {
@@ -412,41 +430,36 @@ static int learner_init(MessageBus* bus, Transport* transport,
 
     /* 解析 params_json */
     if (params_json) {
-        const char* p;
-        if ((p = strstr(params_json, "\"train_hz\":")))
-            sscanf(p + 11, "%lf", &g.cfg_train_hz);
-        if ((p = strstr(params_json, "\"lr\":"))) {
-            float lr;
-            if (sscanf(p + 5, "%f", &lr) == 1) g.cfg_lr = lr;
-        }
-        if ((p = strstr(params_json, "\"batch_size\":")))
-            sscanf(p + 13, "%d", &g.cfg_batch_size);
-        if ((p = strstr(params_json, "\"buffer_size\":"))) {
-            sscanf(p + 14, "%d", &g.buf_size);
-            if (g.buf_size < 16)   g.buf_size = 16;
-            if (g.buf_size > 4096) g.buf_size = 4096;
-        }
-        if ((p = strstr(params_json, "\"full_finetune\":")))
-            sscanf(p + 16, "%d", &g.cfg_full_finetune);
-        if ((p = strstr(params_json, "\"save_interval\":")))
-            sscanf(p + 16, "%d", &g.cfg_save_interval);
-        if ((p = strstr(params_json, "\"model_path\":\""))) {
-            const char* s = p + 14;
-            const char* e = strchr(s, '"');
-            if (e && (size_t)(e - s) < sizeof(g.model_path)) {
-                size_t l = (size_t)(e - s);
-                memcpy(g.model_path, s, l);
-                g.model_path[l] = '\0';
+        cJSON* p = cJSON_Parse(params_json);
+        if (p) {
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(p, "train_hz");
+            if (cJSON_IsNumber(j)) g.cfg_train_hz = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lr");
+            if (cJSON_IsNumber(j)) g.cfg_lr = (float)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "batch_size");
+            if (cJSON_IsNumber(j)) g.cfg_batch_size = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "buffer_size");
+            if (cJSON_IsNumber(j)) {
+                g.buf_size = j->valueint;
+                if (g.buf_size < 16)   g.buf_size = 16;
+                if (g.buf_size > 4096) g.buf_size = 4096;
             }
-        }
-        if ((p = strstr(params_json, "\"save_path\":\""))) {
-            const char* s = p + 13;
-            const char* e = strchr(s, '"');
-            if (e && (size_t)(e - s) < sizeof(g.save_path)) {
-                size_t l = (size_t)(e - s);
-                memcpy(g.save_path, s, l);
-                g.save_path[l] = '\0';
+            j = cJSON_GetObjectItemCaseSensitive(p, "full_finetune");
+            if (cJSON_IsNumber(j)) g.cfg_full_finetune = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "save_interval");
+            if (cJSON_IsNumber(j)) g.cfg_save_interval = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "model_path");
+            if (cJSON_IsString(j) && j->valuestring) {
+                strncpy(g.model_path, j->valuestring, sizeof(g.model_path) - 1);
+                g.model_path[sizeof(g.model_path) - 1] = '\0';
             }
+            j = cJSON_GetObjectItemCaseSensitive(p, "save_path");
+            if (cJSON_IsString(j) && j->valuestring) {
+                strncpy(g.save_path, j->valuestring, sizeof(g.save_path) - 1);
+                g.save_path[sizeof(g.save_path) - 1] = '\0';
+            }
+            cJSON_Delete(p);
         }
     }
 

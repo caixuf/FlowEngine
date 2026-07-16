@@ -10,6 +10,7 @@
 
 #include "message_bus.h"
 #include "error_codes.h"
+#include "clock_service.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -181,12 +182,6 @@ struct MessageBus {
 
 /* ── Helpers ──────────────────────────────────────────── */
 
-static uint64_t monotonic_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
 static bool topic_match(const char* pattern, const char* topic) {
     if (strcmp(pattern, "*") == 0) return true;
     return strcmp(pattern, topic) == 0;
@@ -286,7 +281,7 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
             if (strcmp(bus->topic_entries[i].topic, msg->topic) == 0) {
                 TopicQos* q = &bus->topic_entries[i].qos;
                 if (q->lifespan_ms > 0) {
-                    uint64_t age_ms = (monotonic_us() - msg->timestamp_us) / 1000ULL;
+                    uint64_t age_ms = (clock_now_us() - msg->timestamp_us) / 1000ULL;
                     if (age_ms > (uint64_t)q->lifespan_ms) {
                         bus->topic_entries[i].stats.drop_count++;
                         if (bus->topic_entries[i].pending_count > 0)
@@ -335,7 +330,7 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
                 if (delivered > 0) {
                     TopicStats* s = &bus->topic_entries[i].stats;
                     s->deliver_count += (uint64_t)delivered;
-                    uint64_t now = monotonic_us();
+                    uint64_t now = clock_now_us();
                     uint64_t lat = now - msg->timestamp_us;
                     s->total_latency_us += lat;
                     if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
@@ -409,7 +404,7 @@ static void* dispatch_thread_fn(void* arg) {
                 snprintf(reply.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", msg.topic);
                 reply.msg_id    = msg.msg_id;
                 reply.type      = MSG_TYPE_REPLY;
-                reply.timestamp_us = monotonic_us();
+                reply.timestamp_us = clock_now_us();
                 found->handler(&msg, &reply, found->user_data);
                 pthread_mutex_unlock(&bus->svc_mutex);
 
@@ -526,7 +521,7 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     if (sender) snprintf(msg.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     msg.msg_id       = atomic_fetch_add(&bus->msg_id_counter, 1);
     msg.type         = MSG_TYPE_PUBLISH;
-    msg.timestamp_us = monotonic_us();
+    msg.timestamp_us = clock_now_us();
     msg.data_size    = size;
     if (data && size > 0) memcpy(msg.data, data, size);
 
@@ -754,7 +749,7 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
     if (sender) snprintf(req.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     req.msg_id       = req_id;
     req.type         = MSG_TYPE_REQUEST;
-    req.timestamp_us = monotonic_us();
+    req.timestamp_us = clock_now_us();
     req.data_size    = size;
     if (data && size > 0) memcpy(req.data, data, size);
 
@@ -873,7 +868,7 @@ int message_bus_publish_zero_copy(MessageBus* bus, const char* topic,
     if (!bus || !topic) return ERR_INVALID_PARAM;
 
     uint32_t  msg_id = atomic_fetch_add(&bus->msg_id_counter, 1);
-    uint64_t  ts     = monotonic_us();
+    uint64_t  ts     = clock_now_us();
     int       count  = 0;
 
     atomic_fetch_add(&bus->stat_zc_published, 1);

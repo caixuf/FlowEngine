@@ -51,6 +51,8 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include "clock_service.h"
+
 #include <memory>
 #include <string>
 
@@ -224,9 +226,7 @@ protected:
 
             /* ── 延迟跟踪 + 上报 (每 20 帧) ── */
             if (gps_msg && gps_msg->timestamp_us > 0) {
-                struct timespec ts;
-                clock_gettime(CLOCK_MONOTONIC, &ts);
-                uint64_t wall = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+                uint64_t wall = clock_now_us();
                 if (wall > gps_msg->timestamp_us)
                     latency_tracker_record(lat_tracker_, wall - gps_msg->timestamp_us);
             }
