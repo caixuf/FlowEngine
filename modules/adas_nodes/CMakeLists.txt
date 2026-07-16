@@ -190,8 +190,15 @@ target_link_libraries(model_ota_node ${NODE_LINK_LIBS})
 add_library(flowmond_node SHARED flowmond_node.cpp)
 target_link_libraries(flowmond_node ${NODE_LINK_LIBS})
 
+# actuator_node: SocketCAN 执行器节点（control/raw_cmd → CAN 总线 → ESC/舵机）
+# 真车硬件接入的最后一环。订阅 control_node 输出的 ControlRaw，编码成 SocketCAN 帧
+# 发到 can0 接口。无 CAN 设备时（沙箱/CI/开发机）自动降级为 dry-run 日志模式。
+# 依赖 linux/can.h（Linux 内核头自带，无需额外库）。
+add_library(actuator_node SHARED actuator_node.c)
+target_link_libraries(actuator_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
