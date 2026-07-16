@@ -146,12 +146,12 @@ else()
 endif()
 
 # control_node: PID 纵向/横向控制 (FlowCoro 协程版)
-# 采用 FlowCoroTask（线程池 resume）：PID+Stanley 控制为重计算，同步 resume 会阻塞
-# 消息总线分发线程导致 drops，故改用线程池 resume。
+# 采用 CoroutineTask（同步 resume）：control 是延迟敏感的闭环控制，FlowCoroTask
+# 线程池 resume 的调度抖动会导致 20Hz 周期不一致，prev_steer 低通滤波时间间隔
+# 波动，steer 产生小幅振荡。CoroutineTask 周期精确，且 PID+Stanley 计算量小，
+# 同步 resume 阻塞可忽略。与 safety_control 一致。
 add_library(control_node SHARED control_node.cpp)
-target_compile_definitions(control_node PRIVATE FLOWCORO_INTEGRATION)
-target_compile_options(control_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++)
 
 # safety_control_node: safety envelope for control commands
 # Uses CoroutineTask (synchronous resume on bus delivery thread) instead of
