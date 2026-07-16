@@ -189,11 +189,12 @@ export function _buildSedan(color, secondaryColor) {
   rb.position.set(-2.25, 0.55, 0);
   g.add(rb);
 
-  // Wheels (4)
+  // Wheels (4) — 前轮抽到 frontWheels 子 Group 以支持转向动画
   var wheelPos = [
     [1.3, 0.35, 1.0], [1.3, 0.35, -1.0],
     [-1.3, 0.35, 1.0], [-1.3, 0.35, -1.0]
   ];
+  var frontWheels = new T.Group();
   for (var wi = 0; wi < 4; wi++) {
     var wh = new T.Mesh(
       _carGeom.wheel,
@@ -202,8 +203,15 @@ export function _buildSedan(color, secondaryColor) {
     wh.rotation.z = Math.PI / 2;
     wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
     wh.castShadow = true;
-    g.add(wh);
+    // 前轮（wi=0,1）加入 frontWheels 子 Group，后轮直接挂车体
+    if (wi < 2) {
+      frontWheels.add(wh);
+    } else {
+      g.add(wh);
+    }
   }
+  g.add(frontWheels);
+  g.userData.frontWheels = frontWheels;
 
   // Headlights
   var hl = new T.Mesh(

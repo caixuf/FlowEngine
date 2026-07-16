@@ -421,7 +421,16 @@ function _renderFrame() {
   var sx = _dr.smoothX, sz = _dr.smoothZ;
 
   // ── Ego car: world-space position (road is STATIC at origin) ──
-  if (ego) { ego.position.set(sx, ego.position.y, sz); ego.rotation.y = -_dr.smoothHeading; }
+  if (ego) {
+    ego.position.set(sx, ego.position.y, sz);
+    ego.rotation.y = -_dr.smoothHeading;
+    // 前轮转向动画：从 vehicle.steer 读取转向值旋转前轮组
+    var v = (_topoData.metrics || {}).vehicle || {};
+    var fw = ego.userData.frontWheels;
+    if (fw && typeof v.steer === 'number') {
+      fw.rotation.y = v.steer * 0.5;
+    }
+  }
 
   // Keep ground + environment near ego (road segments are at fixed world X).
   var chunkX = Math.round(sx / 200) * 200;
@@ -505,8 +514,7 @@ function _renderFrame() {
     _lidarCloud.geometry.attributes.position.needsUpdate = true;
   }
 
-  // ── Car bounce ──
-  var v = (_topoData.metrics || {}).vehicle || {};
+  // ── Car bounce ── (v 已在上方 ego 段声明)
   if (ego && v.speed > 0.5) {
     ego.position.y = 0.05 + Math.sin(_animT * 6.5) * 0.008 * Math.min(1, v.speed * 0.12);
   }

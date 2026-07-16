@@ -106,7 +106,9 @@ struct ControlContext {
     /* 横向级联 PD 状态 */
     double lat_kp{0};          /* lateral error → desired heading (rad/m) */
     double lat_kd_heading{0};  /* heading error → steer (阻尼) */
+    double yaw_damping{0};     /* yaw_rate → steer 阻尼, 抑制极限环振荡 */
     double ego_heading{0};     /* 从 fusion 获取的航向角 (rad) */
+    double ego_yaw_rate{0};    /* 从 fusion 获取的偏航角速度 (rad/s) */
     double prev_steer{0};
 
     /* 从 topic 解析的值 */
@@ -196,6 +198,7 @@ static void on_fusion(const Message* msg, void* user_data) {
             g.ego_x         = loc.x;
             g.ego_y         = loc.y;
             g.ego_heading   = loc.heading;
+            g.ego_yaw_rate  = loc.yaw_rate;
             g.has_fusion    = 1;
             struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
             g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
@@ -213,6 +216,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"x\":")))       sscanf(p + 4,  "%lf", &g.ego_x);
     if ((p = strstr(d, "\"y\":")))       sscanf(p + 4,  "%lf", &g.ego_y);
     if ((p = strstr(d, "\"heading\":"))) sscanf(p + 10, "%lf", &g.ego_heading);
+    if ((p = strstr(d, "\"yaw_rate\":"))) sscanf(p + 11, "%lf", &g.ego_yaw_rate);
     g.has_fusion = 1;
     struct timespec ts_fusion; clock_gettime(CLOCK_MONOTONIC, &ts_fusion);
     g.last_fusion_us = (uint64_t)ts_fusion.tv_sec * 1000000ULL + (uint64_t)ts_fusion.tv_nsec / 1000ULL;
@@ -796,7 +800,10 @@ protected:
                                                             g.curve_length_m, g.curve_offset_m);
                 double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
                 double heading_term = lc_lat_kd * (g.ego_heading - road_heading);
-                steer = cte_term - heading_term;
+                /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
+                 * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
+                double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
+                steer = cte_term - heading_term - yaw_damp_term;
                 double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                 if (steer >  steer_limit) steer =  steer_limit;
                 if (steer < -steer_limit) steer = -steer_limit;
@@ -934,6 +941,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
+    g.yaw_damping     = 0.15;  /* yaw_rate → steer 阻尼, 抑制 1.6Hz 极限环振荡 */
     g.lane_width = 3.5;
     g.blocked_timeout_s = 1.2;   /* 原 2.0s，缩短阻塞判定等待，更快评估超车可行性 */
     g.lc_stable_wait_s           = 4.0;  /* 原硬编码 8.0，缩短变道后稳定巡航期 */
@@ -953,6 +961,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.lane_width", g.lane_width, 2.5, 5.0, "Lane width meters");
     param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
     param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
+    param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
     param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
     param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
     param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
@@ -978,6 +987,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
     g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
     g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
+    g.yaw_damping                 = param_get_float("control.yaw_damping");
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
@@ -992,6 +1002,7 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"target_speed\":")))    sscanf(p + 15, "%lf", &g.cfg_cruise_speed);
         if ((p = strstr(params_json, "\"lat_kp\":")))          sscanf(p + 9, "%lf", &g.lat_kp);
         if ((p = strstr(params_json, "\"lat_kd_heading\":")))  sscanf(p + 17, "%lf", &g.lat_kd_heading);
+        if ((p = strstr(params_json, "\"yaw_damping\":")))     sscanf(p + 13, "%lf", &g.yaw_damping);
         if ((p = strstr(params_json, "\"lane_change_blocked_timeout_s\":"))) sscanf(p + 32, "%lf", &g.blocked_timeout_s);
         if ((p = strstr(params_json, "\"lc_stable_wait_s\":")))           sscanf(p + 19, "%lf", &g.lc_stable_wait_s);
         if ((p = strstr(params_json, "\"lc_cooldown_after_stable_s\":"))) sscanf(p + 29, "%lf", &g.lc_cooldown_after_stable_s);
