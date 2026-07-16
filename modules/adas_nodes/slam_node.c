@@ -264,6 +264,10 @@ static void on_imu(const Message* msg, void* user_data) {
  *
  * *** 这是 SLAM 算法的替换点 ***
  *
+ * 本函数是分发器：按 g.algo 路由到具体实现：
+ *   - "dead_reckon"  → slam_update_dead_reckon()（默认，总是编译）
+ *   - "fast_lio2"    → slam_update_fast_lio2()（仅 HAVE_FAST_LIO2 编译时可用）
+ *
  * 默认实现：dead reckoning（航位推算）。
  *   - heading 已由 on_imu 高频率积分维护，本函数读取最新 heading
  *   - 用加速度计 accel_x 积分速度（简化：假设 accel_x 为前向加速度，已去重力）
@@ -272,32 +276,81 @@ static void on_imu(const Message* msg, void* user_data) {
  *   - converged=true（dead reckoning 总是"收敛"但精度低，不代表高精度）
  *   - source=POSE_SOURCE_ODOMETRY(3)
  *
- * 精度限制：dead reckoning 是占位实现，只适合短时间/低速。真车部署应替换为：
- *
- *   ▶ FAST-LIO2（推荐，LiDAR+IMU 紧耦合）：
- *     1. 编译 libfast_lio2.a（见文件头注释）
- *     2. 在本函数里：
- *        esekfom_->predict(last_imu);            // IMU 预测
- *        esekfom_->update(last_lidar);           // LiDAR 配准更新
- *        state = esekfom_->get_state();           // 取状态
- *        pose->x = state.pos(0); pose->y = state.pos(1);
- *        pose->heading = state.rot.yaw();
- *        memcpy(pose->cov_*, state.cov, ...);
- *     3. CMakeLists 链接 PCL + Eigen + Sophus + fast_lio2
- *
- *   ▶ LIO-SAM（因子图，含回环检测）：
- *     在本函数里调用 factor_graph->optimize()，取最优状态填到 pose。
- *
- *   ▶ Cartographer（纯 LiDAR SLAM）：
- *     不用 IMU 也能跑，但精度略低。调用 trajectory_builder->AddSensorData()。
- *
- * 集成方式总结：社区用户**只需替换本函数的实现**，其余订阅/发布/线程框架
- * 无需改动。把 FAST-LIO2/LIO-SAM 编译为静态库，在 slam_update 里调用其
- * process()/optimize()，把结果填到 Pose2D 即可。
+ * 精度限制：dead reckoning 是占位实现，只适合短时间/低速。真车部署应启用
+ * HAVE_FAST_LIO2（LiDAR+IMU 紧耦合），集成步骤见 HARDWARE_DEPLOYMENT.md
+ * "FAST-LIO2 集成"章节与文件头注释。
  *
  * @param pose  输出位姿（调用方已 memset 清零）
  */
-static void slam_update(Pose2D* pose) {
+
+/* ── FAST-LIO2 占位实现（仅 HAVE_FAST_LIO2 编译时启用） ────────
+ *
+ * 启用方式：cmake -DENABLE_FAST_LIO2=ON ...
+ *   CMakeLists 会 target_compile_definitions(slam_node PRIVATE HAVE_FAST_LIO2)
+ *   并链接 PCL/Eigen/Sophus/fast_lio2（参见 CMakeLists.txt 中 ENABLE_FAST_LIO2 块）。
+ *
+ * 集成模板：把下面的占位代码替换为真实 FAST-LIO2 调用。
+ *   1. 顶部 #include "IKFoM_toolkit/esekfom/esekfom.hpp" + PCL 头
+ *   2. fast_lio2_init(): esekfom_ = std::make_shared<esekfom::ESKF>();
+ *      加载 LiDAR 内参/外参 (config/<lidar>.yaml)
+ *   3. fast_lio2_update():
+ *      esekfom_->predict(g.last_imu);          // IMU 预测（高频）
+ *      esekfom_->update(g.last_lidar);         // LiDAR 配准更新
+ *      state = esekfom_->get_state();
+ *      pose->x = state.pos(0); pose->y = state.pos(1);
+ *      pose->heading = state.rot.yaw();
+ *      memcpy(pose->cov_*, state.cov, ...);
+ *      pose->converged = true;
+ *      pose->source = POSE_SOURCE_SLAM;        // 高精度源
+ */
+
+/* 前向声明：slam_update_fast_lio2 占位实现降级时会调 dead_reckon，而后者
+ * 定义在下方，需提前声明避免 implicit declaration 警告。 */
+static void slam_update_dead_reckon(Pose2D* pose);
+
+#ifdef HAVE_FAST_LIO2
+
+/* 真实编译时：用户在这里放 FAST-LIO2 的状态结构（esekfom 指针、点云缓冲等）。
+ * 当前为占位，编译能过但运行时会 LOG_WARN 并降级到 dead reckoning。 */
+typedef struct {
+    int placeholder;  /* 替换为 esekfom::ESKF::Ptr esekfom_; 等 */
+} FastLio2State;
+
+static FastLio2State g_fast_lio2;
+
+static int fast_lio2_init(void) {
+    /* TODO: 初始化 ESKF、加载 LiDAR 内参/外参、分配点云缓冲 */
+    memset(&g_fast_lio2, 0, sizeof(g_fast_lio2));
+    LOG_INFO("slam", "FAST-LIO2 backend initialized (占位实现，需替换为真实 ESKF 调用)");
+    return 0;
+}
+
+static void fast_lio2_cleanup(void) {
+    /* TODO: 释放 ESKF/点云缓冲 */
+    memset(&g_fast_lio2, 0, sizeof(g_fast_lio2));
+}
+
+static void slam_update_fast_lio2(Pose2D* pose) {
+    /* TODO: 替换为真实 FAST-LIO2 调用：
+     *   esekfom_->predict(g.last_imu);
+     *   esekfom_->update(g.last_lidar);
+     *   state = esekfom_->get_state();
+     *   填 pose->x/y/heading/cov_* */
+    (void)pose;
+    /* 占位：首次调用警告一次，后续静默降级到 dead reckoning */
+    static int warned = 0;
+    if (!warned) {
+        LOG_WARN("slam", "FAST-LIO2 占位实现：slam_update_fast_lio2() 未填充真实 ESKF 调用，"
+                 "本帧降级到 dead reckoning。请按 slam_node.c 文件头注释替换实现。");
+        warned = 1;
+    }
+    slam_update_dead_reckon(pose);
+}
+
+#endif /* HAVE_FAST_LIO2 */
+
+/* ── dead reckoning 实现（默认，总是编译） ─────────────────── */
+static void slam_update_dead_reckon(Pose2D* pose) {
     uint64_t now = now_us();
     float dt = 0.0f;
     if (g.last_slam_update_us == 0) {
@@ -312,7 +365,7 @@ static void slam_update(Pose2D* pose) {
 
     /* 速度积分：从加速度计 accel_x 推算（简化模型）。
      * 注意：真实 IMU 的 accel 含重力分量，需先做重力补偿与坐标系变换。
-     * 这里假设 accel_x 已是水平前向加速度（IMU 水平安装且去重力）。
+     * 这里假设 accel_x 已是水平前向加速度（IMU 水平安装且去重）。
      * speed 未知时（无 IMU）dt=0，speed 保持 0，位置不变。 */
     if (g.have_imu && dt > 0.0f) {
         g.speed += g.last_imu.accel_x * dt;
@@ -347,6 +400,18 @@ static void slam_update(Pose2D* pose) {
     pose->source    = POSE_SOURCE_ODOMETRY;  /* 标记为里程计源，下游 fusion 据此降权 */
 
     pthread_mutex_unlock(&g.lock);
+}
+
+/* ── 分发器：按 g.algo 路由到具体 SLAM 实现 ────────────────── */
+static void slam_update(Pose2D* pose) {
+#ifdef HAVE_FAST_LIO2
+    if (strcmp(g.algo, "fast_lio2") == 0) {
+        slam_update_fast_lio2(pose);
+        return;
+    }
+#endif
+    (void)g;  /* dead_reckon 不需要 g.algo，避免未用变量警告 */
+    slam_update_dead_reckon(pose);
 }
 
 /* ── 工作线程：周期调用 slam_update → 序列化 → 发布 sensor/pose ── */
@@ -455,8 +520,24 @@ static int slam_init(MessageBus* bus, Transport* transport,
     /* algo 参数处理：未编译的算法优雅降级到 dead_reckon */
     if (strcmp(g.algo, "dead_reckon") == 0) {
         /* 默认实现，无需特殊处理 */
-    } else if (strcmp(g.algo, "fast_lio2") == 0 || strcmp(g.algo, "lio_sam") == 0) {
-        LOG_WARN("slam", "algo='%s' 未编译，降级到 dead_reckon。集成方式见文件头注释", g.algo);
+    } else if (strcmp(g.algo, "fast_lio2") == 0) {
+#ifdef HAVE_FAST_LIO2
+        /* FAST-LIO2 已编译：初始化后端 */
+        if (fast_lio2_init() != 0) {
+            LOG_WARN("slam", "FAST-LIO2 init 失败，降级到 dead_reckon");
+            snprintf(g.algo, sizeof(g.algo), "dead_reckon");
+        } else {
+            LOG_INFO("slam", "FAST-LIO2 后端已启用（占位实现，需填充真实 ESKF 调用）");
+        }
+#else
+        LOG_WARN("slam", "algo='fast_lio2' 未编译：需 cmake -DENABLE_FAST_LIO2=ON "
+                 "(并预装 PCL/Eigen/Sophus + libfast_lio2.a)。降级到 dead_reckon。"
+                 "集成步骤见 docs/HARDWARE_DEPLOYMENT.md#fast-lio2-集成");
+        snprintf(g.algo, sizeof(g.algo), "dead_reckon");
+#endif
+    } else if (strcmp(g.algo, "lio_sam") == 0) {
+        LOG_WARN("slam", "algo='lio_sam' 暂未提供编译开关，降级到 dead_reckon。"
+                 "集成方式见 slam_node.c 文件头注释");
         snprintf(g.algo, sizeof(g.algo), "dead_reckon");
     } else {
         LOG_WARN("slam", "未知 algo='%s'，使用 dead_reckon", g.algo);
@@ -539,6 +620,11 @@ static void slam_cleanup(void) {
     g.should_stop    = 1;
     if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
     pthread_mutex_destroy(&g.lock);
+#ifdef HAVE_FAST_LIO2
+    if (strcmp(g.algo, "fast_lio2") == 0) {
+        fast_lio2_cleanup();
+    }
+#endif
     LOG_INFO("slam", "cleanup: poses=%lu lidar_frames=%lu imu_samples=%lu",
              (unsigned long)g.poses_published,
              (unsigned long)g.lidar_frames_received,

@@ -88,6 +88,8 @@ static struct {
     int    max_points;          /* 单帧最大点数，默认 2000 */
     float  max_range_m;         /* 最大有效距离 (m)，超出丢弃，默认 60.0 */
     int    dry_run;             /* true=生成模拟点云不走真实串口（开发调试） */
+    char   output_topic[64];    /* 发布 topic，默认 perception/obstacles。
+                                  用 perception_fusion 融合时改 perception/obstacles_lidar */
 
     /* 运行时 */
     Point3D* point_buf;         /* 点云缓冲（init 时分配，cleanup 时释放） */
@@ -319,11 +321,11 @@ static void* lidar_thread(void* arg) {
         obs_list.count = (uint32_t)cnt;
         g.obstacles_published += (uint64_t)cnt;
 
-        /* d. 序列化 + 发布到 perception/obstacles */
+        /* d. 序列化 + 发布到 output_topic（默认 perception/obstacles） */
         uint8_t buf[280];
         size_t len = 0;
         if (ObstacleList_serialize(&obs_list, buf, &len) == 0 && len > 0) {
-            transport_publish(g.transport, "perception/obstacles",
+            transport_publish(g.transport, g.output_topic,
                               buf, (uint32_t)len);
         }
 
@@ -408,6 +410,7 @@ static int lidar_init(MessageBus* bus, Transport* transport,
     g.max_points       = 2000;
     g.max_range_m      = 60.0f;
     g.dry_run          = 0;
+    snprintf(g.output_topic, sizeof(g.output_topic), "perception/obstacles");
 
     if (params_json) {
         parse_string(params_json, "serial_port", g.serial_port,
@@ -421,6 +424,8 @@ static int lidar_init(MessageBus* bus, Transport* transport,
         g.max_points      = parse_int(params_json, "max_points", 2000);
         g.max_range_m     = (float)parse_double(params_json, "max_range_m", 60.0);
         g.dry_run         = parse_int(params_json, "dry_run", 0);
+        parse_string(params_json, "output_topic", g.output_topic,
+                     sizeof(g.output_topic), "perception/obstacles");
     }
 
     if (!g.enabled) {
@@ -460,8 +465,8 @@ static int lidar_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* 广播 perception/obstacles 为发布者（供 fusion_node 等订阅方发现） */
-    discovery_advertise(discovery, "perception/obstacles",
+    /* 广播 output_topic 为发布者（供 fusion_node 等订阅方发现） */
+    discovery_advertise(discovery, g.output_topic,
                         OBSTACLELIST_TYPE_ID, CAP_PUBLISHER, (double)g.scan_hz);
 
     LOG_INFO("lidar_driver", "initialized: serial=%s baud=%d scan=%dHz "

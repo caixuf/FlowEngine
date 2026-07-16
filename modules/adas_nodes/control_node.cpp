@@ -152,6 +152,12 @@ struct ControlContext {
     double min_overtake_gap_speed_mult{0};/* min_overtake_gap 相对速度乘数 (原硬编码 current_speed * 2.0，高速下会导致 gap 过大无法触发超车) */
     double steer_min_clamp{0};            /* 高速最小转向钳位 (原硬编码 0.012，高速下变道耗时过长) */
 
+    /* LDW 车道偏离预警 */
+    double ldw_threshold{0.5};            /* 横向偏离阈值 (m)，|cte| 超此值发警告 */
+    double ldw_min_speed{1.0};            /* LDW 生效最低速度 (m/s)，低于此速不告警（停车/起步不算偏离） */
+    double ldw_cooldown{2.0};            /* 告警冷却期 (s)，避免刷屏 */
+    double ldw_last_warn_time{0};        /* 上次告警时间 (s) */
+
     /* 车道迟滞 + 死锁恢复状态 */
     int    committed_lane_side{0};  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
     double stuck_timer{0};          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
@@ -843,6 +849,32 @@ protected:
             transport_publish(transport_, "control/raw_cmd/text",
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
+            /* 发布 CTE（横向误差）供 LDW/监控/数据记录用 */
+            char cte_text[128];
+            snprintf(cte_text, sizeof(cte_text),
+                     "{\"cte\":%.3f,\"speed\":%.2f,\"seq\":%u}",
+                     lat_error, g.current_speed, g.cycle);
+            transport_publish(transport_, "control/cte",
+                              (const uint8_t*)cte_text, (uint32_t)strlen(cte_text) + 1);
+
+            /* LDW 车道偏离预警：|cte| 超阈值且速度足够高时告警（带冷却期防刷屏） */
+            if (g.current_speed > g.ldw_min_speed && fabs(lat_error) > g.ldw_threshold) {
+                struct timespec ldw_ts; clock_gettime(CLOCK_MONOTONIC, &ldw_ts);
+                double now_s = (double)ldw_ts.tv_sec + (double)ldw_ts.tv_nsec / 1e9;
+                if (now_s - g.ldw_last_warn_time > g.ldw_cooldown) {
+                    g.ldw_last_warn_time = now_s;
+                    const char* side = lat_error > 0 ? "left" : "right";
+                    LOG_WARN("control", "LDW: lane departure! cte=%.3fm (threshold=%.3fm) speed=%.1f side=%s",
+                             lat_error, g.ldw_threshold, g.current_speed, side);
+                    char ldw_text[128];
+                    snprintf(ldw_text, sizeof(ldw_text),
+                             "{\"warn\":1,\"cte\":%.3f,\"threshold\":%.3f,\"side\":\"%s\"}",
+                             lat_error, g.ldw_threshold, side);
+                    transport_publish(transport_, "control/ldw",
+                                      (const uint8_t*)ldw_text, (uint32_t)strlen(ldw_text) + 1);
+                }
+            }
+
             g.prev_error = error;
 
             if (g.cycle % 20 == 1) {
@@ -1016,6 +1048,9 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"min_overtake_gap_speed_mult\":"))) sscanf(p + 30, "%lf", &g.min_overtake_gap_speed_mult);
         if ((p = strstr(params_json, "\"steer_min_clamp\":")))            sscanf(p + 18, "%lf", &g.steer_min_clamp);
         if ((p = strstr(params_json, "\"wheelbase\":")))                  sscanf(p + 12, "%lf", &g.wheelbase);
+        if ((p = strstr(params_json, "\"ldw_threshold\":")))              sscanf(p + 15, "%lf", &g.ldw_threshold);
+        if ((p = strstr(params_json, "\"ldw_min_speed\":")))              sscanf(p + 15, "%lf", &g.ldw_min_speed);
+        if ((p = strstr(params_json, "\"ldw_cooldown\":")))               sscanf(p + 14, "%lf", &g.ldw_cooldown);
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     }
 

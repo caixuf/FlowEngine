@@ -228,8 +228,29 @@ target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 # 自动降级为 dry-run（生成圆形轨迹模拟位姿）。slam_update() 是算法替换点，
 # 社区用户按自己 SLAM 库替换该函数实现即可，订阅/发布/线程框架无需改动。
 # 编译依赖: adas_msgs_gen.h (LidarFrame/ImuData/Pose2D 序列化)，随构建生成。
+#
+# ENABLE_FAST_LIO2 开关：cmake -DENABLE_FAST_LIO2=ON ...
+# 启用后 slam_node 会定义 HAVE_FAST_LIO2 宏，slam_update() 按 algo=fast_lio2
+# 路由到 slam_update_fast_lio2() 占位实现（编译能过，运行时降级到 dead_reckon
+# 并 LOG_WARN 提示填充真实 ESKF 调用）。用户需：
+#   1. 把 slam_node.c 重命名为 slam_node.cpp（FAST-LIO2 是 C++ 模板库）
+#   2. 在 slam_update_fast_lio2() / fast_lio2_init() 里填真实 ESKF 调用
+#   3. 在下面 ENABLE_FAST_LIO2 块里取消注释 find_package + target_link_libraries
+# 完整步骤见 docs/HARDWARE_DEPLOYMENT.md "FAST-LIO2 集成" 章节。
+option(ENABLE_FAST_LIO2 "Enable FAST-LIO2 SLAM backend (requires PCL/Eigen/Sophus + libfast_lio2.a, and slam_node.c → .cpp rename)" OFF)
 add_library(slam_node SHARED slam_node.c)
 target_link_libraries(slam_node ${NODE_LINK_LIBS})
+if(ENABLE_FAST_LIO2)
+    target_compile_definitions(slam_node PRIVATE HAVE_FAST_LIO2)
+    # 用户预装好依赖后取消注释以下行（同时把 slam_node.c 改名为 slam_node.cpp）：
+    # find_package(PCL REQUIRED COMPONENTS common io)
+    # find_package(Eigen3 REQUIRED)
+    # find_package(Sophus REQUIRED)
+    # find_library(FAST_LIO2_LIB NAMES fast_lio2 HINTS /usr/local/lib)
+    # target_link_libraries(slam_node ${NODE_LINK_LIBS}
+    #     ${PCL_LIBRARIES} Eigen3::Eigen Sophus::Sophus ${FAST_LIO2_LIB})
+    message(STATUS "slam_node: HAVE_FAST_LIO2 enabled (占位实现，需填充真实 ESKF 调用)")
+endif()
 
 # stereo_camera_node: 双目摄像头驱动节点（OAK-D left+depth → StereoFrame → sensor/stereo）
 # 真车视觉感知入口，为 perception 提供 RGB+深度输入。默认 dry-run 占位（生成模拟左图
@@ -266,8 +287,26 @@ target_link_libraries(stereo_vision_node ${NODE_LINK_LIBS})
 add_library(actuator_pwm_node SHARED actuator_pwm_node.c)
 target_link_libraries(actuator_pwm_node ${NODE_LINK_LIBS})
 
+# perception_fusion_node: 感知融合节点（LiDAR + Stereo 两路 ObstacleList 去重合并）
+# 解决 lidar_driver 和 stereo_vision 都发 perception/obstacles 时的"后写者覆盖"问题。
+# 两源各发到独立 topic（output_topic 参数改名），本节点订阅两路按 (x,y) 距离去重合并，
+# 输出更稳的 perception/obstacles。不用融合时不挂本节点，单源直发完全兼容。
+# 编译依赖: adas_msgs_gen.h (ObstacleList 反序列化/序列化)，随构建生成。
+add_library(perception_fusion_node SHARED perception_fusion_node.c)
+target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS})
+
+# traversability_node: 可通行区域检测节点（StereoFrame 深度图 → 3D 反投影 → 地面分割 → 占用栅格）
+# 订阅 stereo_camera_node 发布的 sensor/stereo，把 80×60 深度图反投影成带 Z 高度的 3D 点云
+# (与 stereo_vision 的 2D z=0 不同)，用"相机高度+高度阈值"做地面分割，构建占用栅格，
+# 提取可通行走廊，输出 JSON 摘要到 perception/traversability。回答"前方哪里是路"的问题，
+# 是 L2 → L3 的桥梁（obstacles 只告诉"哪有障碍"，本节点告诉"哪能走"）。
+# 算法为沙箱简化版（无 PCL 依赖），RANSAC 地面拟合/Octomap 可作为后续替换点。
+# 编译依赖: adas_msgs_gen.h (StereoFrame 反序列化)，随构建生成。
+add_library(traversability_node SHARED traversability_node.c)
+target_link_libraries(traversability_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

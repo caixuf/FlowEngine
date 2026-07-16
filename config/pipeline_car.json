@@ -1,5 +1,5 @@
 {
-  "_comment": "真车部署配置模板 (RC 小车 L2: 航点跟随 + 局部避障)。本配置面向 RC 小车场景：用 waypoint_follower 替代 planning，用 actuator_pwm 替代 actuator(CAN)。真车高速场景把 waypoint_follower 换回 planning_node、actuator_pwm 换回 actuator_node 即可。改 params 里的串口/I2C/航点文件路径即可部署。",
+  "_comment": "真车部署配置模板 (RC 小车 L2: 航点跟随 + 局部避障)。本配置面向 RC 小车场景：用 waypoint_follower 替代 planning，用 actuator_pwm 替代 actuator(CAN)。真车高速场景把 waypoint_follower 换回 planning_node、actuator_pwm 换回 actuator_node 即可。改 params 里的串口/I2C/航点文件路径即可部署。感知融合(perception_fusion)默认关: 同时用 LiDAR+双目时把 lidar_driver.output_topic 改 perception/obstacles_lidar、stereo_vision.output_topic 改 perception/obstacles_stereo、perception_fusion.enable 改 1，两路自动去重合并成 perception/obstacles。可通行区域检测(traversability)默认开: 订阅 sensor/stereo 输出 perception/traversability (前方占用栅格+可通行走廊摘要)，无下游消费者时不影响流水线，monitor/inference 可选订阅。",
   "log_file": "launcher_car.log",
   "log_level": 2,
   "monitor_interval": 5,
@@ -102,7 +102,7 @@
           }
         }
       ],
-      "params": "{\"serial_port\":\"/dev/ttyUSB1\",\"baud_rate\":115200,\"enable\":0,\"scan_hz\":10,\"dbscan_eps\":2.0,\"dbscan_min_pts\":4,\"ground_z_thresh\":0.15,\"max_points\":2000,\"max_range_m\":60.0,\"dry_run\":0}"
+      "params": "{\"serial_port\":\"/dev/ttyUSB1\",\"baud_rate\":115200,\"enable\":0,\"scan_hz\":10,\"dbscan_eps\":2.0,\"dbscan_min_pts\":4,\"ground_z_thresh\":0.15,\"max_points\":2000,\"max_range_m\":60.0,\"output_topic\":\"perception/obstacles\",\"dry_run\":0}"
     },
     {
       "name": "stereo_vision",
@@ -123,7 +123,45 @@
           }
         }
       ],
-      "params": "{\"enable\":1,\"min_range\":0.5,\"max_range\":8.0,\"stride\":2,\"dbscan_eps\":0.4,\"dbscan_min_pts\":6,\"ground_z_thresh\":0.1,\"min_cluster_size\":8.0}"
+      "params": "{\"enable\":1,\"min_range\":0.5,\"max_range\":8.0,\"stride\":2,\"dbscan_eps\":0.4,\"dbscan_min_pts\":6,\"ground_z_thresh\":0.1,\"min_cluster_size\":8.0,\"output_topic\":\"perception/obstacles\"}"
+    },
+    {
+      "name": "traversability",
+      "library_path": "build/lib/libtraversability_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "sensor/stereo"
+      ],
+      "publish": [
+        {
+          "topic": "perception/traversability",
+          "type": "text",
+          "qos": { "depth": 1, "policy": "drop_oldest", "reliability": "best_effort" }
+        }
+      ],
+      "params": "{\"enable\":1,\"min_range\":0.5,\"max_range\":6.0,\"stride\":2,\"camera_height_m\":0.30,\"camera_tilt_deg\":0.0,\"ground_tol_m\":0.08,\"obstacle_height_m\":0.10,\"cell_size_m\":0.20,\"x_range_m\":6.0,\"y_range_m\":3.0,\"v_fov_deg\":50.0,\"min_corridor_width_m\":0.6,\"publish_hz\":10,\"output_topic\":\"perception/traversability\"}"
+    },
+    {
+      "name": "perception_fusion",
+      "library_path": "build/lib/libperception_fusion_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "perception/obstacles_lidar",
+        "perception/obstacles_stereo"
+      ],
+      "publish": [
+        {
+          "topic": "perception/obstacles",
+          "type": "ObstacleList",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 100
+          }
+        }
+      ],
+      "params": "{\"enable\":0,\"input_a_topic\":\"perception/obstacles_lidar\",\"input_b_topic\":\"perception/obstacles_stereo\",\"output_topic\":\"perception/obstacles\",\"merge_dist\":1.0,\"publish_hz\":10,\"max_age_ms\":500}"
     },
     {
       "name": "fusion",
@@ -186,9 +224,19 @@
             "reliability": "best_effort",
             "deadline_ms": 100
           }
+        },
+        {
+          "topic": "control/cte",
+          "type": "text",
+          "qos": { "depth": 1, "policy": "drop_oldest", "reliability": "best_effort" }
+        },
+        {
+          "topic": "control/ldw",
+          "type": "text",
+          "qos": { "depth": 1, "policy": "drop_oldest", "reliability": "best_effort" }
         }
       ],
-      "params": "{\"pid_kp\": 300.0, \"pid_ki\": 20.0, \"pid_kd\": 40.0, \"target_speed\": 2.0, \"wheelbase\": 0.3, \"lat_kp\": 0.8, \"lat_kd_heading\": 1.35, \"yaw_damping\": 0.15, \"steer_min_clamp\": 0.02}"
+      "params": "{\"pid_kp\": 300.0, \"pid_ki\": 20.0, \"pid_kd\": 40.0, \"target_speed\": 2.0, \"wheelbase\": 0.3, \"lat_kp\": 0.8, \"lat_kd_heading\": 1.35, \"yaw_damping\": 0.15, \"steer_min_clamp\": 0.02, \"ldw_threshold\": 0.3, \"ldw_min_speed\": 0.5, \"ldw_cooldown\": 2.0}"
     },
     {
       "name": "safety_control",

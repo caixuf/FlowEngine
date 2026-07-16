@@ -412,7 +412,7 @@ pipeline_car.json 里 `waypoint_follower` 节点的 params：
 
 1. ~~**fusion 定位输入**~~ **[已解决]**：fusion_node 现为 **三源融合**（LiDAR 位置 + GPS 速度/航向 + SLAM Pose2D 位置+航向）。当 `sensor/pose`（Pose2D）的 `converged=1` 且协方差 <100 时，用 `ekf_fusion_update_gps_full` 接入 SLAM 位置+航向；否则回退 LiDAR 位置更新。GPS 丢失（室内/隧道）场景 SLAM 自动接管定位。
 
-2. **slam 默认是占位算法**：默认 `dead_reckoning` 只做航位推算（圆形轨迹模拟），精度随时间漂移。`fast_lio2` / `lio_sam` 选项已预留接口（`slam_update()` 钩子），但需自行编译对应算法库并链接。无算法库时自动降级为 dead reckoning + LOG_WARN，不阻塞流水线。
+2. **slam 默认是占位算法**：默认 `dead_reckoning` 只做航位推算（圆形轨迹模拟），精度随时间漂移。`fast_lio2` 已提供编译开关 `ENABLE_FAST_LIO2`（占位实现，编译能过但运行时降级到 dead_reckon + LOG_WARN 提示填充真实 ESKF 调用）；`lio_sam` 选项已预留接口（`slam_update()` 钩子）。完整集成步骤见下文 [FAST-LIO2 集成](#fast-lio2-集成) 章节。
 
 3. **safety_control 障碍物输入**：safety_control 原订阅 `vehicle/state`（JSON 含 ego+obstacles），真车模式改成订阅 `perception/obstacles`（ObstacleList 二进制）。safety_control 内部的障碍物解析逻辑需确认是否已适配 ObstacleList 格式。
 
@@ -507,6 +507,104 @@ python3 -c "import depthai as d; print(d.__version__)"
 cd tools/flowboard && python3 -m http.server 8000
 # 浏览器开 http://localhost:8000
 ```
+
+## FAST-LIO2 集成
+
+默认 `slam_node` 用 dead reckoning 占位，长时间会漂移。真车部署建议接入 [FAST-LIO2](https://github.com/hku-mars/FAST_LIO)（LiDAR+IMU 紧耦合，港大 MARS 实验室），误差不发散、室内/隧道/GPS 丢失场景能稳定位。
+
+代码侧已预留编译开关 `HAVE_FAST_LIO2` 与占位实现：`slam_update()` 按 `algo` 路由到 `slam_update_fast_lio2()`，后者当前为占位（编译能过、运行时 LOG_WARN 降级到 dead reckoning）。社区用户**只需填三个函数 + 链库**，订阅/发布/线程框架无需改动。
+
+### 步骤 1：编译 libfast_lio2.a
+
+```bash
+# 依赖：PCL ≥1.8、Eigen ≥3.3、Sophus、yaml-cpp
+sudo apt install libpcl-dev libeigen3-dev libsophus-dev libyaml-cpp-dev
+
+git clone https://github.com/hku-mars/FAST_LIO.git
+cd FAST_LIO && mkdir build && cd build
+cmake .. && make -j
+# 产出 libfast_lio2.a（路径如 ~/FAST_LIO/build/libfast_lio2.a）
+```
+
+### 步骤 2：把 slam_node.c 改名为 .cpp 并填充占位
+
+FAST-LIO2 是 C++ 模板库（ESKF），不能用 C 编译。把 [modules/adas_nodes/slam_node.c](../modules/adas_nodes/slam_node.c) 重命名为 `slam_node.cpp`，并填三个占位函数（位置见源码 `#ifdef HAVE_FAST_LIO2` 块）：
+
+```cpp
+// 文件顶部加 include
+#include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
+#include "IKFoM_toolkit/esekfom/esekfom.hpp"
+#include "use-ikfom.hpp"
+
+// 1. fast_lio2_init(): 初始化 ESKF + 加载 LiDAR 内参/外参
+static int fast_lio2_init(void) {
+    esekfom_ = std::make_shared<esekfom::esekfom<...>>();
+    // 读 config/<lidar>.yaml: 内参矩阵、外参 (LiDAR↔IMU)、噪声参数
+    return 0;
+}
+
+// 2. slam_update_fast_lio2(): 每周期被 slam_thread 调用
+static void slam_update_fast_lio2(Pose2D* pose) {
+    pthread_mutex_lock(&g.lock);
+    ImuData    imu   = g.last_imu;     // 拷贝，避免长时间持锁
+    LidarFrame lidar = g.last_lidar;
+    pthread_mutex_unlock(&g.lock);
+
+    esekfom_->predict(imu);            // IMU 预测（高频）
+    esekfom_->update(lidar);           // LiDAR 配准更新
+    auto state = esekfom_->get_state();
+
+    pose->x        = state.pos(0);
+    pose->y        = state.pos(1);
+    pose->heading   = state.rot.yaw();  // 或 2D 投影 yaw
+    pose->cov_xx   = state.cov(0, 0);
+    pose->cov_yy   = state.cov(1, 1);
+    pose->cov_hh   = state.cov(5, 5);
+    pose->converged = true;
+    pose->source    = POSE_SOURCE_SLAM;  // 高精度源，fusion 据此给高权重
+}
+
+// 3. fast_lio2_cleanup(): 释放 ESKF/点云缓冲
+static void fast_lio2_cleanup(void) { esekfom_.reset(); }
+```
+
+### 步骤 3：启用编译开关 + 取消注释链接
+
+[modules/adas_nodes/CMakeLists.txt](../modules/adas_nodes/CMakeLists.txt) 中 `ENABLE_FAST_LIO2` 块已预留链接模板，取消注释 `find_package` 与 `target_link_libraries` 行：
+
+```bash
+cd /workspace
+cmake -B build/modules/adas_nodes -S modules/adas_nodes \
+      -DFLOWENGINE_BUILD=$PWD/build \
+      -DENABLE_FAST_LIO2=ON
+cmake --build build/modules/adas_nodes --target slam_node
+```
+
+### 步骤 4：pipeline 切换 algo
+
+```json
+{
+  "name": "slam",
+  "params": "{\"enable\":1,\"algo\":\"fast_lio2\",\"publish_hz\":20,...}"
+}
+```
+
+启动后日志应看到 `slam: FAST-LIO2 backend initialized` 而非降级警告。`sensor/pose` 的 `converged=1` + `source=2 (POSE_SOURCE_SLAM)` 表示真实 SLAM 已接管，fusion 会按高权重采信。
+
+### 验证
+
+```bash
+# 看 source 字段：2 = SLAM（高精度），3 = 里程计（dead reckon，低精度）
+./build/bin/flowctl topic echo sensor/pose
+# FlowBoard 定位卡片应显示稳定不漂移的位姿轨迹
+```
+
+### 备注
+
+- **LIO-SAM** 集成思路一致（同样在 `slam_update_fast_lio2` 调 `factor_graph->optimize()`），但依赖 GTSAM 且未提供 `ENABLE_LIO_SAM` 编译开关，需自行添加。
+- **Cartographer** 不需 IMU 也能跑，可仿照本模式加 `ENABLE_CARTOGRAPHER` 开关 + `slam_update_cartographer()` 占位。
+- 占位实现编译能过是为了让 `cmake -DENABLE_FAST_LIO2=ON` 在未填充真实代码时也能跑通 CI，但运行时会 LOG_WARN 降级——**真车部署前务必填三个函数**。
 
 ## 参考
 

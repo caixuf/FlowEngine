@@ -92,6 +92,8 @@ static struct {
     int    dbscan_min_pts;   /* DBSCAN 最小邻域点数，默认 6 */
     double ground_z_thresh;  /* 地面 z 阈值（简化模式 z=0 不生效，保留接口），默认 0.1 */
     double min_cluster_size; /* 聚类最小点数（小于此视为噪声），默认 8 */
+    char   output_topic[64]; /* 发布 topic，默认 perception/obstacles。
+                                用 perception_fusion 融合时改 perception/obstacles_stereo */
 
     /* 缓冲（init 分配，cleanup 释放） */
     Point3D* point_buf;
@@ -140,6 +142,23 @@ static double parse_double(const char* json, const char* key, double default_val
 
 static int parse_int(const char* json, const char* key, int default_val) {
     return (int)parse_double(json, key, (double)default_val);
+}
+
+static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
+    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(json, pat);
+    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
+    p = strchr(p + strlen(pat), ':');
+    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
+    out[n] = '\0';
 }
 
 /* ── ClusterClass → ObstacleType 映射 ─────────────────────── */
@@ -277,12 +296,12 @@ static void* stereo_thread(void* arg) {
         obs_list.count = (uint32_t)cnt;
         g.obstacles_published += (uint64_t)cnt;
 
-        /* 4. 序列化 + 发布 */
+        /* 4. 序列化 + 发布到 output_topic（默认 perception/obstacles） */
         if (cnt > 0) {
             uint8_t buf[280];
             size_t len = 0;
             if (ObstacleList_serialize(&obs_list, buf, &len) == 0 && len > 0) {
-                transport_publish(g.transport, "perception/obstacles",
+                transport_publish(g.transport, g.output_topic,
                                   buf, (uint32_t)len);
             }
         }
@@ -322,6 +341,7 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
     g.dbscan_min_pts  = 6;
     g.ground_z_thresh = 0.1;
     g.min_cluster_size = 8.0;
+    snprintf(g.output_topic, sizeof(g.output_topic), "perception/obstacles");
 
     if (params_json) {
         g.enabled         = parse_int(params_json, "enable", 1);
@@ -332,6 +352,8 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
         g.dbscan_min_pts  = parse_int(params_json, "dbscan_min_pts", 6);
         g.ground_z_thresh = parse_double(params_json, "ground_z_thresh", 0.1);
         g.min_cluster_size = parse_double(params_json, "min_cluster_size", 8.0);
+        parse_string(params_json, "output_topic", g.output_topic,
+                     sizeof(g.output_topic), "perception/obstacles");
     }
 
     if (!g.enabled) {
@@ -355,8 +377,8 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "sensor/stereo", on_stereo, NULL);
     discovery_advertise(discovery, "sensor/stereo", STEREOFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
 
-    /* 发布 perception/obstacles */
-    discovery_advertise(discovery, "perception/obstacles",
+    /* 发布 output_topic（默认 perception/obstacles） */
+    discovery_advertise(discovery, g.output_topic,
                         OBSTACLELIST_TYPE_ID, CAP_PUBLISHER, 30.0);
 
     g.last_frame_time = time(NULL);
