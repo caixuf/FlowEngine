@@ -15,6 +15,7 @@
 | **09** | **[服务发现](../skills/09_discovery.md)** 🆕 | UDP组播 + 拓扑追踪 + 自动IPC |
 | **10** | **[数据融合](../skills/10_fusion.md)** 🆕 | MessageBuffer + 时间对齐 + FusionNodeCpp |
 | **11** | **[协程通信原语](../skills/11_coroutine.md)** 🆕 | C++20 协程等传感器/超时/多路选择 |
+| **15** | **[SocketCAN 执行器节点](../skills/15_socketcan_actuator.md)** 🆕 | 真车硬件接入：CAN 总线 + SocketCAN + actuator_node + 树莓派部署 |
 
 ## 项目评估
 
