@@ -72,6 +72,19 @@ static struct {
 
     /* 跨进程 stats bridge */
     IpcChannel* stats_ch;
+    /* stats bridge subscriber：聚合其它进程的 bus/topic 统计，
+     * 供 export_dashboard_json 输出全局指标（而非仅本进程）。
+     * 注意：本节点也会 publish stats，subscriber 回调里按 source_name
+     * 过滤掉自己发的包，避免自收自发导致重复计数。 */
+    IpcChannel* stats_sub;
+    pthread_mutex_t remote_stats_mutex;
+#define MONITOR_MAX_REMOTE_SRCS 16
+    struct {
+        char            source_name[64];
+        StatsPacket     pkt;
+        int             valid;
+    } remote_stats[MONITOR_MAX_REMOTE_SRCS];
+    int remote_stats_count;
 
     /* 跨进程 dashboard JSON bridge */
     IpcChannel* dashboard_ch;
@@ -130,6 +143,39 @@ static void on_node_info(const Message* msg, void* user_data) {
     }
     g.node_info_json[g.node_info_count][copy] = '\0';
     g.node_info_count++;
+}
+
+/* ── 跨进程 stats bridge 订阅回调 ──────────────────────────── */
+/*
+ * 收到其它进程的 StatsPacket 时，按 source_name 聚合到 remote_stats[]。
+ * 过滤掉本节点自己发的包（source_name == "monitor_node"），避免自收自发
+ * 导致重复计数。export_dashboard_json 读取这些聚合值输出全局指标。
+ */
+static void on_remote_stats(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || msg->data_size < sizeof(StatsPacket)) return;
+    const StatsPacket* pkt = (const StatsPacket*)msg->data;
+    if (strcmp(pkt->source_name, "monitor_node") == 0) return;  /* 跳过自己 */
+
+    pthread_mutex_lock(&g.remote_stats_mutex);
+    int slot = -1;
+    for (int i = 0; i < g.remote_stats_count; i++) {
+        if (strcmp(g.remote_stats[i].source_name, pkt->source_name) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 && g.remote_stats_count < MONITOR_MAX_REMOTE_SRCS) {
+        slot = g.remote_stats_count++;
+    }
+    if (slot >= 0) {
+        snprintf(g.remote_stats[slot].source_name,
+                 sizeof(g.remote_stats[slot].source_name),
+                 "%s", pkt->source_name);
+        g.remote_stats[slot].pkt   = *pkt;
+        g.remote_stats[slot].valid = 1;
+    }
+    pthread_mutex_unlock(&g.remote_stats_mutex);
 }
 
 /* planning/trajectory 订阅 — 提取驾驶模式 + NOA 导航路线目标车道，供仪表盘展示
@@ -232,9 +278,22 @@ static void export_dashboard_json(void) {
     clock_gettime(CLOCK_REALTIME, &now_ts);
     double timestamp = (double)now_ts.tv_sec + (double)now_ts.tv_nsec / 1000000000.0;
 
-    /* 收集指标 */
+    /* 收集指标：本进程 bus stats + 跨进程聚合（stats bridge）。
+     * 多进程部署下，monitor_node 自己的 bus 几乎无业务消息，bus stats ≈ 0；
+     * 必须聚合其它进程（fusion/perception/planning/control/...）经 stats bridge
+     * 上报的统计，dashboard 才能反映全局真实吞吐，否则 charts 恒为 0。 */
     uint64_t pub = 0, del = 0, drop = 0;
     if (g.bus) message_bus_get_stats(g.bus, &pub, &del, &drop);
+
+    /* 聚合远程进程的 bus 统计 */
+    pthread_mutex_lock(&g.remote_stats_mutex);
+    for (int i = 0; i < g.remote_stats_count; i++) {
+        if (!g.remote_stats[i].valid) continue;
+        pub  += g.remote_stats[i].pkt.bus_pub;
+        del  += g.remote_stats[i].pkt.bus_del;
+        drop += g.remote_stats[i].pkt.bus_drop;
+    }
+    pthread_mutex_unlock(&g.remote_stats_mutex);
 
     TransportStats ts;
     memset(&ts, 0, sizeof(ts));
@@ -307,23 +366,74 @@ static void export_dashboard_json(void) {
     fprintf(jf, "\"driver_mode\":\"%s\",\"route_lane\":%d,",
             g.driver_mode[0] ? g.driver_mode : "NA:READY", g.route_lane);
 
-    /* Topic 统计 */
+    /* Topic 统计：合并本进程 + 跨进程（stats bridge）。
+     * 同名 topic 跨进程累加 pub/del/drop，freq 取最大值（代表发布频率），
+     * subs 取最大值。这样 dashboard 的 charts 能看到全局真实吞吐。 */
+    struct { char topic[64]; uint64_t pub, del, drop, lat_us; double freq; uint32_t subs; int has_lat; } merged[64];
+    int merged_n = 0;
+
+    /* 先放入本进程 topics */
     TopicStats tstats[16];
     int nt = g.bus ? message_bus_get_all_topic_stats(g.bus, tstats, 16) : 0;
-    fprintf(jf, "\"topics\":[");
-    for (int ti = 0; ti < nt; ti++) {
-        uint64_t avg_lat = tstats[ti].deliver_count > 0
+    for (int ti = 0; ti < nt && merged_n < 64; ti++) {
+        snprintf(merged[merged_n].topic, sizeof(merged[merged_n].topic), "%s", tstats[ti].topic);
+        merged[merged_n].pub  = tstats[ti].publish_count;
+        merged[merged_n].del  = tstats[ti].deliver_count;
+        merged[merged_n].drop = tstats[ti].drop_count;
+        merged[merged_n].lat_us = tstats[ti].deliver_count > 0
             ? tstats[ti].total_latency_us / tstats[ti].deliver_count : 0;
+        merged[merged_n].freq = tstats[ti].frequency_hz;
+        merged[merged_n].subs = tstats[ti].subscriber_count;
+        merged[merged_n].has_lat = 1;
+        merged_n++;
+    }
+
+    /* 合并远程进程 topics */
+    pthread_mutex_lock(&g.remote_stats_mutex);
+    for (int ri = 0; ri < g.remote_stats_count; ri++) {
+        if (!g.remote_stats[ri].valid) continue;
+        const StatsPacket* rp = &g.remote_stats[ri].pkt;
+        for (uint32_t rti = 0; rti < rp->topic_count && rti < STATS_BRIDGE_MAX_TOPICS; rti++) {
+            const RemoteTopicStat* rt = &rp->topics[rti];
+            /* 查找已合并表里是否已有同名 topic */
+            int found = -1;
+            for (int mi = 0; mi < merged_n; mi++) {
+                if (strcmp(merged[mi].topic, rt->topic) == 0) { found = mi; break; }
+            }
+            if (found >= 0) {
+                merged[found].pub  += rt->publish_count;
+                merged[found].del  += rt->deliver_count;
+                merged[found].drop += rt->drop_count;
+                if (rt->frequency_hz > merged[found].freq) merged[found].freq = rt->frequency_hz;
+                if (rt->subscriber_count > merged[found].subs) merged[found].subs = rt->subscriber_count;
+                /* 延迟取非零值优先（本进程有就用本进程的） */
+            } else if (merged_n < 64) {
+                snprintf(merged[merged_n].topic, sizeof(merged[merged_n].topic), "%s", rt->topic);
+                merged[merged_n].pub  = rt->publish_count;
+                merged[merged_n].del  = rt->deliver_count;
+                merged[merged_n].drop = rt->drop_count;
+                merged[merged_n].lat_us = rt->p50_latency_us;
+                merged[merged_n].freq = rt->frequency_hz;
+                merged[merged_n].subs = rt->subscriber_count;
+                merged[merged_n].has_lat = 1;
+                merged_n++;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g.remote_stats_mutex);
+
+    fprintf(jf, "\"topics\":[");
+    for (int mi = 0; mi < merged_n; mi++) {
         fprintf(jf, "%s{\"topic\":\"%s\",\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
                 "\"lat_us\":%lu,\"freq\":%.1f,\"subs\":%u}",
-                ti > 0 ? "," : "",
-                tstats[ti].topic,
-                (unsigned long)tstats[ti].publish_count,
-                (unsigned long)tstats[ti].deliver_count,
-                (unsigned long)tstats[ti].drop_count,
-                (unsigned long)avg_lat,
-                tstats[ti].frequency_hz,
-                tstats[ti].subscriber_count);
+                mi > 0 ? "," : "",
+                merged[mi].topic,
+                (unsigned long)merged[mi].pub,
+                (unsigned long)merged[mi].del,
+                (unsigned long)merged[mi].drop,
+                (unsigned long)merged[mi].lat_us,
+                merged[mi].freq,
+                merged[mi].subs);
     }
     fprintf(jf, "],");
 
@@ -622,12 +732,26 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
-    /* Open IPC stats bridge for flowmond */
+    /* Open IPC stats bridge for flowmond (publisher) */
     g.stats_ch = stats_bridge_publisher_open();
     if (!g.stats_ch) {
         LOG_WARN("monitor", "stats bridge publisher open failed (flowmond not running yet)");
     } else {
         LOG_INFO("monitor", "stats bridge publisher opened");
+    }
+
+    /* 同时订阅 stats bridge，聚合其它进程的 bus/topic 统计。
+     * flowmond 也会订阅，但 flowmond 的聚合只在 fallback 路径生效；
+     * monitor_node 自己聚合后写进 dashboard JSON，保证主路径数据完整。
+     * 注意：subscriber 必须在 publisher 之后 open，否则 publisher 端的
+     * ipc_channel_publish 会因无 subscriber 而丢弃早期包（可接受，启动竞态）。 */
+    pthread_mutex_init(&g.remote_stats_mutex, NULL);
+    g.stats_sub = stats_bridge_subscriber_open(on_remote_stats, NULL);
+    if (g.stats_sub) {
+        ipc_channel_start(g.stats_sub);
+        LOG_INFO("monitor", "stats bridge subscriber opened (aggregating remote stats)");
+    } else {
+        LOG_INFO("monitor", "stats bridge subscriber not yet available (single-process mode)");
     }
 
     /* Open IPC dashboard JSON bridge for flowmond */
@@ -655,8 +779,10 @@ static void monitor_stop(void)          { g.should_stop = 1; }
 static void monitor_cleanup(void) {
     if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
     if (g.sysmon) { sysmonitor_destroy(g.sysmon); g.sysmon = NULL; }
+    if (g.stats_sub) { ipc_channel_stop(g.stats_sub); ipc_channel_close(g.stats_sub); g.stats_sub = NULL; }
     if (g.stats_ch) { ipc_channel_close(g.stats_ch); g.stats_ch = NULL; }
     if (g.dashboard_ch) { ipc_channel_close(g.dashboard_ch); g.dashboard_ch = NULL; }
+    pthread_mutex_destroy(&g.remote_stats_mutex);
     LOG_INFO("monitor", "cleanup done");
 }
 static int  monitor_health(void)        { return 0; }
