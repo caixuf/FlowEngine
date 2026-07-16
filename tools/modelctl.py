@@ -5,13 +5,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODELS_DIR = ROOT / "models"
 DEFAULT_RUNTIME_MODEL = ROOT / "tools" / "train" / "model.txt"
+TRAINING_STATE_DIR = DEFAULT_MODELS_DIR / ".training"
+TRAINING_STATUS_FILE = TRAINING_STATE_DIR / "status.json"
+TRAINING_PIDFILE = TRAINING_STATE_DIR / "job.pid"
+TRAINING_LOGFILE = TRAINING_STATE_DIR / "job.log"
 
 
 def load_manifest(artifact_dir: Path) -> dict:
@@ -201,8 +209,15 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
-    artifact_dir = Path(args.artifact)
+    artifact_path = Path(args.artifact)
     runtime_model = Path(args.runtime_model)
+
+    artifact_dir = artifact_path
+    if not artifact_dir.is_dir():
+        artifact_dir = DEFAULT_MODELS_DIR / args.artifact
+        if not artifact_dir.is_dir():
+            raise SystemExit(f"error: artifact not found: {args.artifact}")
+
     manifest = load_manifest(artifact_dir)
     backend = manifest.get("backend")
     if backend != "tiny_mlp":
@@ -218,6 +233,191 @@ def cmd_promote(args: argparse.Namespace) -> int:
     runtime_model.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, runtime_model)
     print(f"promoted {source} -> {runtime_model}")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────
+#  Training 子命令 (Stage 0: 后台训练协调)
+# ─────────────────────────────────────────────────────────────
+
+def _write_status(status: dict) -> None:
+    TRAINING_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = TRAINING_STATUS_FILE.with_name("status.json.tmp")
+    tmp.write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(TRAINING_STATUS_FILE)
+
+
+def _load_status() -> dict:
+    if TRAINING_STATUS_FILE.exists():
+        try:
+            return json.loads(TRAINING_STATUS_FILE.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _tail_logfile(lines: int = 50) -> str:
+    if not TRAINING_LOGFILE.exists():
+        return ""
+    try:
+        content = TRAINING_LOGFILE.read_text(encoding="utf-8", errors="replace")
+        return "\n".join(content.split("\n")[-lines:])
+    except Exception:
+        return ""
+
+
+def _supervisor_process(command: list[str], model_name: str, backend: str) -> None:
+    TRAINING_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    logfile = TRAINING_LOGFILE.open("w", encoding="utf-8", buffering=1)
+    try:
+        proc = subprocess.Popen(command, stdout=logfile, stderr=subprocess.STDOUT, cwd=ROOT, text=True)
+        TRAINING_PIDFILE.write_text(str(proc.pid) + "\n", encoding="utf-8")
+        returncode = proc.wait()
+        status = {
+            "running": False,
+            "command": command,
+            "model_name": model_name,
+            "backend": backend,
+            "started_at": _load_status().get("started_at"),
+            "pid": proc.pid,
+            "returncode": returncode,
+            "log_tail": _tail_logfile(100),
+            "error": None if returncode == 0 else f"training exited with code {returncode}",
+        }
+    except Exception as e:
+        status = {
+            "running": False,
+            "command": command,
+            "model_name": model_name,
+            "backend": backend,
+            "started_at": _load_status().get("started_at"),
+            "pid": None,
+            "returncode": None,
+            "log_tail": _tail_logfile(100),
+            "error": str(e),
+        }
+    finally:
+        logfile.close()
+    _write_status(status)
+    TRAINING_PIDFILE.unlink(missing_ok=True)
+
+
+def _validate_model_name(name: str) -> str:
+    name = name.strip()
+    if not name or not all(c.isalnum() or c in "._-" for c in name):
+        raise ValueError(f"invalid model name: {name!r}")
+    return name
+
+
+def _safe_int(value, param_name: str, min_val: int, max_val: int) -> int | None:
+    if value is None:
+        return None
+    try:
+        v = int(value)
+        if not min_val <= v <= max_val:
+            raise ValueError(f"{param_name} must be {min_val}–{max_val}, got {v}")
+        return v
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"invalid {param_name}: {e}") from e
+
+
+def cmd_train_start(args: argparse.Namespace) -> int:
+    backend = args.backend
+    if backend not in ("torch", "tiny"):
+        raise ValueError("backend must be torch or tiny")
+    model_name = _validate_model_name(args.name)
+    epochs = _safe_int(args.epochs, "epochs", 1, 100000)
+    hidden = _safe_int(args.hidden, "hidden", 1, 4096)
+    run_demo = _safe_int(args.run_demo_seconds, "run_demo_seconds", 1, 3600)
+    input_file = args.input or str(Path("/tmp/flow_train_samples.jsonl"))
+
+    status = _load_status()
+    if status.get("running"):
+        raise SystemExit("error: training job is already running")
+
+    command = [sys.executable, "tools/train_demo_model.py", "--backend", backend, "--name", model_name]
+    if epochs is not None:
+        command.extend(["--epochs", str(epochs)])
+    if hidden is not None:
+        command.extend(["--hidden", str(hidden)])
+    if run_demo is not None:
+        command.extend(["--run-demo", str(run_demo)])
+    if args.init_from:
+        command.extend(["--init-from", args.init_from])
+
+    status = {
+        "running": True,
+        "command": command,
+        "model_name": model_name,
+        "backend": backend,
+        "started_at": int(time.time()),
+        "pid": None,
+        "returncode": None,
+        "log_tail": "",
+        "error": None,
+    }
+    _write_status(status)
+
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        child_pid = os.fork()
+        if child_pid == 0:
+            _supervisor_process(command, model_name, backend)
+            sys.exit(0)
+        else:
+            sys.exit(0)
+    else:
+        os.waitpid(pid, 0)
+
+    print(json.dumps({"ok": True, "job": status}, indent=2))
+    return 0
+
+
+def cmd_train_status(args: argparse.Namespace) -> int:
+    models_dir = Path(args.models_dir)
+    status = _load_status()
+
+    if status.get("running") and status.get("pid"):
+        if not _is_pid_alive(status["pid"]):
+            status["running"] = False
+            _write_status(status)
+
+    artifacts = []
+    if models_dir.exists():
+        for path in sorted(models_dir.iterdir()):
+            if path.is_dir() and path.name != ".training" and (path / "manifest.json").exists():
+                manifest = load_manifest(path)
+                backend = manifest.get("backend", "unknown")
+                dataset = manifest.get("dataset", {}) if isinstance(manifest.get("dataset"), dict) else {}
+                metrics_path = path / "metrics.json"
+                metrics = None
+                if metrics_path.exists():
+                    try:
+                        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        metrics = None
+                artifacts.append({
+                    "name": path.name,
+                    "backend": backend,
+                    "promotable": backend == "tiny_mlp",
+                    "manifest": manifest,
+                    "metrics": metrics,
+                })
+
+    result = {
+        "job": status,
+        "models": artifacts,
+    }
+    print(json.dumps(result, indent=2))
     return 0
 
 
@@ -310,6 +510,20 @@ def main() -> int:
     list_parser.add_argument("--runtime-model", default=str(DEFAULT_RUNTIME_MODEL))
     list_parser.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     list_parser.set_defaults(func=cmd_list)
+
+    train_start_parser = sub.add_parser("train-start", help="Start a background training job")
+    train_start_parser.add_argument("--backend", choices=["torch", "tiny"], default="torch")
+    train_start_parser.add_argument("--name", required=True, help="Model name")
+    train_start_parser.add_argument("--epochs", type=int, default=None)
+    train_start_parser.add_argument("--hidden", type=int, default=None)
+    train_start_parser.add_argument("--run-demo-seconds", type=int, default=None)
+    train_start_parser.add_argument("--init-from", default=None)
+    train_start_parser.add_argument("--input", default=None)
+    train_start_parser.set_defaults(func=cmd_train_start)
+
+    train_status_parser = sub.add_parser("train-status", help="Query training job status and artifacts")
+    train_status_parser.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
+    train_status_parser.set_defaults(func=cmd_train_status)
 
     inspect_parser = sub.add_parser("inspect", help="Show detailed manifest and metrics for an artifact")
     inspect_parser.add_argument("artifact", help="Artifact directory containing manifest.json")

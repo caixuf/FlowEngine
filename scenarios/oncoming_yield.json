@@ -1,0 +1,37 @@
+{
+  "name": "oncoming_yield",
+  "description": "对向来车让行：ego在右车道行驶，对向车辆从左车道迎面驶来，ego减速让行后恢复正常",
+  "random_seed": 99,
+  "duration_s": 45.0,
+  "ego": {
+    "x": 0.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 12.0
+  },
+  "actors": [
+    {
+      "id": 0,
+      "type": "car",
+      "x": 80.0, "y": 1.75,
+      "vx": -10.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "对向来车，x=80m处从左车道以10m/s迎面驶来，约4s后与ego会车(x≈40m)"
+    },
+    {
+      "id": 1,
+      "type": "car",
+      "x": 25.0, "y": -1.75,
+      "vx": 5.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "同车道前方慢车，限制ego变道超车空间——ego必须减速跟随而非变道避让对向车"
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 45.0,
+    "min_avg_speed_mps": 4.0,
+    "min_distance_m": 60.0
+  }
+}

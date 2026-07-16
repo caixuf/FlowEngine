@@ -249,6 +249,33 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
     return best_ttc;
 }
 
+/* Phase 5: 对向来车 TTC.
+ * 检查对向车道 (dy > 2.0m) 是否有迎面驶来的车辆 (obs_v < -2 m/s)。
+ * head-on closing speed = ego_speed + |obs_v|, 比同向 closing speed 大得多。 */
+double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
+    double best_ttc = 1e9;
+    double best_dx = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        if (!state.obs_valid[i]) continue;
+        const double dx = state.obs_x[i] - state.x;
+        const double dy = state.obs_y[i] - state.y;
+        /* 对向车道: dy > 2.0m (y≈+1.75 lane), 前方 60m */
+        if (dx < 0.0 || dx > 60.0 || dy < 2.0) continue;
+        /* 迎面驶来: obs_v < -2 m/s */
+        if (state.obs_v[i] > -2.0) continue;
+
+        const double closing = state.speed + std::fabs(state.obs_v[i]);
+        const double clearance = dx - 4.0;  /* 车长余量 */
+        const double ttc = clearance / std::max(0.1, closing);
+        if (ttc < best_ttc) {
+            best_ttc = ttc;
+            best_dx = dx;
+        }
+    }
+    if (out_dx) *out_dx = best_dx;
+    return best_ttc;
+}
+
 double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out_dx = nullptr, double* out_dy_signed = nullptr) {
     double best = 1e9;
     double best_dx = 0.0;
@@ -375,6 +402,21 @@ private:
                     } else {
                         cmd.steer = std::min(cmd.steer, -steer_guard);
                     }
+                }
+            }
+
+            /* Phase 5: 对向碰撞安全检查。
+             * 对向车道来车 (dy>2.0m, vx<-2m/s) 时计算 head-on TTC。
+             * closing speed = ego_v + |obs_v|, 比同向大得多, 需要更早刹车。 */
+            double oncoming_dx = 0.0;
+            double oncoming_ttc = min_oncoming_ttc(state, &oncoming_dx);
+            if (oncoming_ttc < 4.0) {
+                set_changed(cmd.throttle, 0.0);
+                double brake_floor = clamp((4.0 - oncoming_ttc) / 4.0, 0.5, 1.0);
+                if (oncoming_dx < 15.0) brake_floor = std::max(brake_floor, 0.85);
+                set_changed(cmd.brake, std::max(cmd.brake, brake_floor));
+                if (oncoming_ttc < 1.5 || oncoming_dx < 8.0) {
+                    set_changed(cmd.brake, 1.0);  /* 紧急制动 */
                 }
             }
 

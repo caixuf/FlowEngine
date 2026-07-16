@@ -22,11 +22,9 @@ import os
 import sys
 import time
 import threading
-import random
 import math
 import argparse
 import logging
-import re
 import subprocess
 from pathlib import Path
 
@@ -50,93 +48,6 @@ STALE_AFTER_SEC = 5.0        # data older than this is considered stale (e2e sto
 DEFAULT_STATE_FILE = os.environ.get("FLOWENGINE_STATE_FILE", "/tmp/flow_topology.json")
 ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR = ROOT / "models"
-TRAIN_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-
-
-class TrainingJob:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.process = None
-        self.running = False
-        self.command = []
-        self.started_at = None
-        self.finished_at = None
-        self.returncode = None
-        self.model_name = None
-        self.backend = None
-        self.error = None
-        self.log_lines = []
-
-    def snapshot(self):
-        with self.lock:
-            return {
-                "running": self.running,
-                "command": self.command,
-                "started_at": self.started_at,
-                "finished_at": self.finished_at,
-                "returncode": self.returncode,
-                "model_name": self.model_name,
-                "backend": self.backend,
-                "error": self.error,
-                "log_tail": self.log_lines[-80:],
-            }
-
-    def append_log(self, line):
-        with self.lock:
-            self.log_lines.append(line.rstrip())
-            if len(self.log_lines) > 1000:
-                self.log_lines = self.log_lines[-1000:]
-
-    def start(self, command, model_name, backend):
-        with self.lock:
-            if self.running:
-                raise RuntimeError("training job is already running")
-            self.running = True
-            self.command = command
-            self.started_at = time.time()
-            self.finished_at = None
-            self.returncode = None
-            self.model_name = model_name
-            self.backend = backend
-            self.error = None
-            self.log_lines = ["$ " + " ".join(command)]
-
-        def run():
-            try:
-                proc = subprocess.Popen(
-                    command,
-                    cwd=ROOT,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                with self.lock:
-                    self.process = proc
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    self.append_log(line)
-                returncode = proc.wait()
-                with self.lock:
-                    self.returncode = returncode
-                    self.running = False
-                    self.finished_at = time.time()
-                    self.process = None
-                    if returncode != 0:
-                        self.error = f"training exited with code {returncode}"
-            except Exception as exc:
-                with self.lock:
-                    self.returncode = -1
-                    self.running = False
-                    self.finished_at = time.time()
-                    self.process = None
-                    self.error = str(exc)
-                self.append_log(f"error: {exc}")
-
-        threading.Thread(target=run, daemon=True).start()
-
-
-g_training = TrainingJob()
 
 
 def _is_stale():
@@ -320,13 +231,62 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(data).encode())
 
         elif self.path == '/api/training/status':
-            self._send_json({"job": g_training.snapshot(), "models": list_model_artifacts()})
+            try:
+                result = subprocess.run(
+                    [sys.executable, "tools/modelctl.py", "train-status", "--models-dir", str(MODELS_DIR)],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    self._send_json(data)
+                else:
+                    self._send_json({"job": {}, "models": [], "error": result.stdout}, status=500)
+            except Exception as exc:
+                self._send_json({"job": {}, "models": [], "error": str(exc)}, status=500)
 
         elif self.path == '/api/training/log':
-            self._send_json({"log": g_training.snapshot()["log_tail"]})
+            try:
+                result = subprocess.run(
+                    [sys.executable, "tools/modelctl.py", "train-status", "--models-dir", str(MODELS_DIR)],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    log_tail = data.get("job", {}).get("log_tail", "")
+                    self._send_json({"log": log_tail})
+                else:
+                    self._send_json({"log": "", "error": result.stdout}, status=500)
+            except Exception as exc:
+                self._send_json({"log": "", "error": str(exc)}, status=500)
 
         elif self.path == '/api/training/models':
-            self._send_json({"models": list_model_artifacts()})
+            try:
+                result = subprocess.run(
+                    [sys.executable, "tools/modelctl.py", "train-status", "--models-dir", str(MODELS_DIR)],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    self._send_json({"models": data.get("models", [])})
+                else:
+                    self._send_json({"models": [], "error": result.stdout}, status=500)
+            except Exception as exc:
+                self._send_json({"models": [], "error": str(exc)}, status=500)
 
         elif self.path == '/api/stream':
             # SSE (Server-Sent Events) for real-time updates.
@@ -451,17 +411,39 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/api/training/start':
             try:
                 payload = self._read_json_body()
-                command, model_name, backend = build_training_command(payload)
-                g_training.start(command, model_name, backend)
-                self._send_json({"ok": True, "job": g_training.snapshot()})
+                backend = str(payload.get("backend", "torch"))
+                if backend not in ("torch", "tiny"):
+                    raise ValueError("backend must be torch or tiny")
+                model_name = str(payload.get("name", "")).strip()
+                if not model_name or not all(c.isalnum() or c in "._-" for c in model_name):
+                    raise ValueError("invalid model name")
+
+                cmd = [sys.executable, "tools/modelctl.py", "train-start", "--backend", backend, "--name", model_name]
+                if payload.get("epochs") is not None:
+                    cmd.extend(["--epochs", str(int(payload["epochs"]))])
+                if payload.get("hidden") is not None:
+                    cmd.extend(["--hidden", str(int(payload["hidden"]))])
+                if payload.get("run_demo_seconds") is not None:
+                    cmd.extend(["--run-demo-seconds", str(int(payload["run_demo_seconds"]))])
+                if payload.get("init_from"):
+                    cmd.extend(["--init-from", str(payload["init_from"])])
+
+                result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=2)
+                if result.returncode == 0:
+                    data = json.loads(result.stdout)
+                    self._send_json(data)
+                else:
+                    self._send_json({"ok": False, "error": result.stdout}, status=400)
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, status=400)
         elif self.path == '/api/training/promote':
             try:
                 payload = self._read_json_body()
-                model_name = validate_model_name(str(payload.get("name", "")))
+                model_name = str(payload.get("name", "")).strip()
+                if not model_name or not all(c.isalnum() or c in "._-" for c in model_name):
+                    raise ValueError("invalid model name")
                 result = subprocess.run(
-                    [sys.executable, "tools/modelctl.py", "promote", str(MODELS_DIR / model_name)],
+                    [sys.executable, "tools/modelctl.py", "promote", model_name],
                     cwd=ROOT,
                     text=True,
                     stdout=subprocess.PIPE,
@@ -480,90 +462,6 @@ class FlowBoardHandler(http.server.BaseHTTPRequestHandler):
         # by default but available with --log-level debug.
         log.debug("%s - %s", self.address_string(), format % args)
 
-
-def validate_model_name(name):
-    if not TRAIN_NAME_RE.match(name):
-        raise ValueError("model name must be 1-64 chars: letters, digits, _, -, .")
-    return name
-
-
-def safe_positive_int(value, name, min_value=1, max_value=100000):
-    if value in (None, ""):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-    if parsed < min_value or parsed > max_value:
-        raise ValueError(f"{name} must be between {min_value} and {max_value}")
-    return parsed
-
-
-def resolve_init_from(value):
-    if not value:
-        return None
-    name = validate_model_name(str(value))
-    path = MODELS_DIR / name
-    if not path.exists():
-        raise ValueError(f"init_from model not found: {name}")
-    return path
-
-
-def build_training_command(payload):
-    backend = str(payload.get("backend", "torch"))
-    if backend not in ("torch", "tiny"):
-        raise ValueError("backend must be torch or tiny")
-    model_name = validate_model_name(str(payload.get("name", "")).strip())
-    epochs = safe_positive_int(payload.get("epochs"), "epochs", 1, 100000)
-    hidden = safe_positive_int(payload.get("hidden"), "hidden", 1, 4096)
-    run_demo = safe_positive_int(payload.get("run_demo_seconds"), "run_demo_seconds", 1, 3600)
-    init_from = resolve_init_from(payload.get("init_from"))
-    if init_from and backend != "torch":
-        raise ValueError("init_from is only supported for torch backend")
-
-    command = [sys.executable, "tools/train_demo_model.py", "--backend", backend, "--name", model_name]
-    if epochs is not None:
-        command.extend(["--epochs", str(epochs)])
-    if hidden is not None:
-        command.extend(["--hidden", str(hidden)])
-    if run_demo is not None:
-        command.extend(["--run-demo", str(run_demo)])
-    if init_from is not None:
-        command.extend(["--init-from", str(init_from)])
-    return command, model_name, backend
-
-
-def list_model_artifacts():
-    artifacts = []
-    if not MODELS_DIR.exists():
-        return artifacts
-    for path in sorted(MODELS_DIR.iterdir()):
-        manifest_path = path / "manifest.json"
-        if not path.is_dir() or not manifest_path.exists():
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            manifest = {"_error": "invalid manifest.json"}
-        backend = manifest.get("backend", "unknown")
-        dataset = manifest.get("dataset", {}) if isinstance(manifest.get("dataset"), dict) else {}
-        metrics_path = path / "metrics.json"
-        metrics = None
-        if metrics_path.exists():
-            try:
-                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            except Exception:
-                metrics = {"_error": "invalid metrics.json"}
-        artifacts.append({
-            "name": path.name,
-            "backend": backend,
-            "promotable": backend == "tiny_mlp",
-            "scenario": dataset.get("scenario"),
-            "sample_count": dataset.get("sample_count"),
-            "metrics": metrics,
-            "mtime": path.stat().st_mtime,
-        })
-    return artifacts
 
 # ── Main ──────────────────────────────────────────────────
 

@@ -111,6 +111,13 @@ static struct {
     volatile int has_obstacle;
     time_t last_obstacle_time;
 
+    /* 可通行区域（订阅 perception/traversability 写入, Phase 1） */
+    double traversability_nearest_obs;  /* 双目检测到的前方最近障碍 (m), -1 无效 */
+    double traversability_corridor_w;   /* 最宽可通行走廊宽度 (m) */
+    volatile int traversability_blocked; /* 前方无可行走走廊? 1=堵死 */
+    volatile int has_traversability;
+    time_t last_traversability_time;
+
     /* 统计 */
     uint64_t plans_published;
     uint64_t wp_advanced;
@@ -327,6 +334,35 @@ static void on_obstacles(const Message* msg, void* user_data) {
     pthread_mutex_unlock(&g.lock);
 }
 
+/* ── perception/traversability 订阅回调 (Phase 1) ──────────
+ * 解析 traversability JSON,取 nearest_obstacle_x / blocked / corridor_width_m。
+ * 用于补充 LiDAR 盲区(近距低矮障碍),以及窄路/堵死场景的减速决策。
+ */
+static void on_traversability(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+
+    const char* d = (const char*)msg->data;
+    const char* p;
+    double near_obs = -1.0, cor_w = 0.0;
+    int blocked = 0;
+
+    if ((p = strstr(d, "\"nearest_obstacle_x\":")))
+        sscanf(p + 21, "%lf", &near_obs);
+    if ((p = strstr(d, "\"corridor_width_m\":")))
+        sscanf(p + 19, "%lf", &cor_w);
+    if ((p = strstr(d, "\"blocked\":")))
+        blocked = (strncmp(p + 10, "true", 4) == 0 || strncmp(p + 10, "1", 1) == 0);
+
+    pthread_mutex_lock(&g.lock);
+    g.traversability_nearest_obs = near_obs;
+    g.traversability_corridor_w  = cor_w;
+    g.traversability_blocked     = blocked;
+    g.has_traversability         = 1;
+    g.last_traversability_time   = time(NULL);
+    pthread_mutex_unlock(&g.lock);
+}
+
 /* ── Pure Pursuit 核心 ──────────────────────────────────────
  * 找前瞻点 → 计算曲率 → 输出轨迹点列表。
  *
@@ -410,8 +446,40 @@ static int pure_pursuit_step(double ego_x, double ego_y, double ego_heading,
     }
     *path_n = n;
 
-    /* 4. 目标速度：基础巡航速度，遇障碍物减速 */
+    /* 4. 目标速度：基础巡航速度，遇障碍物减速。融合 LiDAR(obstacles) + 双目(traversability)。 */
     double speed = g.cruise_speed;
+
+    /* 4a. 双目可通行区域检查 (Phase 1: traversability 接线)
+     *     数据过期(>3s 未更新)视为无效,降级到纯 LiDAR 模式。 */
+    int trav_fresh = g.has_traversability &&
+                     (time(NULL) - g.last_traversability_time) < 3;
+    if (trav_fresh) {
+        /* 前方堵死 → 立即停车 */
+        if (g.traversability_blocked) {
+            speed = 0.0;
+        }
+        /* 双目检测到前方障碍物 → 按距离减速 */
+        else if (g.traversability_nearest_obs > 0.0 &&
+                 g.traversability_nearest_obs < g.obstacle_slow_dist) {
+            double obs = g.traversability_nearest_obs;
+            if (obs < g.obstacle_stop_dist) {
+                speed = 0.0;
+            } else {
+                double r = (obs - g.obstacle_stop_dist) /
+                           (g.obstacle_slow_dist - g.obstacle_stop_dist);
+                double s = g.cruise_speed * r;
+                if (s < speed) speed = s;
+            }
+        }
+        /* 走廊太窄(<0.6m) → 降速到巡航的 40% */
+        if (g.traversability_corridor_w > 0.0 &&
+            g.traversability_corridor_w < 0.6) {
+            double narrow_speed = g.cruise_speed * 0.4;
+            if (narrow_speed < speed) speed = narrow_speed;
+        }
+    }
+
+    /* 4b. LiDAR 障碍物检查（与双目取更保守者） */
     if (g.has_obstacle && g.nearest_obs_x < g.obstacle_slow_dist) {
         if (g.nearest_obs_x < g.obstacle_stop_dist) {
             speed = 0.0;  /* 停车 */
@@ -419,7 +487,8 @@ static int pure_pursuit_step(double ego_x, double ego_y, double ego_heading,
             /* 线性减速: slow_dist→cruise, stop_dist→0 */
             double r = (g.nearest_obs_x - g.obstacle_stop_dist) /
                        (g.obstacle_slow_dist - g.obstacle_stop_dist);
-            speed = g.cruise_speed * r;
+            double s = g.cruise_speed * r;
+            if (s < speed) speed = s;  /* 取更保守的速度 */
         }
     }
 
@@ -495,10 +564,16 @@ static void* wp_thread(void* arg) {
 
         /* 周期性日志 */
         if (g.plans_published % 50 == 1) {
-            LOG_INFO("waypoint_follower", "#%lu wp=%d/%d tgt_spd=%.2f obs=%s(%.1fm) lap=%d",
+            LOG_INFO("waypoint_follower", "#%lu wp=%d/%d tgt_spd=%.2f "
+                     "obs=%s(%.1fm) st_blk=%d st_obs=%.1fm st_cor=%.2fm lap=%d",
                      (unsigned long)g.plans_published, g.wp_current, g.wp_count,
-                     target_speed, g.has_obstacle ? "Y" : "N",
-                     g.has_obstacle ? g.nearest_obs_x : 0.0, g.lap_count);
+                     target_speed,
+                     g.has_obstacle ? "Y" : "N",
+                     g.has_obstacle ? g.nearest_obs_x : 0.0,
+                     g.has_traversability ? g.traversability_blocked : -1,
+                     g.has_traversability ? g.traversability_nearest_obs : -1.0,
+                     g.has_traversability ? g.traversability_corridor_w : -1.0,
+                     g.lap_count);
         }
 
         long elapsed = now_ms() - t0;
@@ -510,7 +585,8 @@ static void* wp_thread(void* arg) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "perception/obstacles", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "perception/obstacles",
+                                    "perception/traversability", NULL };
 static const char* s_outputs[] = { "planning/trajectory", NULL };
 
 static NodePlugin s_plugin;
@@ -555,8 +631,10 @@ static int wp_init(MessageBus* bus, Transport* transport,
     /* 订阅输入 */
     transport_subscribe(transport, "fusion/localization", on_fusion, NULL);
     transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);
+    transport_subscribe(transport, "perception/traversability", on_traversability, NULL);
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "perception/obstacles", OBSTACLELIST_TYPE_ID, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "perception/traversability", 0, CAP_SUBSCRIBER, 0);
 
     /* 发布 trajectory */
     discovery_advertise(discovery, "planning/trajectory", 0x0, CAP_PUBLISHER, (double)g.plan_hz);

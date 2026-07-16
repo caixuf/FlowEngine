@@ -54,6 +54,7 @@
 #include "node_plugin.h"
 #include "adas_msgs_gen.h"
 #include "dbscan_cluster.h"
+#include "tiny_mlp.h"
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
@@ -75,6 +76,10 @@
 #define SV_DEPTH_H   60    /* StereoFrame.depth_data 降采样高度 */
 #define SV_MAX_POINTS 4000 /* DBSCAN 输入点数上限（stride 降采样后通常 <1000） */
 
+/* Phase 4: 分类头 — MLP 输入特征维度 */
+#define SV_CLS_FEAT_DIM 10   /* width,length,height,pts,depth_mean,depth_std,density,cx,cy,cz */
+#define SV_CLS_NUM_CLASSES 4  /* vehicle, pedestrian, cyclist, unknown */
+
 /* ── 节点状态 ─────────────────────────────────────────────── */
 
 static struct {
@@ -94,6 +99,11 @@ static struct {
     double min_cluster_size; /* 聚类最小点数（小于此视为噪声），默认 8 */
     char   output_topic[64]; /* 发布 topic，默认 perception/obstacles。
                                 用 perception_fusion 融合时改 perception/obstacles_stereo */
+
+    /* Phase 4: MLP 分类头 */
+    int    cls_enabled;         /* 是否启用 MLP 分类 (默认 0,需要模型文件) */
+    char   cls_model_path[256]; /* MLP 模型文件路径 */
+    TinyMLP cls_model;          /* MLP 推理模型 */
 
     /* 缓冲（init 分配，cleanup 释放） */
     Point3D* point_buf;
@@ -169,6 +179,80 @@ static int cluster_class_to_obs_type(ClusterClass cls) {
         case CLS_CYCLIST:    return OBJ_TYPE_CYCLIST;
         default:             return OBJ_TYPE_UNKNOWN;
     }
+}
+
+/* ── Phase 4: MLP 深度聚类分类器 ─────────────────────────────
+ *
+ * 从聚类包围盒 + 深度数据中提取 10 维特征向量，用 tiny_mlp 推理分类。
+ * 特征 (SV_CLS_FEAT_DIM=10):
+ *   [0] width       — 聚类 X 跨度 (m)
+ *   [1] length      — 聚类 Y 跨度 (m)
+ *   [2] height      — 聚类 Z 跨度 (m)
+ *   [3] point_count — 聚类点数
+ *   [4] depth_mean  — 平均深度 (m)
+ *   [5] depth_std   — 深度标准差 (m)
+ *   [6] density     — 点密度代理 (confidence)
+ *   [7] cx          — 聚类中心 X (m, 前向)
+ *   [8] cy          — 聚类中心 Y (m, 横向)
+ *   [9] cz          — 聚类中心 Z (m, 高度)
+ *
+ * 输出: 4 类概率 [vehicle, pedestrian, cyclist, unknown]，取 argmax。
+ * 模型未加载/未启用时返回 -1（调用方 fallback 到启发式分类）。
+ */
+static int classify_depth_cluster(const ClusterBounds* cb,
+                                   const StereoFrame* frame) {
+    if (!g.cls_enabled || !g.cls_model.loaded || !cb || !frame) return -1;
+
+    /* 提取深度统计: 在深度图中采样与聚类中心深度接近的像素 */
+    double depth_sum = 0.0, depth_sq = 0.0;
+    int depth_cnt = 0;
+    int dw = SV_DEPTH_W, dh = frame->depth_count / dw;
+    if (dh <= 0 || dh > SV_DEPTH_H) dh = SV_DEPTH_H;
+
+    for (int j = 0; j < dh; j++) {
+        for (int i = 0; i < dw; i++) {
+            int idx = j * dw + i;
+            if (idx >= (int)frame->depth_count) continue;
+            float d = frame->depth_data[idx];
+            if (d < 0.3f || d > 8.0f) continue;
+            if (fabs((double)d - (double)cb->cx) < (double)cb->cx * 0.3) {
+                depth_sum += (double)d;
+                depth_sq += (double)d * (double)d;
+                depth_cnt++;
+            }
+        }
+    }
+    double depth_mean = (depth_cnt > 0) ? depth_sum / (double)depth_cnt : (double)cb->cx;
+    double depth_var  = (depth_cnt > 1)
+        ? (depth_sq - depth_sum * depth_sum / (double)depth_cnt) / (double)(depth_cnt - 1)
+        : 0.0;
+    if (depth_var < 0.0) depth_var = 0.0;
+
+    float feat[SV_CLS_FEAT_DIM];
+    feat[0] = cb->width;
+    feat[1] = cb->length;
+    feat[2] = cb->max_z - cb->min_z;
+    feat[3] = (float)cb->point_count;
+    feat[4] = (float)depth_mean;
+    feat[5] = (float)sqrt(depth_var);
+    feat[6] = cb->confidence;
+    feat[7] = cb->cx;
+    feat[8] = cb->cy;
+    feat[9] = (cb->max_z + cb->min_z) * 0.5f;
+
+    float prob[SV_CLS_NUM_CLASSES];
+    if (tiny_mlp_forward(&g.cls_model, feat, prob) != SV_CLS_NUM_CLASSES) {
+        return -1;
+    }
+
+    int best = 0;
+    for (int k = 1; k < SV_CLS_NUM_CLASSES; k++) {
+        if (prob[k] > prob[best]) best = k;
+    }
+    static const int8_t cls_map[SV_CLS_NUM_CLASSES] = {
+        OBJ_TYPE_VEHICLE, OBJ_TYPE_PEDESTRIAN, OBJ_TYPE_CYCLIST, OBJ_TYPE_UNKNOWN
+    };
+    return (int)cls_map[best];
 }
 
 /* ── 订阅回调：收到 sensor/stereo ─────────────────────────── */
@@ -289,7 +373,10 @@ static void* stereo_thread(void* arg) {
             o->vy         = 0.0f;
             o->width      = cb->width;
             o->length     = cb->length;
-            o->type       = (int8_t)cluster_class_to_obs_type(cb->cls);
+            /* Phase 4: MLP 分类器优先,未加载则 fallback 到启发式 */
+            int mlp_type = classify_depth_cluster(cb, &frame);
+            o->type       = (mlp_type >= 0) ? (int8_t)mlp_type
+                            : (int8_t)cluster_class_to_obs_type(cb->cls);
             o->confidence = cb->confidence;
             cnt++;
         }
@@ -343,6 +430,10 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
     g.min_cluster_size = 8.0;
     snprintf(g.output_topic, sizeof(g.output_topic), "perception/obstacles");
 
+    /* Phase 4: 分类器默认参数 */
+    g.cls_enabled = 0;
+    snprintf(g.cls_model_path, sizeof(g.cls_model_path), "models/stereo_classifier.txt");
+
     if (params_json) {
         g.enabled         = parse_int(params_json, "enable", 1);
         g.min_range       = parse_double(params_json, "min_range", 0.5);
@@ -354,11 +445,30 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
         g.min_cluster_size = parse_double(params_json, "min_cluster_size", 8.0);
         parse_string(params_json, "output_topic", g.output_topic,
                      sizeof(g.output_topic), "perception/obstacles");
+
+        /* Phase 4 分类器参数 */
+        g.cls_enabled = parse_int(params_json, "cls_enabled", 0);
+        parse_string(params_json, "cls_model_path", g.cls_model_path,
+                     sizeof(g.cls_model_path), "models/stereo_classifier.txt");
     }
 
     if (!g.enabled) {
         LOG_INFO("stereo_vision", "disabled by config (enable=0)");
         return 0;
+    }
+
+    /* Phase 4: 加载 MLP 分类器模型 */
+    if (g.cls_enabled) {
+        memset(&g.cls_model, 0, sizeof(g.cls_model));
+        if (tiny_mlp_load(&g.cls_model, g.cls_model_path) == 0) {
+            LOG_INFO("stereo_vision", "MLP classifier loaded: %s (in=%d hid=%d out=%d)",
+                     g.cls_model_path, g.cls_model.in_dim,
+                     g.cls_model.hid_dim, g.cls_model.out_dim);
+        } else {
+            LOG_WARN("stereo_vision", "MLP classifier load failed: %s, "
+                     "fallback to heuristic", g.cls_model_path);
+            g.cls_enabled = 0;
+        }
     }
 
     /* 初始化 DBSCAN */

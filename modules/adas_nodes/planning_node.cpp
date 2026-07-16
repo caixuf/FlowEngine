@@ -92,7 +92,7 @@ struct PlanningContext {
     volatile int has_fusion{0};
 
     /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
-    double obs_x[4]{}, obs_y[4]{}, obs_vx[4]{};
+    double obs_x[4]{}, obs_y[4]{}, obs_vx[4]{}, obs_vy[4]{};  /* Phase 3: +vy */
     volatile int has_vstate{0};
 
     /* 配置参数 */
@@ -260,6 +260,9 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_y[i]);
         klen = snprintf(key, sizeof(key), "\"ov%d\":", i);
         if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vx[i]);
+        /* Phase 3: parse vy (obstacle lateral velocity in world frame) */
+        klen = snprintf(key, sizeof(key), "\"ovy%d\":", i);
+        if ((p = strstr(d, key))) sscanf(p + klen, "%lf", &g.obs_vy[i]);
     }
     g.has_vstate = 1;
 }
@@ -407,22 +410,74 @@ protected:
              * 叠加关系：route_target_speed > 0 时作为最终目标，否则用默认 target_speed。 */
             double command_speed = (g.route_target_speed > 0.0) ? g.route_target_speed : g.target_speed;
 
+            /* ── Phase 5: 会车让行 + 窄路减速 ────────────────
+             * 在 Frenet 规划前调整 command_speed,让规划器在约束下生成轨迹。
+             * 会车: 对向有来车时降速让行; 窄路: 两侧间距不足时降速。 */
+            if (g.has_vstate) {
+                int oncoming = 0;
+                double min_clearance_left  = 1e9;  /* 左侧最近障碍横向距离 */
+                double min_clearance_right = 1e9;  /* 右侧最近障碍横向距离 */
+
+                for (int i = 0; i < 4; i++) {
+                    double dx = g.obs_x[i] - g.ego_x;
+                    if (dx < -10.0 || dx > 80.0) continue;
+                    double dy = g.obs_y[i] - g.ego_y;  /* 相对 ego 的横向偏移 */
+
+                    /* 会车检测: 对向车道 (dy > 2.0m,即 y≈+1.75 方向),
+                     * 迎面驶来 (vx < -2 m/s), 前方 60m 内 */
+                    if (dy > 2.0 && dx > 0.0 && dx < 60.0 &&
+                        g.obs_vx[i] < -2.0) {
+                        oncoming = 1;
+                    }
+
+                    /* 窄路检测: 统计左右两侧最近障碍物横向距离 */
+                    if (dx > 0.0 && dx < 20.0) {  /* 20m 前瞻窗 */
+                        if (dy < 0.0 && fabs(dy) < min_clearance_right)
+                            min_clearance_right = fabs(dy);
+                        if (dy > 0.0 && dy < min_clearance_left)
+                            min_clearance_left = dy;
+                    }
+                }
+
+                /* 会车让行: 降速到 40% 巡航速度 (≈5m/s),让对向车先通过 */
+                if (oncoming) {
+                    double yield_speed = g.target_speed * 0.4;
+                    if (yield_speed < command_speed)
+                        command_speed = yield_speed;
+                }
+
+                /* 窄路减速: 两侧间距 < 1.5m 时限制速度 */
+                double narrow_width = min_clearance_left + min_clearance_right;
+                if (narrow_width < 1e8 && narrow_width < 1.5) {
+                    /* 间距越窄速度越低: 1.5m→100%, 0.5m→33% */
+                    double ratio = (narrow_width - 0.3) / 1.2;
+                    if (ratio < 0.1) ratio = 0.1;
+                    if (ratio > 1.0) ratio = 1.0;
+                    double narrow_speed = g.target_speed * ratio;
+                    if (narrow_speed < command_speed)
+                        command_speed = narrow_speed;
+                }
+            }
+
             /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
 #ifdef HAVE_FRENET
             if (g.has_vstate) {
                 /* 障碍物数组扩容到 8：4 个 vehicle/state 障碍物 + 最多 4 个
-                 * 红绿灯虚拟停止线墙。红绿灯墙在红灯/黄灯时注入，绿灯时不注入。 */
-                double ox[8], oy[8], ow[8], ol[8];
+                 * 红绿灯虚拟停止线墙。红绿灯墙在红灯/黄灯时注入，绿灯时不注入。
+                 * Phase 3: 添加 vx/vy 数组，传给 Frenet 做位置外推。 */
+                double ox[8], oy[8], ow[8], ol[8], ovx[8], ovy[8];
                 int n_obs = 0;
                 for (int i = 0; i < 4 && n_obs < 8; i++) {
                     /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
                     if (fabs(g.obs_y[i]) > OBS_MAX_ABS_Y_M) continue;
-                    ox[n_obs] = g.obs_x[i];
-                    oy[n_obs] = g.obs_y[i];
-                    ow[n_obs] = OBSTACLE_WIDTH_M;
-                    ol[n_obs] = OBSTACLE_LENGTH_M;
+                    ox[n_obs]  = g.obs_x[i];
+                    oy[n_obs]  = g.obs_y[i];
+                    ow[n_obs]  = OBSTACLE_WIDTH_M;
+                    ol[n_obs]  = OBSTACLE_LENGTH_M;
+                    ovx[n_obs] = g.obs_vx[i];
+                    ovy[n_obs] = g.obs_vy[i];
                     n_obs++;
                 }
 
@@ -460,15 +515,18 @@ protected:
 
                         /* 注入虚拟墙：位置在停止线前 1m，宽度覆盖全路（8m > 6m OBS_MAX_ABS_Y），
                          * 长度给薄墙 0.5m。vx=0 静止。 */
-                        ox[n_obs] = g.tl_x[ti] - 1.0;  /* 停止线前 1m */
-                        oy[n_obs] = 0.0;               /* 路中心 */
-                        ow[n_obs] = 8.0;                /* 跨双车道 */
-                        ol[n_obs] = 0.5;                /* 薄墙 */
+                        ox[n_obs]  = g.tl_x[ti] - 1.0;  /* 停止线前 1m */
+                        oy[n_obs]  = 0.0;               /* 路中心 */
+                        ow[n_obs]  = 8.0;                /* 跨双车道 */
+                        ol[n_obs]  = 0.5;                /* 薄墙 */
+                        ovx[n_obs] = 0.0;                /* 静止虚拟墙 */
+                        ovy[n_obs] = 0.0;
                         n_obs++;
                     }
                 }
 
-                frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
+                /* Phase 3: 传入速度数据,Frenet bridge 做 2s 位置外推 */
+                frenet_set_obstacles_v(g.frenet, ox, oy, ow, ol, ovx, ovy, n_obs);
             }
 #endif
 
@@ -622,7 +680,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     g.plan_count  = 0;
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;
-    for (int i = 0; i < 4; i++) { g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = 0.0; }
+    for (int i = 0; i < 4; i++) { g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0; }
 
     g.curve_start_x   = 0.0;
     g.curve_length_m  = 0.0;

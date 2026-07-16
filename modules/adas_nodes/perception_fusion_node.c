@@ -1,41 +1,31 @@
 /**
- * perception_fusion_node.c — 感知融合节点（LiDAR + Stereo 两路 ObstacleList 去重合并）
+ * perception_fusion_node.c — 感知融合节点（LiDAR + Stereo 两路 ObstacleList 去重合并
+ *                            + 跨帧时序追踪 Phase 2）
  *
  * 解决 lidar_driver 和 stereo_vision 都发布 perception/obstacles 时的"后写者覆盖
  * 先写者"问题。两源各发到独立 topic（perception/obstacles_lidar / _stereo），
- * 本节点订阅两路，按 (x,y) 距离去重合并成更稳的 ObstacleList，输出 perception/obstacles。
+ * 本节点订阅两路，按 (x,y) 距离去重合并后做跨帧最近邻关联，输出带持久 ID 和
+ * 差分速度(vx/vy)的 ObstacleList 到 perception/obstacles。
  *
  * 链路:
  *   lidar_driver   ──▶ perception/obstacles_lidar  ─┐
  *   stereo_vision  ──▶ perception/obstacles_stereo ─┼──▶ [本节点] ──▶ perception/obstacles
- *                                                    │
- * 合并策略:
- *   1. 收集两路障碍物到池（最多 16 = 8+8）
- *   2. 按前向距离 x 排序（近的优先保留）
- *   3. 遍历，与已选障碍物距离 < merge_dist 则合并（位置取置信度高的，尺寸取大的），
- *      否则选入
- *   4. 取最近 8 个，id 重新编号 0..n-1
+ *                                                    │              (持久ID + vx/vy)
+ * 算法:
+ *   Stage 1 — 空间去重合并（fuse_obstacles, 同 Phase 1）:
+ *     1. 收集两路障碍物到池（最多 16）
+ *     2. 按前向距离 x 排序（近的优先保留）
+ *     3. 遍历，与已选障碍物距离 < merge_dist 则合并
+ *     4. 输出去重后的检测列表（最多 8 个）
+ *
+ *   Stage 2 — 跨帧时序追踪（associate_and_track, Phase 2 新增）:
+ *     1. 对每个 fused detection 找最近的 track（Euclidean ≤ assoc_dist, 3m）
+ *     2. 匹配成功 → 更新 track 位置，差分测速 + EMA 平滑
+ *     3. 未匹配 detection → 新建 track，vx=vy=0（首帧无速度）
+ *     4. 连续未匹配的 track → missed++，>max_missed 删除
+ *     5. 输出活跃 track 作为 ObstacleList，id=持久 track_id
  *
  * 新鲜度: 某一路超过 max_age_ms 未更新则视为失效，只用另一路。
- *
- * 话题契约:
- *   输入: perception/obstacles_lidar  (ObstacleList, 可配 input_a_topic)
- *         perception/obstacles_stereo (ObstacleList, 可配 input_b_topic)
- *   输出: perception/obstacles        (ObstacleList, 可配 output_topic)
- *
- * 典型 pipeline.json 配置:
- *   // lidar_driver 和 stereo_vision 的 output_topic 改成各自的别名 topic:
- *   "lidar_driver":  { "params": "{\"output_topic\":\"perception/obstacles_lidar\",...}" }
- *   "stereo_vision": { "params": "{\"output_topic\":\"perception/obstacles_stereo\",...}" }
- *   "perception_fusion": {
- *     "library": "libperception_fusion_node.so",
- *     "subscribe": ["perception/obstacles_lidar", "perception/obstacles_stereo"],
- *     "publish":  [{ "topic": "perception/obstacles", "type": "ObstacleList" }],
- *     "params": "{\"merge_dist\":1.0,\"publish_hz\":10,\"max_age_ms\":500}"
- *   }
- *
- * 不用融合时（单源直发）: lidar_driver/stereo_vision 的 output_topic 保持默认
- * perception/obstacles，不挂本节点即可，完全向后兼容。
  *
  * 编译依赖: adas_msgs_gen.h (ObstacleList 反序列化/序列化)，随构建生成。
  */
@@ -57,6 +47,25 @@
 
 /* ── 节点状态 ─────────────────────────────────────────────── */
 
+/* Phase 2: 跨帧追踪 track */
+#define PF_MAX_TRACKS 16
+
+typedef struct {
+    int      id;              /* 持久 track ID（单调递增） */
+    int      active;          /* 此槽位是否在使用 */
+    double   x, y;            /* 当前位置（车体坐标系） */
+    double   vx, vy;          /* EMA 平滑速度 (m/s) */
+    double   width, length;   /* 尺寸 */
+    int8_t   type;            /* ObstacleType */
+    float    confidence;
+    uint64_t last_update_us;  /* 上次关联时间戳 */
+    int      age;             /* 总存活帧数 */
+    int      missed;          /* 连续未匹配帧数 */
+    /* Phase 6: 远距外推 */
+    int      extrapolated;    /* 是否处于外推模式(超出传感器覆盖) */
+    int      extrap_frames;   /* 连续外推帧数 */
+} Track;
+
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
@@ -71,6 +80,23 @@ static struct {
     int    publish_hz;        /* 发布频率，默认 10 */
     int    max_age_ms;        /* 输入最大新鲜期 (ms)，超期视为失效，默认 500 */
     int    enabled;
+
+    /* Phase 2: 时序追踪参数 */
+    double track_assoc_dist;  /* 最近邻关联距离阈值 (m)，默认 3.0 */
+    int    track_max_missed;  /* 连续未匹配帧数上限，超此删除，默认 3 */
+    double track_ema_alpha;   /* 速度 EMA 平滑因子 (0-1)，默认 0.3 */
+    int    tracking_enabled;  /* 是否启用跨帧追踪，默认 1 */
+
+    /* Phase 6: 远距外推参数 */
+    int    far_enabled;          /* 是否启用远距外推,默认 1 */
+    int    far_persist_frames;   /* 离开传感器覆盖后持续外推帧数,默认 5 */
+    double far_max_range;        /* 外推最远距离 (m),默认 30.0 */
+    double far_conf_decay;       /* 每帧置信度衰减系数,默认 0.85 */
+
+    /* Phase 2: Track 池 */
+    Track  tracks[PF_MAX_TRACKS];
+    int    track_count;       /* 当前活跃 track 数 */
+    int    next_track_id;     /* 下一个新 track 的 ID */
 
     /* 两路输入缓存（回调写，工作线程读，各自 mutex 保护） */
     ObstacleList  a_list;
@@ -88,6 +114,9 @@ static struct {
     uint64_t frames_in_b;
     uint64_t frames_out;
     uint64_t merges_done;
+    uint64_t tracks_created;     /* Phase 2: 累计创建的 track 数 */
+    uint64_t tracks_matched;     /* Phase 2: 累计成功关联次数 */
+    uint64_t tracks_killed;      /* Phase 2: 累计因未匹配删除的 track 数 */
 
     /* 线程 */
     pthread_t thread;
@@ -266,6 +295,186 @@ static void fuse_obstacles(const ObstacleList* a, const ObstacleList* b,
     g.merges_done += (uint64_t)merges;
 }
 
+/* ── Phase 2: 跨帧时序追踪 ──────────────────────────────────
+ *
+ * 对 fuse_obstacles 产出的空间去重检测列表做最近邻跨帧关联:
+ *   1. 每个检测找最近的活跃 track（Euclidean ≤ assoc_dist）
+ *   2. 匹配成功 → 差分测速 + EMA 平滑,更新 track 位置/尺寸
+ *   3. 未匹配 detection → 新建 track (vx=vy=0, 首帧无速度)
+ *   4. 本轮未关联的 track → missed++, 超过 max_missed 则删除
+ *   5. 按 x 排序输出活跃 track → ObstacleList
+ *
+ * @param detections  输入: 空间融合后的检测列表
+ * @param now_us      当前时间戳 (微秒)
+ * @param out         输出: 带持久 ID + 速度的 ObstacleList
+ */
+
+static void associate_and_track(const ObstacleList* detections,
+                                 uint64_t now_us, ObstacleList* out) {
+    int nd = (int)detections->count;
+    int matched_det[8] = {0};  /* detection i 是否已关联到 track */
+    int matched_trk[PF_MAX_TRACKS] = {0};  /* track j 本轮是否已关联 */
+
+    /* ── Pass 1: 对每个 detection 找最近 track ──────────── */
+    for (int i = 0; i < nd; i++) {
+        const Obstacle* d = &detections->obstacles[i];
+        int best_j = -1;
+        double best_d2 = g.track_assoc_dist * g.track_assoc_dist;
+
+        for (int j = 0; j < PF_MAX_TRACKS; j++) {
+            if (!g.tracks[j].active || matched_trk[j]) continue;
+            double dx = (double)d->x - g.tracks[j].x;
+            double dy = (double)d->y - g.tracks[j].y;
+            double d2 = dx * dx + dy * dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best_j = j;
+            }
+        }
+
+        if (best_j >= 0) {
+            /* 匹配成功: 更新 track */
+            Track* t = &g.tracks[best_j];
+            uint64_t dt_us = now_us - t->last_update_us;
+            double dt_s = (dt_us > 0) ? (double)dt_us / 1000000.0 : 0.1;
+
+            /* 差分测速 */
+            double raw_vx = (dt_s > 1e-6) ? ((double)d->x - t->x) / dt_s : 0.0;
+            double raw_vy = (dt_s > 1e-6) ? ((double)d->y - t->y) / dt_s : 0.0;
+
+            /* EMA 平滑 */
+            double a = g.track_ema_alpha;
+            t->vx = a * raw_vx + (1.0 - a) * t->vx;
+            t->vy = a * raw_vy + (1.0 - a) * t->vy;
+
+            t->x = (double)d->x;
+            t->y = (double)d->y;
+            t->width  = (double)d->width;
+            t->length = (double)d->length;
+            t->type   = d->type;
+            t->confidence    = d->confidence;
+            t->last_update_us = now_us;
+            t->age++;
+            t->missed = 0;
+
+            matched_det[i] = 1;
+            matched_trk[best_j] = 1;
+            g.tracks_matched++;
+        }
+    }
+
+    /* ── Pass 2: 未匹配的 detection → 新建 track ───────── */
+    for (int i = 0; i < nd; i++) {
+        if (matched_det[i]) continue;
+
+        /* 找空闲槽位 */
+        int slot = -1;
+        for (int j = 0; j < PF_MAX_TRACKS; j++) {
+            if (!g.tracks[j].active) { slot = j; break; }
+        }
+        if (slot < 0) continue;  /* track 池满，丢弃 */
+
+        const Obstacle* d = &detections->obstacles[i];
+        Track* t = &g.tracks[slot];
+        memset(t, 0, sizeof(*t));
+        t->id   = g.next_track_id++;
+        t->active = 1;
+        t->x = (double)d->x;
+        t->y = (double)d->y;
+        t->vx = 0.0;  /* 首帧无速度估计 */
+        t->vy = 0.0;
+        t->width  = (double)d->width;
+        t->length = (double)d->length;
+        t->type   = d->type;
+        t->confidence    = d->confidence;
+        t->last_update_us = now_us;
+        t->age    = 1;
+        t->missed = 0;
+
+        matched_trk[slot] = 1;
+        g.tracks_created++;
+    }
+
+    /* ── Pass 3: 本轮未匹配的 track → missed++ / 远距外推 / 删除 ── */
+    for (int j = 0; j < PF_MAX_TRACKS; j++) {
+        if (!g.tracks[j].active) continue;
+        if (matched_trk[j]) {
+            /* 刚被匹配: 清除外推状态 */
+            g.tracks[j].extrapolated  = 0;
+            g.tracks[j].extrap_frames = 0;
+            continue;
+        }
+
+        g.tracks[j].missed++;
+
+        /* Phase 6: 远距外推。
+         * track 离开传感器覆盖但有有效速度时，用常速度模型外推位置，
+         * 保持 far_persist_frames 帧后才删除。外推期间置信度逐帧衰减。 */
+        int can_extrapolate = g.far_enabled &&
+            g.tracks[j].extrap_frames < g.far_persist_frames &&
+            (fabs(g.tracks[j].vx) + fabs(g.tracks[j].vy)) > 0.05;
+
+        if (can_extrapolate) {
+            /* 估算 dt: publish_hz 的倒数 */
+            double dt_s = 1.0 / (g.publish_hz > 0 ? g.publish_hz : 10);
+            g.tracks[j].x += g.tracks[j].vx * dt_s;
+            g.tracks[j].y += g.tracks[j].vy * dt_s;
+            g.tracks[j].extrapolated  = 1;
+            g.tracks[j].extrap_frames++;
+            g.tracks[j].confidence   *= (float)g.far_conf_decay;
+
+            /* 超出远距上限 → 不再外推,正常走删除逻辑 */
+            if (g.tracks[j].x > g.far_max_range ||
+                g.tracks[j].x < -g.far_max_range) {
+                can_extrapolate = 0;
+            }
+        }
+
+        if (!can_extrapolate && g.tracks[j].missed > g.track_max_missed) {
+            g.tracks[j].active = 0;
+            g.tracks_killed++;
+        }
+    }
+
+    /* ── 收集活跃 track → 输出 ─────────────────────────── */
+    int n_out = 0;
+    Obstacle sorted[8];
+    for (int j = 0; j < PF_MAX_TRACKS && n_out < 8; j++) {
+        if (!g.tracks[j].active) continue;
+        /* Phase 6: 外推 track 置信度打折,type 标记为 UNKNOWN(远距无法分类) */
+        Obstacle o;
+        memset(&o, 0, sizeof(o));
+        o.id         = (uint32_t)g.tracks[j].id;
+        o.x          = (float)g.tracks[j].x;
+        o.y          = (float)g.tracks[j].y;
+        o.vx         = (float)g.tracks[j].vx;
+        o.vy         = (float)g.tracks[j].vy;
+        o.width      = (float)g.tracks[j].width;
+        o.length     = (float)g.tracks[j].length;
+        o.type       = g.tracks[j].extrapolated ? OBJ_TYPE_UNKNOWN : g.tracks[j].type;
+        o.confidence = g.tracks[j].confidence;  /* 外推时已逐帧衰减 */
+        sorted[n_out++] = o;
+    }
+
+    /* 按前向距离排序 */
+    for (int i = 0; i < n_out - 1; i++) {
+        for (int j = i + 1; j < n_out; j++) {
+            if (sorted[i].x > sorted[j].x) {
+                Obstacle tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
+
+    g.track_count = n_out;
+    memset(out, 0, sizeof(*out));
+    out->count = (uint32_t)n_out;
+    for (int i = 0; i < n_out; i++) {
+        out->obstacles[i] = sorted[i];
+    }
+}
+
 /* ── 工作线程：定时融合 + 发布 ────────────────────────────── */
 
 static void* fusion_thread(void* arg) {
@@ -300,30 +509,45 @@ static void* fusion_thread(void* arg) {
 
         if (!has_a && !has_b) continue;  /* 两路都无数据/过期，跳过 */
 
-        /* 融合 */
+        /* Stage 1: 空间融合（两路去重） */
         ObstacleList fused;
         fuse_obstacles(has_a ? &a_copy : NULL,
                        has_b ? &b_copy : NULL,
                        g.merge_dist, &fused);
 
-        if (fused.count == 0) continue;
+        /* Stage 2 (Phase 2): 跨帧时序追踪
+         * 对融合检测做最近邻关联 → 持久 ID + 差分速度。
+         * 融合结果为空时仍跑一遍追踪以清理过期 track。 */
+        ObstacleList tracked;
+        if (g.tracking_enabled) {
+            associate_and_track(&fused, now, &tracked);
+        } else {
+            tracked = fused;  /* 不追踪，直接透传（向后兼容） */
+        }
 
         /* 序列化 + 发布 */
-        fused.frame_id     = (uint32_t)(g.frames_out & 0xFFFFFFFFu);
-        fused.timestamp_us = now;
+        tracked.frame_id     = (uint32_t)(g.frames_out & 0xFFFFFFFFu);
+        tracked.timestamp_us = now;
 
         uint8_t buf[280];
         size_t len = 0;
-        if (ObstacleList_serialize(&fused, buf, &len) == 0 && len > 0) {
+        if (ObstacleList_serialize(&tracked, buf, &len) == 0 && len > 0) {
             transport_publish(g.transport, g.output_topic, buf, (uint32_t)len);
             g.frames_out++;
         }
 
-        /* 周期性日志（每 50 次一次） */
+        /* 周期性日志（每 50 次,含追踪统计） */
         if (g.frames_out % 50 == 1) {
-            LOG_INFO("perception_fusion", "out #%lu: a=%d b=%d → fused=%d (merges=%lu)",
-                     (unsigned long)g.frames_out, has_a ? (int)a_copy.count : -1,
-                     has_b ? (int)b_copy.count : -1, (int)fused.count,
+            LOG_INFO("perception_fusion", "out #%lu: a=%d b=%d fused=%d "
+                     "trk=%d(created=%lu matched=%lu killed=%lu) merges=%lu",
+                     (unsigned long)g.frames_out,
+                     has_a ? (int)a_copy.count : -1,
+                     has_b ? (int)b_copy.count : -1,
+                     (int)fused.count,
+                     g.track_count,
+                     (unsigned long)g.tracks_created,
+                     (unsigned long)g.tracks_matched,
+                     (unsigned long)g.tracks_killed,
                      (unsigned long)g.merges_done);
         }
     }
@@ -335,6 +559,8 @@ static void* fusion_thread(void* arg) {
 static const char* s_inputs[]  = { "perception/obstacles_lidar",
                                     "perception/obstacles_stereo", NULL };
 static const char* s_outputs[] = { "perception/obstacles", NULL };
+
+static NodePlugin s_plugin;  /* forward decl for node_announce_self in fusion_start */
 
 static int fusion_init(MessageBus* bus, Transport* transport,
                        DiscoveryManager* discovery, Scheduler* scheduler,
@@ -356,6 +582,19 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     g.max_age_ms  = 500;
     g.enabled     = 1;
 
+    /* Phase 2: 追踪默认参数 */
+    g.track_assoc_dist = 3.0;
+    g.track_max_missed = 3;
+    g.track_ema_alpha  = 0.3;
+    g.tracking_enabled = 1;
+    g.next_track_id    = 1;  /* ID 从 1 开始,0 保留 */
+
+    /* Phase 6: 远距外推默认参数 */
+    g.far_enabled        = 1;
+    g.far_persist_frames = 5;
+    g.far_max_range      = 30.0;
+    g.far_conf_decay     = 0.85;
+
     if (params_json) {
         parse_string(params_json, "input_a_topic", g.input_a_topic,
                      sizeof(g.input_a_topic), "perception/obstacles_lidar");
@@ -367,6 +606,18 @@ static int fusion_init(MessageBus* bus, Transport* transport,
         g.publish_hz = parse_int(params_json, "publish_hz", 10);
         g.max_age_ms = parse_int(params_json, "max_age_ms", 500);
         g.enabled    = parse_int(params_json, "enable", 1);
+
+        /* Phase 2 追踪参数 */
+        g.track_assoc_dist = parse_double(params_json, "track_assoc_dist", 3.0);
+        g.track_max_missed = parse_int(params_json, "track_max_missed", 3);
+        g.track_ema_alpha  = parse_double(params_json, "track_ema_alpha", 0.3);
+        g.tracking_enabled = parse_int(params_json, "tracking_enabled", 1);
+
+        /* Phase 6 远距外推参数 */
+        g.far_enabled        = parse_int(params_json, "far_enabled", 1);
+        g.far_persist_frames = parse_int(params_json, "far_persist_frames", 5);
+        g.far_max_range      = parse_double(params_json, "far_max_range", 30.0);
+        g.far_conf_decay     = parse_double(params_json, "far_conf_decay", 0.85);
     }
 
     if (!g.enabled) {
@@ -385,9 +636,15 @@ static int fusion_init(MessageBus* bus, Transport* transport,
                         (double)g.publish_hz);
 
     LOG_INFO("perception_fusion", "initialized: a=%s b=%s → out=%s "
-             "merge_dist=%.2fm hz=%d max_age=%dms",
+             "merge=%.2fm hz=%d max_age=%dms tracking=%s(assoc=%.1fm "
+             "max_missed=%d ema=%.2f) far=%s(persist=%d max_range=%.0fm "
+             "conf_decay=%.2f)",
              g.input_a_topic, g.input_b_topic, g.output_topic,
-             g.merge_dist, g.publish_hz, g.max_age_ms);
+             g.merge_dist, g.publish_hz, g.max_age_ms,
+             g.tracking_enabled ? "on" : "off",
+             g.track_assoc_dist, g.track_max_missed, g.track_ema_alpha,
+             g.far_enabled ? "on" : "off",
+             g.far_persist_frames, g.far_max_range, g.far_conf_decay);
     return 0;
 }
 
@@ -400,6 +657,8 @@ static int fusion_start(void) {
         g.thread_running = 0;
         return -1;
     }
+    LOG_INFO("perception_fusion", "started");
+    node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
@@ -415,9 +674,12 @@ static void fusion_cleanup(void) {
     }
     pthread_mutex_destroy(&g.a_lock);
     pthread_mutex_destroy(&g.b_lock);
-    LOG_INFO("perception_fusion", "cleanup: in_a=%lu in_b=%lu out=%lu merges=%lu",
+    LOG_INFO("perception_fusion", "cleanup: in_a=%lu in_b=%lu out=%lu merges=%lu "
+             "trk_created=%lu trk_matched=%lu trk_killed=%lu",
              (unsigned long)g.frames_in_a, (unsigned long)g.frames_in_b,
-             (unsigned long)g.frames_out, (unsigned long)g.merges_done);
+             (unsigned long)g.frames_out, (unsigned long)g.merges_done,
+             (unsigned long)g.tracks_created, (unsigned long)g.tracks_matched,
+             (unsigned long)g.tracks_killed);
 }
 
 /* ── 插件导出 ─────────────────────────────────────────────── */
@@ -426,7 +688,7 @@ static NodePlugin s_plugin = {
     .api_version   = NODE_PLUGIN_API_VERSION,
     .name          = "perception_fusion",
     .version       = "1.0.0",
-    .description   = "Perception fusion (LiDAR + Stereo ObstacleList merge → perception/obstacles)",
+    .description   = "Perception fusion + tracking (LiDAR+Stereo merge → NN association → persistent IDs + vx/vy)",
     .input_topics  = s_inputs,
     .output_topics = s_outputs,
     .init          = fusion_init,

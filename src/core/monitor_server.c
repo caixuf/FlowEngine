@@ -30,6 +30,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
@@ -401,6 +403,136 @@ static void handle_sse(int fd, MonitorServer* ms) {
     }
 }
 
+/* ── POST 请求体读取 ────────────────────────────────────── */
+
+static char* read_post_body(int fd, const char* headers, size_t max_size) {
+    const char* content_len_header = strstr(headers, "Content-Length:");
+    if (!content_len_header) return NULL;
+
+    int content_len = atoi(content_len_header + 15);
+    if (content_len <= 0 || (size_t)content_len > max_size) return NULL;
+
+    char* body = (char*)malloc(content_len + 1);
+    if (!body) return NULL;
+
+    /* Loop to handle partial reads on sockets */
+    size_t total = 0;
+    while (total < (size_t)content_len) {
+        ssize_t n = read(fd, body + total, (size_t)content_len - total);
+        if (n <= 0) {
+            free(body);
+            return NULL;
+        }
+        total += (size_t)n;
+    }
+    body[content_len] = '\0';
+    return body;
+}
+
+/* ── 执行训练命令通过 training_bridge.py ──────────────────
+ *
+ * 用双管道 fork/exec training_bridge.py:
+ *   stdin_pipe:  父进程写入 JSON 请求体 → 子进程 stdin
+ *   stdout_pipe: 子进程 stdout → 父进程读取 JSON 响应
+ *
+ * 父进程读取完整输出后，包装 HTTP 200 + Content-Type + CORS 头再发送，
+ * 不再把子进程 stdout 直接 dup 到客户端 socket（那样会导致缺少 HTTP 头）。
+ */
+
+static void exec_training_command(int fd, const char* cmd_type,
+                                  const char* json_body, MonitorServer* ms) {
+    int stdin_pipe[2];   /* parent→child: JSON body */
+    int stdout_pipe[2];  /* child→parent: JSON result */
+
+    if (pipe(stdin_pipe) == -1 || pipe(stdout_pipe) == -1) {
+        if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
+        send_response(fd, "500 Internal Server Error", "application/json",
+                      "{\"ok\":false,\"error\":\"pipe failed\"}", 36);
+        close(fd);
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(stdin_pipe[0]);  close(stdin_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        send_response(fd, "500 Internal Server Error", "application/json",
+                      "{\"ok\":false,\"error\":\"fork failed\"}", 36);
+        close(fd);
+        return;
+    }
+
+    if (pid == 0) {
+        /* ── 子进程: 执行 training_bridge.py ──────────────── */
+        close(stdin_pipe[1]);   /* 关闭 stdin 写端 */
+        close(stdout_pipe[0]);  /* 关闭 stdout 读端 */
+
+        dup2(stdin_pipe[0], STDIN_FILENO);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stdout_pipe[1], STDERR_FILENO);
+
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+
+        /* 从 html_path 推导 tools/ 目录的绝对路径 */
+        char bridge_path[768];
+        if (ms && ms->html_path[0]) {
+            /* html_path 如 tools/flowboard/index.html → 向上两级得 tools/ */
+            char dir[512];
+            snprintf(dir, sizeof(dir), "%s", ms->html_path);
+            char* slash = strrchr(dir, '/');
+            if (slash) *slash = '\0';          /* 去掉 index.html */
+            slash = strrchr(dir, '/');
+            if (slash) *slash = '\0';          /* 去掉 flowboard/ → tools/ */
+            snprintf(bridge_path, sizeof(bridge_path),
+                     "%s/training_bridge.py", dir);
+        } else {
+            snprintf(bridge_path, sizeof(bridge_path),
+                     "tools/training_bridge.py");
+        }
+
+        const char* argv[] = {"python3", bridge_path, cmd_type, NULL};
+        execvp("python3", (char* const*)argv);
+        _exit(1);
+    }
+
+    /* ── 父进程: 写 stdin → 读 stdout → 发 HTTP 响应 ────── */
+    close(stdin_pipe[0]);
+    close(stdout_pipe[1]);
+
+    /* 写入 JSON 请求体到子进程 stdin */
+    if (json_body) {
+        size_t len = strlen(json_body);
+        ssize_t w = write(stdin_pipe[1], json_body, len);
+        (void)w;
+    }
+    close(stdin_pipe[1]);  /* 关闭写端 → 子进程 stdin 收到 EOF */
+
+    /* 读取子进程 stdout 的全部输出 */
+    char result[8192];
+    size_t total = 0;
+    ssize_t nread;
+    while (total < sizeof(result) - 1 &&
+           (nread = read(stdout_pipe[0], result + total,
+                         sizeof(result) - 1 - total)) > 0) {
+        total += (size_t)nread;
+    }
+    result[total] = '\0';
+    close(stdout_pipe[0]);
+
+    waitpid(pid, NULL, 0);
+
+    /* 发送完整的 HTTP 响应（含状态行 + 头 + JSON 体） */
+    if (total > 0) {
+        send_response(fd, "200 OK", "application/json", result, (int)total);
+    } else {
+        send_response(fd, "500 Internal Server Error", "application/json",
+                      "{\"ok\":false,\"error\":\"no output from training bridge\"}",
+                      54);
+    }
+    close(fd);
+}
+
 /* ── 处理单个连接 ────────────────────────────────────────── */
 
 static void handle_client(int fd, MonitorServer* ms) {
@@ -443,17 +575,37 @@ static void handle_client(int fd, MonitorServer* ms) {
     /* CORS preflight */
     if (strcmp(method, "OPTIONS") == 0) {
         const char* cors = "HTTP/1.1 204\r\nAccess-Control-Allow-Origin: *\r\n"
-            "Access-Control-Allow-Methods: GET, OPTIONS\r\n\r\n";
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n";
         write(fd, cors, strlen(cors));
         close(fd);
         return;
     }
 
-    /* Only GET is supported beyond this point. */
-    if (strcmp(method, "GET") != 0) {
+    /* Support GET and POST; reject everything else */
+    if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
         send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed", 18);
         close(fd);
         return;
+    }
+
+    /* POST handling for training API */
+    if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/api/training/start") == 0 || strcmp(path, "/api/training/promote") == 0) {
+            char* body = read_post_body(fd, req, 8192);
+            if (body) {
+                const char* cmd_type = (strcmp(path, "/api/training/start") == 0) ? "train-start" : "promote";
+                exec_training_command(fd, cmd_type, body, ms);
+                free(body);
+            } else {
+                send_response(fd, "400 Bad Request", "application/json", "{\"ok\": false, \"error\": \"failed to read body\"}", 48);
+                close(fd);
+            }
+            return;
+        } else {
+            send_response(fd, "404 Not Found", "text/plain", "not found", 9);
+            close(fd);
+            return;
+        }
     }
 
     /* Route: /api/stream → SSE */

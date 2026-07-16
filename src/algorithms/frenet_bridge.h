@@ -35,7 +35,7 @@ FrenetHandle* frenet_create(double max_speed, double max_accel);
 void frenet_set_reference_path(FrenetHandle* fh, const double* wx, const double* wy, int n);
 
 /**
- * Set obstacles in the scene.
+ * Set obstacles in the scene (static version, backward-compatible).
  * @param ox, oy   Obstacle center positions (global, NULL-terminated)
  * @param ow, ol   Obstacle width, length
  * @param n        Number of obstacles
@@ -43,6 +43,22 @@ void frenet_set_reference_path(FrenetHandle* fh, const double* wx, const double*
 void frenet_set_obstacles(FrenetHandle* fh,
                           const double* ox, const double* oy,
                           const double* ow, const double* ol, int n);
+
+/**
+ * Set obstacles with velocities (Phase 3: Frenet 吃速度).
+ * The bridge extrapolates obstacle positions to a 2s prediction horizon
+ * before passing them to the planner, so the planner sees where obstacles
+ * will be rather than where they are now.
+ *
+ * @param ox, oy   Obstacle center positions (global coordinates)
+ * @param ow, ol   Obstacle width, length
+ * @param vx, vy   Obstacle velocities (m/s, global frame). NULL → treated as 0.
+ * @param n        Number of obstacles (max 8)
+ */
+void frenet_set_obstacles_v(FrenetHandle* fh,
+                            const double* ox, const double* oy,
+                            const double* ow, const double* ol,
+                            const double* vx, const double* vy, int n);
 
 /**
  * Plan an optimal trajectory.

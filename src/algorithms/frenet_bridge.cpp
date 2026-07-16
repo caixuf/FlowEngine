@@ -24,7 +24,9 @@ struct FrenetHandle {
     FrenetHyperparameters          hp;
     vector<double>                 wx, wy;
     vector<double>                 ox, oy, ow, ol;
+    vector<double>                 ovx, ovy;      /* Phase 3: obstacle velocities */
     bool                           path_set;
+    bool                           has_velocity;  /* Phase 3: true if vx/vy were provided */
 };
 
 extern "C" {
@@ -71,6 +73,25 @@ void frenet_set_obstacles(FrenetHandle* fh,
     fh->oy.assign(oy, oy + n);
     fh->ow.assign(ow, ow + n);
     fh->ol.assign(ol, ol + n);
+    fh->has_velocity = false;
+}
+
+void frenet_set_obstacles_v(FrenetHandle* fh,
+                            const double* ox, const double* oy,
+                            const double* ow, const double* ol,
+                            const double* vx, const double* vy, int n) {
+    if (!fh) return;
+    fh->ox.assign(ox, ox + n);
+    fh->oy.assign(oy, oy + n);
+    fh->ow.assign(ow, ow + n);
+    fh->ol.assign(ol, ol + n);
+    if (vx && vy) {
+        fh->ovx.assign(vx, vx + n);
+        fh->ovy.assign(vy, vy + n);
+        fh->has_velocity = true;
+    } else {
+        fh->has_velocity = false;
+    }
 }
 
 int frenet_plan(FrenetHandle* fh,
@@ -104,11 +125,22 @@ int frenet_plan(FrenetHandle* fh,
         /* Allocate temp arrays for obstacle bbox corners */
         static double llx[32], lly[32], urx[32], ury[32];
         int actual = (no > 32) ? 32 : no;
+
+        /* Phase 3: 速度位置外推. 用 2s 预测时域把障碍物推到未来位置,
+         * 这样 Frenet 规划器看到的是"障碍物将在哪里"而非"现在在哪里"。 */
+        const double pred_horizon_s = 2.0;  /* 预测时域 (s),与 d_t_s 对齐 */
+
         for (int i = 0; i < actual; i++) {
-            llx[i] = fh->ox[i] - fh->ol[i] * 0.5;
-            lly[i] = fh->oy[i] - fh->ow[i] * 0.5;
-            urx[i] = fh->ox[i] + fh->ol[i] * 0.5;
-            ury[i] = fh->oy[i] + fh->ow[i] * 0.5;
+            double px = fh->ox[i];
+            double py = fh->oy[i];
+            if (fh->has_velocity && (int)fh->ovx.size() > i) {
+                px += fh->ovx[i] * pred_horizon_s;
+                py += fh->ovy[i] * pred_horizon_s;
+            }
+            llx[i] = px - fh->ol[i] * 0.5;
+            lly[i] = py - fh->ow[i] * 0.5;
+            urx[i] = px + fh->ol[i] * 0.5;
+            ury[i] = py + fh->ow[i] * 0.5;
         }
         ic.o_llx = llx;
         ic.o_lly = lly;
