@@ -213,21 +213,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    /* 优先尝试二进制反序列化 */
-    Localization loc;
-    if (msg->data_size >= sizeof(Localization) &&
-        Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-        pthread_mutex_lock(&g.lock);
-        g.ego_x = loc.x;
-        g.ego_y = loc.y;
-        g.ego_v = loc.v;
-        g.ego_heading = loc.heading;
-        g.has_fusion = 1;
-        pthread_mutex_unlock(&g.lock);
-        return;
-    }
-
-    /* 回退到 JSON 文本解析 */
+    /* cJSON parsing (fusion/localization now publishes cJSON) */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     double x = 0, y = 0, v = 0, h = 0;
     if (root) {

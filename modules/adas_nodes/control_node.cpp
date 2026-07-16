@@ -23,7 +23,7 @@
 #include "param_registry.h"
 #include "state_machine.h"
 #include "road_geometry.h"
-#include "adas_msgs_gen.h"
+#include "adas_msgs_gen.h"       /* ControlRaw_serialize, CONTROLRAW_TYPE_ID */
 #include "coroutine_task.h"
 #include "logger.h"
 #include "clock_service.h"
@@ -201,22 +201,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    /* Try binary deserialization (serializer path) */
-    {
-        Localization loc;
-        if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-            g.current_speed = loc.v;
-            g.ego_x         = loc.x;
-            g.ego_y         = loc.y;
-            g.ego_heading   = loc.heading;
-            g.ego_yaw_rate  = loc.yaw_rate;
-            g.has_fusion    = 1;
-            g.last_fusion_us = clock_now_us();
-            return;
-        }
-    }
-
-    /* Fallback: text JSON parsing */
+    /* cJSON parsing (fusion/localization now publishes cJSON) */
     {
         cJSON* root = cJSON_Parse((const char*)msg->data);
         if (root) {

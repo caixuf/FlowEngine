@@ -24,7 +24,7 @@
 
 #include "node_plugin.h"
 #include "state_machine.h"
-#include "adas_msgs_gen.h"
+/* adas_msgs_gen.h previously included for Localization_deserialize — removed in cJSON-only cleanup */
 #include "logger.h"
 #include "tiny_mlp.h"
 #include "clock_service.h"
@@ -465,13 +465,7 @@ static void on_ota_cmd(const Message* msg, void* user_data) {
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    Localization loc;
-    if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-        g.ego_v = loc.v; g.ego_y = loc.y;
-        g.ego_heading = loc.heading; g.ego_yaw_rate = loc.yaw_rate;
-        g.has_fusion = 1;
-        return;
-    }
+    /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* j;

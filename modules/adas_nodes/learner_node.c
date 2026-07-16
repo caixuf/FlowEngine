@@ -106,16 +106,7 @@ static struct {
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    Localization loc;
-    if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-        g.ego_v        = loc.v;
-        g.ego_y        = loc.y;
-        g.ego_heading  = loc.heading;
-        g.ego_yaw_rate = loc.yaw_rate;
-        g.has_fusion   = 1;
-        return;
-    }
-    /* Fallback: 文本 JSON */
+    /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* j;

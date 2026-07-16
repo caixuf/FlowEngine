@@ -35,6 +35,8 @@
 #include "transport.h"
 #include "discovery.h"
 #include "coroutine_task.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
 #undef LOG_TRACE
 #undef LOG_DEBUG
 #undef LOG_INFO
@@ -195,29 +197,38 @@ protected:
                 ekf_fusion_reset(ekf_);
             }
 
-            /* ── 发布融合结果 (二进制序列化) ── */
-            Localization loc;
-            loc.x          = (float)x;
-            loc.y          = (float)y;
-            loc.v          = (float)v;
-            loc.heading    = (float)h;
-            loc.yaw_rate   = (float)yr;
-            loc.cov_xx     = (float)diag[0];
-            loc.cov_yy     = (float)diag[1];
-            loc.cov_vv     = (float)diag[2];
-            loc.cov_hh     = (float)diag[3];
-            loc.cov_yyaw   = (float)diag[4];
-            loc.innovation = (float)ekf_->last_innovation;
-            loc.diverged   = ekf_->diverged;
-            loc.raw_pos_x  = (float)(lidar ? lidar->x : x);
-            loc.raw_pos_y  = (float)(lidar ? lidar->y : y);
-            loc.raw_speed  = (float)(gps ? (double)gps->speed_mps : v);
+            /* ── 发布融合结果 (cJSON + 世界坐标) ── */
+            cJSON* root = cJSON_CreateObject();
+            cJSON_AddNumberToObject(root, "x", x);
+            cJSON_AddNumberToObject(root, "y", y);
+            cJSON_AddNumberToObject(root, "v", v);
+            cJSON_AddNumberToObject(root, "heading", h);
+            cJSON_AddNumberToObject(root, "yaw_rate", yr);
+            cJSON_AddNumberToObject(root, "cov_xx", diag[0]);
+            cJSON_AddNumberToObject(root, "cov_yy", diag[1]);
+            cJSON_AddNumberToObject(root, "cov_vv", diag[2]);
+            cJSON_AddNumberToObject(root, "cov_hh", diag[3]);
+            cJSON_AddNumberToObject(root, "cov_yyaw", diag[4]);
+            cJSON_AddNumberToObject(root, "innovation", ekf_->last_innovation);
+            cJSON_AddBoolToObject(root, "diverged", ekf_->diverged);
+            /* raw sensor for debugging */
+            if (lidar) {
+                cJSON_AddNumberToObject(root, "raw_pos_x", lidar->x);
+                cJSON_AddNumberToObject(root, "raw_pos_y", lidar->y);
+            }
+            if (gps) {
+                cJSON_AddNumberToObject(root, "raw_speed", (double)gps->speed_mps);
+                /* ── 世界坐标 (WGS84) ── */
+                cJSON_AddNumberToObject(root, "world_lat", gps->latitude);
+                cJSON_AddNumberToObject(root, "world_lon", gps->longitude);
+            }
+            cJSON_AddNumberToObject(root, "timestamp_us", (double)clock_now_us());
 
-            uint8_t loc_buf[128];
-            size_t  loc_len = sizeof(loc_buf);
-            Localization_serialize(&loc, loc_buf, &loc_len);
+            char* json_str = cJSON_PrintUnformatted(root);
             transport_publish(transport_, "fusion/localization",
-                              loc_buf, (uint32_t)loc_len);
+                              (const uint8_t*)json_str, (uint32_t)strlen(json_str) + 1);
+            free(json_str);
+            cJSON_Delete(root);
 
             if (g.fused_count % 50 == 0) {
                 LOG_INFO("fusion", "#%u EKF:(%.1f,%.1f) v=%.1f hdg=%.1f° innov=%.2f",

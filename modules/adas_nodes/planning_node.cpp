@@ -21,7 +21,7 @@
 #include "scenario_loader.h"
 #include "road_geometry.h"
 #include "traffic_light.h"
-#include "adas_msgs_gen.h"
+/* adas_msgs_gen.h previously included for Localization_deserialize — removed in cJSON-only cleanup */
 #include "coroutine_task.h"
 #undef LOG_TRACE
 #undef LOG_DEBUG
@@ -215,21 +215,7 @@ static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    /* Try binary deserialization (serializer path) */
-    {
-        Localization loc;
-        if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-            g.ego_x       = loc.x;
-            g.ego_y       = loc.y;
-            g.ego_v       = loc.v;
-            g.ego_heading = loc.heading;
-            g.has_fusion  = 1;
-            g.last_fusion_us = clock_now_us();
-            return;
-        }
-    }
-
-    /* Fallback: text JSON parsing */
+    /* cJSON parsing (fusion/localization now publishes cJSON) */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {

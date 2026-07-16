@@ -65,15 +65,23 @@ static struct {
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    Localization loc;
-    if (Localization_deserialize(&loc, (const uint8_t*)msg->data, msg->data_size) == 0) {
-        g.ego_x        = loc.x;
-        g.ego_y        = loc.y;
-        g.ego_v        = loc.v;
-        g.ego_heading  = loc.heading;
-        g.ego_yaw_rate = loc.yaw_rate;
-        g.has_fusion   = 1;
+    /* fusion/localization now publishes cJSON */
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(root, "x");
+        if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "y");
+        if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "v");
+        if (cJSON_IsNumber(j)) g.ego_v = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+        if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
+        if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+        cJSON_Delete(root);
     }
+    g.has_fusion = 1;
 }
 
 static void on_planning(const Message* msg, void* user_data) {
