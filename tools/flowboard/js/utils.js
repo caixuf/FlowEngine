@@ -327,6 +327,76 @@ export function getColor(name) {
   return _obsColors[name];
 }
 
+// ── Traffic light model ──────────────────────────────────────────
+/**
+ * _buildTrafficLight — build a traffic light mesh (pole + arm + 3-lamp housing).
+ *
+ * Real-world scale (NOT unit-normalised like obstacles — traffic lights are
+ * fixed-size infrastructure, not scaled at render time).
+ *
+ * Coordinate system: X=forward (along road), Y=up, Z=lateral (across road).
+ * The pole is placed at the roadside; the arm reaches over the road.
+ *
+ * Lamp meshes are stored in userData.lamps = [red, yellow, green] so the
+ * renderer can toggle emissive intensity based on the current phase.
+ * Inactive lamps are dim (emissive 0.05), active lamp is bright (emissive 1.0).
+ *
+ * @returns {THREE.Group} with userData.lamps[3] = {mesh, color}
+ */
+export function _buildTrafficLight() {
+  const T = window.THREE;
+  var g = new T.Group();
+
+  // Pole: 5m tall cylinder at roadside
+  var pole = new T.Mesh(
+    new T.CylinderGeometry(0.12, 0.15, 5.0, 12),
+    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 })
+  );
+  pole.position.y = 2.5;
+  pole.castShadow = true;
+  g.add(pole);
+
+  // Arm: horizontal box extending over road (length 4m, at height 4.8m)
+  var arm = new T.Mesh(
+    new T.BoxGeometry(0.12, 0.12, 4.0),
+    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 })
+  );
+  arm.position.set(0, 4.8, 2.0);
+  g.add(arm);
+
+  // Lamp housing: box at end of arm (0.35 wide × 0.9 tall × 0.3 deep)
+  var housing = new T.Mesh(
+    new T.BoxGeometry(0.35, 0.9, 0.3),
+    new T.MeshStandardMaterial({ color: 0x222222, metalness: 0.3, roughness: 0.7 })
+  );
+  housing.position.set(0, 4.3, 4.0);
+  housing.castShadow = true;
+  g.add(housing);
+
+  // Three lamps: red (top), yellow (mid), green (bottom)
+  // Each is a small sphere with emissive material; renderer toggles intensity.
+  var lampColors = [0xff0000, 0xffaa00, 0x00ff00];
+  var lampY = [4.6, 4.3, 4.0];
+  var lamps = [];
+  for (var li = 0; li < 3; li++) {
+    var lamp = new T.Mesh(
+      new T.SphereGeometry(0.11, 16, 12),
+      new T.MeshStandardMaterial({
+        color: lampColors[li],
+        emissive: lampColors[li],
+        emissiveIntensity: 0.05  // dim by default
+      })
+    );
+    lamp.position.set(0, lampY[li], 4.16);
+    g.add(lamp);
+    lamps.push(lamp);
+  }
+
+  g.userData.lamps = lamps;
+  g.userData.lampColors = lampColors;
+  return g;
+}
+
 // ── Stub: export menu ───────────────────────────────────────────
 export function toggleExportMenu() {
   var m = document.getElementById('export-menu');

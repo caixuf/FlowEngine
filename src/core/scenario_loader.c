@@ -173,9 +173,39 @@ ScenarioConfig* scenario_load(const char* path) {
         if (cJSON_IsNumber(j)) sc->road.curve_offset_m = j->valuedouble;
     }
 
+    /* traffic_lights（可选）：红绿灯定义数组。缺省 = 无红绿灯，与既有场景完全兼容。
+     * 见 traffic_light.h 的相位状态机。 */
+    cJSON* jlights = cJSON_GetObjectItemCaseSensitive(root, "traffic_lights");
+    if (cJSON_IsArray(jlights)) {
+        int n = cJSON_GetArraySize(jlights);
+        if (n > SCENARIO_MAX_TRAFFIC_LIGHTS) n = SCENARIO_MAX_TRAFFIC_LIGHTS;
+        sc->traffic_light_count = n;
+        for (int i = 0; i < n; i++) {
+            cJSON* jl = cJSON_GetArrayItem(jlights, i);
+            if (!cJSON_IsObject(jl)) continue;
+            ScenarioTrafficLight* tl = &sc->traffic_lights[i];
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "id");
+            tl->id = cJSON_IsNumber(j) ? (int)j->valuedouble : i;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "x");
+            if (cJSON_IsNumber(j)) tl->x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "y_lane");
+            if (cJSON_IsNumber(j)) tl->y_lane = j->valuedouble;
+            else tl->y_lane = -1.75;  /* 默认单车道横向位置 */
+            j = cJSON_GetObjectItemCaseSensitive(jl, "red_s");
+            if (cJSON_IsNumber(j)) tl->red_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "yellow_s");
+            if (cJSON_IsNumber(j)) tl->yellow_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "green_s");
+            if (cJSON_IsNumber(j)) tl->green_s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jl, "phase_offset_s");
+            if (cJSON_IsNumber(j)) tl->phase_offset_s = j->valuedouble;
+        }
+    }
+
     cJSON_Delete(root);
-    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, seed=%u)",
-             sc->name, sc->actor_count, sc->route_count, sc->random_seed);
+    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, seed=%u)",
+             sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count, sc->random_seed);
     return sc;
 }
 
@@ -246,6 +276,22 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
     cJSON_AddNumberToObject(jroad, "curve_length_m", scenario->road.curve_length_m);
     cJSON_AddNumberToObject(jroad, "curve_offset_m", scenario->road.curve_offset_m);
     cJSON_AddItemToObject(root, "road", jroad);
+
+    /* traffic_lights */
+    cJSON* jlights = cJSON_CreateArray();
+    for (int i = 0; i < scenario->traffic_light_count; i++) {
+        const ScenarioTrafficLight* tl = &scenario->traffic_lights[i];
+        cJSON* jl = cJSON_CreateObject();
+        cJSON_AddNumberToObject(jl, "id",              tl->id);
+        cJSON_AddNumberToObject(jl, "x",               tl->x);
+        cJSON_AddNumberToObject(jl, "y_lane",          tl->y_lane);
+        cJSON_AddNumberToObject(jl, "red_s",           tl->red_s);
+        cJSON_AddNumberToObject(jl, "yellow_s",        tl->yellow_s);
+        cJSON_AddNumberToObject(jl, "green_s",         tl->green_s);
+        cJSON_AddNumberToObject(jl, "phase_offset_s",  tl->phase_offset_s);
+        cJSON_AddItemToArray(jlights, jl);
+    }
+    cJSON_AddItemToObject(root, "traffic_lights", jlights);
 
     char* out = cJSON_Print(root);
     cJSON_Delete(root);

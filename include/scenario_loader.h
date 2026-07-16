@@ -49,6 +49,18 @@
  *   curve_start_x   弯道起点（ego x 坐标, m）
  *   curve_length_m  弯道纵向长度（m），0 = 禁用
  *   curve_offset_m  弯道终点相对起点的横向偏移（m，可正可负）
+ *
+ * traffic_lights（可选）: 红绿灯定义数组（见 traffic_light.h）。不填 = 无红绿灯，
+ * 与既有场景完全兼容。每个灯含停止线位置 + 三色时长 + 初始相位偏移。
+ *   [
+ *     {"id":0,"x":100.0,"y_lane":-1.75,"red_s":20.0,"yellow_s":3.0,
+ *      "green_s":15.0,"phase_offset_s":0.0}
+ *   ]
+ *   id               灯 ID（用于 topic/可视化标识）
+ *   x                停止线位置（ego 前向坐标, m）— ego 到此 x 时应停车
+ *   y_lane           灯所在车道横向坐标（m，默认 -1.75 兼容单车道）
+ *   red_s/yellow_s/green_s  三色时长（s），任一 <=0 视为无灯（恒绿灯）
+ *   phase_offset_s   初始相位偏移（s，默认 0，用于多灯错峰）
  */
 
 #include <stdint.h>
@@ -63,6 +75,7 @@ extern "C" {
 #define SCENARIO_DESC_LEN       128
 #define SCENARIO_MAX_ROUTE_STEPS  8
 #define SCENARIO_ROUTE_LABEL_LEN 32
+#define SCENARIO_MAX_TRAFFIC_LIGHTS 4
 
 /* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
 
@@ -100,6 +113,18 @@ typedef struct {
     double curve_offset_m;  /**< 弯道终点横向偏移（m），默认 0 */
 } ScenarioRoad;
 
+/* ── 红绿灯（可选, 见 traffic_light.h） ────────────────────── */
+
+typedef struct {
+    int    id;              /**< 灯 ID（topic/可视化标识） */
+    double x;               /**< 停止线位置（ego 前向坐标, m） */
+    double y_lane;          /**< 灯所在车道横向坐标（m，默认 -1.75） */
+    double red_s;           /**< 红灯时长（s），<=0 视为无灯 */
+    double yellow_s;        /**< 黄灯时长（s） */
+    double green_s;         /**< 绿灯时长（s） */
+    double phase_offset_s;  /**< 初始相位偏移（s，默认 0） */
+} ScenarioTrafficLight;
+
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
 typedef struct {
@@ -123,6 +148,8 @@ typedef struct {
     ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS]; /**< 导航路线变道指令（可选，NOA 用） */
     int               route_count;
     ScenarioRoad      road;    /**< 道路几何（可选弯道，默认全零 = 直道） */
+    ScenarioTrafficLight traffic_lights[SCENARIO_MAX_TRAFFIC_LIGHTS]; /**< 红绿灯（可选，默认全零 = 无灯） */
+    int               traffic_light_count;
 } ScenarioConfig;
 
 /**

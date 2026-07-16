@@ -57,6 +57,11 @@
       "file": "scenarios/curve_road.json",
       "duration_s": 45,
       "enabled": true
+    },
+    {
+      "file": "scenarios/intersection_signalized.json",
+      "duration_s": 50,
+      "enabled": true
     }
   ],
   "baseline_tolerances": {

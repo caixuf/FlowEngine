@@ -19,6 +19,7 @@
 #include "clock_service.h"
 #include "scenario_loader.h"
 #include "road_geometry.h"
+#include "traffic_light.h"
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "logger.h"
@@ -123,6 +124,11 @@ static struct {
     double curve_start_x;
     double curve_length_m;
     double curve_offset_m;
+
+    /* 红绿灯（可选，来自场景文件 "traffic_lights"；全零 = 无灯，行为不变） */
+    ScenarioTrafficLight traffic_lights[SCENARIO_MAX_TRAFFIC_LIGHTS];
+    int    traffic_light_count;
+    uint64_t sim_start_us;  /* 场景启动时刻，用于计算相位 t */
 
     /* P0.1 确定性时钟：固定随机种子 */
     uint32_t random_seed;
@@ -376,6 +382,39 @@ static void publish_road_geometry(void) {
                       (const uint8_t*)geo, (uint32_t)off + 1);
 }
 
+/* ── 发布红绿灯状态（road/traffic_lights topic） ───────────── */
+/* Phase 2: sim_world 作为红绿灯状态的唯一权威发布者。
+ * 每 tick 用 traffic_light.h 纯函数算当前相位，发布 JSON 数组到
+ * road/traffic_lights。planning/monitor 订阅此 topic 获取灯状态。
+ * 无灯时（traffic_light_count==0）不发布，节省带宽。 */
+#define ROAD_TRAFFIC_LIGHTS_TYPE_ID 0x7E5C0FFEu
+
+static void publish_traffic_lights(void) {
+    if (g.traffic_light_count <= 0) return;  /* 无红绿灯，不发布 */
+
+    /* 仿真时间（秒），从场景启动起算 */
+    double t = (double)(clock_now_us() - g.sim_start_us) / 1e6;
+
+    char buf[512];
+    int off = snprintf(buf, sizeof(buf), "{\"lights\":[");
+    for (int i = 0; i < g.traffic_light_count; i++) {
+        const ScenarioTrafficLight* tl = &g.traffic_lights[i];
+        TrafficLightPhase ph = traffic_light_phase_at(t, tl->green_s,
+                                                       tl->yellow_s, tl->red_s,
+                                                       tl->phase_offset_s);
+        off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                        "%s{\"id\":%d,\"x\":%.2f,\"y_lane\":%.2f,"
+                        "\"state\":\"%s\",\"remain_s\":%.1f}",
+                        i > 0 ? "," : "",
+                        tl->id, tl->x, tl->y_lane,
+                        traffic_light_state_str(ph.state), ph.remain_s);
+        if (off >= (int)sizeof(buf) - 32) break;  /* 防溢出 */
+    }
+    off += snprintf(buf + off, sizeof(buf) - (size_t)off, "]}");
+    transport_publish(g.transport, "road/traffic_lights",
+                      (const uint8_t*)buf, (uint32_t)off + 1);
+}
+
 /* ── control/cmd 订阅回调 ──────────────────────────────────── */
 
 static void on_control_cmd(const Message* msg, void* user_data) {
@@ -554,6 +593,11 @@ static void* sim_thread(void* arg) {
             publish_road_geometry();
         }
 
+        /* Phase 2: 每帧发布 road/traffic_lights（红绿灯状态）。
+         * 有红绿灯时每 tick 都发（planning 需要实时状态做停车决策，10-50Hz 合适）。
+         * 无红绿灯时 publish_traffic_lights 内部直接 return，零开销。 */
+        publish_traffic_lights();
+
         /* ── 发布 vehicle/state（动态生成，覆盖实际 actor 数量）── */
         /* Buffer sizing: fixed header ~150 B + per-obstacle ~100 B (worst: "pedestrian")
          * × SIM_OBSTACLE_COUNT(16) ≈ 1750 B → 2048 is sufficient.
@@ -599,7 +643,7 @@ static void* sim_thread(void* arg) {
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
-static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", "road/geometry", NULL };
+static const char* s_outputs[] = { "vehicle/state", "sim/world_state", "sim/collision", "sim/tick", "road/geometry", "road/traffic_lights", NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
@@ -661,6 +705,11 @@ static int sim_init(MessageBus* bus, Transport* transport,
         g.curve_start_x  = scenario->road.curve_start_x;
         g.curve_length_m = scenario->road.curve_length_m;
         g.curve_offset_m = scenario->road.curve_offset_m;
+        /* 红绿灯（可选）：缺省字段全为 0 = 无灯，行为与之前完全一致 */
+        g.traffic_light_count = scenario->traffic_light_count;
+        for (int i = 0; i < scenario->traffic_light_count && i < SCENARIO_MAX_TRAFFIC_LIGHTS; i++) {
+            g.traffic_lights[i] = scenario->traffic_lights[i];
+        }
     }
 
     /* P0.1: 使用固定种子（保证确定性），在所有种子来源确定后只调用一次 */
@@ -720,6 +769,16 @@ static int sim_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, "road/geometry", ROAD_GEOMETRY_TYPE_ID);
     discovery_advertise(discovery, "road/geometry", ROAD_GEOMETRY_TYPE_ID, CAP_PUBLISHER, 1.0);
     publish_road_geometry();  /* init 时立即发布一次，确保订阅者启动时即有数据 */
+
+    /* Phase 2: 发布 road/traffic_lights — 红绿灯状态的唯一权威来源。
+     * planning 订阅此 topic 做红灯停车决策，monitor 透传到 FlowBoard 3D 可视化。
+     * 无红绿灯时 publish_traffic_lights 内部 return，但 advertise 仍注册
+     * （让 discovery 知道本节点是潜在发布者，有灯场景切换时无需重启）。 */
+    transport_advertise(transport, "road/traffic_lights", ROAD_TRAFFIC_LIGHTS_TYPE_ID);
+    discovery_advertise(discovery, "road/traffic_lights",
+                        ROAD_TRAFFIC_LIGHTS_TYPE_ID, CAP_PUBLISHER, FREQUENCY_HZ);
+    g.sim_start_us = clock_now_us();  /* 记录启动时刻，供相位计算用 */
+    publish_traffic_lights();  /* init 时立即发布一次 */
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "sim_world");

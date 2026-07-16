@@ -20,6 +20,7 @@
 #include "state_machine.h"
 #include "scenario_loader.h"
 #include "road_geometry.h"
+#include "traffic_light.h"
 #include "adas_msgs_gen.h"
 #include "coroutine_task.h"
 #undef LOG_TRACE
@@ -106,6 +107,17 @@ struct PlanningContext {
     double curve_start_x{0};
     double curve_length_m{0};
     double curve_offset_m{0};
+
+    /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，sim_world 发布）。
+     * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
+     * 红灯/黄灯时注入一面跨车道宽度的静止"墙"，绿灯时不注入——
+     * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
+#define TL_CACHE_MAX 4
+    double tl_x[TL_CACHE_MAX];         /* 停止线 x（世界坐标） */
+    double tl_y_lane[TL_CACHE_MAX];    /* 灯所在车道 y */
+    int    tl_state[TL_CACHE_MAX];     /* 0=green 1=yellow 2=red */
+    int    tl_count{0};
+    volatile int has_traffic_lights{0};
 
     int tid{0};  /* scheduler task id */
 
@@ -266,6 +278,65 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"curve_offset_m\":"))) sscanf(p + 17, "%lf", &g.curve_offset_m);
 }
 
+/* ── road/traffic_lights 订阅回调（Phase 2 红绿灯） ────────── */
+/* 从 sim_world 发布的 road/traffic_lights topic 获取红绿灯状态。
+ * JSON 格式: {"lights":[{"id":0,"x":100.0,"y_lane":-1.75,
+ *                         "state":"red","remain_s":12.3},...]}
+ * 解析每个灯的 x(停止线位置)、y_lane(车道)、state(green/yellow/red)。
+ * 缓存到 g.tl_x/tl_y_lane/tl_state，供 Frenet 障碍物注入逻辑读取。 */
+static void on_traffic_lights(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+
+    /* 查找 "lights":[ 数组 */
+    const char* arr = strstr(d, "\"lights\"");
+    if (!arr) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
+    arr = strchr(arr, '[');
+    if (!arr) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
+
+    /* 逐个解析 {"id":..,"x":..,"y_lane":..,"state":"..",...} */
+    int n = 0;
+    const char* p = arr;
+    while (n < TL_CACHE_MAX) {
+        p = strchr(p, '{');
+        if (!p) break;
+        const char* close = strchr(p, '}');
+        if (!close) break;
+
+        /* x: 停止线位置 */
+        double x = 0.0;
+        const char* px = strstr(p, "\"x\":");
+        if (px && px < close) sscanf(px + 4, "%lf", &x);
+
+        /* y_lane: 车道横向位置 */
+        double y_lane = -1.75;
+        const char* py = strstr(p, "\"y_lane\":");
+        if (py && py < close) sscanf(py + 9, "%lf", &y_lane);
+
+        /* state: green/yellow/red */
+        int state = 0;  /* default green */
+        const char* ps = strstr(p, "\"state\":");
+        if (ps && ps < close) {
+            const char* q = strchr(ps + 8, '"');
+            if (q) {
+                if (strncmp(q + 1, "red", 3) == 0) state = 2;
+                else if (strncmp(q + 1, "yellow", 6) == 0) state = 1;
+                /* green or unknown → 0 */
+            }
+        }
+
+        g.tl_x[n] = x;
+        g.tl_y_lane[n] = y_lane;
+        g.tl_state[n] = state;
+        n++;
+
+        p = close + 1;
+    }
+    g.tl_count = n;
+    g.has_traffic_lights = (n > 0) ? 1 : 0;
+}
+
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
 class PlanningTask : public FlowCoroTask {
@@ -339,9 +410,11 @@ protected:
             /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
 #ifdef HAVE_FRENET
             if (g.has_vstate) {
-                double ox[4], oy[4], ow[4], ol[4];
+                /* 障碍物数组扩容到 8：4 个 vehicle/state 障碍物 + 最多 4 个
+                 * 红绿灯虚拟停止线墙。红绿灯墙在红灯/黄灯时注入，绿灯时不注入。 */
+                double ox[8], oy[8], ow[8], ol[8];
                 int n_obs = 0;
-                for (int i = 0; i < 4; i++) {
+                for (int i = 0; i < 4 && n_obs < 8; i++) {
                     /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
@@ -352,6 +425,49 @@ protected:
                     ol[n_obs] = OBSTACLE_LENGTH_M;
                     n_obs++;
                 }
+
+                /* 红绿灯虚拟停止线墙注入：
+                 * 遍历缓存的灯，找前方最近的红/黄灯。若 ego 与停止线距离在
+                 * 刹停可行范围内，注入一面跨车道宽度的静止"墙"——
+                 * safety_control 现有 TTC/brake 逻辑直接对虚拟墙生效，免费复用。
+                 *
+                 * 刹停距离估算: d_brake = v² / (2*a) + 余量，a≈4 m/s²。
+                 * 黄灯判据: 仅当能安全刹停时注入（dx > min_stop_dist）；
+                 *           太近无法安全刹停时不注入（让车通过，避免急刹追尾）。 */
+                if (g.has_traffic_lights && n_obs < 8) {
+                    double v = g.ego_v;
+                    if (v < 0.0) v = 0.0;
+                    /* 刹停距离 = v²/(2*4) + 3m 安全余量；最小 5m 保证近距也能停 */
+                    double brake_dist = v * v / 8.0 + 3.0;
+                    if (brake_dist < 5.0) brake_dist = 5.0;
+                    /* 黄灯最小安全刹停距离：速度太低时用 3m */
+                    double min_yellow_stop = (v > 2.0) ? 3.0 : 0.0;
+
+                    for (int ti = 0; ti < g.tl_count && n_obs < 8; ti++) {
+                        if (g.tl_state[ti] == 0) continue;  /* 绿灯，不注入 */
+                        double dx_tl = g.tl_x[ti] - g.ego_x;
+                        if (dx_tl <= 0.0) continue;  /* 已过停止线 */
+                        if (dx_tl > 60.0) continue;  /* 太远，不注入 */
+
+                        if (g.tl_state[ti] == 2) {
+                            /* 红灯：在刹停距离内注入墙 */
+                            if (dx_tl > brake_dist + 5.0) continue;  /* 还很远，不急 */
+                        } else {
+                            /* 黄灯：仅当能安全刹停时注入（太近则通过） */
+                            if (dx_tl < min_yellow_stop) continue;
+                            if (dx_tl > brake_dist + 5.0) continue;
+                        }
+
+                        /* 注入虚拟墙：位置在停止线前 1m，宽度覆盖全路（8m > 6m OBS_MAX_ABS_Y），
+                         * 长度给薄墙 0.5m。vx=0 静止。 */
+                        ox[n_obs] = g.tl_x[ti] - 1.0;  /* 停止线前 1m */
+                        oy[n_obs] = 0.0;               /* 路中心 */
+                        ow[n_obs] = 8.0;                /* 跨双车道 */
+                        ol[n_obs] = 0.5;                /* 薄墙 */
+                        n_obs++;
+                    }
+                }
+
                 frenet_set_obstacles(g.frenet, ox, oy, ow, ol, n_obs);
             }
 #endif
@@ -478,7 +594,7 @@ void* planning_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", nullptr };
+static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", "road/traffic_lights", nullptr };
 static const char* s_outputs[] = { "planning/trajectory", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -587,6 +703,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
+    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, nullptr);
     transport_advertise(transport, "planning/trajectory", 0x3A7B1C2Du);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
@@ -594,6 +711,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/traffic_lights", 0x7E5C0FFEu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);

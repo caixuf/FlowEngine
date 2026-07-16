@@ -62,6 +62,12 @@ static struct {
     double road_curve_offset_m;
     volatile int has_road_geometry;
 
+    /* Phase 2: 红绿灯状态缓存（从 road/traffic_lights topic 获取，sim_world 发布）
+     * 直接缓存原始 JSON 文本，在拼装 scene.traffic_lights 时透传给 FlowBoard。
+     * 这样 monitor 不需要解析红绿灯语义，只做数据管道。 */
+    char   traffic_lights_json[512];
+    volatile int has_traffic_lights;
+
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
     char node_info_json[MAX_TOPO_NODES][2048];  /* 每个节点的原始 JSON（需能容纳最长节点的 self-description JSON） */
@@ -211,6 +217,21 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     if ((p = strstr(d, "\"lane_width\":")))     sscanf(p + 13, "%lf", &g.lane_width);
     if ((p = strstr(d, "\"lane_count\":")))     sscanf(p + 13, "%d",  &g.lane_count);
     g.has_road_geometry = 1;
+}
+
+/* Phase 2: road/traffic_lights 订阅 — 从 sim_world 获取红绿灯状态。
+ * 直接缓存原始 JSON 文本（{"lights":[...]}），在拼装 scene.traffic_lights 时
+ * 透传给 FlowBoard 3D 渲染。monitor 不解析红绿灯语义，只做数据管道。 */
+static void on_traffic_lights(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    /* 安全拷贝：确保 null 结尾，防止越界 */
+    size_t len = strlen(d);
+    if (len >= sizeof(g.traffic_lights_json)) len = sizeof(g.traffic_lights_json) - 1;
+    memcpy(g.traffic_lights_json, d, len);
+    g.traffic_lights_json[len] = '\0';
+    g.has_traffic_lights = 1;
 }
 
 static void on_fusion_latency(const Message* msg, void* user_data) {
@@ -466,6 +487,21 @@ static void export_dashboard_json(void) {
         fprintf(jf, "\"road\":{\"curve_start_x\":%.4f,\"curve_length_m\":%.4f,"
                 "\"curve_offset_m\":%.4f},",
                 g.road_curve_start_x, g.road_curve_length_m, g.road_curve_offset_m);
+    }
+
+    /* Phase 2: 红绿灯状态从 road/traffic_lights topic 获取，透传给 FlowBoard 3D。
+     * 缓存的 JSON 格式为 {"lights":[...]}，这里提取 [...] 数组部分输出为
+     * "traffic_lights":[...]，供 scene3d.js 直接迭代。 */
+    if (g.has_traffic_lights && g.traffic_lights_json[0] != '\0') {
+        const char* arr_start = strchr(g.traffic_lights_json, '[');
+        const char* arr_end   = strrchr(g.traffic_lights_json, ']');
+        if (arr_start && arr_end && arr_end > arr_start) {
+            fprintf(jf, "\"traffic_lights\":");
+            /* 直接写出原始数组内容（含方括号），保持 sim_world 发布的精度 */
+            size_t arr_len = (size_t)(arr_end - arr_start) + 1;
+            fwrite(arr_start, 1, arr_len, jf);
+            fprintf(jf, ",");
+        }
     }
 
     /* 障碍物（从 vehicle/state 动态读取，障碍物数量由 n_obs 决定） */
@@ -736,6 +772,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "fusion/latency", on_fusion_latency, NULL);
     transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
     transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
+    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, "flowengine/node_info", on_node_info, NULL);
     g.node_info_count = 0;
@@ -744,6 +781,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "vehicle/state",        0x1C0E5A7Eu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/traffic_lights",  0x7E5C0FFEu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
     /* Open IPC stats bridge for flowmond (publisher) */

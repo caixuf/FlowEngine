@@ -123,11 +123,11 @@ def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
     return edges
 
 
-def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict | None]:
+def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict | None, list]:
     """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
 
     Returns:
-        (criteria_dict, scenario_name, has_noa_route, road)
+        (criteria_dict, scenario_name, has_noa_route, road, traffic_lights)
 
     ``has_noa_route`` is True when the scenario defines a non-empty ``route``
     list, meaning the driving-mode state machine is expected to reach NOA
@@ -137,6 +137,11 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
     curve_length_m/curve_offset_m), or None for straight-road scenarios —
     used by score()/sample_metrics() to compute lane_error/road_edge_margin
     relative to the (possibly curved) road centerline instead of a fixed y=0.
+
+    ``traffic_lights`` is the scenario's optional "traffic_lights" list
+    (each entry: x, y_lane, red_s, yellow_s, green_s, phase_offset_s),
+    or [] for scenarios without signalized intersections — used by score()
+    to check red-light violations (ego crossing stop line during red phase).
     """
     pipeline = load_json(PIPELINE_JSON) or {}
     nodes = _pipeline_nodes(pipeline)
@@ -159,7 +164,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
         break
 
     if not scenario_file:
-        return {}, None, False, None
+        return {}, None, False, None, []
 
     scenario_path = Path(scenario_file)
     if not scenario_path.is_absolute():
@@ -167,7 +172,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
 
     scenario = load_json(scenario_path)
     if not isinstance(scenario, dict):
-        return {}, None, False, None
+        return {}, None, False, None, []
 
     criteria = scenario.get("pass_criteria", {})
     if not isinstance(criteria, dict):
@@ -177,7 +182,10 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
     road = scenario.get("road")
     if not isinstance(road, dict):
         road = None
-    return criteria, name, has_route, road
+    traffic_lights = scenario.get("traffic_lights", [])
+    if not isinstance(traffic_lights, list):
+        traffic_lights = []
+    return criteria, name, has_route, road, traffic_lights
 
 
 def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
@@ -308,6 +316,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     ego = scene.get("ego", {})
     obstacles = scene.get("obstacles", [])
     lane = scene.get("lane", {})
+    scn_lights = scene.get("traffic_lights", [])
 
     speed = float(vehicle.get("speed", ego.get("speed", 0.0)) or 0.0)
     x = float(vehicle.get("x", ego.get("x", 0.0)) or 0.0)
@@ -359,6 +368,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "obs_world": obs_world,
         "driver_mode": str(metrics.get("driver_mode", "") or ""),
         "route_lane": int(metrics.get("route_lane", 0) or 0),
+        "traffic_lights": scn_lights if isinstance(scn_lights, list) else [],
     }
 
 
@@ -421,7 +431,7 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
     return samples, proc.returncode or 0
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -543,6 +553,86 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         if lane_change_count < 1:
             warnings.append("NOA route defined but no lane change was observed during the run")
 
+    # ── 红绿灯违章检测 ──
+    # 当场景定义了 traffic_lights 且 pass_criteria.no_red_light_violation 为真时：
+    #   FAIL: ego 在红灯期间越过停止线（闯红灯）
+    #   WARN: ego 在绿灯期间不必要地长时间停留（误判/过度保守，planning 可能在
+    #         绿灯时仍注入了虚拟停止墙）
+    # 红绿灯状态来自 monitor 透传的 scene.traffic_lights（sim_world 真值发布）。
+    # 若某帧缺少状态数据，沿用上一已知状态（灯相位切换周期远大于采样间隔）。
+    scenario_lights = traffic_lights if traffic_lights else []
+    has_red_light_check = bool(criteria.get("no_red_light_violation", False))
+    red_light_violation = False
+    green_phase_max_stop_s = 0.0
+    has_signal_data = False
+
+    if has_red_light_check and scenario_lights:
+        for tl_def in scenario_lights:
+            if not isinstance(tl_def, dict):
+                continue
+            stop_x = float(tl_def.get("x", 0.0) or 0.0)
+
+            prev_ego_x = None
+            prev_state = "unknown"
+            green_stop_start_ts = None
+
+            for i, m in enumerate(series):
+                ego_x_i = m["x"]
+                ts_i = timestamps[i] if i < len(timestamps) else 0.0
+
+                # 从样本中查找对应红绿灯的当前状态（按 x 匹配同一盏灯）
+                curr_state = None
+                for s_tl in m.get("traffic_lights", []):
+                    if isinstance(s_tl, dict):
+                        s_x = float(s_tl.get("x", stop_x) or stop_x)
+                        if abs(s_x - stop_x) < 2.0:
+                            curr_state = str(s_tl.get("state", "") or "")
+                            has_signal_data = True
+                            break
+
+                # 缺失帧沿用上一已知状态
+                if curr_state is None:
+                    curr_state = prev_state
+
+                # 闯红灯检测：ego 从停止线前越到停止线后，且当前或上一帧灯为红
+                if prev_ego_x is not None:
+                    crossed = prev_ego_x < stop_x and ego_x_i >= stop_x
+                    if crossed and "red" in (prev_state, curr_state):
+                        red_light_violation = True
+
+                # 绿灯期间不必要停车检测：灯为绿、ego 尚未过停止线、车速极低
+                if curr_state == "green" and ego_x_i < stop_x and m["speed"] < 0.5:
+                    if green_stop_start_ts is None:
+                        green_stop_start_ts = ts_i
+                else:
+                    if green_stop_start_ts is not None:
+                        stop_dur = ts_i - green_stop_start_ts
+                        if stop_dur > green_phase_max_stop_s:
+                            green_phase_max_stop_s = stop_dur
+                        green_stop_start_ts = None
+
+                prev_ego_x = ego_x_i
+                prev_state = curr_state
+
+            # 样本序列结束时仍在绿灯期停车
+            if green_stop_start_ts is not None and len(timestamps) > 0:
+                stop_dur = timestamps[-1] - green_stop_start_ts
+                if stop_dur > green_phase_max_stop_s:
+                    green_phase_max_stop_s = stop_dur
+
+        if not has_signal_data:
+            warnings.append(
+                "red-light check enabled but no traffic_light state data in samples "
+                "(road/traffic_lights topic may not have been received by monitor)"
+            )
+        elif red_light_violation:
+            failures.append("red light violation: ego crossed stop line during red phase")
+        if green_phase_max_stop_s > 5.0:
+            warnings.append(
+                f"unnecessary stop during green: ego stopped {green_phase_max_stop_s:.1f}s "
+                f"while light was green (possible over-conservative planning)"
+            )
+
     steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:
         warnings.append(f"steer saturated often: {steer_saturation_ratio * 100:.0f}% samples")
@@ -656,6 +746,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "inference_topic_active": inference_topic_active,
         "inference_freq_hz": inference_freq,
         "shadow_delta_latest": shadow_delta,
+        "has_traffic_lights": bool(scenario_lights),
+        "red_light_violation": red_light_violation,
+        "green_phase_max_stop_s": green_phase_max_stop_s,
     }
     return failures, warnings, summary
 
@@ -676,18 +769,18 @@ def main() -> int:
         sample = load_json(args.json_file)
         samples = [sample] if sample else []
         returncode = 0
-        criteria, scenario_name, has_noa_route, road = load_scenario_criteria_from_pipeline()
+        criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
     else:
         with pipeline_scenario_override(args.scenario):
             samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.
-            criteria, scenario_name, has_noa_route, road = load_scenario_criteria_from_pipeline()
+            criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road)
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road, traffic_lights=traffic_lights)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():

@@ -4,7 +4,7 @@
 // scene3d.js — Three.js 3D scene module for ADAS visualization
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle } from './utils.js';
+import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
 
@@ -34,6 +34,7 @@ let _cam = null, _camLook = null, _camTarget = null, _camLookTarget = null;
 let _lidarCloud = null;
 let _lidarWorld = [];
 let _obsPool = [], _obsWorld = [];
+let _trafficLightPool = [], _trafficLightWorld = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
 let _composer = null;  /* EffectComposer 引用（Bloom 后处理），为 null 时直渲 */
@@ -414,6 +415,20 @@ function init3DScene() {
     _obsPool.push(obs);
   }
 
+  // ── Traffic light pool ──
+  // Pre-allocate up to 4 traffic lights (matches SCENARIO_MAX_TRAFFIC_LIGHTS).
+  // Each is a fixed-size mesh (pole+arm+housing+3 lamps); renderer toggles
+  // lamp emissive based on state {green,yellow,red} from scene data.
+  _trafficLightPool = [];
+  _trafficLightWorld = [];
+  for (var ti = 0; ti < 4; ti++) {
+    var tl = _buildTrafficLight();
+    tl.visible = false;
+    scene3d.add(tl);
+    _trafficLightPool.push(tl);
+    _trafficLightWorld.push(null);
+  }
+
   // ── LiDAR point cloud ──
   var lgeo = new THREE.BufferGeometry();
   var lpts = new Float32Array(900);
@@ -599,6 +614,34 @@ function _renderFrame() {
     }
   }
 
+  // ── Traffic lights: position from stored world coords, toggle lamp emissive ──
+  // state: 'green'→lamp[2] bright, 'yellow'→lamp[1] bright, 'red'→lamp[0] bright.
+  // Inactive lamps are dim (emissiveIntensity 0.05), active lamp bright (1.2).
+  if (_trafficLightPool && _trafficLightWorld) {
+    for (var tli2 = 0; tli2 < _trafficLightPool.length; tli2++) {
+      var tlm = _trafficLightPool[tli2];
+      var tlw = _trafficLightWorld[tli2];
+      if (tlw) {
+        tlm.position.set(tlw.x, 0, tlw.z);
+        tlm.visible = true;
+        // Map state → active lamp index: red=0, yellow=1, green=2
+        var activeIdx = 2;  // default green
+        if (tlw.state === 'red') activeIdx = 0;
+        else if (tlw.state === 'yellow') activeIdx = 1;
+        var lamps = tlm.userData.lamps;
+        if (lamps) {
+          for (var li2 = 0; li2 < lamps.length; li2++) {
+            if (lamps[li2] && lamps[li2].material) {
+              lamps[li2].material.emissiveIntensity = (li2 === activeIdx) ? 1.2 : 0.05;
+            }
+          }
+        }
+      } else {
+        tlm.visible = false;
+      }
+    }
+  }
+
   // ── LiDAR: use stored world points ──
   if (_lidarCloud && _lidarWorld && _lidarWorld.length) {
     var wl = _lidarWorld, pos = _lidarCloud.geometry.attributes.position.array;
@@ -664,6 +707,23 @@ function update3D() {
       } else { pos[i * 3] = _dr.lastX; pos[i * 3 + 1] = -2; pos[i * 3 + 2] = _dr.lastZ; }
     }
     _lidarCloud.geometry.attributes.position.needsUpdate = true;
+  }
+
+  // Traffic lights: read state from scene data (published by sim_world via
+  // monitor's scene.traffic_lights). Each entry: {id, x, y_lane, state, remain_s}.
+  // Convert ego-relative x → world x (same anchoring as obstacles).
+  if (_trafficLightPool && scn && scn.traffic_lights) {
+    var lights = scn.traffic_lights;
+    for (var tli = 0; tli < _trafficLightPool.length; tli++) {
+      if (tli < lights.length) {
+        var tl = lights[tli];
+        var wlx = _dr.lastX + (tl.x || 0);
+        var wlz = _dr.lastZ + (tl.y_lane || 0);
+        _trafficLightWorld[tli] = { x: wlx, z: wlz, state: tl.state || 'green' };
+      } else {
+        _trafficLightWorld[tli] = null;
+      }
+    }
   }
 }
 
