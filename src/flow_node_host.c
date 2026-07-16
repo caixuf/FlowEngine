@@ -42,6 +42,8 @@
 #include "scheduler.h"
 #include "config_manager.h"
 #include "adas_msgs_gen.h"
+#include "stats_bridge.h"
+#include "ipc_channel.h"
 
 static volatile int g_running = 1;
 static void sig_handler(int sig) { (void)sig; g_running = 0; }
@@ -180,13 +182,38 @@ int main(int argc, char** argv) {
              node_name, duration > 0 ? "timed" : "until-signal",
              plugin->version, plugin->description);
 
-    if (duration > 0) {
-        for (int t = 0; t < duration && g_running; t++) sleep(1);
+    /* ── stats bridge publisher: 定期上报本进程 bus stats ──────────
+     * 多进程模式下每个节点进程有独立 MessageBus，monitor_node 无法直接
+     * 读取。必须经 stats bridge IPC 上报，monitor_node 订阅聚合后写入
+     * dashboard JSON，否则 charts 恒为 0。source_name 用节点名区分。
+     * publisher 先 open（创建共享内存），monitor 的 subscriber 后连接。 */
+    IpcChannel* stats_ch = stats_bridge_publisher_open();
+    if (stats_ch) {
+        LOG_INFO("node_host", "stats bridge publisher opened (source=%s)", node_name);
     } else {
-        while (g_running) sleep(1);
+        LOG_WARN("node_host", "stats bridge publisher open failed (flowmond not running yet)");
+    }
+
+    /* 主循环：每秒唤醒一次，每 5 秒上报一次 stats */
+    if (duration > 0) {
+        for (int t = 0; t < duration && g_running; t++) {
+            sleep(1);
+            if (stats_ch && (t % 5) == 0) {
+                stats_bridge_publish(stats_ch, bus, node_name);
+            }
+        }
+    } else {
+        int t = 0;
+        while (g_running) {
+            sleep(1);
+            if (stats_ch && (t++ % 5) == 0) {
+                stats_bridge_publish(stats_ch, bus, node_name);
+            }
+        }
     }
 
     /* 优雅停止 */
+    if (stats_ch) { ipc_channel_close(stats_ch); stats_ch = NULL; }
     plugin->stop();
     sleep(1);
     plugin->cleanup();

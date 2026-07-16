@@ -625,10 +625,24 @@ static void* monitor_thread(void* arg) {
     (void)arg;
     pthread_setname_np(pthread_self(), "monitor");
     long period_us = (long)(1.0 / g.frequency_hz * 1e6);
+    /* stats bridge subscriber 重试计数器：多进程启动顺序不定，若 monitor
+     * 先于其它节点 publisher 启动，subscriber_open 返回 NULL。在主循环里
+     * 重试，直到连上其它进程创建的共享内存通道（限 120 周期，2Hz≈60s）。 */
+    int stats_sub_retry = 0;
 
     while (!g.should_stop) {
         usleep((unsigned long)period_us);
         if (g.should_stop) break;
+
+        /* 重试 stats bridge subscriber（每个周期试一次，连上即止） */
+        if (!g.stats_sub && stats_sub_retry < 120) {
+            stats_sub_retry++;
+            g.stats_sub = stats_bridge_subscriber_open(on_remote_stats, NULL);
+            if (g.stats_sub) {
+                ipc_channel_start(g.stats_sub);
+                LOG_INFO("monitor", "stats bridge subscriber opened on retry #%d", stats_sub_retry);
+            }
+        }
 
         /* 收集并导出仪表盘 JSON */
         export_dashboard_json();
