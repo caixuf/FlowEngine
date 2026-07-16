@@ -135,9 +135,9 @@ else()
     message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
-# control_node: PID 纵向/横向控制
-add_library(control_node SHARED control_node.c)
-target_link_libraries(control_node ${NODE_LINK_LIBS})
+# control_node: PID 纵向/横向控制 (FlowCoro 协程版)
+add_library(control_node SHARED control_node.cpp)
+target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++)
 
 # safety_control_node: safety envelope for control commands
 # Uses CoroutineTask (synchronous resume on bus delivery thread) instead of
