@@ -231,8 +231,18 @@ target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 add_library(slam_node SHARED slam_node.c)
 target_link_libraries(slam_node ${NODE_LINK_LIBS})
 
+# stereo_camera_node: 双目摄像头驱动节点（OAK-D left+depth → StereoFrame → sensor/stereo）
+# 真车视觉感知入口，为 perception 提供 RGB+深度输入。默认 dry-run 占位（生成模拟左图
+# + 中心近/边缘远模拟深度走完整链路），真实 OAK-D 通过 depthai 库经 HAVE_DEPTHAI 宏
+# 启用（板载 NPU 算深度，主机零 CPU 负担）。read_stereo_frame() 是硬件适配点，社区用户
+# 按自己方案（OAK-D NPU / OAK-D 原始图+OpenCV SGBM / DIY 双目 V4L2）改它即可。
+# 集成 depthai：find_package(depthai) + 链接 + target_compile_definitions(... HAVE_DEPTHAI)。
+# 编译依赖: adas_msgs_gen.h (StereoFrame 序列化)，随构建生成。
+add_library(stereo_camera_node SHARED stereo_camera_node.c)
+target_link_libraries(stereo_camera_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

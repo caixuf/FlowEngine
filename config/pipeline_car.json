@@ -69,6 +69,24 @@
       "params": "{\"enable\":1,\"publish_hz\":20,\"dry_run\":0,\"use_lidar\":1,\"use_imu\":1,\"algo\":\"dead_reckon\",\"initial_x\":0.0,\"initial_y\":0.0,\"initial_heading\":0.0}"
     },
     {
+      "name": "stereo_camera",
+      "library_path": "build/lib/libstereo_camera_node.so",
+      "auto_start": true,
+      "publish": [
+        {
+          "topic": "sensor/stereo",
+          "type": "StereoFrame",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 200
+          }
+        }
+      ],
+      "params": "{\"fps\":10,\"width\":320,\"height\":240,\"baseline_m\":0.075,\"fov_deg\":65.0,\"jpeg_quality\":70,\"enable\":1,\"dry_run\":0,\"device_id\":\"\"}"
+    },
+    {
       "name": "lidar_driver",
       "library_path": "build/lib/liblidar_driver_node.so",
       "auto_start": true,

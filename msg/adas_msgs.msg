@@ -81,6 +81,23 @@ struct Pose2D {
     uint32   source         # 来源标志：0=UNKNOWN, 1=GPS, 2=SLAM, 3=ODOMETRY
 }
 
+# 双目视觉帧（OAK-D / ZED / DIY 双目）
+# OAK-D 在板载 NPU 上算好深度，主机只收结果，零 CPU 负担。
+# 设计权衡：左图 JPEG 压缩（~10-30KB），深度图降采样到 80×60 float 数组
+# （80*60*4=19.2KB），单帧总计 <50KB，MessageBus 零拷贝下无压力。
+# 如果用 DIY 双目在主机上跑 SGBM，depth_data 仍填算好的深度，计算在节点内完成。
+struct StereoFrame {
+    uint32   width          # 图像宽度（像素）
+    uint32   height         # 图像高度（像素）
+    uint32   timestamp_us   # 采样时间戳（CLOCK_MONOTONIC，微秒）
+    uint32   left_jpeg_size # 左图 JPEG 数据有效字节数
+    uint32   depth_count    # 深度数据有效浮点数个数 (width/4 * height/4 降采样)
+    float    baseline_m     # 双目基线长度（米），OAK-D≈0.075, ZED2≈0.12
+    float    fov_deg        # 水平视场角（度）
+    uint8    left_jpeg[25600]   # 左图 JPEG 压缩数据（25600=25KB 上限，320×240 级别）
+    float    depth_data[4800]   # 深度图降采样数据（80×60=4800 个 float，单位米）
+}
+
 # ── 感知输出 ─────────────────────────────────────────────────
 
 # 嵌套结构体 — 被 ObstacleList 引用
