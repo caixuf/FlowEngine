@@ -50,7 +50,9 @@ namespace {
 #define STEER_FILTER_PREV  0.2     /* 低通滤波旧值权重 */
 #define LC_STABILIZE_S     1.0     /* 变道完成后保持变道增益的稳定期 (s) */
 #define LC_COMPLETE_THRESH 0.15    /* 变道完成横向偏差阈值 (m) — 收紧防振荡 */
-#define CONTROL_WHEELBASE_M 2.7
+/* 轴距 (m)：真车默认 2.7，RC 小车在 pipeline_car.json 里通过 params.wheelbase
+ * 覆盖为 0.25-0.4。这个宏只作为 g.wheelbase 的初值，运行时由配置注入。 */
+#define CONTROL_WHEELBASE_DEFAULT_M 2.7
 /* 控制环周期: 20Hz → 50ms。所有计时器累加步长使用此常量, 与实际循环频率保持一致。 */
 #define CONTROL_DT_S       0.05
 
@@ -163,6 +165,7 @@ struct ControlContext {
     /* 配置参数 */
     double cfg_kp{0}, cfg_ki{0}, cfg_kd{0};
     double cfg_cruise_speed{0};
+    double wheelbase{CONTROL_WHEELBASE_DEFAULT_M};  /* 轴距 (m)：真车 2.7，RC 小车 0.25-0.4 */
 
     /* 道路几何（Phase 2: 从 road/geometry topic 获取，全零 = 直道） */
     double curve_start_x{0};
@@ -178,7 +181,7 @@ ControlContext g;
 static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_mps2) {
     double speed = speed_mps;
     if (speed < 2.0) speed = 2.0;
-    double limit = atan(max_lateral_accel_mps2 * CONTROL_WHEELBASE_M / (speed * speed));
+    double limit = atan(max_lateral_accel_mps2 * g.wheelbase / (speed * speed));
     if (limit < g.steer_min_clamp) limit = g.steer_min_clamp;
     if (limit > 0.24) limit = 0.24;
     return limit;
@@ -938,6 +941,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     /* 默认 PID 参数 */
     g.cfg_kp = 800.0; g.cfg_ki = 50.0; g.cfg_kd = 100.0;
     g.cfg_cruise_speed = 12.0;
+    g.wheelbase = CONTROL_WHEELBASE_DEFAULT_M;
     g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
@@ -1011,6 +1015,7 @@ static int control_init(MessageBus* bus, Transport* transport,
         if ((p = strstr(params_json, "\"min_overtake_gap_cap\":")))       sscanf(p + 23, "%lf", &g.min_overtake_gap_cap);
         if ((p = strstr(params_json, "\"min_overtake_gap_speed_mult\":"))) sscanf(p + 30, "%lf", &g.min_overtake_gap_speed_mult);
         if ((p = strstr(params_json, "\"steer_min_clamp\":")))            sscanf(p + 18, "%lf", &g.steer_min_clamp);
+        if ((p = strstr(params_json, "\"wheelbase\":")))                  sscanf(p + 12, "%lf", &g.wheelbase);
         g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     }
 

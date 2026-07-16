@@ -241,8 +241,33 @@ target_link_libraries(slam_node ${NODE_LINK_LIBS})
 add_library(stereo_camera_node SHARED stereo_camera_node.c)
 target_link_libraries(stereo_camera_node ${NODE_LINK_LIBS})
 
+# waypoint_follower_node: Pure Pursuit 航点跟随规划器（L2 自主跟随，RC 小车用）
+# 替代 planning_node 为 RC 小车提供轻量规划能力。读取预录制 GPS 航点文件，用 Pure
+# Pursuit 算法跟踪航点，输出 planning/trajectory。遇前方障碍物自动减速（不做绕行，
+# 绕行交给 control/safety 限速）。planning_node 是为高速 NOA 设计的（Frenet+状态机），
+# 对 RC 小车（<5m/s，校园/公园）过重且参数不匹配，pipeline_car.json 里二选一。
+# 编译依赖: adas_msgs_gen.h (Localization/ObstacleList 反序列化)，随构建生成。
+add_library(waypoint_follower_node SHARED waypoint_follower_node.c)
+target_link_libraries(waypoint_follower_node ${NODE_LINK_LIBS})
+
+# stereo_vision_node: 双目视觉感知节点（StereoFrame 深度反投影 → DBSCAN → ObstacleList）
+# 订阅 stereo_camera_node 发布的 sensor/stereo，把 80×60 深度图反投影成 3D 点云，
+# DBSCAN 聚类后输出 ObstacleList 到 perception/obstacles。与 lidar_driver 互补：
+# LiDAR 测远距（8-60m），双目测近距稠密（0.5-8m）。RC 小车场景二选一即可。
+# 依赖 dbscan_cluster.h，随 libflowengine_core 提供。
+add_library(stereo_vision_node SHARED stereo_vision_node.c)
+target_link_libraries(stereo_vision_node ${NODE_LINK_LIBS})
+
+# actuator_pwm_node: RC 小车 PWM 执行器节点（control/cmd → PCA9685 I2C / GPIO PWM）
+# 替代 actuator_node 的 SocketCAN 方案。RC 小车用舵机+电调（PWM 信号），不接 CAN。
+# 通过 PCA9685 I2C-PWM 扩展板（¥10）或树莓派 GPIO 硬件 PWM 输出。backend 参数
+# 选 "pca9685" / "gpio" / "dry_run"。带看门狗：3s 无 cmd 强制 ESC 中位（防失控）。
+# I2C 打开失败自动降级 dry_run，不阻塞流水线。Linux 平台用 linux/i2c-dev.h。
+add_library(actuator_pwm_node SHARED actuator_pwm_node.c)
+target_link_libraries(actuator_pwm_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

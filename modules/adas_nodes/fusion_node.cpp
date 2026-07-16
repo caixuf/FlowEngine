@@ -6,13 +6,19 @@
  *   - 保留 MessageBuffer 时间对齐逻辑（message_buffer_find_nearest）
  *   - on_lidar/on_gps 回调仍 push 到 buf，但删除 cond_signal（协程订阅负责唤醒）
  *
- * 输入 topics: sensor/lidar, sensor/gps
+ * 输入 topics: sensor/lidar, sensor/gps, sensor/pose
  * 输出 topics: fusion/localization, fusion/latency
  *
  * 算法: EKF 5D 卡尔曼滤波 (ekf_fusion.c)
  *   状态向量: [x, y, v, heading, yaw_rate]
- *   LiDAR 观测: (x, y)
+ *   LiDAR 观测: (x, y)         — 仿真模式自车位置真值
  *   GPS 观测:   (speed, heading)
+ *   SLAM 观测:  (x, y, heading) — 来自 sensor/pose (Pose2D)，GPS 丢失场景接管定位
+ *
+ * 双源融合策略:
+ *   - 有 GPS 时: GPS 速度/航向 + LiDAR/SLAM 位置 → 主定位
+ *   - 无 GPS 时: SLAM Pose2D 全维更新（位置+航向）→ 接管定位
+ *   SLAM 的 cov_xx/cov_yy 用于动态调节 R 矩阵，发散的 SLAM 自动降权
  *
  * 采用 FlowCoroTask（线程池 resume），而非 CoroutineTask（同步 resume）：
  * EKF 计算 + 序列化 + transport_publish 单次 ~50-100μs，同步 resume 会在
@@ -69,6 +75,7 @@ struct FusionContext {
     /* 消息缓冲区 */
     MessageBuffer* lidar_buf{nullptr};
     MessageBuffer* gps_buf{nullptr};
+    MessageBuffer* pose_buf{nullptr};   /* sensor/pose (SLAM Pose2D) */
 
     /* 统计 */
     uint32_t fused_count{0};
@@ -96,15 +103,21 @@ static void on_gps(const Message* msg, void* user_data) {
     message_buffer_push(g.gps_buf, msg);
 }
 
+static void on_pose(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (g.pose_buf) message_buffer_push(g.pose_buf, msg);
+}
+
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
 class FusionTask : public FlowCoroTask {
 public:
     FusionTask(MessageBus* bus, Transport* transport,
                MessageBuffer* lidar_buf, MessageBuffer* gps_buf,
+               MessageBuffer* pose_buf,
                EkfFusion* ekf, LatencyTracker* lat_tracker)
         : FlowCoroTask(bus), transport_(transport),
-          lidar_buf_(lidar_buf), gps_buf_(gps_buf),
+          lidar_buf_(lidar_buf), gps_buf_(gps_buf), pose_buf_(pose_buf),
           ekf_(ekf), lat_tracker_(lat_tracker) {}
 
 protected:
@@ -115,7 +128,7 @@ protected:
             /* 替代 pthread_cond_timedwait(100ms)：100ms 超时作 watchdog，
              * 防止 lidar 停发时协程卡死。select_for 自动注入 cancel_token_，
              * stop() 可立即唤醒。 */
-            auto res = co_await select_for({"sensor/lidar", "sensor/gps"}, 100000);
+            auto res = co_await select_for({"sensor/lidar", "sensor/gps", "sensor/pose"}, 100000);
             (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
             if (should_stop()) break;
 
@@ -124,23 +137,42 @@ protected:
 
             uint64_t ref_ts = lidar_msg->timestamp_us;
 
-            /* 时间对齐: 找最近 GPS (50ms 窗口) */
-            const Message* gps_msg = message_buffer_find_nearest(gps_buf_, ref_ts, 50000);
+            /* 时间对齐: 找最近 GPS (50ms 窗口) + 最近 Pose2D (100ms 窗口) */
+            const Message* gps_msg  = message_buffer_find_nearest(gps_buf_,  ref_ts, 50000);
+            const Message* pose_msg = pose_buf_ ? message_buffer_find_nearest(pose_buf_, ref_ts, 100000) : nullptr;
 
             /* 类型安全访问 (C 宏版 msg_cast，与原 fusion_node.c 一致) */
             const LidarFrame* lidar = (const LidarFrame*)
                 _msg_cast_impl(lidar_msg, LIDARFRAME_TYPE_ID, sizeof(LidarFrame), "LidarFrame");
             const GpsData* gps = gps_msg ? (const GpsData*)
                 _msg_cast_impl(gps_msg, GPSDATA_TYPE_ID, sizeof(GpsData), "GpsData") : nullptr;
+            const Pose2D* pose = pose_msg ? (const Pose2D*)
+                _msg_cast_impl(pose_msg, POSE2D_TYPE_ID, sizeof(Pose2D), "Pose2D") : nullptr;
             if (!lidar) continue;
 
             /* ── EKF 预测 ── */
             ekf_fusion_predict(ekf_);
 
-            /* ── LiDAR 位置更新 ── */
-            ekf_fusion_update_lidar(ekf_, (double)lidar->x, (double)lidar->y, nullptr);
+            /* ── 位置更新 ──
+             * 真车模式: lidar->x/y 是障碍物点云的某个点（非自车），跳过；
+             *   此时优先用 SLAM Pose2D 的位置（cov 收敛时）。
+             * 仿真模式: lidar->x/y 是自车真值，照常用。
+             * 简化判定: 若有 Pose2D 且 converged，用 Pose2D 覆盖 LiDAR 位置。 */
+            if (pose && pose->converged) {
+                /* SLAM 全维更新（位置+航向），R 用 cov_xx/cov_yy 动态调权 */
+                double pose_cov = (double)pose->cov_xx + (double)pose->cov_yy;
+                if (pose_cov < 100.0) {  /* 协方差过大视为发散，跳过 */
+                    ekf_fusion_update_gps_full(ekf_,
+                        (double)pose->x, (double)pose->y,
+                        /* v 无观测，用 EKF 当前估计 */ ekf_->x[2],
+                        (double)pose->heading);
+                }
+            } else {
+                /* 仿真路径：LiDAR 位置真值 + GPS 速度/航向 */
+                ekf_fusion_update_lidar(ekf_, (double)lidar->x, (double)lidar->y, nullptr);
+            }
 
-            /* ── GPS 速度/航向更新 ── */
+            /* ── GPS 速度/航向更新（无论是否有 SLAM，GPS 总是高权速度源） ── */
             if (gps) {
                 double heading_rad = (double)gps->heading_deg * M_PI / 180.0;
                 ekf_fusion_update_gps(ekf_, (double)gps->speed_mps, heading_rad, nullptr);
@@ -220,6 +252,7 @@ private:
     Transport*     transport_;
     MessageBuffer* lidar_buf_;
     MessageBuffer* gps_buf_;
+    MessageBuffer* pose_buf_;
     EkfFusion*     ekf_;
     LatencyTracker* lat_tracker_;
 };
@@ -238,7 +271,7 @@ void* fusion_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "sensor/lidar", "sensor/gps", nullptr };
+static const char* s_inputs[]  = { "sensor/lidar", "sensor/gps", "sensor/pose", nullptr };
 static const char* s_outputs[] = { "fusion/localization", "fusion/latency", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾，供 init/start 引用 */
@@ -262,7 +295,8 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     /* 消息缓冲区 */
     g.lidar_buf = message_buffer_create("sensor/lidar", LIDARFRAME_TYPE_ID, 32, 5000000);
     g.gps_buf   = message_buffer_create("sensor/gps",   GPSDATA_TYPE_ID,    16, 5000000);
-    if (!g.lidar_buf || !g.gps_buf) return -1;
+    g.pose_buf  = message_buffer_create("sensor/pose",  POSE2D_TYPE_ID,     16, 5000000);
+    if (!g.lidar_buf || !g.gps_buf || !g.pose_buf) return -1;
 
     /* 延迟跟踪器 — 环形缓冲128样本 */
     memset(&g.lat_tracker, 0, sizeof(g.lat_tracker));
@@ -270,10 +304,12 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     /* 订阅输入 topics — 回调仅 push 到 buf，协程订阅负责唤醒 */
     transport_subscribe(transport, "sensor/lidar", on_lidar, nullptr);
     transport_subscribe(transport, "sensor/gps",   on_gps,   nullptr);
+    transport_subscribe(transport, "sensor/pose",  on_pose,  nullptr);
 
     /* Discovery 广告 */
     discovery_advertise(discovery, "sensor/lidar", LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "sensor/gps",   GPSDATA_TYPE_ID,   CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "sensor/pose",  POSE2D_TYPE_ID,    CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u, CAP_FUSION | CAP_PUBLISHER, 10.0);
     discovery_advertise(discovery, "fusion/latency",      0x1A7E9C01u, CAP_PUBLISHER, 2.0);
 
@@ -283,10 +319,10 @@ static int fusion_init(MessageBus* bus, Transport* transport,
 
     /* 构造协程任务 */
     g.task = std::make_unique<FusionTask>(bus, transport,
-                                          g.lidar_buf, g.gps_buf,
+                                          g.lidar_buf, g.gps_buf, g.pose_buf,
                                           &g.ekf, &g.lat_tracker);
 
-    LOG_INFO("fusion", "initialized (FlowCoro, EKF 5D, aligned LiDAR+GPS)");
+    LOG_INFO("fusion", "initialized (FlowCoro, EKF 5D, LiDAR+GPS+SLAM tri-source)");
     return 0;
 }
 
@@ -317,6 +353,7 @@ static void fusion_cleanup(void) {
     g.task.reset();
     if (g.lidar_buf) { message_buffer_destroy(g.lidar_buf); g.lidar_buf = nullptr; }
     if (g.gps_buf)   { message_buffer_destroy(g.gps_buf);   g.gps_buf   = nullptr; }
+    if (g.pose_buf)  { message_buffer_destroy(g.pose_buf);  g.pose_buf  = nullptr; }
     LOG_INFO("fusion", "cleanup done");
 }
 
@@ -331,7 +368,7 @@ NodePlugin s_plugin = {
     NODE_PLUGIN_API_VERSION,
     "fusion",
     "1.0.0",
-    "EKF 5D sensor fusion (LiDAR + GPS) [FlowCoro]",
+    "EKF 5D sensor fusion (LiDAR + GPS + SLAM Pose2D) [FlowCoro]",
     s_inputs,
     s_outputs,
     fusion_init,
