@@ -1021,7 +1021,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_trajectory, nullptr);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
-    transport_advertise(transport, "control/raw_cmd", 0x2D95C6D3u);
+    transport_advertise(transport, "control/raw_cmd", CONTROLRAW_TYPE_ID);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
@@ -1031,7 +1031,7 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "control/raw_cmd", 0x2D95C6D3u,
+    discovery_advertise(discovery, "control/raw_cmd", CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);
 
     g.task = std::make_unique<ControlTask>(bus, transport);

@@ -5,7 +5,13 @@
  * 驱动真实 ESC（电子调速器）+ 转向舵机。
  *
  * 这是 FlowEngine 接入真实硬件的最后一环：
- *   control_node (PID/Stanley) → control/raw_cmd → [actuator_node] → CAN 总线 → ESC/舵机
+ *   control_node → control/raw_cmd → safety_control_node (限幅) → control/cmd
+ *     → [actuator_node] → CAN 总线 → ESC/舵机
+ *
+ * 注意：订阅的是 safety_control_node 限幅后的 control/cmd（ControlCmd），
+ * 不是 control_node 原始的 control/raw_cmd（ControlRaw）。safety_control_node
+ * 负责 TTC/行人/横向交叉防护和限幅，真车上必须经过它，否则裸 raw_cmd 直发
+ * CAN 无任何安全闸。
  *
  * 设计要点：
  *   - SocketCAN 是 Linux 内核标准 CAN 抽象：把 CAN 控制器映射成网络接口
@@ -18,7 +24,7 @@
  *     日志输出模式，不阻塞流水线其余节点运行。
  *
  * 话题契约：
- *   输入: control/raw_cmd  (ControlRaw 二进制，control_node 发布)
+ *   输入: control/cmd  (ControlCmd 二进制，safety_control_node 限幅后发布)
  *   无输出 topic（输出是物理 CAN 帧）
  *
  * 典型 pipeline.json 配置:
@@ -218,41 +224,40 @@ static void encode_steering_frame(float steering, uint32_t seq, uint8_t* out) {
     out[2] = seq & 0xFF; out[3] = (seq >> 8) & 0xFF;
 }
 
-/* ── 订阅回调：收到 control/raw_cmd ─────────────────────────── */
+/* ── 订阅回调：收到 control/cmd（safety_control 限幅后） ─────── */
 
-static void on_control_raw_cmd(const Message* msg, void* user_data) {
+static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !g.enabled) return;
     if (msg->data_size == 0) return;
 
-    /* 二进制路径：ControlRaw 反序列化 */
-    ControlRaw raw;
-    if (ControlRaw_deserialize(&raw, (const uint8_t*)msg->data, msg->data_size) != 0) {
-        LOG_WARN("actuator", "ControlRaw deserialize failed (size=%u)", msg->data_size);
+    /* 二进制路径：ControlCmd 反序列化（safety_control_node 发布） */
+    ControlCmd cmd;
+    if (ControlCmd_deserialize(&cmd, (const uint8_t*)msg->data, msg->data_size) != 0) {
+        LOG_WARN("actuator", "ControlCmd deserialize failed (size=%u)", msg->data_size);
         return;
     }
 
     g.cmds_received++;
-    g.last_seq = raw.seq;
+    g.last_seq = cmd.seq;
 
-    /* 紧急停车：直接发 e_stop 帧，忽略油门/转向 */
-    int e_stop = 0;
-    if (raw.brake > 0.95f && raw.throttle < 0.05f) e_stop = 1;
+    /* 紧急停车：ControlCmd 自带 emergency_stop 标志（safety_control 设置） */
+    int e_stop = cmd.emergency_stop ? 1 : 0;
 
-    /* 编码 + 发送油门/刹车帧 */
+    /* 编码 + 发送油门/刹车帧（gear 直接用 ControlCmd 的 gear 字段） */
     uint8_t tbuf[8];
-    encode_throttle_frame(raw.throttle, raw.brake, 1 /* DRIVE */, e_stop, tbuf);
+    encode_throttle_frame(cmd.throttle, cmd.brake, (int)cmd.gear, e_stop, tbuf);
     can_send(g.can_throttle_id, tbuf, 8);
 
     /* 编码 + 发送转向帧 */
     uint8_t sbuf[4];
-    encode_steering_frame(raw.steering, raw.seq, sbuf);
+    encode_steering_frame(cmd.steering, cmd.seq, sbuf);
     can_send(g.can_steering_id, sbuf, 4);
 
     /* 周期性日志（避免刷屏，每 50 条打一次） */
     if (g.cmds_received % 50 == 1) {
-        LOG_INFO("actuator", "cmd #%u thr=%.2f brk=%.2f steer=%.3f → CAN sent=%lu fail=%lu",
-                 raw.seq, raw.throttle, raw.brake, raw.steering,
+        LOG_INFO("actuator", "cmd #%u thr=%.2f brk=%.2f steer=%.3f gear=%d estop=%d → CAN sent=%lu fail=%lu",
+                 cmd.seq, cmd.throttle, cmd.brake, cmd.steering, (int)cmd.gear, e_stop,
                  (unsigned long)g.frames_sent, (unsigned long)g.frames_failed);
     }
 }
@@ -329,7 +334,7 @@ static void parse_string(const char* json, const char* key, char* out, size_t ou
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "control/raw_cmd", NULL };
+static const char* s_inputs[]  = { "control/cmd", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -384,9 +389,9 @@ static int actuator_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* 订阅 control/raw_cmd */
-    transport_subscribe(transport, "control/raw_cmd", on_control_raw_cmd, NULL);
-    discovery_advertise(discovery, "control/raw_cmd", 0x871712d1u, CAP_SUBSCRIBER, 0);
+    /* 订阅 control/cmd（safety_control_node 限幅后的安全指令） */
+    transport_subscribe(transport, "control/cmd", on_control_cmd, NULL);
+    discovery_advertise(discovery, "control/cmd", CONTROLCMD_TYPE_ID, CAP_SUBSCRIBER, 0);
 
     LOG_INFO("actuator", "initialized: if=%s thr_id=0x%03X steer_id=0x%03X "
              "thr_scale=%.0f steer_scale=%.0f bitrate=%d %s",

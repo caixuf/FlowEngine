@@ -27,8 +27,8 @@
 
 namespace {
 
-constexpr uint32_t CONTROL_RAW_TYPE_ID = 0x2D95C6D3u;
-constexpr uint32_t CONTROL_CMD_TYPE_ID = 0x2D95C6D2u;
+constexpr uint32_t CONTROL_RAW_TYPE_ID = 0x871712d1u;  /* CONTROLRAW_TYPE_ID (adas_msgs_gen.h) */
+constexpr uint32_t CONTROL_CMD_TYPE_ID = 0x2D95C6D2u;  /* CONTROLCMD_TYPE_ID (adas_msgs_gen.h) */
 constexpr uint32_t VEHICLE_STATE_TYPE_ID = 0x1C0E5A7Eu;
 
 struct ControlCmd {

@@ -250,6 +250,7 @@ set(ALGORITHM_SOURCES
     src/algorithms/kalman_tracker.c
     src/algorithms/nuscenes_loader.c
     src/algorithms/nmea_parser.c
+    src/algorithms/serial_port.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────

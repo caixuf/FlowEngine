@@ -197,8 +197,24 @@ target_link_libraries(flowmond_node ${NODE_LINK_LIBS})
 add_library(actuator_node SHARED actuator_node.c)
 target_link_libraries(actuator_node ${NODE_LINK_LIBS})
 
+# lidar_driver_node: 真实 LiDAR 驱动节点（点云 → DBSCAN → ObstacleList）
+# 真车感知入口，替代仿真用的 perception_node（后者依赖 vehicle/state 真值）。
+# 直接读串口点云 → DBSCAN 聚类 → 发布 perception/obstacles。无硬件时自动降级为
+# dry-run（生成模拟点云走完整链路）。read_lidar_frame() 是硬件适配点，社区用户
+# 按自己 LiDAR 协议（RPLIDAR/速腾浦/Velodyne）改它即可。
+# 依赖 serial_port.h (POSIX termios)、dbscan_cluster.h，均随 libflowengine_core 提供。
+add_library(lidar_driver_node SHARED lidar_driver_node.c)
+target_link_libraries(lidar_driver_node ${NODE_LINK_LIBS})
+
+# gps_driver_node: 真实 GPS 串口驱动节点（NMEA 0183 → GpsData → sensor/gps）
+# 真车定位入口，替代仿真用的 sensor_model_node（后者从 vehicle/state 真值加噪声）。
+# 从串口读 NMEA → nmea_parser 解析 → GpsData 序列化发布。无硬件时自动降级为 dry-run。
+# 依赖 serial_port.h (POSIX termios)、nmea_parser.h，均随 libflowengine_core 提供。
+add_library(gps_driver_node SHARED gps_driver_node.c)
+target_link_libraries(gps_driver_node ${NODE_LINK_LIBS})
+
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node
+install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
