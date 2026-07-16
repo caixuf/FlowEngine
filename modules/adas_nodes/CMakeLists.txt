@@ -95,9 +95,9 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 add_library(fusion_node SHARED fusion_node.cpp)
 target_link_libraries(fusion_node ${NODE_LINK_LIBS} stdc++)
 
-# perception_node: DBSCAN 感知 + 传感器仿真
-add_library(perception_node SHARED perception_node.c)
-target_link_libraries(perception_node ${NODE_LINK_LIBS})
+# perception_node: DBSCAN 感知 + 传感器仿真 (FlowCoro 协程版)
+add_library(perception_node SHARED perception_node.cpp)
+target_link_libraries(perception_node ${NODE_LINK_LIBS} stdc++)
 
 # sensor_model_node: 噪声/FOV/遮挡传感器模型
 add_library(sensor_model SHARED sensor_model_node.c)
