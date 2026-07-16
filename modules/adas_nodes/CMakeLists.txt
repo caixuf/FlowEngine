@@ -109,7 +109,9 @@ target_link_libraries(sensor_model ${NODE_LINK_LIBS})
 add_library(sim_world SHARED sim_world_node.c)
 target_link_libraries(sim_world ${NODE_LINK_LIBS})
 
-# planning_node: Frenet 轨迹规划（需要 C++ 运行时的 frenet_bridge）
+# planning_node: Frenet 轨迹规划 (FlowCoro 协程版)
+# 采用 CoroutineTask 同步 resume，与 fusion/perception/safety_control 一致；
+# 仅需 stdc++（子项目已 include flowcoro 头文件目录）。
 find_library(FRENET_BRIDGE
     NAMES frenet_bridge
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
@@ -118,7 +120,7 @@ find_library(FRENET_PLANNER
     NAMES frenet_planner
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
-add_library(planning_node SHARED planning_node.c)
+add_library(planning_node SHARED planning_node.cpp)
 if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_link_libraries(planning_node ${NODE_LINK_LIBS}
         ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++)
@@ -129,7 +131,7 @@ if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_compile_definitions(planning_node PRIVATE HAVE_FRENET)
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")
 else()
-    target_link_libraries(planning_node ${NODE_LINK_LIBS})
+    target_link_libraries(planning_node ${NODE_LINK_LIBS} stdc++)
     message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
