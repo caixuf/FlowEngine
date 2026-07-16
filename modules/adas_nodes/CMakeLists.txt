@@ -89,9 +89,11 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 
 # ── 节点插件 ──────────────────────────────────────────────────
 
-# fuse_node: EKF 5D 传感器融合
-add_library(fusion_node SHARED fusion_node.c)
-target_link_libraries(fusion_node ${NODE_LINK_LIBS})
+# fuse_node: EKF 5D 传感器融合 (FlowCoro 协程版)
+# 采用 CoroutineTask 同步 resume，与 safety_control_node 一致；仅需 stdc++，
+# 无需 FLOWCORO_INTEGRATION/flowcoro 库（子项目已 include flowcoro 头文件目录）。
+add_library(fusion_node SHARED fusion_node.cpp)
+target_link_libraries(fusion_node ${NODE_LINK_LIBS} stdc++)
 
 # perception_node: DBSCAN 感知 + 传感器仿真
 add_library(perception_node SHARED perception_node.c)
