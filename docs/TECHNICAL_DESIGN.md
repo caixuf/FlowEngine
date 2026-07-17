@@ -156,7 +156,7 @@ CMakeLists.txt
 ├── 静态库：flowengine_core（所有 src/core/*.c）
 ├── 可执行文件：flow_bus, flow_coro, flow_ipc,
 │              flow_bag, flowmond, flowctl, launcher, flow_launcher, benchmark
-├── 共享库插件：example_task, example_process, cpp_example_task,
+├── 共享库插件：example_task, example_process, simple_cpp_task,
 │              reactive_task, flowcoro_task
 └── CTest 测试条目
 ```
@@ -199,28 +199,29 @@ CMakeLists.txt
 
 ## 10. 监控与可视化架构
 
-FlowEngine 提供两条可视化链路，但当前仅**文件桥接**完全可用：
+FlowEngine 可视化由统一的 C 监控守护进程 flowmond（`src/flowmond.c`）提供，同时启用
+IPC 桥接（首选）与文件桥接（回退）两条数据链路，按可用性自动回退。
 
-### 10.1 文件桥接（当前唯一可用链路）
+### 10.1 文件桥接（回退链路）
 
 ```
 flow_launcher (业务/仿真节点)
   └─ monitor 任务 (10Hz) 原子写入 /tmp/flow_topology.json
         │  (bus/topic 统计 + 车辆遥测 + 3D scene{ego, obstacles, lidar})
         ▼
-flowboard_server.py (Python HTTP/SSE, 端口 8800)
+flowmond (C HTTP/SSE, 端口 8800) ← dashboard_file_watcher_fn 轮询
         │
         ▼
 FlowBoard Dashboard (浏览器, Three.js 3D + Canvas 2D + D3 拓扑)
 ```
 
 - 数据通过`tmp + rename`原子写入，避免读半截脏数据
-- 桥接层使用 `ThreadingHTTPServer`，不被 SSE 长连接饿死
+- flowmond 多连接 HTTP 服务器，不被 SSE 长连接饿死
 - 前端三态显示：LIVE / STALE / OFFLINE
 
 ### 10.2 flowmond（IPC 统计聚合）
 
-`flow_launcher` 创建自己的进程内 `MessageBus`，与 `flow_launcher` 等业务节点的总线**不共享**。
+`flowmond` 创建自己的进程内 `MessageBus`，与 `flow_launcher` 等业务节点的总线**不共享**。
 跨进程 topic 统计聚合通过 `stats_bridge` IPC 通道实现（`include/stats_bridge.h` / `src/core/stats_bridge.c`）。
 业务进程通过 `stats_bridge_publish()` 每 5 秒发布 TopicStats 快照，flowmond 通过
 `stats_bridge_subscriber_open()` 订阅并聚合。仪表盘 JSON 跨进程传输通过 `dashboard_bridge` IPC 通道实现（`src/core/dashboard_bridge.c`）。

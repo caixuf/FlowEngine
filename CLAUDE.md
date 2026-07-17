@@ -160,18 +160,19 @@ return ERR_INVALID_PARAM;  // 替代 return -1
 
 详见 [可视化架构](docs/VISUALIZATION_ARCHITECTURE.md)。
 
-**主链路（文件桥接，默认）：**
+可视化由统一的 C 监控守护进程 **flowmond**（`src/flowmond.c` → `build/bin/flowmond`）提供，
+内置 HTTP 仪表盘，同时启用两条等价数据链路，按可用性自动回退：
+
 ```
-monitor_node → 10Hz 写 /tmp/flow_topology.json → flowboard_server.py :8800 → 浏览器
+monitor_node → 10Hz 写 /tmp/flow_topology.json → flowmond :8800 → 浏览器 (文件桥接回退)
+monitor_node → stats_bridge / dashboard_bridge → IPC SHM → flowmond :8800 → 浏览器 (IPC 桥接)
 ```
 
-**辅助链路（flowmond IPC 桥接）：**
-```
-monitor_node → stats_bridge / dashboard_bridge → IPC SHM → flowmond :8800 → 浏览器
-```
+- 前端 `tools/flowboard/index.html` 由 flowmond 通过 `--html-path` 加载并托管。
+- `modules/adas_nodes/flowmond_node.cpp` 是 flowmond 的 `NodePlugin` 包装版，可作节点插件在 pipeline 内运行。
+- 启动：`./build/bin/flowmond --html-path tools/flowboard/index.html`（或通过 `scripts/demo.sh`，已改为调用 flowmond）。
 
 | 组件 | 端口 | 说明 |
 |------|------|------|
-| `flowboard_server.py` | 8800 | 默认仪表盘：读取 JSON 文件，HTTP/SSE 推送 |
-| `flowmond` (C) | 8800 | 可选：IPC 统计聚合 + 拓扑发现 + 自动重连 |
+| `flowmond` (C) | 8800 | HTTP 仪表盘：IPC 桥接（首选）+ 文件桥接（`/tmp/flow_topology.json` 回退）+ 自动重连 |
 | `foxglove_bridge.py` | 8765 | Foxglove Studio 3D 桥接 |

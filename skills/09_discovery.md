@@ -89,6 +89,7 @@ bash scripts/fullstack_demo.sh
 
 > ⚠️ **实现状态提示**：Discovery 模块的 UDP 组播协议和拓扑追踪功能已实现，
 > 但**基于 Discovery 的跨进程 topic 数据转发（IPC/TCP bridge）当前未实现**。
-> 因此 `flowmond` 等监控节点虽然能通过 Discovery 发现业务节点，但无法获取
-> 业务节点内部的 topic 统计数据。当前可用的跨进程监控链路为"状态文件 +
-> `flowboard_server.py`"，详见 `docs/VISUALIZATION_ARCHITECTURE.md`。
+> 因此 `flowmond` 等监控节点虽然能通过 Discovery 发现业务节点，但不通过 Discovery
+> 携带 topic 统计数据。flowmond 改由两条独立链路获取统计：(1) `stats_bridge` /
+> `dashboard_bridge` IPC 通道订阅业务进程统计；(2) 轮询 monitor 节点写出的
+> `/tmp/flow_topology.json` 作为回退。详见 `docs/VISUALIZATION_ARCHITECTURE.md`。

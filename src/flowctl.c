@@ -487,8 +487,8 @@ static int cmd_dashboard(void) {
     printf("  API:    /api/topology  /api/stream\n\n");
     printf("Run in another terminal:\n");
     printf("  ./build/bin/flow_launcher config/pipeline.json --duration 30 &\n");
-    printf("  python3 tools/flowboard_server.py --json-file $FLOWENGINE_STATE_FILE\n");
-    printf("  (default: %s)\n", FLOWENGINE_DEFAULT_STATE_FILE);
+    printf("  ./build/bin/flowmond --html-path tools/flowboard/index.html\n");
+    printf("  (state file: %s)\n", FLOWENGINE_DEFAULT_STATE_FILE);
     printf("\nThen open http://localhost:8800 in browser.\n");
     return 0;
 }

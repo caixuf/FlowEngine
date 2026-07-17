@@ -190,9 +190,10 @@ jobs:
           lcov --remove coverage.info '/usr/*' '*/_deps/*' '*/build/*' --output-file coverage.info --ignore-errors unused,empty
           lcov --list coverage.info --ignore-errors unused
 
-  # ── Visualization layer (FlowBoard) tests ──────────────────
-  # Tests the Python dashboard server + data-contract without needing the full
-  # C pipeline. Runs in --demo mode so it is fast and deterministic in CI.
+  # ── Visualization layer (flowmond) + algorithm regression ──
+  # Builds flowmond (the C dashboard daemon that replaced flowboard_server.py)
+  # and runs the pytest suite under tools/tests/ (control-node curve-fallback
+  # regression etc.). The flowmond HTTP API is smoke-tested directly.
   viz:
     runs-on: ubuntu-24.04
     steps:
@@ -201,21 +202,26 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dev dependencies
+      - name: Install dependencies
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libcjson-dev
           python -m pip install --upgrade pip -q
           pip install -q -r tools/tests/requirements-dev.txt
-      - name: Run FlowBoard tests (normalize + HTTP + contract)
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build flowmond
+        run: cmake --build build --target flowmond -j$(nproc)
+      - name: Algorithm regression tests (pytest)
         run: python -m pytest tools/tests -v
-      - name: Server smoke test (--demo)
+      - name: flowmond smoke test
         run: |
-          python3 tools/flowboard_server.py --demo --port 8811 --log-level warning &
+          ./build/bin/flowmond --port 8811 --html-path tools/flowboard/index.html &
           SRV=$!
           sleep 2
           curl -sf http://localhost:8811/api/health | tee /tmp/health.json
           echo
           curl -sf http://localhost:8811/api/topology > /tmp/topo.json
-          python3 -c "import json;d=json.load(open('/tmp/topo.json'));assert d['source']=='demo';assert len(d['nodes'])>0;print('✓ demo topology OK')"
           kill $SRV 2>/dev/null || true
 
   # ── Nightly long-running suite (stability + benchmark) ─────

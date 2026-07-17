@@ -16,24 +16,22 @@ flow_launcher (业务进程)
   └─ monitor 任务每 1s 原子写入 /tmp/flow_topology.json
         │  (discovery + bus/latency/topic 统计 + vehicle 遥测)
         ▼
-flowboard_server.py (HTTP 桥接)
-  ├─ file_watcher 线程轮询 json → 归一化为 FlowBoard 模型
+flowmond (C 监控守护进程, HTTP :8800)
+  ├─ dashboard_file_watcher 线程轮询 json → 归一化为 FlowBoard 模型
   ├─ GET /api/topology  一次性快照
   └─ GET /api/stream    SSE，每 1s 推一帧
         │
         ▼
-flowboard/ (浏览器)
+flowboard/index.html (浏览器)
   ├─ doConnect(): fetch /api/topology → startSSE()
   └─ 连接失败重试 3 次 → setConnStatus('dead','● offline') → doSimulate()
 ```
 
-### 1.2 真正的根因：HTTP 服务器是**单线程**的
+### 1.2 真正的根因：HTTP 桥接曾长期是**单线程**的
 
-`flowboard_server.py` 用的是 `http.server.HTTPServer`，它继承自
-`socketserver.TCPServer`，**没有** `ThreadingMixIn`，因此一次只能处理一个请求。
-
-而 `/api/stream` 的 SSE handler 会在一个循环里**阻塞长达 5 分钟**（每秒推一帧、
-共 300 次）。于是：
+历史上由 Python 桥接（`http.server.HTTPServer`，无 `ThreadingMixIn`）承担可视化，
+一次只能处理一个请求。`/api/stream` 的 SSE handler 会在一个循环里**阻塞长达 5 分钟**
+（每秒推一帧、共 300 次）。于是：
 
 - 浏览器 A 打开面板 → 建立 SSE 长连接 → 服务器唯一的工作线程被这条连接**独占**。
 - 此时任何其它请求都排不上队：
@@ -47,6 +45,8 @@ flowboard/ (浏览器)
 
 这就是"又出现了、鲁棒性太差"的本质——**架构缺陷**，不是偶发。任何一次页面刷新
 或网络抖动都可能触发，且一旦触发面板就悄悄切到模拟数据，让人误以为链路还活着。
+后续用 C 监控守护进程 flowmond（`src/flowmond.c`，`monitor_server` 多线程连接模型）
+取代该 Python 桥接，从根上消除单线程独占问题。
 
 ### 1.3 次要设计问题
 
@@ -55,12 +55,12 @@ flowboard/ (浏览器)
 | SSE 循环用"迭代次数"（300 次）当超时，而非墙钟时间 | 卡顿时长不可控 |
 | 面板把"服务器可达但数据陈旧"和"服务器不可达"混为一谈 | 无法区分是 e2e 停了还是桥接挂了 |
 | 失败后**静默**切换到 `doSimulate()` 假数据 | 掩盖真实故障，误导排查 |
-| 文档（VISUALIZATION_ARCHITECTURE）写的是 `flowmond` 守护进程，实际脚本用的是 `flowboard_server.py` | 两套设计并存、互相矛盾 |
+| 文档（VISUALIZATION_ARCHITECTURE）写的是 `flowmond` 守护进程，实际脚本用的是 Python 桥接 | 两套设计并存、互相矛盾（已由 flowmond 统一取代，矛盾消除） |
 
 > 关于 `flowmond`：它创建自己的**进程内** `message_bus`，与 `flow_launcher` 不共享总线，
-> 因此拿不到业务节点的 topic 统计。跨进程聚合需要 IPC/TCP 桥接，当前未实现。
-> 所以**实际可用**的可视化链路是"状态文件 + flowboard_server.py"。本设计以此为准，
-> 并在文档中消除矛盾。
+> 因此历史上拿不到业务节点的 topic 统计。现已通过两条链路解决：(1) `stats_bridge` /
+> `dashboard_bridge` IPC 通道订阅业务进程统计；(2) `dashboard_file_watcher_fn` 线程
+> 轮询 monitor 节点写出的 `/tmp/flow_topology.json` 作为回退。本设计以此为准。
 
 ---
 
@@ -68,17 +68,18 @@ flowboard/ (浏览器)
 
 ### 2.1 根因修复 —— 服务器多线程化
 
-`HTTPServer` → `ThreadingHTTPServer`（Python 3.7+ 标准库自带）。每个连接一个线程，
-SSE 长连接不再阻塞快照/重连请求。这是**一行级**的根因修复。
+用 C 监控守护进程 flowmond（`src/flowmond.c`，内置 `monitor_server`）取代单线程
+Python 桥接。flowmond 的 HTTP 服务器原生支持多连接并发，SSE 长连接不再阻塞
+快照/重连请求，从架构上根除单线程独占问题。
 
 ### 2.2 韧性增强
 
 - **SSE 心跳 + 墙钟超时**：改用墙钟计时，并周期性发送 `: keep-alive` 注释帧，
   让代理/浏览器不会误判连接死亡。
-- **数据新鲜度**：状态文件带 `timestamp`，服务器在 `/api/topology`、`/api/stream`
+- **数据新鲜度**：状态文件带 `timestamp`，flowmond 在 `/api/topology`、`/api/stream`
   中附带 `stale`（数据是否超过阈值未更新）字段，并新增 `GET /api/health`。
-- **写-读竞态**：e2e 已经"写临时文件 + `rename`"原子落盘；服务器 `JSONDecodeError`
-  时跳过本轮（沿用），避免读到半截文件。
+- **写-读竞态**：e2e 已经"写临时文件 + `rename`"原子落盘；flowmond 解析失败时
+  跳过本轮（沿用），避免读到半截文件。
 
 ### 2.3 前端三态化
 
@@ -160,7 +161,7 @@ e2e monitor 任务在状态 JSON 的 `metrics` 下新增 `scene`：
 ## 四、实施顺序
 
 1. 文档（本文件）。
-2. offline 根因修复：`flowboard_server.py` 多线程化 + 新鲜度/health。
+2. offline 根因修复：flowmond 多连接化 + 新鲜度/health。
 3. 前端三态化：`flowboard/`（ES modules）。
 4. e2e 真实场景：`flow_launcher` 障碍物/横向/ACC/LiDAR + 导出 `scene`。
 5. 3D 视图渲染真实 `scene`。

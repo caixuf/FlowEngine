@@ -1,4 +1,3 @@
-# Dev/CI-only dependencies for the FlowBoard visualization test suite.
-# Production (running the dashboard server) stays zero-dependency (stdlib only).
+# Dev/CI-only dependencies for the pytest regression suite under tools/tests/.
+# Production (running flowmond / dashboard) is zero-dependency (C binary).
 pytest>=7.0
-jsonschema>=4.0

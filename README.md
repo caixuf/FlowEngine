@@ -29,7 +29,7 @@
 | **感知** | DBSCAN LiDAR 聚类、Kalman 跟踪、EKF 传感器融合、NMEA GPS 解析器、nuScenes 数据集加载器 |
 | **规划** | Frenet 最优轨迹（变道/超车）、PID 控制（纵向 + 横向） |
 | **安全** | 基于 FlowCoro 协程的安全包络（TTC / 横向交叉 / 行人保护） |
-| **运维** | 统一日志器（毫秒时间戳）、flowctl CLI、FlowBoard Dashboard（Three.js 3D + 2D）、文件桥接或 flowmond 监控服务器、跨进程 IPC Stats Bridge + Topic Bridge、CI/CD |
+| **运维** | 统一日志器（毫秒时间戳）、flowctl CLI、FlowBoard Dashboard（Three.js 3D + 2D）、flowmond 监控守护进程（IPC 桥接 + 文件桥接）、跨进程 IPC Stats Bridge + Topic Bridge、CI/CD |
 | **学习** | 仿真内学习闭环：数据采集 → 离线训练（scikit-learn MLP / PyTorch）→ 影子模式 tiny-MLP 推理 + 车端 SGD 微调 + 模型 OTA 与 A-B 对比。详见 [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ---
@@ -63,16 +63,18 @@
                       ════════════════════┼════════════════════
                                          │
                           ┌──────────────▼─────────────────────┐
-                          │  文件桥接（默认）                     │
-                          │  monitor_node → /tmp/flow_topology.json │
-                          │  → flowboard_server.py :8800 → 浏览器    │
-                          │  或                                     │
-                          │  flowmond (IPC SHM) :8800 → 浏览器      │
+                          │  flowmond 监控守护进程 :8800          │
+                          │  IPC 桥接（首选）：stats_bridge /      │
+                          │    dashboard_bridge → IPC SHM          │
+                          │  文件桥接（回退）：轮询                 │
+                          │    /tmp/flow_topology.json             │
+                          │  → 托管 flowboard/index.html 前端       │
                           └────────────────────────────────────────┘
 ```
 
-**两种可视化链路互补：** 默认使用文件桥接（`flowboard_server.py` 读取 JSON 文件），
-可选 `flowmond` 守护进程通过 IPC SHM 聚合多进程统计。详见 [docs/VISUALIZATION_ARCHITECTURE.md](docs/VISUALIZATION_ARCHITECTURE.md)。
+**可视化链路：** 由统一的 C 监控守护进程 `flowmond` 提供 HTTP 仪表盘，
+同时启用 IPC 桥接（首选）与文件桥接（回退）两条等价数据链路，按可用性自动回退。
+详见 [docs/VISUALIZATION_ARCHITECTURE.md](docs/VISUALIZATION_ARCHITECTURE.md)。
 
 ---
 
@@ -189,27 +191,19 @@ flowctl param get <name>        # 获取参数
 
 ## 可视化
 
-**主链路（文件桥接，默认）：**
+可视化由统一的 C 监控守护进程 `flowmond` 提供，同时启用 IPC 桥接（首选）与
+文件桥接（回退）两条数据链路。前端 `tools/flowboard/index.html` 由 flowmond 通过
+`--html-path` 加载并托管。
 
 ```bash
-# 终端 1：运行 pipeline（写入 /tmp/flow_topology.json）
-./build/bin/flow_launcher config/pipeline.json --duration 3600
+# 终端 1：监控守护进程（加载前端，启用 IPC 桥接 + 文件桥接回退）
+./build/bin/flowmond --html-path tools/flowboard/index.html
 
-# 终端 2：启动仪表盘服务器
-python3 tools/flowboard_server.py --port 8800 --json-file /tmp/flow_topology.json
+# 终端 2：运行 pipeline（写 /tmp/flow_topology.json + 发布 IPC 统计）
+./build/bin/flow_launcher config/pipeline.json --duration 3600
 
 # 打开浏览器
 open http://localhost:8800
-```
-
-**辅助链路（flowmond IPC 桥接）：**
-
-```bash
-# 终端 1：监控守护进程
-./build/bin/flowmond --port 8800 --html-path tools/flowboard/index.html
-
-# 终端 2：pipeline（通过 IPC SHM 发布统计）
-./build/bin/flow_launcher config/pipeline.json --duration 60
 ```
 
 仪表盘端点：
@@ -222,8 +216,7 @@ open http://localhost:8800
 | `/api/stream` | SSE 实时推送（500 ms 间隔）|
 | `/api/health` | 健康检查 |
 
-> **绑定地址：** `flowboard_server.py` 默认监听 `0.0.0.0`。
-> `flowmond` 默认监听 `127.0.0.1`（回环）。如需远程访问，
+> **绑定地址：** `flowmond` 默认监听 `127.0.0.1`（回环）。如需远程访问，
 > 使用 `flowmond --bind 0.0.0.0`（或设置 `FLOWMOND_BIND_ADDR=0.0.0.0`）。
 
 ---
@@ -267,10 +260,12 @@ pkg-config --cflags --libs flowengine
 flowctl version
 ```
 
-安装完成后，引入 umbrella header：
+安装完成后，按需引入各公共头文件：
 
 ```c
-#include "flowengine.h"   /* FLOWENGINE_VERSION、NODE_PLUGIN_API_VERSION、bus/transport/... */
+#include "task_interface.h"  /* 任务接口（TaskBase / TaskInterface） */
+#include "message_bus.h"     /* 消息总线 */
+#include "transport.h"       /* 传输层（local/IPC/TCP） */
 ```
 
 ---
@@ -410,7 +405,7 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | Stress | ✅ | 15s 全速率 pipeline |
 | Integration | ✅ | 多节点 pipeline + ctest |
 | Coverage | ✅ | lcov 报告 |
-| Viz | ✅ | FlowBoard Python 测试 + 服务器冒烟测试 |
+| Viz | ✅ | flowmond 仪表盘冒烟测试 + FlowBoard 前端测试 |
 | Evaluator | ✅ | 45s 回归评估器（PR 门禁）|
 | Scenario Regression | 🌙 | 全场景套件与基线对比（nightly/手动）|
 | Nightly Stability | 🌙 | 长时间运行（仅调度）|

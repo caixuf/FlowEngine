@@ -101,12 +101,12 @@ algorithm_activate_for_mode(&sm, SM_MODE_CP, plugins);
 | **预测** | 自研轻量 LSTM / Apollo Prediction | 轨迹预测 |
 | **规划-路径** | OMPL / Apollo Planning | 采样规划、搜索 |
 | **规划-速度** | 自研 ST 图 + DP/QP | 速度规划 |
-| **控制-PID** | 自研（参考 example_pid_controller.c）| 最简单、好调试 |
+| **控制-PID** | 自研（参考 `modules/adas_nodes/control_node.cpp`）| 最简单、好调试 |
 | **控制-MPC** | OSQP / acados | 模型预测控制 |
 
 ## 参考实现
 
-- `src/plugins/example_pid_controller.c` — PID 纵向控制器
+- `modules/adas_nodes/control_node.cpp` — PID 纵向 + Stanley 横向控制
 - `src/plugins/example_process.c` — 示例进程插件
 - `src/plugins/example_task.c` — 示例任务插件
 

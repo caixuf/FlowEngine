@@ -3,93 +3,96 @@
 ## 架构原则
 
 ```
-业务节点写状态文件 → 轻量 HTTP 桥接 → 浏览器仪表盘 (零外部依赖)
+业务节点 → flowmond（HTTP 仪表盘 + IPC 桥接 + 文件桥接）→ 浏览器仪表盘 (零外部依赖)
 ```
 
-FlowEngine 提供两种可视化链路，二者互补：
+可视化由统一的 C 语言监控守护进程 **flowmond**（`src/flowmond.c`，编译产物
+`build/bin/flowmond`）提供。flowmond 内置 HTTP 服务器并提供两条等价的数据采集链路，
+按可用性自动回退：
 
-| 链路 | 采集方式 | 适用场景 | 状态 |
-|------|----------|----------|------|
-| **文件桥接** (`flowboard_server.py`) | 读取业务进程写出的状态 JSON (`/tmp/flow_topology.json`) | launch 仿真 / 演示 / 单机 | **当前默认，demo 脚本使用** |
-| **监控守护进程** (`flowmond`) | 通过 UDP 发现 + 内置总线聚合多节点 | 分布式多节点部署 | 可选 / 演进中 |
+| 数据来源 | 采集方式 | 适用场景 |
+|----------|----------|----------|
+| **IPC 桥接**（首选） | 通过 `stats_bridge` / `dashboard_bridge` IPC 通道订阅业务进程统计与仪表盘 JSON | 多进程部署，低延迟 |
+| **文件桥接**（回退） | `dashboard_file_watcher_fn` 线程轮询 `/tmp/flow_topology.json`（由 monitor 节点周期性写入） | launch 仿真 / 演示 / 单机 / IPC 不可用时 |
 
-> 重要：`flowmond` 拥有自己的进程内 Message Bus，**看不到** `flow_launcher`
-> 进程内部的 topic 与仿真状态。因此 launch 演示必须使用文件桥接链路。
-> 之前将 `flowboard_server.py` 标记为"已废弃"是错误的，已在本次修订中纠正。
+> flowmond 同时启动两条链路：IPC 桥接为主，文件桥接为回退。launch 单进程演示时，
+> 业务进程的 monitor 任务会写出 `/tmp/flow_topology.json`，flowmond 通过文件桥接读取，
+> 保证演示场景始终有数据。
 
-## 组件（文件桥接链路，默认）
+前端 `tools/flowboard/index.html`（HTML/JS 仪表盘）由 flowmond 通过 `--html-path` 加载并托管。
+此外 `modules/adas_nodes/flowmond_node.cpp` 是 flowmond 的 `NodePlugin` 包装版，
+可作为节点插件在 pipeline 内运行，功能等价。
+
+## 组件
 
 ```
 ┌────────────────────┐   写状态文件    ┌──────────────────────────┐
 │   flow_launcher config/pipeline.json │ ───────────────▶│  /tmp/flow_topology.json  │
 │   (业务/仿真节点)   │  monitor 任务   │  (原子 tmp+rename, ~1Hz)  │
 │                     │   10Hz 采集     └──────────────────────────┘
-│  Message Bus        │                              │ 文件监听
-│  Transport / Sched  │                              ▼
-│  3D 仿真 (ego/障碍/  │              ┌──────────────────────────┐
-│  LiDAR)             │              │  flowboard_server.py :8800 │
-└────────────────────┘              │  (多线程 HTTP + SSE 桥接)  │
-                                     │  /api/topology /api/stream │
-                                     │  /api/health  freshness    │
-                                     └──────────────────────────┘
+│  Message Bus        │           │ 文件桥接(轮询)        ▲ IPC 桥接
+│  Transport / Sched  │           │                       │ (stats_bridge /
+│  3D 仿真 (ego/障碍/  │           │                       │  dashboard_bridge)
+│  LiDAR)             │           │                       │
+└────────────────────┘           ▼                       │
+                  ┌──────────────────────────┐           │
+                  │  flowmond :8800          │◄──────────┘
+                  │  (C 监控守护进程)         │
+                  │  /api/topology /api/topics│
+                  │  /api/stream /api/health │
+                  │  + --html-path 前端托管   │
+                  └──────────────────────────┘
                                                   │ HTTP SSE
                                                   ▼
                                      ┌──────────────────────────┐
                                      │   FlowBoard Dashboard     │
-                                     │   (浏览器, Three.js 3D)   │
+                                     │   (tools/flowboard/       │
+                                     │    index.html, Three.js)  │
                                      │   LIVE / STALE / OFFLINE  │
                                      └──────────────────────────┘
 ```
 
-## 使用方式（默认文件桥接）
+## 使用方式
 
 ```bash
-# 1. 启动业务/仿真节点（写状态文件）
-./build/bin/flow_launcher config/pipeline.json --duration 3600 &
+# 1. 启动监控守护进程（加载前端，同时启用 IPC 桥接 + 文件桥接回退）
+./build/bin/flowmond --html-path tools/flowboard/index.html &
 
-# 2. 启动 HTTP 桥接（读状态文件, 多线程）
-python3 tools/flowboard_server.py &
+# 2. 启动业务/仿真节点（写状态文件 + 发布 IPC 统计）
+./build/bin/flow_launcher config/pipeline.json --duration 3600 &
 
 # 3. 浏览器打开仪表盘
 open http://localhost:8800
 
-# 或直接使用一键脚本
+# 或直接使用一键脚本（已改为调用 flowmond）
 ./scripts/demo.sh
-```
-
-## 使用方式（可选 flowmond 多节点）
-
-```bash
-# 分布式部署时, 由 flowmond 通过 UDP 发现聚合多个节点
-./build/bin/flowmond --port 8800 &
-./build/bin/flow_launcher config/pipeline.json --duration 3600 &        # 需要节点对外广播 topic 统计
-open http://localhost:8800
 ```
 
 ## 鲁棒性设计（解决"离线"反复出现）
 
-`flowboard_server.py` 与前端针对历史上反复出现的"离线"问题做了如下加固：
+flowmond 与前端针对历史上反复出现的"离线"问题做了如下加固：
 
-1. **多线程 HTTP 服务器**：改用 `ThreadingHTTPServer`。此前单线程服务器
-   在一个 SSE 长连接（阻塞 ~300s）期间会饿死所有其它请求（`/api/topology`
-   超时返回 0 字节），前端因此翻转为离线并静默显示假数据。
-2. **数据新鲜度**：桥接层记录状态文件最后更新时间，超过 `STALE_AFTER_SEC`
-   标记为 `stale`，并在 `/api/topology`、SSE 快照中返回 `stale` / `age_sec`。
+1. **多连接 HTTP 服务器**：flowmond 的 `monitor_server`（`src/core/monitor_server.c`）
+   支持多线程并发连接，SSE 长连接不会饿死 `/api/topology` 等快照/重连请求，
+   避免前端因拉取超时翻转为离线并静默显示假数据。
+2. **数据新鲜度**：flowmond 记录状态最后更新时间，超过阈值标记为 `stale`，
+   并在 `/api/topology`、SSE 快照中返回 `stale` / `age_sec`。
 3. **`/api/health` 端点**：返回 `status` / `source` / `age_sec`，便于探活。
-4. **SSE 心跳**：每 15s 发送 `: keep-alive` 注释帧，避免代理断开；连接使用
-   墙钟截止时间（300s）而非计数循环。
+4. **SSE 心跳**：周期性发送 `: keep-alive` 注释帧，避免代理断开；连接使用
+   墙钟截止时间而非计数循环。
 5. **前端三态**：`applyLiveStatus()` 依据 `source`/`stale`/`age_sec` 显示
    **LIVE / STALE / OFFLINE** 三态；数据陈旧时保留最后一帧真实数据，
    **不再静默切换到模拟数据**。
-6. **后端并发死锁修复**：`recv_thread_fn` 不再在持有 `peers_mutex` 期间
-   `usleep` 或 `message_bus_publish`，避免饿死写状态文件的 monitor 线程
-   （曾导致状态文件停止更新 → 前端离线）。
+6. **IPC 接收线程与文件桥接解耦**：`recv_thread_fn` 不在持有 `peers_mutex`
+   期间 `usleep` 或 `message_bus_publish`，避免饿死轮询状态文件的
+   `dashboard_file_watcher_fn` 线程（曾导致状态文件停止更新 → 前端离线）。
 
 ## API 端点
 
 ```
-GET /              → 实时仪表盘 HTML (SSE 自动更新)
+GET /              → 实时仪表盘 HTML (tools/flowboard/index.html, SSE 自动更新)
 GET /api/topology  → Bus 统计 + 拓扑 + 车辆/场景 JSON (含 source/stale/age_sec)
+GET /api/topics    → Per-topic 统计 (频率/延迟/订阅者)
 GET /api/stream    → SSE 事件流 (含心跳, source/stale 标记)
 GET /api/health    → 探活: {status, source, age_sec}
 ```
@@ -103,15 +106,15 @@ flow_launcher config/pipeline.json (业务/仿真节点)
   ├─ 采集车辆闭环遥测 (PID: speed/target/throttle/brake)
   ├─ 采集 3D 场景 scene{ego, obstacles, lidar, lane}
   └─ 原子写出 /tmp/flow_topology.json (tmp + rename)
-        │ 文件监听
-        ▼
-flowboard_server.py (HTTP 桥接, 多线程)
-  ├─ file_watcher 读取并记录 g_last_update
-  ├─ 新鲜度判定 (_is_stale) → source: live/stale/demo
+        │ 文件桥接(轮询)            ▲ IPC 桥接
+        ▼                           │ (stats_bridge / dashboard_bridge)
+flowmond (C 监控守护进程, 多连接)
+  ├─ dashboard_file_watcher_fn 轮询 /tmp/flow_topology.json
+  ├─ 新鲜度判定 → source: live/stale/demo
   └─ HTTP / SSE 推送
         │
         ▼
-FlowBoard (浏览器)
+FlowBoard (tools/flowboard/index.html, 浏览器)
   ├─ fetch /api/topology  → 初始加载
   ├─ EventSource /api/stream → 实时更新 (~10Hz)
   ├─ applyLiveStatus → LIVE/STALE/OFFLINE 三态

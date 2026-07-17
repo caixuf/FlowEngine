@@ -1,23 +1,23 @@
 # FlowBoard 数据契约 (Data Contract)
 
-> 可视化链路 `monitor_node.c → /tmp/flow_topology.json → flowboard_server.py → /api/topology → flowboard/index.html` 的**唯一事实来源**。
-> 机器可读定义见 [`tools/schema/flowboard.schema.json`](../tools/schema/flowboard.schema.json)。
+> 可视化链路 `monitor_node.c → /tmp/flow_topology.json → flowmond → /api/topology → flowboard/index.html` 的**唯一事实来源**。
+> 数据归一化与 HTTP 推送由 C 监控守护进程 flowmond（`src/flowmond.c`）提供。
 
 ## 为什么需要契约
 
-后端 `normalize_live_data()` 需要同时兼容三种输入格式:
+flowmond 归一化时需要同时兼容三种输入格式:
 
 | 来源 | 顶层形状 | 说明 |
 |------|---------|------|
-| `monitor_node.c` | `{self, nodes, metrics:{bus,latency,topics,vehicle,sysmon,...}, registry, scene}` | 生产链路的主格式 |
+| `monitor_node.c` | `{self, nodes, metrics:{bus,latency,topics,vehicle,sysmon,...}, registry, scene}` | 生产链路的主格式（文件桥接 / IPC dashboard_bridge） |
 | `discovery` | `{self, nodes:[{name, caps, topics:[...]}]}` | peer 发现导出 |
 | `NodePlugin` | `{nodes:[{name, inputs:[...], outputs:[...]}]}` | 插件拓扑,`inputs/outputs` 会被展开为 `topics[]` |
 
-前端历史上到处用 `x || 0` / `x || []` 兜底,契约是隐式的。本文件把它显式化,让**三端(C 生产者 / Python 归一化 / 前端渲染)对齐同一份 schema**,并作为回归测试基准。
+前端历史上到处用 `x || 0` / `x || []` 兜底,契约是隐式的。本文件把它显式化,让**三端(C 生产者 / flowmond 归一化 / 前端渲染)对齐同一份契约**,并作为回归测试基准。
 
 ## 归一化输出 (`/api/topology`)
 
-`normalize_live_data()` 把上述任意输入统一成:
+flowmond 把上述任意输入统一成:
 
 ```jsonc
 {
@@ -33,7 +33,7 @@
 }
 ```
 
-字段类型与必填约束以 schema 为准。schema 刻意**允许 `additionalProperties`**:生产者可以增加字段而不破坏消费者,只有仪表盘真正依赖的字段才被约束。
+契约刻意**允许 `additionalProperties`**:生产者可以增加字段而不破坏消费者,只有仪表盘真正依赖的字段才被约束。
 
 ## `source` 三态语义
 
@@ -65,10 +65,10 @@
 1. 写入 `"<state_file>.tmp"`;
 2. `fclose()` 之后 `rename(tmp, state_file)`。
 
-`rename(2)` 在同一文件系统上是原子的,保证 server 端永远读到完整 JSON,不会读到写一半的内容。任何新的状态文件生产者都应遵循此约定。
+`rename(2)` 在同一文件系统上是原子的,保证 flowmond 永远读到完整 JSON,不会读到写一半的内容。任何新的状态文件生产者都应遵循此约定。
 
 ## 校验与降级
 
-- **server 侧**:`normalize_live_data()` 入口对原始数据做一次轻量 schema 校验(`validate_payload()`)。校验失败**不会**让脏数据流进渲染——记录原因并退化到空/上一帧,而不是抛异常。
+- **flowmond 侧**:归一化入口对原始数据做一次轻量校验。校验失败**不会**让脏数据流进渲染——记录原因并退化到空/上一帧,而不是抛异常。
 - **前端侧**:收到数据后集中做一次兜底(缺字段补默认值),替代散落各处的 `|| 0`。
-- **测试侧**:`tools/tests/` 下 pytest 用本 schema 校验 Python sample data、前端 demo data 与归一化输出,防止某一端偷偷改格式导致联调断裂。
+- **测试侧**:`tools/tests/` 下测试用本契约校验 sample data 与归一化输出,防止某一端偷偷改格式导致联调断裂。

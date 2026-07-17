@@ -1,7 +1,6 @@
 # 仿真测试指南
 
-> **注意：** 本文档中 `scenario_runner` 二进制尚未加入构建（源码在 `tools/scenario_runner.c`）。
-> 当前可用的仿真入口是 `flow_launcher config/pipeline.json`（配置驱动，dlopen 加载插件节点）。
+> **注意：** 当前可用的仿真入口是 `flow_launcher config/pipeline.json`（配置驱动，dlopen 加载插件节点）。
 > Carla 集成桥接 `carla_bridge.py` 尚未实现，此处保留为设计参考。
 
 ## 三层仿真体系
@@ -96,13 +95,13 @@ bash scripts/demo.sh
 - **LiDAR 点云**：对障碍物表面 + 地面环带做光线投射后下采样，坐标位于
   自车系。
 
-一键运行（业务节点 + HTTP 桥接 + 浏览器）：
+一键运行（业务节点 + flowmond 仪表盘 + 浏览器）：
 
 ```bash
 ./scripts/demo.sh
 # 或手动:
+./build/bin/flowmond --html-path tools/flowboard/index.html &
 ./build/bin/flow_launcher config/pipeline.json --duration 3600 &
-python3 tools/flowboard_server.py &
 open http://localhost:8800
 ```
 

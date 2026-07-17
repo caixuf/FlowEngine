@@ -253,8 +253,8 @@ done
 if [ ! -s "$JSON_FILE" ]; then
   echo "  ✗ Timeout waiting for $JSON_FILE — monitor node may have failed"
 fi
-python3 "$ROOT/tools/flowboard_server.py" --port 8800 --json-file "$JSON_FILE" \
-  > /tmp/flowboard_server.log 2>&1 &
+"$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" \
+  > /tmp/flowmond.log 2>&1 &
 SERVER_PID=$!
 sleep 2
 if kill -0 $SERVER_PID 2>/dev/null; then
@@ -265,11 +265,11 @@ if kill -0 $SERVER_PID 2>/dev/null; then
     else
         echo "  ✗ Dashboard started but not responding (HTTP $CHECK)"
         echo "  Server log:"
-        cat /tmp/flowboard_server.log
+        cat /tmp/flowmond.log
     fi
 else
-    echo "  ✗ flowboard_server failed! Check /tmp/flowboard_server.log"
-    cat /tmp/flowboard_server.log
+    echo "  ✗ flowmond failed! Check /tmp/flowmond.log"
+    cat /tmp/flowmond.log
 fi
 
 python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \

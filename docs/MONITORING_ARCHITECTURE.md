@@ -1,17 +1,15 @@
 # FlowEngine 监控与数据采集架构
 
-> **当前可用的监控/可视化链路：**
+> **当前可用的监控/可视化链路（统一由 flowmond 守护进程提供）：**
 >
-> **主链路（文件桥接）：**
-> ```
-> flow_launcher → 写 /tmp/flow_topology.json → flowboard_server.py (Python HTTP) → 浏览器
-> ```
+> **IPC 桥接（首选）：**
+> `flow_launcher` 通过 `stats_bridge` 跨进程 IPC 通道（`src/core/stats_bridge.c`）
+> 发布 TopicStats，flowmond 通过 `stats_bridge_subscriber_open()` 订阅聚合。
+> 仪表盘 JSON 通过 `dashboard_bridge`（`src/core/dashboard_bridge.c`）跨进程传输。
 >
-> **辅助链路（flowmond IPC 桥接）：**
-> `stats_bridge` 跨进程 IPC 通道已实现（`src/core/stats_bridge.c`）。
-> 业务进程通过 `stats_bridge_publish()` 发布 TopicStats，flowmond 通过
-> `stats_bridge_subscriber_open()` 订阅聚合。仪表盘 JSON 通过 `dashboard_bridge`
-> (`src/core/dashboard_bridge.c`) 跨进程传输。
+> **文件桥接（回退）：**
+> flowmond 的 `dashboard_file_watcher_fn` 线程轮询 monitor 节点写出的
+> `/tmp/flow_topology.json`，IPC 不可用时自动回退到此链路。
 > - `flowmond` 有独立的 `MessageBus`，不共享业务节点总线
 > - 跨机 TCP bridge 尚未实现，当前仅支持同机 POSIX SHM
 >

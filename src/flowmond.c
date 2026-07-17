@@ -32,6 +32,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 static volatile bool g_running = true;
 
@@ -146,6 +147,45 @@ static void* dashboard_bridge_reconnect_fn(void* arg) {
     }
 
     if (sub) ipc_channel_close(sub);
+    return NULL;
+}
+
+/* ── 文件桥接监控线程 ──────────────────────────────────── */
+/* 独立 flowmond 拥有自己的 MessageBus, 看不到 flow_launcher 进程内的
+ * bus 数据。当 demo.sh 走文件桥接链路时 (monitor 节点周期性写
+ * /tmp/flow_topology.json), 此线程轮询该文件并把内容注入 monitor_server,
+ * 使 dashboard 能展示拓扑/场景数据。与上面的 IPC dashboard bridge 互补:
+ * IPC 通道提供实时 JSON, 文件桥接作为 standalone 兼容回退。 */
+static void* dashboard_file_watcher_fn(void* arg) {
+    MonitorServer* ms = (MonitorServer*)arg;
+    const char* path = "/tmp/flow_topology.json";
+    uint64_t last_mtime = 0;
+    while (g_running) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            uint64_t mtime = (uint64_t)st.st_mtime;
+            if (mtime != last_mtime) {
+                last_mtime = mtime;
+                FILE* fp = fopen(path, "rb");
+                if (fp) {
+                    fseek(fp, 0, SEEK_END);
+                    long len = ftell(fp);
+                    fseek(fp, 0, SEEK_SET);
+                    if (len > 0) {
+                        char* data = (char*)malloc((size_t)len + 1);
+                        if (data) {
+                            size_t n = fread(data, 1, (size_t)len, fp);
+                            data[n] = '\0';
+                            monitor_server_inject_dashboard_json(ms, data, n);
+                            free(data);
+                        }
+                    }
+                    fclose(fp);
+                }
+            }
+        }
+        usleep(200000); /* 5Hz */
+    }
     return NULL;
 }
 
@@ -273,6 +313,11 @@ int main(int argc, char** argv) {
     LOG_INFO("flowmond", "dashboard bridge: watching for IPC channel '%s'",
              DASHBOARD_BRIDGE_CHANNEL);
 
+    /* ── 文件桥接: 轮询 /tmp/flow_topology.json (standalone 兼容回退) ── */
+    pthread_t file_watcher_thread;
+    pthread_create(&file_watcher_thread, NULL, dashboard_file_watcher_fn, ms);
+    LOG_INFO("flowmond", "file bridge: watching %s", "/tmp/flow_topology.json");
+
     /* ── 告警规则 ── */
     AlertRule rules[] = {
         { .name = "default", .max_drop_rate = 10, .max_latency_us = 5000, .max_node_offline_sec = 30 },
@@ -299,6 +344,7 @@ int main(int argc, char** argv) {
     /* ── 清理 ── */
     pthread_join(stats_reconnect_thread, NULL);
     pthread_join(dashboard_reconnect_thread, NULL);
+    pthread_join(file_watcher_thread, NULL);
     monitor_server_stop(ms);
     monitor_server_destroy(ms);
     discovery_stop(dm);

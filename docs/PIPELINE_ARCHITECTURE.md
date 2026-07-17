@@ -55,10 +55,13 @@ control (PID) → control/raw_cmd → safety_control → control/cmd → sim_wor
 
 ## 可视化链路
 
+可视化由统一的 flowmond 守护进程（`build/bin/flowmond`）提供，同时启用 IPC 桥接（首选）
+与文件桥接（回退）两条数据链路。
+
 | 链路 | 数据路径 | 端口 |
 |------|---------|------|
-| 文件桥接（默认） | monitor_node → `/tmp/flow_topology.json` → `flowboard_server.py` | 8800 |
-| IPC 桥接（可选） | monitor_node → `stats_bridge` / `dashboard_bridge` → `flowmond` | 8800 |
+| IPC 桥接（首选） | monitor_node → `stats_bridge` / `dashboard_bridge` → `flowmond` | 8800 |
+| 文件桥接（回退） | monitor_node → `/tmp/flow_topology.json` → `flowmond` | 8800 |
 | Foxglove 3D | `foxglove_bridge.py` 读取 JSON 文件 | 8765 |
 
 ## 配置格式 (pipeline.json)

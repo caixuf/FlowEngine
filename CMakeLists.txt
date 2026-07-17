@@ -490,7 +490,6 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/flowengine.pc"
 install(PROGRAMS
     scripts/demo.sh
     scripts/stress_test.sh
-    tools/flowboard_server.py
     DESTINATION share/flowengine/scripts
 )
 
