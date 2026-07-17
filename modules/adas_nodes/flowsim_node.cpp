@@ -512,19 +512,62 @@ protected:
              * stop() 触发 cancel_token 立即唤醒，无需外发消息。 */
             auto res = co_await select_for({"control/cmd"}, FLOWSIM_DT_US);
             if (should_stop()) break;
-            (void)res;  /* 数据从 atomic 状态读，不直接用消息 */
 
-            /* control/cmd 陈旧检查：500ms 未收到则回退内置巡航 */
+            /* 直接从 select_for 返回的消息中解析控制指令，不再依赖
+             * transport 层回调更新 atomics（两者订阅同一个 bus，但
+             * 回调触发时序不可靠，这里直接用消息体更鲁棒）。 */
             bool use_internal_cruise = true;
-            if (g.has_control_input.load(std::memory_order_relaxed)) {
-                uint64_t now = clock_now_us();
-                uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
-                if (now > last && now - last < CONTROL_STALE_TIMEOUT_US) {
+            if (res.ok() && res->data_size > 0) {
+                /* 二进制 ControlCmd 路径 */
+                ControlCmd bin;
+                if (ControlCmd_deserialize(&bin,
+                        (const uint8_t*)res->data, res->data_size) == 0) {
+                    g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
+                    g.ego_brake.store(bin.brake, std::memory_order_relaxed);
+                    g.ego_steer.store(bin.steering, std::memory_order_relaxed);
+                    g.last_control_cmd_us.store(clock_now_us(),
+                        std::memory_order_relaxed);
                     use_internal_cruise = false;
                 } else {
-                    g.has_control_input.store(0, std::memory_order_relaxed);
-                    LOG_WARN("flowsim", "control/cmd stale >500ms — fallback to internal cruise");
+                    /* JSON fallback */
+                    cJSON* root = cJSON_Parse((const char*)res->data);
+                    if (root) {
+                        cJSON* j;
+                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
+                            && cJSON_IsNumber(j))
+                            g.ego_throttle.store(j->valuedouble,
+                                std::memory_order_relaxed);
+                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "brake"))
+                            && cJSON_IsNumber(j))
+                            g.ego_brake.store(j->valuedouble,
+                                std::memory_order_relaxed);
+                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "steer"))
+                            && cJSON_IsNumber(j))
+                            g.ego_steer.store(j->valuedouble,
+                                std::memory_order_relaxed);
+                        cJSON_Delete(root);
+                        g.last_control_cmd_us.store(clock_now_us(),
+                            std::memory_order_relaxed);
+                        use_internal_cruise = false;
+                    }
                 }
+            }
+
+            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航 */
+            if (use_internal_cruise) {
+                uint64_t now = clock_now_us();
+                uint64_t last = g.last_control_cmd_us.load(
+                    std::memory_order_relaxed);
+                if (last > 0 && now > last
+                    && now - last < CONTROL_STALE_TIMEOUT_US) {
+                    /* 消息在 select_for 订阅间隙到达，但 transport 回调
+                     * 已更新 atomics — 仍可信且可用。 */
+                    use_internal_cruise = false;
+                }
+            }
+            if (use_internal_cruise && g.last_control_cmd_us.load(
+                    std::memory_order_relaxed) == 0) {
+                ; /* 冷启动：尚无任何控制指令，用内置巡航起步 */
             }
 
             /* ── Step 1: ego 动力学 ── */
