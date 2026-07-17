@@ -45,7 +45,14 @@ namespace {
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
-#define MAX_OBS 4
+/* NOA Phase 6: 障碍物槽位扩到 8。
+ * 0-3: vehicle/state topic 提供的 ego-relative 障碍物（fusion 发布）
+ * 4-7: scene/frame entities 提供的世界坐标车辆（flowsim 发布），由
+ *      on_scene_frame 填充前方/侧方最近的车辆，补全 24-NPC 场景下 vehicle/state
+ *      4 槽位截断导致的感知盲区——这是 P0 pipeline 冻结的根因之一：ego 被慢车
+ *      阻挡但该慢车未进入 vehicle/state 的 4 个槽位，control 的被动超车逻辑
+ *      因 best_gap=1e9 而不触发变道，ego 减速至 0 后管道静默。 */
+#define MAX_OBS 8
 
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
@@ -323,6 +330,80 @@ static double lane_lead_gap(double lane_y, double same_lane_tol) {
         if (dx > 0 && gap < best_gap) best_gap = gap;
     }
     return best_gap;
+}
+
+/* ── scene/frame 订阅（NOA Phase 6 超车感知补全） ──────────────
+ * 从 flowsim 的 scene/frame entities 取世界坐标车辆，填入 obs[4..7]。
+ * 筛选：前方 dx∈[-10,120]m、横向 |dy|<6m、同向 vx>0 的 car/suv/truck。
+ * 填充策略：按 dx 升序取前 4 辆填入 4-7 槽位，每帧覆盖（entities 是最新快照）。
+ * 这补全了 vehicle/state 4 槽位截断导致的盲区，让 lane_lead_gap 等函数
+ * 能看到前方慢车，触发被动超车状态机。 */
+static int _ent_cmp_dx(const void* a, const void* b) {
+    double da = ((const double*)a)[0], db = ((const double*)b)[0];
+    return (da > db) - (da < db);
+}
+
+static void on_scene_frame(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* entities = cJSON_GetObjectItem(root, "entities");
+    if (!entities || !cJSON_IsArray(entities)) { cJSON_Delete(root); return; }
+
+    /* 收集候选车辆 [dx, x, y, vx, type_idx]，type_idx: 0=car 1=suv 2=truck */
+    double cand[32][5];
+    int ncand = 0;
+    cJSON* ent;
+    cJSON_ArrayForEach(ent, entities) {
+        if (ncand >= 32) break;
+        cJSON* jtype = cJSON_GetObjectItem(ent, "type");
+        if (!jtype || !cJSON_IsString(jtype)) continue;
+        const char* t = jtype->valuestring;
+        int tidx;
+        if (strcmp(t, "car") == 0) tidx = 0;
+        else if (strcmp(t, "suv") == 0) tidx = 1;
+        else if (strcmp(t, "truck") == 0) tidx = 2;
+        else continue;
+
+        cJSON* jx = cJSON_GetObjectItem(ent, "x");
+        cJSON* jy = cJSON_GetObjectItem(ent, "y");
+        cJSON* jvx = cJSON_GetObjectItem(ent, "vx");
+        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy) || !cJSON_IsNumber(jvx)) continue;
+
+        double ex = jx->valuedouble, ey = jy->valuedouble, evx = jvx->valuedouble;
+        double dx = ex - g.ego_x, dy = ey - g.ego_y;
+        if (dx < -10.0 || dx > 120.0) continue;       /* 前方 120m 内 */
+        if (fabs(dy) > 6.0) continue;                 /* 道路范围内 */
+        if (evx < 0.0) continue;                       /* 同向车 */
+
+        cand[ncand][0] = dx;
+        cand[ncand][1] = ex;
+        cand[ncand][2] = ey;
+        cand[ncand][3] = evx;
+        cand[ncand][4] = (double)tidx;
+        ncand++;
+    }
+    cJSON_Delete(root);
+
+    /* 先清空 4-7 槽位（每帧重填），0-3 保留 vehicle/state 数据 */
+    for (int i = 4; i < MAX_OBS; i++) g.obs_valid[i] = 0;
+
+    if (ncand == 0) return;
+    qsort(cand, ncand, sizeof(cand[0]), _ent_cmp_dx);  /* 按 dx 升序 */
+
+    static const char* type_names[] = { "car", "suv", "truck" };
+    int fill = 4;
+    for (int i = 0; i < ncand && fill < MAX_OBS; i++) {
+        g.obs_x[fill]    = cand[i][1];
+        g.obs_y[fill]    = cand[i][2];
+        g.obs_vx[fill]   = cand[i][3];
+        g.obs_valid[fill] = 1;
+        int tidx = (int)cand[i][4];
+        if (tidx < 0 || tidx > 2) tidx = 0;
+        snprintf(g.obs_type[fill], sizeof(g.obs_type[fill]), "%s", type_names[tidx]);
+        fill++;
+    }
 }
 
 static double lane_lead_speed(double lane_y, double same_lane_tol) {
@@ -941,7 +1022,7 @@ void* control_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", nullptr };
+static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", "scene/frame", nullptr };
 static const char* s_outputs[] = { "control/raw_cmd", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -1123,6 +1204,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_trajectory, nullptr);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
+    transport_subscribe(transport, "scene/frame", on_scene_frame, nullptr);
     transport_advertise(transport, "control/raw_cmd", CONTROLRAW_TYPE_ID);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
@@ -1132,6 +1214,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "scene/frame",         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "control/raw_cmd", CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);

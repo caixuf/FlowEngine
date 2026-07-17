@@ -258,20 +258,37 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         flowsim::Entity& e = g.pool[id];
         e.id = a->id;
 
-        /* 新格式：segment_id ≥ 0 → 用 esmini Frenet→World 转换 */
-        if (a->segment_id >= 0 && g.roads_loaded) {
-            flowsim::WorldPos wp;
-            if (g.roads.frenet_to_world(a->segment_id, 0, a->s, a->l, wp)) {
-                e.x = wp.x;
-                e.y = wp.y;
-                e.heading = wp.h;
+        /* 新格式：segment_id ≥ 0 → 用 esmini Frenet→World 转换
+         *
+         * NOA Phase 6 P2 兜底：esmini 加载失败（roads_loaded=false）时，新格式场景
+         * 的 actors 仍走此分支做线性放置（e.x=s, e.y=l），而非 fallthrough 到旧
+         * 格式 x/y（新场景 x/y 可能为 0，导致 NPC 全堆原点）。线性放置虽不精确
+         * （忽略道路弯曲），但至少沿 s 方向分散，NPC AI 仍能正常巡航/跟车。 */
+        if (a->segment_id >= 0) {
+            if (g.roads_loaded) {
+                flowsim::WorldPos wp;
+                if (g.roads.frenet_to_world(a->segment_id, 0, a->s, a->l, wp)) {
+                    e.x = wp.x;
+                    e.y = wp.y;
+                    e.heading = wp.h;
+                } else {
+                    /* esmini 查不到此 road id → 退化为沿 x 轴线性放置 */
+                    e.x = a->s;
+                    e.y = a->l;
+                    e.heading = 0.0;
+                    LOG_WARN("flowsim", "NPC %d: road %d not in esmini, fallback to (%.1f, %.1f)",
+                             a->id, a->segment_id, e.x, e.y);
+                }
             } else {
-                /* esmini 查不到此 road id → 退化为沿 x 轴线性放置 */
+                /* esmini 未加载 → 线性放置：s 当 x，l 当 y，heading=0（直道假设）。
+                 * 叠加弯道中心线偏移（若场景配了弯道），让 NPC 不全在 y=l 上。 */
                 e.x = a->s;
-                e.y = a->l;
+                e.y = a->l + road_center_y(a->s, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
                 e.heading = 0.0;
-                LOG_WARN("flowsim", "NPC %d: road %d not in esmini, fallback to (%.1f, %.1f)",
-                         a->id, a->segment_id, e.x, e.y);
+                if (a->id <= 2) {  /* 只对前几个 NPC 日志，避免刷屏 */
+                    LOG_WARN("flowsim", "NPC %d: esmini offline, linear spawn at (%.1f, %.1f)",
+                             a->id, e.x, e.y);
+                }
             }
         } else {
             /* 旧格式：全局 x/y 坐标 + 弯道中心线偏移 */
