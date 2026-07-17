@@ -71,15 +71,16 @@ set(MSG_FILES
     msg/adas_msgs.msg
 )
 
-# 为每个 .msg 生成对应的 _gen.h
+# 为每个 .msg 生成拆分的 per-struct 头文件 + umbrella 头文件
 foreach(MSG_FILE ${MSG_FILES})
     get_filename_component(MSG_NAME ${MSG_FILE} NAME_WE)
     set(GEN_HEADER "${GEN_DIR}/${MSG_NAME}_gen.h")
     add_custom_command(
         OUTPUT ${GEN_HEADER}
-        COMMAND ${Python3_EXECUTABLE} ${MSG_CODEGEN} "${CMAKE_SOURCE_DIR}/${MSG_FILE}" ${GEN_HEADER}
+        COMMAND ${Python3_EXECUTABLE} ${MSG_CODEGEN} "${CMAKE_SOURCE_DIR}/${MSG_FILE}"
+                --split --output-dir ${CMAKE_BINARY_DIR}
         DEPENDS ${MSG_CODEGEN} ${CMAKE_SOURCE_DIR}/${MSG_FILE}
-        COMMENT "Generating serialization code from ${MSG_FILE}"
+        COMMENT "Generating split serialization headers from ${MSG_FILE}"
     )
     list(APPEND GEN_HEADERS ${GEN_HEADER})
 endforeach()
