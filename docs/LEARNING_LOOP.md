@@ -377,7 +377,10 @@ python3 tools/modelctl.py ota status
 |------|------|--------|------|
 | 3 | `learner_node` 车端增量微调 | 持续学习 / on-device SGD / 资源受限调度 | ✅ 已实现 |
 | 4 | 模型 OTA + 版本管理 | Discovery + Transport 灰度发布 / 回滚 / A-B 对比 | ✅ 已实现 |
+| 5 | **端到端 v3** | 感知特征增强 / 多隐层 MLP / 闭环评估 / 渐进灰度 | 🔴 设计完成，待实施 |
 | — | 推理内核升级 | 把 `tiny_mlp_forward()` 替换为 ONNX Runtime / TensorRT，契约不变 | 待实现 |
+
+> v3 详细设计见 [`E2E_LEARNING_V3_PLAN.md`](E2E_LEARNING_V3_PLAN.md)。
 
 ## 生产化提示
 
