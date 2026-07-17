@@ -163,7 +163,6 @@ static int write_schema(McapWriter* w, uint16_t id, const char* name,
 
 static int write_channel_record(McapWriter* w, McapChannel* ch) {
     uint16_t tlen = (uint16_t)strlen(ch->topic);
-    uint32_t total = 2 + 2 + tlen + 2 + 2;
     uint8_t buf[256];
     size_t off = 0;
     w16(buf+off, ch->id); off += 2;

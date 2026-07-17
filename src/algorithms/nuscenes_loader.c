@@ -65,7 +65,6 @@ int nuscenes_load_lidar_fmt(const char* path, NuScenesScan* scan, LidarFormat fm
     uint8_t buf[20 * 1024];  /* Read in chunks */
     int total = 0;
     int pts_per_chunk = (bytes_per_pt == 16) ? 1280 : 1024;
-    size_t chunk_bytes = (size_t)pts_per_chunk * (size_t)bytes_per_pt;
 
     while (total < num_points) {
         int chunk = (num_points - total) > pts_per_chunk ? pts_per_chunk : (num_points - total);

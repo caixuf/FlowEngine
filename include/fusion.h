@@ -117,10 +117,12 @@ typedef struct {
 } FusionPolicy;
 
 #define FUSION_POLICY_TIME_ALIGNED \
-    { .strategy = FUSION_TIME_ALIGNED, .max_timestamp_delta_us = FUSION_DEFAULT_MAX_DELTA_US }
+    { .strategy = FUSION_TIME_ALIGNED, .max_timestamp_delta_us = FUSION_DEFAULT_MAX_DELTA_US, \
+      .sensor_weights = {0}, .kalman_process_q = 0, .kalman_measure_r = 0 }
 
 #define FUSION_POLICY_LATEST \
-    { .strategy = FUSION_LATEST_WINS }
+    { .strategy = FUSION_LATEST_WINS, .max_timestamp_delta_us = 0, \
+      .sensor_weights = {0}, .kalman_process_q = 0, .kalman_measure_r = 0 }
 
 /* ══════════════════════════════════════════════════════════ */
 /* FusionNode — C API 融合节点                                */

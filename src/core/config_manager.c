@@ -126,7 +126,6 @@ LauncherConfig* config_load(const char* config_file) {
                         cJSON* jr = cJSON_GetObjectItemCaseSensitive(jqos, "reliability");
                         cJSON* jdl = cJSON_GetObjectItemCaseSensitive(jqos, "deadline_ms");
                         cJSON* jls = cJSON_GetObjectItemCaseSensitive(jqos, "lifespan_ms");
-                        cJSON* jtr = cJSON_GetObjectItemCaseSensitive(jqos, "transport");
 
                         pc->publish[k].qos_depth = jd ? (int)jd->valuedouble : 0;
                         if (jp) snprintf(pc->publish[k].qos_policy, 16, "%s", jp->valuestring);

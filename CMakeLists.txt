@@ -204,7 +204,7 @@ target_include_directories(flowcoro_headers INTERFACE
 target_compile_features(flowcoro_headers INTERFACE cxx_std_20)
 # GCC 需要显式 -fcoroutines（C++20 模式下通常已隐含，但显式更安全）
 target_compile_options(flowcoro_headers INTERFACE
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-fcoroutines>
 )
 target_compile_definitions(flowcoro_headers INTERFACE
     PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
@@ -396,7 +396,7 @@ add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/fusion_cpp.cp
 target_link_libraries(scheduler_cpp flowengine_core flowcoro_headers)
 target_include_directories(scheduler_cpp PUBLIC ${GEN_DIR})
 target_compile_options(scheduler_cpp PRIVATE
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU>>:-fcoroutines>
 )
 
 # ── 协程任务插件（动态库，供 launcher 动态加载）────────────

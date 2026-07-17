@@ -28,37 +28,10 @@
 
 #define BAG_MAGIC        0x5F424C46u  /* "FLB_" in LE */
 
-static const char BAG_MAGIC_STR[5] = "FLB_";
-
 #define BAG_VERSION      2
 #define BAG_HEADER_SIZE  64
 #define BAG_RESERVED_SIZE 32
 #define BAG_INDEX_ENTRY_TOPIC_LEN 64
-
-/* CRC32 lookup table (generated) */
-static uint32_t crc32_table[256];
-static bool     crc32_table_init = false;
-
-static void crc32_init_table(void) {
-    if (crc32_table_init) return;
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; j++) {
-            crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
-        }
-        crc32_table[i] = crc;
-    }
-    crc32_table_init = true;
-}
-
-static uint32_t crc32_update(uint32_t crc, const uint8_t* data, size_t len) {
-    if (!crc32_table_init) crc32_init_table();
-    crc = ~crc;
-    for (size_t i = 0; i < len; i++) {
-        crc = crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-    }
-    return ~crc;
-}
 
 /* ── Index entry (used during write and read) ──────────────── */
 
@@ -115,12 +88,6 @@ struct BagWriter {
 
 static size_t ring_write_space(BagWriter* w) {
     return BAG_RING_SIZE - w->ring_len;
-}
-
-static size_t ring_contig_write(BagWriter* w) {
-    size_t space = ring_write_space(w);
-    size_t tail = BAG_RING_SIZE - w->ring_w;
-    return space < tail ? space : tail;
 }
 
 static void ring_advance_write(BagWriter* w, size_t n) {

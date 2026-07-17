@@ -269,8 +269,7 @@ extern "C" {
 
 NetworkTransport* net_transport_create(const char* bind_addr, uint16_t port,
                                        MessageBus* bus, DiscoveryManager* dm) {
-    auto* t = new NetworkTransport();
-    memset(t, 0, sizeof(*t));
+    auto* t = new NetworkTransport{}; /* value-init: POD/atomic 置零，非平凡成员默认构造 */
     t->bind_addr  = bind_addr ? bind_addr : "0.0.0.0";
     t->port       = port ? port : NET_DEFAULT_PORT;
     t->bus        = bus;
