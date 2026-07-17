@@ -7,6 +7,7 @@
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight, _buildETCGate } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
+import { initModelCache, buildEgoCar, buildObstacleGroup } from './models.js';
 
 const THREE = window.THREE;
 
@@ -663,22 +664,31 @@ function init3DScene() {
   // ── Environment ──
   _buildEnvironment(scene3d);
 
-  // ── Ego vehicle ──
-  var egoCar = _buildSedan(0x4488dd, 0x3377bb);
+  // ── Ego vehicle (glTF with programmatic fallback) ──
+  initModelCache().then(function() {
+    if (_carGroup) scene3d.remove(_carGroup);
+    var ec = buildEgoCar(0x4488dd);
+    if (ec) {
+      ec.position.set(0, 0, 0);
+      ec.castShadow = true;
+      scene3d.add(ec);
+      _carGroup = ec;
+    }
+  });
+  var egoCar = buildEgoCar(0x4488dd) || _buildSedan(0x4488dd, 0x3377bb);
   egoCar.position.set(0, 0, 0);
   egoCar.castShadow = true;
   scene3d.add(egoCar);
   _carGroup = egoCar;
 
-  // ── Obstacle pool ──
+  // ── Obstacle pool (glTF with programmatic fallback, 24 slots) ──
   // NOA Phase 2.3: 池容量 8 → 24，匹配 NOA 24-NPC 场景。
-  // scene/frame entities 透传全部 NPC（最多 24），旧场景 scn.obstacles
-  // 仅承载前 16 个 obstacle，仍可作为 fallback。
+  // 优先使用 glTF 模型（PBR 材质），GLTFLoader 不可用时降级为 BoxGeometry。
   _obsPool = [];
   _obsLabelPool = [];
   _obsLabelLast = [];
   for (var oi = 0; oi < 24; oi++) {
-    var obs = _buildObstacle('car', 0xff9944);
+    var obs = buildObstacleGroup('car', 0xff9944) || _buildObstacle('car', 0xff9944);
     obs.userData.obsType = 'car';  /* track current mesh type for rebuild-on-change */
     obs.visible = false;
     scene3d.add(obs);
@@ -893,7 +903,7 @@ function _renderFrame() {
         // Defect 5: 障碍物类型变化时重建外形（轿车 ↔ 胶囊行人 ↔ 圆锥路障），
         // 复用同一 group 槽位，只替换 children，保留 position/scale/visible。
         if (om.userData.obsType !== ow.type) {
-          var nm = _buildObstacle(ow.type, c);
+          var nm = buildObstacleGroup(ow.type, c) || _buildObstacle(ow.type, c);
           while (om.children.length) om.remove(om.children[0]);
           while (nm.children.length) om.add(nm.children[0]);
           om.userData.obsType = ow.type;
