@@ -64,6 +64,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include <cjson/cJSON.h>
 #include "clock_service.h"
 #include "serial_port.h"
 
@@ -103,42 +104,6 @@ static struct {
     volatile int  thread_running;
     volatile int  should_stop;
 } g;
-
-/* ── 参数解析（手写 JSON 字符串解析，项目节点里不用 cJSON） ──── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
 
 /* ── 硬件适配点：解析一行 IMU 数据 ───────────────────────────
  *
@@ -314,13 +279,31 @@ static int imu_driver_init(MessageBus* bus, Transport* transport,
     g.dry_run    = 0;
     g.gravity    = 9.80665;
 
+    /* cJSON 参数解析（替代手写 parse_*，CLAUDE.md 规范唯一合法入口） */
     if (params_json) {
-        parse_string(params_json, "serial_port", g.serial_port, sizeof(g.serial_port), "/dev/ttyUSB2");
-        g.baud_rate  = parse_int(params_json, "baud_rate", 115200);
-        g.enabled    = parse_int(params_json, "enable", 1);
-        g.sample_hz  = parse_int(params_json, "sample_hz", 100);
-        g.dry_run    = parse_int(params_json, "dry_run", 0);
-        g.gravity    = parse_double(params_json, "gravity", 9.80665);
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* j;
+            snprintf(g.serial_port, sizeof(g.serial_port), "%s", "/dev/ttyUSB2");
+            if ((j = cJSON_GetObjectItem(root, "serial_port")) && cJSON_IsString(j))
+                snprintf(g.serial_port, sizeof(g.serial_port), "%s", j->valuestring);
+            g.baud_rate  = 115200;
+            if ((j = cJSON_GetObjectItem(root, "baud_rate")) && cJSON_IsNumber(j))
+                g.baud_rate = j->valueint;
+            g.enabled    = 1;
+            if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j))
+                g.enabled = j->valueint;
+            g.sample_hz  = 100;
+            if ((j = cJSON_GetObjectItem(root, "sample_hz")) && cJSON_IsNumber(j))
+                g.sample_hz = j->valueint;
+            g.dry_run    = 0;
+            if ((j = cJSON_GetObjectItem(root, "dry_run")) && cJSON_IsNumber(j))
+                g.dry_run = j->valueint;
+            g.gravity    = 9.80665;
+            if ((j = cJSON_GetObjectItem(root, "gravity")) && cJSON_IsNumber(j))
+                g.gravity = j->valuedouble;
+            cJSON_Delete(root);
+        }
     }
 
     /* dry-run 噪声种子 */

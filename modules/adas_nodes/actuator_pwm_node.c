@@ -84,6 +84,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include <cjson/cJSON.h>
 
 #include <fcntl.h>
 #include <math.h>
@@ -157,45 +158,6 @@ static struct {
     volatile int watchdog_running;
     volatile int should_stop;
 } g;
-
-/* ── 参数解析 ─────────────────────────────────────────────── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) {
-        if (default_val) snprintf(out, out_sz, "%s", default_val);
-        return;
-    }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
 
 /* ── PCA9685 操作 ─────────────────────────────────────────── */
 
@@ -427,26 +389,45 @@ static int actuator_pwm_init(MessageBus* bus, Transport* transport,
     g.watchdog_timeout_s = 3;
     g.i2c_fd            = -1;
 
-    if (params_json) {
-        g.enabled           = parse_int(params_json, "enable", 1);
-        g.dry_run           = parse_int(params_json, "dry_run", 0);
-        g.i2c_bus           = parse_int(params_json, "i2c_bus", 1);
-        g.i2c_addr          = parse_int(params_json, "i2c_addr", 0x40);
-        g.esc_channel       = parse_int(params_json, "esc_channel", 0);
-        g.steer_channel     = parse_int(params_json, "steer_channel", 1);
-        g.pwm_freq_hz       = parse_int(params_json, "pwm_freq_hz", PWM_FREQ_HZ_DEFAULT);
-        g.throttle_scale    = parse_double(params_json, "throttle_scale", PWM_RANGE_US);
-        g.steering_scale    = parse_double(params_json, "steering_scale", PWM_RANGE_US);
-        g.gpio_esc_pin      = parse_int(params_json, "gpio_esc_pin", 12);
-        g.gpio_steer_pin    = parse_int(params_json, "gpio_steer_pin", 13);
-        g.watchdog_timeout_s = parse_int(params_json, "watchdog_timeout_s", 3);
+    cJSON* root = cJSON_Parse(params_json);
+    if (root) {
+        cJSON* j;
+
+        g.enabled           = 1;
+        if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j)) g.enabled = j->valueint;
+        g.dry_run           = 0;
+        if ((j = cJSON_GetObjectItem(root, "dry_run")) && cJSON_IsNumber(j)) g.dry_run = j->valueint;
+        g.i2c_bus           = 1;
+        if ((j = cJSON_GetObjectItem(root, "i2c_bus")) && cJSON_IsNumber(j)) g.i2c_bus = j->valueint;
+        g.i2c_addr          = 0x40;
+        if ((j = cJSON_GetObjectItem(root, "i2c_addr")) && cJSON_IsNumber(j)) g.i2c_addr = j->valueint;
+        g.esc_channel       = 0;
+        if ((j = cJSON_GetObjectItem(root, "esc_channel")) && cJSON_IsNumber(j)) g.esc_channel = j->valueint;
+        g.steer_channel     = 1;
+        if ((j = cJSON_GetObjectItem(root, "steer_channel")) && cJSON_IsNumber(j)) g.steer_channel = j->valueint;
+        g.pwm_freq_hz       = PWM_FREQ_HZ_DEFAULT;
+        if ((j = cJSON_GetObjectItem(root, "pwm_freq_hz")) && cJSON_IsNumber(j)) g.pwm_freq_hz = j->valueint;
+        g.throttle_scale    = PWM_RANGE_US;
+        if ((j = cJSON_GetObjectItem(root, "throttle_scale")) && cJSON_IsNumber(j)) g.throttle_scale = j->valuedouble;
+        g.steering_scale    = PWM_RANGE_US;
+        if ((j = cJSON_GetObjectItem(root, "steering_scale")) && cJSON_IsNumber(j)) g.steering_scale = j->valuedouble;
+        g.gpio_esc_pin      = 12;
+        if ((j = cJSON_GetObjectItem(root, "gpio_esc_pin")) && cJSON_IsNumber(j)) g.gpio_esc_pin = j->valueint;
+        g.gpio_steer_pin    = 13;
+        if ((j = cJSON_GetObjectItem(root, "gpio_steer_pin")) && cJSON_IsNumber(j)) g.gpio_steer_pin = j->valueint;
+        g.watchdog_timeout_s = 3;
+        if ((j = cJSON_GetObjectItem(root, "watchdog_timeout_s")) && cJSON_IsNumber(j)) g.watchdog_timeout_s = j->valueint;
 
         /* 解析 backend 字符串 */
         char backend[32] = {0};
-        parse_string(params_json, "backend", backend, sizeof(backend), "pca9685");
+        snprintf(backend, sizeof(backend), "%s", "pca9685");
+        if ((j = cJSON_GetObjectItem(root, "backend")) && cJSON_IsString(j))
+            snprintf(backend, sizeof(backend), "%s", j->valuestring);
         if (strcmp(backend, "gpio") == 0)       g.backend = BACKEND_GPIO;
         else if (strcmp(backend, "dry_run") == 0) g.backend = BACKEND_DRY_RUN;
         else                                    g.backend = BACKEND_PCA9685;
+
+        cJSON_Delete(root);
     }
 
     if (!g.enabled) {

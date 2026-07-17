@@ -298,14 +298,6 @@ target_link_libraries(example_task flowengine_core)
 add_library(cpp_example_task SHARED src/plugins/simple_cpp_task.cpp)
 target_link_libraries(cpp_example_task flowengine_core)
 
-# 网络服务任务 (C++)
-add_library(network_service_task SHARED src/plugins/network_service_task.cpp)
-target_link_libraries(network_service_task flowengine_core)
-
-# 数据处理任务 (C++)
-add_library(data_processor_task SHARED src/plugins/data_processor_task.cpp)
-target_link_libraries(data_processor_task flowengine_core)
-
 # 监控守护进程 (独立进程, cyber_monitor 等价物)
 add_executable(flowmond src/flowmond.c)
 target_link_libraries(flowmond flowengine_core)
@@ -344,19 +336,7 @@ target_link_libraries(bag_check flowengine_core m)
 add_library(reactive_task SHARED src/plugins/reactive_task.c)
 target_link_libraries(reactive_task flowengine_core)
 
-# ── Algorithm plugins (ADAS pipeline: perception→fusion→planning→control) ──
-add_library(perception_plugin SHARED src/plugins/perception_plugin.c)
-target_link_libraries(perception_plugin flowengine_core)
-
-add_library(planning_plugin SHARED src/plugins/planning_plugin.c)
-target_link_libraries(planning_plugin flowengine_core)
-
-add_library(pid_controller SHARED src/plugins/pid_controller.c)
-target_link_libraries(pid_controller flowengine_core m)
-
 # ── Algorithm plugins (real implementations) ──
-add_library(dbscan_perception_plugin SHARED src/plugins/dbscan_perception_plugin.c)
-target_link_libraries(dbscan_perception_plugin flowengine_core m)
 
 # ── Frenet Optimal Trajectory Planner (from open-source, Apache-2.0) ──
 # Source: https://github.com/fangedward/frenet-optimal-trajectory-planner
@@ -400,10 +380,6 @@ target_include_directories(frenet_bridge PUBLIC
 )
 target_link_libraries(frenet_bridge PUBLIC frenet_planner Eigen3::Eigen m)
 target_compile_options(frenet_bridge PRIVATE -Wno-unused-variable -Wno-sign-compare)
-
-# ── Frenet Planning Plugin (C++ wrapper) ──
-add_library(frenet_planning_plugin SHARED src/plugins/frenet_planning_plugin.cpp)
-target_link_libraries(frenet_planning_plugin flowengine_core frenet_planner m)
 endif() # FLOWENGINE_HAVE_EIGEN
 
 # =============================================================================
@@ -489,14 +465,9 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin planning_plugin pid_controller dbscan_perception_plugin
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task
     LIBRARY DESTINATION lib/flowengine/plugins
 )
-if(FLOWENGINE_HAVE_EIGEN)
-install(TARGETS frenet_planning_plugin
-    LIBRARY DESTINATION lib/flowengine/plugins
-)
-endif()
 
 install(DIRECTORY include/
     DESTINATION include/flowengine

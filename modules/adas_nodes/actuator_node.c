@@ -13,6 +13,10 @@
  * 负责 TTC/行人/横向交叉防护和限幅，真车上必须经过它，否则裸 raw_cmd 直发
  * CAN 无任何安全闸。
  *
+ * 部署状态：真车 CAN 部署预留实现。当前 config/pipeline*.json 默认用
+ * actuator_pwm_node（RC 小车形态），本节点无 pipeline 引用、无测试覆盖，
+ * 真车高速场景切换部署时启用（见 config/pipeline_car.json 头部 _comment）。
+ *
  * 设计要点：
  *   - SocketCAN 是 Linux 内核标准 CAN 抽象：把 CAN 控制器映射成网络接口
  *     (can0)，用 socket(PF_CAN, SOCK_RAW, CAN_RAW) + write() 发帧，
@@ -58,6 +62,7 @@
 #include "transport.h"
 #include "discovery.h"
 #include "logger.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -302,40 +307,6 @@ static uint32_t parse_hex_int(const char* json, const char* key, uint32_t defaul
     return (uint32_t)strtoul(p, NULL, 10);
 }
 
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
-
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
 static const char* s_inputs[]  = { "control/cmd", NULL };
@@ -364,17 +335,39 @@ static int actuator_init(MessageBus* bus, Transport* transport,
     g.dry_run          = 0;
     g.heartbeat_hz     = 10;
 
+    /* CAN 帧 ID 支持 "0x100" 十六进制字符串形式，保留 parse_hex_int */
+    g.can_throttle_id = parse_hex_int(params_json, "can_throttle_id", 0x100);
+    g.can_steering_id = parse_hex_int(params_json, "can_steering_id", 0x101);
+    g.can_status_id   = parse_hex_int(params_json, "can_status_id",   0x102);
+
+    /* cJSON 参数解析（替代手写 parse_double/parse_int/parse_string，CLAUDE.md 规范唯一合法入口） */
     if (params_json) {
-        parse_string(params_json, "can_interface", g.can_interface, sizeof(g.can_interface), "can0");
-        g.can_throttle_id = parse_hex_int(params_json, "can_throttle_id", 0x100);
-        g.can_steering_id = parse_hex_int(params_json, "can_steering_id", 0x101);
-        g.can_status_id   = parse_hex_int(params_json, "can_status_id",   0x102);
-        g.throttle_scale  = (float)parse_double(params_json, "throttle_scale", 1000.0);
-        g.steering_scale  = (float)parse_double(params_json, "steering_scale", 1000.0);
-        g.bitrate         = parse_int(params_json, "bitrate", 500000);
-        g.enabled         = parse_int(params_json, "enable", 1);
-        g.dry_run         = parse_int(params_json, "dry_run", 0);
-        g.heartbeat_hz    = parse_int(params_json, "heartbeat_hz", 10);
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* j;
+            snprintf(g.can_interface, sizeof(g.can_interface), "can0");
+            if ((j = cJSON_GetObjectItem(root, "can_interface")) && cJSON_IsString(j))
+                snprintf(g.can_interface, sizeof(g.can_interface), "%s", j->valuestring);
+            g.throttle_scale = (float)1000.0;
+            if ((j = cJSON_GetObjectItem(root, "throttle_scale")) && cJSON_IsNumber(j))
+                g.throttle_scale = (float)j->valuedouble;
+            g.steering_scale = (float)1000.0;
+            if ((j = cJSON_GetObjectItem(root, "steering_scale")) && cJSON_IsNumber(j))
+                g.steering_scale = (float)j->valuedouble;
+            g.bitrate = 500000;
+            if ((j = cJSON_GetObjectItem(root, "bitrate")) && cJSON_IsNumber(j))
+                g.bitrate = j->valueint;
+            g.enabled = 1;
+            if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j))
+                g.enabled = j->valueint;
+            g.dry_run = 0;
+            if ((j = cJSON_GetObjectItem(root, "dry_run")) && cJSON_IsNumber(j))
+                g.dry_run = j->valueint;
+            g.heartbeat_hz = 10;
+            if ((j = cJSON_GetObjectItem(root, "heartbeat_hz")) && cJSON_IsNumber(j))
+                g.heartbeat_hz = j->valueint;
+            cJSON_Delete(root);
+        }
     }
 
     if (!g.enabled) {

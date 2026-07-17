@@ -101,6 +101,7 @@
 #include "discovery.h"
 #include "logger.h"
 #include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -141,42 +142,6 @@ static struct {
     volatile int  thread_running;
     volatile int  should_stop;
 } g;
-
-/* ── 参数解析（手写 JSON 字符串解析，项目节点里不用 cJSON） ──── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
 
 /* ── 硬件适配点：读取一帧立体数据（左图 + 深度图） ───────────
  *
@@ -389,15 +354,20 @@ static int stereo_camera_init(MessageBus* bus, Transport* transport,
     g.device_id[0] = '\0';    /* 默认空字符串，多 OAK-D 时用 device_id 指定序列号 */
 
     if (params_json) {
-        g.enabled      = parse_int(params_json, "enable", 1);
-        g.fps          = parse_int(params_json, "fps", 10);
-        g.width        = parse_int(params_json, "width", 320);
-        g.height       = parse_int(params_json, "height", 240);
-        g.baseline_m   = parse_double(params_json, "baseline_m", 0.075);
-        g.fov_deg      = parse_double(params_json, "fov_deg", 65.0);
-        g.jpeg_quality = parse_int(params_json, "jpeg_quality", 70);
-        g.dry_run      = parse_int(params_json, "dry_run", 0);
-        parse_string(params_json, "device_id", g.device_id, sizeof(g.device_id), "");
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* j;
+            g.enabled      = 1; if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j)) g.enabled = j->valueint;
+            g.fps          = 10; if ((j = cJSON_GetObjectItem(root, "fps")) && cJSON_IsNumber(j)) g.fps = j->valueint;
+            g.width        = 320; if ((j = cJSON_GetObjectItem(root, "width")) && cJSON_IsNumber(j)) g.width = j->valueint;
+            g.height       = 240; if ((j = cJSON_GetObjectItem(root, "height")) && cJSON_IsNumber(j)) g.height = j->valueint;
+            g.baseline_m   = 0.075; if ((j = cJSON_GetObjectItem(root, "baseline_m")) && cJSON_IsNumber(j)) g.baseline_m = j->valuedouble;
+            g.fov_deg      = 65.0; if ((j = cJSON_GetObjectItem(root, "fov_deg")) && cJSON_IsNumber(j)) g.fov_deg = j->valuedouble;
+            g.jpeg_quality = 70; if ((j = cJSON_GetObjectItem(root, "jpeg_quality")) && cJSON_IsNumber(j)) g.jpeg_quality = j->valueint;
+            g.dry_run      = 0; if ((j = cJSON_GetObjectItem(root, "dry_run")) && cJSON_IsNumber(j)) g.dry_run = j->valueint;
+            snprintf(g.device_id, sizeof(g.device_id), "%s", ""); if ((j = cJSON_GetObjectItem(root, "device_id")) && cJSON_IsString(j)) snprintf(g.device_id, sizeof(g.device_id), "%s", j->valuestring);
+            cJSON_Delete(root);
+        }
     }
 
     /* dry-run 噪声种子 */

@@ -74,6 +74,7 @@
 #include "discovery.h"
 #include "logger.h"
 #include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -141,45 +142,6 @@ static struct {
     volatile int thread_running;
     volatile int should_stop;
 } g;
-
-/* ── 参数解析（复用 lidar_driver_node.c / actuator_node.c 的模式） ──── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) {
-        if (default_val) snprintf(out, out_sz, "%s", default_val);
-        return;
-    }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
 
 /* ── 订阅回调：收到 sensor/lidar ─────────────────────────────
  * 反序列化 LidarFrame，缓存到 g.last_lidar（带时间戳）。
@@ -490,16 +452,40 @@ static int slam_init(MessageBus* bus, Transport* transport,
     g.initial_heading = 0.0f;
     snprintf(g.algo, sizeof(g.algo), "dead_reckon");
 
+    /* cJSON 参数解析（替代手写 parse_*，CLAUDE.md 规范唯一合法入口） */
     if (params_json) {
-        g.enabled         = parse_int(params_json, "enable", 1);
-        g.publish_hz      = parse_int(params_json, "publish_hz", 20);
-        g.dry_run         = parse_int(params_json, "dry_run", 0);
-        g.use_lidar       = parse_int(params_json, "use_lidar", 1);
-        g.use_imu         = parse_int(params_json, "use_imu", 1);
-        g.initial_x       = (float)parse_double(params_json, "initial_x", 0.0);
-        g.initial_y       = (float)parse_double(params_json, "initial_y", 0.0);
-        g.initial_heading = (float)parse_double(params_json, "initial_heading", 0.0);
-        parse_string(params_json, "algo", g.algo, sizeof(g.algo), "dead_reckon");
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* j;
+            g.enabled = 1;
+            if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j))
+                g.enabled = j->valueint;
+            g.publish_hz = 20;
+            if ((j = cJSON_GetObjectItem(root, "publish_hz")) && cJSON_IsNumber(j))
+                g.publish_hz = j->valueint;
+            g.dry_run = 0;
+            if ((j = cJSON_GetObjectItem(root, "dry_run")) && cJSON_IsNumber(j))
+                g.dry_run = j->valueint;
+            g.use_lidar = 1;
+            if ((j = cJSON_GetObjectItem(root, "use_lidar")) && cJSON_IsNumber(j))
+                g.use_lidar = j->valueint;
+            g.use_imu = 1;
+            if ((j = cJSON_GetObjectItem(root, "use_imu")) && cJSON_IsNumber(j))
+                g.use_imu = j->valueint;
+            g.initial_x = (float)0.0;
+            if ((j = cJSON_GetObjectItem(root, "initial_x")) && cJSON_IsNumber(j))
+                g.initial_x = (float)j->valuedouble;
+            g.initial_y = (float)0.0;
+            if ((j = cJSON_GetObjectItem(root, "initial_y")) && cJSON_IsNumber(j))
+                g.initial_y = (float)j->valuedouble;
+            g.initial_heading = (float)0.0;
+            if ((j = cJSON_GetObjectItem(root, "initial_heading")) && cJSON_IsNumber(j))
+                g.initial_heading = (float)j->valuedouble;
+            snprintf(g.algo, sizeof(g.algo), "%s", "dead_reckon");
+            if ((j = cJSON_GetObjectItem(root, "algo")) && cJSON_IsString(j))
+                snprintf(g.algo, sizeof(g.algo), "%s", j->valuestring);
+            cJSON_Delete(root);
+        }
     }
 
     /* algo 参数处理：未编译的算法优雅降级到 dead_reckon */

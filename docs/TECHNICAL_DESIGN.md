@@ -157,8 +157,7 @@ CMakeLists.txt
 ├── 可执行文件：flow_bus, flow_coro, flow_ipc,
 │              flow_bag, flowmond, flowctl, launcher, flow_launcher, benchmark
 ├── 共享库插件：example_task, example_process, cpp_example_task,
-│              reactive_task, network_service_task,
-│              data_processor_task, flowcoro_task
+│              reactive_task, flowcoro_task
 └── CTest 测试条目
 ```
 
