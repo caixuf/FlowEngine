@@ -1120,6 +1120,13 @@ public:
     /** 唤醒事件循环（协程 resume 后调用，可加快响应） */
     void notify() { coro_cv_.notify_all(); }
 
+    /** 显式销毁协程帧（释放 BusChannel 等订阅资源）。
+     *  必须在 message_bus_destroy(bus) 之前调用：协程帧析构会触发
+     *  BusChannel 析构 → message_bus_unsubscribe_ex(bus, ...)，此时
+     *  bus 仍需存活，否则会对已释放的 sub_mutex 加锁（use-after-free）。
+     *  仅在 execute() 返回后调用；idempotent。 */
+    void reset() { task_.reset(); }
+
     /* ── 便捷成员工厂：自动注入本任务的 CancelToken，使 stop() 可取消 ──
      * 子类在 run() 中优先使用这些方法（而非全局工厂），即可获得
      * "无需外发消息即可优雅停止"的能力。 */

@@ -26,6 +26,10 @@ typedef struct {
     MessageCallback callback;
     void*           user_data;
     bool            active;
+    int             in_flight;  /**< 当前在途分发回调数：dispatch_message 持有
+                                  *   快照期间 +1，回调返回后 -1。unsubscribe_ex
+                                  *   等到 0 才放行，防止回调访问已释放的 user_data
+                                  *   （协程 awaitable 在 await_resume 反注册后即析构）。*/
 } SubEntry;
 
 typedef struct {
@@ -128,6 +132,7 @@ struct MessageBus {
     SubEntry   subs[MSG_BUS_MAX_SUBSCRIBERS];
     int        sub_count;
     pthread_mutex_t sub_mutex;
+    pthread_cond_t  sub_cv;   /**< 通知 unsubscribe_ex 在途分发已结束（配合 in_flight）*/
 
     /* Zero-copy subscribers */
     ZcSubEntry zc_subs[MSG_BUS_MAX_SUBSCRIBERS];
@@ -301,8 +306,12 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
 
     /* Snapshot matching subscribers under lock to avoid holding lock during callbacks.
      * This prevents deadlock when a callback calls subscribe/unsubscribe on the bus.
-     * Stack allocation is safe: MSG_BUS_MAX_SUBSCRIBERS is 32 (256 bytes max). */
-    typedef struct { MessageCallback cb; void* ud; } CbSnap;
+     * Stack allocation is safe: MSG_BUS_MAX_SUBSCRIBERS is 32 (256 bytes max).
+     *
+     * in_flight 引用计数：快照时 +1，回调返回后 -1。unsubscribe_ex 会等到
+     * in_flight 归零才放行，从而保证回调期间 user_data（如协程 awaitable）
+     * 不会被析构释放——杜绝"快照后、回调前 awaitable 被销毁"的 UAF。 */
+    typedef struct { MessageCallback cb; void* ud; SubEntry* src; } CbSnap;
     CbSnap snap[MSG_BUS_MAX_SUBSCRIBERS];
     int snap_count = 0;
 
@@ -310,8 +319,10 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
     for (int i = 0; i < bus->sub_count; i++) {
         SubEntry* s = &bus->subs[i];
         if (!s->active) continue;
-        if (topic_match(s->topic, msg->topic))
-            snap[snap_count++] = (CbSnap){ s->callback, s->user_data };
+        if (topic_match(s->topic, msg->topic)) {
+            s->in_flight++;
+            snap[snap_count++] = (CbSnap){ s->callback, s->user_data, s };
+        }
     }
     pthread_mutex_unlock(&bus->sub_mutex);
 
@@ -320,6 +331,14 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
         atomic_fetch_add(&bus->stat_delivered, 1);
         delivered++;
     }
+
+    /* 回调全部返回后扣减在途计数，并唤醒可能在 unsubscribe_ex 中等待的线程。 */
+    pthread_mutex_lock(&bus->sub_mutex);
+    for (int i = 0; i < snap_count; i++) {
+        if (snap[i].src->in_flight > 0) snap[i].src->in_flight--;
+    }
+    pthread_cond_broadcast(&bus->sub_cv);
+    pthread_mutex_unlock(&bus->sub_mutex);
 
     /* Per-topic tracking: decrement in-flight count + update delivery stats */
     if (msg->type == MSG_TYPE_PUBLISH) {
@@ -448,6 +467,7 @@ MessageBus* message_bus_create(const char* bus_name) {
 
     rb_init(&bus->queue);
     pthread_mutex_init(&bus->sub_mutex, NULL);
+    pthread_cond_init(&bus->sub_cv, NULL);
     pthread_mutex_init(&bus->zc_mutex, NULL);
     pthread_mutex_init(&bus->svc_mutex, NULL);
     pthread_mutex_init(&bus->reply_mutex, NULL);
@@ -487,6 +507,7 @@ void message_bus_destroy(MessageBus* bus) {
 
     rb_destroy(&bus->queue);
     pthread_mutex_destroy(&bus->sub_mutex);
+    pthread_cond_destroy(&bus->sub_cv);
     pthread_mutex_destroy(&bus->zc_mutex);
     pthread_mutex_destroy(&bus->svc_mutex);
     pthread_mutex_destroy(&bus->reply_mutex);
@@ -707,6 +728,9 @@ int message_bus_unsubscribe_ex(MessageBus* bus, const char* topic,
                                MessageCallback callback, void* user_data) {
     if (!bus || !topic || !callback) return ERR_INVALID_PARAM;
     int found = -1;
+    /* 分发线程自身的回调内反注册时不等待 in_flight（否则会因等待自己而
+     * 自死锁）；此时 user_data 必然仍存活（回调正在使用它），可安全放行。*/
+    bool on_dispatch_thread = pthread_equal(pthread_self(), bus->dispatch_thread);
     pthread_mutex_lock(&bus->sub_mutex);
     for (int i = 0; i < bus->sub_count; i++) {
         SubEntry* s = &bus->subs[i];
@@ -716,6 +740,13 @@ int message_bus_unsubscribe_ex(MessageBus* bus, const char* topic,
             s->user_data == user_data) {
             s->active = false;
             found = 0;
+            /* 等待该订阅上所有在途分发回调完成：dispatch_message 在回调返回前
+             * 持有 in_flight 引用，此处等到 0 才放行，保证回调不会访问已释放
+             * 的 user_data（协程 awaitable 在 await_resume 反注册后即析构）。*/
+            if (!on_dispatch_thread) {
+                while (s->in_flight > 0)
+                    pthread_cond_wait(&bus->sub_cv, &bus->sub_mutex);
+            }
             break;
         }
     }

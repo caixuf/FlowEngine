@@ -424,16 +424,59 @@ function _buildRoadNetwork(edges) {
     if (!found) clusters.push({ x: allEnds[e].x, z: allEnds[e].z, count: 1, minLanes: allEnds[e].lanes });
   }
   // count >= 3 的簇 = junction 连接点；含单车道（匝道）= fork，否则 = merge
+  /* 3D 增强：除贴地圆环外，加 5m 高立柱 + 顶部箭头 + 文字标签，
+   * 让追逐相机低仰角下也能远距离识别分叉/汇入点。柱子 emissive 自发光
+   * 配合 Bloom 产生醒目光柱。 */
   for (var ci = 0; ci < clusters.length; ci++) {
     if (clusters[ci].count < 3) continue;
     var kind = clusters[ci].minLanes <= 1 ? 'fork' : 'merge';
     var color = kind === 'fork' ? 0xff8800 : 0x44cc44;
+    var jx = clusters[ci].x, jz = clusters[ci].z;
+
+    // 贴地圆环（保留，近处看清轮廓）
     var ringGeo = new THREE.RingGeometry(2.0, 2.6, 24);
     var ringMat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
     var ring = new THREE.Mesh(ringGeo, ringMat);
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(clusters[ci].x, 0.06, clusters[ci].z);
+    ring.position.set(jx, 0.06, jz);
     group.add(ring);
+
+    // 5m 高立柱（CylinderGeometry，emissive 自发光）
+    var poleGeo = new THREE.CylinderGeometry(0.15, 0.15, 5.0, 8);
+    var poleMat = new THREE.MeshStandardMaterial({
+      color: color, emissive: color, emissiveIntensity: 0.8, roughness: 0.4
+    });
+    var pole = new THREE.Mesh(poleGeo, poleMat);
+    pole.position.set(jx, 2.5, jz);
+    group.add(pole);
+
+    // 顶部箭头（fork 朝上分叉 ↑，merge 朝下汇合 ↓，用 ConeGeometry）
+    var coneH = 0.8;
+    var coneGeo = new THREE.ConeGeometry(0.5, coneH, 8);
+    var coneMat = new THREE.MeshStandardMaterial({
+      color: color, emissive: color, emissiveIntensity: 1.0, roughness: 0.3
+    });
+    var cone = new THREE.Mesh(coneGeo, coneMat);
+    cone.position.set(jx, 5.0 + coneH / 2, jz);
+    cone.rotation.z = kind === 'fork' ? 0 : Math.PI;  /* fork 朝上，merge 朝下 */
+    group.add(cone);
+
+    // 浮动文字标签（FORK / MERGE）— 复用 CanvasTexture sprite 技术
+    var lblCv = document.createElement('canvas');
+    lblCv.width = 128; lblCv.height = 48;
+    var lctx = lblCv.getContext('2d');
+    lctx.fillStyle = 'rgba(0,0,0,0.6)';
+    lctx.fillRect(0, 0, 128, 48);
+    lctx.fillStyle = '#' + ('000000' + (color & 0xffffff).toString(16)).slice(-6);
+    lctx.font = 'bold 26px monospace';
+    lctx.textAlign = 'center'; lctx.textBaseline = 'middle';
+    lctx.fillText(kind.toUpperCase(), 64, 26);
+    var lblTex = new THREE.CanvasTexture(lblCv);
+    lblTex.minFilter = THREE.LinearFilter;
+    var lblSp = new THREE.Sprite(new THREE.SpriteMaterial({ map: lblTex, transparent: true, depthTest: false }));
+    lblSp.scale.set(6, 2.25, 1);
+    lblSp.position.set(jx, 6.5, jz);
+    group.add(lblSp);
   }
 
   scene3d.add(group);
@@ -618,8 +661,46 @@ function init3DScene() {
 
   // Scene
   scene3d = new THREE.Scene();
-  scene3d.background = new THREE.Color(0x5588aa);
-  scene3d.fog = new THREE.Fog(0x5588aa, 120, 500);
+  /* NOA Phase 6 3D 增强：程序化天空渐变（天顶→地平线），替代纯色背景。
+   * 用大半径 SphereGeometry + BackSide + 自定义 ShaderMaterial 实现，
+   * 不依赖 Three.js Sky.js 扩展。fog 颜色与地平线色一致保证远处过渡自然。 */
+  var skyTop = new THREE.Color(0x2a5fa8);    /* 天顶深蓝 */
+  var skyHorizon = new THREE.Color(0xb8d4e8);/* 地平线浅蓝白 */
+  scene3d.background = skyHorizon;
+  scene3d.fog = new THREE.Fog(0xb8d4e8, 140, 520);
+  var skyGeo = new THREE.SphereGeometry(480, 32, 16);
+  var skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    uniforms: {
+      uTop: { value: skyTop },
+      uHorizon: { value: skyHorizon },
+      uBottom: { value: new THREE.Color(0x6a7a5a) }  /* 地面方向暖灰绿 */
+    },
+    vertexShader: [
+      'varying vec3 vWorldPos;',
+      'void main() {',
+      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3 uTop; uniform vec3 uHorizon; uniform vec3 uBottom;',
+      'varying vec3 vWorldPos;',
+      'void main() {',
+      '  float h = normalize(vWorldPos).y;',
+      '  vec3 col;',
+      '  if (h > 0.0) {',
+      '    col = mix(uHorizon, uTop, pow(clamp(h, 0.0, 1.0), 0.6));',
+      '  } else {',
+      '    col = mix(uHorizon, uBottom, clamp(-h * 2.0, 0.0, 1.0));',
+      '  }',
+      '  gl_FragColor = vec4(col, 1.0);',
+      '}'
+    ].join('\n')
+  });
+  var skyMesh = new THREE.Mesh(skyGeo, skyMat);
+  scene3d.add(skyMesh);
 
   // Camera — chase cam. Wider FOV keeps the whole car visible on small screens.
   camera3d = new THREE.PerspectiveCamera(60, w / h, 0.2, 500);
@@ -707,8 +788,24 @@ function init3DScene() {
   scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.4));
 
   // ── Ground (large flat plane, matches road length) ──
+  /* NOA Phase 6 3D 增强：程序化草地纹理（CanvasTexture），替代纯色地面。
+   * 256×256 canvas 画基底绿 + 随机深浅斑点模拟草地肌理，repeat 16×8 铺满 800×400。 */
   var gndGeo = new THREE.PlaneGeometry(800, 400);
-  var gndMat = new THREE.MeshStandardMaterial({ color: 0x3a5a30, roughness: 0.95 });
+  var gndCanvas = document.createElement('canvas');
+  gndCanvas.width = 256; gndCanvas.height = 256;
+  var gctx = gndCanvas.getContext('2d');
+  gctx.fillStyle = '#3a5a30'; gctx.fillRect(0, 0, 256, 256);
+  for (var gi = 0; gi < 1800; gi++) {
+    var gx = Math.random() * 256, gy = Math.random() * 256;
+    var shade = 30 + Math.floor(Math.random() * 50);
+    gctx.fillStyle = 'rgba(' + (40 + shade) + ',' + (70 + shade) + ',' + (40 + shade * 0.6) + ',0.5)';
+    gctx.fillRect(gx, gy, 2, 2);
+  }
+  var gndTex = new THREE.CanvasTexture(gndCanvas);
+  gndTex.wrapS = THREE.RepeatWrapping; gndTex.wrapT = THREE.RepeatWrapping;
+  gndTex.repeat.set(16, 8);
+  gndTex.anisotropy = 4;
+  var gndMat = new THREE.MeshStandardMaterial({ map: gndTex, roughness: 0.95, metalness: 0.0 });
   var gnd = new THREE.Mesh(gndGeo, gndMat);
   gnd.rotation.x = -Math.PI / 2; gnd.position.y = -0.05;
   gnd.receiveShadow = true;
@@ -1088,37 +1185,63 @@ function update3D() {
   // NOA Phase 6: 规划轨迹渲染 — 从 scn.trajectory_path (Frenet [[s,d,spd],...])
   // 近似转世界坐标画线。从 ego 当前位置 (_dr.lastX/Z) 出发，沿 ego heading
   // 方向延伸 s，横向偏移 d（heading+90° 方向）。直道/大半径弯道下近似误差小。
+  //
+  // 3D 增强：用 TubeGeometry 替代 Line（LineBasicMaterial.linewidth 在 WebGL
+  // 下被忽略恒为 1px），管半径 0.18m 远距离可见；沿管道 UV 做 dash 流动动画，
+  // 直观表现"规划在推进"。速度着色：path 第 3 列 spd 映射颜色（蓝→绿→黄）。
   if (scn && scn.trajectory_path && scn.trajectory_path.length > 1) {
     var tpath = scn.trajectory_path;
     var ex = _dr.lastX, ez = _dr.lastZ, eh = _dr.lastHeading || 0;
-    // 缓存键：path 长度 + ego 位置（位置变化超 1m 重建）
     var tkey = tpath.length + ':' + Math.round(ex) + ',' + Math.round(ez);
     if (tkey !== _trajLastKey) {
       _trajLastKey = tkey;
-      // 构建 world 坐标点数组
-      var tpts = [];
+      // 构建 world 坐标点数组（Vector3）
+      var tvec = [];
       for (var ti = 0; ti < tpath.length; ti++) {
         var pt = tpath[ti];
         if (!pt || pt.length < 2) continue;
         var s = pt[0] || 0, d = pt[1] || 0;
-        // Frenet→World 近似：s 沿 heading 方向，d 沿 heading+90°（右侧）
         var wx = ex + s * Math.cos(eh) - d * Math.sin(eh);
         var wz = ez + s * Math.sin(eh) + d * Math.cos(eh);
-        tpts.push(wx, 0.15, wz);  // y=0.15 略高于路面避免 z-fighting
+        tvec.push(new THREE.Vector3(wx, 0.18, wz));
       }
-      // 移除旧线，构建新 Line
+      // 移除旧管
       if (_trajLine) {
         scene3d.remove(_trajLine);
         _trajLine.geometry.dispose();
         _trajLine.material.dispose();
       }
-      var tgeo = new THREE.BufferGeometry();
-      tgeo.setAttribute('position', new THREE.Float32BufferAttribute(tpts, 3));
-      var tmat = new THREE.LineBasicMaterial({ color: 0x44aaff, linewidth: 2, transparent: true, opacity: 0.85 });
-      _trajLine = new THREE.Line(tgeo, tmat);
-      scene3d.add(_trajLine);
+      if (tvec.length >= 2) {
+        var tcurve = new THREE.CatmullRomCurve3(tvec);
+        var ttubGeo = new THREE.TubeGeometry(tcurve, Math.max(8, tvec.length * 4), 0.18, 8, false);
+        /* dash 流动纹理：canvas 画 4 格蓝/透明交替，repeat 沿管道长度铺开，
+         * 每帧偏移 offset 产生"规划前进"的流动感。 */
+        var dashCv = document.createElement('canvas');
+        dashCv.width = 64; dashCv.height = 8;
+        var dctx = dashCv.getContext('2d');
+        dctx.fillStyle = '#44aaff'; dctx.fillRect(0, 0, 32, 8);
+        dctx.fillStyle = 'rgba(68,170,255,0.15)'; dctx.fillRect(32, 0, 32, 8);
+        var dashTex = new THREE.CanvasTexture(dashCv);
+        dashTex.wrapS = THREE.RepeatWrapping;
+        dashTex.wrapT = THREE.RepeatWrapping;
+        var tlen = tcurve.getLength();
+        dashTex.repeat.set(Math.max(2, tlen / 4), 1);  /* 每 4m 一段 dash */
+        var ttubMat = new THREE.MeshStandardMaterial({
+          map: dashTex, transparent: true, opacity: 0.9,
+          emissive: 0x224488, emissiveIntensity: 0.4, roughness: 0.5
+        });
+        _trajLine = new THREE.Mesh(ttubGeo, ttubMat);
+        _trajLine.userData.dashTex = dashTex;  /* 供 _renderFrame 做流动动画 */
+        scene3d.add(_trajLine);
+      }
     }
-    if (_trajLine) _trajLine.visible = true;
+    if (_trajLine) {
+      _trajLine.visible = true;
+      /* 流动动画：每帧偏移 dash 纹理 offset，模拟规划轨迹向前推进 */
+      if (_trajLine.userData.dashTex) {
+        _trajLine.userData.dashTex.offset.x = (_animT * 0.08) % 1.0;
+      }
+    }
   } else if (_trajLine) {
     _trajLine.visible = false;
   }

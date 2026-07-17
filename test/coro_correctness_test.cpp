@@ -123,6 +123,9 @@ static void test_buschannel_no_loss() {
     t.join();
 
     CHECK(counter.load() == N, "BusChannel 收到全部 100 条消息（无丢帧）");
+    /* 协程帧内 BusChannel 仍订阅 bus，必须先销毁帧（反注册订阅）再销毁 bus，
+     * 否则 ~BusChannel → message_bus_unsubscribe_ex 对已 free 的 bus 加锁（UAF）。 */
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -216,6 +219,7 @@ static void test_when_any_fires_once() {
     CHECK(resume_count.load() == ROUNDS,
           "when_any_bus 恰好 resume 20 次（10 轮 topic-a + 10 轮 topic-b 均正确路由）");
 
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -317,6 +321,7 @@ static void test_graceful_stop() {
     CHECK(exited_cleanly.load(),   "协程仅凭 stop() 取消令牌即干净退出（无需外发唤醒消息）");
     CHECK(loop_count.load() > 0,   "停止前协程已处理至少 1 条消息（正常运行过）");
 
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -374,6 +379,7 @@ static void test_recv_timeout() {
 
     CHECK(timed_out.load(), "无消息时 recv_for 在超时后返回 Timeout 状态");
 
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -436,6 +442,7 @@ static void test_delay() {
     long e = elapsed_ms.load();
     CHECK(e >= 100 && e < 1000, "sleep_ms(120) 挂起约 120ms 后恢复（100~1000ms 区间）");
 
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -507,6 +514,7 @@ static void test_request() {
     CHECK(ok.load(),            "co_await ask() 成功收到回复");
     CHECK(value.load() == 42,   "回复内容正确（echo 42）");
 
+    task.reset();
     message_bus_destroy(bus);
 }
 
@@ -601,6 +609,7 @@ static void test_stress_concurrency() {
         total_iters += iters.load();
         total_resumes += (long)task.resume_count();
         if (task.coro_latency().sample_count > 0) latency_observed = true;
+        task.reset();
         message_bus_destroy(bus);
     }
 

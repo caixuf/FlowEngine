@@ -131,6 +131,11 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
     GIT_TAG        0934b6f22cf75bc12ca2c60caaaf78519bf4921c
     GIT_SHALLOW    TRUE
+    # 修正 flowcoro lockfree::Queue 的 MPMC ABA / use-after-free 竞态：
+    # 原"无锁"队列在多消费者并发下，败者消费者会读取已被胜者 pool_free、
+    # 又被生产者 pool_malloc 复用的同一内存，导致 data race 与堆损坏。
+    # 替换为互斥保护的 FIFO 实现（接口不变）。脚本幂等。
+    PATCH_COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/patches/flowcoro_lockfree_fix.py
 )
 FetchContent_MakeAvailable(flowcoro)
 
