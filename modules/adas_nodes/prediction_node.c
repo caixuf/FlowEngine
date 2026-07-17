@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 
 /* ── Constants ────────────────────────────────────────────────── */
@@ -380,7 +381,11 @@ static int prediction_init(MessageBus* bus, Transport* transport,
 static int prediction_start(void) {
     g.running = 1;
     g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, prediction_thread, NULL) != 0) return -1;
+    if (pthread_create(&g.thread, NULL, prediction_thread, NULL) != 0) {
+        LOG_WARN("prediction", "pthread_create failed: %s", strerror(errno));
+        g.running = 0;
+        return -1;
+    }
     LOG_INFO("prediction", "started");
     node_announce_self(g.transport, &s_plugin);
     return 0;

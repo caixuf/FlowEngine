@@ -27,6 +27,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -298,7 +299,11 @@ static int recorder_init(MessageBus* bus, Transport* transport,
 
 static int recorder_start(void) {
     g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, recorder_thread, NULL) != 0) return -1;
+    if (pthread_create(&g.thread, NULL, recorder_thread, NULL) != 0) {
+        LOG_WARN("recorder", "pthread_create failed: %s", strerror(errno));
+        g.running = 0;
+        return -1;
+    }
     LOG_INFO("recorder", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);
     return 0;

@@ -348,7 +348,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 | `roadwork_zone.json` | 施工区 |
 | `suite.json` | 场景测试集（批量回归用） |
 
-> 每个场景有对应的 `scenarios/baseline/*.json` 回归基线。
+> 每个场景有对应的 `tests/baseline/*.json` 回归基线。
 
 ---
 

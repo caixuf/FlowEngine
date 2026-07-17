@@ -27,6 +27,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <inttypes.h>
 #include <math.h>
@@ -1020,7 +1021,11 @@ static int sim_init(MessageBus* bus, Transport* transport,
 
 static int sim_start(void) {
     g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, sim_thread, NULL) != 0) return -1;
+    if (pthread_create(&g.thread, NULL, sim_thread, NULL) != 0) {
+        LOG_WARN("sim_world", "pthread_create failed: %s", strerror(errno));
+        g.running = 0;
+        return -1;
+    }
     LOG_INFO("sim_world", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
     return 0;

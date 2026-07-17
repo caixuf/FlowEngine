@@ -39,6 +39,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
@@ -778,7 +779,10 @@ static int planning_init(MessageBus* bus, Transport* transport,
 static int planning_start(void) {
     if (!g.task) return -1;
     g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, planning_thread, nullptr) != 0) return -1;
+    if (pthread_create(&g.thread, nullptr, planning_thread, nullptr) != 0) {
+        LOG_WARN("planning", "pthread_create failed: %s", strerror(errno));
+        return -1;
+    }
     g.running = true;
     LOG_INFO("planning", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */

@@ -239,7 +239,7 @@ jobs:
 
   # ── Scenario-matrix regression vs baseline (B2 收尾) ────────
   # Runs the full scenario suite (8 scenarios, one simulation each) and diffs
-  # numeric summaries against scenarios/baseline/.  Expensive (~10 min), so it
+  # numeric summaries against tests/baseline/.  Expensive (~10 min), so it
   # only runs on the nightly schedule or when triggered manually.
   scenario-regression:
     runs-on: ubuntu-24.04

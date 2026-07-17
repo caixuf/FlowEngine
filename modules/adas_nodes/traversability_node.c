@@ -415,7 +415,7 @@ static void* traversability_thread(void* arg) {
         cJSON_AddNumberToObject(t_root, "corridor_left_y", cor_left_y);
         cJSON_AddNumberToObject(t_root, "corridor_right_y", cor_right_y);
         cJSON_AddNumberToObject(t_root, "corridor_width_m", cor_width);
-        cJSON_AddNumberToObject(t_root, "blocked", blocked);
+        cJSON_AddBoolToObject(t_root, "blocked", blocked ? 1 : 0);
         char* text = cJSON_PrintUnformatted(t_root);
         transport_publish(g.transport, g.output_topic,
                           (const uint8_t*)text, (uint32_t)strlen(text) + 1);

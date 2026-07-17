@@ -124,7 +124,7 @@ python3 tools/scenario_regression.py --dry-run
 # 跑整个套件，输出 PASS/FAIL 矩阵报告
 python3 tools/scenario_regression.py
 
-# 首次录制回归基线（落到 scenarios/baseline/）
+# 首次录制回归基线（落到 tests/baseline/）
 python3 tools/scenario_regression.py --update-baseline
 
 # 跑套件并与基线做数值对比，退化即 FAIL（用于回归门禁）

@@ -70,8 +70,12 @@ typedef struct {
     char depends[PROC_MAX_DEPS][64];
     int  depends_count;
 
-    /* Per-node params (key=value strings from JSON) */
-    char params[256];
+    /* Per-node params (key=value strings from JSON)。
+     * 必须 ≥ NodeDef.params_json[1024]（flow_launcher.c:53），否则超长 params
+     * 会在 config_manager.c:193/197 的 snprintf 处被截断，导致 cJSON_Parse
+     * 在节点 init() 内失败、节点退回硬编码默认值。原值 256 截断了 sim_world
+     * (272B)/traversability(300B)/control(443B) 等节点的 params。 */
+    char params[1024];
 } ProcessConfig;
 
 /**

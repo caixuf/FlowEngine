@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 
 /* ── Type IDs for discovery/advertising ──────────────────── */
@@ -193,7 +194,11 @@ static int tl_recognition_init(MessageBus* bus, Transport* transport,
 static int tl_recognition_start(void) {
     g.running = 1;
     g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, traffic_light_thread, NULL) != 0) return -1;
+    if (pthread_create(&g.thread, NULL, traffic_light_thread, NULL) != 0) {
+        LOG_WARN("traffic_light_recognition", "pthread_create failed: %s", strerror(errno));
+        g.running = 0;
+        return -1;
+    }
     LOG_INFO("traffic_light_recognition", "started");
     node_announce_self(g.transport, &s_plugin);
     return 0;

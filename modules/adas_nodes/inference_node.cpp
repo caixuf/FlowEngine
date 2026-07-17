@@ -46,6 +46,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
@@ -725,7 +726,10 @@ static int inference_init(MessageBus* bus, Transport* transport,
 static int inference_start(void) {
     if (!g.task) return -1;
     g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, inference_thread, nullptr) != 0) return -1;
+    if (pthread_create(&g.thread, nullptr, inference_thread, nullptr) != 0) {
+        LOG_WARN("inference", "pthread_create failed: %s", strerror(errno));
+        return -1;
+    }
     g.running = true;
     LOG_INFO("inference", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);

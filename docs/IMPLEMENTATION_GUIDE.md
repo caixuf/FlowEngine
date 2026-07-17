@@ -145,7 +145,7 @@ remap 回放后目标 topic 在 bus 上出现。
 - 改评分口径：`demo_evaluator.py::score()`；改回归判定：`scenario_regression.py::compare_summary()`。
 
 **待实现（收尾）：**
-1. ✅ 首次基线已录制：`scenarios/baseline/` 已有 8 个场景的基线 JSON。
+1. ✅ 首次基线已录制：`tests/baseline/` 已有 8 个场景的基线 JSON。
 2. ✅ `python3 tools/scenario_regression.py --baseline` 已接入 CI（`scenario-regression` job，
    nightly schedule + workflow_dispatch 手动触发，避免拖慢每个 PR）。
 

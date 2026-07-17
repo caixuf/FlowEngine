@@ -36,6 +36,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
@@ -365,7 +366,10 @@ static int perception_init(MessageBus* bus, Transport* transport,
 static int perception_start(void) {
     if (!g.task) return -1;
     g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, perception_thread, nullptr) != 0) return -1;
+    if (pthread_create(&g.thread, nullptr, perception_thread, nullptr) != 0) {
+        LOG_WARN("perception", "pthread_create failed: %s", strerror(errno));
+        return -1;
+    }
     g.running = true;
     LOG_INFO("perception", "started");
     node_announce_self(g.transport, &s_plugin);

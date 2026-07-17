@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EVALUATOR = ROOT / "tools" / "demo_evaluator.py"
 DEFAULT_SUITE = ROOT / "scenarios" / "suite.json"
 DEFAULT_RESULTS_DIR = Path("/tmp/flow_regression")
-DEFAULT_BASELINE_DIR = ROOT / "scenarios" / "baseline"
+DEFAULT_BASELINE_DIR = ROOT / "tests" / "baseline"
 
 
 def load_json(path: Path) -> dict | None:

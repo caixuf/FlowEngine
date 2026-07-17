@@ -148,6 +148,7 @@ int nuscenes_load_annotations(const char* json_path,
         /* Extract fields from this object */
         size_t obj_len = (size_t)(obj_end - obj_start) + 1;
         char* obj = (char*)malloc(obj_len + 1);
+        if (!obj) { free(json); free(annots); return -1; }
         memcpy(obj, obj_start, obj_len);
         obj[obj_len] = '\0';
 

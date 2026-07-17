@@ -20,6 +20,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <errno.h>
 #include <cstdio>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -188,7 +189,11 @@ static int flowmond_start(void) {
     monitor_server_start(g.server);
     /* 启动文件监控线程 */
     g_watcher_running = 1;
-    pthread_create(&g_watcher_thread, NULL, dashboard_file_watcher, NULL);
+    if (pthread_create(&g_watcher_thread, NULL, dashboard_file_watcher, NULL) != 0) {
+        LOG_WARN("flowmond", "pthread_create failed: %s", strerror(errno));
+        g_watcher_running = 0;
+        return -1;
+    }
     LOG_INFO("flowmond", "started on http://%s:%d", g.bind_addr, g.port);
     node_announce_self(g.transport, &s_plugin);
     return 0;
@@ -196,8 +201,11 @@ static int flowmond_start(void) {
 
 static void flowmond_stop(void) {
     /* 先停 watcher 线程，再停 server */
+    int watcher_was_running = g_watcher_running;  /* 仅当线程已创建时才 join */
     g_watcher_running = 0;
-    pthread_join(g_watcher_thread, NULL);
+    if (watcher_was_running) {
+        pthread_join(g_watcher_thread, NULL);
+    }
     if (g.server) monitor_server_stop(g.server);
     LOG_INFO("flowmond", "stopped");
 }

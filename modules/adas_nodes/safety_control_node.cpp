@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <errno.h>
 #include <memory>
 #include <pthread.h>
 #include <string>
@@ -526,7 +527,10 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
 int safety_start() {
     g.should_stop = false;
     if (!g.task) return -1;
-    if (pthread_create(&g.thread, nullptr, safety_thread, nullptr) != 0) return -1;
+    if (pthread_create(&g.thread, nullptr, safety_thread, nullptr) != 0) {
+        LOG_WARN("safety_control", "pthread_create failed: %s", strerror(errno));
+        return -1;
+    }
     g.running = true;
     node_announce_self(g.transport, &s_plugin);
     LOG_INFO("safety_control", "started");

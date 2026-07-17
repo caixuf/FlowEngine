@@ -1,5 +1,5 @@
 {
-  "scenario": "pedestrian_crossing",
+  "scenario": "congestion_follow",
   "result": "FAIL",
   "failures": [
     "topic fusion/localization freq too low: 19.9 Hz < 20.0 Hz",
@@ -9,7 +9,7 @@
     "npc respawn jump: max_speed=578.6 m/s, max_lateral=0.7 m/s"
   ],
   "summary": {
-    "scenario": "pedestrian_crossing",
+    "scenario": "congestion_follow",
     "samples": 175,
     "duration_s": 38.48300004005432,
     "x_delta_m": 258.1,

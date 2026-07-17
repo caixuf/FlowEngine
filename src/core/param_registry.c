@@ -276,7 +276,12 @@ char* param_export_json(void) {
     pthread_mutex_lock(&g_mutex);
     for (int i = 0; i < g_param_count; i++) {
         ParamEntry* e = &g_params[i];
-        if ((size_t)off + 256 >= sz) { sz *= 2; buf = (char*)realloc(buf, sz); }
+        if ((size_t)off + 256 >= sz) {
+            sz *= 2;
+            char* nb = (char*)realloc(buf, sz);
+            if (!nb) { free(buf); pthread_mutex_unlock(&g_mutex); return NULL; }
+            buf = nb;
+        }
 
         const char* cur_str = "";
         char cur_buf[64];
