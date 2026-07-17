@@ -59,6 +59,7 @@
 #include "discovery.h"
 #include "logger.h"
 #include "clock_service.h"
+#include <cjson/cJSON.h>
 
 #include <math.h>
 #include <pthread.h>
@@ -128,41 +129,7 @@ static struct {
     volatile int should_stop;
 } g;
 
-/* ── 参数解析 ─────────────────────────────────────────────── */
-
-static double parse_double(const char* json, const char* key, double default_val) {
-    if (!json || !key) return default_val;
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) return default_val;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return default_val;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    return strtod(p, NULL);
-}
-
-static int parse_int(const char* json, const char* key, int default_val) {
-    return (int)parse_double(json, key, (double)default_val);
-}
-
-static void parse_string(const char* json, const char* key, char* out, size_t out_sz, const char* default_val) {
-    if (!json || !key || !out || out_sz == 0) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    char pat[64];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char* p = strstr(json, pat);
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p = strchr(p + strlen(pat), ':');
-    if (!p) { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p != '"') { if (default_val) snprintf(out, out_sz, "%s", default_val); return; }
-    p++;
-    size_t n = 0;
-    while (*p && *p != '"' && n < out_sz - 1) out[n++] = *p++;
-    out[n] = '\0';
-}
+/* ── 参数解析（cJSON，CLAUDE.md 唯一合法入口） ─────────────── */
 
 /* ── ClusterClass → ObstacleType 映射 ─────────────────────── */
 static int cluster_class_to_obs_type(ClusterClass cls) {
@@ -428,21 +395,37 @@ static int stereo_vision_init(MessageBus* bus, Transport* transport,
     snprintf(g.cls_model_path, sizeof(g.cls_model_path), "models/stereo_classifier.txt");
 
     if (params_json) {
-        g.enabled         = parse_int(params_json, "enable", 1);
-        g.min_range       = parse_double(params_json, "min_range", 0.5);
-        g.max_range       = parse_double(params_json, "max_range", 8.0);
-        g.stride          = parse_int(params_json, "stride", 2);
-        g.dbscan_eps      = parse_double(params_json, "dbscan_eps", 0.4);
-        g.dbscan_min_pts  = parse_int(params_json, "dbscan_min_pts", 6);
-        g.ground_z_thresh = parse_double(params_json, "ground_z_thresh", 0.1);
-        g.min_cluster_size = parse_double(params_json, "min_cluster_size", 8.0);
-        parse_string(params_json, "output_topic", g.output_topic,
-                     sizeof(g.output_topic), "perception/obstacles");
+        cJSON* root = cJSON_Parse(params_json);
+        if (root) {
+            cJSON* j;
+            g.enabled         = 1;
+            if ((j = cJSON_GetObjectItem(root, "enable")) && cJSON_IsNumber(j)) g.enabled = j->valueint;
+            g.min_range       = 0.5;
+            if ((j = cJSON_GetObjectItem(root, "min_range")) && cJSON_IsNumber(j)) g.min_range = j->valuedouble;
+            g.max_range       = 8.0;
+            if ((j = cJSON_GetObjectItem(root, "max_range")) && cJSON_IsNumber(j)) g.max_range = j->valuedouble;
+            g.stride          = 2;
+            if ((j = cJSON_GetObjectItem(root, "stride")) && cJSON_IsNumber(j)) g.stride = j->valueint;
+            g.dbscan_eps      = 0.4;
+            if ((j = cJSON_GetObjectItem(root, "dbscan_eps")) && cJSON_IsNumber(j)) g.dbscan_eps = j->valuedouble;
+            g.dbscan_min_pts  = 6;
+            if ((j = cJSON_GetObjectItem(root, "dbscan_min_pts")) && cJSON_IsNumber(j)) g.dbscan_min_pts = j->valueint;
+            g.ground_z_thresh = 0.1;
+            if ((j = cJSON_GetObjectItem(root, "ground_z_thresh")) && cJSON_IsNumber(j)) g.ground_z_thresh = j->valuedouble;
+            g.min_cluster_size = 8.0;
+            if ((j = cJSON_GetObjectItem(root, "min_cluster_size")) && cJSON_IsNumber(j)) g.min_cluster_size = j->valuedouble;
+            snprintf(g.output_topic, sizeof(g.output_topic), "%s", "perception/obstacles");
+            if ((j = cJSON_GetObjectItem(root, "output_topic")) && cJSON_IsString(j))
+                snprintf(g.output_topic, sizeof(g.output_topic), "%s", j->valuestring);
 
-        /* Phase 4 分类器参数 */
-        g.cls_enabled = parse_int(params_json, "cls_enabled", 0);
-        parse_string(params_json, "cls_model_path", g.cls_model_path,
-                     sizeof(g.cls_model_path), "models/stereo_classifier.txt");
+            /* Phase 4 分类器参数 */
+            g.cls_enabled = 0;
+            if ((j = cJSON_GetObjectItem(root, "cls_enabled")) && cJSON_IsNumber(j)) g.cls_enabled = j->valueint;
+            snprintf(g.cls_model_path, sizeof(g.cls_model_path), "%s", "models/stereo_classifier.txt");
+            if ((j = cJSON_GetObjectItem(root, "cls_model_path")) && cJSON_IsString(j))
+                snprintf(g.cls_model_path, sizeof(g.cls_model_path), "%s", j->valuestring);
+            cJSON_Delete(root);
+        }
     }
 
     if (!g.enabled) {

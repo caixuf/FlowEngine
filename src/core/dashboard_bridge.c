@@ -114,12 +114,15 @@ static void on_raw_chunk(const Message* msg, void* user_data) {
     /* Single-chunk message: deliver immediately */
     if (count == 1 && seq == 0) {
         if (st->callback) {
-            /* Pass a null-terminated copy */
-            char tmp[4096];
-            size_t copy_len = payload_len < sizeof(tmp) - 1 ? payload_len : sizeof(tmp) - 1;
-            memcpy(tmp, chunk->data, copy_len);
-            tmp[copy_len] = '\0';
-            st->callback(tmp, copy_len, st->user_data);
+            /* 动态分配：MSG_BUS_MAX_DATA_SIZE=65536 后 single-chunk 可能远大于
+             * 旧的 4096，固定栈 buffer 会截断 payload。用 malloc 避免截断和栈溢出。 */
+            char* tmp = (char*)malloc(payload_len + 1);
+            if (tmp) {
+                memcpy(tmp, chunk->data, payload_len);
+                tmp[payload_len] = '\0';
+                st->callback(tmp, payload_len, st->user_data);
+                free(tmp);
+            }
         }
         return;
     }

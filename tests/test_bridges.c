@@ -316,8 +316,10 @@ static void test_dashboard_bridge_multi_chunk(void) {
     ASSERT(sub != NULL, "subscriber open failed");
     ipc_channel_start(sub);
 
-    /* Build a JSON payload larger than one chunk to exercise chunking.
-     * DASHBOARD_CHUNK_DATA_SIZE = 4084, so ~10000 bytes → 3 chunks. */
+    /* Build a JSON payload larger than the legacy 4096 stack buffer to
+     * exercise the single-chunk path with a large payload.
+     * DASHBOARD_CHUNK_DATA_SIZE = MSG_BUS_MAX_DATA_SIZE - 12 = 65524,
+     * so 10000 bytes → single chunk, but > 4096 → catches stack truncation. */
     const size_t big_len = 10000;
     char* big = (char*)malloc(big_len + 1);
     ASSERT(big != NULL, "alloc failed");
