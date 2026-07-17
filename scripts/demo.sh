@@ -197,7 +197,8 @@ cleanup() {
   { pkill -9 -f flow_node_host; pkill -9 -f flow_launcher; \
     pkill -9 -f flowmond; pkill -9 -f flowboard_server; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
 
-  rm -f "$JSON_FILE"
+  # 保留拓扑文件供评估器/evaluator 事后分析（不删除）
+  [ -f "$JSON_FILE" ] && cp "$JSON_FILE" "${JSON_FILE%.json}_$(date +%Y%m%d_%H%M%S).json" 2>/dev/null || true
 
   echo ""
   echo "  ╔══════════════════════════════════════╗"
