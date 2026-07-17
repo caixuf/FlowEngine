@@ -397,6 +397,67 @@ export function _buildTrafficLight() {
   return g;
 }
 
+// ── ETC gate model (Phase 3) ────────────────────────────────────
+/**
+ * _buildETCGate — build an ETC toll gate mesh (2 poles + crossbar + boom arm).
+ *
+ * Real-world scale. The boom arm is stored in userData.boom so the renderer
+ * can rotate it based on the gate's progress (0=closed horizontal, 1=open ~75°).
+ *
+ * Coordinate system: X=forward (along road), Y=up, Z=lateral (across road).
+ * The gate spans the road laterally: poles at Z=±roadHalf, boom rotates
+ * from one pole.
+ *
+ * @returns {THREE.Group} with userData.boom = boom arm mesh
+ */
+export function _buildETCGate() {
+  const T = window.THREE;
+  var g = new T.Group();
+
+  // Two poles at Z = ±4m (covering a 2-lane road of 7m width + margin)
+  var poleGeo = new T.CylinderGeometry(0.15, 0.18, 5.5, 12);
+  var poleMat = new T.MeshStandardMaterial({ color: 0x445566, metalness: 0.5, roughness: 0.4 });
+  for (var pi = 0; pi < 2; pi++) {
+    var pole = new T.Mesh(poleGeo, poleMat);
+    pole.position.set(0, 2.75, pi === 0 ? -4.5 : 4.5);
+    pole.castShadow = true;
+    g.add(pole);
+  }
+
+  // Crossbar: horizontal box connecting pole tops at height 5m
+  var bar = new T.Mesh(
+    new T.BoxGeometry(0.15, 0.15, 9.0),
+    new T.MeshStandardMaterial({ color: 0x445566, metalness: 0.5, roughness: 0.4 })
+  );
+  bar.position.set(0, 5.2, 0);
+  bar.castShadow = true;
+  g.add(bar);
+
+  // Sign panel on crossbar (rectangular plate)
+  var sign = new T.Mesh(
+    new T.BoxGeometry(0.08, 0.6, 3.0),
+    new T.MeshStandardMaterial({ color: 0x2266aa, emissive: 0x113355, roughness: 0.3 })
+  );
+  sign.position.set(0.1, 5.2, 0);
+  g.add(sign);
+
+  // Boom arm: long thin box, pivot at one pole (Z=-4.5)
+  // Rotates around Y axis: 0° = horizontal (closed), 75° = raised (open)
+  var boom = new T.Mesh(
+    new T.BoxGeometry(0.1, 0.1, 8.5),
+    new T.MeshStandardMaterial({ color: 0xffcc00, emissive: 0x332200, roughness: 0.3 })
+  );
+  // Position so one end is at the pivot pole, extends across road to other pole
+  boom.position.set(0, 4.8, 0);
+  // Move geometry so pivot is at one end (Z=-4.5), arm extends to Z=+4
+  boom.geometry.translate(0, 0, 4.25);
+  boom.position.z = -4.5;
+  g.add(boom);
+  g.userData.boom = boom;
+
+  return g;
+}
+
 // ── Stub: export menu ───────────────────────────────────────────
 export function toggleExportMenu() {
   var m = document.getElementById('export-menu');

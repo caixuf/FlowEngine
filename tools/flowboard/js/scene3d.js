@@ -4,7 +4,7 @@
 // scene3d.js — Three.js 3D scene module for ADAS visualization
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight } from './utils.js';
+import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight, _buildETCGate } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
 
@@ -45,6 +45,14 @@ const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cycli
 /** Road curve state */
 let _curveActive = false;
 let _lastCurveKey = "";
+
+/** Phase 3: Road network group (multi-segment road from scene/frame).
+ *  当 scene.road_network 存在时，_roadNetworkGroup 取代旧的 _roadGroup。 */
+let _roadNetworkGroup = null;
+let _lastRoadNetworkKey = "";
+
+/** Phase 3: ETC gate pool (抬杆门架，从 scene/frame entities 读取) */
+let _etcGatePool = [], _etcGateWorld = [];
 
 /** WebGL context-loss flag — render loop skips while true */
 let _glLost = false;
@@ -184,6 +192,204 @@ function _applyRoadCurve(roadData) {
       return;
     }
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Phase 3: 多段道路网络渲染 — 从 scene/frame 的 road_network.edges 构建
+// 使用 CatmullRomCurve3 + 自定义 ribbon mesh 生成沿曲线的平坦路面。
+// 每条 edge 的 nodes [[x,y],...] 是道路参考线控制点，x=纵向 y=横向。
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * _buildRoadNetwork — 从 road_network.edges 构建多段道路网格。
+ *
+ * 每条 edge 用 CatmullRomCurve3 平滑插值 nodes 控制点，然后沿曲线
+ * 采样 N 段，每段生成一个梯形面片（左右边缘点 × 当前+下一点），
+ * 拼成 triangle strip 形成平坦路面。车道线沿曲线虚线绘制。
+ *
+ * 坐标系：scene/frame 的 [x, y] → THREE.Vector3(x, 0, y)
+ *   x=纵向(forward), y=横向(lateral/Z轴), Y=up
+ *
+ * @param {Array} edges  road_network.edges 数组
+ */
+function _buildRoadNetwork(edges) {
+  if (!edges || !edges.length || !scene3d) return;
+
+  // 缓存键：用 edges 的 id+nodes 数量拼接，避免每帧重建
+  var key = '';
+  for (var i = 0; i < edges.length; i++) {
+    key += (edges[i].id || i) + ':' + (edges[i].nodes ? edges[i].nodes.length : 0) + ',';
+  }
+  if (key === _lastRoadNetworkKey) return;  // 未变化，跳过重建
+  _lastRoadNetworkKey = key;
+
+  // 清除旧的道路网络
+  if (_roadNetworkGroup) {
+    scene3d.remove(_roadNetworkGroup);
+    _roadNetworkGroup.traverse(function(child) {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+    _roadNetworkGroup = null;
+  }
+
+  var group = new THREE.Group();
+  var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
+
+  for (var ei = 0; ei < edges.length; ei++) {
+    var edge = edges[ei];
+    var nodes = edge.nodes;
+    if (!nodes || nodes.length < 2) continue;
+
+    // 从 nodes 构建 CatmullRomCurve3 控制点
+    var points = [];
+    for (var ni = 0; ni < nodes.length; ni++) {
+      points.push(new THREE.Vector3(nodes[ni][0], 0, nodes[ni][1]));
+    }
+    var curve = new THREE.CatmullRomCurve3(points);
+
+    var length = edge.length || curve.getLength();
+    var lanes = edge.lanes || 2;
+    var laneWidth = edge.lane_width || 3.5;
+    var roadWidth = lanes * laneWidth;
+    var roadHalf = roadWidth / 2;
+
+    // ── 路面 ribbon mesh ──
+    var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
+    var positions = [];
+    var indices = [];
+    for (var si = 0; si <= nSeg; si++) {
+      var t = si / nSeg;
+      var pos = curve.getPointAt(t);
+      var tangent = curve.getTangentAt(t);
+      // 法线（切线在 XZ 平面内旋转 90°）
+      var nx = -tangent.z, nz = tangent.x;
+
+      // 左右边缘点
+      positions.push(pos.x - nx * roadHalf, 0.01, pos.z - nz * roadHalf);
+      positions.push(pos.x + nx * roadHalf, 0.01, pos.z + nz * roadHalf);
+
+      if (si < nSeg) {
+        var base = si * 2;
+        indices.push(base, base + 1, base + 2);
+        indices.push(base + 1, base + 3, base + 2);
+      }
+    }
+
+    var roadGeo = new THREE.BufferGeometry();
+    roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    roadGeo.setIndex(indices);
+    roadGeo.computeVertexNormals();
+    var roadMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
+    var roadMesh = new THREE.Mesh(roadGeo, roadMat);
+    roadMesh.receiveShadow = true;
+    group.add(roadMesh);
+
+    // ── 路肩（道路两侧的浅色边缘带）──
+    var shldW = 1.0;
+    var shldHalf = roadHalf + shldW / 2;
+    var sPos = [], sIdx = [];
+    for (var si2 = 0; si2 <= nSeg; si2++) {
+      var t2 = si2 / nSeg;
+      var p2 = curve.getPointAt(t2);
+      var tan2 = curve.getTangentAt(t2);
+      var nx2 = -tan2.z, nz2 = tan2.x;
+      // 左路肩外缘 + 右路肩外缘
+      sPos.push(p2.x - nx2 * shldHalf, 0.02, p2.z - nz2 * shldHalf);
+      sPos.push(p2.x + nx2 * shldHalf, 0.02, p2.z + nz2 * shldHalf);
+      if (si2 < nSeg) {
+        var b2 = si2 * 2;
+        sIdx.push(b2, b2 + 1, b2 + 2);
+        sIdx.push(b2 + 1, b2 + 3, b2 + 2);
+      }
+    }
+    var shldGeo = new THREE.BufferGeometry();
+    shldGeo.setAttribute('position', new THREE.Float32BufferAttribute(sPos, 3));
+    shldGeo.setIndex(sIdx);
+    shldGeo.computeVertexNormals();
+    var shldMesh = new THREE.Mesh(shldGeo,
+      new THREE.MeshStandardMaterial({ color: 0x556655, roughness: 1.0 }));
+    shldMesh.receiveShadow = true;
+    group.add(shldMesh);
+
+    // ── 车道线：中心双黄线 + 车道分隔虚线 ──
+    // 中心双黄线（实线）
+    _addCurveLine(group, curve, nSeg, 0, 0.15, 0xffcc44, 0.043, true);
+    _addCurveLine(group, curve, nSeg, 0, -0.15, 0xffcc44, 0.043, true);
+    // 车道分隔虚线（每条车道线）
+    for (var li = 1; li < lanes; li++) {
+      var offset = -roadHalf + li * laneWidth;
+      _addCurveDashedLine(group, curve, nSeg, offset, 0xffffff, 0.043);
+    }
+    // 道路边缘白实线
+    _addCurveLine(group, curve, nSeg, roadHalf - 0.1, 0, 0xffffff, 0.043, true);
+    _addCurveLine(group, curve, nSeg, -roadHalf + 0.1, 0, 0xffffff, 0.043, true);
+  }
+
+  scene3d.add(group);
+  _roadNetworkGroup = group;
+
+  // 隐藏旧的静态道路
+  if (_roadGroup) _roadGroup.visible = false;
+}
+
+/**
+ * 沿曲线添加一条实线标记（用于中心双黄线 / 道路边缘白线）。
+ * @param {THREE.Group} group  父组
+ * @param {THREE.CatmullRomCurve3} curve  道路曲线
+ * @param {number} nSeg  采样段数
+ * @param {number} lateralOffset  横向偏移（相对道路中心线，Z 方向）
+ * @param {number} forwardOffset  纵向微调（沿切线方向，通常 0）
+ * @param {number} color  线条颜色
+ * @param {number} y  Y 高度
+ * @param {boolean} isSolid  true=实线
+ */
+function _addCurveLine(group, curve, nSeg, lateralOffset, forwardOffset, color, y, isSolid) {
+  var positions = [];
+  for (var si = 0; si <= nSeg; si++) {
+    var t = si / nSeg;
+    var pos = curve.getPointAt(t);
+    var tan = curve.getTangentAt(t);
+    var nx = -tan.z, nz = tan.x;
+    positions.push(pos.x + nx * lateralOffset, y, pos.z + nz * lateralOffset);
+  }
+  var geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  var mat = new THREE.LineBasicMaterial({ color: color });
+  group.add(new THREE.Line(geo, mat));
+}
+
+/**
+ * 沿曲线添加虚线标记（用于车道分隔线）。
+ * 每 4.5m 画一段，间隔 5.5m（与旧 _buildRoad 的 DASH/GAP 一致）。
+ */
+function _addCurveDashedLine(group, curve, nSeg, lateralOffset, y) {
+  var length = curve.getLength();
+  var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
+  var nDash = Math.floor(length / STEP);
+  var dashSegLen = Math.max(2, Math.floor(DASH / 3));  // 每段 dash 的子段数
+
+  for (var d = 0; d <= nDash; d++) {
+    var s0 = d * STEP;
+    var s1 = s0 + DASH;
+    if (s1 > length) s1 = length;
+    if (s0 >= length) break;
+
+    var positions = [];
+    var nSub = Math.max(2, Math.ceil((s1 - s0) / 3));
+    for (var si = 0; si <= nSub; si++) {
+      var t = (s0 + (s1 - s0) * si / nSub) / length;
+      if (t > 1) t = 1;
+      var pos = curve.getPointAt(t);
+      var tan = curve.getTangentAt(t);
+      var nx = -tan.z, nz = tan.x;
+      positions.push(pos.x + nx * lateralOffset, y, pos.z + nz * lateralOffset);
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    var mat = new THREE.LineBasicMaterial({ color: 0xffffff });
+    group.add(new THREE.Line(geo, mat));
+  }
 }
 
 // ── Environment: buildings + trees ──
@@ -429,6 +635,18 @@ function init3DScene() {
     _trafficLightWorld.push(null);
   }
 
+  // ── Phase 3: ETC gate pool (高速 ETC 抬杆门架) ──
+  // 每个门架 = 2 立柱 + 横梁 + 可旋转抬杆。progress ∈ [0,1] 控制抬杆角度。
+  _etcGatePool = [];
+  _etcGateWorld = [];
+  for (var gi = 0; gi < 4; gi++) {
+    var gate = _buildETCGate();
+    gate.visible = false;
+    scene3d.add(gate);
+    _etcGatePool.push(gate);
+    _etcGateWorld.push(null);
+  }
+
   // ── LiDAR point cloud ──
   var lgeo = new THREE.BufferGeometry();
   var lpts = new Float32Array(900);
@@ -642,6 +860,29 @@ function _renderFrame() {
     }
   }
 
+  // ── Phase 3: ETC gates — 抬杆动画 ──
+  // state: 'closed' → 抬杆水平 (progress=0)
+  //        'opening' → 抬杆旋转中 (progress 0→1)
+  //        'open'    → 抬杆全开 (progress=1, 旋转 ~75°)
+  if (_etcGatePool && _etcGateWorld) {
+    for (var gi2 = 0; gi2 < _etcGatePool.length; gi2++) {
+      var gm = _etcGatePool[gi2];
+      var gw = _etcGateWorld[gi2];
+      if (gw) {
+        gm.position.set(gw.x, 0, gw.z);
+        gm.visible = true;
+        // 抬杆角度：progress 0→1 映射到 0→75° (1.31 rad)
+        var boom = gm.userData.boom;
+        if (boom) {
+          var targetAngle = (gw.progress || 0) * 1.31;
+          boom.rotation.y += (targetAngle - boom.rotation.y) * 0.15;
+        }
+      } else {
+        gm.visible = false;
+      }
+    }
+  }
+
   // ── LiDAR: use stored world points ──
   if (_lidarCloud && _lidarWorld && _lidarWorld.length) {
     var wl = _lidarWorld, pos = _lidarCloud.geometry.attributes.position.array;
@@ -667,8 +908,34 @@ function update3D() {
   var scn = (_topoData.metrics || {}).scene;
   var now = performance.now() / 1000;
 
-  // Road curve geometry: apply once when scene road data arrives
-  if (scn && scn.road) _applyRoadCurve(scn.road);
+  // Phase 3: 多段道路网络渲染 — 优先使用 scene/frame 的 road_network
+  // （flowsim_node 发布，monitor_node 透传）。无 road_network 时 fallback
+  // 到旧的 scene.road 单段弯道几何（sim_world_node 向后兼容）。
+  if (scn && scn.road_network && scn.road_network.edges) {
+    _buildRoadNetwork(scn.road_network.edges);
+  } else if (scn && scn.road) {
+    // 旧路径：单段弯道，隐藏 road_network 如果存在（场景切换时）
+    if (_roadNetworkGroup) { _roadNetworkGroup.visible = false; _lastRoadNetworkKey = ''; }
+    if (_roadGroup) _roadGroup.visible = true;
+    _applyRoadCurve(scn.road);
+  }
+
+  // Phase 3: ETC 门架 — 从 scene/frame entities 读取（如果有）
+  if (_etcGatePool && scn && scn.entities) {
+    var ents = scn.entities;
+    var gateIdx = 0;
+    for (var ei = 0; ei < ents.length && gateIdx < _etcGatePool.length; ei++) {
+      if (ents[ei].type === 'etc_gate') {
+        var eg = ents[ei];
+        _etcGateWorld[gateIdx] = {
+          x: _dr.lastX + (eg.x || 0), z: _dr.lastZ + (eg.y || 0),
+          state: eg.state || 'closed', progress: eg.progress || 0
+        };
+        gateIdx++;
+      }
+    }
+    for (; gateIdx < _etcGatePool.length; gateIdx++) _etcGateWorld[gateIdx] = null;
+  }
 
   // Ego ground-truth is fed into the dead-reckoning engine by app.js
   // sync2DTarget() (called just before update3D in updateAll). Here we

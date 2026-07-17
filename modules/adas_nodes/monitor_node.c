@@ -71,6 +71,17 @@ static struct {
     char   traffic_lights_json[512];
     volatile int has_traffic_lights;
 
+    /* Phase 3: scene/frame 缓存（从 flowsim_node 发布）。
+     * 只缓存 road_network 部分（entities 由 vehicle/state 覆盖，无需重复）。
+     * road_network 含 edges[]，每条 edge 有 nodes[[x,y],...]，供 3D 前端
+     * 用 CatmullRomCurve3 + TubeGeometry 构建多段道路网络。
+     *
+     * Phase 3.2: 额外缓存 entities 中的 etc_gate / stop_line 实体
+     * （这些不在 vehicle/state 的 obstacles 里，需要从 scene/frame 单独提取）。 */
+    char   scene_road_network_json[4096];
+    char   scene_entities_json[8192];  /* etc_gate / stop_line 等 scene/frame 独有实体 */
+    volatile int has_scene_frame;
+
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
     char node_info_json[MAX_TOPO_NODES][2048];  /* 每个节点的原始 JSON（需能容纳最长节点的 self-description JSON） */
@@ -239,6 +250,63 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
     memcpy(g.traffic_lights_json, d, len);
     g.traffic_lights_json[len] = '\0';
     g.has_traffic_lights = 1;
+}
+
+/* Phase 3: scene/frame 订阅 — 从 flowsim_node 获取完整场景帧。
+ * 提取 road_network（多段道路）+ entities 中的 etc_gate/stop_line
+ * （vehicle/state 不含这些实体类型，需从 scene/frame 单独获取）。
+ * road_network 透传给 3D 前端用于 CatmullRomCurve3 + TubeGeometry
+ * 多段道路渲染。 */
+static void on_scene_frame(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    const char* d = (const char*)msg->data;
+    cJSON* root = cJSON_Parse(d);
+    if (!root) return;
+
+    /* 缓存 road_network */
+    cJSON* rn = cJSON_GetObjectItem(root, "road_network");
+    if (rn) {
+        char* rn_str = cJSON_PrintUnformatted(rn);
+        if (rn_str) {
+            size_t len = strlen(rn_str);
+            if (len >= sizeof(g.scene_road_network_json))
+                len = sizeof(g.scene_road_network_json) - 1;
+            memcpy(g.scene_road_network_json, rn_str, len);
+            g.scene_road_network_json[len] = '\0';
+            free(rn_str);
+        }
+    }
+
+    /* 从 entities 提取 etc_gate / stop_line（其它实体已由 vehicle/state 覆盖） */
+    cJSON* entities = cJSON_GetObjectItem(root, "entities");
+    if (entities && cJSON_IsArray(entities)) {
+        cJSON* filtered = cJSON_CreateArray();
+        cJSON* ent;
+        cJSON_ArrayForEach(ent, entities) {
+            cJSON* type = cJSON_GetObjectItem(ent, "type");
+            if (type && cJSON_IsString(type) &&
+                (strcmp(type->valuestring, "etc_gate") == 0 ||
+                 strcmp(type->valuestring, "stop_line") == 0)) {
+                cJSON_AddItemReferenceToArray(filtered, ent);
+            }
+        }
+        if (cJSON_GetArraySize(filtered) > 0) {
+            char* ent_str = cJSON_PrintUnformatted(filtered);
+            if (ent_str) {
+                size_t len = strlen(ent_str);
+                if (len >= sizeof(g.scene_entities_json))
+                    len = sizeof(g.scene_entities_json) - 1;
+                memcpy(g.scene_entities_json, ent_str, len);
+                g.scene_entities_json[len] = '\0';
+                free(ent_str);
+            }
+        }
+        cJSON_Delete(filtered);
+    }
+
+    g.has_scene_frame = 1;
+    cJSON_Delete(root);
 }
 
 static void on_fusion_latency(const Message* msg, void* user_data) {
@@ -526,6 +594,27 @@ static void export_dashboard_json(void) {
         cJSON_AddNumberToObject(road_o, "curve_offset_m", g.road_curve_offset_m);
     }
 
+    /* Phase 3: road_network 从 scene/frame topic 获取（flowsim_node 发布）。
+     * 透传 {"edges":[...]} 给 3D 前端，每个 edge 含 nodes[[x,y],...] 供
+     * CatmullRomCurve3 构建多段道路。旧场景无 scene/frame 时此字段缺省，
+     * 前端 fallback 到 scene.road 的单段弯道几何。 */
+    if (g.has_scene_frame && g.scene_road_network_json[0] != '\0') {
+        cJSON* rn = cJSON_Parse(g.scene_road_network_json);
+        if (rn) {
+            cJSON_AddItemToObject(scene, "road_network", rn);
+        }
+    }
+
+    /* Phase 3.2: entities 中的 etc_gate / stop_line 从 scene/frame 获取。
+     * 这些实体不在 vehicle/state 的 obstacles 数组里，需要单独透传给
+     * 3D 前端渲染 ETC 门架抬杆动画。 */
+    if (g.has_scene_frame && g.scene_entities_json[0] != '\0') {
+        cJSON* ents = cJSON_Parse(g.scene_entities_json);
+        if (ents) {
+            cJSON_AddItemToObject(scene, "entities", ents);
+        }
+    }
+
     /* Phase 2: 红绿灯状态从 road/traffic_lights topic 获取，透传给 FlowBoard 3D */
     if (g.has_traffic_lights && g.traffic_lights_json[0] != '\0') {
         cJSON* tl_root = cJSON_Parse(g.traffic_lights_json);
@@ -752,7 +841,8 @@ static const TaskInterface monitor_vtable = {
 
 static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
                                    "fusion/latency", "flowengine/node_info",
-                                   "planning/trajectory", "road/geometry", NULL };
+                                   "planning/trajectory", "road/geometry",
+                                   "road/traffic_lights", "scene/frame", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -810,6 +900,8 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
     transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
     transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, NULL);
+    /* Phase 3: scene/frame — 从 flowsim_node 获取 road_network 供 3D 多段道路渲染 */
+    transport_subscribe(transport, "scene/frame", on_scene_frame, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, "flowengine/node_info", on_node_info, NULL);
     g.node_info_count = 0;
@@ -819,6 +911,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/traffic_lights",  0x7E5C0FFEu, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "scene/frame",          0x5CE4E011u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
     /* Open IPC stats bridge for flowmond (publisher) */
