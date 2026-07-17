@@ -656,7 +656,7 @@ static void handle_client(int fd, MonitorServer* ms) {
     /* Route: /js/<file> or /css/<file> → modular frontend from flowboard/ subdir.
      * Maps /js/foo.js → tools/flowboard/js/foo.js, /css/style.css → tools/flowboard/css/style.css */
     if ((strncmp(path, "/js/", 4) == 0 || strncmp(path, "/css/", 5) == 0) && ms->html_path[0]) {
-        char reqpath[256];
+        char reqpath[512];
         snprintf(reqpath, sizeof(reqpath), "%s", path);
         if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
@@ -705,7 +705,7 @@ static void handle_client(int fd, MonitorServer* ms) {
      * graph work offline without relying on external CDNs. */
     if (strncmp(path, "/tools/", 7) == 0 && ms->html_path[0]) {
         /* Use the already-parsed request path (query string stripped). */
-        char reqpath[256];
+        char reqpath[512];
         snprintf(reqpath, sizeof(reqpath), "%s", path);
 
         /* Reject path traversal — block ".." and backslash.
@@ -736,7 +736,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         if (slash && strcmp(slash + 1, "flowboard") == 0)
             *slash = '\0';
 
-        char filepath[768];
+        char filepath[1024];
         snprintf(filepath, sizeof(filepath), "%s/%s", dir, base);
 
         size_t flen = 0;

@@ -40,23 +40,6 @@
 /*  内部: 小型矩阵运算                                        */
 /* ══════════════════════════════════════════════════════════ */
 
-/* C = alpha*A + beta*B,  all n×n row-major */
-static void mat_add_5(double* C, const double* A, const double* B,
-                       double alpha, double beta) {
-    for (int i = 0; i < 25; i++)
-        C[i] = alpha * A[i] + beta * B[i];
-}
-
-/* C = A * B,  n×n row-major */
-static void mat_mul_5(double* C, const double* A, const double* B) {
-    double tmp[25] = {0};
-    for (int i = 0; i < 5; i++)
-        for (int k = 0; k < 5; k++)
-            for (int j = 0; j < 5; j++)
-                tmp[i*5 + j] += A[i*5 + k] * B[k*5 + j];
-    memcpy(C, tmp, sizeof(tmp));
-}
-
 /* F = Jacobian of state transition, 5×5 */
 static void compute_jacobian_F(double* F, const double x[5], double dt) {
     double v   = x[2];

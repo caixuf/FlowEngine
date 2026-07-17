@@ -33,7 +33,9 @@ static struct {
 
     ModuleOverride   modules[LOG_MAX_MODULES];
     int              module_count;
-} g_log = { NULL, LOG_INFO, PTHREAD_MUTEX_INITIALIZER, false, {{0}}, 0 };
+} g_log = { .output = NULL, .min_level = LOG_INFO,
+            .mutex = PTHREAD_MUTEX_INITIALIZER, .initialized = false,
+            .module_count = 0 };
 
 /* ══════════════════════════════════════════════════════════ */
 /* 初始化 / 关闭                                              */

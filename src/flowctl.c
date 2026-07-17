@@ -567,7 +567,8 @@ int main(int argc, char** argv) {
                     while (*nm && *nm != '"' && i < 63) name[i++] = *nm++;
                     printf("  \"%s\" [fillcolor=\"#0d1117\", fontcolor=\"#c9d1d9\"];\n", name);
                     tp = strstr(nm, "},{");
-                    if (!tp) break; tp += 3;
+                    if (!tp) break;
+                    tp += 3;
                 }
             }
             /* Extract topics as edges */

@@ -175,8 +175,10 @@ int main(int argc, char** argv) {
         int x1 = (int)((cb->cx + cb->length/2 - xmin) / xs);
         int y0 = (int)((cb->cy - cb->width/2 - ymin) / ys);
         int y1 = (int)((cb->cy + cb->width/2 - ymin) / ys);
-        if (x0 < 0) x0 = 0; if (x1 >= gw) x1 = gw-1;
-        if (y0 < 0) y0 = 0; if (y1 >= gh) y1 = gh-1;
+        if (x0 < 0) x0 = 0;
+        if (x1 >= gw) x1 = gw-1;
+        if (y0 < 0) y0 = 0;
+        if (y1 >= gh) y1 = gh-1;
         for (int y = y0; y <= y1; y++)
             for (int x = x0; x <= x1; x++)
                 grid[y][x] = (y==y0||y==y1||x==x0||x==x1) ? marker : grid[y][x];

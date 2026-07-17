@@ -67,7 +67,8 @@ static void test_type_registry(void) {
     TEST("type registry register");
     TypeRegistryEntry e = {
         .type_id = 0xDEADBEEF, .schema_version = 1, .struct_size = 42,
-        .type_name = "TestType", .serialize = NULL, .deserialize = NULL, .endian_swap = NULL
+        .type_name = "TestType", .serialize = NULL, .deserialize = NULL, .endian_swap = NULL,
+        .schema_hash = 0, .fields = NULL, .field_count = 0
     };
     ASSERT_EQ(serializer_register_type(&e), 0, "register failed");
 
@@ -127,8 +128,8 @@ static void test_schema_compat(void) {
     };
     TypeRegistryEntry base = {
         .type_id = 0x11112222, .schema_version = 2, .struct_size = 4,
-        .type_name = "CompatType", .schema_hash = 0xAABBCCDD,
-        .fields = dummy_fields, .field_count = 1,
+        .type_name = "CompatType", .serialize = NULL, .deserialize = NULL, .endian_swap = NULL,
+        .schema_hash = 0xAABBCCDD, .fields = dummy_fields, .field_count = 1,
     };
     ASSERT_EQ(serializer_register_type(&base), 0, "register base failed");
 
@@ -656,7 +657,8 @@ static void test_bus_topic_stats(void) {
 static void test_bus_qos_config(void) {
     TEST("bus QoS set/get");
     MessageBus* bus = message_bus_create("test_qos_cfg");
-    TopicQos q = { .depth = 8, .policy = QOS_DROP_LATEST };
+    TopicQos q = { .reliability = QOS_BEST_EFFORT, .depth = 8, .policy = QOS_DROP_LATEST,
+                   .deadline_ms = 0, .lifespan_ms = 0, .transport = TRANSPORT_INTRA };
     ASSERT_EQ(message_bus_set_topic_qos(bus, "t/cfg", &q), 0, "set_qos failed");
     const TopicQos* got = message_bus_get_topic_qos(bus, "t/cfg");
     ASSERT(got != NULL, "get_qos returned NULL");
@@ -669,7 +671,8 @@ static void test_bus_qos_config(void) {
 static void test_bus_qos_drop_latest(void) {
     TEST("bus QoS DROP_LATEST enforces depth");
     MessageBus* bus = message_bus_create("test_drop_latest");
-    TopicQos q = { .depth = 2, .policy = QOS_DROP_LATEST };
+    TopicQos q = { .reliability = QOS_BEST_EFFORT, .depth = 2, .policy = QOS_DROP_LATEST,
+                   .deadline_ms = 0, .lifespan_ms = 0, .transport = TRANSPORT_INTRA };
     message_bus_set_topic_qos(bus, "t/dl", &q);
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
     message_bus_subscribe(bus, "t/dl", bus_counter_cb, &c);
@@ -693,7 +696,8 @@ static void test_bus_qos_drop_latest(void) {
 static void test_bus_qos_drop_oldest(void) {
     TEST("bus QoS DROP_OLDEST keeps newest");
     MessageBus* bus = message_bus_create("test_drop_oldest");
-    TopicQos q = { .depth = 2, .policy = QOS_DROP_OLDEST };
+    TopicQos q = { .reliability = QOS_BEST_EFFORT, .depth = 2, .policy = QOS_DROP_OLDEST,
+                   .deadline_ms = 0, .lifespan_ms = 0, .transport = TRANSPORT_INTRA };
     message_bus_set_topic_qos(bus, "t/do", &q);
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 4000 }; /* slow: 4ms */
     message_bus_subscribe(bus, "t/do", bus_counter_cb, &c);
@@ -716,7 +720,8 @@ static void test_bus_qos_lifespan(void) {
     TEST("bus QoS lifespan_ms drops stale messages");
     MessageBus* bus = message_bus_create("test_lifespan");
     /* 5ms lifespan: messages waiting in queue longer than 5ms must be dropped */
-    TopicQos q = { .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_LATEST, .lifespan_ms = 5 };
+    TopicQos q = { .reliability = QOS_BEST_EFFORT, .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_LATEST,
+                   .deadline_ms = 0, .lifespan_ms = 5, .transport = TRANSPORT_INTRA };
     message_bus_set_topic_qos(bus, "t/ls", &q);
     /* Slow subscriber: 20ms per callback — causes later messages to wait > 5ms lifespan */
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 20000 };
@@ -742,7 +747,8 @@ static void test_bus_qos_deadline_violations(void) {
     TEST("bus QoS deadline_ms detects slow dispatch");
     MessageBus* bus = message_bus_create("test_deadline");
     /* Very tight deadline: 1ms. With a slow subscriber the dispatch will exceed it. */
-    TopicQos q = { .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_OLDEST, .deadline_ms = 1 };
+    TopicQos q = { .reliability = QOS_BEST_EFFORT, .depth = MSG_BUS_QUEUE_SIZE, .policy = QOS_DROP_OLDEST,
+                   .deadline_ms = 1, .lifespan_ms = 0, .transport = TRANSPORT_INTRA };
     message_bus_set_topic_qos(bus, "t/dl2", &q);
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 5000 }; /* 5ms per callback, much greater than 1ms deadline */
     message_bus_subscribe(bus, "t/dl2", bus_counter_cb, &c);

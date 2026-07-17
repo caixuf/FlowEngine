@@ -9,7 +9,7 @@
  *     - 多进程 (fork+exec): 每个节点一个独立进程, 通过 discovery + IPC 桥接通信
  *
  *   历史上多进程模式 exec 的是 `flow_e2e --role <name>` 单体 demo (已移除),
- *   导致节点逻辑在 e2e_demo.c 和 modules/adas_nodes/*.c 里各存一份 (copy-paste 债)。
+ *   导致节点逻辑在 e2e_demo.c 和 modules/adas_nodes 下的 .c 文件里各存一份 (copy-paste 债)。
  *
  *   flow_node_host 是「进程模式」的正确载体: 它只做一件事 —— 在自己的进程里
  *   dlopen 一个 NodePlugin .so, 自建 IPC 桥接基础设施, 跑该节点的生命周期。

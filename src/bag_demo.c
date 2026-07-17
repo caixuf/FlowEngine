@@ -77,7 +77,6 @@ static void* gps_pub_thread(void* arg) {
 
 static void on_playback(const Message* msg, void* user_data) {
     (void)user_data;
-    uint64_t now = clock_now_us();
     printf("[PLAY] ts=%-20lu topic=%-20s size=%u\n",
            (unsigned long)msg->timestamp_us, msg->topic, msg->data_size);
 }

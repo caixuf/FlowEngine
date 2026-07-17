@@ -100,7 +100,7 @@ static void sub_on_ipc(const Message* msg, void* user_data) {
     if (!entry) return;  /* 收到未注册的 topic，忽略 */
 
     /* BIDIR 防回环: 用 "bridge:" 前缀作为 sender 注入本地 bus */
-    char sender[MSG_BUS_MAX_SENDER_LEN];
+    char sender[MSG_BUS_MAX_SENDER_LEN + 8]; /* +8 容纳 "bridge:" 前缀 */
     snprintf(sender, sizeof(sender), "bridge:%s", msg->sender);
 
     int rc = message_bus_publish(bridge->bus,

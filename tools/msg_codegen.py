@@ -721,7 +721,6 @@ class CodeGenerator:
         lines.append(f"static inline void {s.name}_endian_swap(void* data) {{")
         lines.append(f"    if (!data) return;")
         lines.append(f"    uint8_t* p = (uint8_t*)data;")
-        lines.append(f"    size_t off = 0;")
         lines.append("")
 
         offset = 0

@@ -18,7 +18,7 @@
  *
  * 目录结构:
  *   config/pipeline.json        — pipeline 声明
- *   modules/adas_nodes/*.so     — 节点插件（感知/融合/规划/控制/监控）
+ *   modules/adas_nodes 下的 .so — 节点插件（感知/融合/规划/控制/监控）
  *   include/node_plugin.h       — NodePlugin 接口定义
  */
 
@@ -354,7 +354,7 @@ int main(int argc, char** argv) {
             inputs[ni] = NULL;
             for (int j = 0; j < no; j++) outputs[j] = nd->outputs[j];
             outputs[no] = NULL;
-            int r = flow_registry_register_task(nd->name, nd->name, nd->library,
+            (void)flow_registry_register_task(nd->name, nd->name, nd->library,
                                         ni > 0 ? inputs : NULL,
                                         no > 0 ? outputs : NULL,
                                         NULL);

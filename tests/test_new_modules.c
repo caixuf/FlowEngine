@@ -50,10 +50,7 @@ static int g_failed = 0;
 /* ── 辅助变量 ────────────────────────────────────────────── */
 
 /* Minimal vtable for test tasks (task_base_init requires non-NULL vtable) */
-static const TaskInterface g_test_vtable = {
-    /* All fields are NULL — the task is a stub that does nothing */
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
+static const TaskInterface g_test_vtable = {0}; /* all NULL — stub does nothing */
 
 /* ── 辅助类型 ────────────────────────────────────────────── */
 

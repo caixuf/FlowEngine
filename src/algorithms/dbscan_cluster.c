@@ -63,8 +63,10 @@ static int grid_build(GridIndex* g, const Point3D* pts, int n, float eps) {
     for (int i = 0; i < n; i++) {
         int cx = (int)((pts[i].x - min_x) * g->inv_eps);
         int cy = (int)((pts[i].y - min_y) * g->inv_eps);
-        if (cx < 0) cx = 0; if (cx >= g->grid_w) cx = g->grid_w - 1;
-        if (cy < 0) cy = 0; if (cy >= g->grid_h) cy = g->grid_h - 1;
+        if (cx < 0) cx = 0;
+        if (cx >= g->grid_w) cx = g->grid_w - 1;
+        if (cy < 0) cy = 0;
+        if (cy >= g->grid_h) cy = g->grid_h - 1;
         int idx = cy * g->grid_w + cx;
         g->next_point[i] = g->cells[idx].head;
         g->cells[idx].head = i;
@@ -84,8 +86,10 @@ static int grid_region_query(int* neighbors, int max_nb,
 
     int cx = (int)((pi->x - g->min_x) * g->inv_eps);
     int cy = (int)((pi->y - g->min_y) * g->inv_eps);
-    if (cx < 0) cx = 0; if (cx >= g->grid_w) cx = g->grid_w - 1;
-    if (cy < 0) cy = 0; if (cy >= g->grid_h) cy = g->grid_h - 1;
+    if (cx < 0) cx = 0;
+    if (cx >= g->grid_w) cx = g->grid_w - 1;
+    if (cy < 0) cy = 0;
+    if (cy >= g->grid_h) cy = g->grid_h - 1;
 
     /* 检查 3×3 邻域 */
     for (int dy = -1; dy <= 1; dy++) {
@@ -111,6 +115,7 @@ static int grid_region_query(int* neighbors, int max_nb,
 static void dbscan_expand(int pt, int cluster_id,
                            int* labels, const Point3D* pts, int n,
                            const GridIndex* grid, float eps, int min_pts) {
+    (void)n; /* n not needed: neighborhood bounded by grid cells */
     int seeds[DBSCAN_MAX_POINTS];
     int n_seeds = 0;
 
@@ -230,24 +235,6 @@ static int plane_from_3pts(const Point3D* p1, const Point3D* p2, const Point3D* 
     plane[0] = n[0]; plane[1] = n[1]; plane[2] = n[2];
     plane[3] = -(n[0]*p1->x + n[1]*p1->y + n[2]*p1->z);
     return 1;
-}
-
-/* Count points within distance threshold of the plane, store inliers in mask */
-static int count_inliers(const Point3D* points, int n, const float plane[4],
-                          float dist_thresh, uint8_t* mask) {
-    int count = 0;
-    float thresh2 = dist_thresh * dist_thresh;
-    for (int i = 0; i < n; i++) {
-        float dist = plane[0]*points[i].x + plane[1]*points[i].y
-                   + plane[2]*points[i].z + plane[3];
-        if (dist*dist <= thresh2) {
-            mask[i] = 1;
-            count++;
-        } else {
-            mask[i] = 0;
-        }
-    }
-    return count;
 }
 
 /* RANSAC ground plane fitting */
