@@ -28,6 +28,24 @@
  * 新鲜度: 某一路超过 max_age_ms 未更新则视为失效，只用另一路。
  *
  * 编译依赖: adas_msgs_gen.h (ObstacleList 反序列化/序列化)，随构建生成。
+ *
+ * ── 架构选择：为什么用 MessageBuffer 而非 FusionNode C API ──
+ * 项目核心融合设施 src/core/fusion.c 提供两层 API：
+ *   (1) MessageBuffer    — 单传感器环形缓冲 + 时间戳查找（低层）
+ *   (2) FusionNode C API — 事件驱动的融合节点（高层，build_synced_frame → callback）
+ *
+ * 本节点选 (1) MessageBuffer，与 fusion_node.cpp / ekf_fusion_plugin.c /
+ * fusion_plugin.c 三个生产节点保持一致，消除原先手写 a_list/b_list +
+ * pthread_mutex 的重复造轮子。不选 (2) 的理由：
+ *   - FusionNode C API 是"任一输入到达 → 时间对齐 → 回调"的事件驱动模型，
+ *     而本节点是"定时轮询 + 空间去重 + 跨帧追踪"模型：即便两路都无新数据，
+ *     工作线程仍需按 publish_hz 跑一遍 associate_and_track() 清理过期 track，
+ *     事件驱动模型做不到这种"无输入也要产出"的定时清理。
+ *   - 空间去重（两路 ObstacleList 合并）是本节点特有业务逻辑，与 FusionNode
+ *     的"时间对齐同步帧"语义无关，硬套 FusionCallback 反而绕弯。
+ *
+ *   注意：Message.data 是内联数组 data[MSG_BUS_MAX_DATA_SIZE]，故
+ *   message_buffer_push 的浅拷贝是值拷贝，回调返回后消费安全。
  */
 
 #include "node_plugin.h"
@@ -36,6 +54,7 @@
 #include "discovery.h"
 #include "logger.h"
 #include "clock_service.h"
+#include "fusion.h"   /* MessageBuffer: 替代手写 a_list/b_list + mutex */
 
 #include <math.h>
 #include <pthread.h>
@@ -99,16 +118,11 @@ static struct {
     int    track_count;       /* 当前活跃 track 数 */
     int    next_track_id;     /* 下一个新 track 的 ID */
 
-    /* 两路输入缓存（回调写，工作线程读，各自 mutex 保护） */
-    ObstacleList  a_list;
-    uint64_t      a_ts_us;
-    int           a_ready;
-    pthread_mutex_t a_lock;
-
-    ObstacleList  b_list;
-    uint64_t      b_ts_us;
-    int           b_ready;
-    pthread_mutex_t b_lock;
+    /* 两路输入缓冲：复用 core/fusion.c 的 MessageBuffer（与 fusion_node.cpp 等
+     * 三个生产节点一致），替代原先手写的 a_list/b_list + pthread_mutex。
+     * Message.data 是内联数组，push 是值拷贝，回调返回后消费安全。 */
+    MessageBuffer* a_buf;
+    MessageBuffer* b_buf;
 
     /* 统计 */
     uint64_t frames_in_a;
@@ -161,38 +175,20 @@ static void parse_string(const char* json, const char* key, char* out, size_t ou
     out[n] = '\0';
 }
 
-/* ── 订阅回调：两路 ObstacleList ──────────────────────────── */
+/* ── 订阅回调：两路 ObstacleList ────────────────────────────
+ * 回调只做 push 到 MessageBuffer（与 fusion_node.cpp 模式一致），
+ * 反序列化推迟到工作线程做，避免在 transport 回调线程里做重活。 */
 
 static void on_input_a(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || !g.enabled) return;
-    ObstacleList list;
-    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0) {
-        LOG_WARN("perception_fusion", "input_a deserialize failed (size=%u)", msg->data_size);
-        return;
-    }
-    pthread_mutex_lock(&g.a_lock);
-    g.a_list = list;
-    g.a_ts_us = clock_now_us();
-    g.a_ready = 1;
-    g.frames_in_a++;
-    pthread_mutex_unlock(&g.a_lock);
+    if (!msg || msg->data_size == 0 || !g.enabled) return;
+    if (message_buffer_push(g.a_buf, msg) == 0) g.frames_in_a++;
 }
 
 static void on_input_b(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || !g.enabled) return;
-    ObstacleList list;
-    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0) {
-        LOG_WARN("perception_fusion", "input_b deserialize failed (size=%u)", msg->data_size);
-        return;
-    }
-    pthread_mutex_lock(&g.b_lock);
-    g.b_list = list;
-    g.b_ts_us = clock_now_us();
-    g.b_ready = 1;
-    g.frames_in_b++;
-    pthread_mutex_unlock(&g.b_lock);
+    if (!msg || msg->data_size == 0 || !g.enabled) return;
+    if (message_buffer_push(g.b_buf, msg) == 0) g.frames_in_b++;
 }
 
 /* ── 融合核心：两路 ObstacleList → 去重合并 ──────────────────
@@ -482,23 +478,22 @@ static void* fusion_thread(void* arg) {
         uint64_t now = clock_now_us();
         uint64_t max_age_us = (uint64_t)g.max_age_ms * 1000ULL;
 
-        /* 拷贝两路缓存（加锁，快拷贝） */
+        /* 从 MessageBuffer 取最新一条，按 max_age 判断新鲜度（与 fusion_node.cpp
+         * 的 message_buffer_latest + 时间窗判断模式一致）。反序列化在此做。 */
         ObstacleList a_copy, b_copy;
         int has_a = 0, has_b = 0;
 
-        pthread_mutex_lock(&g.a_lock);
-        if (g.a_ready && (now - g.a_ts_us) < max_age_us) {
-            a_copy = g.a_list;
+        const Message* a_msg = message_buffer_latest(g.a_buf);
+        if (a_msg && (now - a_msg->timestamp_us) < max_age_us &&
+            ObstacleList_deserialize(&a_copy, a_msg->data, a_msg->data_size) == 0) {
             has_a = 1;
         }
-        pthread_mutex_unlock(&g.a_lock);
 
-        pthread_mutex_lock(&g.b_lock);
-        if (g.b_ready && (now - g.b_ts_us) < max_age_us) {
-            b_copy = g.b_list;
+        const Message* b_msg = message_buffer_latest(g.b_buf);
+        if (b_msg && (now - b_msg->timestamp_us) < max_age_us &&
+            ObstacleList_deserialize(&b_copy, b_msg->data, b_msg->data_size) == 0) {
             has_b = 1;
         }
-        pthread_mutex_unlock(&g.b_lock);
 
         if (!has_a && !has_b) continue;  /* 两路都无数据/过期，跳过 */
 
@@ -563,8 +558,7 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     g.transport = transport;
     g.discovery = discovery;
 
-    pthread_mutex_init(&g.a_lock, NULL);
-    pthread_mutex_init(&g.b_lock, NULL);
+    /* MessageBuffer 在参数解析后创建（依赖 max_age_ms），见下方 */
 
     /* 默认参数 */
     snprintf(g.input_a_topic, sizeof(g.input_a_topic), "perception/obstacles_lidar");
@@ -618,6 +612,17 @@ static int fusion_init(MessageBus* bus, Transport* transport,
         return 0;
     }
 
+    /* 创建两路 MessageBuffer（capacity=4 足够最新值轮询；window_us 对齐 max_age）。
+     * 复用 core/fusion.c 设施，替代原先手写的 a_list/b_list + pthread_mutex。 */
+    g.a_buf = message_buffer_create(g.input_a_topic, OBSTACLELIST_TYPE_ID, 4,
+                                    (uint64_t)g.max_age_ms * 1000ULL);
+    g.b_buf = message_buffer_create(g.input_b_topic, OBSTACLELIST_TYPE_ID, 4,
+                                    (uint64_t)g.max_age_ms * 1000ULL);
+    if (!g.a_buf || !g.b_buf) {
+        LOG_ERROR("perception_fusion", "message_buffer_create failed (OOM?)");
+        return -1;
+    }
+
     /* 订阅两路输入 */
     transport_subscribe(transport, g.input_a_topic, on_input_a, NULL);
     transport_subscribe(transport, g.input_b_topic, on_input_b, NULL);
@@ -665,8 +670,10 @@ static void fusion_cleanup(void) {
         pthread_join(g.thread, NULL);
         g.thread_running = 0;
     }
-    pthread_mutex_destroy(&g.a_lock);
-    pthread_mutex_destroy(&g.b_lock);
+    message_buffer_destroy(g.a_buf);
+    message_buffer_destroy(g.b_buf);
+    g.a_buf = NULL;
+    g.b_buf = NULL;
     LOG_INFO("perception_fusion", "cleanup: in_a=%lu in_b=%lu out=%lu merges=%lu "
              "trk_created=%lu trk_matched=%lu trk_killed=%lu",
              (unsigned long)g.frames_in_a, (unsigned long)g.frames_in_b,
