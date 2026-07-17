@@ -161,7 +161,12 @@ static bool mode_transition_guard(void* task, StateId from, EventId event, State
     if (event == SM_EVT_MODE_UPGRADE) {
         switch (to_mode) {
             case SM_MODE_CP:  return g.has_fusion != 0;
-            case SM_MODE_NP:  return g.highway_ready != 0;
+            case SM_MODE_NP:
+                /* 已加载导航路线时放行 NP（路线步骤本身定义驾驶策略，
+                 * 不应被 highway_ready 卡住——城市段也有路线指令如减速/
+                 * 过红绿灯/匝道汇入）。无路线时仍保持高速工况守卫。 */
+                if (g.route_count > 0) return true;
+                return g.highway_ready != 0;
             case SM_MODE_NOA: return g.route_count > 0;
             default: return true;
         }

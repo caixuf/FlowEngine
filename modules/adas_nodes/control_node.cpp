@@ -482,7 +482,9 @@ protected:
 
             /* ── 车道判定加迟滞: 使用"已提交车道", 只有 ego_y 明确越过中心线
              *    ±LANE_HYSTERESIS_M 才切换, 避免 y≈0 处目标车道每帧翻转的抖振 ── */
-            if (g.committed_lane_side == 0) {
+            if (g.committed_lane_side == 0 && g.ego_x > 0.5) {
+                /* 仅在收到第一帧有效车辆状态后初始化车道侧。
+                 * 首帧 ego_x≈0 时为未初始化数据, 误判会引发跨中心线漂移。 */
                 g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
             } else if (g.committed_lane_side < 0 && g.ego_y - road_c > LANE_HYSTERESIS_M) {
                 g.committed_lane_side = 1;

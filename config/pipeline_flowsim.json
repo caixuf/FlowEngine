@@ -14,7 +14,7 @@
       "library_path": "build/lib/libflowsim_node.so",
       "auto_start": true,
       "subscribe": [
-        "control/raw_cmd"
+        "control/cmd"
       ],
       "publish": [
         {
@@ -56,6 +56,14 @@
           "topic": "sim/tick",
           "qos": {
             "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "sim/collision",
+          "qos": {
+            "depth": 4,
             "policy": "drop_oldest",
             "reliability": "best_effort"
           }
