@@ -10,9 +10,12 @@
   },
   "processes": [
     {
-      "name": "sim_world",
-      "library_path": "build/lib/libsim_world.so",
+      "name": "flowsim",
+      "library_path": "build/lib/libflowsim_node.so",
       "auto_start": true,
+      "subscribe": [
+        "control/cmd"
+      ],
       "publish": [
         {
           "topic": "vehicle/state",
@@ -29,6 +32,38 @@
           "type": "RoadGeometry",
           "qos": {
             "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "road/traffic_lights",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "scene/frame",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "sim/tick",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        },
+        {
+          "topic": "sim/collision",
+          "qos": {
+            "depth": 4,
             "policy": "drop_oldest",
             "reliability": "best_effort"
           }
@@ -121,7 +156,8 @@
       "subscribe": [
         "fusion/localization",
         "vehicle/state",
-        "road/geometry"
+        "road/geometry",
+        "road/traffic_lights"
       ],
       "publish": [
         {
@@ -283,7 +319,9 @@
         "fusion/latency",
         "flowengine/node_info",
         "planning/trajectory",
-        "road/geometry"
+        "road/geometry",
+        "road/traffic_lights",
+        "scene/frame"
       ],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
     }

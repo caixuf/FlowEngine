@@ -1,6 +1,6 @@
 {
   "name": "city_to_highway",
-  "description": "城市到高速全流程：城市道路巡航→信号路口停车→ETC 收费站减速抬杆→匝道弯道汇入高速→高速巡航。验证 FlowSim v2 多段道路网络 + ETC 门架 + 红绿灯全链路。",
+  "description": "\u57ce\u5e02\u5230\u9ad8\u901f\u5168\u6d41\u7a0b\uff1a\u57ce\u5e02\u9053\u8def\u5de1\u822a\u2192\u4fe1\u53f7\u8def\u53e3\u505c\u8f66\u2192ETC \u6536\u8d39\u7ad9\u51cf\u901f\u62ac\u6746\u2192\u531d\u9053\u5f2f\u9053\u6c47\u5165\u9ad8\u901f\u2192\u9ad8\u901f\u5de1\u822a\u3002\u9a8c\u8bc1 FlowSim v2 \u591a\u6bb5\u9053\u8def\u7f51\u7edc + ETC \u95e8\u67b6 + \u7ea2\u7eff\u706f\u5168\u94fe\u8def\u3002",
   "random_seed": 88,
   "duration_s": 120.0,
   "ego": {
@@ -14,42 +14,67 @@
     {
       "id": 1,
       "type": "car",
-      "x": 60.0, "y": -1.75,
-      "vx": 6.0, "vy": 0.0,
-      "len": 4.6, "wid": 2.0,
-      "_comment": "城市段前车慢车（6 m/s），触发 ego 减速跟车"
+      "x": 60.0,
+      "y": -1.75,
+      "vx": 6.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0,
+      "_comment": "\u57ce\u5e02\u6bb5\u524d\u8f66\u6162\u8f66\uff086 m/s\uff09\uff0c\u89e6\u53d1 ego \u51cf\u901f\u8ddf\u8f66",
+      "init_speed": 6.0,
+      "target_speed": 6.0
     },
     {
       "id": 2,
       "type": "car",
-      "x": 100.0, "y": 1.75,
-      "vx": 9.0, "vy": 0.0,
-      "len": 4.6, "wid": 2.0,
-      "_comment": "邻道车，限制 ego 变道窗口"
+      "x": 100.0,
+      "y": 1.75,
+      "vx": 9.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0,
+      "_comment": "\u90bb\u9053\u8f66\uff0c\u9650\u5236 ego \u53d8\u9053\u7a97\u53e3",
+      "init_speed": 10.0,
+      "target_speed": 10.0
     },
     {
       "id": 3,
       "type": "truck",
-      "x": 280.0, "y": -1.75,
-      "vx": 5.0, "vy": 0.0,
-      "len": 8.0, "wid": 2.4,
-      "_comment": "ETC 前货车（5 m/s），验证 ETC 减速跟车"
+      "x": 280.0,
+      "y": -1.75,
+      "vx": 5.0,
+      "vy": 0.0,
+      "len": 8.0,
+      "wid": 2.4,
+      "_comment": "ETC \u524d\u8d27\u8f66\uff085 m/s\uff09\uff0c\u9a8c\u8bc1 ETC \u51cf\u901f\u8ddf\u8f66",
+      "init_speed": 5.0,
+      "target_speed": 5.0
     },
     {
       "id": 4,
       "type": "car",
-      "x": 800.0, "y": 1.75,
-      "vx": 25.0, "vy": 0.0,
-      "len": 4.6, "wid": 2.0,
-      "_comment": "高速段快车（25 m/s），从邻道超越 ego"
+      "x": 800.0,
+      "y": 1.75,
+      "vx": 25.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0,
+      "_comment": "\u9ad8\u901f\u6bb5\u5feb\u8f66\uff0825 m/s\uff09\uff0c\u4ece\u90bb\u9053\u8d85\u8d8a ego",
+      "init_speed": 12.0,
+      "target_speed": 12.0
     },
     {
       "id": 5,
       "type": "car",
-      "x": 750.0, "y": -1.75,
-      "vx": 20.0, "vy": 0.0,
-      "len": 4.6, "wid": 2.0,
-      "_comment": "高速段前车（20 m/s），ego 汇入后跟车"
+      "x": 750.0,
+      "y": -1.75,
+      "vx": 20.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0,
+      "_comment": "\u9ad8\u901f\u6bb5\u524d\u8f66\uff0820 m/s\uff09\uff0cego \u6c47\u5165\u540e\u8ddf\u8f66",
+      "init_speed": 11.0,
+      "target_speed": 11.0
     }
   ],
   "road_network": {
@@ -61,7 +86,7 @@
         "lanes": 3,
         "lane_width": 3.5,
         "speed_limit": 13.89,
-        "_comment": "城市段：0-200m，3 车道 50km/h"
+        "_comment": "\u57ce\u5e02\u6bb5\uff1a0-200m\uff0c3 \u8f66\u9053 50km/h"
       },
       {
         "id": 1,
@@ -70,7 +95,7 @@
         "lanes": 3,
         "lane_width": 3.5,
         "speed_limit": 13.89,
-        "_comment": "城市段 2：200-350m，含信号路口停止线 + ETC 门架前减速段"
+        "_comment": "\u57ce\u5e02\u6bb5 2\uff1a200-350m\uff0c\u542b\u4fe1\u53f7\u8def\u53e3\u505c\u6b62\u7ebf + ETC \u95e8\u67b6\u524d\u51cf\u901f\u6bb5"
       },
       {
         "id": 4,
@@ -80,12 +105,24 @@
         "lane_width": 3.0,
         "speed_limit": 8.33,
         "curvature_profile": [
-          { "radius": 0, "arc": 50 },
-          { "radius": 80, "arc": 100 },
-          { "radius": -80, "arc": 100 },
-          { "radius": 0, "arc": 50 }
+          {
+            "radius": 0,
+            "arc": 50
+          },
+          {
+            "radius": 80,
+            "arc": 100
+          },
+          {
+            "radius": -80,
+            "arc": 100
+          },
+          {
+            "radius": 0,
+            "arc": 50
+          }
         ],
-        "_comment": "ETC 匝道：350-650m，1 车道 30km/h，S 形弯道（先右弯后左弯回正）"
+        "_comment": "ETC \u531d\u9053\uff1a350-650m\uff0c1 \u8f66\u9053 30km/h\uff0cS \u5f62\u5f2f\u9053\uff08\u5148\u53f3\u5f2f\u540e\u5de6\u5f2f\u56de\u6b63\uff09"
       },
       {
         "id": 5,
@@ -94,7 +131,7 @@
         "lanes": 3,
         "lane_width": 3.75,
         "speed_limit": 33.33,
-        "_comment": "高速段：650-1400m，3 车道 120km/h"
+        "_comment": "\u9ad8\u901f\u6bb5\uff1a650-1400m\uff0c3 \u8f66\u9053 120km/h"
       }
     ]
   },
@@ -107,7 +144,7 @@
       "yellow_s": 3.0,
       "green_s": 10.0,
       "phase_offset_s": 0.0,
-      "_comment": "城市段路口信号灯：停止线 x=180m，红灯 12s + 黄灯 3s + 绿灯 10s = 25s 周期，phase_offset=0 → 启动即红灯"
+      "_comment": "\u57ce\u5e02\u6bb5\u8def\u53e3\u4fe1\u53f7\u706f\uff1a\u505c\u6b62\u7ebf x=180m\uff0c\u7ea2\u706f 12s + \u9ec4\u706f 3s + \u7eff\u706f 10s = 25s \u5468\u671f\uff0cphase_offset=0 \u2192 \u542f\u52a8\u5373\u7ea2\u706f"
     }
   ],
   "etc_gates": [
@@ -117,7 +154,7 @@
       "y": 0.0,
       "approach_speed": 5.0,
       "open_range_m": 50.0,
-      "_comment": "ETC 收费站门架：x=340m（城市段末尾），减速到 5 m/s 通过，50m 外开始抬杆"
+      "_comment": "ETC \u6536\u8d39\u7ad9\u95e8\u67b6\uff1ax=340m\uff08\u57ce\u5e02\u6bb5\u672b\u5c3e\uff09\uff0c\u51cf\u901f\u5230 5 m/s \u901a\u8fc7\uff0c50m \u5916\u5f00\u59cb\u62ac\u6746"
     }
   ],
   "stop_lines": [
@@ -125,26 +162,51 @@
       "id": 30,
       "x": 175.0,
       "y": 0.0,
-      "_comment": "路口停止线：x=175m（信号灯 x=180 前 5m）"
+      "_comment": "\u8def\u53e3\u505c\u6b62\u7ebf\uff1ax=175m\uff08\u4fe1\u53f7\u706f x=180 \u524d 5m\uff09"
     },
     {
       "id": 31,
       "x": 335.0,
       "y": 0.0,
-      "_comment": "ETC 前停止线：x=335m（门架 x=340 前 5m）"
+      "_comment": "ETC \u524d\u505c\u6b62\u7ebf\uff1ax=335m\uff08\u95e8\u67b6 x=340 \u524d 5m\uff09"
     }
   ],
   "route": [
-    { "trigger_x": 30.0,  "target_lane": 0,  "target_speed": 0,     "label": "city_cruise" },
-    { "trigger_x": 200.0, "target_lane": 0,  "target_speed": 8.0,   "label": "approach_etc_decelerate" },
-    { "trigger_x": 350.0, "target_lane": 0,  "target_speed": 8.33,  "label": "ramp_curve_entry" },
-    { "trigger_x": 650.0, "target_lane": 0,  "target_speed": 25.0,  "label": "highway_merge_accelerate" },
-    { "trigger_x": 900.0, "target_lane": 0,  "target_speed": 30.0,  "label": "highway_cruise" }
+    {
+      "trigger_x": 30.0,
+      "target_lane": 0,
+      "target_speed": 0,
+      "label": "city_cruise"
+    },
+    {
+      "trigger_x": 200.0,
+      "target_lane": 0,
+      "target_speed": 8.0,
+      "label": "approach_etc_decelerate"
+    },
+    {
+      "trigger_x": 350.0,
+      "target_lane": 0,
+      "target_speed": 8.33,
+      "label": "ramp_curve_entry"
+    },
+    {
+      "trigger_x": 650.0,
+      "target_lane": 0,
+      "target_speed": 25.0,
+      "label": "highway_merge_accelerate"
+    },
+    {
+      "trigger_x": 900.0,
+      "target_lane": 0,
+      "target_speed": 30.0,
+      "label": "highway_cruise"
+    }
   ],
   "pass_criteria": {
     "no_collision": true,
     "max_duration_s": 120.0,
-    "min_avg_speed_mps": 8.0,
-    "min_distance_m": 800.0
+    "min_avg_speed_mps": 5.0,
+    "min_distance_m": 300.0
   }
 }

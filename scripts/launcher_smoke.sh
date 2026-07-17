@@ -24,12 +24,12 @@ if [ ! -x "$BUILD_DIR/bin/flow_launcher" ]; then
 fi
 
 # ── 2. 确保节点插件已构建（独立 cmake 子项目） ────────────────
-if [ ! -f "$BUILD_DIR/lib/libsim_world.so" ]; then
+if [ ! -f "$BUILD_DIR/lib/libflowsim_node.so" ]; then
     echo "INFO: node plugins missing — building modules/adas_nodes ..."
     cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
           -DFLOWENGINE_BUILD="$BUILD_DIR" >/dev/null 2>&1 \
         && cmake --build "$BUILD_DIR/modules/adas_nodes" -j"$(nproc)" >/dev/null 2>&1
-    if [ ! -f "$BUILD_DIR/lib/libsim_world.so" ]; then
+    if [ ! -f "$BUILD_DIR/lib/libflowsim_node.so" ]; then
         echo "FAIL: could not build node plugins"
         exit 1
     fi

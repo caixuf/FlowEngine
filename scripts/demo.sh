@@ -30,7 +30,6 @@ MULTI_MODE=false
 RECORD_MODE=false
 REPLAY_FILE=""
 SCENARIO=""
-FLOWSIM_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -42,7 +41,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
-    --flowsim) FLOWSIM_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
     --scenario) SCENARIO="$2"; shift ;;
@@ -52,18 +50,8 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ── Flowsim mode: use v2 pipeline (multi-segment roads, ETC gates, traffic lights) ──
-if [ "$FLOWSIM_MODE" = true ]; then
-  if [ -f "$ROOT/config/pipeline_flowsim.json" ]; then
-    PIPELINE="$ROOT/config/pipeline_flowsim.json"
-    [ -z "$SCENARIO" ] && SCENARIO="city_to_highway"
-  else
-    echo "  ⚠ pipeline_flowsim.json not found, falling back to default pipeline"
-  fi
-fi
-
 # ── Scenario override: patch pipeline.json's scenario_file ──
-PIPELINE_ORIG="$PIPELINE"
+PIPELINE_ORIG="$ROOT/config/pipeline.json"
 PIPELINE_TMP=""
 cleanup_pipeline_tmp() {
   [ -n "$PIPELINE_TMP" ] && rm -f "$PIPELINE_TMP"
@@ -228,7 +216,7 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 # ── Start flow_launcher with pipeline ───────────────────────
-echo "───[2/5] Starting pipeline ($([ "$FLOWSIM_MODE" = true ] && echo "flowsim→sensor_model→perception→fusion→planning→control→monitor" || echo "sim_world→sensor_model→perception→fusion→planning→control→monitor"))..."
+echo "───[2/5] Starting pipeline (flowsim→sensor_model→perception→fusion→planning→control→monitor)..."
 rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
 
@@ -304,7 +292,7 @@ fi
 # ── Live monitor ────────────────────────────────────────────
 echo "───[5/5] Live monitor (${DURATION}s)..."
 echo ""
-echo "  ┌─ $([ "$FLOWSIM_MODE" = true ] && echo "FlowSim" || echo "SimWorld") ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
+echo "  ┌─ FlowSim ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
 echo "  │  dynamics      DBSCAN          EKF          Frenet       PID      │"
 echo "  └───────────────────────────────────────────────────────────────────┘"
 echo ""
@@ -343,7 +331,7 @@ echo "═══ Pipeline Summary ═══"
 FUSED=$(grep -a "EKF" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
 CTRL=$(grep -a "control.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
 PLAN=$(grep -a "planning.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
-SPEED=$(grep -a "sim_world.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oP "speed=\K[0-9.]+" || echo "?")
+SPEED=$(grep -a "flowsim.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oP "speed=\K[0-9.]+" || echo "?")
 
 echo "  Simulation : $SPEED m/s final speed"
 echo "  Fusion     : $FUSED EKF frames"

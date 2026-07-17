@@ -603,9 +603,13 @@ protected:
             if (n_col > 0) {
                 flowsim::apply_collision_response(g.pool, pairs);
                 for (const auto& p : pairs) {
-                    LOG_ERROR("flowsim", "COLLISION entity%d ↔ entity%d",
-                             p.a, p.b);
-                    publish_sim_collision(g.pool[p.a], g.pool[p.b]);
+                    int is_ego = (p.a == 0 || p.b == 0);
+                    if (is_ego) {
+                        LOG_ERROR("flowsim", "COLLISION ego↔entity%d", p.a == 0 ? p.b : p.a);
+                    }
+                    /* 仅发布涉及 ego 的碰撞事件，与旧 sim_world 行为一致；
+                     * NPC 间 AABB 重叠不产生 topic 消息，避免 evaluator 误判。 */
+                    if (is_ego) publish_sim_collision(g.pool[p.a], g.pool[p.b]);
                 }
             }
 

@@ -124,7 +124,7 @@ def expected_edges_from_pipeline(pipeline: dict) -> list[tuple[str, str, str]]:
 
 
 def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict | None, list]:
-    """Load pass_criteria from config/pipeline.json -> sim_world.params.scenario_file.
+    """Load pass_criteria from config/pipeline.json -> flowsim.params.scenario_file.
 
     Returns:
         (criteria_dict, scenario_name, has_noa_route, road, traffic_lights)
@@ -149,14 +149,14 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        if node.get("name") != "sim_world":
+        if node.get("name") != "flowsim":
             continue
         params = node.get("params", {})
         if isinstance(params, str):
             try:
                 params = json.loads(params)
             except json.JSONDecodeError:
-                print("warning: sim_world.params is not valid JSON; skipping scenario_file lookup",
+                print("warning: flowsim.params is not valid JSON; skipping scenario_file lookup",
                       file=sys.stderr)
                 params = {}
         if isinstance(params, dict):
@@ -203,7 +203,7 @@ def load_json(path: Path) -> dict | None:
 
 @contextlib.contextmanager
 def pipeline_scenario_override(scenario_file: str | None):
-    """Temporarily point config/pipeline.json's sim_world (and planning, if present)
+    """Temporarily point config/pipeline.json's flowsim (and planning, if present)
     node(s) at ``scenario_file``.
 
     Node ``params`` is a JSON-encoded string; we patch the embedded
@@ -211,7 +211,7 @@ def pipeline_scenario_override(scenario_file: str | None):
     Passing ``None`` is a no-op so callers can use this unconditionally.
     planning also reading scenario_file lets NOA route-driven lane changes
     (defined in the scenario's optional "route" array) take effect during
-    evaluator runs, not just sim_world's actor/ego placement.
+    evaluator runs, not just flowsim's actor/ego placement.
     """
     if not scenario_file:
         yield None
@@ -221,7 +221,7 @@ def pipeline_scenario_override(scenario_file: str | None):
     pipeline = json.loads(original_text)
     patched_nodes = []
     for node in _pipeline_nodes(pipeline):
-        if not isinstance(node, dict) or node.get("name") not in ("sim_world", "planning", "control"):
+        if not isinstance(node, dict) or node.get("name") not in ("flowsim", "planning", "control"):
             continue
         params = node.get("params")
         # params may be a JSON string (launcher format) or a plain dict.
@@ -235,10 +235,10 @@ def pipeline_scenario_override(scenario_file: str | None):
             continue
         patched_nodes.append(node["name"])
 
-    if "sim_world" not in patched_nodes:
-        raise RuntimeError("sim_world node with params not found in config/pipeline.json")
+    if "flowsim" not in patched_nodes:
+        raise RuntimeError("flowsim node with params not found in config/pipeline.json")
     # planning is optional (older pipeline.json layouts may omit scenario_file support),
-    # so only sim_world is required for the override to be considered successful.
+    # so only flowsim is required for the override to be considered successful.
     if "planning" not in patched_nodes:
         print("warning: planning node not patched with scenario_file (missing/malformed "
               "params?) — NOA route-driven lane changes will not be exercised this run",
@@ -276,7 +276,7 @@ def node_topic_roles(sample: dict) -> tuple[set[tuple[str, str]], set[tuple[str,
 
 def road_center_y(x: float, road: dict | None) -> float:
     """Mirror of include/road_geometry.h::road_center_y() — must stay in sync
-    with the C implementation shared by sim_world/planning/control nodes.
+    with the C implementation shared by flowsim/planning/control nodes.
     Returns 0.0 (straight road) when ``road`` is None/absent or the curve is
     disabled (curve_length_m <= 0 or curve_offset_m == 0), matching every
     existing scenario file that has no "road" section."""
@@ -558,7 +558,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     #   FAIL: ego 在红灯期间越过停止线（闯红灯）
     #   WARN: ego 在绿灯期间不必要地长时间停留（误判/过度保守，planning 可能在
     #         绿灯时仍注入了虚拟停止墙）
-    # 红绿灯状态来自 monitor 透传的 scene.traffic_lights（sim_world 真值发布）。
+    # 红绿灯状态来自 monitor 透传的 scene.traffic_lights（flowsim 真值发布）。
     # 若某帧缺少状态数据，沿用上一已知状态（灯相位切换周期远大于采样间隔）。
     scenario_lights = traffic_lights if traffic_lights else []
     has_red_light_check = bool(criteria.get("no_red_light_violation", False))
@@ -760,7 +760,7 @@ def main() -> int:
     parser.add_argument("--json-file", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--no-run", action="store_true", help="evaluate current JSON/logs without starting demo.sh")
     parser.add_argument("--scenario", type=str, default=None,
-                        help="scenario JSON path; temporarily overrides sim_world.scenario_file for this run")
+                        help="scenario JSON path; temporarily overrides flowsim.scenario_file for this run")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="write the machine-readable evaluation result to this JSON path")
     args = parser.parse_args()
