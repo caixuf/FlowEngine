@@ -200,7 +200,7 @@ typedef struct {
     uint32_t seq;            /**< 指令序号 */
     float    throttle;       /**< 油门 [0.0, 1.0] */
     float    brake;          /**< 制动 [0.0, 1.0] */
-    float    steering;       /**< 转向：-1.0 = 最大左转，+1.0 = 最大右转 */
+    float    steering;       /**< 转向角（rad）：正值右转，负值左转，范围约 ±0.22 rad（约 ±12.6°），actuator 负责归一化到硬件量程 */
     Gear     gear;           /**< 档位 */
     bool     emergency_stop; /**< 紧急制动标志 */
 } ControlCmd;

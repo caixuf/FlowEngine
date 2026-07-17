@@ -217,9 +217,13 @@ static void encode_throttle_frame(float throttle, float brake,
 }
 
 static void encode_steering_frame(float steering, uint32_t seq, uint8_t* out) {
-    if (steering < -1) steering = -1;
-    if (steering >  1) steering =  1;
-    int16_t s_q = (int16_t)(steering * g.steering_scale);
+    /* ControlCmd.steering 是弧度（control_node 产出，限幅 ±0.22 rad），
+     * actuator 硬件需要归一化 [-1,1]，故先除以最大转向角再量化。 */
+    const float MAX_STEER_RAD = 0.22f;
+    float steer_norm = steering / MAX_STEER_RAD;
+    if (steer_norm < -1) steer_norm = -1;
+    if (steer_norm >  1) steer_norm =  1;
+    int16_t s_q = (int16_t)(steer_norm * g.steering_scale);
     out[0] = s_q & 0xFF; out[1] = (s_q >> 8) & 0xFF;
     out[2] = seq & 0xFF; out[3] = (seq >> 8) & 0xFF;
 }

@@ -1,11 +1,11 @@
 /**
  * object_tracker_node.c — Multi-Object Kalman Tracker Node Plugin
  *
- * Subscribes to raw ObstacleList (cJSON), assigns persistent IDs across frames
+ * Subscribes to raw ObstacleList (binary), assigns persistent IDs across frames
  * via Kalman filter + Hungarian association, classifies static/dynamic targets,
  * and outputs TrackedObjectList (cJSON).
  *
- * Input:  perception/obstacles  — cJSON ObstacleList
+ * Input:  perception/obstacles  — binary ObstacleList (type_id=0x308f5f71)
  * Output: perception/tracked_objects — cJSON TrackedObjectList
  *
  * Algorithm:
@@ -17,6 +17,7 @@
 
 #include "node_plugin.h"
 #include "kalman_tracker.h"
+#include "adas_msgs_gen.h"
 #include "logger.h"
 #include "clock_service.h"
 #include <cjson/cJSON.h>
@@ -75,60 +76,37 @@ static struct {
     int              n_static_cache;
 } g;
 
-/* ── Subscription callback: perception/obstacles (cJSON) ─────── */
+/* ── Subscription callback: perception/obstacles (binary ObstacleList) ── */
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
 
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
+    ObstacleList obs_list;
+    if (ObstacleList_deserialize(&obs_list, (const uint8_t*)msg->data, msg->data_size) != 0) {
+        LOG_WARN("tracker", "ObstacleList deserialize failed (size=%u)", msg->data_size);
+        return;
+    }
 
     pthread_mutex_lock(&g.mutex);
 
-    g.obs_count = 0;
+    int n = (int)obs_list.count;
+    if (n > KTRACKER_MAX_DETS) n = KTRACKER_MAX_DETS;
+    g.obs_count = n;
 
-    /* "obstacles" array */
-    cJSON* j_obs = cJSON_GetObjectItemCaseSensitive(root, "obstacles");
-    if (cJSON_IsArray(j_obs)) {
-        int n = cJSON_GetArraySize(j_obs);
-        if (n > KTRACKER_MAX_DETS) n = KTRACKER_MAX_DETS;
-
-        for (int i = 0; i < n; i++) {
-            cJSON* item = cJSON_GetArrayItem(j_obs, i);
-            if (!item) continue;
-
-            /* Sensible defaults */
-            g.obs_x[i] = 0.0;   g.obs_y[i] = 0.0;
-            g.obs_vx[i] = 0.0;  g.obs_vy[i] = 0.0;
-            g.obs_width[i] = 2.0;   g.obs_length[i] = 4.6;
-            g.obs_cls[i] = 0;
-            g.obs_confidence[i] = 0.5;
-
-            cJSON* j;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "x")) && cJSON_IsNumber(j))
-                g.obs_x[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "y")) && cJSON_IsNumber(j))
-                g.obs_y[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "vx")) && cJSON_IsNumber(j))
-                g.obs_vx[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "vy")) && cJSON_IsNumber(j))
-                g.obs_vy[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "width")) && cJSON_IsNumber(j))
-                g.obs_width[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "length")) && cJSON_IsNumber(j))
-                g.obs_length[i] = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "type")) && cJSON_IsNumber(j))
-                g.obs_cls[i] = (int)j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(item, "confidence")) && cJSON_IsNumber(j))
-                g.obs_confidence[i] = j->valuedouble;
-        }
-        g.obs_count = n;
+    for (int i = 0; i < n; i++) {
+        const Obstacle* o = &obs_list.obstacles[i];
+        g.obs_x[i]         = (double)o->x;
+        g.obs_y[i]         = (double)o->y;
+        g.obs_vx[i]        = (double)o->vx;
+        g.obs_vy[i]        = (double)o->vy;
+        g.obs_width[i]     = (double)o->width;
+        g.obs_length[i]    = (double)o->length;
+        g.obs_cls[i]       = (int)o->type;
+        g.obs_confidence[i]= (double)o->confidence;
     }
 
     g.has_new_data = 1;
     pthread_mutex_unlock(&g.mutex);
-
-    cJSON_Delete(root);
 }
 
 /* ── Helper: map numerical class → string label ──────────────── */

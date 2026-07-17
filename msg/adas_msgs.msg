@@ -161,7 +161,7 @@ struct ControlRaw {
     uint32   seq            # 指令序号
     float    throttle       # 油门 [0.0, 1.0]
     float    brake          # 制动 [0.0, 1.0]
-    float    steering       # 转向：-1.0=最大左转，+1.0=最大右转
+    float    steering       # 转向角（rad）：正值右转，负值左转，范围约 ±0.22 rad，actuator 负责归一化
     float    speed          # 当前速度 (m/s)
     float    target         # 目标速度 (m/s)
     float    error          # 速度误差 (m/s)
@@ -172,7 +172,7 @@ struct ControlCmd {
     uint32   seq            # 指令序号
     float    throttle       # 油门 [0.0, 1.0]
     float    brake          # 制动 [0.0, 1.0]
-    float    steering       # 转向：-1.0=最大左转，+1.0=最大右转
+    float    steering       # 转向角（rad）：正值右转，负值左转，范围约 ±0.22 rad，actuator 负责归一化
     Gear     gear           # 档位
     bool     emergency_stop # 紧急制动标志
 }

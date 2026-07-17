@@ -321,12 +321,12 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "sensor/lidar", LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "sensor/gps",   GPSDATA_TYPE_ID,   CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "sensor/pose",  POSE2D_TYPE_ID,    CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u, CAP_FUSION | CAP_PUBLISHER, 10.0);
-    discovery_advertise(discovery, "fusion/latency",      0x1A7E9C01u, CAP_PUBLISHER, 2.0);
+    discovery_advertise(discovery, "fusion/localization", LOCALIZATION_TYPE_ID, CAP_FUSION | CAP_PUBLISHER, 10.0);
+    discovery_advertise(discovery, "fusion/latency",      LATENCYREPORT_TYPE_ID, CAP_PUBLISHER, 2.0);
 
     /* 发布 topic 广告 */
-    transport_advertise(transport, "fusion/localization", 0xF0ED10C0u);
-    transport_advertise(transport, "fusion/latency",      0x1A7E9C01u);
+    transport_advertise(transport, "fusion/localization", LOCALIZATION_TYPE_ID);
+    transport_advertise(transport, "fusion/latency",      LATENCYREPORT_TYPE_ID);
 
     /* 构造协程任务 */
     g.task = std::make_unique<FusionTask>(bus, transport,

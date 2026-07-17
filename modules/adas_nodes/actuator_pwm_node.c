@@ -319,8 +319,12 @@ static void apply_control_cmd(const ControlCmd* cmd) {
         esc_us = (int)(PWM_CENTER_US + (double)cmd->throttle * g.throttle_scale);
     }
 
-    /* 舵机脉宽计算: steering ∈ [-1, 1] → 1500 + steering*scale */
-    int steer_us = (int)(PWM_CENTER_US + (double)cmd->steering * g.steering_scale);
+    /* 舵机脉宽计算: steering 是弧度(±0.22 rad)，先归一化到 [-1,1] 再映射 PWM */
+    const double MAX_STEER_RAD = 0.22;
+    double steer_norm = (double)cmd->steering / MAX_STEER_RAD;
+    if (steer_norm > 1.0) steer_norm = 1.0;
+    if (steer_norm < -1.0) steer_norm = -1.0;
+    int steer_us = (int)(PWM_CENTER_US + steer_norm * (double)g.steering_scale);
 
     /* 输出 PWM */
     if (g.backend == BACKEND_PCA9685) {
