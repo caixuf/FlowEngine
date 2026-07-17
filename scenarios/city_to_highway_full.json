@@ -16,10 +16,9 @@
         "etc_gates": [{"s": 100, "l": 0, "open_delay_s": 1.5}] },
       { "id": 3, "type": "ramp_curve",  "length_m": 250, "lanes": 1, "lane_width": 3.0, "speed_limit": 11.11,
         "curvature_profile": [
-          {"radius":  200, "arc": 30},
-          {"radius":   45, "arc": 130},
-          {"radius": -200, "arc": 40},
-          {"radius": 1000, "arc": 50}
+          {"radius":  350, "arc": 90},
+          {"radius":    0, "arc": 70},
+          {"radius": -350, "arc": 90}
         ] },
       { "id": 4, "type": "merge_lane",  "length_m": 200, "lanes": 1, "lane_width": 3.5, "speed_limit": 27.78 },
       { "id": 5, "type": "highway",     "length_m": 800, "lanes": 3, "lane_width": 3.5, "speed_limit": 27.78 }
@@ -33,10 +32,9 @@
             "curvature_profile": [{"radius": -60, "arc": 100}] },
           { "id": 3,  "name": "right_ramp", "length_m": 250, "lanes": 1, "speed_limit": 11.11,
             "curvature_profile": [
-              {"radius":  200, "arc": 30},
-              {"radius":   45, "arc": 130},
-              {"radius": -200, "arc": 40},
-              {"radius": 1000, "arc": 50}
+              {"radius":  350, "arc": 90},
+              {"radius":    0, "arc": 70},
+              {"radius": -350, "arc": 90}
             ] }
         ]
       },

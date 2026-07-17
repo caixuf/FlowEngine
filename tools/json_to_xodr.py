@@ -264,17 +264,40 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
             junctions.append(Junction(jid, f"fork_{jid}", incoming, conns))
 
         elif jtype == "merge":
-            # 汇入：incoming_road（加速车道）作为 connecting road 汇入 target_road。
-            # target_s（汇入点）几何上按端点接续，不单独建模。
+            # 汇入：incoming_road（加速车道）→ 新建短 connecting road → target_road（主线）。
+            # OpenDRIVE 要求 connectingRoad ≠ incomingRoad，所以必须生成独立的过渡段。
             target = int(jcfg.get("target_road", -1))
-            # 找到已构建的 incoming road，标记为 junction connecting road 并接续 target
+            inc_state = end_states.get(incoming, RoadState())
+
+            # 生成唯一 connecting road id（基于 junction id，避免碰撞）
+            conn_rid = jid * 100 + 1
+            existing_ids = {r.id for r in roads}
+            while conn_rid in existing_ids:
+                conn_rid += 1
+
+            # 沿用 incoming road 的车道/限速参数
+            conn_sp = DEFAULT_SPEED
+            conn_lw = DEFAULT_LANE_WIDTH
+            conn_lanes = 1
             for rd in roads:
                 if rd.id == incoming:
-                    rd.junction_id = jid
-                    if target >= 0:
-                        rd.successor = target
+                    conn_sp = rd.speed_limit
+                    conn_lw = rd.lane_width
+                    conn_lanes = rd.lane_count
                     break
-            conns2: list[tuple[int, Optional[int]]] = [(incoming, target if target >= 0 else None)]
+
+            # 从 incoming road 终点起构建短过渡段（几何接续，拓扑独立）
+            conn_len = 5.0
+            conn_road, conn_end = build_straight_road(
+                conn_rid, f"merge_{jid}_conn", conn_len, conn_lanes, conn_lw, conn_sp, inc_state)
+            conn_road.junction_id = jid
+            conn_road.predecessor = incoming
+            if target >= 0:
+                conn_road.successor = target
+            roads.append(conn_road)
+            end_states[conn_rid] = conn_end
+
+            conns2: list[tuple[int, Optional[int]]] = [(conn_rid, target if target >= 0 else None)]
             junctions.append(Junction(jid, f"merge_{jid}", incoming, conns2))
 
     if not roads:

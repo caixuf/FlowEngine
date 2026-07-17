@@ -96,6 +96,7 @@ ScenarioConfig* scenario_load(const char* path) {
             cJSON* ja = cJSON_GetArrayItem(jactors, i);
             if (!cJSON_IsObject(ja)) continue;
             ScenarioActor* a = &sc->actors[i];
+            a->segment_id = -1;  /* 默认旧格式：无 segment，用 x/y */
             cJSON* j;
             j = cJSON_GetObjectItemCaseSensitive(ja, "id");
             if (cJSON_IsNumber(j)) a->id = (int)j->valuedouble;
@@ -114,6 +115,13 @@ ScenarioConfig* scenario_load(const char* path) {
             if (cJSON_IsNumber(j)) a->len = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(ja, "wid");
             if (cJSON_IsNumber(j)) a->wid = j->valuedouble;
+            /* road_network 新格式：s/l/segment_id → 流速仿真用 Frenet 坐标放置 NPC */
+            j = cJSON_GetObjectItemCaseSensitive(ja, "segment_id");
+            if (cJSON_IsNumber(j)) a->segment_id = (int)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(ja, "s");
+            if (cJSON_IsNumber(j)) a->s = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(ja, "l");
+            if (cJSON_IsNumber(j)) a->l = j->valuedouble;
         }
     }
 

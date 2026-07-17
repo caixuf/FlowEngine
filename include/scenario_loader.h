@@ -84,9 +84,13 @@ extern "C" {
 typedef struct {
     int    id;
     char   type[16];   /**< "car" | "pedestrian" | "truck" */
-    double x, y;       /**< 初始位置（m，世界坐标系） */
+    double x, y;       /**< 初始位置（m，世界坐标系）— 旧格式 */
     double vx, vy;     /**< 初始速度（m/s） */
     double len, wid;   /**< 碰撞包围盒尺寸（m） */
+    /* ── road_network 新格式：按 segment 放置 ── */
+    int    segment_id; /**< 所属 road edge id（新格式，-1=旧格式用 x/y） */
+    double s;          /**< 沿道路纵向位置 m（Frenet s，新格式） */
+    double l;          /**< 车道横向偏移 m（新格式，0=参考线） */
 } ScenarioActor;
 
 /* ── Ego 初始状态 ─────────────────────────────────────────── */

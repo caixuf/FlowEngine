@@ -257,17 +257,42 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         if (id == flowsim::INVALID_ENTITY) break;
         flowsim::Entity& e = g.pool[id];
         e.id = a->id;
-        e.x = a->x;
-        /* 沿车道行驶的车 (vy==0) 需加道路中心线偏移；行人/横穿车用绝对 y */
-        if (a->vy == 0.0) {
-            e.y = road_center_y(a->x, g.curve_start_x, g.curve_length_m, g.curve_offset_m) + a->y;
+
+        /* 新格式：segment_id ≥ 0 → 用 esmini Frenet→World 转换 */
+        if (a->segment_id >= 0 && g.roads_loaded) {
+            flowsim::WorldPos wp;
+            if (g.roads.frenet_to_world(a->segment_id, 0, a->s, a->l, wp)) {
+                e.x = wp.x;
+                e.y = wp.y;
+                e.heading = wp.h;
+            } else {
+                /* esmini 查不到此 road id → 退化为沿 x 轴线性放置 */
+                e.x = a->s;
+                e.y = a->l;
+                e.heading = 0.0;
+                LOG_WARN("flowsim", "NPC %d: road %d not in esmini, fallback to (%.1f, %.1f)",
+                         a->id, a->segment_id, e.x, e.y);
+            }
         } else {
-            e.y = a->y;
+            /* 旧格式：全局 x/y 坐标 + 弯道中心线偏移 */
+            e.x = a->x;
+            if (a->vy == 0.0) {
+                e.y = road_center_y(a->x, g.curve_start_x, g.curve_length_m, g.curve_offset_m) + a->y;
+            } else {
+                e.y = a->y;
+            }
         }
         e.vx = a->vx;
         e.vy = a->vy;
         e.speed = sqrt(a->vx * a->vx + a->vy * a->vy);
-        e.target_vx = a->vx;  /* NPC 初始目标速度 = 场景速度 */
+        /* 对向来车 (vx<0)：反转 heading 为 π，让速度朝 -x 方向，
+         * target_vx 取绝对值，避免 NPC AI 将负目标速度当急刹车。 */
+        if (a->vx < 0.0 && a->vy == 0.0) {
+            e.heading = M_PI;
+            e.target_vx = -a->vx;
+        } else {
+            e.target_vx = a->vx;  /* NPC 初始目标速度 = 场景速度 */
+        }
         e.length = (a->len > 0) ? a->len : 4.6;
         e.width = (a->wid > 0) ? a->wid : 2.0;
         if (e.is_vehicle()) {

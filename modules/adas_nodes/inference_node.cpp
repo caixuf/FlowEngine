@@ -464,7 +464,7 @@ static void run_inference(double* out_speed, double* out_d,
             }
         } else if (g.model.in_dim >= 16) {
             /* v2: 单帧 16 维 */
-            build_frame(x);
+            build_frame(x, V2_DIM);
         } else {
             /* v1: 单帧 4 维 */
             x[0] = (float)g.ego_v;

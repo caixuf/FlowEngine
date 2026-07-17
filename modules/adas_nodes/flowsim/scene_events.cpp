@@ -129,11 +129,15 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
 
         if (should_stop) {
             // 按制动距离判断：v²/2a，提前减速
+            // 不覆盖 target_vx——NPC AI 的 StopForTL 状态已使 v_desired=0，
+            // 保留原始 target_vx 供绿灯后恢复巡航。
             double brake_dist = npc.speed * npc.speed / (2.0 * npc.max_brake);
             if (nearest_block_s < brake_dist + 5.0) {
-                npc.target_vx = 0.0;
                 npc.ai_state = AIState::StopForTL;
             }
+        } else if (npc.ai_state == AIState::StopForTL) {
+            // 前方无红灯/黄灯 → 恢复巡航（绿灯已亮或已通过路口）
+            npc.ai_state = AIState::Cruise;
         }
     }
 }
