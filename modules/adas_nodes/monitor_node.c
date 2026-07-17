@@ -54,9 +54,14 @@ static struct {
 
     /* NOA 驾驶模式 (来自 planning/trajectory 的 "mode=" / "route_lane="
      * 追加字段，见 planning_node.c / control_node.c)。用于仪表盘展示当前
-     * 模式层级 (NA/ACC/CP/NP/NOA) 及 NOA 导航驱动的目标车道。 */
+     * 模式层级 (NA/ACC/CP/NP/NOA) 及 NOA 导航驱动的目标车道。
+     *
+     * NOA Phase 6: 同时缓存 trajectory 的 path 数组（Frenet [s,d,spd]），
+     * 透传给 3D 前端画规划轨迹线。planning 消息是 JSON + 尾部文本混合，
+     * path 在 JSON 部分内，cJSON 解析时忽略尾部文本。 */
     char driver_mode[32];
     int  route_lane;
+    char trajectory_path_json[4096];  /* path 数组 JSON 文本，如 [[s,d,spd],...] */
     volatile int has_planning;
 
     /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，sim_world 发布） */
@@ -203,7 +208,12 @@ static void on_remote_stats(const Message* msg, void* user_data) {
 
 /* planning/trajectory 订阅 — 提取驾驶模式 + NOA 导航路线目标车道，供仪表盘展示
  * (见 planning_node.c 追加的 "mode=" / "route_lane=" 字段，与 control_node.c 的
- * 解析方式一致，采用宽松的 strstr + sscanf)。 */
+ * 解析方式一致，采用宽松的 strstr + sscanf)。
+ *
+ * NOA Phase 6: 同时提取 JSON 部分的 path 数组（Frenet [s,d,spd]），透传给
+ * 3D 前端画规划轨迹线。planning 消息格式: <json>{"path":[[s,d,spd],...],...}
+ * speed=... mode=... route_lane=...，cJSON_Parse 只解析前缀 JSON，尾部文本
+ * 自动忽略。path 数组重新序列化为紧凑 JSON 文本缓存，避免每帧重复解析。 */
 static void on_planning_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
@@ -217,6 +227,24 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
     }
     p = strstr(d, "route_lane=");
     if (p) sscanf(p + 11, "%d", &g.route_lane);
+
+    /* NOA Phase 6: 提取 path 数组并缓存为 JSON 文本 */
+    cJSON* root = cJSON_Parse(d);
+    if (root) {
+        cJSON* path = cJSON_GetObjectItem(root, "path");
+        if (path && cJSON_IsArray(path)) {
+            char* path_str = cJSON_PrintUnformatted(path);
+            if (path_str) {
+                size_t len = strlen(path_str);
+                if (len >= sizeof(g.trajectory_path_json))
+                    len = sizeof(g.trajectory_path_json) - 1;
+                memcpy(g.trajectory_path_json, path_str, len);
+                g.trajectory_path_json[len] = '\0';
+                free(path_str);
+            }
+        }
+        cJSON_Delete(root);
+    }
 
     g.has_planning = 1;
 }
@@ -618,6 +646,17 @@ static void export_dashboard_json(void) {
                 cJSON_AddItemToObject(scene, "traffic_lights", cJSON_Duplicate(tl_arr, 1));
             }
             cJSON_Delete(tl_root);
+        }
+    }
+
+    /* NOA Phase 6: 规划轨迹 path 数组透传给 3D 前端。
+     * path 是 Frenet 坐标 [[s,d,spd],...]，前端从 ego 当前位置出发沿 heading
+     * 方向延伸 s、横向偏移 d 近似绘制世界坐标轨迹线（无 esmini Frenet→World
+     * 转换的纯前端近似，直道/大半径弯道下足够可视化）。 */
+    if (g.has_planning && g.trajectory_path_json[0] != '\0') {
+        cJSON* path = cJSON_Parse(g.trajectory_path_json);
+        if (path) {
+            cJSON_AddItemToObject(scene, "trajectory_path", path);
         }
     }
 

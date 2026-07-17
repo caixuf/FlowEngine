@@ -61,6 +61,13 @@ let _lastCurveKey = "";
 let _roadNetworkGroup = null;
 let _lastRoadNetworkKey = "";
 
+/** NOA Phase 6: 规划轨迹线（planning/trajectory 的 path 数组渲染）。
+ *  从 ego 当前位置出发，沿 heading 方向延伸 s、横向偏移 d 近似转世界坐标。
+ *  用 Line2 风格的粗线（TubeGeometry 或 fat line）保证 3D 可见。这里用
+ *  BufferGeometry + LineBasicMaterial（简单可靠，后续可升级 fat line）。 */
+let _trajLine = null;
+let _trajLastKey = "";
+
 /** Phase 3: ETC gate pool (抬杆门架，从 scene/frame entities 读取) */
 let _etcGatePool = [], _etcGateWorld = [];
 
@@ -287,6 +294,10 @@ function _buildRoadNetwork(edges) {
   var group = new THREE.Group();
   var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
 
+  // NOA Phase 6: 收集每条 edge 的首尾世界坐标，渲染后扫描分叉/汇入点。
+  // 两条 edge 的首/尾节点重合（距离 < 1m）即判定为 junction 连接点。
+  var edgeEnds = [];  // [{start:{x,z}, end:{x,z}, lanes, length}, ...]
+
   for (var ei = 0; ei < edges.length; ei++) {
     var edge = edges[ei];
     var nodes = edge.nodes;
@@ -304,6 +315,13 @@ function _buildRoadNetwork(edges) {
     var laneWidth = edge.lane_width || 3.5;
     var roadWidth = lanes * laneWidth;
     var roadHalf = roadWidth / 2;
+
+    // 记录首尾坐标供 junction 检测
+    edgeEnds.push({
+      start: { x: nodes[0][0], z: nodes[0][1] },
+      end:   { x: nodes[nodes.length - 1][0], z: nodes[nodes.length - 1][1] },
+      lanes: lanes, length: length
+    });
 
     // ── 路面 ribbon mesh ──
     var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
@@ -376,6 +394,46 @@ function _buildRoadNetwork(edges) {
     // 道路边缘白实线（宽 0.15m）
     _addLaneMarkRibbon(group, curve, nSeg,  roadHalf - 0.06, 0.15, 0xffffff, 0.043);
     _addLaneMarkRibbon(group, curve, nSeg, -roadHalf + 0.06, 0.15, 0xffffff, 0.043);
+  }
+
+  // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
+  // 一个端点被 ≥3 条 edge 共享时判定为 junction（分叉/汇入点）。
+  // 阈值=3：顺序拼接处一个端点恰好被 2 条 edge 共享（前一条 end + 后一条 start），
+  // 而 junction 分叉点会被 3 条以上 edge 共享（incoming + 2 条 connecting，或
+  // merge 的 connecting + target + incoming）。
+  var JUNCTION_TOL = 1.5;  // 端点重合判定容差(m)
+  // 收集所有端点，聚类成"连接点"（距离 < TOL 的端点归为同一个连接点）
+  var allEnds = [];
+  for (var i = 0; i < edgeEnds.length; i++) {
+    allEnds.push({ x: edgeEnds[i].start.x, z: edgeEnds[i].start.z, lanes: edgeEnds[i].lanes });
+    allEnds.push({ x: edgeEnds[i].end.x,   z: edgeEnds[i].end.z,   lanes: edgeEnds[i].lanes });
+  }
+  // 聚类：每个端点找最近的已有簇，<TOL 则归入，否则新建簇
+  var clusters = [];  // [{x, z, count, minLanes}]
+  for (var e = 0; e < allEnds.length; e++) {
+    var found = false;
+    for (var cl = 0; cl < clusters.length; cl++) {
+      var ddx = allEnds[e].x - clusters[cl].x;
+      var ddz = allEnds[e].z - clusters[cl].z;
+      if (ddx * ddx + ddz * ddz < JUNCTION_TOL * JUNCTION_TOL) {
+        clusters[cl].count++;
+        if (allEnds[e].lanes < clusters[cl].minLanes) clusters[cl].minLanes = allEnds[e].lanes;
+        found = true; break;
+      }
+    }
+    if (!found) clusters.push({ x: allEnds[e].x, z: allEnds[e].z, count: 1, minLanes: allEnds[e].lanes });
+  }
+  // count >= 3 的簇 = junction 连接点；含单车道（匝道）= fork，否则 = merge
+  for (var ci = 0; ci < clusters.length; ci++) {
+    if (clusters[ci].count < 3) continue;
+    var kind = clusters[ci].minLanes <= 1 ? 'fork' : 'merge';
+    var color = kind === 'fork' ? 0xff8800 : 0x44cc44;
+    var ringGeo = new THREE.RingGeometry(2.0, 2.6, 24);
+    var ringMat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+    var ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.set(clusters[ci].x, 0.06, clusters[ci].z);
+    group.add(ring);
   }
 
   scene3d.add(group);
@@ -1025,6 +1083,44 @@ function update3D() {
     if (_roadNetworkGroup) { _roadNetworkGroup.visible = false; _lastRoadNetworkKey = ''; }
     if (_roadGroup) _roadGroup.visible = true;
     _applyRoadCurve(scn.road);
+  }
+
+  // NOA Phase 6: 规划轨迹渲染 — 从 scn.trajectory_path (Frenet [[s,d,spd],...])
+  // 近似转世界坐标画线。从 ego 当前位置 (_dr.lastX/Z) 出发，沿 ego heading
+  // 方向延伸 s，横向偏移 d（heading+90° 方向）。直道/大半径弯道下近似误差小。
+  if (scn && scn.trajectory_path && scn.trajectory_path.length > 1) {
+    var tpath = scn.trajectory_path;
+    var ex = _dr.lastX, ez = _dr.lastZ, eh = _dr.lastHeading || 0;
+    // 缓存键：path 长度 + ego 位置（位置变化超 1m 重建）
+    var tkey = tpath.length + ':' + Math.round(ex) + ',' + Math.round(ez);
+    if (tkey !== _trajLastKey) {
+      _trajLastKey = tkey;
+      // 构建 world 坐标点数组
+      var tpts = [];
+      for (var ti = 0; ti < tpath.length; ti++) {
+        var pt = tpath[ti];
+        if (!pt || pt.length < 2) continue;
+        var s = pt[0] || 0, d = pt[1] || 0;
+        // Frenet→World 近似：s 沿 heading 方向，d 沿 heading+90°（右侧）
+        var wx = ex + s * Math.cos(eh) - d * Math.sin(eh);
+        var wz = ez + s * Math.sin(eh) + d * Math.cos(eh);
+        tpts.push(wx, 0.15, wz);  // y=0.15 略高于路面避免 z-fighting
+      }
+      // 移除旧线，构建新 Line
+      if (_trajLine) {
+        scene3d.remove(_trajLine);
+        _trajLine.geometry.dispose();
+        _trajLine.material.dispose();
+      }
+      var tgeo = new THREE.BufferGeometry();
+      tgeo.setAttribute('position', new THREE.Float32BufferAttribute(tpts, 3));
+      var tmat = new THREE.LineBasicMaterial({ color: 0x44aaff, linewidth: 2, transparent: true, opacity: 0.85 });
+      _trajLine = new THREE.Line(tgeo, tmat);
+      scene3d.add(_trajLine);
+    }
+    if (_trajLine) _trajLine.visible = true;
+  } else if (_trajLine) {
+    _trajLine.visible = false;
   }
 
   // Phase 3: ETC 门架 — 从 scene/frame entities 读取（如果有）
