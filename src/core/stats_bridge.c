@@ -40,8 +40,10 @@ int stats_bridge_publish(IpcChannel* ch, MessageBus* bus, const char* source_nam
     pkt.topic_count = (uint32_t)nt;
 
     for (int i = 0; i < nt; i++) {
-        snprintf(pkt.topics[i].topic, sizeof(pkt.topics[i].topic),
-                 "%s", tstats[i].topic);
+        size_t n = strlen(tstats[i].topic);
+        if (n >= sizeof(pkt.topics[i].topic)) n = sizeof(pkt.topics[i].topic) - 1;
+        memcpy(pkt.topics[i].topic, tstats[i].topic, n);
+        pkt.topics[i].topic[n] = '\0';
         pkt.topics[i].publish_count     = tstats[i].publish_count;
         pkt.topics[i].deliver_count     = tstats[i].deliver_count;
         pkt.topics[i].drop_count        = tstats[i].drop_count;

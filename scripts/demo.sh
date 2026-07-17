@@ -30,6 +30,7 @@ MULTI_MODE=false
 RECORD_MODE=false
 REPLAY_FILE=""
 SCENARIO=""
+FLOWSIM_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -41,6 +42,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
+    --flowsim) FLOWSIM_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
     --scenario) SCENARIO="$2"; shift ;;
@@ -50,8 +52,18 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ── Scenario override: patch pipeline.json's scenario_file in sim_world/planning/control ──
-PIPELINE_ORIG="$ROOT/config/pipeline.json"
+# ── Flowsim mode: use v2 pipeline (multi-segment roads, ETC gates, traffic lights) ──
+if [ "$FLOWSIM_MODE" = true ]; then
+  if [ -f "$ROOT/config/pipeline_flowsim.json" ]; then
+    PIPELINE="$ROOT/config/pipeline_flowsim.json"
+    [ -z "$SCENARIO" ] && SCENARIO="city_to_highway"
+  else
+    echo "  ⚠ pipeline_flowsim.json not found, falling back to default pipeline"
+  fi
+fi
+
+# ── Scenario override: patch pipeline.json's scenario_file ──
+PIPELINE_ORIG="$PIPELINE"
 PIPELINE_TMP=""
 cleanup_pipeline_tmp() {
   [ -n "$PIPELINE_TMP" ] && rm -f "$PIPELINE_TMP"
@@ -60,8 +72,6 @@ if [ -n "$SCENARIO" ]; then
   PIPELINE_TMP=$(mktemp /tmp/pipeline_XXXX.json)
   trap 'cleanup_pipeline_tmp' EXIT
   SCENARIO_ABS="$([ -f "$SCENARIO" ] && echo "$(cd "$(dirname "$SCENARIO")" && pwd)/$(basename "$SCENARIO")" || echo "$SCENARIO")"
-  # Pipeline JSON 中 params 是 JSON 字符串，scenario_file 前的引号为 \" 转义形式。
-  # 必须用 \\" 匹配（sed 中 \\\\ 匹配字面量 \\），单引号防止 bash 二次转义。
   sed 's|\\"scenario_file\\": \\"[^\\"]*\\"|\\"scenario_file\\": \\"'$SCENARIO_ABS'\\"|g' "$PIPELINE_ORIG" > "$PIPELINE_TMP"
   PIPELINE="$PIPELINE_TMP"
   echo "  Scenario: $SCENARIO_ABS"
@@ -104,7 +114,8 @@ cat << 'BANNER'
 
 BANNER
 
-   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO:-$(grep -oP 'scenario_file\": \"[^\"]+' "$PIPELINE_ORIG" | head -1 | sed 's/scenario_file": "//')}"
+   SCENARIO_DISPLAY="${SCENARIO:-$(grep -o 'scenarios/[^\"]*' "$PIPELINE_ORIG" | head -1)}"
+   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
 echo ""
 
 # ── Build ───────────────────────────────────────────────────
@@ -217,7 +228,7 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 # ── Start flow_launcher with pipeline ───────────────────────
-echo "───[2/5] Starting pipeline (sim_world→sensor_model→perception→fusion→planning→control→monitor)..."
+echo "───[2/5] Starting pipeline ($([ "$FLOWSIM_MODE" = true ] && echo "flowsim→sensor_model→perception→fusion→planning→control→monitor" || echo "sim_world→sensor_model→perception→fusion→planning→control→monitor"))..."
 rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
 
@@ -293,7 +304,7 @@ fi
 # ── Live monitor ────────────────────────────────────────────
 echo "───[5/5] Live monitor (${DURATION}s)..."
 echo ""
-echo "  ┌─ SimWorld ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
+echo "  ┌─ $([ "$FLOWSIM_MODE" = true ] && echo "FlowSim" || echo "SimWorld") ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
 echo "  │  dynamics      DBSCAN          EKF          Frenet       PID      │"
 echo "  └───────────────────────────────────────────────────────────────────┘"
 echo ""

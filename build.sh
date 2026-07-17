@@ -66,15 +66,29 @@ build_project() {
     fi
     
     print_info "构建项目..."
-    make -j$(nproc)
-    
-    if [ $? -ne 0 ]; then
+    local warn_log
+    warn_log="$(mktemp)"
+    make -j$(nproc) 2> >(grep -i "warning:" > "$warn_log" || true)
+    local make_rc=$?
+
+    if [ $make_rc -ne 0 ]; then
         print_error "构建失败"
+        rm -f "$warn_log"
         exit 1
     fi
-    
+
+    local warn_count
+    warn_count=$(wc -l < "$warn_log" 2>/dev/null || echo 0)
+    if [ "$warn_count" -gt 0 ]; then
+        print_warning "发现 $warn_count 个编译警告:"
+        while IFS= read -r line; do
+            echo "  ${YELLOW}⚠${NC} $line"
+        done < "$warn_log"
+    fi
+    rm -f "$warn_log"
+
     cd ..
-    print_success "构建完成"
+    print_success "构建完成 ($warn_count 个警告)"
 }
 
 # 安装项目

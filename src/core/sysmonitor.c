@@ -218,7 +218,9 @@ static void read_loadavg(double* l1, double* l5, double* l15) {
     FILE* f = fopen(PROC_LOADAVG_PATH, "r");
     *l1 = *l5 = *l15 = 0.0;
     if (!f) return;
-    fscanf(f, "%lf %lf %lf", l1, l5, l15);
+    if (fscanf(f, "%lf %lf %lf", l1, l5, l15) < 3) {
+        *l1 = *l5 = *l15 = 0.0;
+    }
     fclose(f);
 }
 
@@ -227,7 +229,7 @@ static double read_uptime(void) {
     FILE* f = fopen(PROC_UPTIME_PATH, "r");
     if (!f) return 0.0;
     double up = 0.0;
-    fscanf(f, "%lf", &up);
+    if (fscanf(f, "%lf", &up) < 1) up = 0.0;
     fclose(f);
     return up;
 }

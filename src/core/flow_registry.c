@@ -203,7 +203,10 @@ int flow_registry_list_types(FlowTypeMeta* buf, int max) {
     pthread_mutex_lock(&g_mutex);
     int n = (g_type_cache_count < max) ? g_type_cache_count : max;
     for (int i = 0; i < n; i++) {
-        snprintf(buf[i].name, sizeof(buf[i].name), "%s", g_type_cache[i].type_name);
+        size_t n = strlen(g_type_cache[i].type_name);
+        if (n >= sizeof(buf[i].name)) n = sizeof(buf[i].name) - 1;
+        memcpy(buf[i].name, g_type_cache[i].type_name, n);
+        buf[i].name[n] = '\0';
         buf[i].type_id     = g_type_cache[i].type_id;
         buf[i].struct_size = g_type_cache[i].struct_size;
     }

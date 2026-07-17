@@ -331,7 +331,8 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
 /* ── HTTP 响应 ──────────────────────────────────────────── */
 
 static void send_response(int fd, const char* status, const char* content_type,
-                          const char* body, int body_len) {
+                          const char* body) {
+    int body_len = body ? (int)strlen(body) : 0;
     char header[512];
     int hl = snprintf(header, sizeof(header),
         "HTTP/1.1 %s\r\n"
@@ -342,8 +343,12 @@ static void send_response(int fd, const char* status, const char* content_type,
         "Connection: close\r\n"
         "\r\n",
         status, content_type, body_len);
-    write(fd, header, (size_t)hl);
-    if (body && body_len > 0) write(fd, body, (size_t)body_len);
+    ssize_t w = write(fd, header, (size_t)hl);
+    (void)w;
+    if (body && body_len > 0) {
+        w = write(fd, body, (size_t)body_len);
+        (void)w;
+    }
 }
 
 /* ── SSE 流 ──────────────────────────────────────────────── */
@@ -356,7 +361,8 @@ static void handle_sse(int fd, MonitorServer* ms) {
         "Cache-Control: no-cache\r\n"
         "Connection: keep-alive\r\n"
         "\r\n";
-    write(fd, sse_header, strlen(sse_header));
+    ssize_t w = write(fd, sse_header, strlen(sse_header));
+    (void)w;
 
     char buf[MONITOR_HTTP_BUF_SIZE];
     /* Push a new frame only when the underlying dashboard payload actually
@@ -431,7 +437,7 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
     if (pipe(stdin_pipe) == -1 || pipe(stdout_pipe) == -1) {
         if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
         send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"pipe failed\"}", 36);
+                      "{\"ok\":false,\"error\":\"pipe failed\"}");
         close(fd);
         return;
     }
@@ -441,7 +447,7 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
         close(stdin_pipe[0]);  close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"fork failed\"}", 36);
+                      "{\"ok\":false,\"error\":\"fork failed\"}");
         close(fd);
         return;
     }
@@ -499,10 +505,10 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
     waitpid(pid, NULL, 0);
 
     if (total > 0) {
-        send_response(fd, "200 OK", "application/json", result, (int)total);
+        send_response(fd, "200 OK", "application/json", result);
     } else {
         send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"no output\"}", 36);
+                      "{\"ok\":false,\"error\":\"no output\"}");
     }
     close(fd);
 }
@@ -541,7 +547,7 @@ static void handle_client(int fd, MonitorServer* ms) {
 
     /* Malformed request line (no method/path) → 400 Bad Request. */
     if (method[0] == '\0' || path[0] == '\0') {
-        send_response(fd, "400 Bad Request", "text/plain", "bad request", 11);
+        send_response(fd, "400 Bad Request", "text/plain", "bad request");
         close(fd);
         return;
     }
@@ -550,14 +556,15 @@ static void handle_client(int fd, MonitorServer* ms) {
     if (strcmp(method, "OPTIONS") == 0) {
         const char* cors = "HTTP/1.1 204\r\nAccess-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n";
-        write(fd, cors, strlen(cors));
+        ssize_t w = write(fd, cors, strlen(cors));
+        (void)w;
         close(fd);
         return;
     }
 
     /* Support GET and POST; reject everything else */
     if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
-        send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed", 18);
+        send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed");
         close(fd);
         return;
     }
@@ -574,12 +581,20 @@ static void handle_client(int fd, MonitorServer* ms) {
                 free(body);
             } else {
                 send_response(fd, "400 Bad Request", "application/json",
-                              "{\"ok\":false,\"error\":\"failed to read body\"}", 48);
+                              "{\"ok\":false,\"error\":\"failed to read body\"}");
                 close(fd);
             }
             return;
         }
-        send_response(fd, "404 Not Found", "text/plain", "not found", 9);
+        send_response(fd, "404 Not Found", "text/plain", "not found");
+        close(fd);
+        return;
+    }
+
+    /* GET: /api/health → liveness check for dashboard/script polling */
+    if (strcmp(path, "/api/health") == 0) {
+        send_response(fd, "200 OK", "application/json",
+                      "{\"status\":\"ok\"}");
         close(fd);
         return;
     }
@@ -602,10 +617,10 @@ static void handle_client(int fd, MonitorServer* ms) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
         if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf, cached_len);
+            send_response(fd, "200 OK", "application/json", buf);
         } else {
             build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+            send_response(fd, "200 OK", "application/json", buf);
         }
         close(fd);
         return;
@@ -616,10 +631,10 @@ static void handle_client(int fd, MonitorServer* ms) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
         if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf, cached_len);
+            send_response(fd, "200 OK", "application/json", buf);
         } else {
             build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf, (int)strlen(buf));
+            send_response(fd, "200 OK", "application/json", buf);
         }
         close(fd);
         return;
@@ -628,12 +643,11 @@ static void handle_client(int fd, MonitorServer* ms) {
     /* Route: / → flowboard/index.html (from --html-path) */
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
         char* html = NULL;
-        size_t html_len = 0;
         if (ms->html_path[0]) {
-            html = read_file(ms->html_path, &html_len);
+            html = read_file(ms->html_path, NULL);
         }
         if (html) {
-            send_response(fd, "200 OK", "text/html; charset=utf-8", html, (int)html_len);
+            send_response(fd, "200 OK", "text/html; charset=utf-8", html);
             free(html);
         } else {
             /* Fallback: minimal embedded dashboard */
@@ -647,7 +661,7 @@ static void handle_client(int fd, MonitorServer* ms) {
                 "<p><a href='/api/stream'>/api/stream</a> — SSE live feed</p>"
                 "</body></html>";
             send_response(fd, "200 OK", "text/html; charset=utf-8",
-                          fallback, (int)strlen(fallback));
+                          fallback);
         }
         close(fd);
         return;
@@ -660,7 +674,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         snprintf(reqpath, sizeof(reqpath), "%s", path);
         if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
-            send_response(fd, "403 Forbidden", "application/json", forbidden, (int)strlen(forbidden));
+            send_response(fd, "403 Forbidden", "application/json", forbidden);
             close(fd); return;
         }
         /* Derive parent dir from html_path, then go up once more to reach
@@ -678,8 +692,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         char filepath[768];
         const char* rel = path + 1;  /* "/js/app.js" → "js/app.js" */
         snprintf(filepath, sizeof(filepath), "%s/flowboard/%s", parent, rel);
-        size_t flen = 0;
-        char* fbuf = read_file(filepath, &flen);
+        char* fbuf = read_file(filepath, NULL);
         if (fbuf) {
             const char* ctype = "application/octet-stream";
             const char* dot = strrchr(filepath, '.');
@@ -689,11 +702,11 @@ static void handle_client(int fd, MonitorServer* ms) {
                 else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
                 else if (strcmp(dot, ".json") == 0) ctype = "application/json";
             }
-            send_response(fd, "200 OK", ctype, fbuf, (int)flen);
+            send_response(fd, "200 OK", ctype, fbuf);
             free(fbuf);
         } else {
             const char* notfound = "{\"error\":\"not found\"}";
-            send_response(fd, "404 Not Found", "application/json", notfound, (int)strlen(notfound));
+            send_response(fd, "404 Not Found", "application/json", notfound);
         }
         close(fd);
         return;
@@ -713,8 +726,7 @@ static void handle_client(int fd, MonitorServer* ms) {
          * embedded '/' by only using the part after the last '/'. */
         if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
-            send_response(fd, "403 Forbidden", "application/json",
-                          forbidden, (int)strlen(forbidden));
+            send_response(fd, "403 Forbidden", "application/json", forbidden);
             close(fd);
             return;
         }
@@ -739,8 +751,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         char filepath[1024];
         snprintf(filepath, sizeof(filepath), "%s/%s", dir, base);
 
-        size_t flen = 0;
-        char* fbuf = read_file(filepath, &flen);
+        char* fbuf = read_file(filepath, NULL);
         if (fbuf) {
             /* Content type by extension. */
             const char* ctype = "application/octet-stream";
@@ -754,12 +765,11 @@ static void handle_client(int fd, MonitorServer* ms) {
                 else if (strcmp(dot, ".wasm") == 0) ctype = "application/wasm";
                 else if (strcmp(dot, ".png") == 0)  ctype = "image/png";
             }
-            send_response(fd, "200 OK", ctype, fbuf, (int)flen);
+            send_response(fd, "200 OK", ctype, fbuf);
             free(fbuf);
         } else {
             const char* notfound = "{\"error\":\"not found\"}";
-            send_response(fd, "404 Not Found", "application/json",
-                          notfound, (int)strlen(notfound));
+            send_response(fd, "404 Not Found", "application/json", notfound);
         }
         close(fd);
         return;
@@ -767,7 +777,7 @@ static void handle_client(int fd, MonitorServer* ms) {
 
     /* 404 */
     const char* notfound = "{\"error\":\"not found\"}";
-    send_response(fd, "404 Not Found", "application/json", notfound, (int)strlen(notfound));
+    send_response(fd, "404 Not Found", "application/json", notfound);
     close(fd);
 }
 

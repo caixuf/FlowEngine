@@ -378,12 +378,20 @@ BagReader* bag_reader_open(const char* path) {
         r->is_v2 = true;
         uint32_t magic, version;
         uint64_t index_offset = 0;
+        int header_ok = 1;
 
-        fread(&magic,        sizeof(magic),        1, fp);
-        fread(&version,      sizeof(version),      1, fp);
-        fread(&r->msg_count, sizeof(r->msg_count), 1, fp);
-        fread(&r->duration_us, sizeof(r->duration_us), 1, fp);
-        fread(&index_offset, sizeof(index_offset),  1, fp);
+        header_ok &= (fread(&magic,        sizeof(magic),        1, fp) == 1);
+        header_ok &= (fread(&version,      sizeof(version),      1, fp) == 1);
+        header_ok &= (fread(&r->msg_count, sizeof(r->msg_count), 1, fp) == 1);
+        header_ok &= (fread(&r->duration_us, sizeof(r->duration_us), 1, fp) == 1);
+        header_ok &= (fread(&index_offset, sizeof(index_offset),  1, fp) == 1);
+
+        if (!header_ok) {
+            fclose(fp);
+            free(r);
+            return NULL;
+        }
+
         fseek(fp, BAG_HEADER_SIZE, SEEK_SET);
         r->data_start = BAG_HEADER_SIZE;
 
@@ -396,12 +404,17 @@ BagReader* bag_reader_open(const char* path) {
                 for (uint64_t i = 0; i < entry_count; i++) {
                     BagIndexEntry* e = &r->index[r->index_count++];
                     char topic_padded[BAG_INDEX_ENTRY_TOPIC_LEN];
-                    fread(topic_padded,          1, sizeof(topic_padded),  fp);
-                    fread(&e->count,             sizeof(e->count),         1, fp);
-                    fread(&e->first_offset,      sizeof(e->first_offset),  1, fp);
-                    fread(&e->last_offset,       sizeof(e->last_offset),   1, fp);
-                    fread(&e->type_id,           sizeof(e->type_id),       1, fp);
-                    fread(&e->schema_version,    sizeof(e->schema_version), 1, fp);
+                    int entry_ok = 1;
+                    entry_ok &= (fread(topic_padded,          1, sizeof(topic_padded),  fp) == sizeof(topic_padded));
+                    entry_ok &= (fread(&e->count,             sizeof(e->count),         1, fp) == 1);
+                    entry_ok &= (fread(&e->first_offset,      sizeof(e->first_offset),  1, fp) == 1);
+                    entry_ok &= (fread(&e->last_offset,       sizeof(e->last_offset),   1, fp) == 1);
+                    entry_ok &= (fread(&e->type_id,           sizeof(e->type_id),       1, fp) == 1);
+                    entry_ok &= (fread(&e->schema_version,    sizeof(e->schema_version), 1, fp) == 1);
+                    if (!entry_ok) {
+                        r->index_count--;
+                        break;
+                    }
                     memcpy(e->topic, topic_padded, BAG_INDEX_ENTRY_TOPIC_LEN - 1);
                     e->topic[BAG_INDEX_ENTRY_TOPIC_LEN - 1] = '\0';
                 }
