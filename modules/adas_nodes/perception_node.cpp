@@ -25,6 +25,7 @@
 #include "adas_msgs_gen.h"
 #include "transport.h"
 #include "discovery.h"
+#include "serializer.h"   /* NOA Phase 2.1: msg_cast 解析 sensor/lidar LidarFrame */
 #include "coroutine_task.h"
 #undef LOG_TRACE
 #undef LOG_DEBUG
@@ -86,6 +87,17 @@ struct PerceptionContext {
     double obs_noise_std_m{0.08};
     int    enable_simple_occlusion{1};
 
+    /* NOA Phase 2.1: 感知输入模式
+     *   ground_truth (默认): 从 vehicle/state 读真值 ego+obstacles，向后兼容
+     *   sensor: 额外消费 sensor/lidar 的 LidarFrame，用传感器测量的 ego 位置替代
+     *           vehicle/state 真值定位（建立 sensor/lidar → perception 数据链路，
+     *           见 NOA_SCENARIO_PLAN §2.3）。障碍物仍由 vehicle/state 经 FOV/噪声/
+     *           遮挡滤波提供——sensor_model 目前发布的是定位级 LidarFrame（单点），
+     *           障碍物级点云发布为后续工作。 */
+    int mode{0};  /* 0 = ground_truth, 1 = sensor */
+    double lid_x{0}, lid_y{0};
+    volatile int has_lidar{0};
+
     /* 协程任务 */
     std::unique_ptr<class PerceptionTask> task;
 };
@@ -140,6 +152,22 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
+/* ── sensor/lidar 订阅（NOA Phase 2.1: sensor 模式） ──────────
+ * 解析 sensor_model 发布的 LidarFrame 二进制消息，取其 (x,y) 作为传感器测量
+ * 的 ego 位置。sensor 模式下用它替代 vehicle/state 的真值定位，建立真实的
+ * sensor/lidar → perception 数据依赖。 */
+static void on_sensor_lidar(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    /* 直接走 _msg_cast_impl：C++ 编译器会优先匹配 serializer.h 的 msg_cast 模板
+     * (要求 T::TYPE_ID 形式)，故按 fusion_node.cpp 的写法显式调用底层实现。 */
+    const LidarFrame* f = (const LidarFrame*)_msg_cast_impl(msg, LIDARFRAME_TYPE_ID, sizeof(LidarFrame), "LidarFrame");
+    if (!f) return;
+    g.lid_x = (double)f->x;
+    g.lid_y = (double)f->y;
+    g.has_lidar = 1;
+}
+
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
 class PerceptionTask : public FlowCoroTask {
@@ -163,6 +191,15 @@ protected:
                 int np = 0;
                 double ch = cos(-g.ego_heading), sh = sin(-g.ego_heading);
 
+                /* NOA Phase 2.1: sensor 模式下用 sensor/lidar 测量的 ego 位置作为
+                 * 障碍物相对坐标的参考原点（含传感器噪声），ground_truth 模式仍用
+                 * vehicle/state 真值定位。 */
+                double ego_ref_x = g.ego_x, ego_ref_y = g.ego_y;
+                if (g.mode == 1 && g.has_lidar) {
+                    ego_ref_x = g.lid_x;
+                    ego_ref_y = g.lid_y;
+                }
+
                 /* 地面环 */
                 for (int ring = 0; ring < 2 && np < 256; ring++) {
                     float r = 6.0f + (float)ring * 4.0f;
@@ -177,8 +214,8 @@ protected:
                 int vis_idx[16];
                 int vis_count = 0;
                 for (int oi = 0; oi < g.n_obs && vis_count < 16; oi++) {
-                    double dx = g.obs_x[oi] - g.ego_x;
-                    double dy = g.obs_y[oi] - g.ego_y;
+                    double dx = g.obs_x[oi] - ego_ref_x;
+                    double dy = g.obs_y[oi] - ego_ref_y;
                     double rx = dx * ch - dy * sh;
                     double ry = dx * sh + dy * ch;
                     if (!obstacle_in_fov(rx, ry, g.lidar_max_range_m, g.lidar_fov_deg)) {
@@ -296,7 +333,7 @@ void* perception_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "vehicle/state", nullptr };
+static const char* s_inputs[]  = { "vehicle/state", "sensor/lidar", nullptr };
 static const char* s_outputs[] = { "perception/obstacles", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -319,6 +356,9 @@ static int perception_init(MessageBus* bus, Transport* transport,
     g.lidar_max_range_m = 60.0;
     g.obs_noise_std_m = 0.08;
     g.enable_simple_occlusion = 1;
+    g.mode         = 0;       /* NOA Phase 2.1: 默认 ground_truth，向后兼容 */
+    g.has_lidar    = 0;
+    g.lid_x = g.lid_y = 0.0;
     g.transport    = transport;
     g.discovery    = discovery;
     g.should_stop  = false;
@@ -340,6 +380,11 @@ static int perception_init(MessageBus* bus, Transport* transport,
                 g.obs_noise_std_m = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "enable_simple_occlusion")) && cJSON_IsNumber(j))
                 g.enable_simple_occlusion = (int)j->valuedouble;
+            /* NOA Phase 2.1: mode = "sensor" | "ground_truth" (默认) */
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "mode")) && cJSON_IsString(j) &&
+                j->valuestring && strcmp(j->valuestring, "sensor") == 0) {
+                g.mode = 1;
+            }
             cJSON_Delete(p);
         }
     }
@@ -350,15 +395,19 @@ static int perception_init(MessageBus* bus, Transport* transport,
     dbscan_set_ransac(&g.dbscan, 100, 0.2f, 0.3f);
 
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
+    /* sensor 模式额外消费 sensor/lidar（ground_truth 模式下订阅无害，仅更新 has_lidar） */
+    transport_subscribe(transport, "sensor/lidar", on_sensor_lidar, nullptr);
 
     discovery_advertise(discovery, "vehicle/state",         0x1C0E5A7Eu, CAP_SUBSCRIBER,  0);
+    discovery_advertise(discovery, "sensor/lidar",          LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "perception/obstacles",  0x0B5A010Eu, CAP_PUBLISHER, 20.0);
 
     transport_advertise(transport, "perception/obstacles", 0x0B5A010Eu);
 
     g.task = std::make_unique<PerceptionTask>(bus, transport, g.lidar_rate_hz);
 
-    LOG_INFO("perception", "initialized (FlowCoro, DBSCAN eps=%.1f, LiDAR %dHz FOV=%.0fdeg range=%.0fm noise=%.2f occ=%d)",
+    LOG_INFO("perception", "initialized (FlowCoro, mode=%s, DBSCAN eps=%.1f, LiDAR %dHz FOV=%.0fdeg range=%.0fm noise=%.2f occ=%d)",
+             g.mode == 1 ? "sensor" : "ground_truth",
              g.dbscan_eps, g.lidar_rate_hz, g.lidar_fov_deg, g.lidar_max_range_m,
              g.obs_noise_std_m, g.enable_simple_occlusion);
     return 0;

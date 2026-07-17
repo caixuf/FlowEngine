@@ -80,6 +80,12 @@ struct PlanningContext {
     int               route_next_idx{0};    /* 下一条待触发的路线指令 */
     int               route_target_lane{0}; /* 当前路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
     double            route_target_speed{0.0};/* 当前路线步骤要求的目标速度（0 = 无改变） */
+    /* NOA Phase 3.2/3.3: 当前路线步骤类型 + branch_select 选中的 connecting_road id。
+     * - route_type 持续下发到 control/monitor，供下游区分普通变道/分叉选路/汇入。
+     * - current_branch_id 用于 branch_select 后参考路径切换的几何参考（fallback 模式
+     *   下无 esmini，仅作日志/可视化标识；HAVE_FRENET 模式下未来用于切换参考路径）。 */
+    RouteStepType     route_type{ROUTE_LANE_CHANGE};
+    int               current_branch_id{-1};
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -363,22 +369,83 @@ protected:
              * 提前决定车道，是 NOA 区别于被动跟车/超车（LCC/NP）的核心行为。
              * route_target_lane 一经触发即持续下发，直到下一条路线指令覆盖它，
              * 供 control 节点在其既有安全变道状态机上执行（rear/front gap 检查）。
-             * 若路线步骤指定了 target_speed，则同时调整巡航速度（用于出口匝道减速等）。 ── */
+             * 若路线步骤指定了 target_speed，则同时调整巡航速度（用于出口匝道减速等）。
+             *
+             * NOA Phase 3.2/3.3: 按 step->type 分发：
+             *   lane_change   — 同路段变道（原行为），设 target_lane + target_speed
+             *   branch_select — 路口分叉选路，记录 branch_id，触发参考路径刷新，
+             *                   target_lane 缺省 -1（靠右准备出匝道，符合 json_to_xodr
+             *                   默认右匝道方向）
+             *   merge         — 加速车道汇入，强制 target_speed（加速目标）+ target_lane
+             *                   （汇入后车道方向），control 节点据此做 gap 检查 + 加速 */
             if (SM_MODE_OF(statem_current(&g.mode_sm)) == SM_MODE_NOA &&
                 g.route_next_idx < g.route_count &&
                 g.ego_x >= g.route[g.route_next_idx].trigger_x) {
                 const ScenarioRouteStep* step = &g.route[g.route_next_idx];
-                g.route_target_lane = step->target_lane;
-                if (step->target_speed > 0.0) {
-                    g.route_target_speed = step->target_speed;
-                    LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
-                             g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
+                g.route_type = step->type;
+
+                switch (step->type) {
+                case ROUTE_BRANCH_SELECT: {
+                    /* 分叉选路：选中 branch_id 指定的 connecting_road。
+                     * target_lane 缺省 -1（右匝道方向）；若场景显式指定则用场景值。 */
+                    int lane = (step->target_lane != 0) ? step->target_lane : -1;
+                    g.route_target_lane = lane;
+                    g.current_branch_id = step->branch_id;
+                    if (step->target_speed > 0.0) g.route_target_speed = step->target_speed;
+                    else                          g.route_target_speed = 0.0;
+                    /* 触发参考路径刷新：branch_select 后 ego 进入新的 connecting_road，
+                     * 参考路径需重新基于新路段几何构建（fallback 模式下沿用 curve_*
+                     * 单段几何，HAVE_FRENET 模式下应切到 branch_id 对应道路采样）。 */
+                    update_reference_path(g.ego_x - 5.0);
+                    LOG_INFO("planning",
+                             "NOA branch_select #%d @x=%.0f -> branch_id=%d lane=%d (%s)",
+                             g.route_next_idx, g.ego_x, step->branch_id, lane,
                              step->label[0] ? step->label : "-");
-                } else {
-                    g.route_target_speed = 0.0;
-                    LOG_INFO("planning", "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
-                             g.route_next_idx, g.ego_x, step->target_lane,
-                             step->label[0] ? step->label : "-");
+                    break;
+                }
+                case ROUTE_MERGE: {
+                    /* 加速车道汇入：强制 target_speed（加速到主路速度）+ target_lane
+                     * （汇入后车道方向）。control 节点在 merge 状态下做 gap 检查 +
+                     * 加速 + 横向汇入。target_lane 缺省 +1（汇入左侧主路）。 */
+                    int lane = (step->target_lane != 0) ? step->target_lane : 1;
+                    g.route_target_lane = lane;
+                    g.current_branch_id = -1;
+                    if (step->target_speed > 0.0) {
+                        g.route_target_speed = step->target_speed;
+                        LOG_INFO("planning",
+                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s (%s)",
+                                 g.route_next_idx, g.ego_x, lane, step->target_speed,
+                                 step->label[0] ? step->label : "-");
+                    } else {
+                        /* merge 必须有 target_speed（加速目标），缺省用 cfg_max_speed */
+                        g.route_target_speed = g.cfg_max_speed;
+                        LOG_INFO("planning",
+                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s (default, %s)",
+                                 g.route_next_idx, g.ego_x, lane, g.cfg_max_speed,
+                                 step->label[0] ? step->label : "-");
+                    }
+                    break;
+                }
+                case ROUTE_LANE_CHANGE:
+                default: {
+                    /* 普通变道：原行为，设 target_lane + target_speed */
+                    g.route_target_lane = step->target_lane;
+                    g.current_branch_id = -1;
+                    if (step->target_speed > 0.0) {
+                        g.route_target_speed = step->target_speed;
+                        LOG_INFO("planning",
+                                 "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
+                                 g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
+                                 step->label[0] ? step->label : "-");
+                    } else {
+                        g.route_target_speed = 0.0;
+                        LOG_INFO("planning",
+                                 "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
+                                 g.route_next_idx, g.ego_x, step->target_lane,
+                                 step->label[0] ? step->label : "-");
+                    }
+                    break;
+                }
                 }
                 g.route_next_idx++;
             }
@@ -592,12 +659,30 @@ protected:
 
             /* 后向兼容: PID 也读取 speed= 字段。附加 mode/route_lane 供 control 消费
              * (NOA 主动变道) 及仪表盘展示驾驶模式，采用与 speed= 相同的宽松追加格式,
-             * 不影响既有基于 strstr 的解析。 */
+             * 不影响既有基于 strstr 的解析。
+             *
+             * NOA Phase 3.2/3.3: 追加 route_type= 字段（lane_change/branch_select/merge）
+             * 供 control/monitor 区分当前 NOA 行为，branch_select 还附带 branch_id=。 */
             char mode_buf[32];
             statem_format_hierarchical(statem_current(&g.mode_sm), mode_buf, sizeof(mode_buf));
+            const char* route_type_str = "lane_change";
+            switch (g.route_type) {
+                case ROUTE_BRANCH_SELECT: route_type_str = "branch_select"; break;
+                case ROUTE_MERGE:         route_type_str = "merge";         break;
+                default:                  route_type_str = "lane_change";   break;
+            }
             char traj_final[1200];
-            snprintf(traj_final, sizeof(traj_final), "%s speed=%.1f mode=%s route_lane=%d",
-                     traj, command_speed, mode_buf, g.route_target_lane);
+            if (g.route_type == ROUTE_BRANCH_SELECT) {
+                snprintf(traj_final, sizeof(traj_final),
+                         "%s speed=%.1f mode=%s route_lane=%d route_type=%s branch_id=%d",
+                         traj, command_speed, mode_buf, g.route_target_lane,
+                         route_type_str, g.current_branch_id);
+            } else {
+                snprintf(traj_final, sizeof(traj_final),
+                         "%s speed=%.1f mode=%s route_lane=%d route_type=%s",
+                         traj, command_speed, mode_buf, g.route_target_lane,
+                         route_type_str);
+            }
 
             transport_publish(transport_, "planning/trajectory",
                               (const uint8_t*)traj_final,
@@ -671,6 +756,9 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.route_next_idx     = 0;
     g.route_target_lane  = 0;
     g.route_target_speed = 0.0;
+    /* NOA Phase 3.2/3.3: 路线步骤类型默认 lane_change，branch_id 复位 */
+    g.route_type         = ROUTE_LANE_CHANGE;
+    g.current_branch_id  = -1;
 
     g.plan_count  = 0;
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;

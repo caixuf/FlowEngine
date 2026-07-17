@@ -90,6 +90,24 @@ class Road:
     lane_width: float
     speed_limit: float
     geoms: list[GeometrySeg] = field(default_factory=list)
+    # OpenDRIVE junction linkage (NOA Phase 1: 分叉/汇入路网支持)
+    # junction_id >= 0 表示本 road 是某 junction 的 connecting road；
+    # predecessor/successor >= 0 时生成 <link>，描述与 incoming/target road 的连接。
+    junction_id: int = -1
+    predecessor: int = -1   # elementId of predecessor road (<link><predecessor>)
+    successor: int = -1     # elementId of successor road (<link><successor>)
+
+
+@dataclass
+class Junction:
+    """OpenDRIVE <junction> 描述：道路分叉(fork)或汇入(merge)。
+    incoming_road 是分叉前/汇入前的主路 id；connections 中每项为
+    (connecting_road_id, target_road_id_or_None)，target 为 None 时
+    表示该 connecting road 终点不再接续（fork 的分支末端）。"""
+    id: int
+    name: str
+    incoming_road: int
+    connections: list  # list[tuple[int, Optional[int]]]
 
 
 def build_straight_road(rid: int, name: str, length: float, lanes: int,
@@ -158,11 +176,22 @@ def roads_from_legacy_road(road_cfg: dict) -> list[Road]:
     return roads
 
 
-def roads_from_road_network(rn_cfg: dict) -> list[Road]:
-    """新格式 road_network{edges:[...]} → 每个 edge 一个 road。"""
+def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
+    """新格式 road_network{edges:[...], junctions:[...]} → (roads, junctions)。
+
+    每个 edge 一个 road；edges 之间默认顺序拼接（端点连续）。
+    junctions 数组描述道路分叉(fork)/汇入(merge)：
+      - fork: incoming_road 终点分叉出多条 connecting_roads，每条从 incoming_road
+              终点状态起独立构建，标记 junction_id 并设 predecessor=incoming_road。
+      - merge: incoming_road（加速车道）汇入 target_road，把 incoming_road 标记为
+              junction 的 connecting road，successor=target_road。
+    无 junctions 时退化为既有顺序拼接逻辑（完全向后兼容）。"""
     edges = rn_cfg.get("edges") or rn_cfg.get("segments") or []
     state = RoadState(0.0, 0.0, 0.0)
     roads: list[Road] = []
+    end_states: dict[int, RoadState] = {}   # road id → 该 road 终点的全局状态
+
+    # 第一遍：顺序构建所有 edge（主路串联），记录每段终点状态供 junction 分支起算。
     for i, e in enumerate(edges):
         eid = int(e.get("id", i))
         etype = str(e.get("type", "road"))
@@ -177,11 +206,69 @@ def roads_from_road_network(rn_cfg: dict) -> list[Road]:
         else:
             r, state = build_straight_road(eid, etype, length, lanes, lw, sp, state)
         roads.append(r)
+        end_states[eid] = state
+
+    junctions: list[Junction] = []
+    junctions_cfg = rn_cfg.get("junctions") or []
+    for jcfg in junctions_cfg:
+        jid = int(jcfg.get("id", 100 + len(junctions)))
+        jtype = str(jcfg.get("type", "fork"))
+        incoming = int(jcfg.get("incoming_road", -1))
+        if incoming < 0:
+            continue
+        start_state = end_states.get(incoming, RoadState())
+
+        if jtype == "fork":
+            # 分叉：每条 connecting_road 从 incoming_road 终点起独立构建。
+            conns: list[tuple[int, Optional[int]]] = []
+            for c in jcfg.get("connecting_roads", []):
+                cid = int(c.get("id", -1))
+                if cid < 0:
+                    continue
+                cname = str(c.get("name", f"conn_{cid}"))
+                clen = float(c.get("length_m", 0.0))
+                clanes = int(c.get("lanes", c.get("lane_count", 1)))
+                clw = float(c.get("lane_width", DEFAULT_LANE_WIDTH))
+                csp = float(c.get("speed_limit", DEFAULT_SPEED))
+                cprofile = c.get("curvature_profile")
+                # 分支各自从分叉点起算，互不影响：拷贝起点状态
+                if cprofile:
+                    cr, cend = build_curve_road_from_profile(
+                        cid, cname, cprofile, clanes, clw, csp, start_state)
+                else:
+                    cr, cend = build_straight_road(cid, cname, clen, clanes, clw, csp, start_state)
+                cr.junction_id = jid
+                cr.predecessor = incoming
+                # 若配置了 target_road，分支末端接续到目标主路
+                tgt = c.get("target_road")
+                if tgt is not None:
+                    cr.successor = int(tgt)
+                    conns.append((cid, int(tgt)))
+                else:
+                    conns.append((cid, None))
+                roads.append(cr)
+                end_states[cid] = cend
+            junctions.append(Junction(jid, f"fork_{jid}", incoming, conns))
+
+        elif jtype == "merge":
+            # 汇入：incoming_road（加速车道）作为 connecting road 汇入 target_road。
+            # target_s（汇入点）几何上按端点接续，不单独建模。
+            target = int(jcfg.get("target_road", -1))
+            # 找到已构建的 incoming road，标记为 junction connecting road 并接续 target
+            for rd in roads:
+                if rd.id == incoming:
+                    rd.junction_id = jid
+                    if target >= 0:
+                        rd.successor = target
+                    break
+            conns2: list[tuple[int, Optional[int]]] = [(incoming, target if target >= 0 else None)]
+            junctions.append(Junction(jid, f"merge_{jid}", incoming, conns2))
+
     if not roads:
         r, _ = build_straight_road(0, "urban", 1000.0, 2, DEFAULT_LANE_WIDTH,
                                    DEFAULT_SPEED, RoadState())
         roads.append(r)
-    return roads
+    return roads, junctions
 
 
 # ── Road 列表 → xodr XML ───────────────────────────────────
@@ -191,8 +278,24 @@ def road_to_xml(road: Road) -> ET.Element:
         "name": road.name,
         "length": f"{road.length:.6f}",
         "id": str(road.id),
-        "junction": "-1",
+        "junction": str(road.junction_id),
     })
+    # NOA Phase 1: <link> 描述 connecting road 与 incoming/target road 的拓扑连接，
+    # esmini RoadManager 据此构建分叉/汇入路网。
+    if road.predecessor >= 0 or road.successor >= 0:
+        link = ET.SubElement(r, "link")
+        if road.predecessor >= 0:
+            ET.SubElement(link, "predecessor", {
+                "elementId": str(road.predecessor),
+                "elementType": "road",
+                "contactPoint": "end",
+            })
+        if road.successor >= 0:
+            ET.SubElement(link, "successor", {
+                "elementId": str(road.successor),
+                "elementType": "road",
+                "contactPoint": "start",
+            })
     pv = ET.SubElement(r, "planView")
     for g in road.geoms:
         geom = ET.SubElement(pv, "geometry", {
@@ -225,7 +328,7 @@ def road_to_xml(road: Road) -> ET.Element:
     return r
 
 
-def build_xodr(roads: list[Road]) -> ET.Element:
+def build_xodr(roads: list[Road], junctions: list[Junction] | None = None) -> ET.Element:
     root = ET.Element("OpenDRIVE")
     ET.SubElement(root, "header", {
         "revMajor": "1", "revMinor": "4", "name": "FlowEngine",
@@ -234,6 +337,21 @@ def build_xodr(roads: list[Road]) -> ET.Element:
     })
     for rd in roads:
         root.append(road_to_xml(rd))
+    # NOA Phase 1: <junction> 元素声明分叉/汇入拓扑。esmini 用其解析 connecting
+    # road 与 incoming road 的连接关系，是表达匝道分叉/加速车道汇入的关键。
+    for j in (junctions or []):
+        je = ET.SubElement(root, "junction", {
+            "name": j.name,
+            "id": str(j.id),
+        })
+        for ci, (conn_road, _target) in enumerate(j.connections):
+            # target 仅用于 connecting road 的 <successor>，已在 road_to_xml 的 <link> 中表达
+            ET.SubElement(je, "connection", {
+                "id": str(ci),
+                "incomingRoad": str(j.incoming_road),
+                "connectingRoad": str(conn_road),
+                "contactPoint": "start",
+            })
     return root
 
 
@@ -241,15 +359,16 @@ def build_xodr(roads: list[Road]) -> ET.Element:
 
 def convert(scenario: dict) -> str:
     """场景 dict → xodr XML 字符串。"""
+    junctions: list[Junction] = []
     if "road_network" in scenario:
-        roads = roads_from_road_network(scenario["road_network"])
+        roads, junctions = roads_from_road_network(scenario["road_network"])
     elif "road" in scenario:
         roads = roads_from_legacy_road(scenario["road"])
     else:
         r, _ = build_straight_road(0, "urban", 1000.0, 2, DEFAULT_LANE_WIDTH,
                                    DEFAULT_SPEED, RoadState())
         roads = [r]
-    root = build_xodr(roads)
+    root = build_xodr(roads, junctions)
     ET.indent(root, space="  ")
     return ET.tostring(root, encoding="unicode", xml_declaration=True)
 

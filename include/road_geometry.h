@@ -51,6 +51,35 @@ static inline double road_center_heading(double x,
     return atan(dy_dx);
 }
 
+/**
+ * 道路中心线在给定 x 处的曲率 κ = d²y/dx² / (1 + (dy/dx)²)^(3/2)。
+ *
+ * 用于横向控制的曲率前馈（Stanley/Pure Pursuit）：steady-state 转向角
+ * δ_ff = wheelbase * κ。曲率带符号：κ>0 = 道路向 +y 方向弯曲（左弯），
+ * κ<0 = 向 -y 方向弯曲（右弯）。
+ *
+ * smoothstep 的二阶导 d²y/dx² = offset * (6 - 12t) / len²，在 t=0.5 处为 0
+ * （拐点），在两端极值 |6*offset/len²|。返回 0 表示直道或弯道端点外。
+ *
+ * NOA Phase 3.4: control_node 在 R ≤ 60m 时增大前馈权重，让控制器预先打
+ * 方向盘而不是等 CTE 累积后再反应——匝道 R=45m 的回头弯尤其需要。
+ */
+static inline double road_center_curvature(double x,
+                                            double curve_start_x,
+                                            double curve_length_m,
+                                            double curve_offset_m) {
+    if (curve_length_m <= 0.0 || curve_offset_m == 0.0) return 0.0;
+    if (x <= curve_start_x || x >= curve_start_x + curve_length_m) return 0.0;
+    double t = (x - curve_start_x) / curve_length_m;
+    double dy_dt  = curve_offset_m * (6.0 * t - 6.0 * t * t);
+    double d2y_dt2 = curve_offset_m * (6.0 - 12.0 * t);
+    double dy_dx   = dy_dt / curve_length_m;
+    double d2y_dx2 = d2y_dt2 / (curve_length_m * curve_length_m);
+    double denom = pow(1.0 + dy_dx * dy_dx, 1.5);
+    if (denom < 1e-9) return 0.0;
+    return d2y_dx2 / denom;
+}
+
 #ifdef __cplusplus
 }
 #endif
