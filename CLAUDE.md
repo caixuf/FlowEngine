@@ -2,6 +2,9 @@
 
 轻量级自动驾驶中间件，核心是一个 Pub/Sub 消息总线 + 调度器 + 传输层。
 
+> **开发流程：** 设计 → 执行 → 测试 → 迭代 → 清理 → 文档。详见 `.claude/skills/workflow.md`。
+> 改完代码后必跑：`/verify` → `/code-review` → `/simplify` → commit → 更新文档。
+
 ## 架构
 
 ```
