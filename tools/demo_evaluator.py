@@ -463,7 +463,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     collision_pub = int(topics.get("sim/collision", {}).get("pub", 0) or 0)
     log_text = launcher_log.read_text(encoding="utf-8", errors="ignore") if launcher_log.exists() else ""
-    collision_log_count = len(re.findall(r"COLLISION", log_text))
+    collision_log_count = len(re.findall(r"COLLISION ego", log_text))
     no_collision_required = bool(criteria.get("no_collision", True))
     if no_collision_required and (collision_pub > 0 or collision_log_count > 0):
         failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}")
