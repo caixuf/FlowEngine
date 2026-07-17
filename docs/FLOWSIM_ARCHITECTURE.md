@@ -7,6 +7,55 @@
 
 ---
 
+## 实施状态（2026-07 更新）
+
+### ✅ 已完成（Phase 0–2）
+
+| 模块 | 状态 | 实现位置 |
+|------|------|---------|
+| esmini RoadManager 集成 + Frenet↔World | ✅ | `flowsim/road_network.h/.cpp` |
+| Entity System（固定池 64 实体，8 种类型） | ✅ | `flowsim/entity.h` |
+| 自行车模型 ego 动力学 | ✅ | `flowsim/physics.cpp` |
+| NPC AI（IDM 跟车 + 8 状态机） | ✅ | `flowsim/npc_ai.cpp` |
+| OBB SAT 碰撞检测 | ✅ | `flowsim/collision.cpp` |
+| 场景事件（红绿灯相位 + ETC 抬杆） | ✅ | `flowsim/scene_events.cpp` |
+| scene/frame topic 发布 | ✅ | `flowsim/scene_pub.cpp` |
+| JSON→xodr 转换器（旧格式 + curvature_profile） | ✅ | `tools/json_to_xodr.py` |
+| flowcoro 协程主循环（20Hz） | ✅ | `flowsim_node.cpp` |
+| pipeline.json 默认使用 flowsim | ✅ | `config/pipeline.json` |
+| 14 个旧场景全部通过 `demo_evaluator.py` 回归 | ✅ | `scenarios/*.json` |
+
+### 🔴 待完成（Phase 3–5，见 NOA_SCENARIO_PLAN.md）
+
+| 缺口 | 优先级 |
+|------|--------|
+| 分叉/汇入路网（OpenDRIVE `<junction>`） | P0 |
+| planning branch_select + merge 逻辑 | P0 |
+| perception ↔ sensor_model 数据流对接 | P0 |
+| 3D 前端消费 scene/frame entities | P1 |
+| monitor_node 透传完整 entities | P1 |
+| glTF 车辆模型（当前用程序化几何） | P2 |
+| 规划轨迹渲染 | P2 |
+
+### 已完成的代码行数
+
+| 模块 | 行数 |
+|------|------|
+| `flowsim_node.cpp` | 850 |
+| `flowsim/entity.h` | 170 |
+| `flowsim/physics.cpp` | 90 |
+| `flowsim/npc_ai.cpp` | 330 |
+| `flowsim/collision.cpp` | 200 |
+| `flowsim/scene_events.cpp` | 180 |
+| `flowsim/scene_pub.cpp` | 350 |
+| `flowsim/road_network.cpp` | 150 |
+| `json_to_xodr.py` | 275 |
+| **合计** | **~2600 行** |
+
+> 详细 NOA 场景实施计划见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
+
+---
+
 ## 零、核心理念：只写开源没有的东西
 
 现有开源项目已经覆盖的大块：
@@ -687,57 +736,46 @@ third_party/
 
 ---
 
-## 十、实施路径
+## 十、实施路径（2026-07 更新）
 
-### Phase 0 — 环境准备（1天）
+### Phase 0 — 环境准备 ✅ 已完成
 
-```bash
-git submodule add https://github.com/esmini/esmini third_party/esmini
-cd third_party/esmini && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --target esminiRMLib
-```
+esmini 已作为子模块集成，RoadManager 静态链接到 `libflowsim_node.so`。
 
-### Phase 1 — 核心仿真（5天）
+### Phase 1 — 核心仿真 ✅ 已完成
 
-| 步骤 | 产出 | 依赖 |
-|------|------|------|
-| 1.1 JSON→xodr 转换器 | `scripts/json_to_xodr.py` | 无 |
-| 1.2 esmini RoadManager 封装 | `flowsim/road_network.h/.cpp` | 1.1 |
-| 1.3 Entity System + 车辆动力学 | `entity.h/.cpp`, `physics.h/.cpp` | 无 |
-| 1.4 NPC AI（IDM + 状态机） | `npc_ai.h/.cpp` | 1.2, 1.3 |
-| 1.5 碰撞检测 | `collision.h/.cpp` | 1.3 |
-| 1.6 场景事件调度（红灯/ETC） | `scene_events.h/.cpp` | 1.2 |
+所有 6 个步骤（JSON→xodr / esmini 封装 / Entity System / NPC AI / 碰撞 / 场景事件）
+均已实现并通过 `demo_evaluator.py` 验证。
 
-### Phase 2 — Topic 集成（3天）
+### Phase 2 — Topic 集成 ✅ 已完成
 
-| 步骤 | 产出 | 依赖 |
-|------|------|------|
-| 2.1 flowcoro 主循环 | `flowsim_node.cpp` | 1.1–1.6 |
-| 2.2 scene/frame 发布 | `scene_pub.h/.cpp` | 1.3 |
-| 2.3 monitor 适配 | `monitor_node.c` 改动 | 2.2 |
-| 2.4 旧场景回归测试 | 全部既有场景通过 | 2.1 |
+flowsim 已通过 pipeline.json 作为默认仿真节点运行，
+`scene/frame` topic 20Hz 发布到 monitor_node。
 
-### Phase 3 — 3D 渲染（4天）
+### Phase 3 — 3D 渲染 🟡 部分完成
 
-| 步骤 | 产出 | 依赖 |
-|------|------|------|
-| 3.1 道路 TubeGeometry 渲染 | `scene3d.js` 重写 | 2.2 |
-| 3.2 glTF 车辆模型 + InstancedMesh | 模型加载 + 实例化 | 3.1 |
-| 3.3 场景装饰（建筑/树/路灯） | 城市生成 | 3.1 |
-| 3.4 特效升级（阴影/Bloom/车灯） | 后期处理 | 3.2 |
-| 3.5 2D 俯视图多段道路适配 | `scene2d.js` 升级 | 2.2 |
-
-### Phase 4 — 场景落地（2天）
-
-| 步骤 | 产出 |
+| 步骤 | 状态 |
 |------|------|
-| 4.1 编写 `city_to_highway.json` | 完整场景 |
-| 4.2 验证 NOA 全链路行为 | 红灯/ETC/选路/汇入/超车 |
-| 4.3 demo_evaluator.py 回归 | pass_criteria 全绿 |
-| 4.4 美化参数调优 | 光照/颜色/摄像机角度 |
+| 3.1 道路渲染（CatmullRomCurve3 + ribbon mesh） | ✅ 已实现 `_buildRoadNetwork()` |
+| 3.2 车辆模型 | 🟡 程序化几何（BoxGeometry），glTF 待 Phase 6 |
+| 3.3 场景装饰（建筑/树） | ✅ 已实现 |
+| 3.4 特效（阴影/Bloom） | ✅ 已实现 |
+| 3.5 2D 多段道路 | 🟡 待 `scene/frame entities` 消费路径切换 |
 
-**总计：约 15 天（一个人）**
+### Phase 4 — 场景落地 🔴 待 NOA_SCENARIO_PLAN.md
+
+当前场景 `city_to_highway.json` 是简化版（单条直道+弯道）。
+完整 NOA 全链路场景（分叉/汇入/24 NPC）见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
+
+### Phase 5 — 数据流修复 🔴 待实施
+
+- perception ↔ sensor_model 对接
+- monitor 透传 entities
+- 3D 前端 entities 消费
+
+详见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
+
+**已完成：约 15 天（Phase 0–2）。剩余：约 10 天（Phase 3–5）。**
 
 ---
 

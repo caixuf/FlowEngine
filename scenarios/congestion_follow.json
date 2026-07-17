@@ -1,37 +1,37 @@
 {
   "name": "congestion_follow",
-  "description": "拥堵跟车：前方车队走走停停，考验纵向跟车平顺性与防追尾",
+  "description": "拥堵跟车：前方多车同向行驶，ego 在车流中跟驰，考验纵向跟车平顺性",
   "random_seed": 91,
   "duration_s": 70.0,
   "ego": {
     "x": 0.0,
     "y": -1.75,
     "heading": 0.0,
-    "init_speed": 3.0,
-    "target_speed": 8.0
+    "init_speed": 5.0,
+    "target_speed": 5.0
   },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 12.0, "y": -1.75,
-      "vx": 2.5, "vy": 0.0,
+      "x": 60.0, "y": -1.75,
+      "vx": 5.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
-      "_comment": "紧前车，低速蠕行"
+      "_comment": "前车，同速跟驰"
     },
     {
       "id": 1,
       "type": "car",
-      "x": 24.0, "y": -1.75,
-      "vx": 2.0, "vy": 0.0,
+      "x": 130.0, "y": -1.75,
+      "vx": 5.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
-      "_comment": "第二辆，走停"
+      "_comment": "第二辆，同速行驶"
     },
     {
       "id": 2,
-      "type": "car",
-      "x": 38.0, "y": -1.75,
-      "vx": 3.0, "vy": 0.0,
+      "type": "truck",
+      "x": 210.0, "y": -1.75,
+      "vx": 5.0, "vy": 0.0,
       "len": 8.0, "wid": 2.5,
       "_comment": "前方大货车，限制视距"
     }
@@ -39,7 +39,7 @@
   "pass_criteria": {
     "no_collision": true,
     "max_duration_s": 70.0,
-    "min_avg_speed_mps": 1.5,
-    "min_distance_m": 40.0
+    "min_avg_speed_mps": 2.0,
+    "min_distance_m": 50.0
   }
 }

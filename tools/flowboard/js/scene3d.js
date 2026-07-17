@@ -280,12 +280,13 @@ function _buildRoadNetwork(edges) {
     roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     roadGeo.setIndex(indices);
     roadGeo.computeVertexNormals();
-    var roadMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
+    // 沥青路面：深灰近黑，高粗糙度（无镜面反射）
+    var roadMat = new THREE.MeshStandardMaterial({ color: 0x2a2d30, roughness: 0.95, metalness: 0.02 });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
     group.add(roadMesh);
 
-    // ── 路肩（道路两侧的浅色边缘带）──
+    // ── 路肩（道路两侧的浅灰边缘带，比沥青略亮）──
     var shldW = 1.0;
     var shldHalf = roadHalf + shldW / 2;
     var sPos = [], sIdx = [];
@@ -308,22 +309,22 @@ function _buildRoadNetwork(edges) {
     shldGeo.setIndex(sIdx);
     shldGeo.computeVertexNormals();
     var shldMesh = new THREE.Mesh(shldGeo,
-      new THREE.MeshStandardMaterial({ color: 0x556655, roughness: 1.0 }));
+      new THREE.MeshStandardMaterial({ color: 0x4a4d50, roughness: 0.9, metalness: 0.05 }));
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
 
-    // ── 车道线：中心双黄线 + 车道分隔虚线 ──
-    // 中心双黄线（实线）
-    _addCurveLine(group, curve, nSeg, 0, 0.15, 0xffcc44, 0.043, true);
-    _addCurveLine(group, curve, nSeg, 0, -0.15, 0xffcc44, 0.043, true);
-    // 车道分隔虚线（每条车道线）
+    // ── 车道线：用 ribbon mesh（非 THREE.Line）保证 3D 可见宽度 ──
+    // 中心双黄线（实线，宽 0.15m，间距 0.3m）
+    _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.043);
+    _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.043);
+    // 车道分隔虚线（每条车道线，宽 0.12m）
     for (var li = 1; li < lanes; li++) {
       var offset = -roadHalf + li * laneWidth;
-      _addCurveDashedLine(group, curve, nSeg, offset, 0xffffff, 0.043);
+      _addLaneMarkRibbon(group, curve, nSeg, offset, 0.12, 0xffffff, 0.043, true);
     }
-    // 道路边缘白实线
-    _addCurveLine(group, curve, nSeg, roadHalf - 0.1, 0, 0xffffff, 0.043, true);
-    _addCurveLine(group, curve, nSeg, -roadHalf + 0.1, 0, 0xffffff, 0.043, true);
+    // 道路边缘白实线（宽 0.15m）
+    _addLaneMarkRibbon(group, curve, nSeg,  roadHalf - 0.06, 0.15, 0xffffff, 0.043);
+    _addLaneMarkRibbon(group, curve, nSeg, -roadHalf + 0.06, 0.15, 0xffffff, 0.043);
   }
 
   scene3d.add(group);
@@ -334,62 +335,70 @@ function _buildRoadNetwork(edges) {
 }
 
 /**
- * 沿曲线添加一条实线标记（用于中心双黄线 / 道路边缘白线）。
+ * 沿曲线创建车道标线 ribbon mesh（替代 THREE.Line，后者线宽恒为 1px）。
+ *
+ * 与 road surface ribbon 同技术：等距采样 → 左右顶点 → triangle strip。
+ * 宽度 0.12–0.15m，在追逐摄像机距离下清晰可见。
+ *
  * @param {THREE.Group} group  父组
  * @param {THREE.CatmullRomCurve3} curve  道路曲线
  * @param {number} nSeg  采样段数
- * @param {number} lateralOffset  横向偏移（相对道路中心线，Z 方向）
- * @param {number} forwardOffset  纵向微调（沿切线方向，通常 0）
- * @param {number} color  线条颜色
+ * @param {number} lateralOffset  横向偏移（相对道路中心线，Z 方向，标线中心）
+ * @param {number} width  标线宽度（m）
+ * @param {number} color  颜色
  * @param {number} y  Y 高度
- * @param {boolean} isSolid  true=实线
+ * @param {boolean} dashed  true=虚线（4.5m dash + 5.5m gap）
  */
-function _addCurveLine(group, curve, nSeg, lateralOffset, forwardOffset, color, y, isSolid) {
+function _addLaneMarkRibbon(group, curve, nSeg, lateralOffset, width, color, y, dashed) {
+  var halfW = width / 2;
+  var length = curve.getLength();
+
+  if (dashed) {
+    // 虚线：每段 dash 独立 ribbon，不连成整体
+    var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
+    var nDash = Math.floor(length / STEP);
+    for (var d = 0; d <= nDash; d++) {
+      var s0 = d * STEP;
+      var s1 = s0 + DASH;
+      if (s1 > length) s1 = length;
+      if (s0 >= length) break;
+      var dashLen = s1 - s0;
+      var dSeg = Math.max(2, Math.ceil(dashLen / 1.5));
+      _emitRibbonSegment(group, curve, s0, s1, dSeg, length, lateralOffset, halfW, color, y);
+    }
+  } else {
+    _emitRibbonSegment(group, curve, 0, length, nSeg, length, lateralOffset, halfW, color, y);
+  }
+}
+
+/** 沿曲线 [s0, s1] 段生成一条 ribbon 并加入 group */
+function _emitRibbonSegment(group, curve, s0, s1, nSeg, totalLen, lateralOffset, halfW, color, y) {
   var positions = [];
-  for (var si = 0; si <= nSeg; si++) {
-    var t = si / nSeg;
+  var indices = [];
+  var m = Math.max(2, nSeg);
+  for (var si = 0; si <= m; si++) {
+    var t = (s0 + (s1 - s0) * si / m) / totalLen;
+    if (t > 1) t = 1;
     var pos = curve.getPointAt(t);
     var tan = curve.getTangentAt(t);
     var nx = -tan.z, nz = tan.x;
-    positions.push(pos.x + nx * lateralOffset, y, pos.z + nz * lateralOffset);
+    // 左右边缘：沿法线偏移
+    positions.push(pos.x + nx * (lateralOffset - halfW), y, pos.z + nz * (lateralOffset - halfW));
+    positions.push(pos.x + nx * (lateralOffset + halfW), y, pos.z + nz * (lateralOffset + halfW));
+    if (si < m) {
+      var base = si * 2;
+      indices.push(base, base + 1, base + 2);
+      indices.push(base + 1, base + 3, base + 2);
+    }
   }
   var geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  var mat = new THREE.LineBasicMaterial({ color: color });
-  group.add(new THREE.Line(geo, mat));
-}
-
-/**
- * 沿曲线添加虚线标记（用于车道分隔线）。
- * 每 4.5m 画一段，间隔 5.5m（与旧 _buildRoad 的 DASH/GAP 一致）。
- */
-function _addCurveDashedLine(group, curve, nSeg, lateralOffset, y) {
-  var length = curve.getLength();
-  var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
-  var nDash = Math.floor(length / STEP);
-  var dashSegLen = Math.max(2, Math.floor(DASH / 3));  // 每段 dash 的子段数
-
-  for (var d = 0; d <= nDash; d++) {
-    var s0 = d * STEP;
-    var s1 = s0 + DASH;
-    if (s1 > length) s1 = length;
-    if (s0 >= length) break;
-
-    var positions = [];
-    var nSub = Math.max(2, Math.ceil((s1 - s0) / 3));
-    for (var si = 0; si <= nSub; si++) {
-      var t = (s0 + (s1 - s0) * si / nSub) / length;
-      if (t > 1) t = 1;
-      var pos = curve.getPointAt(t);
-      var tan = curve.getTangentAt(t);
-      var nx = -tan.z, nz = tan.x;
-      positions.push(pos.x + nx * lateralOffset, y, pos.z + nz * lateralOffset);
-    }
-    var geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    var mat = new THREE.LineBasicMaterial({ color: 0xffffff });
-    group.add(new THREE.Line(geo, mat));
-  }
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  var mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4, emissive: color, emissiveIntensity: 0.25 });
+  var mesh = new THREE.Mesh(geo, mat);
+  mesh.receiveShadow = true;
+  group.add(mesh);
 }
 
 // ── Environment: buildings + trees ──
