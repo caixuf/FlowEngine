@@ -13,13 +13,33 @@
   "road": {
     "curve_start_x": 150.0,
     "curve_length_m": 260.0,
-    "curve_offset_m": 9.0
+    "curve_offset_m": 9.0,
+    "_comment": "保留旧弯道定义供 flowsim 兜底（esmini 未加载时 road_center_y 仍生效）"
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "length_m": 520,
+        "lanes": 2,
+        "lane_width": 3.5,
+        "speed_limit": 15,
+        "curvature_profile": [
+          { "radius": 0,    "arc": 150 },
+          { "radius": 3756, "arc": 260 },
+          { "radius": 0,    "arc": 110 }
+        ],
+        "_comment": "弯道段 radius≈3756m（k=2*offset/L²=2*9/260²），对应 road.curve_offset_m=9；esmini 用此 profile 生成 arc geometry"
+      }
+    ]
   },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 60.0,  "y": -1.75,
+      "segment_id": 0,
+      "s": 60.0,  "l": -1.75,
       "vx": 8.0,  "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "弯道前方同车道慢车，跟随弯道行驶（curve-follow）"
@@ -27,7 +47,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 260.0, "y": 1.75,
+      "segment_id": 0,
+      "s": 260.0, "l": 1.75,
       "vx": 10.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "弯道内邻道车辆，随中心线偏移"
@@ -35,7 +56,8 @@
     {
       "id": 2,
       "type": "car",
-      "x": 420.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 420.0, "l": -1.75,
       "vx": 7.0,  "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "弯道后直道慢车，触发变道"

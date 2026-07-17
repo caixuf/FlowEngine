@@ -10,11 +10,17 @@
     "init_speed": 5.0,
     "target_speed": 12.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban", "length_m": 240, "lanes": 2, "lane_width": 3.5, "speed_limit": 15 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 35.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 35.0, "l": -1.75,
       "vx": 7.0,  "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "同车道前方慢车，触发第一次变道"
@@ -22,7 +28,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 90.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 90.0, "l": -1.75,
       "vx": 7.0,  "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "同车道第二辆慢车，触发第二次变道"
@@ -30,7 +37,8 @@
     {
       "id": 2,
       "type": "pedestrian",
-      "x": 140.0, "y": 8.0,
+      "segment_id": 0,
+      "s": 140.0, "l": 8.0,
       "vx": 0.0,  "vy": 0.6,
       "len": 0.6, "wid": 0.6,
       "_comment": "行人在远处路边往复横穿"
@@ -38,7 +46,8 @@
     {
       "id": 3,
       "type": "car",
-      "x": 130.0, "y": 1.75,
+      "segment_id": 0,
+      "s": 130.0, "l": 1.75,
       "vx": 12.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "邻道快车，变道时需避让"

@@ -10,11 +10,17 @@
     "init_speed": 8.0,
     "target_speed": 16.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "highway", "length_m": 225, "lanes": 2, "lane_width": 3.5, "speed_limit": 20 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 40.0,  "y": -1.75,
+      "segment_id": 0,
+      "s": 40.0,  "l": -1.75,
       "vx": 5.0,  "vy": 0.0,
       "len": 8.0, "wid": 2.5,
       "_comment": "前方货车 A"
@@ -22,7 +28,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 80.0,  "y": -1.75,
+      "segment_id": 0,
+      "s": 80.0,  "l": -1.75,
       "vx": 5.5,  "vy": 0.0,
       "len": 8.0, "wid": 2.5,
       "_comment": "前方货车 B"
@@ -30,7 +37,8 @@
     {
       "id": 2,
       "type": "car",
-      "x": 125.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 125.0, "l": -1.75,
       "vx": 6.0,  "vy": 0.0,
       "len": 8.0, "wid": 2.5,
       "_comment": "前方货车 C"
@@ -38,7 +46,8 @@
     {
       "id": 3,
       "type": "car",
-      "x": 60.0,  "y": 1.75,
+      "segment_id": 0,
+      "s": 60.0,  "l": 1.75,
       "vx": 14.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "邻道快速轿车，限制变道窗口"

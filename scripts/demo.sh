@@ -14,6 +14,10 @@
 # =============================================================================
 set -e
 
+# NOA Phase 6: 默认旗舰场景（城区→ETC→分叉匝道→汇入→高速超车，24 NPC）。
+# 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
+DEFAULT_SCENARIO="scenarios/city_to_highway_full.json"
+
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
   pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
@@ -29,7 +33,7 @@ OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
 REPLAY_FILE=""
-SCENARIO=""
+SCENARIO=""  # 留空则用 DEFAULT_SCENARIO（旗舰场景）
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -51,11 +55,15 @@ while [ $# -gt 0 ]; do
 done
 
 # ── Scenario override: patch pipeline.json's scenario_file ──
+# 未指定 --scenario 时用 DEFAULT_SCENARIO（旗舰场景），patch 进临时 pipeline.json。
 PIPELINE_ORIG="$ROOT/config/pipeline.json"
 PIPELINE_TMP=""
 cleanup_pipeline_tmp() {
   [ -n "$PIPELINE_TMP" ] && rm -f "$PIPELINE_TMP"
 }
+if [ -z "$SCENARIO" ]; then
+  SCENARIO="$DEFAULT_SCENARIO"
+fi
 if [ -n "$SCENARIO" ]; then
   PIPELINE_TMP=$(mktemp /tmp/pipeline_XXXX.json)
   trap 'cleanup_pipeline_tmp' EXIT

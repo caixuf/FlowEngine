@@ -9,11 +9,17 @@
     "init_speed": 8.0,
     "target_speed": 14.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban", "length_m": 162, "lanes": 2, "lane_width": 3.5, "speed_limit": 17 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 50.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 50.0, "l": -1.75,
       "vx": 6.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "前方慢车，行人在其后横穿"
@@ -21,7 +27,8 @@
     {
       "id": 1,
       "type": "pedestrian",
-      "x": 56.0, "y": 8.0,
+      "segment_id": 0,
+      "s": 56.0, "l": 8.0,
       "vx": 0.0, "vy": -1.2,
       "len": 0.6, "wid": 0.6,
       "_comment": "左侧行人快速横穿"
@@ -29,7 +36,8 @@
     {
       "id": 2,
       "type": "pedestrian",
-      "x": 62.0, "y": -8.0,
+      "segment_id": 0,
+      "s": 62.0, "l": -8.0,
       "vx": 0.0, "vy": 1.0,
       "len": 0.6, "wid": 0.6,
       "_comment": "右侧行人横穿"

@@ -9,11 +9,17 @@
     "init_speed": 8.0,
     "target_speed": 12.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban", "length_m": 200, "lanes": 2, "lane_width": 3.5, "speed_limit": 15 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 70.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 70.0, "l": -1.75,
       "vx": 0.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "左车道停放的故障车，ego 需变道到右车道绕行"
@@ -21,7 +27,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 100.0, "y": 1.75,
+      "segment_id": 0,
+      "s": 100.0, "l": 1.75,
       "vx": 13.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "右侧车道来车，限制绕行窗口"
@@ -29,7 +36,8 @@
     {
       "id": 2,
       "type": "car",
-      "x": 60.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 60.0, "l": -1.75,
       "vx": 6.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "前车，屏蔽视线让故障车突然暴露"

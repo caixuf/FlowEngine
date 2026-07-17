@@ -10,11 +10,17 @@
     "init_speed": 5.0,
     "target_speed": 5.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban", "length_m": 310, "lanes": 2, "lane_width": 3.5, "speed_limit": 6 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 60.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 60.0, "l": -1.75,
       "vx": 5.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "前车，同速跟驰"
@@ -22,7 +28,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 130.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 130.0, "l": -1.75,
       "vx": 5.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "第二辆，同速行驶"
@@ -30,7 +37,8 @@
     {
       "id": 2,
       "type": "truck",
-      "x": 210.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 210.0, "l": -1.75,
       "vx": 5.0, "vy": 0.0,
       "len": 8.0, "wid": 2.5,
       "_comment": "前方大货车，限制视距"

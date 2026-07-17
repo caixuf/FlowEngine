@@ -10,11 +10,27 @@
     "init_speed": 8.0,
     "target_speed": 10.0
   },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "intersection",
+        "length_m": 190,
+        "lanes": 2,
+        "lane_width": 3.5,
+        "speed_limit": 12,
+        "traffic_lights": [
+          { "s": 50, "l": -1.75, "red_s": 15, "yellow_s": 3, "green_s": 12 }
+        ]
+      }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 90.0,  "y": 6.0,
+      "segment_id": 0,
+      "s": 90.0,  "l": 6.0,
       "vx": 0.0,  "vy": -5.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "横向来车（绿灯期间穿越路口，红灯期间已通过）"
@@ -29,7 +45,7 @@
       "yellow_s": 3.0,
       "green_s": 12.0,
       "phase_offset_s": 0.0,
-      "_comment": "ego 车道方向信号灯：停止线 x=50m，红灯 15s + 黄灯 3s + 绿灯 12s = 30s 周期。phase_offset=0 → 启动即红灯"
+      "_comment": "ego 车道方向信号灯：停止线 x=50m，红灯 15s + 黄灯 3s + 绿灯 12s = 30s 周期。phase_offset=0 → 启动即红灯（顶层字段保留供 scenario_loader/demo_evaluator 读取，edge.traffic_lights 为新格式镜像）"
     }
   ],
   "pass_criteria": {

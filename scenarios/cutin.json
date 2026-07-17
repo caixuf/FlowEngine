@@ -9,11 +9,17 @@
     "init_speed": 8.0,
     "target_speed": 14.0
   },
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban", "length_m": 145, "lanes": 2, "lane_width": 3.5, "speed_limit": 17 }
+    ]
+  },
   "actors": [
     {
       "id": 0,
       "type": "car",
-      "x": 45.0, "y": -1.75,
+      "segment_id": 0,
+      "s": 45.0, "l": -1.75,
       "vx": 6.0, "vy": 0.0,
       "len": 4.6, "wid": 2.0,
       "_comment": "前方慢车"
@@ -21,7 +27,8 @@
     {
       "id": 1,
       "type": "car",
-      "x": 18.0, "y": 1.75,
+      "segment_id": 0,
+      "s": 18.0, "l": 1.75,
       "vx": 11.0, "vy": -2.8,
       "len": 4.6, "wid": 2.0,
       "_comment": "右侧加速超车后切入 ego 车道（vy<0 表示向左切入）"

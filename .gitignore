@@ -78,6 +78,9 @@ lcov.info
 # 本地训练产物
 datasets/
 models/
+# 例外：FlowBoard 3D 模型资产（glTF 占位模型，非训练产物）
+!tools/flowboard/models/
+!tools/flowboard/models/*.gltf
 
 # Valgrind输出
 *.valgrind
