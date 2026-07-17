@@ -82,6 +82,7 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
     /* 串口句柄，NULL 表示未打开（dry-run 模式） */
     SerialPort*       serial;
@@ -99,10 +100,9 @@ static struct {
     uint64_t samples_failed;    /* 读取/解析失败的样本数 */
     uint64_t imu_published;     /* 发布到 sensor/imu 的帧数 */
 
-    /* 读取线程 */
-    pthread_t     thread;
-    volatile int  thread_running;
-    volatile int  should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 imu_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase taskbase;
 } g;
 
 /* ── 硬件适配点：解析一行 IMU 数据 ───────────────────────────
@@ -181,33 +181,36 @@ static void make_synthetic_imu(ImuData* out) {
     out->temperature = 25.0f + na * 10.0f;
 }
 
-/* ── 读取线程：循环 serial_read_line → parse_imu_line → publish ─
+/* ── 托管模式主循环：循环 serial_read_line → parse_imu_line → publish ─
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 imu_reader_thread 行为等价，只是 should_stop 改由 TaskBase 提供。
  *
  * 真实模式：从串口逐行读 IMU 数据，解析成功则序列化发布到 sensor/imu。
  *           IMU 自身按其输出频率推数，serial_read_line 阻塞等待下一行（超时 50ms），
  *           故真实采样率由硬件决定；sample_hz 主要用于 dry-run 节拍与 discovery 通告。
  * dry-run 模式：无硬件，按 sample_hz 生成模拟 IMU 数据，走完整 publish 链路。
  */
-static void* imu_reader_thread(void* arg) {
-    (void)arg;
+static int imu_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "imu_reader");
     char line[256];
     long period_us = 1000000L / (g.sample_hz > 0 ? g.sample_hz : 100);
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         ImuData imu;
         int     ok = 0;
 
         if (g.dry_run || !g.serial) {
             /* 降级模式：按 sample_hz 生成模拟 IMU，走完整发布链路 */
             usleep((unsigned long)period_us);
-            if (g.should_stop) break;
+            if (task->should_stop) break;
             make_synthetic_imu(&imu);
             ok = 1;
         } else {
             /* 真实模式：从串口读一行 IMU 数据，超时 50ms（IMU 高频不能等太久） */
             int n = serial_read_line(g.serial, line, sizeof(line), 50);
-            if (g.should_stop) break;
+            if (task->should_stop) break;
             if (n < 0) {
                 /* 设备错误/关闭 */
                 g.samples_failed++;
@@ -252,8 +255,15 @@ static void* imu_reader_thread(void* arg) {
             }
         }
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface imu_vtable = {
+    .execute = imu_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -265,7 +275,8 @@ static NodePlugin s_plugin;
 static int imu_driver_init(MessageBus* bus, Transport* transport,
                            DiscoveryManager* discovery, Scheduler* scheduler,
                            const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
+    g.scheduler = scheduler;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
@@ -328,6 +339,20 @@ static int imu_driver_init(MessageBus* bus, Transport* transport,
     /* 向 discovery 通告本节点发布 sensor/imu (ImuData, type_id=0x7dc626af, IMUDATA_TYPE_ID) */
     discovery_advertise(discovery, "sensor/imu", 0x7dc626afu, CAP_PUBLISHER, (double)g.sample_hz);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "imu_driver");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.sample_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &imu_vtable, &cfg) != 0) {
+        LOG_WARN("imu_driver", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("imu_driver", "initialized: dev=%s baud=%d hz=%d gravity=%.4f %s",
              g.serial_port, g.baud_rate, g.sample_hz, g.gravity,
              g.dry_run ? "[DRY-RUN]" : "[LIVE-SERIAL]");
@@ -343,27 +368,24 @@ static int imu_driver_init(MessageBus* bus, Transport* transport,
 
 static int imu_driver_start(void) {
     if (!g.enabled) return 0;
-    g.thread_running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, imu_reader_thread, NULL) != 0) {
-        LOG_WARN("imu_driver", "reader thread create failed");
-        return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("imu_driver", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("imu_driver", "started (%s, %dHz target)",
+    LOG_INFO("imu_driver", "started (managed) (%s, %dHz target)",
              g.dry_run ? "dry-run" : "live serial", g.sample_hz);
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void imu_driver_stop(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
+    task_stop(&g.taskbase);
 }
 
 static void imu_driver_cleanup(void) {
-    g.thread_running = 0;
-    g.should_stop = 1;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     if (g.serial) { serial_close(g.serial); g.serial = NULL; }
     LOG_INFO("imu_driver", "cleanup: read=%lu failed=%lu published=%lu",
              (unsigned long)g.samples_read,
@@ -391,6 +413,7 @@ static NodePlugin s_plugin = {
     .stop          = imu_driver_stop,
     .cleanup       = imu_driver_cleanup,
     .health        = imu_driver_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

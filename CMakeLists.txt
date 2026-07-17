@@ -242,6 +242,7 @@ set(CORE_SOURCES
     src/core/topic_bridge.c
     src/core/json_extract.c
     src/core/json_schema.c
+    src/core/node_plugin.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────

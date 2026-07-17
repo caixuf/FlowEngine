@@ -17,6 +17,26 @@ permissions:
   contents: read
 
 jobs:
+  # ── clock_service enforcement gate ─────────────────────────
+  # clock_service.h must be the only time source for nodes. Raw
+  # clock_gettime(CLOCK_MONOTONIC) in modules/ bypasses sim-time injection
+  # (bag replay), breaking deterministic playback. This gate fails any PR that
+  # reintroduces the raw call in a node plugin — nodes must use clock_now_us().
+  # NOTE: src/core/clock_service.c itself is the legitimate single call site
+  # (inside clock_now_us) and lives outside modules/, so it is not scanned.
+  clock-service-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject clock_gettime(CLOCK_MONOTONIC) in modules/
+        run: |
+          set -e
+          if grep -rnE 'clock_gettime[[:space:]]*\([[:space:]]*CLOCK_MONOTONIC' modules/ ; then
+            echo "::error::Forbidden: modules/ must use clock_now_us() from clock_service.h, not clock_gettime(CLOCK_MONOTONIC). See skills/06_clock_service.md."
+            exit 1
+          fi
+          echo "✓ modules/ uses clock_now_us() exclusively"
+
   # ── Standard build + test (Release) ────────────────────────
   build-release:
     runs-on: ubuntu-24.04

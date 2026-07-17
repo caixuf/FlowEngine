@@ -27,6 +27,13 @@ uint64_t clock_now_us(void) {
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
+/* Deprecated transition shim: funnel legacy monotonic_us() callers through
+ * clock_now_us() so they respect sim-time. Declared deprecated in the header;
+ * new code must call clock_now_us() directly. */
+uint64_t monotonic_us(void) {
+    return clock_now_us();
+}
+
 void clock_set_sim_mode(bool enable) {
     pthread_mutex_lock(&g_clock_mutex);
     g_sim_mode = enable;

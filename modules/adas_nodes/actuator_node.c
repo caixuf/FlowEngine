@@ -96,6 +96,11 @@ struct can_frame { uint32_t can_id; uint8_t can_dlc; uint8_t data[8]; };
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
+
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 actuator_execute。
+     * 取代原先自管的 pthread hb_thread / hb_running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     /* SocketCAN 句柄，<0 表示未连接（dry-run 模式） */
     int               can_sock;
@@ -117,10 +122,6 @@ static struct {
     uint64_t cmds_received;        /* 收到的 control/raw_cmd 数 */
     uint32_t last_seq;             /* 最近一次指令 seq */
 
-    /* 心跳线程：定期发 status 帧让 ESC 知道控制器还活着 */
-    pthread_t hb_thread;
-    volatile int hb_running;
-    volatile int should_stop;
     int      heartbeat_hz;         /* 心跳频率，默认 10Hz */
 } g;
 
@@ -271,23 +272,29 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     }
 }
 
-/* ── 心跳线程：定期发 status 帧让 ESC 知道控制器在线 ─────────── */
+/* ── 心跳主循环（托管模式）：定期发 status 帧让 ESC 知道控制器在线 ─── */
 
-static void* heartbeat_thread(void* arg) {
-    (void)arg;
+static int actuator_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "act_hb");
     long period_us = 1000000L / (g.heartbeat_hz > 0 ? g.heartbeat_hz : 10);
-    while (g.hb_running) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (!g.hb_running || !g.enabled) break;
+        if (task->should_stop || !g.enabled) break;
         /* status 帧: [0-3] frames_sent, [4-7] cmds_received */
         uint8_t buf[8];
         memcpy(buf,     &g.frames_sent,    4);
         memcpy(buf + 4, &g.cmds_received,  4);
         can_send(g.can_status_id, buf, 8);
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整心跳主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface actuator_vtable = {
+    .execute = actuator_execute,
+};
 
 /* ── 参数解析 ─────────────────────────────────────────────── */
 
@@ -317,10 +324,11 @@ static NodePlugin s_plugin;
 static int actuator_init(MessageBus* bus, Transport* transport,
                          DiscoveryManager* discovery, Scheduler* scheduler,
                          const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
+    g.scheduler = scheduler;
     g.can_sock  = -1;
 
     /* 默认参数 */
@@ -402,31 +410,49 @@ static int actuator_init(MessageBus* bus, Transport* transport,
                  "sudo ip link set %s type can bitrate %d && sudo ip link set %s up",
                  g.can_interface, g.can_interface, g.bitrate, g.can_interface);
     }
+
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "actuator");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.heartbeat_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &actuator_vtable, &cfg) != 0) {
+        LOG_WARN("actuator", "task_base_init failed");
+        return -1;
+    }
     return 0;
 }
 
 static int actuator_start(void) {
     if (!g.enabled) return 0;
-    g.hb_running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.hb_thread, NULL, heartbeat_thread, NULL) != 0) {
-        LOG_WARN("actuator", "heartbeat thread create failed");
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * actuator_execute()。节点不再 pthread_create 自建心跳线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("actuator", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("actuator", "started (heartbeat %dHz, %s)",
+    LOG_INFO("actuator", "started (managed, heartbeat %dHz, %s)",
              g.heartbeat_hz, g.dry_run ? "dry-run" : "live CAN");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void actuator_stop(void) {
-    g.should_stop = 1;
-    g.hb_running = 0;
+    /* task_stop 置 should_stop=true 并 join 工作线程（actuator_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void actuator_cleanup(void) {
-    g.hb_running = 0;
-    if (g.hb_thread) { pthread_join(g.hb_thread, NULL); g.hb_thread = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
 #if HAVE_SOCKETCAN
     if (g.can_sock >= 0) { close(g.can_sock); g.can_sock = -1; }
 #endif
@@ -455,6 +481,7 @@ static NodePlugin s_plugin = {
     .stop          = actuator_stop,
     .cleanup       = actuator_cleanup,
     .health        = actuator_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

@@ -126,6 +126,11 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
+
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 actuator_pwm_execute。
+     * 取代原先自管的 pthread watchdog_thread / watchdog_running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     /* 配置 */
     int    enabled;
@@ -154,9 +159,6 @@ static struct {
     /* 安全看门狗：超过 watchdog_timeout_s 未收到 cmd → 自动停转 */
     time_t   last_cmd_time;
     int      watchdog_timeout_s;
-    pthread_t watchdog_thread;
-    volatile int watchdog_running;
-    volatile int should_stop;
 } g;
 
 /* ── PCA9685 操作 ─────────────────────────────────────────── */
@@ -329,16 +331,17 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     apply_control_cmd(&cmd);
 }
 
-/* ── 安全看门狗线程 ─────────────────────────────────────────
+/* ── 安全看门狗主循环（托管模式） ─────────────────────────────
  * 超过 watchdog_timeout_s 未收到 cmd → 强制 ESC 中位（停转）。
  * 防止 control_node 崩溃时小车失控狂奔。
+ * task_thread_fn 调用 actuator_pwm_execute 一次（完整主循环），循环中检查
+ * task->should_stop 退出；task_stop() 置 should_stop=true 并 join 本线程。
  */
-static void* watchdog_thread(void* arg) {
-    (void)arg;
+static int actuator_pwm_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "act_pwm_wd");
-    while (g.watchdog_running && !g.should_stop) {
+    while (!task->should_stop) {
         sleep(1);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
         time_t now = time(NULL);
         if (g.last_cmd_time > 0 && (now - g.last_cmd_time) > g.watchdog_timeout_s) {
             /* 超时：ESC 强制中位 */
@@ -355,8 +358,15 @@ static void* watchdog_thread(void* arg) {
             g.last_cmd_time = now;  /* 避免每秒重复告警 */
         }
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整看门狗主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface actuator_pwm_vtable = {
+    .execute = actuator_pwm_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -368,10 +378,11 @@ static NodePlugin s_plugin;
 static int actuator_pwm_init(MessageBus* bus, Transport* transport,
                               DiscoveryManager* discovery, Scheduler* scheduler,
                               const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
+    g.scheduler = scheduler;
 
     /* 默认参数 */
     g.enabled           = 1;
@@ -479,33 +490,49 @@ static int actuator_pwm_init(MessageBus* bus, Transport* transport,
              g.backend == BACKEND_PCA9685 ? "pca9685" :
              (g.backend == BACKEND_GPIO ? "gpio" : "dry_run"),
              g.dry_run, g.throttle_scale, g.steering_scale, g.watchdog_timeout_s);
+
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。看门狗主循环
+     * sleep(1) → 1 Hz，max_frequency_hz 与之对齐。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "actuator_pwm");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = 1.0;  /* sleep(1) → 1 Hz 看门狗节拍 */
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &actuator_pwm_vtable, &cfg) != 0) {
+        LOG_WARN("actuator_pwm", "task_base_init failed");
+        return -1;
+    }
     return 0;
 }
 
 static int actuator_pwm_start(void) {
     if (!g.enabled) return 0;
-    g.watchdog_running = 1;
-    g.should_stop = 0;
     g.last_cmd_time = time(NULL);
-    if (pthread_create(&g.watchdog_thread, NULL, watchdog_thread, NULL) != 0) {
-        LOG_WARN("actuator_pwm", "watchdog thread create failed");
-        g.watchdog_running = 0;
-        /* 看门狗失败不阻塞启动，主功能仍可用 */
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * actuator_pwm_execute()。节点不再 pthread_create 自建看门狗线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("actuator_pwm", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("actuator_pwm", "started");
+    LOG_INFO("actuator_pwm", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void actuator_pwm_stop(void) {
-    g.should_stop = 1;
-    g.watchdog_running = 0;
+    /* task_stop 置 should_stop=true 并 join 工作线程（actuator_pwm_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void actuator_pwm_cleanup(void) {
-    g.should_stop = 1;
-    g.watchdog_running = 0;
-    if (g.watchdog_thread) { pthread_join(g.watchdog_thread, NULL); g.watchdog_thread = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
 
     /* 停机：ESC 强制中位（防失控） */
     if (g.enabled && !g.dry_run) {
@@ -548,6 +575,7 @@ static NodePlugin s_plugin = {
     .stop          = actuator_pwm_stop,
     .cleanup       = actuator_pwm_cleanup,
     .health        = actuator_pwm_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

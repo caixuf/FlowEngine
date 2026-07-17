@@ -37,9 +37,9 @@ static struct {
     DiscoveryManager* discovery;
     Scheduler*        scheduler;
 
-    pthread_t   thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 monitor_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     SysMonitor* sysmon;
 
@@ -694,10 +694,9 @@ static void export_dashboard_json(void) {
     free(topo_json);
 }
 
-/* ── 任务线程 ────────────────────────────────────────────────── */
+/* ── 任务主循环（托管模式 execute） ──────────────────────────── */
 
-static void* monitor_thread(void* arg) {
-    (void)arg;
+static int monitor_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "monitor");
     long period_us = (long)(1.0 / g.frequency_hz * 1e6);
     /* stats bridge subscriber 重试计数器：多进程启动顺序不定，若 monitor
@@ -705,9 +704,9 @@ static void* monitor_thread(void* arg) {
      * 重试，直到连上其它进程创建的共享内存通道（限 120 周期，2Hz≈60s）。 */
     int stats_sub_retry = 0;
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         /* 重试 stats bridge subscriber（每个周期试一次，连上即止） */
         if (!g.stats_sub && stats_sub_retry < 120) {
@@ -739,8 +738,15 @@ static void* monitor_thread(void* arg) {
     }
 
     LOG_INFO("monitor", "stopped");
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface monitor_vtable = {
+    .execute = monitor_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -759,7 +765,6 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
 
     /* state_file 可从环境变量或默认路径获得 */
     const char* sf = flowengine_state_file();
@@ -846,26 +851,48 @@ static int monitor_init(MessageBus* bus, Transport* transport,
         LOG_INFO("monitor", "dashboard bridge publisher opened");
     }
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 取 g.frequency_hz，与 execute() 内 usleep 周期（1/frequency_hz）一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "monitor");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.frequency_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &monitor_vtable, &cfg) != 0) {
+        LOG_WARN("monitor", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("monitor", "initialized (%.0f Hz, state_file=%s)",
              g.frequency_hz, g.state_file);
     return 0;
 }
 
 static int monitor_start(void) {
-    g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, monitor_thread, NULL) != 0) {
-        LOG_WARN("monitor", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * monitor_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("monitor", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("monitor", "started");
+    LOG_INFO("monitor", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
-static void monitor_stop(void)          { g.should_stop = 1; }
+static void monitor_stop(void) {
+    /* task_stop 置 should_stop=true 并 join 工作线程（monitor_execute 随即退出）。 */
+    task_stop(&g.taskbase);
+}
 static void monitor_cleanup(void) {
-    if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源。sysmon / IPC 通道 / remote_stats_mutex
+     * 与 taskbase 无关，保持原有清理流程不变。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     if (g.sysmon) { sysmonitor_destroy(g.sysmon); g.sysmon = NULL; }
     if (g.stats_sub) { ipc_channel_stop(g.stats_sub); ipc_channel_close(g.stats_sub); g.stats_sub = NULL; }
     if (g.stats_ch) { ipc_channel_close(g.stats_ch); g.stats_ch = NULL; }
@@ -887,6 +914,7 @@ static NodePlugin s_plugin = {
     .stop          = monitor_stop,
     .cleanup       = monitor_cleanup,
     .health        = monitor_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

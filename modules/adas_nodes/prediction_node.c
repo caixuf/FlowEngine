@@ -51,10 +51,11 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
-    pthread_t    thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 prediction_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase    taskbase;
 
     float     rate_hz;
     uint32_t  frame_id;
@@ -181,16 +182,15 @@ static cJSON* build_waypoints(float x0, float y0, float vx, float vy, int mode) 
     return wps;
 }
 
-/* ── Main processing thread ──────────────────────────────────── */
-static void* prediction_thread(void* arg) {
-    (void)arg;
+/* ── Managed-mode main processing loop ──────────────────────── */
+static int prediction_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "prediction");
 
     const long period_us = (long)(1000000.0 / g.rate_hz);
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         /* ── Snapshot the latest tracks JSON under lock ── */
         pthread_mutex_lock(&g.mutex);
@@ -328,8 +328,15 @@ static void* prediction_thread(void* arg) {
     }
 
     LOG_INFO("prediction", "stopped (%u frames)", g.frame_id);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface prediction_vtable = {
+    .execute = prediction_execute,
+};
 
 /* ── NodePlugin lifecycle ────────────────────────────────────── */
 static const char* s_inputs[]  = { PRED_TOPIC_IN_TRACKS, PRED_TOPIC_IN_LOC, NULL };
@@ -341,12 +348,11 @@ static int prediction_init(MessageBus* bus, Transport* transport,
                            DiscoveryManager* discovery, Scheduler* scheduler,
                            const char* params_json) {
     (void)bus;
-    (void)scheduler;
 
     memset(&g, 0, sizeof(g));
     g.transport   = transport;
     g.discovery   = discovery;
-    g.should_stop = 0;
+    g.scheduler   = scheduler;
 
     g.rate_hz = PRED_DEFAULT_HZ;
 
@@ -374,33 +380,49 @@ static int prediction_init(MessageBus* bus, Transport* transport,
     /* ── Mutex ── */
     pthread_mutex_init(&g.mutex, NULL);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "prediction");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.rate_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &prediction_vtable, &cfg) != 0) {
+        LOG_WARN("prediction", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("prediction", "initialized (%.1f Hz)", g.rate_hz);
     return 0;
 }
 
 static int prediction_start(void) {
-    g.running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, prediction_thread, NULL) != 0) {
-        LOG_WARN("prediction", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * prediction_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("prediction", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("prediction", "started");
+    LOG_INFO("prediction", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void prediction_stop(void) {
-    g.should_stop = 1;
+    /* task_stop 置 should_stop=true 并 join 工作线程（prediction_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void prediction_cleanup(void) {
-    if (g.running) {
-        g.should_stop = 1;
-        pthread_join(g.thread, NULL);
-        g.running = 0;
-    }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源。节点互斥锁 g.mutex 与 latch 缓冲
+     * tracks_json 与 taskbase 无关，单独销毁/释放。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     pthread_mutex_destroy(&g.mutex);
     if (g.tracks_json) {
         free(g.tracks_json);
@@ -425,6 +447,7 @@ static NodePlugin s_plugin = {
     .stop          = prediction_stop,
     .cleanup       = prediction_cleanup,
     .health        = prediction_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

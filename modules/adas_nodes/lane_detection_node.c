@@ -45,10 +45,11 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
-    pthread_t   thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 lane_detection_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     /* Road geometry cache (from road/geometry callback) */
     double curve_start_x;
@@ -174,18 +175,17 @@ static const char* boundary_type(int boundary_idx, int total_boundaries) {
     return "DASHED";
 }
 
-/* ── Main thread: publish lane boundaries at 10 Hz ──────── */
-static void* lane_detection_thread(void* arg) {
-    (void)arg;
+/* ── Managed-mode main loop: publish lane boundaries at 10 Hz ─── */
+static int lane_detection_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "lane_detect");
 
     long period_us = (g.frequency_hz > 0.0)
         ? (long)(1000000.0 / g.frequency_hz)
         : 100000L;  /* default 10 Hz */
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         if (!g.has_road_geometry) {
             /* No road data yet — skip this frame */
@@ -241,8 +241,15 @@ static void* lane_detection_thread(void* arg) {
     }
 
     LOG_INFO("lane_detection", "stopped (%u frames)", g.frame_id);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface lane_detection_vtable = {
+    .execute = lane_detection_execute,
+};
 
 /* ── NodePlugin lifecycle ────────────────────────────────── */
 
@@ -255,12 +262,11 @@ static int lane_detection_init(MessageBus* bus, Transport* transport,
                                 DiscoveryManager* discovery, Scheduler* scheduler,
                                 const char* params_json) {
     (void)bus;
-    (void)scheduler;
 
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
-    g.should_stop = 0;
+    g.scheduler = scheduler;
     g.frequency_hz = 10.0;
 
     /* Defaults (will be overwritten by road/geometry incoming data) */
@@ -287,33 +293,48 @@ static int lane_detection_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "perception/lanes", PERCEPTION_LANES_TYPE_ID,
                         CAP_PUBLISHER, g.frequency_hz);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "lane_detection");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.frequency_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &lane_detection_vtable, &cfg) != 0) {
+        LOG_WARN("lane_detection", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("lane_detection", "initialized (%.1f Hz)", g.frequency_hz);
     return 0;
 }
 
 static int lane_detection_start(void) {
-    g.running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, lane_detection_thread, NULL) != 0) {
-        LOG_WARN("lane_detection", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * lane_detection_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("lane_detection", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("lane_detection", "started");
+    LOG_INFO("lane_detection", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void lane_detection_stop(void) {
-    g.should_stop = 1;
+    /* task_stop 置 should_stop=true 并 join 工作线程（lane_detection_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void lane_detection_cleanup(void) {
-    if (g.running) {
-        g.should_stop = 1;
-        pthread_join(g.thread, NULL);
-        g.running = 0;
-    }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     LOG_INFO("lane_detection", "cleanup done");
 }
 
@@ -333,6 +354,7 @@ static NodePlugin s_plugin = {
     .stop          = lane_detection_stop,
     .cleanup       = lane_detection_cleanup,
     .health        = lane_detection_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

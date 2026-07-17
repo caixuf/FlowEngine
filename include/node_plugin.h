@@ -47,8 +47,13 @@ extern "C" {
  *   - 其它非 0 值     → 不兼容，拒绝加载
  *
  * 每次 NodePlugin 结构体布局或生命周期契约发生不兼容变更时，递增此宏。
+ *
+ * v2 (current): 在结构体末尾追加 `TaskBase* taskbase` 字段，启用"托管模式"
+ * （node_start_managed）。追加尾部字段对仅访问旧字段的 launcher 透明；新字段
+ * 由 node_start_managed() 在 api_version>=2 且 taskbase!=NULL 时才解引用，
+ * 因此 v1 插件（taskbase 未设置）仍可被加载并按旧路径自管线程。
  */
-#define NODE_PLUGIN_API_VERSION 1u
+#define NODE_PLUGIN_API_VERSION 2u
 
 /* ── 节点插件描述符 ──────────────────────────────────────────── */
 
@@ -96,11 +101,50 @@ typedef struct NodePlugin {
      */
     int  (*health)(void);
 
+    /* ── v2: 托管模式（managed mode）────────────────────────── */
+
+    /**
+     * 节点嵌入的 TaskBase（可选, NULL = 自管线程的旧路径）。
+     *
+     * 节点在 init() 里调用 task_base_init(&g.taskbase, &my_vtable, &cfg)
+     * 初始化好嵌入的 TaskBase，并赋值 plugin->taskbase = &g.taskbase，
+     * 即可在 start() 中调用 node_start_managed() 享受调度器的全部能力
+     * （RateControl / LatencyTracker / ResourceQuota / 统一 should_stop /
+     * 反射式状态机）。节点无需再 pthread_create 自建线程。
+     *
+     * ABI 规则: 此字段为 v2 追加字段。node_start_managed() 仅在
+     * api_version>=2 且 taskbase!=NULL 时解引用；旧插件保持 NULL 即可。
+     */
+    TaskBase* taskbase;
+
 } NodePlugin;
 
 /* ── 节点 .so 必须导出此函数 ─────────────────────────────────── */
 typedef NodePlugin* (*NodeGetPluginFn)(void);
 #define NODE_PLUGIN_SYMBOL "node_get_plugin"
+
+/* ── 托管模式：让 NodePlugin 自动管理线程 ─────────────────────── */
+
+/**
+ * 以"托管模式"启动节点：把 plugin->taskbase 注册到调度器并启动其工作线程。
+ *
+ * 内部等价于：
+ *   scheduler_register_task(sched, plugin->taskbase, plugin->name);
+ *   task_start(plugin->taskbase);     // 真正派生 pthread 跑 vtable->execute()
+ *   scheduler_start(sched);           // 翻开调度器运行标志（幂等）
+ *
+ * 说明：
+ *   - scheduler_start() 本身只置位不建线程；真正执行节点主循环的线程来自
+ *     task_start()，它派生一个 joinable pthread 调用 taskbase->vtable->execute()
+ *     （execute() 应为完整的主循环，循环中检查 task->should_stop 退出）。
+ *   - 节点 stop() 应调用 task_stop(plugin->taskbase)（置 should_stop + join），
+ *     cleanup() 调用 task_base_destroy(plugin->taskbase)。
+ *   - 节点自描述广播 (node_announce_self) 仍由节点在 start() 里调用，因为
+ *     transport 指针保存在节点自身。
+ *
+ * @return 0 成功, 非 0 失败（taskbase 未设置 / 注册失败 / 线程创建失败）
+ */
+int node_start_managed(NodePlugin* plugin, Scheduler* sched);
 
 /* ── 节点自描述广播 ──────────────────────────────────────────── */
 

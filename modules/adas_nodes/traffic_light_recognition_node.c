@@ -47,10 +47,11 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
-    pthread_t   thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 tl_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     /* Cached traffic light state (from road/traffic_lights) */
     char   cached_json[2048];
@@ -98,18 +99,21 @@ static void add_confidence_to_lights(cJSON* root) {
     }
 }
 
-/* ── Main thread: republish cached traffic light state at 10 Hz ─ */
-static void* traffic_light_thread(void* arg) {
-    (void)arg;
+/* ── Managed-mode main loop: republish cached traffic light state at 10 Hz
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 traffic_light_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int tl_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "tl_recog");
 
     long period_us = (g.frequency_hz > 0.0)
         ? (long)(1000000.0 / g.frequency_hz)
         : 100000L;  /* default 10 Hz */
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         if (!g.has_cached) {
             /* No traffic light data yet — skip */
@@ -145,8 +149,15 @@ static void* traffic_light_thread(void* arg) {
     }
 
     LOG_INFO("traffic_light_recognition", "stopped (%u frames)", g.frame_id);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface tl_vtable = {
+    .execute = tl_execute,
+};
 
 /* ── NodePlugin lifecycle ────────────────────────────────── */
 
@@ -159,12 +170,11 @@ static int tl_recognition_init(MessageBus* bus, Transport* transport,
                                 DiscoveryManager* discovery, Scheduler* scheduler,
                                 const char* params_json) {
     (void)bus;
-    (void)scheduler;
 
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
-    g.should_stop = 0;
+    g.scheduler = scheduler;
     g.frequency_hz = 10.0;
 
     if (params_json) {
@@ -187,33 +197,48 @@ static int tl_recognition_init(MessageBus* bus, Transport* transport,
                         PERCEPTION_TRAFFIC_LIGHTS_TYPE_ID,
                         CAP_PUBLISHER, g.frequency_hz);
 
-    LOG_INFO("traffic_light_recognition", "initialized (%.1f Hz)", g.frequency_hz);
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "traffic_light_recognition");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.frequency_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &tl_vtable, &cfg) != 0) {
+        LOG_WARN("traffic_light_recognition", "task_base_init failed");
+        return -1;
+    }
+
+    LOG_INFO("traffic_light_recognition", "initialized (%.1f Hz, managed mode)", g.frequency_hz);
     return 0;
 }
 
 static int tl_recognition_start(void) {
-    g.running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, traffic_light_thread, NULL) != 0) {
-        LOG_WARN("traffic_light_recognition", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * tl_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("traffic_light_recognition", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("traffic_light_recognition", "started");
+    LOG_INFO("traffic_light_recognition", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void tl_recognition_stop(void) {
-    g.should_stop = 1;
+    /* task_stop 置 should_stop=true 并 join 工作线程（tl_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void tl_recognition_cleanup(void) {
-    if (g.running) {
-        g.should_stop = 1;
-        pthread_join(g.thread, NULL);
-        g.running = 0;
-    }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     LOG_INFO("traffic_light_recognition", "cleanup done");
 }
 
@@ -233,6 +258,7 @@ static NodePlugin s_plugin = {
     .stop          = tl_recognition_stop,
     .cleanup       = tl_recognition_cleanup,
     .health        = tl_recognition_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

@@ -34,6 +34,20 @@ extern "C" {
 uint64_t clock_now_us(void);
 
 /**
+ * monotonic_us() — 已废弃的过渡别名。
+ *
+ * 历史上各模块各自实现 `static uint64_t monotonic_us(void) {
+ * clock_gettime(CLOCK_MONOTONIC, &ts); ... }`，绕过了仿真时钟，导致
+ * bag 回放时时间不一致。clock_service 成为唯一时间源后，本函数作为
+ * 迁移桥梁：保留旧名字，但内部直接转发到 clock_now_us()，编译期触发
+ * 废弃告警，强制调用方改用 clock_now_us()。
+ *
+ * 严禁新增调用；现有调用应替换为 clock_now_us()。
+ */
+uint64_t monotonic_us(void)
+    __attribute__((deprecated("clock_service is the only time source; use clock_now_us()")));
+
+/**
  * 获取当前绝对时间（微秒，CLOCK_REALTIME）
  * 不受仿真模式影响，始终返回真实墙钟时间。
  * 用于训练样本时间戳、仪表盘时间戳等需要绝对时间的场景。
