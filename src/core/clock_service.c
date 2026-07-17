@@ -13,6 +13,12 @@ uint64_t clock_now_realtime_us(void) {
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
+uint64_t clock_now_monotonic_wall_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
 uint64_t clock_now_us(void) {
     pthread_mutex_lock(&g_clock_mutex);
     bool sim = g_sim_mode;

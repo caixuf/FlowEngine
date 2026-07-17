@@ -281,7 +281,10 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
             if (strcmp(bus->topic_entries[i].topic, msg->topic) == 0) {
                 TopicQos* q = &bus->topic_entries[i].qos;
                 if (q->lifespan_ms > 0) {
-                    uint64_t age_ms = (clock_now_us() - msg->timestamp_us) / 1000ULL;
+                    /* lifespan 衡量消息在队列里"真实"滞留时长，须用墙钟时间：
+                     * 仿真模式下 clock_now_us() 是按固定步长推进的逻辑时间，
+                     * 无法反映真实老化。这里与 publish 处的 timestamp_us 同源。 */
+                    uint64_t age_ms = (clock_now_monotonic_wall_us() - msg->timestamp_us) / 1000ULL;
                     if (age_ms > (uint64_t)q->lifespan_ms) {
                         bus->topic_entries[i].stats.drop_count++;
                         if (bus->topic_entries[i].pending_count > 0)
@@ -330,7 +333,9 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
                 if (delivered > 0) {
                     TopicStats* s = &bus->topic_entries[i].stats;
                     s->deliver_count += (uint64_t)delivered;
-                    uint64_t now = clock_now_us();
+                    /* 延迟用墙钟单调时间，避免仿真模式下逻辑时钟按固定步长
+                     * (如 50ms/tick) 推进导致延迟恒为 0 或 50ms 倍数而失真。 */
+                    uint64_t now = clock_now_monotonic_wall_us();
                     uint64_t lat = now - msg->timestamp_us;
                     s->total_latency_us += lat;
                     if (s->min_latency_us == 0 || lat < s->min_latency_us) s->min_latency_us = lat;
@@ -404,7 +409,7 @@ static void* dispatch_thread_fn(void* arg) {
                 snprintf(reply.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", msg.topic);
                 reply.msg_id    = msg.msg_id;
                 reply.type      = MSG_TYPE_REPLY;
-                reply.timestamp_us = clock_now_us();
+                reply.timestamp_us = clock_now_monotonic_wall_us();
                 found->handler(&msg, &reply, found->user_data);
                 pthread_mutex_unlock(&bus->svc_mutex);
 
@@ -521,7 +526,7 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
     if (sender) snprintf(msg.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     msg.msg_id       = atomic_fetch_add(&bus->msg_id_counter, 1);
     msg.type         = MSG_TYPE_PUBLISH;
-    msg.timestamp_us = clock_now_us();
+    msg.timestamp_us = clock_now_monotonic_wall_us();
     msg.data_size    = size;
     if (data && size > 0) memcpy(msg.data, data, size);
 
@@ -749,7 +754,7 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
     if (sender) snprintf(req.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
     req.msg_id       = req_id;
     req.type         = MSG_TYPE_REQUEST;
-    req.timestamp_us = clock_now_us();
+    req.timestamp_us = clock_now_monotonic_wall_us();
     req.data_size    = size;
     if (data && size > 0) memcpy(req.data, data, size);
 
@@ -868,7 +873,7 @@ int message_bus_publish_zero_copy(MessageBus* bus, const char* topic,
     if (!bus || !topic) return ERR_INVALID_PARAM;
 
     uint32_t  msg_id = atomic_fetch_add(&bus->msg_id_counter, 1);
-    uint64_t  ts     = clock_now_us();
+    uint64_t  ts     = clock_now_monotonic_wall_us();
     int       count  = 0;
 
     atomic_fetch_add(&bus->stat_zc_published, 1);

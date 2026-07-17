@@ -55,6 +55,18 @@ uint64_t monotonic_us(void)
 uint64_t clock_now_realtime_us(void);
 
 /**
+ * 获取墙钟单调时间（微秒，CLOCK_MONOTONIC）
+ * 不受仿真模式影响，始终返回真实墙钟单调时间。
+ *
+ * 用途：测量真实处理延迟。仿真模式下 clock_now_us() 返回按固定步长
+ * 推进的逻辑时间（如 50ms/tick），同一 tick 内发布与分发的延迟恒为 0、
+ * 跨 tick 才出现 50ms 倍数，使 total_latency_us / p50 / p99 等延迟统计
+ * 失去意义。本函数提供不受仿真时钟污染的单调时间源，供 message_bus
+ * 等延迟/寿命计算使用。
+ */
+uint64_t clock_now_monotonic_wall_us(void);
+
+/**
  * 启用/禁用仿真时间模式
  * @param enable  true = 使用仿真时间；false = 使用真实 CLOCK_MONOTONIC
  */

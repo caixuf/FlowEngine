@@ -850,6 +850,38 @@ static void test_clock_sim_loop(void) {
     PASS();
 }
 
+static void test_clock_monotonic_wall_us(void) {
+    TEST("clock_now_monotonic_wall_us non-zero in real mode");
+    clock_set_sim_mode(false);
+    uint64_t t = clock_now_monotonic_wall_us();
+    ASSERT(t > 0, "wall monotonic clock should be non-zero");
+
+    TEST("clock_now_monotonic_wall_us advances with real time");
+    uint64_t t2 = clock_now_monotonic_wall_us();
+    ASSERT(t2 >= t, "wall monotonic clock must not go backwards");
+
+    TEST("clock_now_monotonic_wall_us unaffected by sim mode");
+    /* 仿真模式下 clock_now_us() 被冻结在注入值，而 wall clock 仍应真实推进。
+     * 这正是延迟统计改用本函数的原因：避免固定步长逻辑时钟污染延迟测量。 */
+    clock_set_sim_mode(true);
+    clock_set_sim_time(1000000ULL); /* 冻结逻辑时间 */
+    uint64_t w1 = clock_now_monotonic_wall_us();
+    uint64_t s1 = clock_now_us();
+    ASSERT(s1 == 1000000ULL, "sim time should be frozen at injected value");
+    /* 忙等一小段墙钟时间，确认 wall clock 推进而 sim clock 不动 */
+    volatile uint64_t spin = 0;
+    for (int i = 0; i < 1000000; i++) spin += i;
+    (void)spin;
+    uint64_t w2 = clock_now_monotonic_wall_us();
+    uint64_t s2 = clock_now_us();
+    ASSERT(w2 > w1, "wall monotonic clock must advance even in sim mode");
+    ASSERT(s2 == s1, "sim time must stay frozen (no advance_us called)");
+
+    /* Clean up */
+    clock_set_sim_mode(false);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════ */
 /* Scenario Loader Tests                                      */
 /* ══════════════════════════════════════════════════════════ */
@@ -1182,6 +1214,7 @@ int main(void) {
     test_clock_sim_mode();
     test_clock_step_us();
     test_clock_sim_loop();
+    test_clock_monotonic_wall_us();
 
     /* ── Scenario Loader ────────────────────── */
     printf("\n═══ Scenario Loader ═══\n");

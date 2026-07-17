@@ -55,7 +55,7 @@ typedef struct {
     char        sender[MSG_BUS_MAX_SENDER_LEN];  /**< 发送者名称 */
     uint32_t    msg_id;                           /**< 消息唯一ID */
     MessageType type;                             /**< 消息类型 */
-    uint64_t    timestamp_us;                     /**< 时间戳（微秒，CLOCK_MONOTONIC） */
+    uint64_t    timestamp_us;                     /**< 发布时间戳（微秒，CLOCK_MONOTONIC 墙钟，不受仿真模式影响） */
     uint32_t    data_size;                        /**< 有效数据字节数 */
 
     /* ── 类型安全序列化字段 (Phase 1) ─────────────────────── */
