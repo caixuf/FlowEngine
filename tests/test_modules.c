@@ -933,11 +933,12 @@ static void test_scenario_load_pedestrian_crossing(void) {
     TEST("scenario actor_count is 4");
     ASSERT_EQ(sc->actor_count, 4, "actor_count wrong");
 
-    TEST("scenario actor[0] is car at x=35");
+    TEST("scenario actor[0] is car at s=35");
     ASSERT(strcmp(sc->actors[0].type, "car") == 0,
            "actor[0] type should be 'car' (got '%s')", sc->actors[0].type);
-    ASSERT(fabs(sc->actors[0].x - 35.0) < 0.01,
-           "actor[0].x should be 35.0 (got %.2f)", sc->actors[0].x);
+    /* 场景迁移到新格式后 x/y 改为 s/l（segment_id 坐标系），值不变 */
+    ASSERT(fabs(sc->actors[0].s - 35.0) < 0.01,
+           "actor[0].s should be 35.0 (got %.2f)", sc->actors[0].s);
 
     TEST("scenario actor[2] is pedestrian");
     ASSERT(strcmp(sc->actors[2].type, "pedestrian") == 0,
