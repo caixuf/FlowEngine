@@ -56,8 +56,6 @@
 > | `tests/test_modules` (50/50) | ✅ |
 > | `tests/test_new_modules` (36/36) | ✅ |
 > | `tests/test_bridges` (8/8) | ✅ |
-> | `tools/tests/test_normalize.py` (32/32) | ✅ |
-> | `tools/tests/test_server_http.py` (13/13) | ✅ |
 > | `tools/tests/test_phase5_curve_fallback.py` (9/9) | ✅ **新增** |
 > | `tools/flowboard/js/smoke.mjs` (模块加载链) | ✅ |
 > | `python3 tools/demo_evaluator.py --scenario curve_road` (12s 跳) | ✅ |

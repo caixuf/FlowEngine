@@ -16,7 +16,7 @@ set -e
 
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
-  pkill -9 -f flowmond; pkill -9 -f foxglove; } 2>/dev/null || true
+  pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
 sleep 1
 for port in 8800 8765; do
   pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
