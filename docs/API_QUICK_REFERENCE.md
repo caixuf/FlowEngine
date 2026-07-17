@@ -106,18 +106,27 @@ discovery_print_graph(dm);
 
 ## Fusion
 
-```c
-FusionNode* fn = fusion_node_create("name", bus, &policy);
-fusion_node_add_input(fn, "sensor/lidar", TYPE_ID, 32);
-fusion_node_set_output(fn, "fusion/out", TYPE_ID);
-fusion_node_set_callback(fn, my_callback, user_data);
-fusion_node_start(fn);
+生产范式：FlowCoroTask + MessageBuffer（范本见 modules/adas_nodes/fusion_node.cpp）。
+回调仅 push 到 MessageBuffer，协程体用 select_for 等输入 + message_buffer_find_nearest 时间对齐。
 
-// C++ 协程基类
-class MyFusion : public FusionNodeCpp {
-    Message Fuse(const SyncedFrame& f) override { ... }
+```cpp
+class MyFusion : public FlowCoroTask {
+    MessageBuffer* lidar_buf_;
+    Task run() override {
+        while (!should_stop()) {
+            co_await select_for({"sensor/lidar", "sensor/gps"}, 100000); // 100ms 超时作 watchdog
+            const Message* lidar = message_buffer_latest(lidar_buf_);
+            if (!lidar) continue;
+            const Message* gps = message_buffer_find_nearest(gps_buf_, lidar->timestamp_us, 50000);
+            // ... fuse + transport_publish ...
+        }
+    }
 };
+// 回调仅 push，不做计算（避免阻塞总线分发线程）
+static void on_lidar(const Message* m, void*) { message_buffer_push(g.lidar_buf, m); }
 ```
+
+> 注：core/fusion.c 的 FusionNode C API / FusionNodeCpp 为历史 API，新代码请用上述 FlowCoroTask 范式。
 
 ## Logger
 

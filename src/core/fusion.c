@@ -106,8 +106,13 @@ void message_buffer_destroy(MessageBuffer* mb) {
 }
 
 /* ══════════════════════════════════════════════════════════ */
-/* FusionNode C API                                           */
+/* FusionNode C API  —  历史 API（不推荐新代码使用）           */
 /* ══════════════════════════════════════════════════════════ */
+/* 生产融合节点（fusion_node.cpp 等）已迁移到 FlowCoroTask +   */
+/* MessageBuffer 范式：回调 push 到 MessageBuffer，协程体用    */
+/* select_for 等输入 + message_buffer_find_nearest 时间对齐。  */
+/* 本 C API 为事件驱动模型（build_synced_frame → callback），  */
+/* 保留供参考。新代码请参照 modules/adas_nodes/fusion_node.cpp。*/
 
 struct FusionNode {
     char          name[64];

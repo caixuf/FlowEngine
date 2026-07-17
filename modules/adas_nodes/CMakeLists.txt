@@ -298,13 +298,16 @@ target_link_libraries(stereo_vision_node ${NODE_LINK_LIBS})
 add_library(actuator_pwm_node SHARED actuator_pwm_node.c)
 target_link_libraries(actuator_pwm_node ${NODE_LINK_LIBS})
 
-# perception_fusion_node: 感知融合节点（LiDAR + Stereo 两路 ObstacleList 去重合并）
+# perception_fusion_node: 感知融合节点（LiDAR + Stereo 两路 ObstacleList 去重合并 + 跨帧追踪）
 # 解决 lidar_driver 和 stereo_vision 都发 perception/obstacles 时的"后写者覆盖"问题。
-# 两源各发到独立 topic（output_topic 参数改名），本节点订阅两路按 (x,y) 距离去重合并，
-# 输出更稳的 perception/obstacles。不用融合时不挂本节点，单源直发完全兼容。
-# 编译依赖: adas_msgs_gen.h (ObstacleList 反序列化/序列化)，随构建生成。
-add_library(perception_fusion_node SHARED perception_fusion_node.c)
-target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS})
+# 两源各发到独立 topic，本节点订阅两路按 (x,y) 距离去重合并 + 最近邻跨帧关联，
+# 输出带持久 ID 和差分速度的 perception/obstacles。
+# FlowCoro 协程版（参照 fusion_node.cpp）：select_for 等两路输入 + MessageBuffer 时间对齐，
+# 替代旧 pthread_create + usleep 轮询。fuse_obstacles/associate_and_track 业务算法原样保留。
+add_library(perception_fusion_node SHARED perception_fusion_node.cpp)
+target_compile_definitions(perception_fusion_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(perception_fusion_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS} stdc++ atomic)
 
 # traversability_node: 可通行区域检测节点（StereoFrame 深度图 → 3D 反投影 → 地面分割 → 占用栅格）
 # 订阅 stereo_camera_node 发布的 sensor/stereo，把 80×60 深度图反投影成带 Z 高度的 3D 点云

@@ -3,83 +3,81 @@
 ## 核心组件
 
 ```
-MessageBuffer (环形缓冲) → find_nearest (时间对齐) → SyncedFrame → Fuse() → publish
+MessageBuffer (环形缓冲) → find_nearest (时间对齐) → Fuse 逻辑 → publish
 ```
 
-## 快速开始 — C++ 协程方式
+## 生产范式 — FlowCoroTask + MessageBuffer
+
+项目生产融合节点（modules/adas_nodes/fusion_node.cpp）采用此范式：
+回调仅 push 到 MessageBuffer，协程体用 select_for 等待输入 + message_buffer_find_nearest
+做时间对齐，再执行融合逻辑并 transport_publish。
 
 ```cpp
 #include "fusion.h"
+#include "coroutine_task.h"
 #include "adas_msgs_gen.h"
 
-class SensorFusion : public FusionNodeCpp {
+class SensorFusion : public FlowCoroTask {
 public:
-    SensorFusion(MessageBus* bus)
-        : FusionNodeCpp(bus, FUSION_POLICY_TIME_ALIGNED)
-    {
-        AddSensorInput("sensor/lidar", LIDARFRAME_TYPE_ID, 32);
-        AddSensorInput("sensor/gps",   GPSDATA_TYPE_ID,    16);
-        SetOutputTopic("fusion/localization", FUSEDLOC_TYPE_ID);
-    }
+    SensorFusion(MessageBus* bus, Transport* t,
+                 MessageBuffer* lidar_buf, MessageBuffer* gps_buf)
+        : FlowCoroTask(bus), transport_(t),
+          lidar_buf_(lidar_buf), gps_buf_(gps_buf) {}
 
 protected:
-    Message Fuse(const SyncedFrame& frame) override {
-        const auto* lidar = msg_cast<LidarFrame>(&frame.inputs[0]);
-        const auto* gps   = msg_cast<GpsData>(&frame.inputs[1]);
+    Task run() override {
+        while (!should_stop()) {
+            // 等任一输入到达或 100ms 超时（超时作 watchdog，防止 lidar 停发卡死）
+            co_await select_for({"sensor/lidar", "sensor/gps"}, 100000);
+            if (should_stop()) break;
 
-        FusedLocalization out = {};
-        out.timestamp_us = frame.reference_ts;
-        if (lidar) { out.x = lidar->x; out.y = lidar->y; }
-        if (gps)   { out.lat = gps->latitude; out.lon = gps->longitude; }
+            const Message* lidar_msg = message_buffer_latest(lidar_buf_);
+            if (!lidar_msg) continue;
+            uint64_t ref_ts = lidar_msg->timestamp_us;
 
-        Message msg;
-        msg_init_typed(&msg, "fusion/localization", "fusion",
-                       FUSEDLOC_TYPE_ID, 1, &out, sizeof(out));
-        return msg;
+            // 时间对齐：找 50ms 窗口内最近的 GPS
+            const Message* gps_msg = message_buffer_find_nearest(gps_buf_, ref_ts, 50000);
+
+            const LidarFrame* lidar = (const LidarFrame*)lidar_msg->data;
+            // ... 融合计算 ...
+            transport_publish(transport_, "fusion/localization", out_buf, out_len);
+        }
     }
+
+private:
+    Transport* transport_;
+    MessageBuffer* lidar_buf_;
+    MessageBuffer* gps_buf_;
 };
+
+// 订阅回调：仅 push 到 buf，不做计算（避免阻塞总线分发线程）
+static void on_lidar(const Message* m, void*) { message_buffer_push(g.lidar_buf, m); }
+static void on_gps(const Message* m, void*)   { message_buffer_push(g.gps_buf,   m); }
 ```
-
-## 快速开始 — C API
-
-```c
-FusionNode* fn = fusion_node_create("my_fusion", bus, &policy);
-fusion_node_add_input(fn, "sensor/lidar", LIDARFRAME_TYPE_ID, 32);
-fusion_node_add_input(fn, "sensor/gps",   GPSDATA_TYPE_ID,    16);
-fusion_node_set_output(fn, "fusion/output", FUSEDOUT_TYPE_ID);
-fusion_node_set_callback(fn, my_fusion_callback, user_data);
-fusion_node_start(fn);
-
-// 消息到达时自动触发回调 → build_synced_frame → callback
-```
-
-## 融合策略
-
-| 策略 | 描述 |
-|------|------|
-| `FUSION_TIME_ALIGNED` | 时间对齐到最新帧（默认，max_delta_us） |
-| `FUSION_LATEST_WINS` | 使用每个输入的最新值 |
-| `FUSION_WEIGHTED_AVERAGE` | 加权平均（同类型传感器） |
-| `FUSION_KALMAN_SLOT` | 卡尔曼滤波器槽位 |
 
 ## 时间对齐算法
 
 ```
-1. 找到所有缓冲中最新的时间戳作为 reference_ts
-2. 对每个输入，find_nearest(buffer, reference_ts, max_delta_us)
-3. 所有在 max_delta 内的 → SyncedFrame.input_valid[i] = true
-4. 至少一个有效 → 触发 callback / Fuse()
+1. select_for 等待任一输入到达（或超时）
+2. 取主输入最新帧的 timestamp_us 作 reference_ts
+3. 对其他输入，message_buffer_find_nearest(buf, ref_ts, max_delta_us)
+4. 在 max_delta 内的视为有效，参与融合
 ```
 
 ## API 速查
 
 | 函数 | 用途 |
 |------|------|
-| `message_buffer_create()` | 创建传感器缓冲 |
-| `message_buffer_push()` | 推入消息 |
-| `message_buffer_find_nearest()` | 时间戳最近查找 |
-| `message_buffer_latest()` | 获取最新消息 |
-| `fusion_node_create()` | 创建融合节点 (C) |
-| `fusion_node_add_input()` | 添加传感器输入 |
-| `fusion_node_start()` | 启动融合线程 |
-| `FusionNodeCpp::Fuse()` | 重写实现融合逻辑 (C++) |
+| `message_buffer_create()` | 创建传感器环形缓冲 |
+| `message_buffer_push()` | 回调里推入消息（值拷贝，线程安全） |
+| `message_buffer_find_nearest()` | 时间戳最近邻查找（时间对齐核心） |
+| `message_buffer_latest()` | 取最新消息 |
+| `message_buffer_destroy()` | 销毁缓冲 |
+| `FlowCoroTask::run()` | 重写协程体，co_await select_for 等输入 |
+| `FlowCoroTask::select_for()` | 等任一 topic 消息或超时（自动注入 CancelToken） |
+
+## 历史 API（不推荐新代码使用）
+
+core/fusion.c 另提供 FusionNode C API 与 FusionNodeCpp C++ 基类（事件驱动时间对齐模型）。
+生产代码已迁移到上述 FlowCoroTask 范式，这两个 API 保留供参考，新融合节点请参照
+modules/adas_nodes/fusion_node.cpp。

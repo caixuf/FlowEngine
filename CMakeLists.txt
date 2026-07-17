@@ -348,9 +348,6 @@ target_link_libraries(reactive_task flowengine_core)
 add_library(perception_plugin SHARED src/plugins/perception_plugin.c)
 target_link_libraries(perception_plugin flowengine_core)
 
-add_library(fusion_plugin SHARED src/plugins/fusion_plugin.c)
-target_link_libraries(fusion_plugin flowengine_core)
-
 add_library(planning_plugin SHARED src/plugins/planning_plugin.c)
 target_link_libraries(planning_plugin flowengine_core)
 
@@ -358,9 +355,6 @@ add_library(pid_controller SHARED src/plugins/pid_controller.c)
 target_link_libraries(pid_controller flowengine_core m)
 
 # ── Algorithm plugins (real implementations) ──
-add_library(ekf_fusion_plugin SHARED src/plugins/ekf_fusion_plugin.c)
-target_link_libraries(ekf_fusion_plugin flowengine_core m)
-
 add_library(dbscan_perception_plugin SHARED src/plugins/dbscan_perception_plugin.c)
 target_link_libraries(dbscan_perception_plugin flowengine_core m)
 
@@ -495,7 +489,7 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
-install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin fusion_plugin planning_plugin pid_controller ekf_fusion_plugin dbscan_perception_plugin
+install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task network_service_task data_processor_task perception_plugin planning_plugin pid_controller dbscan_perception_plugin
     LIBRARY DESTINATION lib/flowengine/plugins
 )
 if(FLOWENGINE_HAVE_EIGEN)

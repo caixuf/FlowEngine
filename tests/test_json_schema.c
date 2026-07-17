@@ -110,7 +110,7 @@ static void test_edge_cases(void) {
  * ════════════════════════════════════════════════════════════════ */
 
 static void test_dsl_double(void) {
-    /* Real fusion/localization DSL format from fusion_plugin.c */
+    /* DSL format sample (historical — fusion_plugin.c, now removed, used this format) */
     const char* dsl = "pos=(1.5,2.5) gps=(39.9,116.4) speed=33.0 dt=50us";
     double v = 0;
     TEST(dsl_get_double_strict(dsl, "speed", &v) && v == 33.0,
