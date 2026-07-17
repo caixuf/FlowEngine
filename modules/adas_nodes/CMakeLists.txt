@@ -124,9 +124,44 @@ target_link_libraries(sensor_model ${NODE_LINK_LIBS})
 
 # ── 新增节点插件 ──────────────────────────────────────────────
 
-# sim_world_node: 车辆动力学 + 障碍物仿真
+# sim_world_node: 车辆动力学 + 障碍物仿真（旧版，保留用于回归对比）
 add_library(sim_world SHARED sim_world_node.c)
 target_link_libraries(sim_world ${NODE_LINK_LIBS})
+
+# flowsim_node: FlowSim v2 仿真世界 (C++20 flowcoro + esmini RoadManager)
+# 替换 sim_world_node。集成 Phase 1 组件（road_network/entity/physics/npc_ai/
+# collision/scene_events）为 20Hz flowcoro 协程主循环节点。
+# 采用 FlowCoroTask（线程池 resume）：物理+NPC AI+碰撞+事件+JSON 序列化单次
+# ~50-200μs，同步 resume 会阻塞消息总线分发线程，故改用线程池 resume。
+# 链接 esminiRMLib（C API，ABI 稳定）做道路网络 Frenet↔World 转换。
+set(ESMINI_ROOT "${FLOW_ROOT}/third_party/esmini")
+set(ESMINI_RMLIB_INCLUDE "${ESMINI_ROOT}/EnvironmentSimulator/Libraries/esminiRMLib")
+find_library(ESMINI_RMLIB
+    NAMES esminiRMLib
+    HINTS "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"
+)
+add_library(flowsim_node SHARED
+    flowsim_node.cpp
+    flowsim/road_network.cpp
+    flowsim/physics.cpp
+    flowsim/npc_ai.cpp
+    flowsim/collision.cpp
+    flowsim/scene_events.cpp
+    flowsim/scene_pub.cpp
+)
+target_compile_definitions(flowsim_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(flowsim_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_include_directories(flowsim_node PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${ESMINI_RMLIB_INCLUDE}
+)
+if(ESMINI_RMLIB)
+    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} stdc++ atomic ${ESMINI_RMLIB})
+    message(STATUS "flowsim_node: esminiRMLib found at ${ESMINI_RMLIB}")
+else()
+    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} stdc++ atomic)
+    message(WARNING "flowsim_node: esminiRMLib NOT found — road_network.cpp will fail to link")
+endif()
 
 # planning_node: Frenet 轨迹规划 (FlowCoro 协程版)
 # 采用 FlowCoroTask（线程池 resume）：Frenet 轨迹规划为重计算，同步 resume 会阻塞
@@ -340,7 +375,7 @@ add_library(scene_assembler_node SHARED scene_assembler_node.c)
 target_link_libraries(scene_assembler_node ${NODE_LINK_LIBS})
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
+install(TARGETS fusion_node perception_node sensor_model sim_world flowsim_node planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
