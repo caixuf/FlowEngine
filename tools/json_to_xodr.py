@@ -232,13 +232,27 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
                 csp = float(c.get("speed_limit", DEFAULT_SPEED))
                 cprofile = c.get("curvature_profile")
                 # 分支各自从分叉点起算，互不影响：拷贝起点状态
-                if cprofile:
-                    cr, cend = build_curve_road_from_profile(
-                        cid, cname, cprofile, clanes, clw, csp, start_state)
+                # 如果连接道路 id 已存在（已在 edges 中定义），则更新它的
+                # junction_id/predecessor 而非重新构建。
+                existing = None
+                for r in roads:
+                    if r.id == cid:
+                        existing = r
+                        break
+                if existing:
+                    cr = existing
+                    cr.junction_id = jid
+                    cr.predecessor = incoming
+                    cend = end_states.get(cid, start_state)
                 else:
-                    cr, cend = build_straight_road(cid, cname, clen, clanes, clw, csp, start_state)
-                cr.junction_id = jid
-                cr.predecessor = incoming
+                    if cprofile:
+                        cr, cend = build_curve_road_from_profile(
+                            cid, cname, cprofile, clanes, clw, csp, start_state)
+                    else:
+                        cr, cend = build_straight_road(cid, cname, clen, clanes, clw, csp, start_state)
+                    cr.junction_id = jid
+                    cr.predecessor = incoming
+                    roads.append(cr)
                 # 若配置了 target_road，分支末端接续到目标主路
                 tgt = c.get("target_road")
                 if tgt is not None:
@@ -246,7 +260,6 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
                     conns.append((cid, int(tgt)))
                 else:
                     conns.append((cid, None))
-                roads.append(cr)
                 end_states[cid] = cend
             junctions.append(Junction(jid, f"fork_{jid}", incoming, conns))
 
