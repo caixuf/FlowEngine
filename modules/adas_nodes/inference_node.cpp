@@ -73,8 +73,9 @@ enum CtrlMode {
 
 /* ── 时序滑窗 ────────────────────────────────────────────────── */
 
-#define V2_DIM          16    /* 每帧特征维度 */
-#define TEMPORAL_WINDOW  5    /* 时序滑窗帧数 (共 5×16 = 80 维) */
+#define V2_DIM          16    /* 每帧特征维度 (v2) */
+#define V3_DIM          59    /* 每帧特征维度 (v3) */
+#define TEMPORAL_WINDOW  5    /* 时序滑窗帧数 (v2: 5×16=80, v3: 5×59=295) */
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
@@ -113,6 +114,16 @@ struct InferenceContext {
     int    ctrl_emergency_stop{0};
     volatile int has_control{0};
 
+    /* v3 特征: 场景上下文（来自 road/traffic_lights + road/geometry） */
+    double tl_state{-1.0};       /* -1=无, 0=绿, 1=黄, 2=红 */
+    double tl_distance{-1.0};    /* 距最近灯距离（m）, -1=无 */
+    double road_curvature{0.0};  /* 当前曲率 (1/R) */
+    double road_speed_limit{30.0};
+    double lane_count{2.0};
+    double lane_width{3.5};
+    double ego_lane_offset{0.0};
+    volatile int has_scene{0};
+
     /* 影子对比: planning 发布的 target_speed（若存在） */
     double planning_target_speed{0};
     volatile int has_planning{0};
@@ -121,8 +132,9 @@ struct InferenceContext {
     double cfg_max_speed{20.0};
     double cfg_frequency_hz{20.0};
 
-    /* 时序滑窗缓冲: 保存最近 TEMPORAL_WINDOW 帧的 16 维特征 */
-    float  frame_buf[TEMPORAL_WINDOW][V2_DIM];
+    /* 时序滑窗缓冲: 保存最近 TEMPORAL_WINDOW 帧的特征向量 */
+    float  frame_buf[TEMPORAL_WINDOW][V3_DIM];  /* 5×59，兼容 v2/v3 */
+    int    frame_dim{V2_DIM};                   /* 当前帧维度（自动检测） */
     int    frame_head{0};  /* 当前写入位置（环形） */
     int    frame_count{0}; /* 已写入帧数 */
 
@@ -285,9 +297,89 @@ static void on_model_ota_active(const Message* msg, void* user_data) {
     }
 }
 
-/* 将当前时刻 ego + obstacles + control 打包成 16 维帧 */
-static void build_frame(float frame[V2_DIM]) {
-    memset(frame, 0, sizeof(float) * V2_DIM);
+/* ── v3: 红绿灯状态回调 ─────────────────────────────────────── */
+
+static void on_traffic_lights(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* lights = cJSON_GetObjectItem(root, "lights");
+    if (!cJSON_IsArray(lights)) { cJSON_Delete(root); return; }
+
+    /* 找最近的红灯 */
+    double nearest_red = 1e9;
+    int has_red = 0;
+    cJSON* light;
+    cJSON_ArrayForEach(light, lights) {
+        cJSON* s = cJSON_GetObjectItem(light, "state");
+        cJSON* x = cJSON_GetObjectItem(light, "x");
+        if (!cJSON_IsString(s) || !cJSON_IsNumber(x)) continue;
+        double dist = x->valuedouble - g.ego_x;
+        if (dist < 0) continue;  /* 后方灯忽略 */
+        const char* state = s->valuestring;
+        if (strcmp(state, "red") == 0) {
+            if (dist < nearest_red) {
+                nearest_red = dist;
+                has_red = 1;
+            }
+        } else if (strcmp(state, "yellow") == 0) {
+            /* 黄灯也视为减速信号，但优先级低于红灯 */
+            if (!has_red && dist < nearest_red) {
+                nearest_red = dist;
+            }
+        }
+        /* 绿灯：只记录第一个 */
+        if (!has_red && g.tl_state < 0.0 && strcmp(state, "green") == 0) {
+            g.tl_state = 0.0;
+            g.tl_distance = dist;
+        }
+    }
+    if (has_red) {
+        g.tl_state = 2.0;
+        g.tl_distance = nearest_red;
+    } else if (g.tl_state < 0.0) {
+        g.tl_state = 0.0;  /* 有灯但都是绿灯 */
+    }
+    g.has_scene = 1;
+    cJSON_Delete(root);
+}
+
+/* ── v3: 道路几何回调 ───────────────────────────────────────── */
+
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    j = cJSON_GetObjectItem(root, "lane_width");
+    if (cJSON_IsNumber(j)) g.lane_width = j->valuedouble;
+    j = cJSON_GetObjectItem(root, "lane_count");
+    if (cJSON_IsNumber(j)) g.lane_count = j->valuedouble;
+    /* 从 curve_offset_m 估算曲率 */
+    j = cJSON_GetObjectItem(root, "curve_offset_m");
+    if (cJSON_IsNumber(j)) {
+        double off = j->valuedouble;
+        j = cJSON_GetObjectItem(root, "curve_length_m");
+        double len = cJSON_IsNumber(j) ? j->valuedouble : 0.0;
+        if (len > 1.0) {
+            /* 小角度近似: offset ≈ L²·k/2 → k = 2·offset/L² */
+            g.road_curvature = 2.0 * fabs(off) / (len * len);
+        }
+    }
+    g.has_scene = 1;
+    cJSON_Delete(root);
+}
+
+/* 将当前时刻 ego + obstacles + control + scene context 打包成帧。
+ * dim 为实际帧维度：
+ *   V2_DIM=16 → 仅填充 v2 基础特征
+ *   V3_DIM=59 → 额外填充场景上下文
+ */
+static void build_frame(float frame[V3_DIM], int dim) {
+    memset(frame, 0, sizeof(float) * dim);
+    /* ── v2 基础特征（索引 0-15）── */
     frame[0]  = (float)g.ego_v;
     frame[1]  = (float)g.ego_y;
     frame[2]  = (float)g.ego_heading;
@@ -304,11 +396,24 @@ static void build_frame(float frame[V2_DIM]) {
     frame[13] = (float)g.front1_confidence;
     frame[14] = (float)g.ctrl_brake;
     frame[15] = (float)g.ctrl_emergency_stop;
+
+    /* ── v3 场景上下文（索引 22-28）── */
+    if (dim >= V3_DIM) {
+        frame[22] = (float)g.tl_state;
+        frame[23] = (float)g.tl_distance;
+        frame[24] = (float)g.road_curvature;
+        frame[25] = (float)g.road_speed_limit;
+        frame[26] = (float)g.lane_count;
+        frame[27] = (float)g.lane_width;
+        g.ego_lane_offset = g.ego_y;  /* 默认道路参考线在 y=0 */
+        frame[28] = (float)g.ego_lane_offset;
+        /* 索引 16-21（感知统计）和 29-58（障碍物全貌）待数据流修复后填充 */
+    }
 }
 
 /* 将当前帧压入环形缓冲 */
 static void push_frame(void) {
-    build_frame(g.frame_buf[g.frame_head]);
+    build_frame(g.frame_buf[g.frame_head], g.frame_dim);
     g.frame_head = (g.frame_head + 1) % TEMPORAL_WINDOW;
     if (g.frame_count < TEMPORAL_WINDOW) g.frame_count++;
 }
@@ -339,8 +444,17 @@ static void run_inference(double* out_speed, double* out_d,
     if (g.model.loaded) {
         float x[TINY_MLP_MAX_IN] = {0};
 
-        if (g.model.in_dim >= 80 && g.frame_count >= TEMPORAL_WINDOW) {
-            /* v3: 时序滑窗 5×16 = 80 维 */
+        if (g.model.in_dim >= 295 && g.frame_count >= TEMPORAL_WINDOW) {
+            /* v3: 时序滑窗 5×59 = 295 维 */
+            int idx = 0;
+            for (int w = 0; w < TEMPORAL_WINDOW; w++) {
+                int fi = (g.frame_head + w) % TEMPORAL_WINDOW;
+                for (int d = 0; d < V3_DIM; d++) {
+                    x[idx++] = g.frame_buf[fi][d];
+                }
+            }
+        } else if (g.model.in_dim >= 80 && g.frame_count >= TEMPORAL_WINDOW) {
+            /* v2: 时序滑窗 5×16 = 80 维 */
             int idx = 0;
             for (int w = 0; w < TEMPORAL_WINDOW; w++) {
                 int fi = (g.frame_head + w) % TEMPORAL_WINDOW;
@@ -605,6 +719,8 @@ static const char* s_inputs[]  = {
     "perception/obstacles",   /* v2 */
     "control/cmd",            /* v2 */
     "model_ota/active",       /* OTA 热重载信号 */
+    "road/traffic_lights",    /* v3 场景上下文 */
+    "road/geometry",          /* v3 场景上下文 */
     nullptr
 };
 static const char* s_outputs[] = {
@@ -644,6 +760,15 @@ static int inference_init(MessageBus* bus, Transport* transport,
     g.planning_target_speed = 0.0;
     g.has_planning = 0;
 
+    /* v3 场景上下文 */
+    g.tl_state = -1.0;
+    g.tl_distance = -1.0;
+    g.road_curvature = 0.0;
+    g.road_speed_limit = 30.0;
+    g.lane_count = 2.0;
+    g.lane_width = 3.5;
+    g.ego_lane_offset = 0.0;
+    g.has_scene = 0;
     g.frame_head = 0;
     g.frame_count = 0;
     memset(g.frame_buf, 0, sizeof(g.frame_buf));
@@ -693,11 +818,17 @@ static int inference_init(MessageBus* bus, Transport* transport,
                  g.model_path);
     }
 
+    /* 根据模型输入维度自动选择帧维度 */
+    g.frame_dim = (g.model.in_dim >= 295) ? V3_DIM : V2_DIM;
+
     transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
     transport_subscribe(transport, "planning/trajectory", on_planning, nullptr);
     transport_subscribe(transport, "perception/obstacles", on_obstacles, nullptr);  /* v2 */
     transport_subscribe(transport, "control/cmd", on_control_cmd, nullptr);         /* v2 */
     transport_subscribe(transport, "model_ota/active", on_model_ota_active, nullptr); /* OTA */
+    /* v3 场景上下文 */
+    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, nullptr);
+    transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
     transport_advertise(transport, "inference/trajectory", 0x1F5E2A10u);
     if (g.control_mode >= CTRL_MODE_PLAN_ASSIST)
         transport_advertise(transport, "inference/assist", 0x1F5E2A11u);

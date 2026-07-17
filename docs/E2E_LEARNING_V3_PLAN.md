@@ -350,33 +350,33 @@ Step 4: direct_ctrl (无 safety 干预)
 
 ## 七、实施路径
 
-### Phase 1 — 特征升级（~2 天）
+### Phase 1 — 特征升级（~2 天）✅ 大部分完成
 
-| 步骤 | 文件 | 产出 |
+| 步骤 | 文件 | 状态 |
 |------|------|------|
-| 1.1 扩展 feature_schema v3 | `tools/train_e2e/feature_schema.py` | FEATURE_NAMES_V3 (59 维) + build_v3_features() |
-| 1.2 data_recorder 记录 v3 特征 | `modules/adas_nodes/data_recorder_node.c` | 新增 lidar / tl / road_curve 字段锁存 + features_v3 写入 |
-| 1.3 inference_node 支持 v3 特征 | `modules/adas_nodes/inference_node.cpp` | frame_buf 扩展为 59 维，订阅新增 topic |
-| 1.4 单元测试 | `tests/` | 验证 features_v3 维度 + 归一化参数一致性 |
+| 1.1 扩展 feature_schema v3 | `tools/train_e2e/feature_schema.py` | ✅ FEATURE_NAMES_V3 (59 维) + build_v3_features() + augment_features() |
+| 1.2 data_recorder 记录 v3 特征 | `modules/adas_nodes/data_recorder_node.c` | 🔴 待感知数据流修复 |
+| 1.3 inference_node 支持 v3 特征 | `modules/adas_nodes/inference_node.cpp` | ✅ frame_buf 扩展为 59 维，场景上下文订阅 |
+| 1.4 单元测试 | `tests/` | 🟡 手动验证通过 |
 
-### Phase 2 — 模型升级（~2 天）
+### Phase 2 — 模型升级（~2 天）✅ 已完成
 
-| 步骤 | 文件 | 产出 |
+| 步骤 | 文件 | 状态 |
 |------|------|------|
-| 2.1 多隐层 MLP 实现 | `tools/train_e2e/temporal_train.py` | 支持 `--hidden 128 64` |
-| 2.2 tiny_mlp.h v3 格式 | `modules/adas_nodes/tiny_mlp.h` | 支持多隐层 + v3 header |
-| 2.3 model.txt v3 导出/加载 | inference_node + train 两端 | 双向兼容 v1/v2/v3 格式 |
-| 2.4 合成数据训练验证 | 用合成数据训一个 v3 模型，确认推理输出合理 |
+| 2.1 多隐层 MLP 实现 | `tools/train_e2e/temporal_train.py` | ✅ 支持 `--hidden 128 64`，多隐层 BP |
+| 2.2 tiny_mlp.h v3 格式 | `modules/adas_nodes/tiny_mlp.h` | ✅ 支持多隐层 + v3 header，双向兼容 v1/v2 |
+| 2.3 model.txt v3 导出/加载 | inference_node + train 两端 | ✅ 双向兼容；单隐层用 w2/b2 标签，多隐层用 w_out/b_out |
+| 2.4 合成数据训练验证 | 用合成数据训练了 80→128→64→5 模型，推理输出合理 | ✅ |
 
-### Phase 3 — 训练管线（~2 天）
+### Phase 3 — 训练管线（~2 天）🟡 部分完成
 
-| 步骤 | 产出 |
-|------|------|
-| 3.1 多场景 JSONL 合并工具 | `tools/dataset/merge_samples.py` |
-| 3.2 数据增强管线 | `temporal_train.py --augment` |
-| 3.3 train/val/test 自动划分 | `temporal_train.py --val-split --test-split` |
-| 3.4 训练日志 + TensorBoard 兼容输出 | CSV epochs log |
-| 3.5 14 场景全量采集脚本 | `scripts/collect_all_samples.sh` |
+| 步骤 | 文件 | 状态 |
+|------|------|------|
+| 3.1 多场景 JSONL 合并工具 | `tools/dataset/merge_samples.py` | 🔴 待实现 |
+| 3.2 数据增强管线 | `temporal_train.py --augment` | ✅ 已在 temporal_train.py 中实现 |
+| 3.3 train/val/test 自动划分 | `temporal_train.py --val-split --test-split` | 🔴 待实现 |
+| 3.4 训练日志 + TensorBoard 兼容输出 | CSV epochs log | 🔴 待实现 |
+| 3.5 14 场景全量采集脚本 | `scripts/collect_all_samples.sh` | 🔴 待实现 |
 
 ### Phase 4 — 闭环评估（~2 天）
 
@@ -395,7 +395,7 @@ Step 4: direct_ctrl (无 safety 干预)
 | 5.2 更新 LEARNING_LOOP.md | v3 状态 + 快速上手 |
 | 5.3 更新 EVOLUTION_ROADMAP.md | v3 阶段标记 |
 
-**总计：约 9 天（比 NOA 场景的 10 天略少，因为学习闭环基础设施已很完整）**
+**进度：已实施 4/9 天。剩余：约 5 天（Phase 3-5）。**
 
 ---
 
