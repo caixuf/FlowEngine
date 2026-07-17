@@ -1,0 +1,104 @@
+{
+  "name": "city_to_highway_full",
+  "description": "NOA 全链路回归场景：城区巡航→信号灯停车→ETC 抬杆→匝道分叉(branch_select)→急弯匝道→加速车道汇入(merge)→高速超车。验证 FlowSim v2 分叉/汇入路网 + 24 NPC + branch_select/merge route step。",
+  "random_seed": 88,
+  "duration_s": 180.0,
+  "ego": {
+    "x": 10.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 11.11
+  },
+  "actors": [
+    { "id": 0,  "type": "car",        "x": 60,   "y": -1.75, "vx": 3.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg0 城区同车道前方慢车 3m/s，触发 ego 跟车", "segment_id": 0 },
+    { "id": 1,  "type": "car",        "x": 40,   "y": 1.75,  "vx": 6.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg0 左车道并行，阻塞变道", "segment_id": 0 },
+    { "id": 2,  "type": "car",        "x": 100,  "y": -5.25, "vx": 4.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg0 右侧远车道慢车", "segment_id": 0 },
+    { "id": 3,  "type": "car",        "x": 150,  "y": -5.25, "vx": 0.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg0 路边停车", "segment_id": 0 },
+    { "id": 4,  "type": "pedestrian", "x": 80,   "y": 5.5,   "vx": 0.8,  "vy": 0.0,   "len": 0.5, "wid": 0.5, "_comment": "seg0 人行道行人", "segment_id": 0 },
+    { "id": 5,  "type": "pedestrian", "x": 120,  "y": 5.5,   "vx": -0.6, "vy": 0.0,   "len": 0.5, "wid": 0.5, "_comment": "seg0 反向行走行人", "segment_id": 0 },
+    { "id": 6,  "type": "car",        "x": 260,  "y": 5.25,  "vx": -6.0, "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg1 横向来车（红灯期间不触发）", "segment_id": 1 },
+    { "id": 7,  "type": "car",        "x": 300,  "y": 5.25,  "vx": -8.0, "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg1 对向直行", "segment_id": 1 },
+    { "id": 8,  "type": "car",        "x": 210,  "y": -1.75, "vx": 0.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg1 同车道等红灯", "segment_id": 1 },
+    { "id": 9,  "type": "car",        "x": 215,  "y": 1.75,  "vx": 0.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg1 左道等红灯", "segment_id": 1 },
+    { "id": 10, "type": "pedestrian", "x": 270,  "y": 5.5,   "vx": 0.0,  "vy": -1.2,  "len": 0.5, "wid": 0.5, "_comment": "seg1 绿灯时横穿马路", "segment_id": 1 },
+    { "id": 11, "type": "pedestrian", "x": 240,  "y": 5.5,   "vx": 0.4,  "vy": 0.0,   "len": 0.5, "wid": 0.5, "_comment": "seg1 路边看手机", "segment_id": 1 },
+    { "id": 12, "type": "car",        "x": 370,  "y": -1.75, "vx": 1.5,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg2 ETC 排队", "segment_id": 2 },
+    { "id": 13, "type": "car",        "x": 375,  "y": 1.75,  "vx": 2.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg2 邻道 ETC", "segment_id": 2 },
+    { "id": 14, "type": "car",        "x": 380,  "y": 5.25,  "vx": 1.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg2 左道排队", "segment_id": 2 },
+    { "id": 15, "type": "car",        "x": 460,  "y": -1.75, "vx": 5.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg2 已过闸门加速", "segment_id": 2 },
+    { "id": 16, "type": "car",        "x": 580,  "y": 3.0,   "vx": 7.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "left_ramp 走左匝道（与 ego 分道扬镳）", "segment_id": 10 },
+    { "id": 17, "type": "car",        "x": 600,  "y": -1.75, "vx": 5.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg3 右匝道前方慢车", "segment_id": 3 },
+    { "id": 18, "type": "car",        "x": 540,  "y": -1.75, "vx": 9.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg3 后方快车接近", "segment_id": 3 },
+    { "id": 19, "type": "truck",      "x": 1500, "y": 1.75,  "vx": 14.0, "vy": 0.0,   "len": 8.0, "wid": 2.4, "_comment": "seg5 高速主路卡车（慢）", "segment_id": 5 },
+    { "id": 20, "type": "car",        "x": 1450, "y": 5.25,  "vx": 26.0, "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg5 左道快车，ego 等它过去再汇入", "segment_id": 5 },
+    { "id": 21, "type": "car",        "x": 1600, "y": -5.25, "vx": 0.0,  "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg5 应急车道双闪车", "segment_id": 5 },
+    { "id": 22, "type": "car",        "x": 1350, "y": 5.25,  "vx": 22.0, "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg5 左后方来车", "segment_id": 5 },
+    { "id": 23, "type": "car",        "x": 1800, "y": -1.75, "vx": 20.0, "vy": 0.0,   "len": 4.6, "wid": 2.0, "_comment": "seg5 远处车流", "segment_id": 5 }
+  ],
+  "road_network": {
+    "edges": [
+      { "id": 0, "type": "urban",      "length_m": 200.0, "lanes": 3, "lane_width": 3.5, "speed_limit": 11.11, "_comment": "城区 0-200m，3 车道 40km/h" },
+      { "id": 1, "type": "urban",      "length_m": 150.0, "lanes": 3, "lane_width": 3.5, "speed_limit": 11.11, "_comment": "信号灯路口 200-350m" },
+      { "id": 2, "type": "toll",       "length_m": 150.0, "lanes": 4, "lane_width": 3.5, "speed_limit": 5.56,  "_comment": "ETC 收费站 350-500m，20km/h" },
+      { "id": 3, "type": "ramp_curve", "length_m": 400.0, "lanes": 1, "lane_width": 3.0, "speed_limit": 11.11,
+        "curvature_profile": [
+          { "radius": 0,    "arc": 100 },
+          { "radius": 200,  "arc": 40  },
+          { "radius": 45,   "arc": 130 },
+          { "radius": -200, "arc": 80  },
+          { "radius": 0,    "arc": 50  }
+        ],
+        "_comment": "右匝道 500-900m：分叉后 S 形 + R=45m 回头弯，限速 40km/h（profile 合计 400m）" },
+      { "id": 4, "type": "merge_lane", "length_m": 500.0, "lanes": 1, "lane_width": 3.0, "speed_limit": 27.78, "_comment": "加速车道 900-1400m，加速至 100km/h" },
+      { "id": 5, "type": "highway",    "length_m": 800.0, "lanes": 3, "lane_width": 3.75, "speed_limit": 27.78, "_comment": "高速主路 1400-2200m，3 车道 100km/h" }
+    ],
+    "junctions": [
+      {
+        "id": 100,
+        "type": "fork",
+        "incoming_road": 2,
+        "connecting_roads": [
+          { "id": 10, "name": "left_ramp", "length_m": 200.0, "lanes": 1, "lane_width": 3.0, "speed_limit": 11.11,
+            "curvature_profile": [ { "radius": -60, "arc": 100 }, { "radius": 0, "arc": 100 } ],
+            "_comment": "左匝道分支（ego 不走，与 ego 分道扬镳）" }
+        ],
+        "_comment": "ETC 后分叉：主路继续为右匝道(edge 3)，左匝道(edge 10)为备选分支"
+      },
+      {
+        "id": 101,
+        "type": "merge",
+        "incoming_road": 4,
+        "target_road": 5,
+        "target_s": 0,
+        "_comment": "加速车道(edge 4)汇入高速主路(edge 5)"
+      }
+    ]
+  },
+  "traffic_lights": [
+    { "id": 100, "x": 200.0, "y_lane": -1.75, "red_s": 15.0, "yellow_s": 3.0, "green_s": 12.0, "phase_offset_s": 0.0,
+      "_comment": "信号灯路口：停止线 x=200，红15+黄3+绿12=30s 周期，启动即红灯" }
+  ],
+  "etc_gates": [
+    { "id": 200, "x": 425.0, "y": 0.0, "approach_speed": 5.56, "open_range_m": 50.0,
+      "_comment": "ETC 门架 x=425（ETC 段中部），减速至 5.56m/s 通过，50m 外抬杆" }
+  ],
+  "stop_lines": [
+    { "id": 300, "x": 195.0, "y": 0.0, "_comment": "路口停止线（信号灯 x=200 前 5m）" },
+    { "id": 301, "x": 420.0, "y": 0.0, "_comment": "ETC 前停止线（门架 x=425 前 5m）" }
+  ],
+  "route": [
+    { "trigger_x": 0.0,    "type": "lane_change",   "target_lane": 0,   "label": "city_cruise" },
+    { "trigger_x": 200.0,  "type": "lane_change",   "target_lane": 0,   "target_speed": 8.0,  "label": "approach_signal_decel" },
+    { "trigger_x": 500.0,  "type": "branch_select", "branch_id": 3,     "label": "take_right_ramp" },
+    { "trigger_x": 900.0,  "type": "merge",         "target_lane": 1,   "target_speed": 27.78, "label": "merge_highway" },
+    { "trigger_x": 1600.0, "type": "lane_change",   "target_lane": -1,  "target_speed": 27.78, "label": "overtake_left" },
+    { "trigger_x": 1850.0, "type": "lane_change",   "target_lane": 1,   "label": "return_right" }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 180.0,
+    "min_avg_speed_mps": 4.0,
+    "min_distance_m": 1500.0
+  }
+}

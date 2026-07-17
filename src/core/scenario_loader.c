@@ -137,7 +137,10 @@ ScenarioConfig* scenario_load(const char* path) {
         sc->criteria.no_collision = true;
     }
 
-    /* route（可选）：导航路线主动变道指令，按 trigger_x 触发，与障碍物无关 */
+    /* route（可选）：导航路线主动变道指令，按 trigger_x 触发，与障碍物无关。
+     * NOA Phase 3.1: 新增 type 字段（lane_change/branch_select/merge）+
+     * branch_id（branch_select 选路）。无 type 字段 = ROUTE_LANE_CHANGE，
+     * 与既有场景文件完全向后兼容。 */
     cJSON* jroute = cJSON_GetObjectItemCaseSensitive(root, "route");
     if (cJSON_IsArray(jroute)) {
         int n = cJSON_GetArraySize(jroute);
@@ -147,6 +150,8 @@ ScenarioConfig* scenario_load(const char* path) {
             cJSON* jr = cJSON_GetArrayItem(jroute, i);
             if (!cJSON_IsObject(jr)) continue;
             ScenarioRouteStep* r = &sc->route[i];
+            /* 默认 lane_change（向后兼容：无 type 字段的旧场景仍走原变道逻辑） */
+            r->type = ROUTE_LANE_CHANGE;
             cJSON* j;
             j = cJSON_GetObjectItemCaseSensitive(jr, "trigger_x");
             if (cJSON_IsNumber(j)) r->trigger_x = j->valuedouble;
@@ -154,6 +159,18 @@ ScenarioConfig* scenario_load(const char* path) {
             if (cJSON_IsNumber(j)) r->target_lane = (int)j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jr, "target_speed");
             if (cJSON_IsNumber(j)) r->target_speed = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "branch_id");
+            if (cJSON_IsNumber(j)) r->branch_id = (int)j->valuedouble;
+            /* type 字符串 → 枚举 */
+            j = cJSON_GetObjectItemCaseSensitive(jr, "type");
+            if (cJSON_IsString(j) && j->valuestring) {
+                if (strcmp(j->valuestring, "branch_select") == 0)
+                    r->type = ROUTE_BRANCH_SELECT;
+                else if (strcmp(j->valuestring, "merge") == 0)
+                    r->type = ROUTE_MERGE;
+                else
+                    r->type = ROUTE_LANE_CHANGE;
+            }
             j = cJSON_GetObjectItemCaseSensitive(jr, "label");
             if (cJSON_IsString(j) && j->valuestring)
                 strncpy(r->label, j->valuestring, sizeof(r->label) - 1);
@@ -313,6 +330,16 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         const ScenarioRouteStep* r = &scenario->route[i];
         cJSON* jr = cJSON_CreateObject();
         cJSON_AddNumberToObject(jr, "trigger_x",   r->trigger_x);
+        /* NOA Phase 3.1: 序列化 type + branch_id（branch_select 选路用） */
+        const char* type_str = "lane_change";
+        switch (r->type) {
+            case ROUTE_BRANCH_SELECT: type_str = "branch_select"; break;
+            case ROUTE_MERGE:         type_str = "merge";         break;
+            default:                  type_str = "lane_change";   break;
+        }
+        cJSON_AddStringToObject(jr, "type", type_str);
+        if (r->type == ROUTE_BRANCH_SELECT)
+            cJSON_AddNumberToObject(jr, "branch_id", r->branch_id);
         cJSON_AddNumberToObject(jr, "target_lane", r->target_lane);
         if (r->target_speed > 0.0)
             cJSON_AddNumberToObject(jr, "target_speed", r->target_speed);

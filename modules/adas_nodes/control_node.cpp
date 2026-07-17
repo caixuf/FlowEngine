@@ -181,6 +181,13 @@ struct ControlContext {
     double curve_length_m{0};
     double curve_offset_m{0};
 
+    /* NOA Phase 3.4: 弯道曲率前馈权重提升参数。
+     * 当道路曲率半径 R ≤ curve_ff_boost_radius_m 时，前馈权重 × curve_ff_boost_factor，
+     * 让 Stanley 控制器在急弯（如匝道 R=45m）预先打方向，而非等 CTE 累积后反应。
+     * 默认 R≤60m 触发 ×1.5 提升，可经 params 配置覆盖。 */
+    double curve_ff_boost_radius_m{60.0};
+    double curve_ff_boost_factor{1.5};
+
     /* 协程任务 */
     std::unique_ptr<class ControlTask> task;
 };
@@ -812,7 +819,24 @@ protected:
                 /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
                  * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
-                steer = cte_term - heading_term - yaw_damp_term;
+
+                /* NOA Phase 3.4: 曲率前馈项 δ_ff = wheelbase * κ。
+                 * steady-state 转向角，让控制器预先打方向而非等 CTE 累积。
+                 * 急弯（R ≤ curve_ff_boost_radius_m）时权重 ×curve_ff_boost_factor，
+                 * 匝道 R=45m 回头弯尤其需要——纯反馈在急弯入口总是滞后。
+                 * 直道 / 弯道端点外 κ=0，前馈为 0，与原行为完全一致。 */
+                double kappa = road_center_curvature(g.ego_x, g.curve_start_x,
+                                                     g.curve_length_m, g.curve_offset_m);
+                double ff_weight = 1.0;
+                if (fabs(kappa) > 1e-9) {
+                    double R = 1.0 / fabs(kappa);  /* 曲率半径 (m) */
+                    if (R <= g.curve_ff_boost_radius_m) {
+                        ff_weight = g.curve_ff_boost_factor;
+                    }
+                }
+                double ff_term = g.wheelbase * kappa * ff_weight;
+
+                steer = cte_term - heading_term - yaw_damp_term + ff_term;
                 double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                 if (steer >  steer_limit) steer =  steer_limit;
                 if (steer < -steer_limit) steer = -steer_limit;
@@ -977,6 +1001,9 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.curve_start_x = 0.0;
     g.curve_length_m = 0.0;
     g.curve_offset_m = 0.0;
+    /* NOA Phase 3.4: 弯道前馈权重提升默认参数 */
+    g.curve_ff_boost_radius_m = 60.0;
+    g.curve_ff_boost_factor   = 1.5;
 
     /* 默认 PID 参数 */
     g.cfg_kp = 800.0; g.cfg_ki = 50.0; g.cfg_kd = 100.0;
@@ -1079,6 +1106,11 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.ldw_min_speed = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "ldw_cooldown");
             if (cJSON_IsNumber(j)) g.ldw_cooldown = j->valuedouble;
+            /* NOA Phase 3.4: 弯道前馈权重提升参数 */
+            j = cJSON_GetObjectItemCaseSensitive(p, "curve_ff_boost_radius_m");
+            if (cJSON_IsNumber(j)) g.curve_ff_boost_radius_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "curve_ff_boost_factor");
+            if (cJSON_IsNumber(j)) g.curve_ff_boost_factor = j->valuedouble;
             cJSON_Delete(p);
             g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
         }

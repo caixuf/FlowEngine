@@ -70,7 +70,7 @@
 extern "C" {
 #endif
 
-#define SCENARIO_MAX_ACTORS      16
+#define SCENARIO_MAX_ACTORS      32   /* NOA 24-NPC 场景需要 >16 */
 #define SCENARIO_NAME_LEN        64
 #define SCENARIO_DESC_LEN       128
 #define SCENARIO_MAX_ROUTE_STEPS  8
@@ -100,11 +100,30 @@ typedef struct {
 
 /* ── 导航路线变道指令（NOA 主动变道） ───────────────────────── */
 
+/**
+ * NOA 路线步骤类型。type 字段决定 planning_node 在 trigger_x 处如何处理：
+ *   ROUTE_LANE_CHANGE   : 普通变道（同一路段内换车道），用 target_lane 指定方向
+ *   ROUTE_BRANCH_SELECT : 路口分叉选路（fork junction），用 branch_id 指定走哪条
+ *                         connecting_road（json_to_xodr 生成的 junction 内 connecting
+ *                         road 的 id）。planning_node 据此切换 Frenet 参考路径。
+ *   ROUTE_MERGE         : 加速车道汇入主路（merge junction），用 target_lane 指定汇入
+ *                         主路后的目标车道方向，target_speed 指定加速目标。
+ *
+ * 缺省（无 "type" 字段）= ROUTE_LANE_CHANGE，与既有场景文件完全向后兼容。
+ */
+typedef enum {
+    ROUTE_LANE_CHANGE    = 0,
+    ROUTE_BRANCH_SELECT  = 1,
+    ROUTE_MERGE          = 2,
+} RouteStepType;
+
 typedef struct {
-    double trigger_x;     /**< ego x 越过此值触发（m） */
-    int    target_lane;   /**< 目标车道方向: -1=初始车道一侧(y<0), +1=对侧相邻车道(y>0) */
-    double target_speed;  /**< 目标速度（m/s），0 = 不改变当前目标速度（可选项，用于出口匝道减速等） */
-    char   label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */
+    double        trigger_x;     /**< ego x 越过此值触发（m） */
+    RouteStepType type;          /**< 步骤类型（默认 ROUTE_LANE_CHANGE） */
+    int           target_lane;   /**< 目标车道方向: -1=初始车道一侧(y<0), +1=对侧相邻车道(y>0) */
+    int           branch_id;     /**< ROUTE_BRANCH_SELECT: connecting_road 的 id（fork 选路） */
+    double        target_speed;  /**< 目标速度（m/s），0 = 不改变当前目标速度（可选项，用于出口匝道减速等） */
+    char          label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */
 } ScenarioRouteStep;
 
 /* ── 道路几何（可选弯道定义, 见 road_geometry.h） ───────────── */

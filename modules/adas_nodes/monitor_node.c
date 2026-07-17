@@ -76,10 +76,13 @@ static struct {
      * road_network 含 edges[]，每条 edge 有 nodes[[x,y],...]，供 3D 前端
      * 用 CatmullRomCurve3 + TubeGeometry 构建多段道路网络。
      *
-     * Phase 3.2: 额外缓存 entities 中的 etc_gate / stop_line 实体
-     * （这些不在 vehicle/state 的 obstacles 里，需要从 scene/frame 单独提取）。 */
+     * NOA Phase 2.2: 透传 scene/frame 的完整 entities 数组（不再过滤
+     * etc_gate / stop_line）。vehicle/state 的 obstacles 仅承载前 16 个 NPC
+     * 车辆/行人（MAX_OBS_SCENE=16），而 NOA 24-NPC 场景需要前端能渲染全部 24
+     * 个 NPC + ego + 红绿灯 + ETC 门架 + 停止线。完整 entities 透传后，前端
+     * (scene3d.js) 优先消费 scn.entities，scn.obstacles 作为旧场景 fallback。 */
     char   scene_road_network_json[4096];
-    char   scene_entities_json[8192];  /* etc_gate / stop_line 等 scene/frame 独有实体 */
+    char   scene_entities_json[16384];  /* 完整 entities（24 NPC + ego + TL/ETC/StopLine） */
     volatile int has_scene_frame;
 
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
@@ -253,10 +256,11 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 }
 
 /* Phase 3: scene/frame 订阅 — 从 flowsim_node 获取完整场景帧。
- * 提取 road_network（多段道路）+ entities 中的 etc_gate/stop_line
- * （vehicle/state 不含这些实体类型，需从 scene/frame 单独获取）。
+ * 提取 road_network（多段道路）+ 完整 entities 数组（NOA Phase 2.2 改为
+ * 透传全部实体，不再过滤 etc_gate/stop_line）。
  * road_network 透传给 3D 前端用于 CatmullRomCurve3 + TubeGeometry
- * 多段道路渲染。 */
+ * 多段道路渲染；entities 透传给前端用于渲染全部 24 NPC + 事件触发器
+ * （vehicle/state 仅承载前 16 个 obstacle，不足以覆盖 NOA 场景）。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
@@ -278,31 +282,20 @@ static void on_scene_frame(const Message* msg, void* user_data) {
         }
     }
 
-    /* 从 entities 提取 etc_gate / stop_line（其它实体已由 vehicle/state 覆盖） */
+    /* NOA Phase 2.2: 透传完整 entities 数组（不再过滤类型）。
+     * 前端 scene3d.js 按 type 分发渲染：ego/NPC/pedestrian/tl/etc_gate/stop_line，
+     * scn.obstacles (vehicle/state) 作为旧场景 fallback。 */
     cJSON* entities = cJSON_GetObjectItem(root, "entities");
     if (entities && cJSON_IsArray(entities)) {
-        cJSON* filtered = cJSON_CreateArray();
-        cJSON* ent;
-        cJSON_ArrayForEach(ent, entities) {
-            cJSON* type = cJSON_GetObjectItem(ent, "type");
-            if (type && cJSON_IsString(type) &&
-                (strcmp(type->valuestring, "etc_gate") == 0 ||
-                 strcmp(type->valuestring, "stop_line") == 0)) {
-                cJSON_AddItemReferenceToArray(filtered, ent);
-            }
+        char* ent_str = cJSON_PrintUnformatted(entities);
+        if (ent_str) {
+            size_t len = strlen(ent_str);
+            if (len >= sizeof(g.scene_entities_json))
+                len = sizeof(g.scene_entities_json) - 1;
+            memcpy(g.scene_entities_json, ent_str, len);
+            g.scene_entities_json[len] = '\0';
+            free(ent_str);
         }
-        if (cJSON_GetArraySize(filtered) > 0) {
-            char* ent_str = cJSON_PrintUnformatted(filtered);
-            if (ent_str) {
-                size_t len = strlen(ent_str);
-                if (len >= sizeof(g.scene_entities_json))
-                    len = sizeof(g.scene_entities_json) - 1;
-                memcpy(g.scene_entities_json, ent_str, len);
-                g.scene_entities_json[len] = '\0';
-                free(ent_str);
-            }
-        }
-        cJSON_Delete(filtered);
     }
 
     g.has_scene_frame = 1;
@@ -605,9 +598,10 @@ static void export_dashboard_json(void) {
         }
     }
 
-    /* Phase 3.2: entities 中的 etc_gate / stop_line 从 scene/frame 获取。
-     * 这些实体不在 vehicle/state 的 obstacles 数组里，需要单独透传给
-     * 3D 前端渲染 ETC 门架抬杆动画。 */
+    /* NOA Phase 2.2: 完整 entities 从 scene/frame 透传。
+     * 含全部 NPC（最多 24）+ ego + 红绿灯 + ETC 门架 + 停止线。前端 scene3d.js
+     * 优先消费 scn.entities 渲染障碍物池（扩到 24），scn.obstacles 作为旧场景
+     * fallback。 */
     if (g.has_scene_frame && g.scene_entities_json[0] != '\0') {
         cJSON* ents = cJSON_Parse(g.scene_entities_json);
         if (ents) {

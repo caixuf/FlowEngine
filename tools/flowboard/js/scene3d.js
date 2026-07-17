@@ -42,6 +42,15 @@ let _composer = null;  /* EffectComposer 引用（Bloom 后处理），为 null 
 /** Obstacle type → colour lookup (defined once, shared) */
 const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cyclist: 0x33ddff, cone: 0xff6600 };
 
+/** NOA Phase 5: NPC AI 状态 → 显示色（与场景实体的 ai 字段对齐，见 scene_pub.cpp）。
+ *  cruise/follow/stop/stop_for_tl/etc_approach/branch_sel/merge/yield。 */
+const _aiLabelColors = {
+  cruise: 0x88aacc, follow: 0xaacc88, stop: 0xff5555, stop_for_tl: 0xffaa55,
+  etc_approach: 0xffcc44, branch_sel: 0x44ffcc, merge: 0xcc88ff, yield: 0xff88aa
+};
+let _obsLabelPool = [];   // per-obstacle Sprite (NPC AI state label, Phase 5)
+let _obsLabelLast = [];   // 上次显示的 ai 字符串，避免每帧重建 CanvasTexture
+
 /** Road curve state */
 let _curveActive = false;
 let _lastCurveKey = "";
@@ -77,6 +86,47 @@ function _makeCyl(rTop, rBot, h, segs, color) {
     new THREE.CylinderGeometry(rTop, rBot, h, segs || 16),
     new THREE.MeshStandardMaterial({ color: color, metalness: 0.3, roughness: 0.6 })
   );
+}
+
+// ── NOA Phase 5: NPC AI 状态标签 sprite（CanvasTexture） ──
+// 每个障碍物槽位配一个 Sprite，浮在车顶上方显示当前 ai 状态。
+// ai 字符串变化时才重建 CanvasTexture，避免每帧 GC 压力。
+function _makeLabelSprite() {
+  var canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 32;
+  var tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  var mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  var sp = new THREE.Sprite(mat);
+  sp.scale.set(4, 1, 1);   // 世界坐标 4m 宽 1m 高
+  sp.visible = false;
+  return sp;
+}
+
+function _setLabelSprite(sp, text, colorHex) {
+  if (!sp || !sp.material || !sp.material.map) return;
+  var canvas = sp.material.map.image;
+  var ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (text) {
+    // 圆角背景
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    var r = 6, w = canvas.width, h = canvas.height;
+    ctx.beginPath();
+    ctx.moveTo(r, 0); ctx.lineTo(w - r, 0);
+    ctx.quadraticCurveTo(w, 0, w, r); ctx.lineTo(w, h - r);
+    ctx.quadraticCurveTo(w, h, w - r, h); ctx.lineTo(r, h);
+    ctx.quadraticCurveTo(0, h, 0, h - r); ctx.lineTo(0, r);
+    ctx.quadraticCurveTo(0, 0, r, 0); ctx.closePath(); ctx.fill();
+    // 文字
+    var hex = ('000000' + (colorHex & 0xffffff).toString(16)).slice(-6);
+    ctx.fillStyle = '#' + hex;
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, h / 2 + 1);
+  }
+  sp.material.map.needsUpdate = true;
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -621,13 +671,23 @@ function init3DScene() {
   _carGroup = egoCar;
 
   // ── Obstacle pool ──
+  // NOA Phase 2.3: 池容量 8 → 24，匹配 NOA 24-NPC 场景。
+  // scene/frame entities 透传全部 NPC（最多 24），旧场景 scn.obstacles
+  // 仅承载前 16 个 obstacle，仍可作为 fallback。
   _obsPool = [];
-  for (var oi = 0; oi < 8; oi++) {
+  _obsLabelPool = [];
+  _obsLabelLast = [];
+  for (var oi = 0; oi < 24; oi++) {
     var obs = _buildObstacle('car', 0xff9944);
     obs.userData.obsType = 'car';  /* track current mesh type for rebuild-on-change */
     obs.visible = false;
     scene3d.add(obs);
     _obsPool.push(obs);
+    // NOA Phase 5: 配套的 AI 状态标签 sprite
+    var lbl = _makeLabelSprite();
+    scene3d.add(lbl);
+    _obsLabelPool.push(lbl);
+    _obsLabelLast.push(null);
   }
 
   // ── Traffic light pool ──
@@ -804,6 +864,7 @@ function _renderFrame() {
     for (var oi = 0; oi < _obsPool.length; oi++) {
       var om = _obsPool[oi];
       var ow = _obsWorld[oi];
+      var lbl = _obsLabelPool[oi];
       if (ow) {
         var L = ow.len || DEFAULT_OBS_LEN, W = ow.wid || 2;
         // Type-based real height: trucks tall, pedestrians slim.
@@ -814,7 +875,11 @@ function _renderFrame() {
         var tx = ow.x + (ow.vx || 0) * dtObs, tz = ow.z + (ow.vz || 0) * dtObs;
         var distToEgo = Math.sqrt((tx - sx) * (tx - sx) + (tz - sz) * (tz - sz));
         // Bounding-box-aware occlusion: hide only when truly overlapping ego body
-        if (distToEgo < L * 0.5 + EGO_HALF_LEN) { om.visible = false; continue; }
+        if (distToEgo < L * 0.5 + EGO_HALF_LEN) {
+          om.visible = false;
+          if (lbl) lbl.visible = false;
+          continue;
+        }
         // Unit-normalised model: group origin at road surface (y=0.05).
         // Children sit at fractions 0-1 so scale.set maps directly to metres.
         _tmpV3.set(tx, 0.05, tz);
@@ -837,7 +902,30 @@ function _renderFrame() {
           om.children[0].material.color.setHex(c);
         }
         om.visible = true;
-      } else { om.visible = false; }
+
+        // NOA Phase 5: NPC AI 状态标签（仅车辆类型显示，行人不显示）。
+        // 标签浮在车顶上方 2.2m，ai 字符串变化时才重建 CanvasTexture。
+        if (lbl) {
+          var isVehicle = (ow.type === 'car' || ow.type === 'suv' || ow.type === 'truck');
+          if (isVehicle && ow.ai) {
+            // 标签位置：障碍物位置 + 车顶上方
+            lbl.position.set(om.position.x, H + 1.2, om.position.z);
+            // 仅当 ai 状态变化时重建纹理
+            if (_obsLabelLast[oi] !== ow.ai) {
+              var lblColor = _aiLabelColors[ow.ai] || 0xffffff;
+              _setLabelSprite(lbl, ow.ai, lblColor);
+              _obsLabelLast[oi] = ow.ai;
+            }
+            lbl.visible = true;
+          } else {
+            lbl.visible = false;
+            _obsLabelLast[oi] = null;
+          }
+        }
+      } else {
+        om.visible = false;
+        if (lbl) { lbl.visible = false; _obsLabelLast[oi] = null; }
+      }
     }
   }
 
@@ -936,8 +1024,9 @@ function update3D() {
     for (var ei = 0; ei < ents.length && gateIdx < _etcGatePool.length; ei++) {
       if (ents[ei].type === 'etc_gate') {
         var eg = ents[ei];
+        // entities 已是世界坐标（flowsim_node 发布），无需叠加 ego 偏移。
         _etcGateWorld[gateIdx] = {
-          x: _dr.lastX + (eg.x || 0), z: _dr.lastZ + (eg.y || 0),
+          x: (eg.x || 0), z: (eg.y || 0),
           state: eg.state || 'closed', progress: eg.progress || 0
         };
         gateIdx++;
@@ -950,23 +1039,54 @@ function update3D() {
   // sync2DTarget() (called just before update3D in updateAll). Here we
   // only read _dr.lastX / lastZ to world-anchor obstacles & LiDAR.
 
-  // Obstacles: convert ego-relative → WORLD coords once, store as targets.
-  // This prevents obstacles from drifting when ego moves laterally between
-  // data ticks — they stay anchored in their real-world lanes.
-  if (_obsPool && scn && scn.obstacles) {
-    var obs = scn.obstacles;
-    for (var oi = 0; oi < _obsPool.length; oi++) {
-      var om = _obsPool[oi];
-      if (oi < obs.length) {
+  // NOA Phase 2.3: 优先消费 scn.entities（flowsim_node 发布，世界坐标，
+  // 含全部 24 NPC + 行人）。无 entities 时 fallback 到 scn.obstacles
+  // （vehicle/state，ego-relative，前 16 个）。
+  //
+  // entities 字段映射 (scene_pub.cpp)：
+  //   car/suv/truck: {type,id,x,y,h,spd,len,wid,ai,vx,vy}
+  //   pedestrian:    {type,id,x,y,spd,vx,vy,parked}
+  //   ego/tl/etc_gate/stop_line 跳过（由专门 pool 处理或不渲染）。
+  if (_obsPool && scn) {
+    var usedSlots = 0;
+    if (scn.entities && scn.entities.length) {
+      var ents2 = scn.entities;
+      for (var ei2 = 0; ei2 < ents2.length && usedSlots < _obsPool.length; ei2++) {
+        var ent = ents2[ei2];
+        if (!ent || !ent.type) continue;
+        // 跳过非障碍物实体：ego / 红绿灯 / ETC 门架 / 停止线由专门渲染路径处理。
+        if (ent.type === 'ego' || ent.type === 'tl' ||
+            ent.type === 'etc_gate' || ent.type === 'stop_line') continue;
+        // entities 已是世界坐标，直接用 ent.x/ent.y 作为世界 (x, z)。
+        _obsWorld[usedSlots] = {
+          x: (ent.x || 0), z: (ent.y || 0),
+          vx: (ent.vx || 0), vz: (ent.vy || 0),
+          t0: now,
+          len: ent.len || 4, wid: ent.wid || 2,
+          type: ent.type,
+          ai: ent.ai || null,   // Phase 5 NPC AI 状态标签用
+          heading: ent.h || 0
+        };
+        _obsPool[usedSlots].visible = true;
+        usedSlots++;
+      }
+    } else if (scn.obstacles) {
+      // Fallback: vehicle/state obstacles（ego-relative，最多 16 个）。
+      var obs = scn.obstacles;
+      for (var oi = 0; oi < _obsPool.length && oi < obs.length; oi++) {
         var o = obs[oi];
         var wx = _dr.lastX + (o.x || 0), wz = _dr.lastZ + (o.y || 0);
-        // Store base position + world velocity + base timestamp →
-        // _renderFrame extrapolates by velocity to avoid jerky stepping
-        // for fast obstacles (oncoming car -9m/s) at 10Hz data ticks.
         _obsWorld[oi] = { x: wx, z: wz, vx: (o.vx || 0), vz: (o.vy || 0),
-          t0: now, len: o.len || 4, wid: o.wid || 2, type: o.type };
-        om.visible = true;
-      } else { om.visible = false; _obsWorld[oi] = null; }
+          t0: now, len: o.len || 4, wid: o.wid || 2, type: o.type,
+          ai: null, heading: 0 };
+        _obsPool[oi].visible = true;
+        usedSlots++;
+      }
+    }
+    // 清空未使用的槽位
+    for (var ci = usedSlots; ci < _obsPool.length; ci++) {
+      _obsPool[ci].visible = false;
+      _obsWorld[ci] = null;
     }
   }
   // LiDAR: convert ego-relative → world once
