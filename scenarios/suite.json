@@ -62,6 +62,11 @@
       "file": "scenarios/intersection_signalized.json",
       "duration_s": 50,
       "enabled": true
+    },
+    {
+      "file": "scenarios/city_to_highway.json",
+      "duration_s": 120,
+      "enabled": true
     }
   ],
   "baseline_tolerances": {

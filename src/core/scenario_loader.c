@@ -203,9 +203,60 @@ ScenarioConfig* scenario_load(const char* path) {
         }
     }
 
+    /* etc_gates（可选，FlowSim v2 新增）：高速 ETC 抬杆门架。
+     * 缺省 = 无门架，与既有场景完全兼容。 */
+    cJSON* jetc = cJSON_GetObjectItemCaseSensitive(root, "etc_gates");
+    if (cJSON_IsArray(jetc)) {
+        int n = cJSON_GetArraySize(jetc);
+        if (n > SCENARIO_MAX_ETC_GATES) n = SCENARIO_MAX_ETC_GATES;
+        sc->etc_gate_count = n;
+        for (int i = 0; i < n; i++) {
+            cJSON* jg = cJSON_GetArrayItem(jetc, i);
+            if (!cJSON_IsObject(jg)) continue;
+            ScenarioETCGate* g = &sc->etc_gates[i];
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(jg, "id");
+            g->id = cJSON_IsNumber(j) ? (int)j->valuedouble : i;
+            j = cJSON_GetObjectItemCaseSensitive(jg, "x");
+            if (cJSON_IsNumber(j)) g->x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jg, "y");
+            if (cJSON_IsNumber(j)) g->y = j->valuedouble;
+            else g->y = 0.0;  /* 默认跨路面中心 */
+            j = cJSON_GetObjectItemCaseSensitive(jg, "approach_speed");
+            if (cJSON_IsNumber(j)) g->approach_speed = j->valuedouble;
+            else g->approach_speed = 5.0;  /* ETC 默认减速到 5 m/s */
+            j = cJSON_GetObjectItemCaseSensitive(jg, "open_range_m");
+            if (cJSON_IsNumber(j)) g->open_range_m = j->valuedouble;
+            else g->open_range_m = 50.0;  /* ego 进入 50m 时抬杆 */
+        }
+    }
+
+    /* stop_lines（可选，FlowSim v2 新增）：路口/ETC 停车位置标记。
+     * 缺省 = 无停止线，与既有场景完全兼容。 */
+    cJSON* jsl = cJSON_GetObjectItemCaseSensitive(root, "stop_lines");
+    if (cJSON_IsArray(jsl)) {
+        int n = cJSON_GetArraySize(jsl);
+        if (n > SCENARIO_MAX_STOP_LINES) n = SCENARIO_MAX_STOP_LINES;
+        sc->stop_line_count = n;
+        for (int i = 0; i < n; i++) {
+            cJSON* js = cJSON_GetArrayItem(jsl, i);
+            if (!cJSON_IsObject(js)) continue;
+            ScenarioStopLine* sl = &sc->stop_lines[i];
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(js, "id");
+            sl->id = cJSON_IsNumber(j) ? (int)j->valuedouble : i;
+            j = cJSON_GetObjectItemCaseSensitive(js, "x");
+            if (cJSON_IsNumber(j)) sl->x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(js, "y");
+            if (cJSON_IsNumber(j)) sl->y = j->valuedouble;
+            else sl->y = 0.0;
+        }
+    }
+
     cJSON_Delete(root);
-    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, seed=%u)",
-             sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count, sc->random_seed);
+    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, seed=%u)",
+             sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count,
+             sc->etc_gate_count, sc->stop_line_count, sc->random_seed);
     return sc;
 }
 

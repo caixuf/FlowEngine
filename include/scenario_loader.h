@@ -76,6 +76,8 @@ extern "C" {
 #define SCENARIO_MAX_ROUTE_STEPS  8
 #define SCENARIO_ROUTE_LABEL_LEN 32
 #define SCENARIO_MAX_TRAFFIC_LIGHTS 4
+#define SCENARIO_MAX_ETC_GATES      4
+#define SCENARIO_MAX_STOP_LINES     4
 
 /* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
 
@@ -125,6 +127,24 @@ typedef struct {
     double phase_offset_s;  /**< 初始相位偏移（s，默认 0） */
 } ScenarioTrafficLight;
 
+/* ── ETC 门架（高速收费站抬杆，FlowSim v2 新增） ─────────── */
+
+typedef struct {
+    int    id;              /**< 门架 ID（可视化标识） */
+    double x;               /**< 门架位置（ego 前向坐标, m） */
+    double y;               /**< 横向坐标（m，默认 0 = 跨路面中心） */
+    double approach_speed;  /**< 通过时目标速度（m/s，默认 5.0 = ETC 减速） */
+    double open_range_m;    /**< ego 进入此距离时抬杆（m，默认 50） */
+} ScenarioETCGate;
+
+/* ── 停止线（路口/ETC 停车位置标记，FlowSim v2 新增） ─────── */
+
+typedef struct {
+    int    id;              /**< 停止线 ID */
+    double x;               /**< 停止线位置（ego 前向坐标, m） */
+    double y;               /**< 横向坐标（m，默认 0） */
+} ScenarioStopLine;
+
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
 typedef struct {
@@ -150,6 +170,10 @@ typedef struct {
     ScenarioRoad      road;    /**< 道路几何（可选弯道，默认全零 = 直道） */
     ScenarioTrafficLight traffic_lights[SCENARIO_MAX_TRAFFIC_LIGHTS]; /**< 红绿灯（可选，默认全零 = 无灯） */
     int               traffic_light_count;
+    ScenarioETCGate   etc_gates[SCENARIO_MAX_ETC_GATES]; /**< ETC 门架（FlowSim v2 新增） */
+    int               etc_gate_count;
+    ScenarioStopLine  stop_lines[SCENARIO_MAX_STOP_LINES]; /**< 停止线（FlowSim v2 新增） */
+    int               stop_line_count;
 } ScenarioConfig;
 
 /**

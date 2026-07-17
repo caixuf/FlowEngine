@@ -292,6 +292,37 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.steer    = tl->red_s;       /* red 时长 */
         e.target_vx = tl->phase_offset_s;  /* 相位偏移 */
     }
+
+    /* Phase 4: ETC 门架 → ETCGate 实体（高速收费站抬杆）。
+     * scene_events.cpp 的 tick_etc_gates() 根据 ego 距离门架的距离驱动
+     * 抬杆动画：远距 closed → 进入 open_range_m 时 opening → 通过后 open。
+     * approach_speed 复用 target_vx 字段，open_range_m 复用 phase_timer 字段。 */
+    for (int i = 0; i < sc->etc_gate_count && i < SCENARIO_MAX_ETC_GATES; i++) {
+        const ScenarioETCGate* eg = &sc->etc_gates[i];
+        flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::ETCGate);
+        if (id == flowsim::INVALID_ENTITY) break;
+        flowsim::Entity& e = g.pool[id];
+        e.id = eg->id;
+        e.x = eg->x;
+        e.y = eg->y;
+        e.target_vx = eg->approach_speed;   /* ETC 通过目标速度 */
+        e.phase_timer = 0.0;                 /* 抬杆进度 [0,1]，初始 closed */
+        /* open_range_m 存到 width 字段（ETCGate 无碰撞包围盒，width 空闲） */
+        e.width = eg->open_range_m;
+        e.ai_state = flowsim::AIState::Stop; /* 初始 closed 状态 */
+    }
+
+    /* Phase 4: 停止线 → StopLine 实体（路口/ETC 停车位置标记）。
+     * 纯可视化标记，无动力学无状态机，scene_pub 直接序列化位置。 */
+    for (int i = 0; i < sc->stop_line_count && i < SCENARIO_MAX_STOP_LINES; i++) {
+        const ScenarioStopLine* sl = &sc->stop_lines[i];
+        flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::StopLine);
+        if (id == flowsim::INVALID_ENTITY) break;
+        flowsim::Entity& e = g.pool[id];
+        e.id = sl->id;
+        e.x = sl->x;
+        e.y = sl->y;
+    }
 }
 
 /* ── 发布函数 ─────────────────────────────────────────────────── */

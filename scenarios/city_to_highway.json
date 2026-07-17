@@ -1,0 +1,150 @@
+{
+  "name": "city_to_highway",
+  "description": "城市到高速全流程：城市道路巡航→信号路口停车→ETC 收费站减速抬杆→匝道弯道汇入高速→高速巡航。验证 FlowSim v2 多段道路网络 + ETC 门架 + 红绿灯全链路。",
+  "random_seed": 88,
+  "duration_s": 120.0,
+  "ego": {
+    "x": 10.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 13.89
+  },
+  "actors": [
+    {
+      "id": 1,
+      "type": "car",
+      "x": 60.0, "y": -1.75,
+      "vx": 6.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "城市段前车慢车（6 m/s），触发 ego 减速跟车"
+    },
+    {
+      "id": 2,
+      "type": "car",
+      "x": 100.0, "y": 1.75,
+      "vx": 9.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "邻道车，限制 ego 变道窗口"
+    },
+    {
+      "id": 3,
+      "type": "truck",
+      "x": 280.0, "y": -1.75,
+      "vx": 5.0, "vy": 0.0,
+      "len": 8.0, "wid": 2.4,
+      "_comment": "ETC 前货车（5 m/s），验证 ETC 减速跟车"
+    },
+    {
+      "id": 4,
+      "type": "car",
+      "x": 800.0, "y": 1.75,
+      "vx": 25.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "高速段快车（25 m/s），从邻道超越 ego"
+    },
+    {
+      "id": 5,
+      "type": "car",
+      "x": 750.0, "y": -1.75,
+      "vx": 20.0, "vy": 0.0,
+      "len": 4.6, "wid": 2.0,
+      "_comment": "高速段前车（20 m/s），ego 汇入后跟车"
+    }
+  ],
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "urban",
+        "length_m": 200.0,
+        "lanes": 3,
+        "lane_width": 3.5,
+        "speed_limit": 13.89,
+        "_comment": "城市段：0-200m，3 车道 50km/h"
+      },
+      {
+        "id": 1,
+        "type": "urban",
+        "length_m": 150.0,
+        "lanes": 3,
+        "lane_width": 3.5,
+        "speed_limit": 13.89,
+        "_comment": "城市段 2：200-350m，含信号路口停止线 + ETC 门架前减速段"
+      },
+      {
+        "id": 4,
+        "type": "ramp_curve",
+        "length_m": 300.0,
+        "lanes": 1,
+        "lane_width": 3.0,
+        "speed_limit": 8.33,
+        "curvature_profile": [
+          { "radius": 0, "arc": 50 },
+          { "radius": 80, "arc": 100 },
+          { "radius": -80, "arc": 100 },
+          { "radius": 0, "arc": 50 }
+        ],
+        "_comment": "ETC 匝道：350-650m，1 车道 30km/h，S 形弯道（先右弯后左弯回正）"
+      },
+      {
+        "id": 5,
+        "type": "highway",
+        "length_m": 750.0,
+        "lanes": 3,
+        "lane_width": 3.75,
+        "speed_limit": 33.33,
+        "_comment": "高速段：650-1400m，3 车道 120km/h"
+      }
+    ]
+  },
+  "traffic_lights": [
+    {
+      "id": 10,
+      "x": 180.0,
+      "y_lane": -1.75,
+      "red_s": 12.0,
+      "yellow_s": 3.0,
+      "green_s": 10.0,
+      "phase_offset_s": 0.0,
+      "_comment": "城市段路口信号灯：停止线 x=180m，红灯 12s + 黄灯 3s + 绿灯 10s = 25s 周期，phase_offset=0 → 启动即红灯"
+    }
+  ],
+  "etc_gates": [
+    {
+      "id": 20,
+      "x": 340.0,
+      "y": 0.0,
+      "approach_speed": 5.0,
+      "open_range_m": 50.0,
+      "_comment": "ETC 收费站门架：x=340m（城市段末尾），减速到 5 m/s 通过，50m 外开始抬杆"
+    }
+  ],
+  "stop_lines": [
+    {
+      "id": 30,
+      "x": 175.0,
+      "y": 0.0,
+      "_comment": "路口停止线：x=175m（信号灯 x=180 前 5m）"
+    },
+    {
+      "id": 31,
+      "x": 335.0,
+      "y": 0.0,
+      "_comment": "ETC 前停止线：x=335m（门架 x=340 前 5m）"
+    }
+  ],
+  "route": [
+    { "trigger_x": 30.0,  "target_lane": 0,  "target_speed": 0,     "label": "city_cruise" },
+    { "trigger_x": 200.0, "target_lane": 0,  "target_speed": 8.0,   "label": "approach_etc_decelerate" },
+    { "trigger_x": 350.0, "target_lane": 0,  "target_speed": 8.33,  "label": "ramp_curve_entry" },
+    { "trigger_x": 650.0, "target_lane": 0,  "target_speed": 25.0,  "label": "highway_merge_accelerate" },
+    { "trigger_x": 900.0, "target_lane": 0,  "target_speed": 30.0,  "label": "highway_cruise" }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 120.0,
+    "min_avg_speed_mps": 8.0,
+    "min_distance_m": 800.0
+  }
+}
