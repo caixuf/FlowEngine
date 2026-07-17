@@ -81,11 +81,26 @@ struct PlanningContext {
     int               route_target_lane{0}; /* 当前路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
     double            route_target_speed{0.0};/* 当前路线步骤要求的目标速度（0 = 无改变） */
     /* NOA Phase 3.2/3.3: 当前路线步骤类型 + branch_select 选中的 connecting_road id。
-     * - route_type 持续下发到 control/monitor，供下游区分普通变道/分叉选路/汇入。
+     * - route_type 持续下发到 control/monitor，供下游区分普通变道/分支选路/汇入。
      * - current_branch_id 用于 branch_select 后参考路径切换的几何参考（fallback 模式
      *   下无 esmini，仅作日志/可视化标识；HAVE_FRENET 模式下未来用于切换参考路径）。 */
     RouteStepType     route_type{ROUTE_LANE_CHANGE};
     int               current_branch_id{-1};
+
+    /* NOA Phase 6 merge 闭环：从 scene/frame entities 采样主线来车，算前后 gap
+     * 决策并入时机。entities 是世界坐标无 segment_id，用"前方同向行驶 + 主路 y 范围"
+     * 近似筛选主线车辆。
+     *
+     * merge_state: 0=未在 merge, 1=等待 gap(跟车巡航), 2=gap 充足已下发并入
+     * merge_gap_front/rear: 主路前后最近同向车的纵向间距(m)，1e9 表示无车
+     * merge_min_gap: 触发并入所需最小前 gap(m)，默认 4s 时距对应距离
+     * merge_hold_lane: gap 不足时暂保持的车道（不把 route_target_lane 下发给 control） */
+    int    merge_state{0};
+    double merge_gap_front{1e9};
+    double merge_gap_rear{1e9};
+    double merge_min_gap{30.0};
+    int    merge_hold_lane{0};
+    volatile int has_scene_frame{0};
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -288,6 +303,63 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     }
 }
 
+/* ── scene/frame 订阅回调（NOA Phase 6 merge 闭环） ─────────── */
+/* 从 flowsim_node 发布的 scene/frame 提取主线来车，缓存前后 gap 供 merge 决策。
+ *
+ * entities 是世界坐标(x/y/vx/vy)，无 segment_id 字段。主线筛选启发式：
+ *   - 类型为 car/suv/truck（排除 ego/pedestrian/tl/etc_gate/stop_line）
+ *   - 同向行驶：vx > 2 m/s（主路车流方向，与 ego 一致）
+ *   - 主路 y 范围：|y - ego_y| < 6m（粗略排除对向车道和匝道车）
+ *
+ * gap 计算：相对 ego 的纵向 dx = ent.x - ego_x
+ *   - 前方车：dx > 0，取最近一辆的 dx 为 merge_gap_front
+ *   - 后方车：dx < 0，取最近一辆的 |dx| 为 merge_gap_rear
+ * 同时考虑相对速度：前车比 ego 慢则 gap 会缩小，用 TTC 加权 min_gap。 */
+static void on_scene_frame(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    if (g.route_type != ROUTE_MERGE) {
+        /* 非 merge 状态无需每帧解析 entities（省 CPU） */
+        g.has_scene_frame = 1;
+        return;
+    }
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* entities = cJSON_GetObjectItem(root, "entities");
+    if (!entities || !cJSON_IsArray(entities)) { cJSON_Delete(root); return; }
+
+    double gap_front = 1e9, gap_rear = 1e9;
+    double ego_x = g.ego_x, ego_y = g.ego_y;
+    const double MAINLINE_Y_TOL = 6.0;   /* 主路 y 容差(m) */
+    const double SAMEDIR_VX_MIN = 2.0;   /* 同向最低速度(m/s) */
+
+    cJSON* ent;
+    cJSON_ArrayForEach(ent, entities) {
+        cJSON* jtype = cJSON_GetObjectItem(ent, "type");
+        if (!jtype || !cJSON_IsString(jtype)) continue;
+        const char* t = jtype->valuestring;
+        if (strcmp(t, "car") != 0 && strcmp(t, "suv") != 0 && strcmp(t, "truck") != 0) continue;
+
+        cJSON* jx = cJSON_GetObjectItem(ent, "x");
+        cJSON* jy = cJSON_GetObjectItem(ent, "y");
+        cJSON* jvx = cJSON_GetObjectItem(ent, "vx");
+        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy) || !cJSON_IsNumber(jvx)) continue;
+
+        double ex = jx->valuedouble, ey = jy->valuedouble, evx = jvx->valuedouble;
+        if (evx < SAMEDIR_VX_MIN) continue;                 /* 仅同向来车 */
+        if (fabs(ey - ego_y) > MAINLINE_Y_TOL) continue;    /* 仅主路 y 范围 */
+
+        double dx = ex - ego_x;
+        if (dx > 0.0 && dx < gap_front) gap_front = dx;
+        else if (dx < 0.0 && -dx < gap_rear) gap_rear = -dx;
+    }
+    cJSON_Delete(root);
+
+    g.merge_gap_front = gap_front;
+    g.merge_gap_rear  = gap_rear;
+    g.has_scene_frame = 1;
+}
+
 /* ── road/traffic_lights 订阅回调（Phase 2 红绿灯） ────────── */
 /* 从 sim_world 发布的 road/traffic_lights topic 获取红绿灯状态。
  * JSON 格式: {"lights":[{"id":0,"x":100.0,"y_lane":-1.75,
@@ -406,21 +478,28 @@ protected:
                 case ROUTE_MERGE: {
                     /* 加速车道汇入：强制 target_speed（加速到主路速度）+ target_lane
                      * （汇入后车道方向）。control 节点在 merge 状态下做 gap 检查 +
-                     * 加速 + 横向汇入。target_lane 缺省 +1（汇入左侧主路）。 */
+                     * 加速 + 横向汇入。target_lane 缺省 +1（汇入左侧主路）。
+                     *
+                     * NOA Phase 6 merge 闭环：进入 merge 后先置 state=1（等 gap），
+                     * 主循环根据 scene/frame 的主线来车 gap 决策何时下发并入。
+                     * gap 不足期间 route_target_lane 暂存到 merge_hold_lane 并置 0
+                     * （不下发变道），control 保持当前车道跟车巡航。 */
                     int lane = (step->target_lane != 0) ? step->target_lane : 1;
                     g.route_target_lane = lane;
+                    g.merge_hold_lane = lane;       /* 暂存，gap 充足时恢复 */
+                    g.merge_state = 1;              /* 进入等 gap 状态 */
                     g.current_branch_id = -1;
                     if (step->target_speed > 0.0) {
                         g.route_target_speed = step->target_speed;
                         LOG_INFO("planning",
-                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s (%s)",
+                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s wait_gap (%s)",
                                  g.route_next_idx, g.ego_x, lane, step->target_speed,
                                  step->label[0] ? step->label : "-");
                     } else {
                         /* merge 必须有 target_speed（加速目标），缺省用 cfg_max_speed */
                         g.route_target_speed = g.cfg_max_speed;
                         LOG_INFO("planning",
-                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s (default, %s)",
+                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s wait_gap (default, %s)",
                                  g.route_next_idx, g.ego_x, lane, g.cfg_max_speed,
                                  step->label[0] ? step->label : "-");
                     }
@@ -461,6 +540,41 @@ protected:
             /* NOA 路线步骤可能指定目标速度（如出口匝道减速），覆盖纯粹的巡航速度。
              * 叠加关系：route_target_speed > 0 时作为最终目标，否则用默认 target_speed。 */
             double command_speed = (g.route_target_speed > 0.0) ? g.route_target_speed : g.target_speed;
+
+            /* ── NOA Phase 6 merge 闭环：基于 scene/frame 主线来车 gap 决策并入 ──
+             * merge_state==1（等 gap）：用 on_scene_frame 缓存的前后 gap 判断
+             *   - 前 gap ≥ min_gap 且 后 gap ≥ min_gap*0.6 → state=2，恢复 route_target_lane 下发并入
+             *   - 否则：route_target_lane 置 0（不下发变道），command_speed 跟前车（gap_front<60m 时按 TTC 限速）
+             * merge_state==2（已下发并入）：保持 route_target_lane，不再干预
+             * 无 scene/frame 数据时（has_scene_frame==0）保守放行，避免阻塞 demo。 */
+            if (g.merge_state == 1 && g.route_type == ROUTE_MERGE) {
+                double gf = g.merge_gap_front, gr = g.merge_gap_rear;
+                double min_front = g.merge_min_gap;
+                double min_rear  = g.merge_min_gap * 0.6;
+                if (!g.has_scene_frame || (gf >= min_front && gr >= min_rear)) {
+                    /* gap 充足或无数据 → 放行并入 */
+                    g.route_target_lane = g.merge_hold_lane;
+                    g.merge_state = 2;
+                    LOG_INFO("planning",
+                             "NOA merge gap OK front=%.0f rear=%.0f -> commit lane=%d",
+                             gf, gr, g.merge_hold_lane);
+                } else {
+                    /* gap 不足：跟车巡航，不下发变道 */
+                    g.route_target_lane = 0;
+                    /* 前 gap < 60m 时按 3s TTC 限速跟随前车 */
+                    if (gf < 60.0 && gf > 0.0) {
+                        double follow_speed = (gf - 5.0) / 3.0;  /* (gap-5m)/3s */
+                        if (follow_speed < 0.0) follow_speed = 0.0;
+                        if (follow_speed > command_speed) follow_speed = command_speed;
+                        command_speed = follow_speed;
+                    }
+                    if (g.plan_count % 25 == 0) {
+                        LOG_INFO("planning",
+                                 "NOA merge wait gap front=%.0f rear=%.0f (need f>=%.0f r>=%.0f) follow=%.1f",
+                                 gf, gr, min_front, min_rear, command_speed);
+                    }
+                }
+            }
 
             /* ── Phase 5: 会车让行 + 窄路减速 ────────────────
              * 在 Frenet 规划前调整 command_speed,让规划器在约束下生成轨迹。
@@ -731,7 +845,7 @@ void* planning_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", "road/traffic_lights", nullptr };
+static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", "road/traffic_lights", "scene/frame", nullptr };
 static const char* s_outputs[] = { "planning/trajectory", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -841,6 +955,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
     transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, nullptr);
+    transport_subscribe(transport, "scene/frame", on_scene_frame, nullptr);
     transport_advertise(transport, "planning/trajectory", 0x3A7B1C2Du);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
@@ -850,6 +965,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/traffic_lights", 0x7E5C0FFEu,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "scene/frame",         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);
