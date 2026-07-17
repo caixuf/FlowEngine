@@ -63,9 +63,9 @@ static struct {
     DiscoveryManager* discovery;
     Scheduler*        scheduler;
 
-    pthread_t         thread;
-    volatile int      running;
-    volatile int      should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 ota_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     ReflectiveStateMachine sm;
 
@@ -568,11 +568,10 @@ static void run_ab_inference(void) {
 }
 
 /* ─────────────────────────────────────────────────────────── */
-/*  主线程                                                      */
+/*  主循环（托管模式 execute）                                   */
 /* ─────────────────────────────────────────────────────────── */
 
-static void* ota_thread(void* arg) {
-    (void)arg;
+static int ota_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "model_ota");
 
     const useconds_t poll_us = (useconds_t)(g.poll_interval_ms * 1000);
@@ -583,9 +582,9 @@ static void* ota_thread(void* arg) {
 
     uint64_t t_last_us = clock_now_us();
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep(poll_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         uint64_t t_now_us = clock_now_us();
         double dt = (double)(t_now_us - t_last_us) * 1e-6;
@@ -613,8 +612,15 @@ static void* ota_thread(void* arg) {
              g.reload_count, g.rollback_count);
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface ota_vtable = {
+    .execute = ota_execute,
+};
 
 /* ─────────────────────────────────────────────────────────── */
 /*  NodePlugin 实现                                             */
@@ -642,7 +648,6 @@ static int ota_init(MessageBus* bus, Transport* transport,
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
 
     /* 默认配置 */
     g.poll_interval_ms = 500;
@@ -717,6 +722,22 @@ static int ota_init(MessageBus* bus, Transport* transport,
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "model_ota");
     statem_send_event(&g.sm, SM_EVENT_START, NULL);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 取主循环轮询频率（usleep = poll_interval_ms * 1000us），与 execute()
+     * 内 usleep 周期一致；cfg_status_hz 是 status 发布子频率，不作为循环速率。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "model_ota");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.poll_interval_ms > 0
+                           ? 1000.0 / (double)g.poll_interval_ms : 0.0;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &ota_vtable, &cfg) != 0) {
+        LOG_WARN("model_ota", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("model_ota",
              "initialized (versions=%d current='%s' poll=%dms ab=%s)",
              g.version_count,
@@ -727,27 +748,30 @@ static int ota_init(MessageBus* bus, Transport* transport,
 }
 
 static int ota_start(void) {
-    g.running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, ota_thread, NULL) != 0) {
-        LOG_WARN("model_ota", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * ota_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("model_ota", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("model_ota", "started [state=%s]",
+    LOG_INFO("model_ota", "started (managed) [state=%s]",
              statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
-static void ota_stop(void) { g.should_stop = 1; }
+static void ota_stop(void) {
+    /* task_stop 置 should_stop=true 并 join 工作线程（ota_execute 随即退出）。 */
+    task_stop(&g.taskbase);
+}
 
 static void ota_cleanup(void) {
-    if (g.running) {
-        g.should_stop = 1;
-        pthread_join(g.thread, NULL);
-        g.running = 0;
-    }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源。reg_mutex 与版本注册表持久化与此
+     * 无关，保持原有清理流程不变。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     registry_save();
     pthread_mutex_destroy(&g.reg_mutex);
     LOG_INFO("model_ota", "cleanup done");
@@ -767,6 +791,7 @@ static NodePlugin s_plugin = {
     .stop          = ota_stop,
     .cleanup       = ota_cleanup,
     .health        = ota_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

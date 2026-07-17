@@ -98,6 +98,7 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
     /* 配置参数（pipeline.json 注入） */
     int    enabled;            /* 总开关，false=不订阅也不发布 */
@@ -137,10 +138,9 @@ static struct {
     uint64_t imu_samples_received;
     time_t   last_imu_time;   /* 最近一次收到 IMU 的墙上时间（health 用） */
 
-    /* 工作线程 */
-    pthread_t thread;
-    volatile int thread_running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 slam_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 } g;
 
 /* ── 订阅回调：收到 sensor/lidar ─────────────────────────────
@@ -361,15 +361,17 @@ static void slam_update(Pose2D* pose) {
     slam_update_dead_reckon(pose);
 }
 
-/* ── 工作线程：周期调用 slam_update → 序列化 → 发布 sensor/pose ── */
-
-static void* slam_thread(void* arg) {
-    (void)arg;
+/* ── 托管模式主循环：周期调用 slam_update → 序列化 → 发布 sensor/pose ──
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 slam_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int slam_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "slam_node");
 
     long period_ms = 1000L / (g.publish_hz > 0 ? g.publish_hz : 20);
 
-    while (g.thread_running && !g.should_stop) {
+    while (!task->should_stop) {
         if (!g.enabled) {
             usleep((unsigned long)period_ms * 1000UL);
             continue;
@@ -421,8 +423,15 @@ static void* slam_thread(void* arg) {
         long remain  = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface slam_vtable = {
+    .execute = slam_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -434,10 +443,11 @@ static NodePlugin s_plugin;
 static int slam_init(MessageBus* bus, Transport* transport,
                      DiscoveryManager* discovery, Scheduler* scheduler,
                      const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
+    g.scheduler = scheduler;
 
     pthread_mutex_init(&g.lock, NULL);
 
@@ -547,6 +557,20 @@ static int slam_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "sensor/pose",
                         POSE2D_TYPE_ID, CAP_PUBLISHER, (double)g.publish_hz);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "slam");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.publish_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &slam_vtable, &cfg) != 0) {
+        LOG_WARN("slam", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("slam", "initialized: algo=%s hz=%d lidar=%d imu=%d "
              "init=[%.1f,%.1f,%.3f] %s",
              g.algo, g.publish_hz, g.use_lidar, g.use_imu,
@@ -568,28 +592,30 @@ static int slam_init(MessageBus* bus, Transport* transport,
 
 static int slam_start(void) {
     if (!g.enabled) return 0;
-    g.thread_running = 1;
-    g.should_stop    = 0;
-    if (pthread_create(&g.thread, NULL, slam_thread, NULL) != 0) {
-        LOG_WARN("slam", "worker thread create failed");
-        g.thread_running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * slam_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("slam", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("slam", "started (publish %dHz, algo=%s, %s)",
+    LOG_INFO("slam", "started (managed) (publish %dHz, algo=%s, %s)",
              g.publish_hz, g.algo, g.dry_run ? "dry-run" : "live");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void slam_stop(void) {
-    g.should_stop    = 1;
-    g.thread_running = 0;
+    /* task_stop 置 should_stop=true 并 join 工作线程（slam_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void slam_cleanup(void) {
-    g.thread_running = 0;
-    g.should_stop    = 1;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     pthread_mutex_destroy(&g.lock);
 #ifdef HAVE_FAST_LIO2
     if (strcmp(g.algo, "fast_lio2") == 0) {
@@ -624,6 +650,7 @@ static NodePlugin s_plugin = {
     .stop          = slam_stop,
     .cleanup       = slam_cleanup,
     .health        = slam_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

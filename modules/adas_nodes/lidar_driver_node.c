@@ -74,6 +74,7 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
     /* 硬件句柄，NULL 表示未连接（dry-run 模式） */
     SerialPort*   serial;
@@ -104,10 +105,9 @@ static struct {
     uint64_t obstacles_published;  /* 累计发布的障碍物数 */
     time_t   last_frame_time;      /* 最近一次成功读帧的时间（health 用） */
 
-    /* 工作线程 */
-    pthread_t thread;
-    volatile int thread_running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 lidar_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase taskbase;
 } g;
 
 /* [lo, hi] 均匀随机浮点。 */
@@ -250,15 +250,17 @@ static int read_lidar_frame(Point3D* points, int max_points, int frame_budget_ms
     return n;
 }
 
-/* ── 工作线程：读帧 → DBSCAN → 发布 ObstacleList ──────────── */
-
-static void* lidar_thread(void* arg) {
-    (void)arg;
+/* ── 托管模式主循环：读帧 → DBSCAN → 发布 ObstacleList ────────────
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 lidar_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int lidar_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "lidar_drv");
 
     long period_ms = 1000L / (g.scan_hz > 0 ? g.scan_hz : 10);
 
-    while (g.thread_running && !g.should_stop) {
+    while (!task->should_stop) {
         if (!g.enabled) {
             usleep((unsigned long)period_ms * 1000UL);
             continue;
@@ -327,8 +329,15 @@ static void* lidar_thread(void* arg) {
         long remain = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface lidar_vtable = {
+    .execute = lidar_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -340,7 +349,8 @@ static NodePlugin s_plugin;
 static int lidar_init(MessageBus* bus, Transport* transport,
                       DiscoveryManager* discovery, Scheduler* scheduler,
                       const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
+    g.scheduler = scheduler;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
@@ -442,6 +452,20 @@ static int lidar_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, g.output_topic,
                         OBSTACLELIST_TYPE_ID, CAP_PUBLISHER, (double)g.scan_hz);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "lidar_driver");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.scan_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &lidar_vtable, &cfg) != 0) {
+        LOG_WARN("lidar_driver", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("lidar_driver", "initialized: serial=%s baud=%d scan=%dHz "
              "eps=%.2f min_pts=%d ground_z=%.2f max_pts=%d max_range=%.1fm %s",
              g.serial_port, g.baud_rate, g.scan_hz,
@@ -460,27 +484,24 @@ static int lidar_init(MessageBus* bus, Transport* transport,
 
 static int lidar_start(void) {
     if (!g.enabled) return 0;
-    g.thread_running = 1;
-    g.should_stop    = 0;
-    if (pthread_create(&g.thread, NULL, lidar_thread, NULL) != 0) {
-        LOG_WARN("lidar_driver", "worker thread create failed");
-        g.thread_running = 0;
-        return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("lidar_driver", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("lidar_driver", "started (scan %dHz, %s)",
+    LOG_INFO("lidar_driver", "started (managed) (scan %dHz, %s)",
              g.scan_hz, g.dry_run ? "dry-run" : "live serial");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void lidar_stop(void) {
-    g.should_stop    = 1;
-    g.thread_running = 0;
+    task_stop(&g.taskbase);
 }
 
 static void lidar_cleanup(void) {
-    g.thread_running = 0;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     if (g.point_buf) { free(g.point_buf); g.point_buf = NULL; g.point_buf_cap = 0; }
     if (g.serial) { serial_close(g.serial); g.serial = NULL; }
     LOG_INFO("lidar_driver", "cleanup: frames=%lu clusters=%lu obstacles=%lu",
@@ -509,6 +530,7 @@ static NodePlugin s_plugin = {
     .stop          = lidar_stop,
     .cleanup       = lidar_cleanup,
     .health        = lidar_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

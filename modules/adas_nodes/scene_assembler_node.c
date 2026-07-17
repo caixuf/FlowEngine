@@ -45,9 +45,9 @@ static struct {
     DiscoveryManager* discovery;
     Scheduler*        scheduler;
 
-    pthread_t    thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 assembler_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     ReflectiveStateMachine sm;
 
@@ -239,15 +239,17 @@ static const char* degradation_str(DegradationLevel lv) {
     }
 }
 
-/* ── 聚合线程 ────────────────────────────────────────────────── */
-
-static void* assembler_thread(void* arg) {
-    (void)arg;
+/* ── 聚合主循环（托管模式） ─────────────────────────────────────
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 assembler_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int assembler_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "assembler");
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep(100000);  /* 10 Hz */
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         uint64_t now_us = clock_now_us();
         DegradationLevel degrade = assess_degradation(now_us);
@@ -390,8 +392,15 @@ static void* assembler_thread(void* arg) {
     LOG_INFO("assembler", "stopped (%d frames)", g.frame_count);
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整聚合主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface assembler_vtable = {
+    .execute = assembler_execute,
+};
 
 /* ── NodePlugin 接口 ────────────────────────────────────────── */
 
@@ -414,7 +423,6 @@ static int assembler_init(MessageBus* bus, Transport* transport,
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
 
     transport_subscribe(transport, "fusion/localization",          on_localization,    NULL);
     transport_subscribe(transport, "perception/tracked_objects",   on_tracked_objects, NULL);
@@ -431,26 +439,48 @@ static int assembler_init(MessageBus* bus, Transport* transport,
     statem_send_event(&g.sm, SM_EVENT_START, NULL);
 
     LOG_INFO("assembler", "initialized (7 inputs → scene/environment_model @ 10 Hz)");
+
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep(100000) 的 10 Hz 对齐。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "scene_assembler");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = 10.0;  /* usleep(100000) → 10 Hz */
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &assembler_vtable, &cfg) != 0) {
+        LOG_WARN("scene_assembler", "task_base_init failed");
+        return -1;
+    }
     return 0;
 }
 
 static int assembler_start(void) {
-    g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, assembler_thread, NULL) != 0) {
-        LOG_WARN("assembler", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * assembler_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("assembler", "node_start_managed failed: %d", rc);
+        return rc;
     }
     node_announce_self(g.transport, &s_plugin);
-    LOG_INFO("assembler", "started");
+    LOG_INFO("assembler", "started (managed)");
     return 0;
 }
 
-static void assembler_stop(void)  { g.should_stop = 1; }
+static void assembler_stop(void) {
+    /* task_stop 置 should_stop=true 并 join 工作线程（assembler_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
+}
 static int  assembler_health(void) { return g.has_ego && g.has_tracked ? 0 : 1; }
 
 static void assembler_cleanup(void) {
-    if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     LOG_INFO("assembler", "cleanup done");
 }
 
@@ -466,6 +496,7 @@ static NodePlugin s_plugin = {
     .stop          = assembler_stop,
     .cleanup       = assembler_cleanup,
     .health        = assembler_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

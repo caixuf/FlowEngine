@@ -117,6 +117,7 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
     /* 配置参数（pipeline.json 注入） */
     int    enabled;          /* 总开关，false=不读相机也不发布 */
@@ -137,10 +138,9 @@ static struct {
     /* dry-run 提示只打一次，避免刷屏 */
     int    dry_run_warned;
 
-    /* 读取线程 */
-    pthread_t     thread;
-    volatile int  thread_running;
-    volatile int  should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 stereo_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase taskbase;
 } g;
 
 /* ── 硬件适配点：读取一帧立体数据（左图 + 深度图） ───────────
@@ -278,22 +278,25 @@ static int read_stereo_frame(StereoFrame* out) {
 #endif
 }
 
-/* ── 读取线程：循环 read_stereo_frame → serialize → publish ─
+/* ── 托管模式主循环：循环 read_stereo_frame → serialize → publish ─
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 stereo_reader_thread 行为等价，只是 should_stop 改由 TaskBase 提供。
  *
  * 真实模式（HAVE_DEPTHAI）：通过桥接函数从 OAK-D 取 left + depth，按 fps 节拍发布。
  * dry-run 模式：无硬件，按 fps 生成模拟立体数据，走完整 publish 链路。
  */
-static void* stereo_reader_thread(void* arg) {
-    (void)arg;
+static int stereo_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "stereo_reader");
     long period_us = 1000000L / (g.fps > 0 ? g.fps : 10);
 
     /* StereoFrame 序列化后固定 44828 字节，线程栈上分配（默认 8MB 栈无压力） */
     uint8_t buf[44828];
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep((unsigned long)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         StereoFrame frame;
         if (read_stereo_frame(&frame) != 0) {
@@ -324,8 +327,15 @@ static void* stereo_reader_thread(void* arg) {
             LOG_ERROR("stereo_camera", "StereoFrame_serialize failed (len=%zu)", len);
         }
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface stereo_vtable = {
+    .execute = stereo_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -337,7 +347,8 @@ static NodePlugin s_plugin;
 static int stereo_camera_init(MessageBus* bus, Transport* transport,
                               DiscoveryManager* discovery, Scheduler* scheduler,
                               const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
+    g.scheduler = scheduler;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
@@ -395,6 +406,20 @@ static int stereo_camera_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "sensor/stereo", STEREOFRAME_TYPE_ID,
                         CAP_PUBLISHER, (double)g.fps);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "stereo_camera");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.fps;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &stereo_vtable, &cfg) != 0) {
+        LOG_WARN("stereo_camera", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("stereo_camera", "initialized: %dx%d fps=%d baseline=%.3fm fov=%.1f "
              "jpeg_q=%d device='%s' %s",
              g.width, g.height, g.fps, g.baseline_m, g.fov_deg,
@@ -411,27 +436,24 @@ static int stereo_camera_init(MessageBus* bus, Transport* transport,
 
 static int stereo_camera_start(void) {
     if (!g.enabled) return 0;
-    g.thread_running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, stereo_reader_thread, NULL) != 0) {
-        LOG_WARN("stereo_camera", "reader thread create failed");
-        return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("stereo_camera", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("stereo_camera", "started (%s, %dfps target)",
+    LOG_INFO("stereo_camera", "started (managed) (%s, %dfps target)",
              g.dry_run ? "dry-run" : "live OAK-D", g.fps);
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void stereo_camera_stop(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
+    task_stop(&g.taskbase);
 }
 
 static void stereo_camera_cleanup(void) {
-    g.thread_running = 0;
-    g.should_stop = 1;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     LOG_INFO("stereo_camera", "cleanup: captured=%lu failed=%lu published=%lu",
              (unsigned long)g.frames_captured,
              (unsigned long)g.frames_failed,
@@ -459,6 +481,7 @@ static NodePlugin s_plugin = {
     .stop          = stereo_camera_stop,
     .cleanup       = stereo_camera_cleanup,
     .health        = stereo_camera_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

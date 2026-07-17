@@ -99,10 +99,11 @@ typedef struct {
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
-    pthread_t   thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 sim_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     /* 反射式状态机：跟踪生命周期 */
     ReflectiveStateMachine sm;
@@ -389,7 +390,7 @@ static void vehicle_tick(void) {
 /* Phase 2 统一道路几何：sim_world 作为道路几何的唯一权威发布者，
  * control/planning/monitor 通过订阅本 topic 获取弯道参数，
  * 消除三节点各自 scenario_load 的冗余。
- * init() 时发布一次 + sim_thread 中每 ~1s 重发，确保后启动的订阅者也能收到。 */
+ * init() 时发布一次 + sim_execute 中每 ~1s 重发，确保后启动的订阅者也能收到。 */
 #define ROAD_GEOMETRY_TYPE_ID          0x80AD5C12u
 #define ROAD_GEOMETRY_REPUBLISH_CYCLES 50  /* 50 cycle ≈ 1s @ 50Hz */
 
@@ -623,8 +624,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
 
 /* ── 任务线程 ────────────────────────────────────────────────── */
 
-static void* sim_thread(void* arg) {
-    (void)arg;
+static int sim_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "sim_world");
 
     /* P0.1: 仿真时钟从 0 开始步进（逻辑时间，不依赖 wall-clock） */
@@ -632,10 +632,10 @@ static void* sim_thread(void* arg) {
     clock_set_sim_time(0);
     clock_set_step_us(DT_US);
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         /* 用 wall-clock sleep 来限制实时输出速率，但逻辑时间由 clock 独立管理 */
         usleep((unsigned long)DT_US);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         /* 控制指令陈旧超时: 500ms 未收到则回退到内置巡航 */
         if (g.has_control_input) {
@@ -834,8 +834,15 @@ static void* sim_thread(void* arg) {
              statem_state_name(&g.sm, g.sm.current));
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface sim_vtable = {
+    .execute = sim_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -846,12 +853,12 @@ static NodePlugin s_plugin;  /* forward decl */
 static int sim_init(MessageBus* bus, Transport* transport,
                     DiscoveryManager* discovery, Scheduler* scheduler,
                     const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
 
     memset(&g, 0, sizeof(g));
     g.transport    = transport;
     g.discovery    = discovery;
-    g.should_stop  = 0;
+    g.scheduler    = scheduler;
 
     /* 默认参数 */
     g.init_speed    = 5.0;
@@ -1011,6 +1018,20 @@ static int sim_init(MessageBus* bus, Transport* transport,
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "sim_world");
     statem_send_event(&g.sm, SM_EVENT_START, NULL);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "sim_world");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = FREQUENCY_HZ;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &sim_vtable, &cfg) != 0) {
+        LOG_WARN("sim_world", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("sim_world", "initialized (init=%.1f m/s, target=%.1f m/s, %.0f Hz, "
              "seed=%u, actors=%d, scenario='%s')",
              g.init_speed, g.target_speed, FREQUENCY_HZ,
@@ -1020,20 +1041,28 @@ static int sim_init(MessageBus* bus, Transport* transport,
 }
 
 static int sim_start(void) {
-    g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, sim_thread, NULL) != 0) {
-        LOG_WARN("sim_world", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * sim_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("sim_world", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("sim_world", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
+    LOG_INFO("sim_world", "started (managed) [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
     return 0;
 }
 
-static void sim_stop(void)          { g.should_stop = 1; }
+static void sim_stop(void) {
+    /* task_stop 置 should_stop=true 并 join 工作线程（sim_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
+}
 static void sim_cleanup(void) {
-    if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     LOG_INFO("sim_world", "cleanup done");
 }
 static int  sim_health(void)        { return 0; }
@@ -1050,6 +1079,7 @@ static NodePlugin s_plugin = {
     .stop          = sim_stop,
     .cleanup       = sim_cleanup,
     .health        = sim_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

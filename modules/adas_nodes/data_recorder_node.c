@@ -40,9 +40,9 @@ static struct {
     DiscoveryManager* discovery;
     Scheduler*        scheduler;
 
-    pthread_t    thread;
-    volatile int running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 recorder_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     ReflectiveStateMachine sm;
 
@@ -159,16 +159,20 @@ static cJSON* build_obstacle_json(const Obstacle* obs) {
     return obj;
 }
 
-static void* recorder_thread(void* arg) {
-    (void)arg;
+/* ── 托管模式主循环：按 cfg_frequency_hz 采样并落盘训练样本 ──
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 recorder_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int recorder_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "recorder");
 
     double period = g.cfg_frequency_hz > 0.0 ? 1.0 / g.cfg_frequency_hz : 0.1;
     useconds_t sleep_us = (useconds_t)(period * 1e6);
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep(sleep_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
         /* 只在两路数据都到齐时采样，保证 (特征,标签) 完整 */
         if (!g.has_fusion || !g.has_planning || !g.out) continue;
 
@@ -235,8 +239,15 @@ static void* recorder_thread(void* arg) {
     LOG_INFO("recorder", "stopped (%d samples → %s)", g.sample_count, g.out_path);
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整采样主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface recorder_vtable = {
+    .execute = recorder_execute,
+};
 
 static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "perception/obstacles", "control/cmd", NULL };
 static const char* s_outputs[] = { NULL };
@@ -252,7 +263,6 @@ static int recorder_init(MessageBus* bus, Transport* transport,
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
 
     g.cfg_frequency_hz = 10.0;
     strncpy(g.out_path, "/tmp/flow_train_samples.jsonl", sizeof(g.out_path) - 1);
@@ -294,25 +304,47 @@ static int recorder_init(MessageBus* bus, Transport* transport,
 
     LOG_INFO("recorder", "initialized (%.0f Hz → %s)",
              g.cfg_frequency_hz, g.out_path);
+
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "data_recorder");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = g.cfg_frequency_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &recorder_vtable, &cfg) != 0) {
+        LOG_WARN("data_recorder", "task_base_init failed");
+        return -1;
+    }
     return 0;
 }
 
 static int recorder_start(void) {
-    g.running = 1; g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, recorder_thread, NULL) != 0) {
-        LOG_WARN("recorder", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * recorder_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("recorder", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("recorder", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
+    LOG_INFO("recorder", "started (managed) [state=%s]", statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
-static void recorder_stop(void) { g.should_stop = 1; }
+static void recorder_stop(void) {
+    /* task_stop 置 should_stop=true 并 join 工作线程（recorder_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
+}
 
 static void recorder_cleanup(void) {
-    if (g.running) { g.should_stop = 1; pthread_join(g.thread, NULL); g.running = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     if (g.out) { fclose(g.out); g.out = NULL; }
     LOG_INFO("recorder", "cleanup done");
 }
@@ -331,6 +363,7 @@ static NodePlugin s_plugin = {
     .stop          = recorder_stop,
     .cleanup       = recorder_cleanup,
     .health        = recorder_health,
+    .taskbase      = &g.taskbase,
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

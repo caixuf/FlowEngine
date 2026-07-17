@@ -58,9 +58,9 @@ static struct {
     DiscoveryManager* discovery;
     Scheduler*        scheduler;
 
-    pthread_t         thread;
-    volatile int      running;
-    volatile int      should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 learner_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 
     ReflectiveStateMachine sm;
 
@@ -291,10 +291,9 @@ static float do_train_step(void) {
     return total_loss / (float)batch;
 }
 
-/* ── 主训练线程 ─────────────────────────────────────────────────── */
+/* ── 主训练循环（托管模式 execute） ─────────────────────────────── */
 
-static void* learner_thread(void* arg) {
-    (void)arg;
+static int learner_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "learner");
 
     /* 采样频率 20 Hz，训练频率 cfg_train_hz（通常 0.5~2 Hz） */
@@ -305,9 +304,9 @@ static void* learner_thread(void* arg) {
     double accum = 0.0;
     uint64_t t_last_us = clock_now_us();
 
-    while (!g.should_stop) {
+    while (!task->should_stop) {
         usleep(sample_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         /* 1. 采样 */
         push_sample();
@@ -380,8 +379,15 @@ static void* learner_thread(void* arg) {
     LOG_INFO("learner", "stopped (step=%d loss=%.4f)", g.train_step, (double)g.running_loss);
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface learner_vtable = {
+    .execute = learner_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -407,7 +413,6 @@ static int learner_init(MessageBus* bus, Transport* transport,
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = 0;
 
     /* 默认配置 */
     g.cfg_train_hz      = 0.5;
@@ -487,6 +492,21 @@ static int learner_init(MessageBus* bus, Transport* transport,
     statem_init(&g.sm, NULL, SM_STATE_INITIALIZED, "learner");
     statem_send_event(&g.sm, SM_EVENT_START, NULL);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 取主循环采样频率（usleep 50000us = 20 Hz），与 execute() 内 usleep 周期
+     * 一致；cfg_train_hz 是训练子频率，不作为循环速率。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "learner");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = 1000000.0 / 50000.0;  /* 20 Hz 采样循环 */
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &learner_vtable, &cfg) != 0) {
+        LOG_WARN("learner", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("learner",
              "initialized (train=%.2fHz lr=%.5f batch=%d buf=%d %s → %s)",
              g.cfg_train_hz, (double)g.cfg_lr, g.cfg_batch_size, g.buf_size,
@@ -496,29 +516,30 @@ static int learner_init(MessageBus* bus, Transport* transport,
 }
 
 static int learner_start(void) {
-    g.running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, learner_thread, NULL) != 0) {
-        LOG_WARN("learner", "pthread_create failed: %s", strerror(errno));
-        g.running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * learner_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("learner", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("learner", "started [state=%s]",
+    LOG_INFO("learner", "started (managed) [state=%s]",
              statem_state_name(&g.sm, g.sm.current));
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void learner_stop(void) {
-    g.should_stop = 1;
+    /* task_stop 置 should_stop=true 并 join 工作线程（learner_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void learner_cleanup(void) {
-    if (g.running) {
-        g.should_stop = 1;
-        pthread_join(g.thread, NULL);
-        g.running = 0;
-    }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     /* 退出前最后保存一次 */
     if (g.model.loaded && g.train_step > 0) {
         pthread_mutex_lock(&g.model_mutex);
@@ -549,6 +570,7 @@ static NodePlugin s_plugin = {
     .stop          = learner_stop,
     .cleanup       = learner_cleanup,
     .health        = learner_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

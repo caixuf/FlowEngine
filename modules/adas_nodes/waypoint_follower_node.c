@@ -125,10 +125,9 @@ static struct {
     uint64_t wp_advanced;
     int    lap_count;               /* 循环模式下完成的圈数 */
 
-    /* 工作线程 */
-    pthread_t thread;
-    volatile int thread_running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 wp_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 } g;
 
 /* ── 加载航点文件 ───────────────────────────────────────────
@@ -439,13 +438,16 @@ static int pure_pursuit_step(double ego_x, double ego_y, double ego_heading,
     return 0;
 }
 
-/* ── 工作线程 ─────────────────────────────────────────────── */
-static void* wp_thread(void* arg) {
-    (void)arg;
+/* ── 托管模式主循环 ─────────────────────────────────────────
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 wp_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int wp_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "wp_follow");
     long period_ms = 1000L / (g.plan_hz > 0 ? g.plan_hz : 10);
 
-    while (g.thread_running && !g.should_stop) {
+    while (!task->should_stop) {
         long t0 = (long)(clock_now_us() / 1000);
 
         if (!g.has_fusion) {
@@ -517,8 +519,15 @@ static void* wp_thread(void* arg) {
         long remain = period_ms - elapsed;
         if (remain > 0) usleep((unsigned long)remain * 1000UL);
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface wp_vtable = {
+    .execute = wp_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -590,6 +599,20 @@ static int wp_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "planning/trajectory", 0x0, CAP_PUBLISHER, (double)g.plan_hz);
     transport_advertise(transport, "planning/trajectory", 0x0);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "waypoint_follower");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.plan_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &wp_vtable, &cfg) != 0) {
+        LOG_WARN("waypoint_follower", "task_base_init failed");
+        return -1;
+    }
+
     LOG_INFO("waypoint_follower", "initialized: file=%s wps=%d loop=%d "
              "cruise=%.1fm/s lookahead=%.2fm obs_slow=%.1fm obs_stop=%.1fm hz=%d",
              g.waypoints_file, g.wp_count, g.loop, g.cruise_speed, g.lookahead_m,
@@ -598,27 +621,29 @@ static int wp_init(MessageBus* bus, Transport* transport,
 }
 
 static int wp_start(void) {
-    g.thread_running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, wp_thread, NULL) != 0) {
-        LOG_WARN("waypoint_follower", "thread create failed");
-        g.thread_running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * wp_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("waypoint_follower", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("waypoint_follower", "started (Pure Pursuit, %dHz)", g.plan_hz);
+    LOG_INFO("waypoint_follower", "started (managed) (Pure Pursuit, %dHz)", g.plan_hz);
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void wp_stop(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
+    /* task_stop 置 should_stop=true 并 join 工作线程（wp_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void wp_cleanup(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     pthread_mutex_destroy(&g.lock);
     LOG_INFO("waypoint_follower", "cleanup: plans=%lu wp_adv=%lu laps=%d",
              (unsigned long)g.plans_published,
@@ -642,6 +667,7 @@ static NodePlugin s_plugin = {
     .stop          = wp_stop,
     .cleanup       = wp_cleanup,
     .health        = wp_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }

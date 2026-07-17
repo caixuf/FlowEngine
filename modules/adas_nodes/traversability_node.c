@@ -97,6 +97,7 @@
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
+    Scheduler*        scheduler;
 
     /* 配置 */
     int    enabled;
@@ -131,10 +132,9 @@ static struct {
     uint32_t frame_id;
     time_t   last_frame_time;
 
-    /* 工作线程 */
-    pthread_t thread;
-    volatile int thread_running;
-    volatile int should_stop;
+    /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 traversability_execute。
+     * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
+    TaskBase   taskbase;
 } g;
 
 /* ── 订阅回调：收到 sensor/stereo ─────────────────────────── */
@@ -345,9 +345,12 @@ static double nearest_obstacle_x(int grid_w, int grid_h, double cell_size) {
     return (nearest > g.max_range) ? -1.0 : nearest;
 }
 
-/* ── 工作线程：收到帧 → 反投影 → 分割 → 栅格 → 发布 ────────── */
-static void* traversability_thread(void* arg) {
-    (void)arg;
+/* ── 托管模式主循环：收到帧 → 反投影 → 分割 → 栅格 → 发布 ──────────
+ *
+ * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
+ * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
+ * 的 traversability_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+static int traversability_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "traversable");
 
     long period_us = 1000000L / (g.publish_hz > 0 ? g.publish_hz : 10);
@@ -366,9 +369,9 @@ static void* traversability_thread(void* arg) {
         if (grid_h < 1) grid_h = 1;
     }
 
-    while (g.thread_running && !g.should_stop) {
+    while (!task->should_stop) {
         usleep((useconds_t)period_us);
-        if (g.should_stop) break;
+        if (task->should_stop) break;
 
         StereoFrame frame;
         pthread_mutex_lock(&g.lock);
@@ -432,8 +435,15 @@ static void* traversability_thread(void* arg) {
                      free_cnt, occ_cnt, nearest_obs, cor_width, blocked);
         }
     }
-    return NULL;
+    return 0;
 }
+
+/* 托管模式虚函数表：仅实现 execute()（完整主循环）。initialize/cleanup 由
+ * task_thread_fn 在 execute 前后按需调用，这里不需要——节点初始化在
+ * NodePlugin.init，资源释放在 NodePlugin.cleanup。 */
+static const TaskInterface traversability_vtable = {
+    .execute = traversability_execute,
+};
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -445,10 +455,11 @@ static NodePlugin s_plugin;
 static int traversability_init(MessageBus* bus, Transport* transport,
                                 DiscoveryManager* discovery, Scheduler* scheduler,
                                 const char* params_json) {
-    (void)bus; (void)scheduler;
+    (void)bus;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
+    g.scheduler = scheduler;
 
     pthread_mutex_init(&g.lock, NULL);
 
@@ -530,6 +541,20 @@ static int traversability_init(MessageBus* bus, Transport* transport,
     /* 发布 output_topic（text 类型，无 type_id） */
     discovery_advertise(discovery, g.output_topic, 0, CAP_PUBLISHER, (double)g.publish_hz);
 
+    /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在
+     * 静态初始化里已指向 &g.taskbase，故此处只需填好其内容。max_frequency_hz
+     * 喂给调度器 RateControl，与 execute() 内 usleep 周期一致。 */
+    TaskConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    snprintf(cfg.name, sizeof(cfg.name), "traversability");
+    cfg.priority         = TASK_PRIORITY_NORMAL;
+    cfg.max_frequency_hz = (double)g.publish_hz;
+    cfg.enable_stats     = true;
+    if (task_base_init(&g.taskbase, &traversability_vtable, &cfg) != 0) {
+        LOG_WARN("traversability", "task_base_init failed");
+        return -1;
+    }
+
     g.last_frame_time = time(NULL);
 
     LOG_INFO("traversability", "initialized: range=[%.1f,%.1f]m stride=%d "
@@ -542,27 +567,29 @@ static int traversability_init(MessageBus* bus, Transport* transport,
 
 static int traversability_start(void) {
     if (!g.enabled) return 0;
-    g.thread_running = 1;
-    g.should_stop = 0;
-    if (pthread_create(&g.thread, NULL, traversability_thread, NULL) != 0) {
-        LOG_WARN("traversability", "thread create failed");
-        g.thread_running = 0;
-        return -1;
+    /* 托管模式：node_start_managed 注册 taskbase 到调度器并派生工作线程跑
+     * traversability_execute()。节点不再 pthread_create 自建线程。 */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("traversability", "node_start_managed failed: %d", rc);
+        return rc;
     }
-    LOG_INFO("traversability", "started");
+    LOG_INFO("traversability", "started (managed)");
     node_announce_self(g.transport, &s_plugin);
     return 0;
 }
 
 static void traversability_stop(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
+    /* task_stop 置 should_stop=true 并 join 工作线程（traversability_execute 随即退出）。
+     * launcher 保证 stop() 在 cleanup() 前调用，故此处阻塞 join 是安全的。 */
+    task_stop(&g.taskbase);
 }
 
 static void traversability_cleanup(void) {
-    g.should_stop = 1;
-    g.thread_running = 0;
-    if (g.thread) { pthread_join(g.thread, NULL); g.thread = 0; }
+    /* stop() 已 join 线程；此处再 task_stop 一次作幂等保险（STOPPED 态直接
+     * 返回 0），随后释放 TaskBase 资源（互斥锁等）。 */
+    task_stop(&g.taskbase);
+    task_base_destroy(&g.taskbase);
     if (g.point_buf) { free(g.point_buf); g.point_buf = NULL; }
     pthread_mutex_destroy(&g.lock);
     LOG_INFO("traversability", "cleanup: frames=%lu grids=%lu",
@@ -590,6 +617,7 @@ static NodePlugin s_plugin = {
     .stop          = traversability_stop,
     .cleanup       = traversability_cleanup,
     .health        = traversability_health,
+    .taskbase      = &g.taskbase,   /* v2: 托管模式钩子，指向嵌入的 TaskBase */
 };
 
 NodePlugin* node_get_plugin(void) { return &s_plugin; }
