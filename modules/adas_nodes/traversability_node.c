@@ -591,3 +591,5 @@ static NodePlugin s_plugin = {
     .cleanup       = traversability_cleanup,
     .health        = traversability_health,
 };
+
+NodePlugin* node_get_plugin(void) { return &s_plugin; }

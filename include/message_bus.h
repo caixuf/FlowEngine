@@ -32,7 +32,12 @@ extern "C" {
 
 #define MSG_BUS_MAX_TOPIC_LEN    64
 #define MSG_BUS_MAX_SENDER_LEN   64
-#define MSG_BUS_MAX_DATA_SIZE    4096
+/* 必须容纳 StereoFrame 序列化后的固定 44828 字节（depth_data[4800] float
+ * + left_jpeg[25600] + 标定参数头）。原值 4096 会导致 transport_publish 调用
+ * message_bus_publish 时返回 ERR_OVERFLOW，sensor/stereo 永远收不到帧。
+ * 调到 65536 (64KB) 留 ~20KB 余量；副作用：Message 队列 1024×~64KB ≈ 64MB，
+ * bag.c 中两处栈缓冲也变成 64KB —— 系统 3.8GB RAM / 8MB 默认线程栈均能承受。 */
+#define MSG_BUS_MAX_DATA_SIZE    65536
 #define MSG_BUS_MAX_TOPICS       64
 #define MSG_BUS_MAX_SUBSCRIBERS  128
 #define MSG_BUS_QUEUE_SIZE       1024

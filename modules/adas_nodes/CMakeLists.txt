@@ -53,10 +53,15 @@ if(PkgConfig_FOUND)
     pkg_check_modules(CJSON QUIET libcjson)
 endif()
 if(NOT CJSON_FOUND)
-    # 主项目通过 FetchContent 构建的 cJSON 位于 build/_deps/cjson-build/
+    # 主项目通过 FetchContent 构建的 cJSON 静态库。FetchContent 目标的产物
+    # libcjson.a 落在 ${FLOWENGINE_BUILD}/lib（主项目 ARCHIVE_OUTPUT_DIRECTORY），
+    # 而非 _deps/cjson-build（后者只含 .pc/cmake 配置文件）。故 HINTS 必须同时
+    # 包含 build/lib，否则无系统 libcjson-dev 时 find_library 失败 → CJSON_FOUND=FALSE
+    # → include_directories 被跳过 → <cjson/cJSON.h> 找不到。
     find_library(CJSON_LIB
         NAMES cjson libcjson
         HINTS
+            ${FLOWENGINE_BUILD}/lib
             ${FLOWENGINE_BUILD}/_deps/cjson-build
             ${FLOWENGINE_BUILD}/_deps/cjson-build/Debug
             ${FLOWENGINE_BUILD}/_deps/cjson-build/Release

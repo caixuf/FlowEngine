@@ -869,10 +869,19 @@ static int sim_init(MessageBus* bus, Transport* transport,
     g.stereo_camera_height_m = 0.30;    /* 相机离地高度 */
     g.stereo_camera_tilt_deg = 10.0;    /* 相机下倾角 */
 
+    /* DEBUG Phase 0: 确认 params_json 是否传入 */
+    LOG_INFO("sim_world", "DEBUG params_json=%s len=%d",
+             params_json ? "NON-NULL" : "NULL",
+             params_json ? (int)strlen(params_json) : 0);
+    if (params_json) {
+        LOG_INFO("sim_world", "DEBUG params content (first 200 chars): %.200s", params_json);
+    }
+
     if (params_json) {
         cJSON* p = cJSON_Parse(params_json);
         if (p) {
             cJSON* j;
+            LOG_INFO("sim_world", "DEBUG cJSON_Parse OK, parsing fields...");
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "init_speed")) && cJSON_IsNumber(j))
                 g.init_speed = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "target_speed")) && cJSON_IsNumber(j))
