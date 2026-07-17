@@ -38,7 +38,25 @@
 >
 > 下面的原始 Phase 描述保留作历史参考。
 
-> ## ⚠️ 现状更新（2026-07-15）— Phase 4+5 已完成 ✅
+> ## ⚠️ 现状更新（2026-07-17）— 端到端 v3 Phase 1-2 + glTF 模型引擎 ✅
+>
+> 本轮完成端到端学习闭环 v3 的前两个 Phase + 3D glTF 模型引擎：
+>
+> | 模块 | 完成内容 | 状态 |
+> |------|---------|------|
+> | tiny_mlp.h v3 | 多隐层支持（1-4 层），hidden_dims[]，w3/w4/w_out/b_out，MAX_IN=295/MAX_HID=256 | ✅ |
+> | temporal_train.py | 多隐层 MLP + BP，--hidden "128 64"，--init-model 继续训练，--augment 数据增强 | ✅ |
+> | feature_schema.py | FEATURE_NAMES_V3 (59 维)：感知统计 + 场景上下文 + 障碍物全貌 | ✅ |
+> | inference_node | frame_buf 扩展 V3_DIM=59，scene context 订阅（红绿灯/道路几何），295-dim 推理 | ✅ |
+> | glTF 模型 | gen_models.py 生成轿车/卡车/SUV/行人 PBR 模型，models.js 异步加载 + 程序化降级 | ✅ |
+> | 障碍物池 | 8→24 槽，NPC AI 状态 Sprite 标签 | ✅ (PR #61) |
+> | 旧文档清理 | 删除 E2E_SIMULATION_DESIGN / FLOWCORO_MIGRATION_PLAN / FLOW_REGISTRY_PLAN | ✅ |
+>
+> **下一阶段优先级（2026-07-17 更新）：**
+> 1. json_to_xodr.py junction 支持（NOA 分叉/汇入路网）
+> 2. perception↔sensor_model 数据流对接
+> 3. E2E v3 Phase 3-5（训练管线、闭环评估、调优）
+> 4. glTF 模型升级（纹理/UV/更高面数）
 >
 > 本轮在 2026-07-14 的 Phase 2+3 基础上继续做架构性收敛，**三件一起做 + 不留技术债**：
 >
