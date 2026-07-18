@@ -17,6 +17,8 @@ import * as TopologyStore from './scene3d/model/TopologyStore.js';
 import { EgoTiltState, TiltPool } from './scene3d/model/VisualPhysics.js';
 // 分层架构：view 层（道路、环境、车辆等 Three.js 构建器）
 import { buildLegacyRoad, applyRoadCurve } from './scene3d/view/RoadView.js';
+// 分层架构：controller 层（相机、用户输入）
+import * as CameraController from './scene3d/controller/CameraController.js';
 
 const THREE = window.THREE;
 
@@ -159,13 +161,7 @@ const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7, cone: 0.8 };
 const _OBS_L = { truck: 7.5, pedestrian: 0.5, cyclist: 1.8, cone: 0.5 };
 const _OBS_W = { truck: 2.3, pedestrian: 0.5, cyclist: 0.6, cone: 0.5 };
 
-/** C.1: Camera modes — chase / top / orbit / driver / front */
-let _camMode = 'chase';
-let _orbitState = null;   // { azimuth, polar, distance, target }
-let _orbitDragging = false;
-let _orbitLast = { x: 0, y: 0 };
-let _raycaster = null;
-let _mouse = null;
+/** MVC Controller: 相机模式与轨道交互状态（scene3d/controller/CameraController.js） */
 let _npcPanel = null;     // DOM element for clicked NPC info
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1512,7 +1508,7 @@ function init3DScene() {
   el.appendChild(renderer3d.domElement);
 
   // C.1: 绑定轨道/点击交互（renderer 创建后 canvas 才存在）
-  _initCameraControls();
+  CameraController.initCameraControls(renderer3d.domElement, { pickNPC: _pickNPC });
 
   // ── 程序化环境贴图：PMREMGenerator 从自建简单场景生成 ──
   // MeshStandardMaterial 需 envMap 才能让 metalness/roughness 产生反射。
@@ -1848,74 +1844,40 @@ function setPerfTier(tier) {
   }
 }
 
-/** C.1: 切换相机模式；index.html 的视角按钮调用此函数 */
+/** C.1: 切换相机模式；index.html 的视角按钮调用此函数。
+ *  实际状态由 MVC Controller 层 CameraController.js 维护。 */
 function setCameraMode(mode) {
-  if (['chase', 'top', 'orbit', 'driver', 'front'].indexOf(mode) < 0) return;
-  _camMode = mode;
-  if (mode === 'orbit' && !_orbitState) {
-    _orbitState = { azimuth: Math.PI * 0.15, polar: Math.PI / 3, distance: 28, target: new THREE.Vector3() };
-  }
-  // 切回 chase 时重置平滑相机，避免旧位置突兀过渡
-  if (mode === 'chase' && _cam && _camTarget) {
-    var sx = _dr.smoothX, sz = _dr.smoothZ;
-    _cam.set(sx - 15, 5, sz);
-    _camLook.set(sx + 8, 0.5, sz);
-    _camTarget.set(sx - 15, 5, sz);
-    _camLookTarget.set(sx + 8, 0.5, sz);
-  }
+  CameraController.setCameraMode(mode, {
+    onResetSmoothCamera: function() {
+      if (!_cam || !_camTarget) return;
+      var sx = _dr.smoothX, sz = _dr.smoothZ;
+      _cam.set(sx - 15, 5, sz);
+      _camLook.set(sx + 8, 0.5, sz);
+      _camTarget.set(sx - 15, 5, sz);
+      _camLookTarget.set(sx + 8, 0.5, sz);
+    }
+  });
 }
 
 /** C.1: 重置为默认 chase 视角 */
 function resetCamera() {
-  setCameraMode('chase');
-}
-
-/** C.1: 初始化鼠标轨道控制 + NPC 点击检测 */
-function _initCameraControls() {
-  var canvas = renderer3d && renderer3d.domElement;
-  if (!canvas) return;
-  _raycaster = new THREE.Raycaster();
-  _mouse = new THREE.Vector2();
-  var dragMoved = false, downPos = { x: 0, y: 0 };
-
-  canvas.addEventListener('mousedown', function(e) {
-    dragMoved = false;
-    downPos.x = e.clientX; downPos.y = e.clientY;
-    if (_camMode !== 'orbit') return;
-    _orbitDragging = true;
-    _orbitLast.x = e.clientX; _orbitLast.y = e.clientY;
-  });
-  window.addEventListener('mousemove', function(e) {
-    if (Math.abs(e.clientX - downPos.x) > 3 || Math.abs(e.clientY - downPos.y) > 3) dragMoved = true;
-    if (!_orbitDragging) return;
-    var dx = e.clientX - _orbitLast.x;
-    var dy = e.clientY - _orbitLast.y;
-    _orbitLast.x = e.clientX; _orbitLast.y = e.clientY;
-    _orbitState.azimuth -= dx * 0.008;
-    _orbitState.polar = Math.max(0.12, Math.min(Math.PI / 2 - 0.08, _orbitState.polar + dy * 0.008));
-  });
-  window.addEventListener('mouseup', function() { _orbitDragging = false; });
-  canvas.addEventListener('wheel', function(e) {
-    if (_camMode !== 'orbit') return;
-    e.preventDefault();
-    _orbitState.distance *= (e.deltaY > 0) ? 1.08 : 0.92;
-    _orbitState.distance = Math.max(4, Math.min(120, _orbitState.distance));
-  }, { passive: false });
-
-  // C.2: 点击 NPC 显示信息面板（任何模式下都可用）
-  canvas.addEventListener('click', function(e) {
-    if (dragMoved) return;  // 拖拽/滚轮时不触发点击
-    var rect = canvas.getBoundingClientRect();
-    _mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    _mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    _pickNPC();
+  CameraController.resetCamera({
+    onResetSmoothCamera: function() {
+      if (!_cam || !_camTarget) return;
+      var sx = _dr.smoothX, sz = _dr.smoothZ;
+      _cam.set(sx - 15, 5, sz);
+      _camLook.set(sx + 8, 0.5, sz);
+      _camTarget.set(sx - 15, 5, sz);
+      _camLookTarget.set(sx + 8, 0.5, sz);
+    }
   });
 }
 
-/** C.2: Raycast 检测点击的 NPC，命中后弹出信息面板 */
-function _pickNPC() {
-  if (!_raycaster || !camera3d || !_obsPool) return;
-  _raycaster.setFromCamera(_mouse, camera3d);
+/** C.2: Raycast 检测点击的 NPC，命中后弹出信息面板。
+ *  鼠标坐标与 Raycaster 由 CameraController.initCameraControls 在点击时传入。 */
+function _pickNPC(mouse, raycaster) {
+  if (!raycaster || !camera3d || !_obsPool) return;
+  raycaster.setFromCamera(mouse, camera3d);
   // 收集所有可见障碍物的子 mesh
   var targets = [];
   for (var oi = 0; oi < _obsPool.length; oi++) {
@@ -1923,7 +1885,7 @@ function _pickNPC() {
     if (om && om.visible) targets.push(om);
   }
   if (!targets.length) return;
-  var hits = _raycaster.intersectObjects(targets, true);
+  var hits = raycaster.intersectObjects(targets, true);
   if (!hits.length) return;
   // 找到命中 mesh 所属的最顶层 obs group（_obsPool 都是 scene3d 的直接子对象）
   var obj = hits[0].object;
@@ -2077,40 +2039,43 @@ function _renderFrame() {
     _camLook.lerp(_camLookTarget, camLerp);
     camera3d.position.copy(_cam);
     camera3d.lookAt(_camLook);
-  } else if (_camMode === 'top') {
-    camera3d.position.set(sx, 85, sz);
-    camera3d.lookAt(sx + 5, 0, sz);
-  } else if (_camMode === 'driver') {
-    // 驾驶员视角：车顶略后方，看向前方道路
-    var dh = -_dr.smoothHeading;
-    var dcos = Math.cos(dh), dsin = Math.sin(dh);
-    camera3d.position.set(sx - 0.8 * dcos, 1.55, sz - 0.8 * dsin);
-    camera3d.lookAt(sx + 20 * dcos, 0.8, sz + 20 * dsin);
-  } else if (_camMode === 'front') {
-    // 前保险杠视角
-    var fh = -_dr.smoothHeading;
-    var fcos = Math.cos(fh), fsin = Math.sin(fh);
-    camera3d.position.set(sx + 2.0 * fcos, 0.7, sz + 2.0 * fsin);
-    camera3d.lookAt(sx + 25 * fcos, 1.0, sz + 25 * fsin);
-  } else if (_camMode === 'orbit') {
-    // 自由轨道：鼠标拖拽旋转，滚轮缩放
-    _orbitState.target.set(sx, 0, sz);
-    var ox = _orbitState.distance * Math.sin(_orbitState.polar) * Math.cos(_orbitState.azimuth);
-    var oy = _orbitState.distance * Math.cos(_orbitState.polar);
-    var oz = _orbitState.distance * Math.sin(_orbitState.polar) * Math.sin(_orbitState.azimuth);
-    camera3d.position.set(sx + ox, Math.max(1.5, oy), sz + oz);
-    camera3d.lookAt(_orbitState.target);
   } else {
-    // chase (default)
-    var backC   = narrow ? 20 : 15;
-    var heightC = narrow ? 6.5 : 5.0;
-    _camTarget.set(sx - backC, heightC, sz);
-    _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
-    _cam.lerp(_camTarget, 0.08);
-    _camLook.lerp(_camLookTarget, 0.08);
-    camera3d.position.copy(_cam);
-    camera3d.lookAt(_camLook);
-  }
+    var _camMode = CameraController.getMode();
+    var _orbitState = CameraController.getOrbitState();
+    if (_camMode === 'top') {
+      camera3d.position.set(sx, 85, sz);
+      camera3d.lookAt(sx + 5, 0, sz);
+    } else if (_camMode === 'driver') {
+      // 驾驶员视角：车顶略后方，看向前方道路
+      var dh = -_dr.smoothHeading;
+      var dcos = Math.cos(dh), dsin = Math.sin(dh);
+      camera3d.position.set(sx - 0.8 * dcos, 1.55, sz - 0.8 * dsin);
+      camera3d.lookAt(sx + 20 * dcos, 0.8, sz + 20 * dsin);
+    } else if (_camMode === 'front') {
+      // 前保险杠视角
+      var fh = -_dr.smoothHeading;
+      var fcos = Math.cos(fh), fsin = Math.sin(fh);
+      camera3d.position.set(sx + 2.0 * fcos, 0.7, sz + 2.0 * fsin);
+      camera3d.lookAt(sx + 25 * fcos, 1.0, sz + 25 * fsin);
+    } else if (_camMode === 'orbit') {
+      // 自由轨道：鼠标拖拽旋转，滚轮缩放
+      _orbitState.target.set(sx, 0, sz);
+      var ox = _orbitState.distance * Math.sin(_orbitState.polar) * Math.cos(_orbitState.azimuth);
+      var oy = _orbitState.distance * Math.cos(_orbitState.polar);
+      var oz = _orbitState.distance * Math.sin(_orbitState.polar) * Math.sin(_orbitState.azimuth);
+      camera3d.position.set(sx + ox, Math.max(1.5, oy), sz + oz);
+      camera3d.lookAt(_orbitState.target);
+    } else {
+      // chase (default)
+      var backC   = narrow ? 20 : 15;
+      var heightC = narrow ? 6.5 : 5.0;
+      _camTarget.set(sx - backC, heightC, sz);
+      _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
+      _cam.lerp(_camTarget, 0.08);
+      _camLook.lerp(_camLookTarget, 0.08);
+      camera3d.position.copy(_cam);
+      camera3d.lookAt(_camLook);
+    }
 
   // Road + environment are STATIC — no scrolling. The camera follows
   // the ego through the world so the road appears to flow past naturally.
