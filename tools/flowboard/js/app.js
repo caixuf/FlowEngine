@@ -47,6 +47,13 @@ var chartTopic = '';
 var connectRetries = 0;
 var lastNodeNames = '';
 
+// SSE / data freshness state
+var _lastDataTime = 0;          // 上次收到数据的时间戳（performance.now()）
+var _dataStaleTimer = null;     // 数据超时检测定时器
+var _reconnectDelay = 2000;     // 当前重连间隔（指数退避）
+var _maxReconnectDelay = 30000; // 最大重连间隔 30s
+var _staleThreshold = 3500;     // >3.5s 无数据认为 stale
+
 // Load saved state
 try {
   var saved = JSON.parse(localStorage.getItem('flowboard')||'{}');
@@ -64,7 +71,42 @@ function setConnStatus(cls, text) {
   el.className = 'pill pill-'+cls; el.textContent = text;
 }
 
+function _set3DStaleMessage(show, text) {
+  var el = document.getElementById('scene3d-msg');
+  if (!el) return;
+  // 只在 3D 视图可见且没有严重错误信息时显示 stale 提示
+  if (!show) {
+    if (el.getAttribute('data-stale') === '1') {
+      el.style.display = 'none';
+      el.removeAttribute('data-stale');
+      el.innerHTML = '';
+    }
+    return;
+  }
+  el.setAttribute('data-stale', '1');
+  el.style.display = '';
+  el.style.color = '#d29922';
+  el.innerHTML = '<div style="font-size:32px;margin-bottom:10px">⏳</div>' +
+    '<div style="color:#d29922;font-size:14px;font-weight:600;margin-bottom:6px">Waiting for data...</div>' +
+    '<div style="color:#8b949e;font-size:11px;font-family:monospace;line-height:1.5;max-width:340px;word-break:break-all">' +
+    (text || 'No message from server for a few seconds.') + '</div>';
+}
+
+function _markDataFresh() {
+  _lastDataTime = performance.now();
+  _set3DStaleMessage(false);
+}
+
+function _checkDataStale() {
+  var age = performance.now() - _lastDataTime;
+  if (_lastDataTime > 0 && age > _staleThreshold) {
+    setConnStatus('warn', '● stale ' + Math.round(age / 1000) + 's');
+    _set3DStaleMessage(true, 'No data for ' + Math.round(age / 1000) + 's');
+  }
+}
+
 function applyLiveStatus(d) {
+  _markDataFresh();
   var wm = document.getElementById('demo-watermark');
   if (!d || typeof d !== 'object') { setConnStatus('live','● live'); if (wm) wm.style.display='none'; return; }
   if (d.source === 'demo') { setConnStatus('live','● demo'); if (wm) wm.style.display=''; return; }
@@ -422,7 +464,9 @@ function doSimulate() {
 function startSSE() {
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (sseRenewTimer) { clearTimeout(sseRenewTimer); sseRenewTimer = null; }
+  if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
 
+  setConnStatus('warn', '● connecting');
   eventSource = new EventSource(serverUrl+'/api/stream');
 
   // Seamless renewal: server caps each SSE stream at 300s.
@@ -431,6 +475,9 @@ function startSSE() {
     if (!paused) startSSE();
   }, 270000);
 
+  // 启动数据新鲜度检测（每 1s 检查一次）
+  _dataStaleTimer = setInterval(_checkDataStale, 1000);
+
   // SSE: only update data model; rendering driven by rAF.
   // Avoid synchronous updateAll() in SSE callback (blocks main thread).
   var _pendingUpdate = false;
@@ -438,6 +485,10 @@ function startSSE() {
     if (paused) return;
     try { topoData = JSON.parse(e.data); }
     catch(err) { return; }
+    // 收到消息即刷新数据时间戳并重置退避
+    _markDataFresh();
+    _reconnectDelay = 2000;
+    connectRetries = 0;
     if (!_pendingUpdate) {
       _pendingUpdate = true;
       requestAnimationFrame(function() {
@@ -452,15 +503,22 @@ function startSSE() {
     setConnStatus('warn','● retry');
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (sseRenewTimer) { clearTimeout(sseRenewTimer); sseRenewTimer = null; }
+    if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(tryReconnect, 2000);
+    reconnectTimer = setTimeout(tryReconnect, _reconnectDelay);
   };
 
-  eventSource.onopen = function() { setConnStatus('live','● live'); };
+  eventSource.onopen = function() {
+    setConnStatus('live','● live');
+    _markDataFresh();
+    _reconnectDelay = 2000;
+    connectRetries = 0;
+  };
 }
 
 function tryReconnect() {
-  if (paused) { reconnectTimer = setTimeout(tryReconnect, 2000); return; }
+  if (paused) { reconnectTimer = setTimeout(tryReconnect, _reconnectDelay); return; }
+  setConnStatus('warn','● retry');
   fetch(serverUrl+'/api/topology')
     .then(function(r) { return r.json(); })
     .then(function(d) {
@@ -468,11 +526,14 @@ function tryReconnect() {
       updateAll();
       applyLiveStatus(d);
       connectRetries = 0;
+      _reconnectDelay = 2000;
       startSSE();
     })
     .catch(function() {
-      setConnStatus('warn','● retry');
-      reconnectTimer = setTimeout(tryReconnect, 2000);
+      // 指数退避：2s -> 4s -> 8s ... 最大 30s，减轻 server 压力
+      _reconnectDelay = Math.min(_reconnectDelay * 2, _maxReconnectDelay);
+      setConnStatus('warn','● retry ('+Math.round(_reconnectDelay/1000)+'s)');
+      reconnectTimer = setTimeout(tryReconnect, _reconnectDelay);
     });
 }
 
@@ -481,12 +542,15 @@ async function doConnect() {
   saveState();
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
+  setConnStatus('warn', '● connecting');
   try {
     var r = await fetch(serverUrl+'/api/topology');
     topoData = await r.json();
     updateAll();
     applyLiveStatus(topoData);
     connectRetries = 0;
+    _reconnectDelay = 2000;
     startSSE();
   } catch(err) {
     connectRetries++;
