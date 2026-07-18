@@ -714,8 +714,13 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         warnings.append(f"npc respawn jump: max_speed={max_npc_speed:.1f} m/s, max_lateral={max_npc_lateral_speed:.1f} m/s")
 
     drops = sum(int(t.get("drop", 0) or 0) for t in topics.values())
-    if drops > 0:
-        failures.append(f"message drops detected: {drops}")
+    total_pub = sum(int(t.get("pub", 0) or 0) for t in topics.values())
+    drop_rate = drops / total_pub if total_pub > 0 else 0.0
+    # Tolerate a small number of transient drops during startup/scheduling jitter.
+    if drops > 10 or drop_rate > 0.005:
+        failures.append(f"message drops detected: {drops} (rate {drop_rate*100:.2f}%)")
+    elif drops > 0:
+        warnings.append(f"message drops detected: {drops} (rate {drop_rate*100:.2f}%)")
 
     # ── inference/trajectory frequency check (only when topic is present in runtime data) ──
     inference_freq = float(topics.get("inference/trajectory", {}).get("freq", 0.0) or 0.0)

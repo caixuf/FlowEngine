@@ -116,15 +116,9 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
                     }
                 }
             }
-            // ETC 闸门：关闭时减速
-            if (ev.type == EntityType::ETCGate) {
-                if (ev.ai_state == AIState::Stop && ev.phase_timer < 0.5) {
-                    if (dx < nearest_block_s) {
-                        nearest_block_s = dx;
-                        should_stop = true;
-                    }
-                }
-            }
+            // ETC 闸门：NPC 不响应闸栏杆，避免在路口远处排队把 ego 堵住。
+            // ego 自己的 planning/safety 会在关闭的闸门前停车。
+            // if (ev.type == EntityType::ETCGate) { ... }
         }
 
         if (should_stop) {

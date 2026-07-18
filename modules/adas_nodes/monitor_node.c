@@ -44,8 +44,8 @@ static struct {
     SysMonitor* sysmon;
 
     /* 订阅数据缓存 */
-    char latest_obstacles_json[2048];
-    char latest_vehicle_state[1024];
+    char latest_obstacles_json[8192];
+    char latest_vehicle_state[8192];
     double fusion_lat_avg_us;
     double fusion_lat_p50_us;
     double fusion_lat_p99_us;

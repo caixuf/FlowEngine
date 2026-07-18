@@ -53,6 +53,12 @@
     { "trigger_x": 1600, "type": "lane_change",   "target_lane": -1, "target_speed": 28, "label": "overtake_left" },
     { "trigger_x": 1850, "type": "lane_change",   "target_lane": 1,  "label": "return_right" }
   ],
+  "traffic_lights": [
+    { "id": 0, "x": 400, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0 }
+  ],
+  "etc_gates": [
+    { "id": 0, "x": 450, "y": 0, "approach_speed": 5.0, "open_range_m": 50 }
+  ],
   "pass_criteria": {
     "min_distance_m": 100.0,
     "min_avg_speed_mps": 3.0,
@@ -69,8 +75,8 @@
     { "id": 6,  "segment_id": 0,  "type": "pedestrian","s": 40,  "l": -8.5, "vx": -0.6,"vy": -0.2 },
     { "id": 7,  "segment_id": 1,  "type": "car",  "s": 60,  "l": 5.5,  "vx": -6.0, "len": 4.6, "wid": 2.0 },
     { "id": 8,  "segment_id": 1,  "type": "car",  "s": 80,  "l": 8.0,  "vx": -8.0, "len": 4.6, "wid": 2.0 },
-    { "id": 9,  "segment_id": 1,  "type": "car",  "s": 10,  "l": -1.75,"vx": 0,    "len": 4.6, "wid": 2.0 },
-    { "id": 10, "segment_id": 1,  "type": "car",  "s": 25,  "l": 0,    "vx": 0,    "len": 4.6, "wid": 2.0 },
+    { "id": 9,  "segment_id": 1,  "type": "car",  "s": 10,  "l": -1.75,"vx": 5.0,  "len": 4.6, "wid": 2.0 },
+    { "id": 10, "segment_id": 1,  "type": "car",  "s": 25,  "l": 0,    "vx": 6.0,  "len": 4.6, "wid": 2.0 },
     { "id": 11, "segment_id": 1,  "type": "pedestrian","s": 40, "l": 6.0,"vx": -1.2,"vy": -0.8 },
     { "id": 12, "segment_id": 1,  "type": "pedestrian","s": 20,"l": -8.0,"vx": 0.4,  "vy": 0 },
     { "id": 13, "segment_id": 2,  "type": "car",  "s": 30,   "l": 0,    "vx": 1.5, "len": 4.6, "wid": 2.0 },

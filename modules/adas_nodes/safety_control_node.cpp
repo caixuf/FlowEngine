@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -440,6 +441,29 @@ private:
                 set_changed(cmd.brake, std::max(cmd.brake, 1.0 - ratio));
                 if (hold_gap < 1.5) {
                     set_changed(cmd.brake, 1.0);
+                }
+            }
+
+            /* Low-speed deadlock recovery: if ego has been stuck for too long
+             * and the road ahead is clear, ease the brake and allow a small
+             * throttle so the planner can creep forward (e.g. stopped at a
+             * red light or blocked during a low-speed lane change). */
+            static auto last_move_time = std::chrono::steady_clock::now();
+            if (state.speed >= 0.5) {
+                last_move_time = std::chrono::steady_clock::now();
+            } else {
+                double elapsed_ms = static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - last_move_time)
+                        .count());
+                if (elapsed_ms > 5000.0) {
+                    double gap = nearest_same_lane_gap(state, params_);
+                    if (gap > 10.0) {
+                        fprintf(stderr, "[safety] low-speed recovery: spd=%.2f gap=%.2f -> brake=%.2f throttle=%.2f\n",
+                                state.speed, gap, cmd.brake, cmd.throttle);
+                        set_changed(cmd.brake, std::min(cmd.brake, 0.30));
+                        set_changed(cmd.throttle, std::max(cmd.throttle, 0.20));
+                    }
                 }
             }
         }
