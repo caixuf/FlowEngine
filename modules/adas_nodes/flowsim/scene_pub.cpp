@@ -173,7 +173,13 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
             cJSON_AddItemToObject(edge, "nodes", nodes);
 
             cJSON_AddNumberToObject(edge, "lanes", (double)info.drivable_lanes);
-            cJSON_AddNumberToObject(edge, "lane_width", cfg.lane_width);
+            /* 从 esmini 查询该 road 第一条行驶车道的实际宽度；
+             * 查询失败或为 0 时退回 cfg.lane_width（默认 3.5m）。 */
+            {
+                double road_lw = cfg.roads->lane_width(info.id, -1, 0.0);
+                cJSON_AddNumberToObject(edge, "lane_width",
+                                        (road_lw > 0.0) ? road_lw : cfg.lane_width);
+            }
             cJSON_AddNumberToObject(edge, "length", info.length);
             cJSON_AddItemToArray(edges, edge);
         }

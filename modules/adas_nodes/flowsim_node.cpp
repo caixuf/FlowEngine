@@ -302,10 +302,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.vx = a->vx;
         e.vy = a->vy;
         e.speed = sqrt(a->vx * a->vx + a->vy * a->vy);
-        /* 对向来车 (vx<0)：反转 heading 为 π，让速度朝 -x 方向，
-         * target_vx 取绝对值，避免 NPC AI 将负目标速度当急刹车。 */
+        /* 对向来车 (vx<0)：叠加 π 到 esmini 报告的 heading，
+         * 而非覆盖为固定 M_PI。弯道路段 esmini heading 可能非零。 */
         if (a->vx < 0.0 && a->vy == 0.0) {
-            e.heading = M_PI;
+            e.heading = fmod(e.heading + M_PI, 2.0 * M_PI);
             e.target_vx = -a->vx;
         } else {
             e.target_vx = a->vx;  /* NPC 初始目标速度 = 场景速度 */
