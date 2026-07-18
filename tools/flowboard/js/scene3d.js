@@ -837,6 +837,9 @@ function _buildSkyline(scene) {
   var grp = new THREE.Group();
   // 冷蓝灰剪影色，fog 会进一步淡化到背景色
   var skyMat = new THREE.MeshBasicMaterial({ color: 0x4a5868, fog: true });
+  // 天际线：把 72 个独立建筑合并为 1 个 BufferGeometry，draw call 从 72 降到 1。
+  var boxTpl = new THREE.BoxGeometry(1, 1, 1);
+  var skyGeos = [];
   var N = 72;
   for (var i = 0; i < N; i++) {
     var ang = (i / N) * Math.PI * 2 + (Math.random() - 0.5) * 0.04;
@@ -846,17 +849,20 @@ function _buildSkyline(scene) {
     var bw = 8 + Math.random() * 22;
     var bd = 8 + Math.random() * 22;
     var bh = 18 + Math.random() * 85;
-    var b = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bd), skyMat);
-    b.position.set(bx, bh / 2, bz);
-    grp.add(b);
+    var matB = new THREE.Matrix4().makeTranslation(bx, bh / 2, bz);
+    matB.scale(new THREE.Vector3(bw, bh, bd));
+    skyGeos.push(_transformGeometry(boxTpl, matB));
     // 30% 概率叠加一个稍高的塔楼，丰富轮廓
     if (Math.random() > 0.7) {
       var th = bh * (1.1 + Math.random() * 0.5);
-      var tower = new THREE.Mesh(new THREE.BoxGeometry(bw * 0.5, th, bd * 0.5), skyMat);
-      tower.position.set(bx, th / 2, bz);
-      grp.add(tower);
+      var matT = new THREE.Matrix4().makeTranslation(bx, th / 2, bz);
+      matT.scale(new THREE.Vector3(bw * 0.5, th, bd * 0.5));
+      skyGeos.push(_transformGeometry(boxTpl, matT));
     }
   }
+  var skylineMesh = new THREE.Mesh(_mergeGeometries(skyGeos), skyMat);
+  skylineMesh.frustumCulled = true;
+  grp.add(skylineMesh);
   scene.add(grp);
   _skylineGroup = grp;
 }
@@ -937,12 +943,103 @@ function _updateTireTrail(sx, sz, heading, speed) {
   _tireTrailMesh.geometry.attributes.color.needsUpdate = true;
 }
 
+/**
+ * 合并多个 THREE.*Geometry 为一个 BufferGeometry（无 BufferGeometryUtils 依赖）。
+ * 所有几何体必须具有 position + normal + uv 属性；输出为 indexed BufferGeometry。
+ * 仅用于 _buildEnvironment 内部静态环境物体合并。
+ */
+function _mergeGeometries(geos) {
+  var totalVerts = 0, totalIdx = 0;
+  for (var i = 0; i < geos.length; i++) {
+    var g = geos[i];
+    totalVerts += g.attributes.position.count;
+    totalIdx += (g.index ? g.index.count : g.attributes.position.count);
+  }
+  var pos = new Float32Array(totalVerts * 3);
+  var norm = new Float32Array(totalVerts * 3);
+  var idx = new (totalIdx > 65535 ? Uint32Array : Uint16Array)(totalIdx);
+  var vOff = 0, iOff = 0;
+  for (var j = 0; j < geos.length; j++) {
+    var gg = geos[j];
+    var pc = gg.attributes.position.count;
+    var pa = gg.attributes.position.array;
+    var na = gg.attributes.normal ? gg.attributes.normal.array : null;
+    for (var k = 0; k < pc; k++) {
+      pos[(vOff + k) * 3]     = pa[k * 3];
+      pos[(vOff + k) * 3 + 1] = pa[k * 3 + 1];
+      pos[(vOff + k) * 3 + 2] = pa[k * 3 + 2];
+      if (na) {
+        norm[(vOff + k) * 3]     = na[k * 3];
+        norm[(vOff + k) * 3 + 1] = na[k * 3 + 1];
+        norm[(vOff + k) * 3 + 2] = na[k * 3 + 2];
+      }
+    }
+    if (gg.index) {
+      var ia = gg.index.array;
+      for (var m = 0; m < ia.length; m++) {
+        idx[iOff + m] = ia[m] + vOff;
+      }
+      iOff += ia.length;
+    } else {
+      for (var m2 = 0; m2 < pc; m2++) idx[iOff + m2] = vOff + m2;
+      iOff += pc;
+    }
+    vOff += pc;
+  }
+  var merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+  if (totalIdx > 0) merged.setIndex(new THREE.BufferAttribute(idx, 1));
+  return merged;
+}
+
+/**
+ * 用 transform matrix 复制一份 geometry 并变换顶点，返回新 geometry。
+ * 用于把模板几何体摆到世界不同位置后合并。
+ */
+function _transformGeometry(geo, matrix) {
+  var g = geo.clone();
+  var pos = g.attributes.position.array;
+  var norm = g.attributes.normal ? g.attributes.normal.array : null;
+  var e = matrix.elements;
+  for (var i = 0; i < g.attributes.position.count; i++) {
+    var x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+    var tx = e[0] * x + e[4] * y + e[8] * z + e[12];
+    var ty = e[1] * x + e[5] * y + e[9] * z + e[13];
+    var tz = e[2] * x + e[6] * y + e[10] * z + e[14];
+    pos[i * 3] = tx; pos[i * 3 + 1] = ty; pos[i * 3 + 2] = tz;
+    if (norm) {
+      var nx = norm[i * 3], ny = norm[i * 3 + 1], nz = norm[i * 3 + 2];
+      var tnx = e[0] * nx + e[4] * ny + e[8] * nz;
+      var tny = e[1] * nx + e[5] * ny + e[9] * nz;
+      var tnz = e[2] * nx + e[6] * ny + e[10] * nz;
+      norm[i * 3] = tnx; norm[i * 3 + 1] = tny; norm[i * 3 + 2] = tnz;
+    }
+  }
+  return g;
+}
+
 function _buildEnvironment(scene) {
   var env = new THREE.Group();
-  var bldColors = [0x4a5868, 0x566676, 0x3d4d5d, 0x5a6a7a, 0x6b5a5a];
-  var windowMat = new THREE.MeshStandardMaterial({ color: 0x88aacc, metalness: 0.6, roughness: 0.15, emissive: 0x223344, emissiveIntensity: 0.25 });
+  var T = THREE;
 
-  // Buildings: 主楼 + 窗户网格 + 屋顶/裙楼，避免纯方块
+  // 共享模板几何体（只创建一次）
+  var boxTpl = new T.BoxGeometry(1, 1, 1);
+  var cylTpl = new T.CylinderGeometry(1, 1, 1, 10);
+  var dodecTpl = new T.DodecahedronGeometry(1, 0);
+  var planeTpl = new T.PlaneGeometry(1, 1);
+
+  // 按材质分组的待合并几何体列表
+  var bldGeos = [];      // 建筑主体
+  var winGeos = [];      // 窗户
+  var trunkGeos = [];    // 树干
+  var leafGeos = [];     // 树冠
+  var propGeos = [];     // 路灯杆/臂
+  var lampGeos = [];     // 路灯灯罩
+  var trashGeos = [];    // 垃圾桶
+  var hydrantGeos = [];  // 消防栓
+
+  // Buildings
   for (var b = 0; b < 14; b++) {
     var side = (b % 2 === 0) ? 1 : -1;
     var bx = (b - 7) * 180 + Math.random() * 70;
@@ -950,104 +1047,123 @@ function _buildEnvironment(scene) {
     var bz = side * (26 + Math.random() * 28);
     var bh = 12 + Math.random() * 42;
     var depth = 6 + Math.random() * 8;
-    var bldColor = bldColors[b % bldColors.length];
 
-    // 主楼
-    var bld = _makeBox(bw, bh, depth, bldColor, 0x000000, 0.92);
-    bld.position.set(bx, bh / 2, bz);
-    bld.castShadow = true; bld.receiveShadow = true;
-    env.add(bld);
+    var matB = new T.Matrix4().makeTranslation(bx, bh / 2, bz);
+    matB.scale(new T.Vector3(bw, bh, depth));
+    bldGeos.push(_transformGeometry(boxTpl, matB));
+
+    // 屋顶女儿墙
+    var matP = new T.Matrix4().makeTranslation(bx, bh + 0.4, bz);
+    matP.scale(new T.Vector3(bw * 0.9, 0.8, depth * 0.9));
+    bldGeos.push(_transformGeometry(boxTpl, matP));
+
+    // 低层裙楼（50%概率）
+    if (Math.random() > 0.5) {
+      var podiumH = 3 + Math.random() * 3;
+      var matPod = new T.Matrix4().makeTranslation(bx, podiumH / 2, bz);
+      matPod.scale(new T.Vector3(bw + 2, podiumH, depth + 2));
+      bldGeos.push(_transformGeometry(boxTpl, matPod));
+    }
 
     // 窗户（面向道路的一面）
     var floors = Math.max(3, Math.floor(bh / 3.2));
     var cols = Math.max(2, Math.floor(bw / 2.5));
     var winW = (bw - 1) / cols * 0.55;
     var winH = 1.2;
-    var winGeo = new THREE.PlaneGeometry(winW, winH);
     for (var fi = 0; fi < floors; fi++) {
       for (var cj = 0; cj < cols; cj++) {
-        var win = new THREE.Mesh(winGeo, windowMat);
         var wx = bx - (bw - 1) / 2 + (cj + 0.5) * ((bw - 1) / cols);
         var wy = 1.8 + fi * 3.2;
-        var faceZ = bz + side * (depth / 2 + 0.02);
-        win.position.set(wx, wy, faceZ);
-        win.rotation.y = side > 0 ? Math.PI : 0;
-        env.add(win);
+        var faceZ = bz + side * (depth / 2 + 0.06);
+        var matW = new T.Matrix4().makeTranslation(wx, wy, faceZ);
+        matW.scale(new T.Vector3(winW, winH, 1));
+        if (side > 0) matW.multiply(new T.Matrix4().makeRotationY(Math.PI));
+        winGeos.push(_transformGeometry(planeTpl, matW));
       }
-    }
-
-    // 屋顶女儿墙/设备平台
-    var parapet = _makeBox(bw * 0.9, 0.8, depth * 0.9, 0x333333, 0x000000, 0.95);
-    parapet.position.set(bx, bh + 0.4, bz);
-    parapet.castShadow = true; env.add(parapet);
-
-    // 低层裙楼（50%概率）
-    if (Math.random() > 0.5) {
-      var podiumH = 3 + Math.random() * 3;
-      var podium = _makeBox(bw + 2, podiumH, depth + 2, 0x555555, 0x000000, 0.9);
-      podium.position.set(bx, podiumH / 2, bz);
-      podium.castShadow = true; podium.receiveShadow = true;
-      env.add(podium);
     }
   }
 
-  // Trees: 树干 + 多个不规则球冠，更像真实树木
+  // Trees
   for (var t = 0; t < 26; t++) {
     var tx = (t - 13) * 120 + Math.random() * 60;
     var tz = (t % 2 === 0 ? 1 : -1) * (17 + Math.random() * 36);
     var th = 2 + Math.random() * 2.5;
-    var trunk = _makeCyl(0.18, 0.28, th, 8, 0x6b4423);
-    trunk.position.set(tx, th / 2, tz);
-    trunk.castShadow = true; env.add(trunk);
-    var canopyColor = 0x2d5a27 + Math.floor(Math.random() * 0x202010);
-    var leafMat = new THREE.MeshStandardMaterial({ color: canopyColor, roughness: 0.9 });
+
+    var matTrunk = new T.Matrix4().makeTranslation(tx, th / 2, tz);
+    matTrunk.scale(new T.Vector3(0.18, th, 0.28));
+    trunkGeos.push(_transformGeometry(cylTpl, matTrunk));
+
     var nBlobs = 3 + Math.floor(Math.random() * 3);
     for (var cb = 0; cb < nBlobs; cb++) {
       var r = 1.2 + Math.random() * 1.6;
-      var blob = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), leafMat);
-      blob.position.set(
+      var matL = new T.Matrix4().makeTranslation(
         tx + (Math.random() - 0.5) * r * 1.2,
         th + r * 0.4 + Math.random() * 1.2,
         tz + (Math.random() - 0.5) * r * 1.2
       );
-      blob.scale.set(1, 0.75 + Math.random() * 0.4, 1);
-      blob.castShadow = true;
-      env.add(blob);
+      matL.scale(new T.Vector3(r, r * (0.75 + Math.random() * 0.4), r));
+      leafGeos.push(_transformGeometry(dodecTpl, matL));
     }
   }
 
-  // Street props: 路灯杆 + 垃圾桶 + 消防栓
-  var propMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
-  var trashMat = new THREE.MeshStandardMaterial({ color: 0x446644, roughness: 0.7 });
-  var hydrantMat = new THREE.MeshStandardMaterial({ color: 0xaa2222, roughness: 0.5 });
+  // Street props
   for (var p = 0; p < 16; p++) {
     var px = (p - 8) * 160 + Math.random() * 60;
     var pside = (p % 2 === 0) ? 1 : -1;
     var pz = pside * (10 + Math.random() * 4);
     var poleH = 5.5 + Math.random() * 1.5;
-    var pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, poleH, 10), propMat);
-    pole.position.set(px, poleH / 2, pz);
-    pole.castShadow = true; env.add(pole);
+
+    var matPole = new T.Matrix4().makeTranslation(px, poleH / 2, pz);
+    matPole.scale(new T.Vector3(0.07, poleH, 0.1));
+    propGeos.push(_transformGeometry(cylTpl, matPole));
+
     var armLen = 1.2;
-    var arm = new THREE.Mesh(new THREE.BoxGeometry(armLen, 0.08, 0.08), propMat);
-    arm.position.set(px - pside * armLen / 2, poleH - 0.3, pz);
-    env.add(arm);
-    var lamp = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.1, 0.18),
-      new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.9 }));
-    lamp.position.set(px - pside * armLen, poleH - 0.3, pz);
-    env.add(lamp);
+    var matArm = new T.Matrix4().makeTranslation(px - pside * armLen / 2, poleH - 0.3, pz);
+    matArm.scale(new T.Vector3(armLen, 0.08, 0.08));
+    propGeos.push(_transformGeometry(boxTpl, matArm));
+
+    var matLamp = new T.Matrix4().makeTranslation(px - pside * armLen, poleH - 0.3, pz);
+    matLamp.scale(new T.Vector3(0.35, 0.1, 0.18));
+    lampGeos.push(_transformGeometry(boxTpl, matLamp));
 
     if (Math.random() > 0.3) {
-      var trash = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.22, 0.7, 10), trashMat);
-      trash.position.set(px + pside * 0.6, 0.35, pz + (Math.random() - 0.5) * 0.5);
-      trash.castShadow = true; env.add(trash);
+      var matTrash = new T.Matrix4().makeTranslation(px + pside * 0.6, 0.35, pz + (Math.random() - 0.5) * 0.5);
+      matTrash.scale(new T.Vector3(0.25, 0.7, 0.22));
+      trashGeos.push(_transformGeometry(cylTpl, matTrash));
     }
     if (Math.random() > 0.8) {
-      var hydrant = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.55, 8), hydrantMat);
-      hydrant.position.set(px + pside * 0.9, 0.28, pz + (Math.random() - 0.5) * 0.6);
-      hydrant.castShadow = true; env.add(hydrant);
+      var matHyd = new T.Matrix4().makeTranslation(px + pside * 0.9, 0.28, pz + (Math.random() - 0.5) * 0.6);
+      matHyd.scale(new T.Vector3(0.12, 0.55, 0.12));
+      hydrantGeos.push(_transformGeometry(cylTpl, matHyd));
     }
   }
+
+  // 合并并创建 mesh
+  var bldMat = new T.MeshStandardMaterial({ color: 0x4a5868, roughness: 0.85 });
+  var winMat = new T.MeshStandardMaterial({ color: 0x88aacc, metalness: 0.6, roughness: 0.15, emissive: 0x223344, emissiveIntensity: 0.25, side: T.DoubleSide });
+  var trunkMat = new T.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.9 });
+  var leafMat = new T.MeshStandardMaterial({ color: 0x2d5a27, roughness: 0.9 });
+  var propMat = new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
+  var lampMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.9 });
+  var trashMat = new T.MeshStandardMaterial({ color: 0x446644, roughness: 0.7 });
+  var hydrantMat = new T.MeshStandardMaterial({ color: 0xaa2222, roughness: 0.5 });
+
+  function addMerged(geos, mat, castShadow, receiveShadow) {
+    if (!geos.length) return;
+    var mesh = new T.Mesh(_mergeGeometries(geos), mat);
+    if (castShadow) mesh.castShadow = true;
+    if (receiveShadow) mesh.receiveShadow = true;
+    env.add(mesh);
+  }
+
+  addMerged(bldGeos, bldMat, true, true);
+  addMerged(winGeos, winMat, false, false);
+  addMerged(trunkGeos, trunkMat, true, false);
+  addMerged(leafGeos, leafMat, true, false);
+  addMerged(propGeos, propMat, true, false);
+  addMerged(lampGeos, lampMat, false, false);
+  addMerged(trashGeos, trashMat, true, false);
+  addMerged(hydrantGeos, hydrantMat, true, false);
 
   scene.add(env);
   _envGroup = env;
