@@ -50,6 +50,8 @@ sim_world_node                   │
 
 ```jsonc
 {
+  "schema_version": "1.0.0",  // string, 数据契约版本号（v1.2.1 新增）
+
   "ego": {
     "x": 102.5,          // double, 世界坐标 X
     "y": -1.75,          // double, 世界坐标 Z（映射到 Three.js z）
@@ -102,12 +104,13 @@ sim_world_node                   │
     { "id": 0, "type": "car", "x": 10.0, "y": -1.75, "vx": 0.0, "vy": 0.0, "len": 4.6, "wid": 2.0 }
   ],
 
-  // 规划轨迹（Frenet 坐标）
+  // 规划轨迹（Frenet 坐标，v1.2.0 起每点第 4 元素可选 edge_id）
   "trajectory_path": [
     [0.0,  0.0, 8.0],   // [s, d, spd]
     [5.0,  0.1, 8.5],
     [10.0, 0.2, 9.0]
   ],
+  "trajectory_edge_id": 0,  // int, ego 所在 road edge id，前端用它定位轨迹起始曲线（v1.2.1 新增）
 
   // LiDAR 点云（ego-relative）
   "lidar": [
@@ -232,6 +235,12 @@ Frenet 坐标数组：`[[s, d, spd], ...]` 或 `[[s, d, spd, edge_id], ...]`（v
 | `spd` | double | m/s | 该点目标速度 |
 | `edge_id` | int? | - | v1.2.0 可选。所在 edge 在 `road_network.edges` 数组中的下标。planning 升级后填充 |
 
+`trajectory_edge_id`（v1.2.1 新增）是 scene 级别的字段，来自 `vehicle/state.road_id`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `trajectory_edge_id` | int | ego 所在道路 edge 的 id，前端用此优化起始曲线定位（优先于 per-point edge_id） |
+
 **渲染约定**（v1.2.0 跨 edge 链式投影）：
 
 - 有 `road_network` 时，前端将 ego 投影到最近 edge，沿 curve 前进 s 米，再横向偏移 d
@@ -254,7 +263,8 @@ Frenet 坐标数组：`[[s, d, spd], ...]` 或 `[[s, d, spd, edge_id], ...]`（v
 
 1. **轨迹参考线**：~~`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准~~ v1.2.0 已修复：前端实现跨 edge 链式投影；planning 输出 `edge_id` 待后续重构参考线后启用
 2. **红绿灯来源冗余**：~~`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`~~ v2.0.0 已修复：移除 `scene.traffic_lights`，红绿灯统一由 `scene.entities` 中的 `tl` 提供
-3. **版本号字段**：建议在 `metrics.scene` 顶层增加 `schema_version` 字段，便于前端做兼容性处理
+3. ~~版本号字段~~（v1.2.1 已在 `metrics.scene` 顶层增加 `schema_version: "1.0.0"`）
+4. **trajectory_edge_id**（v1.2.1 新增）：`metrics.scene` 中的 `trajectory_edge_id` 来自 `vehicle/state` 的 `road_id` 字段（flowsim_node 发布），前端优先用该字段定位起始 road edge，避免多段路网搜索最近曲线时的歧义
 
 ## 8. 责任边界
 

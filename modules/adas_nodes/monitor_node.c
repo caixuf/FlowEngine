@@ -62,6 +62,7 @@ static struct {
     char driver_mode[32];
     int  route_lane;
     char trajectory_path_json[4096];  /* path 数组 JSON 文本，如 [[s,d,spd],...] */
+    int  ego_road_id;                 /* ego 所在道路段 id（flowsim_node 发布） */
     volatile int has_planning;
 
     /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，sim_world 发布） */
@@ -137,6 +138,8 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     memcpy(g.latest_vehicle_state, msg->data, copy);
     g.latest_vehicle_state[copy] = '\0';
     g.has_vehicle_state = 1;
+    /* 提取 ego 所在 road_id，供 trajectory_edge_id 用 */
+    g.ego_road_id = json_extract_int(g.latest_vehicle_state, "road_id");
 }
 
 /* 收集其他节点的自描述广播 */
@@ -574,6 +577,8 @@ static void export_dashboard_json(void) {
     double steer = json_extract_double(g.latest_vehicle_state, "st");
 
     cJSON* scene = cJSON_AddObjectToObject(metrics, "scene");
+    /* schema_version 供前端做兼容性检查，见 docs/FLOWBOARD_SCENE_CONTRACT.md §6 */
+    cJSON_AddStringToObject(scene, "schema_version", "1.0.0");
     cJSON* ego_o = cJSON_AddObjectToObject(scene, "ego");
     cJSON_AddNumberToObject(ego_o, "x", ego_x);
     cJSON_AddNumberToObject(ego_o, "y", ego_y);
@@ -616,15 +621,16 @@ static void export_dashboard_json(void) {
         }
     }
 
-    /* NOA Phase 6: 规划轨迹 path 数组透传给 3D 前端。
-     * path 是 Frenet 坐标 [[s,d,spd],...]，前端从 ego 当前位置出发沿 heading
-     * 方向延伸 s、横向偏移 d 近似绘制世界坐标轨迹线（无 esmini Frenet→World
-     * 转换的纯前端近似，直道/大半径弯道下足够可视化）。 */
+    /* 规划轨迹 path 数组透传给 3D 前端。
+     * path 是 Frenet 坐标 [[s,d,spd],...]，前端可沿 road_network 曲线做
+     * Frenet→World 转换（有 edge_id 时精确定位，否则搜索最近 edge）。
+     * trajectory_edge_id 来自 vehicle/state 的 ego.road_id，指示轨迹所属道路段。 */
     if (g.has_planning && g.trajectory_path_json[0] != '\0') {
         cJSON* path = cJSON_Parse(g.trajectory_path_json);
         if (path) {
             cJSON_AddItemToObject(scene, "trajectory_path", path);
         }
+        cJSON_AddNumberToObject(scene, "trajectory_edge_id", (double)g.ego_road_id);
     }
 
     /* 障碍物（从 vehicle/state 动态读取） */

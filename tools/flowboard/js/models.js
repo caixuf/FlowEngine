@@ -254,8 +254,8 @@ function _relinkWheelUserData(clone) {
 
 /**
  * 将 glTF 车身的 PBR 材质升级为 MeshPhysicalMaterial（clearcoat 车漆），
- * 并整体涂色。仅改 body/cabin/cab/cargo/hood/trunklid/door_*/wiper_* 等
- * 车身件；跳过灯节点（brakelight_*/turnsignal_*/headlight_* 保留发光材质）、
+ * 并整体涂色。仅改 body/cabin/cab/cargo/hood/trunklid/door_* / wiper_* 等
+ * 车身件；跳过灯节点（brakelight_* / turnsignal_* / headlight_* 保留发光材质）、
  * 车轮（wheel_* 保持轮胎黑）和玻璃（windshield/rear_window 保持透明）。
  */
 function _upgradeCarPaint(model, color) {

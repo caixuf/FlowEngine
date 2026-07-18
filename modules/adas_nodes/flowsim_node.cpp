@@ -222,6 +222,24 @@ static std::string convert_scenario_to_xodr(const std::string& scenario_path) {
 
 /* ── 从场景配置填充 EntityPool ─────────────────────────────────── */
 
+/**
+ * 计算 (x, y) 处的道路切线航向角。
+ * - esmini 模式：world_to_frenet → frenet_to_world 获取准确航向
+ * - legacy 模式：road_center_heading() 解析计算
+ */
+static double compute_road_heading_at(double x, double y) {
+    if (g.roads_loaded) {
+        flowsim::FrenetPos fp;
+        if (g.roads.world_to_frenet(x, y, fp)) {
+            flowsim::WorldPos wp;
+            if (g.roads.frenet_to_world(fp.road_id, 0, fp.s, 0.0, wp)) {
+                return wp.h;
+            }
+        }
+    }
+    return road_center_heading(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+}
+
 static flowsim::EntityType actor_type_to_entity(const char* type) {
     if (!type) return flowsim::EntityType::Car;
     if (strcmp(type, "pedestrian") == 0) return flowsim::EntityType::Pedestrian;
@@ -334,10 +352,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.steer    = tl->red_s;       /* red 时长 */
         e.target_vx = tl->phase_offset_s;  /* 相位偏移 */
         e.heading = tl->heading;
-        /* 未显式配置 heading 时，按旧道路弯道几何估算切线方向，
-         * 保证弯道场景红绿灯 arm 大致垂直于道路。 */
-        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
-            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        /* 未显式配置 heading 时，按道路几何估算切线方向（esmini 优先，
+         * legacy 弯道 fallback），保证弯道场景红绿灯 arm 大致垂直于道路。 */
+        if (e.heading == 0.0) {
+            e.heading = compute_road_heading_at(e.x, e.y);
         }
     }
 
@@ -359,8 +377,8 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.width = eg->open_range_m;
         e.ai_state = flowsim::AIState::Stop; /* 初始 closed 状态 */
         e.heading = eg->heading;
-        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
-            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        if (e.heading == 0.0) {
+            e.heading = compute_road_heading_at(e.x, e.y);
         }
     }
 
@@ -375,8 +393,8 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.x = sl->x;
         e.y = sl->y;
         e.heading = sl->heading;
-        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
-            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        if (e.heading == 0.0) {
+            e.heading = compute_road_heading_at(e.x, e.y);
         }
     }
 }
@@ -396,6 +414,8 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(vstate, "tgt", ego.target_vx);
     cJSON_AddNumberToObject(vstate, "st", ego.steer);
     cJSON_AddNumberToObject(vstate, "t_us", (double)sim_time_us);
+    cJSON_AddNumberToObject(vstate, "road_id", (double)ego.road_id);
+    cJSON_AddNumberToObject(vstate, "lane_id", (double)ego.lane_id);
 
     /* 收集非 ego 的活跃实体作为障碍物（车辆 + 行人） */
     int n_obs = 0;

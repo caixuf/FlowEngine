@@ -1734,16 +1734,31 @@ function update3D() {
       _trajLastKey = tkey;
       // 构建 world 坐标点数组（Vector3）
       var tvec = [];
-      // 把 ego 投影到道路网络曲线，记录起始 edge 索引与 t 参数
+      // 把 ego 投影到道路网络曲线，记录起始 edge 索引与 t 参数。
+      // trajectory_edge_id（monitor 透传 ego.road_id）优先，避免搜索最近曲线
+      // 在多段路网中可能选错边的偏差。无 edge_id 时退化为全局最近搜索。
       var nearCurveIdx = -1, nearT = 0;
       if (_roadCurves && _roadCurves.length) {
-        var bestD2 = Infinity;
-        for (var ci = 0; ci < _roadCurves.length; ci++) {
-          var pts = _roadCurves[ci].getSpacedPoints(30);
-          for (var pi = 0; pi < pts.length; pi++) {
-            var dx = pts[pi].x - ex, dz = pts[pi].z - ez;
+        var hintId = (scn.trajectory_edge_id != null) ? scn.trajectory_edge_id : -1;
+        if (hintId >= 0 && hintId < _roadCurves.length) {
+          // 显式 edge_id：只在该 edge 上搜索 ego 投影点
+          nearCurveIdx = hintId;
+          var hpts = _roadCurves[hintId].getSpacedPoints(30);
+          var bestD2 = Infinity;
+          for (var pi = 0; pi < hpts.length; pi++) {
+            var dx = hpts[pi].x - ex, dz = hpts[pi].z - ez;
             var d2 = dx * dx + dz * dz;
-            if (d2 < bestD2) { bestD2 = d2; nearCurveIdx = ci; nearT = pi / (pts.length - 1); }
+            if (d2 < bestD2) { bestD2 = d2; nearT = pi / (hpts.length - 1); }
+          }
+        } else {
+          var bestD2 = Infinity;
+          for (var ci = 0; ci < _roadCurves.length; ci++) {
+            var pts = _roadCurves[ci].getSpacedPoints(30);
+            for (var pi = 0; pi < pts.length; pi++) {
+              var dx = pts[pi].x - ex, dz = pts[pi].z - ez;
+              var d2 = dx * dx + dz * dz;
+              if (d2 < bestD2) { bestD2 = d2; nearCurveIdx = ci; nearT = pi / (pts.length - 1); }
+            }
           }
         }
       }
