@@ -97,6 +97,12 @@ let _glLost = false;
 /** Animation time counter (incremented per frame) */
 let _animT = 0;
 
+/** Performance tier: 'high'|'medium'|'low'. Auto-adjusted by FPS monitor. */
+let _perfTier = 'high';
+let _perfFrameCount = 0;
+let _perfLastTime = 0;
+let _perfCheckInterval = 60; // 每 60 帧评估一次
+
 /** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
 let _tmpV3 = null, _tmpScale = null;
 
@@ -272,8 +278,13 @@ function _applyRoadCurve(roadData) {
 // 每条 edge 的 nodes [[x,y],...] 是道路参考线控制点，x=纵向 y=横向。
 // ══════════════════════════════════════════════════════════════════════════════
 
+// 共享沥青纹理缓存：避免每条 edge 都创建 512×512 CanvasTexture。
+let _asphaltTex = null;
+let _shoulderTex = null;
+
 /** 程序化沥青纹理：深灰底 + 多层噪点 + 随机补丁/裂缝，模拟真实路面。 */
 function _makeAsphaltTexture() {
+  if (_asphaltTex) return _asphaltTex;
   var canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 512;
   var ctx = canvas.getContext('2d');
@@ -317,9 +328,16 @@ function _makeAsphaltTexture() {
     }
     ctx.stroke();
   }
-  var tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
-  return tex;
+  _asphaltTex = new THREE.CanvasTexture(canvas);
+  _asphaltTex.wrapS = THREE.RepeatWrapping; _asphaltTex.wrapT = THREE.RepeatWrapping;
+  return _asphaltTex;
+}
+
+/** 返回路肩专用纹理（沥青纹理 clone，独立 repeat/anisotropy）。 */
+function _getShoulderTexture() {
+  if (_shoulderTex) return _shoulderTex;
+  _shoulderTex = _makeAsphaltTexture().clone();
+  return _shoulderTex;
 }
 
 /**
@@ -467,7 +485,7 @@ function _buildRoadNetwork(edges) {
     shldGeo.setAttribute('position', new THREE.Float32BufferAttribute(sPos, 3));
     shldGeo.setIndex(sIdx);
     shldGeo.computeVertexNormals();
-    var shldTex = _makeAsphaltTexture();
+    var shldTex = _getShoulderTexture();
     shldTex.repeat.set(length / 6, 1);
     shldTex.anisotropy = 4;
     var shldMesh = new THREE.Mesh(shldGeo,
@@ -1091,6 +1109,8 @@ function init3DScene() {
       staleCanvasCount++;
     }
   }
+  // 旧 composer 引用了旧 renderer，必须重置否则恢复后仍尝试用 dead context 渲染。
+  _composer = null;
   // Defensive: remove any other leftover <canvas> children (e.g. from a
   // context-loss race where cleanup above didn't run before a new canvas
   // was appended).
@@ -1152,6 +1172,14 @@ function init3DScene() {
   camera3d = new THREE.PerspectiveCamera(60, w / h, 0.2, 500);
 
   // Renderer
+  // 根据 URL 参数 ?perf=low 或屏幕尺寸选择初始性能档位，避免低端设备开局卡死。
+  var urlParams = new URLSearchParams(window.location.search);
+  var initPerf = urlParams.get('perf');
+  if (initPerf === 'low' || initPerf === 'medium' || initPerf === 'high') {
+    _perfTier = initPerf;
+  } else if (window.innerWidth < 700) {
+    _perfTier = 'medium';
+  }
   renderer3d = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer3d.setSize(w, h);
   renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -1159,7 +1187,8 @@ function init3DScene() {
   renderer3d.toneMappingExposure = 1.1;
   // 开启阴影渲染：物体 castShadow/receiveShadow 才会真正产生阴影，
   // 之前 sun.castShadow=true 但 renderer 未启用 shadowMap，阴影被静默丢弃。
-  renderer3d.shadowMap.enabled = true;
+  // low 档位默认关闭阴影以提升帧率。
+  renderer3d.shadowMap.enabled = (_perfTier !== 'low');
   renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
   el.appendChild(renderer3d.domElement);
 
@@ -1383,6 +1412,34 @@ function init3DScene() {
     window._bloomUnavailable = true;
   }
 
+  // ── Performance-based adaptive quality ──
+  // 每 _perfCheckInterval 帧统计 FPS，低于阈值时自动降级：
+  // high   -> 全开（Bloom + 阴影 + 街灯 PointLight）
+  // medium -> 关闭 Bloom，保留阴影
+  // low    -> 关闭 Bloom + 阴影，减少 uniform 重传
+  function _updatePerfTier() {
+    _perfFrameCount++;
+    var now = performance.now();
+    if (_perfFrameCount >= _perfCheckInterval) {
+      var elapsed = (now - _perfLastTime) / 1000;
+      var fps = elapsed > 0 ? _perfFrameCount / elapsed : 60;
+      _perfFrameCount = 0;
+      _perfLastTime = now;
+      var newTier = _perfTier;
+      if (fps < 18) newTier = 'low';
+      else if (fps < 28) newTier = 'medium';
+      else if (fps > 35 && _perfTier === 'low') newTier = 'medium';
+      else if (fps > 45 && _perfTier === 'medium') newTier = 'high';
+      if (newTier !== _perfTier) {
+        _perfTier = newTier;
+        if (renderer3d) {
+          renderer3d.shadowMap.enabled = (_perfTier !== 'low');
+        }
+        console.log('[scene3d] perf tier changed to', _perfTier, '(fps=', fps.toFixed(1), ')');
+      }
+    }
+  }
+
   // ── Animation loop ──
   function anim3D() {
     requestAnimationFrame(anim3D);
@@ -1391,7 +1448,9 @@ function init3DScene() {
     if (!renderer3d || !scene3d || !camera3d) return;
     safeCall('scene3d.frame', function() {
       _renderFrame();
-      if (_composer) {
+      _updatePerfTier();
+      // low/medium 关闭 Bloom；high 且 composer 存在才用 Bloom。
+      if (_composer && _perfTier === 'high') {
         _composer.render();
       } else {
         renderer3d.render(scene3d, camera3d);
@@ -1419,6 +1478,20 @@ function _show3DError(msg) {
     '<div style="color:#f08888;font-size:11px;font-family:monospace;line-height:1.5;max-width:380px;word-break:break-all">' +
     (msg || 'unknown error') + '</div>';
   if (window.console && console.error) console.error('[scene3d]', msg);
+}
+
+/**
+ * 手动设置 3D 性能档位。可用于 UI 开关或测试：
+ *   'high'   = Bloom + 阴影全开
+ *   'medium' = 无 Bloom，保留阴影
+ *   'low'    = 无 Bloom，无阴影
+ */
+export function setPerfTier(tier) {
+  if (tier !== 'high' && tier !== 'medium' && tier !== 'low') return;
+  _perfTier = tier;
+  if (renderer3d) {
+    renderer3d.shadowMap.enabled = (_perfTier !== 'low');
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1568,12 +1641,32 @@ function _renderFrame() {
         // 复用同一 group 槽位，只替换 children，保留 position/scale/visible。
         if (om.userData.obsType !== ow.type) {
           var nm = buildObstacleGroup(ow.type, c) || _buildObstacle(ow.type, c);
-          while (om.children.length) om.remove(om.children[0]);
+          // 清理旧 mesh 的 GPU 资源，避免类型频繁切换时内存泄漏。
+          while (om.children.length) {
+            var oldChild = om.children[0];
+            om.remove(oldChild);
+            if (oldChild.traverse) {
+              oldChild.traverse(function(ch) {
+                if (ch.geometry) ch.geometry.dispose();
+                if (ch.material) {
+                  if (Array.isArray(ch.material)) {
+                    ch.material.forEach(function(m) { m.dispose(); });
+                  } else {
+                    ch.material.dispose();
+                  }
+                }
+              });
+            }
+          }
           while (nm.children.length) om.add(nm.children[0]);
           om.userData.obsType = ow.type;
+          om.userData.obsColor = c;
         }
-        if (om.children.length > 0 && om.children[0].material && om.children[0].material.color) {
+        // 颜色只在变化时 setHex，避免每帧触发 uniform 重传。
+        if (om.userData.obsColor !== c && om.children.length > 0 &&
+            om.children[0].material && om.children[0].material.color) {
           om.children[0].material.color.setHex(c);
+          om.userData.obsColor = c;
         }
         om.visible = true;
 
