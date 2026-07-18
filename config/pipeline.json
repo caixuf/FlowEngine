@@ -178,7 +178,8 @@
         "fusion/localization",
         "planning/trajectory",
         "vehicle/state",
-        "road/geometry"
+        "road/geometry",
+        "scene/frame"
       ],
       "publish": [
         {

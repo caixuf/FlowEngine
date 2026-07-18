@@ -629,9 +629,14 @@ protected:
             int overtake_worthwhile = 0;
             int overtake_need_accel = 0;
             if (best_gap < safe_gap && best_gap < 80.0) {
+                /* 跟车目标速度: gap=0 时匹配前车速度, gap≥safe_gap 时恢复巡航。
+                 * 用 lead_speed 作下界替代 ratio*boost_target，避免 ego 减速过头
+                 * 导致 gap 反复振荡→速度归零→管道冻住。 */
                 double ratio = best_gap / safe_gap;
-                if (ratio < 0.2) ratio = 0.2;
-                acc_target = boost_target * ratio;
+                if (ratio > 1.0) ratio = 1.0;
+                if (ratio < 0.0) ratio = 0.0;
+                acc_target = lead_speed + (boost_target - lead_speed) * ratio;
+                if (acc_target > boost_target) acc_target = boost_target;
                 if (acc_target < boost_target * 0.7) blocked = 1;
             }
             /* 状态机: 跟踪障碍物阻塞状态变化（was_blocked_sm 从函数 static 改为成员） */
