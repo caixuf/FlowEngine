@@ -193,6 +193,23 @@ def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
     return expected_edges_from_pipeline(pipeline)
 
 
+def load_scenario_for_duration(scenario_override: str | None = None) -> dict:
+    """Load scenario JSON to read duration_s for auto-detection."""
+    scenario_path = scenario_override
+    if not scenario_path:
+        # Read default scenario from demo.sh
+        demo_sh = ROOT / "scripts" / "demo.sh"
+        if demo_sh.exists():
+            text = demo_sh.read_text()
+            for line in text.splitlines():
+                if line.strip().startswith("DEFAULT_SCENARIO="):
+                    scenario_path = line.split("=", 1)[1].strip().strip('"')
+                    break
+    if scenario_path:
+        return load_json(ROOT / scenario_path) or {}
+    return {}
+
+
 def load_json(path: Path) -> dict | None:
     try:
         with path.open("r", encoding="utf-8") as f:
@@ -316,7 +333,6 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     ego = scene.get("ego", {})
     obstacles = scene.get("obstacles", [])
     lane = scene.get("lane", {})
-    scn_lights = scene.get("traffic_lights", [])
     scn_entities = scene.get("entities", [])
 
     speed = float(vehicle.get("speed", ego.get("speed", 0.0)) or 0.0)
@@ -369,7 +385,6 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "obs_world": obs_world,
         "driver_mode": str(metrics.get("driver_mode", "") or ""),
         "route_lane": int(metrics.get("route_lane", 0) or 0),
-        "traffic_lights": scn_lights if isinstance(scn_lights, list) else [],
         "entities": scn_entities if isinstance(scn_entities, list) else [],
     }
 
@@ -584,10 +599,8 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
                 # 从样本中查找对应红绿灯的当前状态（按 x 匹配同一盏灯）
                 curr_state = None
-                # 优先从 entities (v2.0 世界坐标) 读取，fallback 到 traffic_lights
-                tl_source = m.get("entities", []) or m.get("traffic_lights", [])
-                for s_tl in tl_source:
-                    if isinstance(s_tl, dict) and s_tl.get("type") in (None, "tl"):
+                for s_tl in m.get("entities", []):
+                    if isinstance(s_tl, dict) and s_tl.get("type") == "tl":
                         s_x = float(s_tl.get("x", stop_x) or stop_x)
                         if abs(s_x - stop_x) < 2.0:
                             curr_state = str(s_tl.get("state", "") or "")
@@ -759,7 +772,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate FlowEngine demo behavior.")
-    parser.add_argument("--duration", type=int, default=15, help="demo run duration in seconds")
+    parser.add_argument("--duration", type=int, default=0, help="demo run duration in seconds (0=auto-detect from scenario)")
     parser.add_argument("--interval", type=float, default=0.25, help="JSON sample interval in seconds")
     parser.add_argument("--json-file", type=Path, default=DEFAULT_JSON)
     parser.add_argument("--no-run", action="store_true", help="evaluate current JSON/logs without starting demo.sh")
@@ -769,6 +782,15 @@ def main() -> int:
                         help="write the machine-readable evaluation result to this JSON path")
     args = parser.parse_args()
 
+    # Auto-detect duration from scenario if not explicitly given
+    duration = args.duration
+    if duration <= 0 and not args.no_run:
+        scenario_cfg = load_scenario_for_duration(args.scenario)
+        if scenario_cfg and scenario_cfg.get("duration_s", 0) > 0:
+            duration = int(scenario_cfg["duration_s"])
+        if duration <= 0:
+            duration = 60  # fallback
+
     if args.no_run:
         sample = load_json(args.json_file)
         samples = [sample] if sample else []
@@ -776,7 +798,7 @@ def main() -> int:
         criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
     else:
         with pipeline_scenario_override(args.scenario):
-            samples, returncode = collect_samples(args.duration, args.json_file, args.interval)
+            samples, returncode = collect_samples(duration, args.json_file, args.interval)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.

@@ -28,7 +28,7 @@ for port in 8800 8765; do
 done
 sleep 0.5
 
-DURATION=0  # 0 = 持续运行直到 Ctrl+C，设置正数 = 限时运行秒数
+DURATION=0  # 0 = 自动从场景 duration_s 读取，设置正数 = 覆盖
 OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
@@ -111,6 +111,11 @@ cat << 'BANNER'
 BANNER
 
    SCENARIO_DISPLAY="${SCENARIO:-$(grep -o 'scenarios/[^\"]*' "$PIPELINE_ORIG" | head -1)}"
+   # Auto-detect duration from scenario if not explicitly given
+   if [ "$DURATION" -le 0 ] 2>/dev/null; then
+     DURATION=$(python3 -c "import json; d=json.load(open('$SCENARIO_ABS')); print(int(d.get('duration_s',0) or 0))" 2>/dev/null || echo 0)
+     [ "$DURATION" -le 0 ] 2>/dev/null && DURATION=60
+   fi
    echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
 echo ""
 
