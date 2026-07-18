@@ -1185,10 +1185,15 @@ protected:
  * 而线程池工作线程仍在 await_suspend 内部执行续体返回流程，就会出现数据竞争。
  *
  * 解决方案：在 execute() 调用前将 CompletionNotifier 句柄设为 task_ 的
- * continuation。协程完成时，FinalAwaiter 通过对称转移将控制权交给 notifier，
- * notifier 的 return_void() 在工作线程上原子地设置 frame_done_ 并唤醒 cv。
- * execute() 等待 frame_done_（而非 task_->done()），保证工作线程已彻底退出
- * 协程帧，不再访问任何协程相关内存，然后才销毁 task_。
+ * continuation。协程完成时，FinalAwaiter 通过对称转移将控制权交给 notifier。
+ * notifier 在 final_suspend 的 await_suspend 中原子地设置 frame_done_ 并唤醒 cv。
+ *
+ * 关键：frame_done_ 由 final_suspend::await_suspend 设置，此刻 notifier 帧已
+ * 到达最终挂起点（resume 指针已清零，帧处于稳定状态，不再被工作线程访问）。
+ * 因此 execute() 看到 frame_done_==true 后可直接销毁 notifier 帧，
+ * 无需自旋等待 handle.done()——后者是对协程帧状态的非原子读，
+ * 与工作线程的写操作构成数据竞争（UB，-O2 下编译器可能提升加载导致
+ * 死循环或过早 destroy 仍在被写的帧，引发堆损坏）。
  */
 struct CompletionNotifier {
     struct promise_type {
@@ -1200,12 +1205,29 @@ struct CompletionNotifier {
                 std::coroutine_handle<promise_type>::from_promise(*this)};
         }
         std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
-        void return_void() noexcept {
-            if (done_flag) {
-                done_flag->store(true, std::memory_order_release);
-                cv->notify_all();
+
+        /* 自定义 final_suspend：帧到达最终挂起点后原子地发出完成信号。
+         * 标准保证 await_suspend 执行时协程帧已处于稳定挂起状态，
+         * 此处 store(release) 与 execute() 线程的 load(acquire) 建立
+         * happens-before，使后续 handle.destroy() 安全。返回 noop_coroutine
+         * 释放 worker 线程回线程池，不再访问 notifier 帧。 */
+        struct FinalAwaiter {
+            bool await_ready() noexcept { return false; }
+            std::coroutine_handle<> await_suspend(
+                std::coroutine_handle<promise_type> h) noexcept {
+                auto& p = h.promise();
+                if (p.done_flag) {
+                    p.done_flag->store(true, std::memory_order_release);
+                    p.cv->notify_all();
+                }
+                return std::noop_coroutine();
             }
+            void await_resume() noexcept {}
+        };
+        FinalAwaiter final_suspend() noexcept { return {}; }
+
+        void return_void() noexcept {
+            /* 信号已移至 final_suspend，此处无需操作 */
         }
         void unhandled_exception() noexcept {}
     };
@@ -1218,27 +1240,12 @@ struct CompletionNotifier {
     CompletionNotifier& operator=(const CompletionNotifier&) = delete;
     CompletionNotifier(CompletionNotifier&& o) noexcept
         : handle(o.handle) { o.handle = nullptr; }
-    /* TSAN 无法理解此自旋等待构成的事先发生后关系（happens-before）：
-     * 工作线程通过 return_void() 的 atomic store 通知 execute()，
-     * 然后挂起协程帧。execute() 自旋等待帧完全挂起后才 destroy。
-     * 对 TSAN 而言这是跨线程无锁访问——抑制假阳性。 */
-#if defined(__SANITIZE_THREAD__) || defined(__has_feature)
-#  if defined(__has_feature)
-#    if __has_feature(thread_sanitizer)
-#      define FLOWENGINE_NO_TSAN __attribute__((no_sanitize("thread")))
-#    endif
-#  else
-#    define FLOWENGINE_NO_TSAN __attribute__((no_sanitize("thread")))
-#  endif
-#endif
-#ifndef FLOWENGINE_NO_TSAN
-#  define FLOWENGINE_NO_TSAN
-#endif
 
-    FLOWENGINE_NO_TSAN
     ~CompletionNotifier() {
+        /* execute() 已等待 frame_done_（由 final_suspend::await_suspend 设置），
+         * 此时 notifier 帧处于稳定挂起状态，可直接 destroy，
+         * 无需自旋 handle.done()（避免非原子读 UB）。 */
         if (handle) {
-            while (!handle.done()) {}
             handle.destroy();
         }
     }
