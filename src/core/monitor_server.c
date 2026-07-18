@@ -731,11 +731,13 @@ static void handle_client(int fd, MonitorServer* ms) {
             return;
         }
 
-        /* Basename after the last '/'. */
-        const char* base = strrchr(reqpath, '/');
-        base = base ? base + 1 : reqpath;
+        /* Path relative to tools/ dir: skip the "/tools/" prefix (7 chars).
+         * e.g. /tools/flowboard/models/sedan.gltf → flowboard/models/sedan.gltf
+         *      /tools/three.min.js              → three.min.js */
+        const char* rel = reqpath + 7;  /* after "/tools/" */
+        if (*rel == '\0') rel = "index.html";
 
-        /* Directory of html_path (the tools/ folder).
+        /* Directory of html_path, stripped to the tools/ folder.
          * html_path may be tools/flowboard.html (legacy) or
          * tools/flowboard/index.html (modular) — strip basename,
          * then strip "flowboard" if present, so dir always ends at
@@ -749,13 +751,13 @@ static void handle_client(int fd, MonitorServer* ms) {
             *slash = '\0';
 
         char filepath[1024];
-        snprintf(filepath, sizeof(filepath), "%s/%s", dir, base);
+        snprintf(filepath, sizeof(filepath), "%s/%s", dir, rel);
 
         char* fbuf = read_file(filepath, NULL);
         if (fbuf) {
             /* Content type by extension. */
             const char* ctype = "application/octet-stream";
-            const char* dot = strrchr(base, '.');
+            const char* dot = strrchr(reqpath, '.');
             if (dot) {
                 if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
                 else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
