@@ -208,20 +208,14 @@ function _buildRoad(scene) {
     roadGroup.add(seg);
   }
 
-  // Centre double yellow dashes
-  var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
-  var nDash = Math.floor(ROAD_LEN / STEP);
-  var dGeo = new THREE.BoxGeometry(DASH, 0.02, 0.22, 1, 1, 1);
-  var dMat = new THREE.MeshStandardMaterial({ color: 0xffcc44, emissive: 0x333333, roughness: 0.3 });
-  for (var d = -Math.floor(nDash / 2); d < Math.floor(nDash / 2); d++) {
-    var dx = d * STEP + DASH / 2;
-    for (var dy = -1; dy <= 1; dy += 2) {
-      var dash = new THREE.Mesh(dGeo, dMat);
-      dash.position.set(dx, 0.043, dy * 0.12);
-      dash.userData.isLaneMark = true;
-      dash.userData.baseZ = dy * 0.12;
-      roadGroup.add(dash);
-    }
+  // Centre double yellow lines (solid, not dashed — highway standard)
+  var clGeo = new THREE.BoxGeometry(ROAD_LEN, 0.02, 0.15, 1, 1, 1);
+  var clMat = new THREE.MeshBasicMaterial({ color: 0xffcc44 });
+  for (var dy = -1; dy <= 1; dy += 2) {
+    var cl = new THREE.Mesh(clGeo, clMat);
+    cl.position.set(0, 0.043, dy * 0.15);
+    cl.userData.isLaneMark = true;
+    roadGroup.add(cl);
   }
 
   scene.add(roadGroup);
@@ -482,16 +476,18 @@ function _buildRoadNetwork(edges) {
     group.add(shldMesh);
 
     // ── 车道线：中心双黄线 + 多车道时分隔虚线 + 道路边缘白实线 ──
-    // 中心双黄线（实线）：±0.15m
-    _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
-    _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
-    // 多车道时分隔虚线（每相邻车道之间一条）
-    if (lanes > 2) {
-      for (var li = 1; li < lanes / 2; li++) {
-        var off = li * laneWidth;
-        _addLaneMarkRibbon(group, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
-        _addLaneMarkRibbon(group, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
-      }
+    // 中心双黄线（实线）：只对双向道路（lanes ≥ 2）绘制，单车道为单向路无需中心线
+    if (lanes >= 2) {
+      _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
+      _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
+    }
+    // 多车道分隔虚线：每方向 ≥2 车道时才需要内侧分隔线。
+    // lanes 是双向总车道数，floor(lanes/2) 是单向车道数，避免 3 车道不对称路误画。
+    var perSide = Math.floor(lanes / 2);
+    for (var li = 1; li < perSide; li++) {
+      var off = li * laneWidth;
+      _addLaneMarkRibbon(group, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
+      _addLaneMarkRibbon(group, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
     }
     // 道路边缘白实线
     _addLaneMarkRibbon(group, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
