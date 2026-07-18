@@ -317,6 +317,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     obstacles = scene.get("obstacles", [])
     lane = scene.get("lane", {})
     scn_lights = scene.get("traffic_lights", [])
+    scn_entities = scene.get("entities", [])
 
     speed = float(vehicle.get("speed", ego.get("speed", 0.0)) or 0.0)
     x = float(vehicle.get("x", ego.get("x", 0.0)) or 0.0)
@@ -369,6 +370,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "driver_mode": str(metrics.get("driver_mode", "") or ""),
         "route_lane": int(metrics.get("route_lane", 0) or 0),
         "traffic_lights": scn_lights if isinstance(scn_lights, list) else [],
+        "entities": scn_entities if isinstance(scn_entities, list) else [],
     }
 
 
@@ -558,7 +560,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     #   FAIL: ego 在红灯期间越过停止线（闯红灯）
     #   WARN: ego 在绿灯期间不必要地长时间停留（误判/过度保守，planning 可能在
     #         绿灯时仍注入了虚拟停止墙）
-    # 红绿灯状态来自 monitor 透传的 scene.traffic_lights（flowsim 真值发布）。
+    # 红绿灯状态来自 monitor 透传的 scene.entities（flowsim 真值发布，世界坐标）。
     # 若某帧缺少状态数据，沿用上一已知状态（灯相位切换周期远大于采样间隔）。
     scenario_lights = traffic_lights if traffic_lights else []
     has_red_light_check = bool(criteria.get("no_red_light_violation", False))
@@ -582,8 +584,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
                 # 从样本中查找对应红绿灯的当前状态（按 x 匹配同一盏灯）
                 curr_state = None
-                for s_tl in m.get("traffic_lights", []):
-                    if isinstance(s_tl, dict):
+                # 优先从 entities (v2.0 世界坐标) 读取，fallback 到 traffic_lights
+                tl_source = m.get("entities", []) or m.get("traffic_lights", [])
+                for s_tl in tl_source:
+                    if isinstance(s_tl, dict) and s_tl.get("type") in (None, "tl"):
                         s_x = float(s_tl.get("x", stop_x) or stop_x)
                         if abs(s_x - stop_x) < 2.0:
                             curr_state = str(s_tl.get("state", "") or "")
@@ -623,7 +627,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         if not has_signal_data:
             warnings.append(
                 "red-light check enabled but no traffic_light state data in samples "
-                "(road/traffic_lights topic may not have been received by monitor)"
+                "(scene.entities may not include tl type)"
             )
         elif red_light_violation:
             failures.append("red light violation: ego crossed stop line during red phase")

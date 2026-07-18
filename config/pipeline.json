@@ -321,7 +321,6 @@
         "flowengine/node_info",
         "planning/trajectory",
         "road/geometry",
-        "road/traffic_lights",
         "scene/frame"
       ],
       "params": "{\"state_file\":\"/tmp/flow_topology.json\",\"export_scene\":true}"
