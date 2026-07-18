@@ -488,6 +488,9 @@ export function _buildObstacle(type, color) {
   var grille = new T.Mesh(new T.BoxGeometry(0.03, 0.18, 0.55, 1, 1, 2), blackMat);
   grille.position.set(0.51, 0.35, 0); g.add(grille);
 
+  // 车底接触阴影：unit-normalized，随父级 scale.set(L,H,W) 自动映射为真实尺寸
+  g.add(_buildContactShadow(1.0, 1.0));
+
   // 车轮：带胎纹 + 5 辐条 + 中心盖
   var wheels = [];
   var wheelGeo = new T.CylinderGeometry(0.17, 0.17, 0.09, 18);

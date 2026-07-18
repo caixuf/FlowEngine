@@ -203,74 +203,72 @@ function _applyRoadCurve(roadData) {
 let _asphaltTex = null;
 let _shoulderTex = null;
 
-/** 程序化沥青纹理：深灰底 + 多层噪点 + 随机补丁/裂缝 + 轮胎痕迹，模拟真实路面。 */
+/** 程序化沥青纹理 v2：浅灰底 + 细腻噪点，走干净卡通风格（参考图）。 */
 function _makeAsphaltTexture() {
   if (_asphaltTex) return _asphaltTex;
   var canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 512;
   var ctx = canvas.getContext('2d');
-  // 基底：不均匀的深灰（略带蓝调，模拟真实沥青）
-  ctx.fillStyle = '#22242a'; ctx.fillRect(0, 0, 512, 512);
-  // 大色块补丁（模拟沥青压实不均，提高对比度）
-  for (var p = 0; p < 55; p++) {
+  // 基底：浅灰（参考图主色调）
+  ctx.fillStyle = '#7a7d80'; ctx.fillRect(0, 0, 512, 512);
+  // 低对比度大补丁（让路面不那么单调，但不显脏）
+  for (var p = 0; p < 35; p++) {
     var px = Math.random() * 512, py = Math.random() * 512;
-    var pr = 25 + Math.random() * 70;
+    var pr = 30 + Math.random() * 80;
     var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
-    var base = 22 + Math.floor(Math.random() * 35);
-    var isDark = Math.random() > 0.55;
-    var a0 = isDark ? 0.42 : 0.32;
-    grd.addColorStop(0, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 5) + ',' + a0 + ')');
-    grd.addColorStop(1, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 5) + ',0)');
+    var base = 110 + Math.floor(Math.random() * 25);
+    var isDark = Math.random() > 0.5;
+    var a0 = isDark ? 0.18 : 0.12;
+    grd.addColorStop(0, 'rgba(' + base + ',' + base + ',' + base + ',' + a0 + ')');
+    grd.addColorStop(1, 'rgba(' + base + ',' + base + ',' + base + ',0)');
     ctx.fillStyle = grd;
     ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
   }
-  // 轮胎痕迹：两条沿纹理方向的暗带，增加方向感和真实感
-  for (var r = 0; r < 3; r++) {
-    var ry = 120 + r * 140 + (Math.random() - 0.5) * 40;
-    var rw = 18 + Math.random() * 10;
-    var rgrd = ctx.createLinearGradient(0, ry - rw, 0, ry + rw);
-    rgrd.addColorStop(0, 'rgba(16,17,20,0)');
-    rgrd.addColorStop(0.5, 'rgba(16,17,20,0.28)');
-    rgrd.addColorStop(1, 'rgba(16,17,20,0)');
-    ctx.fillStyle = rgrd;
-    ctx.fillRect(0, ry - rw, 512, rw * 2);
-  }
-  // 深色颗粒
-  for (var i = 0; i < 8000; i++) {
+  // 深色颗粒（沥青质感）
+  for (var i = 0; i < 4500; i++) {
     var x = Math.random() * 512, y = Math.random() * 512;
-    var shade = Math.floor(Math.random() * 40);
-    ctx.fillStyle = 'rgba(' + (22 + shade) + ',' + (24 + shade) + ',' + (28 + shade) + ',0.6)';
+    var shade = Math.floor(Math.random() * 30);
+    ctx.fillStyle = 'rgba(' + (90 + shade) + ',' + (92 + shade) + ',' + (94 + shade) + ',0.35)';
     ctx.fillRect(x, y, 2, 2);
   }
   // 浅色颗粒/反光碎石
-  for (var j = 0; j < 3500; j++) {
+  for (var j = 0; j < 2200; j++) {
     var x2 = Math.random() * 512, y2 = Math.random() * 512;
-    var sh2 = Math.floor(Math.random() * 55);
-    ctx.fillStyle = 'rgba(' + (75 + sh2) + ',' + (80 + sh2) + ',' + (88 + sh2) + ',0.35)';
+    var sh2 = Math.floor(Math.random() * 40);
+    ctx.fillStyle = 'rgba(' + (145 + sh2) + ',' + (148 + sh2) + ',' + (152 + sh2) + ',0.22)';
     ctx.fillRect(x2, y2, 2, 2);
-  }
-  // 随机细裂缝
-  ctx.strokeStyle = 'rgba(8,9,11,0.4)';
-  ctx.lineWidth = 1;
-  for (var k = 0; k < 16; k++) {
-    ctx.beginPath();
-    var cx = Math.random() * 512, cy = Math.random() * 512;
-    ctx.moveTo(cx, cy);
-    for (var s = 0; s < 5; s++) {
-      cx += (Math.random() - 0.5) * 70; cy += (Math.random() - 0.5) * 70;
-      ctx.lineTo(cx, cy);
-    }
-    ctx.stroke();
   }
   _asphaltTex = new THREE.CanvasTexture(canvas);
   _asphaltTex.wrapS = THREE.RepeatWrapping; _asphaltTex.wrapT = THREE.RepeatWrapping;
   return _asphaltTex;
 }
 
-/** 返回路肩专用纹理（沥青纹理 clone，独立 repeat/anisotropy）。 */
-function _getShoulderTexture() {
+/** 路肩专用纹理：深褐灰土路/碎石带，与沥青有明显分界。 */
+function _makeShoulderTexture() {
   if (_shoulderTex) return _shoulderTex;
-  _shoulderTex = _makeAsphaltTexture().clone();
+  var canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 256;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#5a4d40'; ctx.fillRect(0, 0, 256, 256);
+  for (var p = 0; p < 40; p++) {
+    var px = Math.random() * 256, py = Math.random() * 256;
+    var pr = 20 + Math.random() * 40;
+    var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
+    var base = 80 + Math.floor(Math.random() * 25);
+    var a0 = Math.random() > 0.5 ? 0.20 : 0.14;
+    grd.addColorStop(0, 'rgba(' + base + ',' + (base - 8) + ',' + (base - 16) + ',' + a0 + ')');
+    grd.addColorStop(1, 'rgba(' + base + ',' + (base - 8) + ',' + (base - 16) + ',0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+  }
+  for (var i = 0; i < 1500; i++) {
+    var x = Math.random() * 256, y = Math.random() * 256;
+    var shade = Math.floor(Math.random() * 25);
+    ctx.fillStyle = 'rgba(' + (75 + shade) + ',' + (68 + shade) + ',' + (58 + shade) + ',0.4)';
+    ctx.fillRect(x, y, 2, 2);
+  }
+  _shoulderTex = new THREE.CanvasTexture(canvas);
+  _shoulderTex.wrapS = THREE.RepeatWrapping; _shoulderTex.wrapT = THREE.RepeatWrapping;
   return _shoulderTex;
 }
 
@@ -421,20 +419,20 @@ function _buildRoadNetwork(edges) {
     // ── 车道线：中心双黄线 + 多车道时分隔虚线 + 道路边缘白实线 ──
     // 中心双黄线（实线）：只对双向道路（lanes ≥ 2）绘制，单车道为单向路无需中心线
     if (lanes >= 2) {
-      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
-      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -0.12, 0.15, 0xffd633, 0.046);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  0.12, 0.15, 0xffd633, 0.046);
     }
     // 多车道分隔虚线：每方向 ≥2 车道时才需要内侧分隔线。
     // lanes 是双向总车道数，floor(lanes/2) 是单向车道数，避免 3 车道不对称路误画。
     var perSide = Math.floor(lanes / 2);
     for (var li = 1; li < perSide; li++) {
       var off = li * laneWidth;
-      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
-      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  off, 0.15, 0xffffff, 0.046, true);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -off, 0.15, 0xffffff, 0.046, true);
     }
     // 道路边缘白实线
-    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
-    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.046);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.046);
 
     // ── 路面导向箭头（每条 edge 中段画一个直行箭头）──
     _addRoadArrow(arrowGeos, curve, length * 0.5, laneWidth, lanes);
@@ -601,8 +599,8 @@ function _buildRoadNetwork(edges) {
     asphaltTex.anisotropy = 8;
     var roadMat = new THREE.MeshStandardMaterial({
       map: asphaltTex,
-      color: 0xbbbbbb, roughness: 0.88, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.035
+      color: 0xffffff, roughness: 0.82, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.02
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -619,18 +617,19 @@ function _buildRoadNetwork(edges) {
     shldGeo.setAttribute('uv', new THREE.Float32BufferAttribute(shldUV, 2));
     shldGeo.setIndex(allShldIdx);
     shldGeo.computeVertexNormals();
-    var shldTex = _getShoulderTexture();
+    var shldTex = _makeShoulderTexture();
     shldTex.repeat.set(1, 1);
     shldTex.wrapS = THREE.RepeatWrapping; shldTex.wrapT = THREE.RepeatWrapping;
     shldTex.anisotropy = 4;
     var shldMesh = new THREE.Mesh(shldGeo,
-      new THREE.MeshStandardMaterial({ map: shldTex, color: 0x999999, roughness: 0.95, metalness: 0.0, bumpMap: shldTex, bumpScale: 0.015 }));
+      new THREE.MeshStandardMaterial({ map: shldTex, color: 0xcccccc, roughness: 0.95, metalness: 0.0, bumpMap: shldTex, bumpScale: 0.01 }));
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
   }
 
   // 合并护栏：post+cap+rail 同材质合并；reflector 单独合并。
-  var guardMat = new THREE.MeshStandardMaterial({ color: 0x7799aa, metalness: 0.55, roughness: 0.35 });
+  // 参考图：黑色金属护栏
+  var guardMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.45, roughness: 0.45 });
   var reflectorMat = new THREE.MeshStandardMaterial({ color: 0xffeebb, emissive: 0xffeebb, emissiveIntensity: 0.35, roughness: 0.4 });
   var allGuardGeos = guardPostGeos.concat(guardCapGeos).concat(guardRailGeos);
   if (allGuardGeos.length) {
@@ -794,8 +793,8 @@ function _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertO
   var length = curve.getLength();
 
   if (dashed) {
-    // 虚线：每段 dash 独立 ribbon，不连成整体
-    var DASH = 4.5, GAP = 5.5, STEP = DASH + GAP;
+    // 虚线：每段 dash 独立 ribbon，不连成整体（参考图：短线较密）
+    var DASH = 3.0, GAP = 4.5, STEP = DASH + GAP;
     var nDash = Math.floor(length / STEP);
     for (var d = 0; d <= nDash; d++) {
       var s0 = d * STEP;
@@ -914,34 +913,66 @@ function _addStopLine(stopLineGeos, curve, s, laneWidth, lanes) {
 // ══════════════════════════════════════════════════════════════════════════════
 function _buildSkyline(scene) {
   var grp = new THREE.Group();
-  // 冷蓝灰剪影色，fog 会进一步淡化到背景色
-  var skyMat = new THREE.MeshBasicMaterial({ color: 0x4a5868, fog: true });
-  // 天际线：把 72 个独立建筑合并为 1 个 BufferGeometry，draw call 从 72 降到 1。
-  var boxTpl = new THREE.BoxGeometry(1, 1, 1);
-  var skyGeos = [];
-  var N = 72;
+  var T = THREE;
+
+  // ── 远山（低多边形山脉环）──
+  // 参考图：白色/浅蓝低多边形山脉，在 fog 中淡出
+  var mountainMat = new T.MeshBasicMaterial({ color: 0xc8d8e8, fog: true, side: T.DoubleSide });
+  var coneTpl = new T.ConeGeometry(1, 1, 5);
+  var mountainGeos = [];
+  var N = 48;
   for (var i = 0; i < N; i++) {
-    var ang = (i / N) * Math.PI * 2 + (Math.random() - 0.5) * 0.04;
-    var dist = 430 + Math.random() * 90;
-    var bx = Math.cos(ang) * dist;
-    var bz = Math.sin(ang) * dist;
-    var bw = 8 + Math.random() * 22;
-    var bd = 8 + Math.random() * 22;
-    var bh = 18 + Math.random() * 85;
-    var matB = new THREE.Matrix4().makeTranslation(bx, bh / 2, bz);
-    matB.scale(new THREE.Vector3(bw, bh, bd));
-    skyGeos.push(_transformGeometry(boxTpl, matB));
-    // 30% 概率叠加一个稍高的塔楼，丰富轮廓
-    if (Math.random() > 0.7) {
-      var th = bh * (1.1 + Math.random() * 0.5);
-      var matT = new THREE.Matrix4().makeTranslation(bx, th / 2, bz);
-      matT.scale(new THREE.Vector3(bw * 0.5, th, bd * 0.5));
-      skyGeos.push(_transformGeometry(boxTpl, matT));
+    var ang = (i / N) * Math.PI * 2 + (Math.random() - 0.5) * 0.12;
+    var dist = 400 + Math.random() * 120;
+    var mx = Math.cos(ang) * dist;
+    var mz = Math.sin(ang) * dist;
+    var mw = 35 + Math.random() * 55;
+    var mh = 30 + Math.random() * 70;
+    var matM = new T.Matrix4().makeTranslation(mx, mh / 2 - 8, mz);
+    matM.scale(new T.Vector3(mw, mh, mw * (0.6 + Math.random() * 0.6)));
+    matM.multiply(new T.Matrix4().makeRotationY(Math.random() * Math.PI));
+    mountainGeos.push(_transformGeometry(coneTpl, matM));
+  }
+  if (mountainGeos.length) {
+    var mountainMesh = new T.Mesh(_mergeGeometries(mountainGeos), mountainMat);
+    mountainMesh.frustumCulled = true;
+    grp.add(mountainMesh);
+  }
+
+  // ── 扁平白云（参考图风格）──
+  var cloudMat = new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75, fog: true, depthWrite: false });
+  var cloudGeos = [];
+  var boxTpl = new T.BoxGeometry(1, 1, 1);
+  for (var c = 0; c < 18; c++) {
+    var cx = (Math.random() - 0.5) * 700;
+    var cz = (Math.random() - 0.5) * 500;
+    var cy = 55 + Math.random() * 35;
+    var cw = 25 + Math.random() * 35;
+    var cd = 12 + Math.random() * 18;
+    var ch = 3 + Math.random() * 4;
+    var matC = new T.Matrix4().makeTranslation(cx, cy, cz);
+    matC.scale(new T.Vector3(cw, ch, cd));
+    cloudGeos.push(_transformGeometry(boxTpl, matC));
+    // 再给每朵云加 1~2 个小块，避免太规则
+    var nPuffs = 1 + Math.floor(Math.random() * 2);
+    for (var cp = 0; cp < nPuffs; cp++) {
+      var pw = cw * (0.4 + Math.random() * 0.4);
+      var pd = cd * (0.4 + Math.random() * 0.4);
+      var pmat = new T.Matrix4().makeTranslation(
+        cx + (Math.random() - 0.5) * cw * 0.7,
+        cy + (Math.random() - 0.5) * ch,
+        cz + (Math.random() - 0.5) * cd * 0.7
+      );
+      pmat.scale(new T.Vector3(pw, ch * (0.7 + Math.random() * 0.5), pd));
+      cloudGeos.push(_transformGeometry(boxTpl, pmat));
     }
   }
-  var skylineMesh = new THREE.Mesh(_mergeGeometries(skyGeos), skyMat);
-  skylineMesh.frustumCulled = true;
-  grp.add(skylineMesh);
+  if (cloudGeos.length) {
+    var cloudMesh = new T.Mesh(_mergeGeometries(cloudGeos), cloudMat);
+    cloudMesh.frustumCulled = true;
+    grp.add(cloudMesh);
+  }
+
   scene.add(grp);
   _skylineGroup = grp;
 }
@@ -1150,8 +1181,8 @@ function _updateTireTrail(sx, sz, heading, speed) {
 
   var posAttr = _tireTrailMesh.geometry.attributes.position.array;
   var colAttr = _tireTrailMesh.geometry.attributes.color.array;
-  // 沥青底色（与 _buildRoad 的 0x3a3f4a 接近），胎痕从此色渐变到深黑
-  var roadR = 0.227, roadG = 0.247, roadB = 0.290;
+  // 沥青底色（与 _makeAsphaltTexture v2 的 #7a7d80 接近），胎痕从此色渐变到深黑
+  var roadR = 0.478, roadG = 0.490, roadB = 0.502;
   var darkR = 0.02, darkG = 0.02, darkB = 0.025;
 
   for (var i = 0; i <= n; i++) {
@@ -1183,6 +1214,7 @@ function _buildEnvironment(scene) {
   // 共享模板几何体（只创建一次）
   var boxTpl = new T.BoxGeometry(1, 1, 1);
   var cylTpl = new T.CylinderGeometry(1, 1, 1, 10);
+  var coneTpl = new T.ConeGeometry(1, 1, 8);  // 锥形树冠（参考图）
   var dodecTpl = new T.DodecahedronGeometry(1, 0);
   var planeTpl = new T.PlaneGeometry(1, 1);
 
@@ -1242,58 +1274,66 @@ function _buildEnvironment(scene) {
     }
   }
 
-  // Trees
-  for (var t = 0; t < 26; t++) {
-    var tx = (t - 13) * 120 + Math.random() * 60;
-    var tz = (t % 2 === 0 ? 1 : -1) * (17 + Math.random() * 36);
-    var th = 2 + Math.random() * 2.5;
+  // Trees — 城市绿化锥形树，沿道路两侧排列，参考图风格
+  var nTrees = 64;
+  for (var t = 0; t < nTrees; t++) {
+    var tx = (t - nTrees / 2) * 55 + (Math.random() - 0.5) * 25;
+    var tside = (t % 2 === 0 ? 1 : -1);
+    // 近路侧 12~20m，远路侧 20~40m，避免遮挡车道
+    var tzBase = (t % 4 < 2) ? 12 : 26;
+    var tz = tside * (tzBase + Math.random() * 14);
+    var th = 3.5 + Math.random() * 2.5;     // 树干高
+    var trunkR = 0.16 + Math.random() * 0.06;
+    var crownH = 3.5 + Math.random() * 2.0; // 树冠高
+    var crownR = 1.4 + Math.random() * 0.8; // 树冠底半径
 
+    // 树干（圆柱，圆锥默认底在 y=0，需平移使底面接地）
     var matTrunk = new T.Matrix4().makeTranslation(tx, th / 2, tz);
-    matTrunk.scale(new T.Vector3(0.18, th, 0.28));
+    matTrunk.scale(new T.Vector3(trunkR, th, trunkR));
     trunkGeos.push(_transformGeometry(cylTpl, matTrunk));
 
-    var nBlobs = 3 + Math.floor(Math.random() * 3);
-    for (var cb = 0; cb < nBlobs; cb++) {
-      var r = 1.2 + Math.random() * 1.6;
-      var matL = new T.Matrix4().makeTranslation(
-        tx + (Math.random() - 0.5) * r * 1.2,
-        th + r * 0.4 + Math.random() * 1.2,
-        tz + (Math.random() - 0.5) * r * 1.2
-      );
-      matL.scale(new T.Vector3(r, r * (0.75 + Math.random() * 0.4), r));
-      leafGeos.push(_transformGeometry(dodecTpl, matL));
-    }
+    // 树冠（圆锥）— 参考图三角形/锥形树
+    var matLeaf = new T.Matrix4().makeTranslation(tx, th + crownH / 2 - 0.15, tz);
+    matLeaf.scale(new T.Vector3(crownR, crownH, crownR));
+    leafGeos.push(_transformGeometry(coneTpl, matLeaf));
   }
 
-  // Street props
-  for (var p = 0; p < 16; p++) {
-    var px = (p - 8) * 160 + Math.random() * 60;
+  // Street lamps — 城市道路双侧路灯，杆+悬臂+扁圆柱灯罩
+  var nLamps = 40;
+  for (var p = 0; p < nLamps; p++) {
+    var px = (p - nLamps / 2) * 65 + (Math.random() - 0.5) * 15;
     var pside = (p % 2 === 0) ? 1 : -1;
-    var pz = pside * (10 + Math.random() * 4);
-    var poleH = 5.5 + Math.random() * 1.5;
+    var pz = pside * (10.5 + Math.random() * 2.5);
+    var poleH = 7.5 + Math.random() * 1.0;
+    var poleR = 0.10 + Math.random() * 0.03;
 
+    // 灯杆
     var matPole = new T.Matrix4().makeTranslation(px, poleH / 2, pz);
-    matPole.scale(new T.Vector3(0.07, poleH, 0.1));
+    matPole.scale(new T.Vector3(poleR, poleH, poleR));
     propGeos.push(_transformGeometry(cylTpl, matPole));
 
-    var armLen = 1.2;
-    var matArm = new T.Matrix4().makeTranslation(px - pside * armLen / 2, poleH - 0.3, pz);
-    matArm.scale(new T.Vector3(armLen, 0.08, 0.08));
+    // 悬臂（伸向道路中心）
+    var armLen = 1.6 + Math.random() * 0.4;
+    var armY = poleH - 0.35;
+    var matArm = new T.Matrix4().makeTranslation(px - pside * armLen / 2, armY, pz);
+    matArm.scale(new T.Vector3(armLen, 0.07, 0.07));
     propGeos.push(_transformGeometry(boxTpl, matArm));
 
-    var matLamp = new T.Matrix4().makeTranslation(px - pside * armLen, poleH - 0.3, pz);
-    matLamp.scale(new T.Vector3(0.35, 0.1, 0.18));
-    lampGeos.push(_transformGeometry(boxTpl, matLamp));
+    // 灯罩：扁圆柱，朝下
+    var lampX = px - pside * armLen;
+    var matLamp = new T.Matrix4().makeTranslation(lampX, armY - 0.04, pz);
+    matLamp.scale(new T.Vector3(0.28, 0.08, 0.18));
+    lampGeos.push(_transformGeometry(cylTpl, matLamp));
 
-    if (Math.random() > 0.3) {
-      var matTrash = new T.Matrix4().makeTranslation(px + pside * 0.6, 0.35, pz + (Math.random() - 0.5) * 0.5);
+    // 灯罩下小反光片/LED 面板
+    var matLampFace = new T.Matrix4().makeTranslation(lampX, armY - 0.09, pz);
+    matLampFace.scale(new T.Vector3(0.22, 0.02, 0.14));
+    lampGeos.push(_transformGeometry(boxTpl, matLampFace));
+
+    if (Math.random() > 0.6) {
+      var matTrash = new T.Matrix4().makeTranslation(px + pside * 0.9, 0.35, pz + (Math.random() - 0.5) * 0.5);
       matTrash.scale(new T.Vector3(0.25, 0.7, 0.22));
       trashGeos.push(_transformGeometry(cylTpl, matTrash));
-    }
-    if (Math.random() > 0.8) {
-      var matHyd = new T.Matrix4().makeTranslation(px + pside * 0.9, 0.28, pz + (Math.random() - 0.5) * 0.6);
-      matHyd.scale(new T.Vector3(0.12, 0.55, 0.12));
-      hydrantGeos.push(_transformGeometry(cylTpl, matHyd));
     }
   }
 
@@ -1332,8 +1372,8 @@ function _buildEnvironment(scene) {
   var winMat = new T.MeshStandardMaterial({ color: 0x88aacc, metalness: 0.6, roughness: 0.15, emissive: 0x223344, emissiveIntensity: 0.25, side: T.DoubleSide });
   var trunkMat = new T.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.9 });
   var leafMat = new T.MeshStandardMaterial({ color: 0x2d5a27, roughness: 0.9 });
-  var propMat = new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
-  var lampMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.9 });
+  var propMat = new T.MeshStandardMaterial({ color: 0x444444, metalness: 0.4, roughness: 0.55 });
+  var lampMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.35 });
   var trashMat = new T.MeshStandardMaterial({ color: 0x446644, roughness: 0.7 });
   var hydrantMat = new T.MeshStandardMaterial({ color: 0xaa2222, roughness: 0.5 });
   var bushMat = new T.MeshStandardMaterial({ color: 0x3a6b2e, roughness: 0.95 });
@@ -1439,10 +1479,10 @@ function init3DScene() {
   /* NOA Phase 6 3D 增强：程序化天空渐变（天顶→地平线），替代纯色背景。
    * 用大半径 SphereGeometry + BackSide + 自定义 ShaderMaterial 实现，
    * 不依赖 Three.js Sky.js 扩展。fog 颜色与地平线色一致保证远处过渡自然。 */
-  var skyTop = new THREE.Color(0x2a5fa8);    /* 天顶深蓝 */
-  var skyHorizon = new THREE.Color(0xb8d4e8);/* 地平线浅蓝白 */
+  var skyTop = new THREE.Color(0x3a8fd8);    /* 天顶明亮蓝 */
+  var skyHorizon = new THREE.Color(0xd6eafa);/* 地平线近白 */
   scene3d.background = skyHorizon;
-  scene3d.fog = new THREE.Fog(0xb8d4e8, 140, 520);
+  scene3d.fog = new THREE.Fog(0xd6eafa, 180, 650);
   var skyGeo = new THREE.SphereGeometry(480, 32, 16);
   var skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
@@ -1627,11 +1667,12 @@ function init3DScene() {
   var gndCanvas = document.createElement('canvas');
   gndCanvas.width = 256; gndCanvas.height = 256;
   var gctx = gndCanvas.getContext('2d');
-  gctx.fillStyle = '#3a5a30'; gctx.fillRect(0, 0, 256, 256);
-  for (var gi = 0; gi < 1800; gi++) {
+  // 城市绿化草坪：明亮低饱和绿色（参考图风格）
+  gctx.fillStyle = '#5a8a4a'; gctx.fillRect(0, 0, 256, 256);
+  for (var gi = 0; gi < 2200; gi++) {
     var gx = Math.random() * 256, gy = Math.random() * 256;
-    var shade = 30 + Math.floor(Math.random() * 50);
-    gctx.fillStyle = 'rgba(' + (40 + shade) + ',' + (70 + shade) + ',' + (40 + shade * 0.6) + ',0.5)';
+    var shade = 20 + Math.floor(Math.random() * 45);
+    gctx.fillStyle = 'rgba(' + (65 + shade) + ',' + (110 + shade) + ',' + (55 + shade * 0.5) + ',0.45)';
     gctx.fillRect(gx, gy, 2, 2);
   }
   var gndTex = new THREE.CanvasTexture(gndCanvas);

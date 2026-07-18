@@ -32,11 +32,11 @@ export function buildLegacyRoad(scene) {
   var nSeg       = Math.floor(ROAD_LEN / SEG_LEN);
 
   var aGeo = new THREE.BoxGeometry(SEG_LEN, 0.08, ASPHALT_W, 1, 1, 1);
-  var aMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
+  var aMat = new THREE.MeshStandardMaterial({ color: 0x7a7d80, roughness: 0.82 });
   var eGeo = new THREE.BoxGeometry(SEG_LEN, 0.02, 0.28, 1, 1, 1);
   var eMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333, roughness: 0.3 });
   var sGeo = new THREE.BoxGeometry(SEG_LEN, 0.04, SHLD_W, 1, 1, 1);
-  var sMat = new THREE.MeshStandardMaterial({ color: 0x556655, roughness: 1.0 });
+  var sMat = new THREE.MeshStandardMaterial({ color: 0x5a4d40, roughness: 1.0 });
 
   for (var si = -Math.floor(nSeg / 2); si < Math.floor(nSeg / 2); si++) {
     var cx = si * SEG_LEN + SEG_LEN / 2;
