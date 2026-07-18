@@ -1057,12 +1057,18 @@ function init3DScene() {
   var el = document.getElementById("scene3d");
   if (!el) return;
   if (typeof THREE === "undefined") {
-    console.warn("[scene3d] THREE not available — 3D disabled, falling back to 2D");
+    _show3DError("THREE.js not loaded — check /tools/three.min.js");
     return;
   }
-  // 立即隐藏 placeholder，确保后续即使出错也不会卡在提示页
+  if (!THREE.WebGLRenderer) {
+    _show3DError("WebGL not available — your browser or GPU may not support it");
+    return;
+  }
+  // 立即隐藏 placeholder
   var msgEl = document.getElementById("scene3d-msg");
   if (msgEl) msgEl.style.display = "none";
+
+  try {
   // Use fallback size when card is collapsed (clientWidth=0)
   var w = el.clientWidth || el.parentElement && el.parentElement.clientWidth || 800;
   var h = el.clientHeight || 400;
@@ -1394,8 +1400,25 @@ function init3DScene() {
   }
   anim3D();
   sceneReady = true;
+
+  } catch (initErr) {
+    _show3DError(initErr.message || String(initErr));
+  }
   // Phase 4.9: scene3d / camera3d / renderer3d stay module-scoped;
   // debug access flows through app.js -> window.flowboard._scene3d etc.
+}
+
+/** 在 3D 视图区域显示错误信息，方便诊断 */
+function _show3DError(msg) {
+  var el = document.getElementById("scene3d-msg");
+  if (!el) return;
+  el.style.display = "";
+  el.style.color = "#f0a0a0";
+  el.innerHTML = '<div style="font-size:40px;margin-bottom:10px">⚠️</div>' +
+    '<div style="color:#f0a0a0;font-size:14px;font-weight:600;margin-bottom:8px">3D Init Failed</div>' +
+    '<div style="color:#f08888;font-size:11px;font-family:monospace;line-height:1.5;max-width:380px;word-break:break-all">' +
+    (msg || 'unknown error') + '</div>';
+  if (window.console && console.error) console.error('[scene3d]', msg);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
