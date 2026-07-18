@@ -4,8 +4,9 @@
 
 ## 1. 版本
 
-- **版本**: 1.0.0
+- **版本**: 1.1.0
 - **生效日期**: 2026-07-18
+- **变更**: v1.1.0 新增 `entities` 中 `tl`/`etc_gate`/`stop_line` 的 `h`（heading）字段
 - **维护者**: sim-world / perception / flowboard 三端共同维护
 
 ## 2. 数据链路
@@ -89,9 +90,9 @@ road/traffic_lights ─────────────┘
     { "type": "suv",  "id": 2, "x": 130.0, "y":  1.75, "h": 0.0, "spd": 5.0, "len": 4.8, "wid": 2.0, "ai": "cruise", "vx": 5.0, "vy": 0.0 },
     { "type": "truck","id": 3, "x": 140.0, "y": -1.75, "h": 0.0, "spd": 4.0, "len": 8.0, "wid": 2.5, "ai": "follow", "vx": 4.0, "vy": 0.0 },
     { "type": "pedestrian", "id": 4, "x": 110.0, "y": 3.5, "spd": 1.0, "vx": 0.0, "vy": 1.0, "parked": false },
-    { "type": "tl",   "id": 5, "x": 200.0, "y": -5.0, "state": "red", "remain_s": 12.3 },
-    { "type": "etc_gate", "id": 6, "x": 450.0, "y": 0.0, "state": "closed", "progress": 0.0 },
-    { "type": "stop_line", "id": 7, "x": 190.0, "y": -1.75 }
+    { "type": "tl",   "id": 5, "x": 200.0, "y": -5.0, "h": 0.0, "state": "red", "remain_s": 12.3 },
+    { "type": "etc_gate", "id": 6, "x": 450.0, "y": 0.0, "h": 0.0, "state": "closed", "progress": 0.0 },
+    { "type": "stop_line", "id": 7, "x": 190.0, "y": -1.75, "h": 0.0 }
   ],
 
   // 障碍物 fallback（vehicle/state，ego-relative，最多 16 个）
@@ -196,6 +197,7 @@ road/traffic_lights ─────────────┘
 | `id` | int | 实体 ID |
 | `x` | double | 世界坐标 X |
 | `y` | double | 世界坐标 Z |
+| `h` | double | 航向角（rad），灯 arm 垂直于该方向；未配置时前端按道路切线估算 |
 | `state` | string | `"green"`, `"yellow"`, `"red"` |
 | `remain_s` | double | 剩余时间（s） |
 
@@ -209,6 +211,7 @@ road/traffic_lights ─────────────┘
 | `id` | int | 实体 ID |
 | `x` | double | 世界坐标 X |
 | `y` | double | 世界坐标 Z |
+| `h` | double | 航向角（rad），门架 crossbar 垂直于该方向；未配置时前端按道路切线估算 |
 | `state` | string | `"closed"`, `"opening"`, `"open"` |
 | `progress` | double | 抬杆进度 [0, 1] |
 
@@ -247,11 +250,9 @@ Frenet 坐标数组：`[[s, d, spd], ...]`
 
 以下改进需要修改 schema，因此需要 sim-world / planning 配合：
 
-1. **红绿灯朝向**：`tl` 实体缺少 `h` 字段，前端只能根据位置估算道路切线方向
-2. **ETC 门架朝向**：`etc_gate` 缺少 `h` 字段，同上
-3. **轨迹参考线**：`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准
-4. **红绿灯来源冗余**：`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`
-5. **版本号字段**：建议在 `metrics.scene` 顶层增加 `schema_version` 字段，便于前端做兼容性处理
+1. **轨迹参考线**：`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准
+2. **红绿灯来源冗余**：`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`
+3. **版本号字段**：建议在 `metrics.scene` 顶层增加 `schema_version` 字段，便于前端做兼容性处理
 
 ## 8. 责任边界
 

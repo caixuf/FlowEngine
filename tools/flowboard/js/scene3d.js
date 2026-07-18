@@ -1192,9 +1192,14 @@ function _renderFrame() {
         tlm.position.set(tlw.x, 0, tlw.z);
         tlm.visible = true;
         // 交通灯 arm 沿模型 +Z，应横跨道路（垂直于道路切线）。
-        var tlTan = _getRoadTangentAt(tlw.x, tlw.z);
-        if (tlTan.found) {
-          tlm.rotation.y = -(tlTan.heading + Math.PI / 2);
+        // 优先使用 flowsim 发布的 heading，无则按道路切线估算。
+        if (typeof tlw.h === 'number' && tlw.h !== 0.0) {
+          tlm.rotation.y = -(tlw.h + Math.PI / 2);
+        } else {
+          var tlTan = _getRoadTangentAt(tlw.x, tlw.z);
+          if (tlTan.found) {
+            tlm.rotation.y = -(tlTan.heading + Math.PI / 2);
+          }
         }
         // Map state → active lamp index: red=0, yellow=1, green=2
         var activeIdx = 2;  // default green
@@ -1226,9 +1231,13 @@ function _renderFrame() {
         gm.position.set(gw.x, 0, gw.z);
         gm.visible = true;
         // ETC 门架 crossbar 沿模型 +Z，应横跨道路（垂直于道路切线）。
-        var gateTan = _getRoadTangentAt(gw.x, gw.z);
-        if (gateTan.found) {
-          gm.rotation.y = -(gateTan.heading + Math.PI / 2);
+        if (typeof gw.h === 'number' && gw.h !== 0.0) {
+          gm.rotation.y = -(gw.h + Math.PI / 2);
+        } else {
+          var gateTan = _getRoadTangentAt(gw.x, gw.z);
+          if (gateTan.found) {
+            gm.rotation.y = -(gateTan.heading + Math.PI / 2);
+          }
         }
         // 抬杆角度：progress 0→1 映射到 0→75° (1.31 rad)
         var boom = gm.userData.boom;
@@ -1378,6 +1387,7 @@ function update3D() {
         // entities 已是世界坐标（flowsim_node 发布），无需叠加 ego 偏移。
         _etcGateWorld[gateIdx] = {
           x: (eg.x || 0), z: (eg.y || 0),
+          h: (eg.h || 0),
           state: eg.state || 'closed', progress: eg.progress || 0
         };
         gateIdx++;
@@ -1456,21 +1466,34 @@ function update3D() {
     _lidarCloud.geometry.attributes.position.needsUpdate = true;
   }
 
-  // Traffic lights: read state from scene data (published by sim_world via
-  // monitor's scene.traffic_lights). Each entry: {id, x, y_lane, state, remain_s}.
-  // Convert ego-relative x → world x (same anchoring as obstacles).
-  if (_trafficLightPool && scn && scn.traffic_lights) {
-    var lights = scn.traffic_lights;
-    for (var tli = 0; tli < _trafficLightPool.length; tli++) {
-      if (tli < lights.length) {
+  // Traffic lights: 优先使用 scene.entities 中的 tl（world 坐标 + heading）。
+  // 无 entities 时 fallback 到 scene.traffic_lights（ego-relative，来自 road/traffic_lights）。
+  if (_trafficLightPool && scn) {
+    var tlIdx = 0;
+    if (scn.entities && scn.entities.length) {
+      for (var ei3 = 0; ei3 < scn.entities.length && tlIdx < _trafficLightPool.length; ei3++) {
+        var ent3 = scn.entities[ei3];
+        if (ent3.type !== 'tl') continue;
+        _trafficLightWorld[tlIdx] = {
+          x: (ent3.x || 0), z: (ent3.y || 0),
+          h: (ent3.h || 0),
+          state: ent3.state || 'green'
+        };
+        tlIdx++;
+      }
+    } else if (scn.traffic_lights) {
+      var lights = scn.traffic_lights;
+      for (var tli = 0; tli < _trafficLightPool.length && tli < lights.length; tli++) {
         var tl = lights[tli];
-        var wlx = _dr.lastX + (tl.x || 0);
-        var wlz = _dr.lastZ + (tl.y_lane || 0);
-        _trafficLightWorld[tli] = { x: wlx, z: wlz, state: tl.state || 'green' };
-      } else {
-        _trafficLightWorld[tli] = null;
+        _trafficLightWorld[tlIdx] = {
+          x: _dr.lastX + (tl.x || 0),
+          z: _dr.lastZ + (tl.y_lane || 0),
+          state: tl.state || 'green'
+        };
+        tlIdx++;
       }
     }
+    for (; tlIdx < _trafficLightPool.length; tlIdx++) _trafficLightWorld[tlIdx] = null;
   }
 }
 

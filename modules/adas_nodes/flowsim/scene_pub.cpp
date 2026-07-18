@@ -263,6 +263,7 @@ cJSON* build_traffic_light_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
+    cJSON_AddNumberToObject(j, "h", e.heading);
     cJSON_AddStringToObject(j, "state", tl_phase_str(e.phase_state));
     cJSON_AddNumberToObject(j, "remain_s", e.phase_timer);
     return j;
@@ -274,6 +275,7 @@ cJSON* build_etc_gate_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
+    cJSON_AddNumberToObject(j, "h", e.heading);
     cJSON_AddStringToObject(j, "state", etc_gate_state_str(e.ai_state));
     /* phase_timer ∈ [0,1] 表示抬杆进度（scene_events.cpp 约定） */
     cJSON_AddNumberToObject(j, "progress", e.phase_timer);
@@ -286,6 +288,7 @@ cJSON* build_stop_line_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
+    cJSON_AddNumberToObject(j, "h", e.heading);
     return j;
 }
 

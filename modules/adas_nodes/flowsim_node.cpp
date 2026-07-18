@@ -333,6 +333,12 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.brake    = tl->yellow_s;    /* yellow 时长 */
         e.steer    = tl->red_s;       /* red 时长 */
         e.target_vx = tl->phase_offset_s;  /* 相位偏移 */
+        e.heading = tl->heading;
+        /* 未显式配置 heading 时，按旧道路弯道几何估算切线方向，
+         * 保证弯道场景红绿灯 arm 大致垂直于道路。 */
+        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
+            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        }
     }
 
     /* Phase 4: ETC 门架 → ETCGate 实体（高速收费站抬杆）。
@@ -352,6 +358,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         /* open_range_m 存到 width 字段（ETCGate 无碰撞包围盒，width 空闲） */
         e.width = eg->open_range_m;
         e.ai_state = flowsim::AIState::Stop; /* 初始 closed 状态 */
+        e.heading = eg->heading;
+        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
+            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        }
     }
 
     /* Phase 4: 停止线 → StopLine 实体（路口/ETC 停车位置标记）。
@@ -364,6 +374,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.id = sl->id;
         e.x = sl->x;
         e.y = sl->y;
+        e.heading = sl->heading;
+        if (e.heading == 0.0 && g.curve_length_m > 0.0) {
+            e.heading = road_center_heading(e.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        }
     }
 }
 

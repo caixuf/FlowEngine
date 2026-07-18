@@ -217,6 +217,8 @@ ScenarioConfig* scenario_load(const char* path) {
             j = cJSON_GetObjectItemCaseSensitive(jl, "y_lane");
             if (cJSON_IsNumber(j)) tl->y_lane = j->valuedouble;
             else tl->y_lane = -1.75;  /* 默认单车道横向位置 */
+            j = cJSON_GetObjectItemCaseSensitive(jl, "heading");
+            if (cJSON_IsNumber(j)) tl->heading = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jl, "red_s");
             if (cJSON_IsNumber(j)) tl->red_s = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jl, "yellow_s");
@@ -247,6 +249,8 @@ ScenarioConfig* scenario_load(const char* path) {
             j = cJSON_GetObjectItemCaseSensitive(jg, "y");
             if (cJSON_IsNumber(j)) g->y = j->valuedouble;
             else g->y = 0.0;  /* 默认跨路面中心 */
+            j = cJSON_GetObjectItemCaseSensitive(jg, "heading");
+            if (cJSON_IsNumber(j)) g->heading = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jg, "approach_speed");
             if (cJSON_IsNumber(j)) g->approach_speed = j->valuedouble;
             else g->approach_speed = 5.0;  /* ETC 默认减速到 5 m/s */
@@ -371,6 +375,7 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         cJSON_AddNumberToObject(jl, "id",              tl->id);
         cJSON_AddNumberToObject(jl, "x",               tl->x);
         cJSON_AddNumberToObject(jl, "y_lane",          tl->y_lane);
+        cJSON_AddNumberToObject(jl, "heading",         tl->heading);
         cJSON_AddNumberToObject(jl, "red_s",           tl->red_s);
         cJSON_AddNumberToObject(jl, "yellow_s",        tl->yellow_s);
         cJSON_AddNumberToObject(jl, "green_s",         tl->green_s);

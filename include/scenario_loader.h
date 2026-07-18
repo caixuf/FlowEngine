@@ -144,6 +144,7 @@ typedef struct {
     int    id;              /**< 灯 ID（topic/可视化标识） */
     double x;               /**< 停止线位置（ego 前向坐标, m） */
     double y_lane;          /**< 灯所在车道横向坐标（m，默认 -1.75） */
+    double heading;         /**< 灯朝向（rad，默认 0 = 朝 +X；未配置时 flowsim 可按道路切线估算） */
     double red_s;           /**< 红灯时长（s），<=0 视为无灯 */
     double yellow_s;        /**< 黄灯时长（s） */
     double green_s;         /**< 绿灯时长（s） */
@@ -156,6 +157,7 @@ typedef struct {
     int    id;              /**< 门架 ID（可视化标识） */
     double x;               /**< 门架位置（ego 前向坐标, m） */
     double y;               /**< 横向坐标（m，默认 0 = 跨路面中心） */
+    double heading;         /**< 门架朝向（rad，默认 0 = 朝 +X；未配置时 flowsim 可按道路切线估算） */
     double approach_speed;  /**< 通过时目标速度（m/s，默认 5.0 = ETC 减速） */
     double open_range_m;    /**< ego 进入此距离时抬杆（m，默认 50） */
 } ScenarioETCGate;
@@ -166,6 +168,7 @@ typedef struct {
     int    id;              /**< 停止线 ID */
     double x;               /**< 停止线位置（ego 前向坐标, m） */
     double y;               /**< 横向坐标（m，默认 0） */
+    double heading;         /**< 停止线法向（rad，默认 0 = 垂直于 +X；未配置时 flowsim 可按道路切线估算） */
 } ScenarioStopLine;
 
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
