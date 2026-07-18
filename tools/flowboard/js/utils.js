@@ -308,6 +308,16 @@ export function _buildObstacle(type, color) {
   ws.position.set(0.32, 0.78, 0);
   g.add(ws);
 
+  // 前灯/尾灯：unit-normalized，位置在车体四角，emissive 触发 Bloom
+  var headMat = new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.2, roughness: 0.2 });
+  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.0, roughness: 0.2 });
+  var hlGeo = new T.BoxGeometry(0.08, 0.12, 0.18);
+  var tlGeo = new T.BoxGeometry(0.06, 0.12, 0.18);
+  var hl1 = new T.Mesh(hlGeo, headMat); hl1.position.set(0.48, 0.35, 0.32); g.add(hl1);
+  var hl2 = new T.Mesh(hlGeo, headMat); hl2.position.set(0.48, 0.35, -0.32); g.add(hl2);
+  var tl1 = new T.Mesh(tlGeo, tailMat); tl1.position.set(-0.48, 0.35, 0.32); g.add(tl1);
+  var tl2 = new T.Mesh(tlGeo, tailMat); tl2.position.set(-0.48, 0.35, -0.32); g.add(tl2);
+
   return g;
 }
 

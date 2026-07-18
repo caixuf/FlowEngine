@@ -60,6 +60,8 @@ let _lastCurveKey = "";
  *  当 scene.road_network 存在时，_roadNetworkGroup 取代旧的 _roadGroup。 */
 let _roadNetworkGroup = null;
 let _lastRoadNetworkKey = "";
+/** 当前道路网络的曲线数组，供交通灯/ETC门架/轨迹线查询最近切线方向。 */
+let _roadCurves = [];
 
 /** NOA Phase 6: 规划轨迹线（planning/trajectory 的 path 数组渲染）。
  *  从 ego 当前位置出发，沿 heading 方向延伸 s、横向偏移 d 近似转世界坐标。
@@ -258,6 +260,30 @@ function _applyRoadCurve(roadData) {
 // 每条 edge 的 nodes [[x,y],...] 是道路参考线控制点，x=纵向 y=横向。
 // ══════════════════════════════════════════════════════════════════════════════
 
+/** 程序化沥青纹理：深灰底 + 随机噪点，模拟真实路面颗粒感。 */
+function _makeAsphaltTexture() {
+  var canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 256;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#2a2d30'; ctx.fillRect(0, 0, 256, 256);
+  // 深色颗粒
+  for (var i = 0; i < 3000; i++) {
+    var x = Math.random() * 256, y = Math.random() * 256;
+    var shade = Math.floor(Math.random() * 40);
+    ctx.fillStyle = 'rgba(' + (30 + shade) + ',' + (32 + shade) + ',' + (36 + shade) + ',0.5)';
+    ctx.fillRect(x, y, 2, 2);
+  }
+  // 浅色颗粒
+  for (var j = 0; j < 1200; j++) {
+    var x2 = Math.random() * 256, y2 = Math.random() * 256;
+    var sh2 = Math.floor(Math.random() * 50);
+    ctx.fillStyle = 'rgba(' + (60 + sh2) + ',' + (64 + sh2) + ',' + (70 + sh2) + ',0.35)';
+    ctx.fillRect(x2, y2, 2, 2);
+  }
+  var tex = new THREE.CanvasTexture(canvas);
+  return tex;
+}
+
 /**
  * _buildRoadNetwork — 从 road_network.edges 构建多段道路网格。
  *
@@ -290,6 +316,7 @@ function _buildRoadNetwork(edges) {
     });
     _roadNetworkGroup = null;
   }
+  _roadCurves = [];
 
   var group = new THREE.Group();
   var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
@@ -309,22 +336,26 @@ function _buildRoadNetwork(edges) {
       points.push(new THREE.Vector3(nodes[ni][0], 0, nodes[ni][1]));
     }
     var curve = new THREE.CatmullRomCurve3(points);
+    _roadCurves.push(curve);
 
     var length = edge.length || curve.getLength();
     var lanes = edge.lanes || 2;
     var laneWidth = edge.lane_width || 3.5;
+    /* 道路关于参考线对称：总宽度 = 车道数 × 单车道宽。
+     * 参考线两侧均有车道（ OpenDRIVE lane 0 居中作为分隔基准）。
+     * 旧实现把全部车道放在参考线一侧，导致 ego/车辆经常"悬空"在道路外。 */
     var roadWidth = lanes * laneWidth;
+    var halfWidth = roadWidth / 2;
 
     // 记录首尾坐标供 junction 检测
     edgeEnds.push({
       start: { x: nodes[0][0], z: nodes[0][1] },
       end:   { x: nodes[nodes.length - 1][0], z: nodes[nodes.length - 1][1] },
-      lanes: lanes, length: length
+      lanes: lanes, length: length, curve: curve
     });
 
     // ── 路面 ribbon mesh ──
-    // OpenDRIVE 车道全部在参考线右侧（world y 负方向），而非对称分布。
-    // 左边缘 = 参考线（offset=0），右边缘 = offset = -roadWidth。
+    // 左边缘 = +halfWidth，右边缘 = -halfWidth（对称）
     var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
     var positions = [];
     var indices = [];
@@ -332,12 +363,11 @@ function _buildRoadNetwork(edges) {
       var t = si / nSeg;
       var pos = curve.getPointAt(t);
       var tangent = curve.getTangentAt(t);
-      // 法线（切线在 XZ 平面内旋转 90°）
+      // 法线（切线在 XZ 平面内旋转 90°，指向"右"侧，即 d<0）
       var nx = -tangent.z, nz = tangent.x;
 
-      // 参考线 (offset=0) 和右边缘 (offset = -roadWidth)
-      positions.push(pos.x, 0.01, pos.z);
-      positions.push(pos.x - nx * roadWidth, 0.01, pos.z - nz * roadWidth);
+      positions.push(pos.x + nx * halfWidth, 0.01, pos.z + nz * halfWidth);  // 左边缘
+      positions.push(pos.x - nx * halfWidth, 0.01, pos.z - nz * halfWidth);  // 右边缘
 
       if (si < nSeg) {
         var base = si * 2;
@@ -346,17 +376,34 @@ function _buildRoadNetwork(edges) {
       }
     }
 
+    // 路面 UV：u 沿道路长度，v 沿横向（左=0，右=1）
+    var uvs = [];
+    for (var si = 0; si <= nSeg; si++) {
+      var u = si / nSeg;
+      uvs.push(u, 0);
+      uvs.push(u, 1);
+    }
+
     var roadGeo = new THREE.BufferGeometry();
     roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     roadGeo.setIndex(indices);
     roadGeo.computeVertexNormals();
-    // 沥青路面：深灰近黑，高粗糙度（无镜面反射）
-    var roadMat = new THREE.MeshStandardMaterial({ color: 0x2a2d30, roughness: 0.95, metalness: 0.02 });
+
+    // 程序化沥青纹理：深灰底 + 随机浅色斑点模拟沥青颗粒
+    var roadTex = _makeAsphaltTexture();
+    roadTex.wrapS = THREE.RepeatWrapping;
+    roadTex.wrapT = THREE.RepeatWrapping;
+    roadTex.repeat.set(length / 6, roadWidth / 4);
+    roadTex.anisotropy = 4;
+    var roadMat = new THREE.MeshStandardMaterial({
+      map: roadTex, color: 0x888888, roughness: 0.92, metalness: 0.01
+    });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
     group.add(roadMesh);
 
-    // ── 路肩（参考线左侧 + 路面右侧外缘）──
+    // ── 路肩（路面两侧外缘再外扩 1m）──
     var shldW = 1.0;
     var sPos = [], sIdx = [];
     for (var si2 = 0; si2 <= nSeg; si2++) {
@@ -364,10 +411,8 @@ function _buildRoadNetwork(edges) {
       var p2 = curve.getPointAt(t2);
       var tan2 = curve.getTangentAt(t2);
       var nx2 = -tan2.z, nz2 = tan2.x;
-      // 左路肩：参考线往左方向 +shldW（nx/nz 指向"右"，取反得左）
-      sPos.push(p2.x + nx2 * shldW, 0.02, p2.z + nz2 * shldW);
-      // 右路肩外缘：路面右边缘再往右 +shldW
-      sPos.push(p2.x - nx2 * (roadWidth + shldW), 0.02, p2.z - nz2 * (roadWidth + shldW));
+      sPos.push(p2.x + nx2 * (halfWidth + shldW), 0.02, p2.z + nz2 * (halfWidth + shldW));
+      sPos.push(p2.x - nx2 * (halfWidth + shldW), 0.02, p2.z - nz2 * (halfWidth + shldW));
       if (si2 < nSeg) {
         var b2 = si2 * 2;
         sIdx.push(b2, b2 + 1, b2 + 2);
@@ -379,22 +424,24 @@ function _buildRoadNetwork(edges) {
     shldGeo.setIndex(sIdx);
     shldGeo.computeVertexNormals();
     var shldMesh = new THREE.Mesh(shldGeo,
-      new THREE.MeshStandardMaterial({ color: 0x4a4d50, roughness: 0.9, metalness: 0.05 }));
+      new THREE.MeshStandardMaterial({ color: 0x3a3d40, roughness: 0.92, metalness: 0.02 }));
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
 
-    // ── 车道线（全部在参考线右侧，offset 为负值）──
-    // 参考线双黄线（实线，宽 0.15m，间距 0.3m）
-    _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.043);
-    _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.043);
-    // 车道分隔虚线（每条车道线，offset = -li * laneWidth）
-    for (var li = 1; li < lanes; li++) {
-      var offset = -li * laneWidth;
-      _addLaneMarkRibbon(group, curve, nSeg, offset, 0.12, 0xffffff, 0.043, true);
+    // ── 车道线（对称分布在参考线两侧）──
+    // 中心双黄线（实线）：±0.15m
+    _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
+    _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
+    // 内侧车道分隔虚线：±laneWidth, ±2*laneWidth, ...（避开中心双黄线已占区域）
+    for (var li = 1; li <= Math.floor(lanes / 2); li++) {
+      var off = li * laneWidth;
+      if (Math.abs(off - 0.15) < 0.25) continue;  // 避免与双黄线重叠
+      _addLaneMarkRibbon(group, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
+      _addLaneMarkRibbon(group, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
     }
-    // 道路边缘白实线（参考线 + 路面右边缘）
-    _addLaneMarkRibbon(group, curve, nSeg,  0.06, 0.15, 0xffffff, 0.043);
-    _addLaneMarkRibbon(group, curve, nSeg, -roadWidth + 0.06, 0.15, 0xffffff, 0.043);
+    // 道路边缘白实线
+    _addLaneMarkRibbon(group, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
+    _addLaneMarkRibbon(group, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
   }
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
@@ -524,6 +571,28 @@ function _addLaneMarkRibbon(group, curve, nSeg, lateralOffset, width, color, y, 
   }
 }
 
+/**
+ * 根据当前道路网络曲线，查询 (x,z) 处最近的道路切线方向。
+ * 返回 { heading: 切线与 +X 轴夹角(rad), found: bool }。
+ * 用于交通灯/ETC门架/轨迹线对齐道路方向。
+ */
+function _getRoadTangentAt(x, z) {
+  if (!_roadCurves || !_roadCurves.length) return { found: false, heading: 0 };
+  var bestT = null, bestD2 = Infinity;
+  for (var ci = 0; ci < _roadCurves.length; ci++) {
+    var curve = _roadCurves[ci];
+    var pts = curve.getSpacedPoints(20);
+    for (var pi = 0; pi < pts.length; pi++) {
+      var dx = pts[pi].x - x, dz = pts[pi].z - z;
+      var d2 = dx * dx + dz * dz;
+      if (d2 < bestD2) { bestD2 = d2; bestT = { curve: curve, t: pi / (pts.length - 1) }; }
+    }
+  }
+  if (!bestT) return { found: false, heading: 0 };
+  var tan = bestT.curve.getTangentAt(Math.max(0, Math.min(1, bestT.t)));
+  return { found: true, heading: Math.atan2(tan.z, tan.x) };
+}
+
 /** 沿曲线 [s0, s1] 段生成一条 ribbon 并加入 group */
 function _emitRibbonSegment(group, curve, s0, s1, nSeg, totalLen, lateralOffset, halfW, color, y) {
   var positions = [];
@@ -548,9 +617,12 @@ function _emitRibbonSegment(group, curve, s0, s1, nSeg, totalLen, lateralOffset,
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setIndex(indices);
   geo.computeVertexNormals();
-  var mat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.4, emissive: color, emissiveIntensity: 0.25 });
+  /* 车道线用 MeshBasicMaterial 保证在任何光照下都清晰可见；
+   * 白天场景 DirectionalLight 很强，MeshStandard 容易被洗淡。
+   * 夜晚/隧道场景也保持自发光可见性。 */
+  var mat = new THREE.MeshBasicMaterial({ color: color });
   var mesh = new THREE.Mesh(geo, mat);
-  mesh.receiveShadow = true;
+  mesh.receiveShadow = false;
   group.add(mesh);
 }
 
@@ -767,20 +839,21 @@ function init3DScene() {
 
   // Lighting — brighter scene so lane markings are clearly visible
   // 环境贴图已提供基础反射，降低 ambient 避免过曝，让阴影更立体
-  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.45));
-  var sun = new THREE.DirectionalLight(0xfff8ee, 1.8);
-  sun.position.set(30, 40, 15);
+  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.35));
+  var sun = new THREE.DirectionalLight(0xfff8ee, 1.65);
+  sun.position.set(30, 50, 20);
   sun.castShadow = true;
-  // 阴影相机参数：默认 frustum 太大导致阴影分辨率低（糊），收窄到跟随区域
+  // 阴影相机参数：2048 贴图 + 适中 frustum，覆盖 ego 周围 60m 区域
   sun.shadow.mapSize.width = 2048;
   sun.shadow.mapSize.height = 2048;
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 120;
-  sun.shadow.camera.left = -40;
-  sun.shadow.camera.right = 40;
-  sun.shadow.camera.top = 40;
-  sun.shadow.camera.bottom = -40;
-  sun.shadow.bias = -0.0005;  // 消除 peter-panning
+  sun.shadow.camera.far = 160;
+  sun.shadow.camera.left = -50;
+  sun.shadow.camera.right = 50;
+  sun.shadow.camera.top = 50;
+  sun.shadow.camera.bottom = -50;
+  sun.shadow.bias = -0.0004;
+  sun.shadow.normalBias = 0.02;  // 减少曲面/斜面上的阴影条纹
   scene3d.add(sun);
   _sunLight = sun;  /* 供 _renderFrame 跟随 ego 更新 */
   // sun 目标点跟随 ego（在 _renderFrame 里更新 sun.target.position）
@@ -1055,6 +1128,19 @@ function _renderFrame() {
           om.position.lerp(_tmpV3, 0.18);
         }
         _tmpScale.set(L, H, W); om.scale.lerp(_tmpScale, 0.18);
+
+        // ── 朝向：车辆模型前向为 +X，故 rotation.y = -heading。
+        // 行人没有 h 字段，用速度向量方向近似；静止行人保持朝前。
+        var targetYaw = -ow.heading;
+        if ((ow.type === 'pedestrian' || ow.type === 'cyclist') &&
+            (Math.abs(ow.vx) > 0.05 || Math.abs(ow.vz) > 0.05)) {
+          targetYaw = -Math.atan2(ow.vz, ow.vx);
+        }
+        var dy = targetYaw - om.rotation.y;
+        while (dy > Math.PI) dy -= 2 * Math.PI;
+        while (dy < -Math.PI) dy += 2 * Math.PI;
+        om.rotation.y += dy * 0.18;
+
         var c = (_obsColors[ow.type]) || 0xff9944;
         // Defect 5: 障碍物类型变化时重建外形（轿车 ↔ 胶囊行人 ↔ 圆锥路障），
         // 复用同一 group 槽位，只替换 children，保留 position/scale/visible。
@@ -1105,6 +1191,11 @@ function _renderFrame() {
       if (tlw) {
         tlm.position.set(tlw.x, 0, tlw.z);
         tlm.visible = true;
+        // 交通灯 arm 沿模型 +Z，应横跨道路（垂直于道路切线）。
+        var tlTan = _getRoadTangentAt(tlw.x, tlw.z);
+        if (tlTan.found) {
+          tlm.rotation.y = -(tlTan.heading + Math.PI / 2);
+        }
         // Map state → active lamp index: red=0, yellow=1, green=2
         var activeIdx = 2;  // default green
         if (tlw.state === 'red') activeIdx = 0;
@@ -1134,6 +1225,11 @@ function _renderFrame() {
       if (gw) {
         gm.position.set(gw.x, 0, gw.z);
         gm.visible = true;
+        // ETC 门架 crossbar 沿模型 +Z，应横跨道路（垂直于道路切线）。
+        var gateTan = _getRoadTangentAt(gw.x, gw.z);
+        if (gateTan.found) {
+          gm.rotation.y = -(gateTan.heading + Math.PI / 2);
+        }
         // 抬杆角度：progress 0→1 映射到 0→75° (1.31 rad)
         var boom = gm.userData.boom;
         if (boom) {
@@ -1179,17 +1275,17 @@ function update3D() {
   } else if (scn && scn.road) {
     // 旧路径：单段弯道，隐藏 road_network 如果存在（场景切换时）
     if (_roadNetworkGroup) { _roadNetworkGroup.visible = false; _lastRoadNetworkKey = ''; }
+    _roadCurves = [];
     if (_roadGroup) _roadGroup.visible = true;
     _applyRoadCurve(scn.road);
   }
 
   // NOA Phase 6: 规划轨迹渲染 — 从 scn.trajectory_path (Frenet [[s,d,spd],...])
-  // 近似转世界坐标画线。从 ego 当前位置 (_dr.lastX/Z) 出发，沿 ego heading
-  // 方向延伸 s，横向偏移 d（heading+90° 方向）。直道/大半径弯道下近似误差小。
+  // 转世界坐标画线。若已有道路网络曲线，则把 ego 当前位置投影到最近 curve，
+  // 沿 curve 前进 s 米并横向偏移 d；否则退化为沿 ego heading 直线外推。
   //
   // 3D 增强：用 TubeGeometry 替代 Line（LineBasicMaterial.linewidth 在 WebGL
-  // 下被忽略恒为 1px），管半径 0.18m 远距离可见；沿管道 UV 做 dash 流动动画，
-  // 直观表现"规划在推进"。速度着色：path 第 3 列 spd 映射颜色（蓝→绿→黄）。
+  // 下被忽略恒为 1px），管半径 0.18m 远距离可见；沿管道 UV 做 dash 流动动画。
   if (scn && scn.trajectory_path && scn.trajectory_path.length > 1) {
     var tpath = scn.trajectory_path;
     var ex = _dr.lastX, ez = _dr.lastZ, eh = _dr.lastHeading || 0;
@@ -1198,12 +1294,37 @@ function update3D() {
       _trajLastKey = tkey;
       // 构建 world 坐标点数组（Vector3）
       var tvec = [];
+      // 尝试把 ego 投影到道路网络曲线
+      var nearCurve = null, nearT = 0;
+      if (_roadCurves && _roadCurves.length) {
+        var bestD2 = Infinity;
+        for (var ci = 0; ci < _roadCurves.length; ci++) {
+          var pts = _roadCurves[ci].getSpacedPoints(30);
+          for (var pi = 0; pi < pts.length; pi++) {
+            var dx = pts[pi].x - ex, dz = pts[pi].z - ez;
+            var d2 = dx * dx + dz * dz;
+            if (d2 < bestD2) { bestD2 = d2; nearCurve = _roadCurves[ci]; nearT = pi / (pts.length - 1); }
+          }
+        }
+      }
       for (var ti = 0; ti < tpath.length; ti++) {
         var pt = tpath[ti];
         if (!pt || pt.length < 2) continue;
         var s = pt[0] || 0, d = pt[1] || 0;
-        var wx = ex + s * Math.cos(eh) - d * Math.sin(eh);
-        var wz = ez + s * Math.sin(eh) + d * Math.cos(eh);
+        var wx, wz;
+        if (nearCurve) {
+          var len = nearCurve.getLength();
+          var t = Math.max(0, Math.min(1, nearT + s / len));
+          var pos = nearCurve.getPointAt(t);
+          var tan = nearCurve.getTangentAt(t);
+          var nx = -tan.z, nz = tan.x;  // 右侧法线；d>0 在左侧，d<0 在右侧
+          wx = pos.x + nx * d;
+          wz = pos.z + nz * d;
+        } else {
+          // 无道路网络时退化为直线外推（旧场景兼容）
+          wx = ex + s * Math.cos(eh) - d * Math.sin(eh);
+          wz = ez + s * Math.sin(eh) + d * Math.cos(eh);
+        }
         tvec.push(new THREE.Vector3(wx, 0.18, wz));
       }
       // 移除旧管
