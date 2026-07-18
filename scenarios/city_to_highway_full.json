@@ -53,6 +53,13 @@
     { "trigger_x": 1600, "type": "lane_change",   "target_lane": -1, "target_speed": 28, "label": "overtake_left" },
     { "trigger_x": 1850, "type": "lane_change",   "target_lane": 1,  "label": "return_right" }
   ],
+  "pass_criteria": {
+    "min_distance_m": 100.0,
+    "min_avg_speed_mps": 3.0,
+    "required_lane_changes": 0,
+    "no_collision": true,
+    "no_red_light_violation": true
+  },
   "actors": [
     { "id": 1,  "segment_id": 0,  "type": "car",  "s": 80,  "l": -1.75, "vx": 3.0,  "len": 4.6, "wid": 2.0 },
     { "id": 2,  "segment_id": 0,  "type": "car",  "s": 85,  "l": 0,     "vx": 6.0,  "len": 4.6, "wid": 2.0 },

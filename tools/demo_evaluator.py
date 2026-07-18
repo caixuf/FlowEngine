@@ -421,7 +421,10 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
 
     samples: list[dict] = []
     started = time.monotonic()
-    deadline = started + duration + 12.0
+    # 缓冲时间：给 demo.sh 构建 node plugins、等待首帧 topology 写入、
+    # 以及正常收尾足够余量。首次运行或 CI 冷启动时 12s 经常不够。
+    deadline = started + duration + 30.0
+    first_sample_seen = False
     while proc.poll() is None and time.monotonic() < deadline:
         try:
             if json_file.stat().st_mtime < started_wall:
@@ -433,15 +436,22 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
         sample = load_json(json_file)
         if sample:
             samples.append(sample)
+            if not first_sample_seen:
+                first_sample_seen = True
+                # 收到首个有效样本后再给运行时长 + 15s 收尾缓冲，避免
+                # 刚出数据就被 deadline 截断。
+                deadline = max(deadline, time.monotonic() + duration + 15.0)
         time.sleep(interval)
 
     if proc.poll() is None:
+        print(f"warning: demo.sh still running after {time.monotonic() - started:.1f}s, terminating",
+              file=sys.stderr)
         proc.terminate()
         try:
-            proc.wait(timeout=3.0)
+            proc.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=3.0)
+            proc.wait(timeout=5.0)
     output = proc.stdout.read() if proc.stdout else ""
     if output:
         print(output.rstrip())
