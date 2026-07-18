@@ -124,10 +124,6 @@ target_link_libraries(sensor_model ${NODE_LINK_LIBS})
 
 # ── 新增节点插件 ──────────────────────────────────────────────
 
-# sim_world_node: 车辆动力学 + 障碍物仿真（旧版，保留用于回归对比）
-add_library(sim_world SHARED sim_world_node.c)
-target_link_libraries(sim_world ${NODE_LINK_LIBS})
-
 # flowsim_node: FlowSim v2 仿真世界 (C++20 flowcoro + esmini RoadManager)
 # 替换 sim_world_node。集成 Phase 1 组件（road_network/entity/physics/npc_ai/
 # collision/scene_events）为 20Hz flowcoro 协程主循环节点。
@@ -381,7 +377,7 @@ add_library(scene_assembler_node SHARED scene_assembler_node.c)
 target_link_libraries(scene_assembler_node ${NODE_LINK_LIBS})
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model sim_world flowsim_node planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
+install(TARGETS fusion_node perception_node sensor_model flowsim_node planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
         LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
 
 message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")

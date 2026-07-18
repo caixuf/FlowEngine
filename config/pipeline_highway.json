@@ -10,8 +10,8 @@
   },
   "processes": [
     {
-      "name": "sim_world",
-      "library_path": "build/lib/libsim_world.so",
+      "name": "flowsim",
+      "library_path": "build/lib/libflowsim_node.so",
       "auto_start": true,
       "publish": [
         {
