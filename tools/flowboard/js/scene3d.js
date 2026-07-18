@@ -430,6 +430,71 @@ function _buildRoadNetwork(edges) {
     // 道路边缘白实线
     _addLaneMarkRibbon(group, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
     _addLaneMarkRibbon(group, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
+
+    // ── 道路护栏（两侧）──
+    // 沿道路边缘外侧 0.35m 处连续立柱，形成护栏轮廓。
+    var guardPostGeo = new THREE.BoxGeometry(0.12, 0.7, 0.12);
+    var guardMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.5, roughness: 0.4 });
+    var guardSpacing = 3.0;  // 每隔 3m 一个立柱
+    var guardCount = Math.max(2, Math.floor(length / guardSpacing));
+    for (var gi2 = 0; gi2 <= guardCount; gi2++) {
+      var gt = gi2 / guardCount;
+      var gp = curve.getPointAt(gt);
+      var gtan = curve.getTangentAt(gt);
+      var gnx = -gtan.z, gnz = gtan.x;
+      var gLeft = halfWidth + 0.35, gRight = -(halfWidth + 0.35);
+      var gpL = new THREE.Vector3(gp.x + gnx * gLeft, 0.35, gp.z + gnz * gLeft);
+      var gpR = new THREE.Vector3(gp.x + gnx * gRight, 0.35, gp.z + gnz * gRight);
+      var postL = new THREE.Mesh(guardPostGeo, guardMat); postL.position.copy(gpL); postL.castShadow = true; group.add(postL);
+      var postR = new THREE.Mesh(guardPostGeo, guardMat); postR.position.copy(gpR); postR.castShadow = true; group.add(postR);
+      // 立柱间横梁（每隔一段）
+      if (gi2 < guardCount) {
+        var gt2 = (gi2 + 1) / guardCount;
+        var gp2 = curve.getPointAt(gt2);
+        var gtan2 = curve.getTangentAt(gt2);
+        var gnx2 = -gtan2.z, gnz2 = gtan2.x;
+        var railLen = gp.distanceTo(gp2);
+        var railGeo = new THREE.BoxGeometry(railLen, 0.06, 0.04);
+        var railL = new THREE.Mesh(railGeo, guardMat);
+        railL.position.copy(gpL).lerp(new THREE.Vector3(gp2.x + gnx2 * gLeft, 0.55, gp2.z + gnz2 * gLeft), 0.5);
+        railL.lookAt(gp2.x + gnx2 * gLeft, 0.55, gp2.z + gnz2 * gLeft);
+        group.add(railL);
+        var railR = new THREE.Mesh(railGeo, guardMat);
+        railR.position.copy(gpR).lerp(new THREE.Vector3(gp2.x + gnx2 * gRight, 0.55, gp2.z + gnz2 * gRight), 0.5);
+        railR.lookAt(gp2.x + gnx2 * gRight, 0.55, gp2.z + gnz2 * gRight);
+        group.add(railR);
+      }
+    }
+
+    // ── 路灯（两侧交错，每隔 40m）──
+    // 静态灯杆 + 顶部微弱 PointLight，增强夜间/隧道氛围；数量有限避免性能问题。
+    var poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 6.0, 10);
+    var poleMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
+    var lampGeo = new THREE.BoxGeometry(0.5, 0.12, 0.25);
+    var lampMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.8 });
+    var lampSpacing = 40.0;
+    var lampCount = Math.max(1, Math.floor(length / lampSpacing));
+    for (var li3 = 1; li3 <= lampCount; li3++) {
+      var lt = Math.min(1.0, li3 * lampSpacing / length);
+      var lp = curve.getPointAt(lt);
+      var ltan = curve.getTangentAt(lt);
+      var lnx = -ltan.z, lnz = ltan.x;
+      var side = (li3 % 2 === 0) ? 1 : -1;  // 交错
+      var lateral = side * (halfWidth + 2.5);
+      var poleX = lp.x + lnx * lateral, poleZ = lp.z + lnz * lateral;
+      var pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(poleX, 3.0, poleZ);
+      pole.castShadow = true;
+      group.add(pole);
+      var lamp = new THREE.Mesh(lampGeo, lampMat);
+      lamp.position.set(poleX - lnx * side * 0.8, 5.9, poleZ - lnz * side * 0.8);
+      lamp.lookAt(poleX - lnx * side * 3.0, 0, poleZ - lnz * side * 3.0);
+      group.add(lamp);
+      // 微弱路面照明，距离衰减避免远处过亮
+      var plight = new THREE.PointLight(0xffffee, 0.6, 28, 1.8);
+      plight.position.set(lamp.position.x, 5.5, lamp.position.z);
+      group.add(plight);
+    }
   }
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
@@ -460,59 +525,30 @@ function _buildRoadNetwork(edges) {
     if (!found) clusters.push({ x: allEnds[e].x, z: allEnds[e].z, count: 1, minLanes: allEnds[e].lanes });
   }
   // count >= 3 的簇 = junction 连接点；含单车道（匝道）= fork，否则 = merge
-  /* 3D 增强：除贴地圆环外，加 5m 高立柱 + 顶部箭头 + 文字标签，
-   * 让追逐相机低仰角下也能远距离识别分叉/汇入点。柱子 emissive 自发光
-   * 配合 Bloom 产生醒目光柱。 */
+  // 简化标记：只保留贴地圆环 + 方向箭头，去掉高立柱和浮动文字，避免卡通感。
   for (var ci = 0; ci < clusters.length; ci++) {
     if (clusters[ci].count < 3) continue;
     var kind = clusters[ci].minLanes <= 1 ? 'fork' : 'merge';
     var color = kind === 'fork' ? 0xff8800 : 0x44cc44;
     var jx = clusters[ci].x, jz = clusters[ci].z;
 
-    // 贴地圆环（保留，近处看清轮廓）
+    // 贴地圆环
     var ringGeo = new THREE.RingGeometry(2.0, 2.6, 24);
-    var ringMat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.8 });
+    var ringMat = new THREE.MeshBasicMaterial({ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.75 });
     var ring = new THREE.Mesh(ringGeo, ringMat);
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(jx, 0.06, jz);
+    ring.position.set(jx, 0.07, jz);
     group.add(ring);
 
-    // 5m 高立柱（CylinderGeometry，emissive 自发光）
-    var poleGeo = new THREE.CylinderGeometry(0.15, 0.15, 5.0, 8);
-    var poleMat = new THREE.MeshStandardMaterial({
-      color: color, emissive: color, emissiveIntensity: 0.8, roughness: 0.4
-    });
-    var pole = new THREE.Mesh(poleGeo, poleMat);
-    pole.position.set(jx, 2.5, jz);
-    group.add(pole);
-
-    // 顶部箭头（fork 朝上分叉 ↑，merge 朝下汇合 ↓，用 ConeGeometry）
-    var coneH = 0.8;
-    var coneGeo = new THREE.ConeGeometry(0.5, coneH, 8);
-    var coneMat = new THREE.MeshStandardMaterial({
-      color: color, emissive: color, emissiveIntensity: 1.0, roughness: 0.3
-    });
-    var cone = new THREE.Mesh(coneGeo, coneMat);
-    cone.position.set(jx, 5.0 + coneH / 2, jz);
-    cone.rotation.z = kind === 'fork' ? 0 : Math.PI;  /* fork 朝上，merge 朝下 */
-    group.add(cone);
-
-    // 浮动文字标签（FORK / MERGE）— 复用 CanvasTexture sprite 技术
-    var lblCv = document.createElement('canvas');
-    lblCv.width = 128; lblCv.height = 48;
-    var lctx = lblCv.getContext('2d');
-    lctx.fillStyle = 'rgba(0,0,0,0.6)';
-    lctx.fillRect(0, 0, 128, 48);
-    lctx.fillStyle = '#' + ('000000' + (color & 0xffffff).toString(16)).slice(-6);
-    lctx.font = 'bold 26px monospace';
-    lctx.textAlign = 'center'; lctx.textBaseline = 'middle';
-    lctx.fillText(kind.toUpperCase(), 64, 26);
-    var lblTex = new THREE.CanvasTexture(lblCv);
-    lblTex.minFilter = THREE.LinearFilter;
-    var lblSp = new THREE.Sprite(new THREE.SpriteMaterial({ map: lblTex, transparent: true, depthTest: false }));
-    lblSp.scale.set(6, 2.25, 1);
-    lblSp.position.set(jx, 6.5, jz);
-    group.add(lblSp);
+    // 贴地箭头：fork 朝前分叉（Cone 压扁），merge 朝后汇合
+    var arrowGeo = new THREE.ConeGeometry(0.6, 1.2, 3);
+    var arrowMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.7, side: THREE.DoubleSide });
+    var arrow = new THREE.Mesh(arrowGeo, arrowMat);
+    arrow.scale.y = 0.25;
+    arrow.rotation.x = -Math.PI / 2;
+    arrow.rotation.z = kind === 'fork' ? 0 : Math.PI;
+    arrow.position.set(jx, 0.08, jz);
+    group.add(arrow);
   }
 
   scene3d.add(group);

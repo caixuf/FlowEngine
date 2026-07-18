@@ -235,6 +235,23 @@ export function _buildSedan(color, secondaryColor) {
   tl2.position.z = -0.5;
   g.add(tl2);
 
+  // 车头灯真实照射：两个 SpotLight，低角度投射在路面上形成光锥。
+  // 注意：SpotLight 比较贵，只给 ego 车辆开；NPC 车辆只用 emissive 尾灯。
+  var spotL = new T.SpotLight(0xffffee, 2.5, 45, 0.55, 0.5, 1.2);
+  spotL.position.set(2.25, 0.65, 0.5);
+  spotL.target.position.set(12, 0, 0.5);
+  spotL.castShadow = false;  // 避免性能开销和自阴影条纹
+  g.add(spotL);
+  g.add(spotL.target);
+  var spotR = new T.SpotLight(0xffffee, 2.5, 45, 0.55, 0.5, 1.2);
+  spotR.position.set(2.25, 0.65, -0.5);
+  spotR.target.position.set(12, 0, -0.5);
+  spotR.castShadow = false;
+  g.add(spotR);
+  g.add(spotR.target);
+  // 把车灯存入 userData，方便外部根据昼夜开关
+  g.userData.headlights = [spotL, spotR];
+
   return g;
 }
 
@@ -308,9 +325,21 @@ export function _buildObstacle(type, color) {
   ws.position.set(0.32, 0.78, 0);
   g.add(ws);
 
+  // 车轮：unit-normalized，半径约 0.18，厚度 0.08
+  var wheelGeo = new T.CylinderGeometry(0.18, 0.18, 0.08, 14);
+  var wheelMat = new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.2, roughness: 0.7 });
+  var wheelPos = [[0.32, 0.18, 0.42], [0.32, 0.18, -0.42], [-0.32, 0.18, 0.42], [-0.32, 0.18, -0.42]];
+  for (var wi = 0; wi < 4; wi++) {
+    var wh = new T.Mesh(wheelGeo, wheelMat);
+    wh.rotation.z = Math.PI / 2;
+    wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
+    wh.castShadow = true;
+    g.add(wh);
+  }
+
   // 前灯/尾灯：unit-normalized，位置在车体四角，emissive 触发 Bloom
-  var headMat = new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.2, roughness: 0.2 });
-  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.0, roughness: 0.2 });
+  var headMat = new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.2 });
+  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.8, roughness: 0.2 });
   var hlGeo = new T.BoxGeometry(0.08, 0.12, 0.18);
   var tlGeo = new T.BoxGeometry(0.06, 0.12, 0.18);
   var hl1 = new T.Mesh(hlGeo, headMat); hl1.position.set(0.48, 0.35, 0.32); g.add(hl1);
