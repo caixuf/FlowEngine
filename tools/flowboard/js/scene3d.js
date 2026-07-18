@@ -8,8 +8,20 @@ import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle,
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
 import { initModelCache, buildEgoCar, buildObstacleGroup, _setVehicleLights } from './models.js';
+// 分层架构：utils 层（几何合并、曲线数学、标签 Sprite）已迁移到 scene3d/utils/
+import { mergeGeometries as _mergeGeometries, transformGeometry as _transformGeometry } from './scene3d/utils/GeometryMerge.js';
+import { curveShiftAt as _curveShiftAt, curveHeadingAt as _curveHeadingAt, getRoadTangentAt as _getRoadTangentAtImpl } from './scene3d/utils/CurveMath.js';
+import { makeLabelSprite as _makeLabelSprite, setLabelSprite as _setLabelSprite } from './scene3d/utils/LabelSprite.js';
+// 分层架构：model 层（拓扑数据、场景快照、路网模型、性能档位）已迁移到 scene3d/model/
+import * as TopologyStore from './scene3d/model/TopologyStore.js';
 
 const THREE = window.THREE;
+
+// _getRoadTangentAt 保留无参签名，内部把 _roadCurves 传给 CurveMath 实现。
+// 这样 _renderFrame 里的调用点（tlw.x/gw.x 等）无需改动。
+function _getRoadTangentAt(x, z) {
+  return _getRoadTangentAtImpl(_roadCurves, x, z);
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Module-level state (replaces former window globals)
@@ -26,7 +38,12 @@ export function setDebugCam(v) { _debugCam = v; }
 // Live topology data (Phase 4.9: no longer read from window.topoData).
 // app.js calls setTopoData() from updateAll() / sync2DTarget().
 let _topoData = { nodes: [], metrics: {} };
-export function setTopoData(d) { _topoData = d || _topoData; }
+export function setTopoData(d) {
+  _topoData = d || _topoData;
+  // 分层架构：同步写入 TopologyStore，供 model 层访问器使用。
+  // scene3d.js 内部仍读 _topoData（渐进式迁移，保持逻辑不变）。
+  TopologyStore.setTopoData(_topoData);
+}
 
 /** Camera chase-cam state vectors */
 let _cam = null, _camLook = null, _camTarget = null, _camLookTarget = null;
@@ -165,45 +182,7 @@ function _makeCyl(rTop, rBot, h, segs, color) {
 }
 
 // ── NOA Phase 5: NPC AI 状态标签 sprite（CanvasTexture） ──
-// 每个障碍物槽位配一个 Sprite，浮在车顶上方显示当前 ai 状态。
-// ai 字符串变化时才重建 CanvasTexture，避免每帧 GC 压力。
-function _makeLabelSprite() {
-  var canvas = document.createElement('canvas');
-  canvas.width = 128; canvas.height = 32;
-  var tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  var mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
-  var sp = new THREE.Sprite(mat);
-  sp.scale.set(4, 1, 1);   // 世界坐标 4m 宽 1m 高
-  sp.visible = false;
-  return sp;
-}
-
-function _setLabelSprite(sp, text, colorHex) {
-  if (!sp || !sp.material || !sp.material.map) return;
-  var canvas = sp.material.map.image;
-  var ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (text) {
-    // 圆角背景
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    var r = 6, w = canvas.width, h = canvas.height;
-    ctx.beginPath();
-    ctx.moveTo(r, 0); ctx.lineTo(w - r, 0);
-    ctx.quadraticCurveTo(w, 0, w, r); ctx.lineTo(w, h - r);
-    ctx.quadraticCurveTo(w, h, w - r, h); ctx.lineTo(r, h);
-    ctx.quadraticCurveTo(0, h, 0, h - r); ctx.lineTo(0, r);
-    ctx.quadraticCurveTo(0, 0, r, 0); ctx.closePath(); ctx.fill();
-    // 文字
-    var hex = ('000000' + (colorHex & 0xffffff).toString(16)).slice(-6);
-    ctx.fillStyle = '#' + hex;
-    ctx.font = 'bold 18px monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, w / 2, h / 2 + 1);
-  }
-  sp.material.map.needsUpdate = true;
-}
+// 已迁移至 scene3d/utils/LabelSprite.js（makeLabelSprite / setLabelSprite）
 
 // ════════════════════════════════════════════════════════════════════
 // Road builder — 2 lanes × 3.5m, split into 2m segment groups.
@@ -270,23 +249,7 @@ function _buildRoad(scene) {
   _roadGroup = roadGroup;
 }
 
-function _curveShiftAt(x, sx, len, off) {
-  if (len <= 0 || Math.abs(off) < 0.01) return 0;
-  if (x <= sx) return 0;
-  if (x >= sx + len) return off;
-  var t = (x - sx) / len;
-  return off * (3 * t * t - 2 * t * t * t);
-}
-
-/** Road centerline tangent heading at x (radians), mirror of road_center_heading() in C. */
-function _curveHeadingAt(x, sx, len, off) {
-  if (len <= 0 || Math.abs(off) < 0.01 || x <= sx) return 0;
-  if (x >= sx + len) return 0;
-  var t = (x - sx) / len;
-  // smoothstep derivative: d/dt (3t² - 2t³) = 6t - 6t²
-  var dy = off * (6 * t - 6 * t * t) / len;
-  return Math.atan(dy);
-}
+// _curveShiftAt / _curveHeadingAt 已迁移至 scene3d/utils/CurveMath.js
 
 function _applyRoadCurve(roadData) {
   if (!roadData) return;
@@ -895,25 +858,9 @@ function _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertO
 
 /**
  * 根据当前道路网络曲线，查询 (x,z) 处最近的道路切线方向。
- * 返回 { heading: 切线与 +X 轴夹角(rad), found: bool }。
- * 用于交通灯/ETC门架/轨迹线对齐道路方向。
+ * 已迁移至 scene3d/utils/CurveMath.js（getRoadTangentAt）。
+ * 文件顶部的 _getRoadTangentAt(x,z) wrapper 保留无参签名，内部转发到 CurveMath。
  */
-function _getRoadTangentAt(x, z) {
-  if (!_roadCurves || !_roadCurves.length) return { found: false, heading: 0 };
-  var bestT = null, bestD2 = Infinity;
-  for (var ci = 0; ci < _roadCurves.length; ci++) {
-    var curve = _roadCurves[ci];
-    var pts = curve.getSpacedPoints(20);
-    for (var pi = 0; pi < pts.length; pi++) {
-      var dx = pts[pi].x - x, dz = pts[pi].z - z;
-      var d2 = dx * dx + dz * dz;
-      if (d2 < bestD2) { bestD2 = d2; bestT = { curve: curve, t: pi / (pts.length - 1) }; }
-    }
-  }
-  if (!bestT) return { found: false, heading: 0 };
-  var tan = bestT.curve.getTangentAt(Math.max(0, Math.min(1, bestT.t)));
-  return { found: true, heading: Math.atan2(tan.z, tan.x) };
-}
 
 /** 沿曲线 [s0, s1] 段生成一条 ribbon 并追加到合并数组 */
 function _emitRibbonSegment(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, s0, s1, nSeg, totalLen, lateralOffset, halfW, color, y) {
@@ -1269,80 +1216,9 @@ function _updateTireTrail(sx, sz, heading, speed) {
 }
 
 /**
- * 合并多个 THREE.*Geometry 为一个 BufferGeometry（无 BufferGeometryUtils 依赖）。
- * 所有几何体必须具有 position + normal + uv 属性；输出为 indexed BufferGeometry。
- * 仅用于 _buildEnvironment 内部静态环境物体合并。
+ * _mergeGeometries / _transformGeometry 已迁移至 scene3d/utils/GeometryMerge.js
+ * （mergeGeometries / transformGeometry），通过顶部 import 别名引入。
  */
-function _mergeGeometries(geos) {
-  var totalVerts = 0, totalIdx = 0;
-  for (var i = 0; i < geos.length; i++) {
-    var g = geos[i];
-    totalVerts += g.attributes.position.count;
-    totalIdx += (g.index ? g.index.count : g.attributes.position.count);
-  }
-  var pos = new Float32Array(totalVerts * 3);
-  var norm = new Float32Array(totalVerts * 3);
-  var idx = new (totalIdx > 65535 ? Uint32Array : Uint16Array)(totalIdx);
-  var vOff = 0, iOff = 0;
-  for (var j = 0; j < geos.length; j++) {
-    var gg = geos[j];
-    var pc = gg.attributes.position.count;
-    var pa = gg.attributes.position.array;
-    var na = gg.attributes.normal ? gg.attributes.normal.array : null;
-    for (var k = 0; k < pc; k++) {
-      pos[(vOff + k) * 3]     = pa[k * 3];
-      pos[(vOff + k) * 3 + 1] = pa[k * 3 + 1];
-      pos[(vOff + k) * 3 + 2] = pa[k * 3 + 2];
-      if (na) {
-        norm[(vOff + k) * 3]     = na[k * 3];
-        norm[(vOff + k) * 3 + 1] = na[k * 3 + 1];
-        norm[(vOff + k) * 3 + 2] = na[k * 3 + 2];
-      }
-    }
-    if (gg.index) {
-      var ia = gg.index.array;
-      for (var m = 0; m < ia.length; m++) {
-        idx[iOff + m] = ia[m] + vOff;
-      }
-      iOff += ia.length;
-    } else {
-      for (var m2 = 0; m2 < pc; m2++) idx[iOff + m2] = vOff + m2;
-      iOff += pc;
-    }
-    vOff += pc;
-  }
-  var merged = new THREE.BufferGeometry();
-  merged.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  merged.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
-  if (totalIdx > 0) merged.setIndex(new THREE.BufferAttribute(idx, 1));
-  return merged;
-}
-
-/**
- * 用 transform matrix 复制一份 geometry 并变换顶点，返回新 geometry。
- * 用于把模板几何体摆到世界不同位置后合并。
- */
-function _transformGeometry(geo, matrix) {
-  var g = geo.clone();
-  var pos = g.attributes.position.array;
-  var norm = g.attributes.normal ? g.attributes.normal.array : null;
-  var e = matrix.elements;
-  for (var i = 0; i < g.attributes.position.count; i++) {
-    var x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
-    var tx = e[0] * x + e[4] * y + e[8] * z + e[12];
-    var ty = e[1] * x + e[5] * y + e[9] * z + e[13];
-    var tz = e[2] * x + e[6] * y + e[10] * z + e[14];
-    pos[i * 3] = tx; pos[i * 3 + 1] = ty; pos[i * 3 + 2] = tz;
-    if (norm) {
-      var nx = norm[i * 3], ny = norm[i * 3 + 1], nz = norm[i * 3 + 2];
-      var tnx = e[0] * nx + e[4] * ny + e[8] * nz;
-      var tny = e[1] * nx + e[5] * ny + e[9] * nz;
-      var tnz = e[2] * nx + e[6] * ny + e[10] * nz;
-      norm[i * 3] = tnx; norm[i * 3 + 1] = tny; norm[i * 3 + 2] = tnz;
-    }
-  }
-  return g;
-}
 
 function _buildEnvironment(scene) {
   var env = new THREE.Group();
