@@ -87,7 +87,7 @@
 - 前视图（`setCameraMode('front')`）下打方向，前轮原地转向，不画弧线。
 - `gen_models.py` 重新生成模型后，包围盒中心应落在前轴位置（约 x≈1.4m）。
 
-**状态**：待执行
+**状态**：已完成（2026-07-18）— `models.js:75-90` 与 `models.js:215-230` 已改用 `Box3().setFromObject()` 取左右前轮几何中心作为 frontWheels Group pivot，并随分层架构重构一同推送到 main。
 
 ---
 
@@ -122,7 +122,7 @@
 - 行人显示为约 0.5×0.5×1.8m，明显小于车辆。
 - 锥桶显示为约 0.5×0.5×0.8m。
 
-**状态**：待执行
+**状态**：已完成（2026-07-18）— `scene3d.js:155-156` 已新增 `_OBS_L` / `_OBS_W` per-type 表，`scene3d.js:2241` 已改用 `ow.len || _OBS_L[ow.type] || DEFAULT_OBS_LEN`，并随分层架构重构一同推送到 main。
 
 ---
 
