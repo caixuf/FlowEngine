@@ -2,7 +2,7 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady, setTopoData as setTopoData3D, setDebugCam } from './scene3d.js';
+import { init3DScene, resize3D, update3D, sceneReady, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, closeNPCDetail, setPerfTier } from './scene3d.js';
 import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
 import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
 import { safeCall, reportDiag, clearDiag } from './utils.js';
@@ -1211,6 +1211,12 @@ window.flowboard = {
     // delegated to scene2d module
     import('./scene2d.js').then(function (m) { m.switchSceneView(mode); });
   },
+  // C.1: 3D camera controls
+  setCameraMode: setCameraMode,
+  resetCamera: resetCamera,
+  setPerfTier: setPerfTier,
+  // C.2: NPC detail panel
+  closeNPCDetail: closeNPCDetail,
   // export
   toggleExportMenu: toggleExportMenu,
   exportPNG: exportPNG,

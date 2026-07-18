@@ -91,6 +91,20 @@ let _trailLastX = 9999, _trailLastZ = 9999;
  *  配合 fog 产生大气透视效果。 */
 let _skylineGroup = null;
 
+/** B.1: 雨粒子系统（LineSegments），提升天气氛围 */
+let _rainMesh = null;
+let _rainPos = null;              // Float32Array of positions
+let _rainVel = null;              // Float32Array of fall speeds
+const _RAIN_COUNT = 1200;         // 雨线条数
+const _RAIN_BOX = 120;            // 围绕 ego 的 120m × 120m 范围
+const _RAIN_HEIGHT = 40;          // 雨滴起始高度
+
+/** B.1: 程序化水面 —— 道路两侧低洼水域，ShaderMaterial 波动 + 菲涅尔反射 */
+let _waterMesh = null;
+let _waterMat = null;
+const _WATER_SIZE = 1200;         // 水面平面尺寸（m）
+const _WATER_SEGS = 80;           // 细分段数（high 档位）
+
 /** WebGL context-loss flag — render loop skips while true */
 let _glLost = false;
 
@@ -108,6 +122,15 @@ let _tmpV3 = null, _tmpScale = null;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
 const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7, cone: 0.8 };
+
+/** C.1: Camera modes — chase / top / orbit / driver / front */
+let _camMode = 'chase';
+let _orbitState = null;   // { azimuth, polar, distance, target }
+let _orbitDragging = false;
+let _orbitLast = { x: 0, y: 0 };
+let _raycaster = null;
+let _mouse = null;
+let _npcPanel = null;     // DOM element for clicked NPC info
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 3D ADAS scene builder — road, cars, environment
@@ -379,6 +402,20 @@ function _buildRoadNetwork(edges) {
   var group = new THREE.Group();
   var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
 
+  // 道路合并绘制：把所有 edge 的同类型几何体收集后合并，draw call 从 O(N) 降到 O(1)。
+  var allRoadPos = [], allRoadIdx = [], allRoadUV = [];
+  var allShldPos = [], allShldIdx = [];
+  var roadVertOffset = 0, shldVertOffset = 0;
+  // 车道线（黄/白，实/虚）全部合并为一个 vertex-colors mesh
+  var laneMarkPos = [], laneMarkIdx = [], laneMarkCol = [];
+  var laneMarkVertOffset = 0;
+  // 护栏/路灯/箭头/停止线模板几何体累积，循环结束后合并
+  var guardPostGeos = [], guardCapGeos = [], guardRefGeos = [], guardRailGeos = [];
+  var lampPostGeos = [], lampHeadGeos = [];
+  var arrowGeos = [], stopLineGeos = [];
+  // B.1: 路面水坑几何体累积，合并为 1 个 reflective mesh
+  var puddleGeos = [];
+
   // NOA Phase 6: 收集每条 edge 的首尾世界坐标，渲染后扫描分叉/汇入点。
   // 两条 edge 的首/尾节点重合（距离 < 1m）即判定为 junction 连接点。
   var edgeEnds = [];  // [{start:{x,z}, end:{x,z}, lanes, length}, ...]
@@ -418,6 +455,7 @@ function _buildRoadNetwork(edges) {
     var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
     var positions = [];
     var indices = [];
+    var uvs = [];
     for (var si = 0; si <= nSeg; si++) {
       var t = si / nSeg;
       var pos = curve.getPointAt(t);
@@ -425,8 +463,13 @@ function _buildRoadNetwork(edges) {
       // 法线（切线在 XZ 平面内旋转 90°，指向"右"侧，即 d<0）
       var nx = -tangent.z, nz = tangent.x;
 
-      positions.push(pos.x + nx * halfWidth, 0.01, pos.z + nz * halfWidth);  // 左边缘
-      positions.push(pos.x - nx * halfWidth, 0.01, pos.z - nz * halfWidth);  // 右边缘
+      var lx = pos.x + nx * halfWidth, lz = pos.z + nz * halfWidth;  // 左边缘
+      var rx = pos.x - nx * halfWidth, rz = pos.z - nz * halfWidth;  // 右边缘
+      positions.push(lx, 0.01, lz);
+      positions.push(rx, 0.01, rz);
+      // world-space UV：所有 edge 共享同一 repeat（4m 一个纹理周期）
+      uvs.push(lx / 4, lz / 4);
+      uvs.push(rx / 4, rz / 4);
 
       if (si < nSeg) {
         var base = si * 2;
@@ -435,32 +478,11 @@ function _buildRoadNetwork(edges) {
       }
     }
 
-    // 路面 UV：u 沿道路长度，v 沿横向（左=0，右=1）
-    var uvs = [];
-    for (var si = 0; si <= nSeg; si++) {
-      var u = si / nSeg;
-      uvs.push(u, 0);
-      uvs.push(u, 1);
-    }
-
-    var roadGeo = new THREE.BufferGeometry();
-    roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-    roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-    roadGeo.setIndex(indices);
-    roadGeo.computeVertexNormals();
-
-    // 沥青路面：使用程序化纹理 + bump 感，强光下仍保持沥青黑灰质感。
-    var asphaltTex = _makeAsphaltTexture();
-    asphaltTex.repeat.set(length / 4, roadWidth / 4);
-    asphaltTex.anisotropy = 8;
-    var roadMat = new THREE.MeshStandardMaterial({
-      map: asphaltTex,
-      color: 0x888888, roughness: 0.92, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.02
-    });
-    var roadMesh = new THREE.Mesh(roadGeo, roadMat);
-    roadMesh.receiveShadow = true;
-    group.add(roadMesh);
+    // 把当前 edge 路面追加到全局数组
+    for (var pi = 0; pi < positions.length; pi++) allRoadPos.push(positions[pi]);
+    for (var ui = 0; ui < uvs.length; ui++) allRoadUV.push(uvs[ui]);
+    for (var ii = 0; ii < indices.length; ii++) allRoadIdx.push(indices[ii] + roadVertOffset);
+    roadVertOffset += positions.length / 3;
 
     // ── 路肩（路面两侧外扩 1.2m，外侧略低模拟排水横坡）──
     var shldW = 1.2;
@@ -481,51 +503,65 @@ function _buildRoadNetwork(edges) {
         sIdx.push(b2 + 2, b2 + 6, b2 + 3,  b2 + 3, b2 + 6, b2 + 7);
       }
     }
-    var shldGeo = new THREE.BufferGeometry();
-    shldGeo.setAttribute('position', new THREE.Float32BufferAttribute(sPos, 3));
-    shldGeo.setIndex(sIdx);
-    shldGeo.computeVertexNormals();
-    var shldTex = _getShoulderTexture();
-    shldTex.repeat.set(length / 6, 1);
-    shldTex.anisotropy = 4;
-    var shldMesh = new THREE.Mesh(shldGeo,
-      new THREE.MeshStandardMaterial({ map: shldTex, color: 0x999999, roughness: 0.95, metalness: 0.0, bumpMap: shldTex, bumpScale: 0.015 }));
-    shldMesh.receiveShadow = true;
-    group.add(shldMesh);
+    for (var spi = 0; spi < sPos.length; spi++) allShldPos.push(sPos[spi]);
+    for (var sii = 0; sii < sIdx.length; sii++) allShldIdx.push(sIdx[sii] + shldVertOffset);
+    shldVertOffset += sPos.length / 3;
 
     // ── 车道线：中心双黄线 + 多车道时分隔虚线 + 道路边缘白实线 ──
     // 中心双黄线（实线）：只对双向道路（lanes ≥ 2）绘制，单车道为单向路无需中心线
     if (lanes >= 2) {
-      _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
-      _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
     }
     // 多车道分隔虚线：每方向 ≥2 车道时才需要内侧分隔线。
     // lanes 是双向总车道数，floor(lanes/2) 是单向车道数，避免 3 车道不对称路误画。
     var perSide = Math.floor(lanes / 2);
     for (var li = 1; li < perSide; li++) {
       var off = li * laneWidth;
-      _addLaneMarkRibbon(group, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
-      _addLaneMarkRibbon(group, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
+      laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
     }
     // 道路边缘白实线
-    _addLaneMarkRibbon(group, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
-    _addLaneMarkRibbon(group, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
 
     // ── 路面导向箭头（每条 edge 中段画一个直行箭头）──
-    _addRoadArrow(group, curve, length * 0.5, laneWidth, lanes);
+    _addRoadArrow(arrowGeos, curve, length * 0.5, laneWidth, lanes);
     // ── 停止线（起点处，城市/路口道路）──
     if (length < 120) {
-      _addStopLine(group, curve, 0, laneWidth, lanes);
+      _addStopLine(stopLineGeos, curve, 0, laneWidth, lanes);
+    }
+
+    // ── B.1: 路面水坑（雨后积水，低 roughness 模拟反射）──
+    // 每条约 0-2 个水坑，沿曲线随机分布，合并后仅 1 个 draw call
+    var nPuddle = Math.floor(Math.random() * 2.2);
+    for (var pi2 = 0; pi2 < nPuddle; pi2++) {
+      var ps = (0.15 + Math.random() * 0.7) * length;
+      var pt2 = ps / length;
+      var ppos2 = curve.getPointAt(pt2);
+      var ptan2 = curve.getTangentAt(pt2);
+      var pnx2 = -ptan2.z, pnz2 = ptan2.x;
+      var plat = (Math.random() - 0.5) * roadWidth * 0.75;
+      var pw2 = 1.0 + Math.random() * 1.2;
+      var pl2 = 1.4 + Math.random() * 1.6;
+      var puddleGeo = new THREE.PlaneGeometry(pw2, pl2);
+      var pm = new THREE.Matrix4();
+      pm.makeRotationX(-Math.PI / 2);
+      pm.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ptan2.z, ptan2.x)));
+      pm.setPosition(ppos2.x + pnx2 * plat, 0.012, ppos2.z + pnz2 * plat);
+      puddleGeos.push(_transformGeometry(puddleGeo, pm));
     }
 
     // ── 道路护栏（两侧）──
     // 波形护栏：圆形立柱 + 上下双横梁 + 反光片，比单一方块真实。
-    var guardMat = new THREE.MeshStandardMaterial({ color: 0x7799aa, metalness: 0.55, roughness: 0.35 });
-    var guardPostGeo = new THREE.CylinderGeometry(0.055, 0.07, 0.9, 12);
-    var railGeo = new THREE.BoxGeometry(1, 0.05, 0.08, 1, 1, 1);
-    var reflectorMat = new THREE.MeshStandardMaterial({ color: 0xffeebb, emissive: 0xffeebb, emissiveIntensity: 0.35, roughness: 0.4 });
+    // 为了降低 draw call，不直接 group.add，而是把变换后的几何体 push
+    // 到数组，等所有 edge 处理完再合并为 2 个 mesh（guardMat + reflectorMat）。
     var guardSpacing = 3.0;
     var guardCount = Math.max(2, Math.floor(length / guardSpacing));
+    var guardPostGeoTpl = new THREE.CylinderGeometry(0.055, 0.07, 0.9, 12);
+    var guardCapGeoTpl = new THREE.CylinderGeometry(0.08, 0.055, 0.04, 12);
+    var guardRailGeoTpl = new THREE.BoxGeometry(1, 0.05, 0.07, 1, 1, 1);
+    var guardRefGeoTpl = new THREE.BoxGeometry(0.04, 0.18, 0.12);
     for (var gi2 = 0; gi2 <= guardCount; gi2++) {
       var gt = gi2 / guardCount;
       var gp = curve.getPointAt(gt);
@@ -535,16 +571,16 @@ function _buildRoadNetwork(edges) {
       for (var gside = 0; gside < 2; gside++) {
         var lateral = gside === 0 ? gLeft : gRight;
         var gpP = new THREE.Vector3(gp.x + gnx * lateral, 0.45, gp.z + gnz * lateral);
-        var post = new THREE.Mesh(guardPostGeo, guardMat);
-        post.position.copy(gpP); post.castShadow = true; group.add(post);
+        var postMat = new THREE.Matrix4().makeTranslation(gpP.x, gpP.y, gpP.z);
+        guardPostGeos.push(_transformGeometry(guardPostGeoTpl, postMat));
         // 立柱顶部盖帽
-        var cap = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.055, 0.04, 12), guardMat);
-        cap.position.copy(gpP); cap.position.y += 0.47; group.add(cap);
+        var capMat = new THREE.Matrix4().makeTranslation(gpP.x, gpP.y + 0.47, gpP.z);
+        guardCapGeos.push(_transformGeometry(guardCapGeoTpl, capMat));
         // 每隔一根立柱加反光片
         if (gi2 % 2 === 0) {
-          var ref = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.18, 0.12), reflectorMat);
-          ref.position.copy(gpP); ref.position.y += 0.12; ref.position.x -= gnx * 0.04; ref.position.z -= gnz * 0.04;
-          group.add(ref);
+          var refMat = new THREE.Matrix4().makeTranslation(
+            gpP.x - gnx * 0.04, gpP.y + 0.12, gpP.z - gnz * 0.04);
+          guardRefGeos.push(_transformGeometry(guardRefGeoTpl, refMat));
         }
       }
       // 立柱间横梁（上下各一根）
@@ -558,24 +594,32 @@ function _buildRoadNetwork(edges) {
           var lateral = gside === 0 ? gLeft : gRight;
           var gpS = new THREE.Vector3(gp.x + gnx * lateral, 0.62, gp.z + gnz * lateral);
           var gpE = new THREE.Vector3(gp2.x + gnx2 * lateral, 0.62, gp2.z + gnz2 * lateral);
-          var railTop = new THREE.Mesh(new THREE.BoxGeometry(railLen, 0.05, 0.07), guardMat);
-          railTop.position.copy(gpS).lerp(gpE, 0.5); railTop.lookAt(gpE); group.add(railTop);
-          var gpS2 = gpS.clone(); gpS2.y = 0.32;
-          var gpE2 = gpE.clone(); gpE2.y = 0.32;
-          var railBot = new THREE.Mesh(new THREE.BoxGeometry(railLen, 0.05, 0.07), guardMat);
-          railBot.position.copy(gpS2).lerp(gpE2, 0.5); railBot.lookAt(gpE2); group.add(railBot);
+          var railM = new THREE.Matrix4();
+          // 构造 lookAt 矩阵：Z 轴指向 gpE，Y 轴向上
+          var eye = gpS.clone().lerp(gpE, 0.5);
+          var target = gpE.clone();
+          var up = new THREE.Vector3(0, 1, 0);
+          railM.lookAt(eye, target, up);
+          // BoxGeometry(1,0.05,0.07) 默认沿 X 轴，需缩放 X=railLen
+          railM.multiply(new THREE.Matrix4().makeScale(railLen, 1, 1));
+          guardRailGeos.push(_transformGeometry(guardRailGeoTpl, railM));
+          // 下横梁
+          var railM2 = new THREE.Matrix4();
+          eye = gpS.clone().lerp(gpE, 0.5); eye.y = 0.32;
+          target = gpE.clone(); target.y = 0.32;
+          railM2.lookAt(eye, target, up);
+          railM2.multiply(new THREE.Matrix4().makeScale(railLen, 1, 1));
+          guardRailGeos.push(_transformGeometry(guardRailGeoTpl, railM2));
         }
       }
     }
 
     // ── 路灯（两侧交错，每隔 40m）──
-    // 静态灯杆 + 顶部微弱 PointLight，增强夜间/隧道氛围；数量有限避免性能问题。
-    var poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 6.0, 10);
-    var poleMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
-    var lampGeo = new THREE.BoxGeometry(0.5, 0.12, 0.25);
-    var lampMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.8 });
+    // 静态灯杆 + emissive 灯罩，不添加 PointLight，避免动态光源数量爆炸。
     var lampSpacing = 40.0;
     var lampCount = Math.max(1, Math.floor(length / lampSpacing));
+    var lampPostGeoTpl = new THREE.CylinderGeometry(0.08, 0.12, 6.0, 10);
+    var lampHeadGeoTpl = new THREE.BoxGeometry(0.5, 0.12, 0.25);
     for (var li3 = 1; li3 <= lampCount; li3++) {
       var lt = Math.min(1.0, li3 * lampSpacing / length);
       var lp = curve.getPointAt(lt);
@@ -584,18 +628,16 @@ function _buildRoadNetwork(edges) {
       var side = (li3 % 2 === 0) ? 1 : -1;  // 交错
       var lateral = side * (halfWidth + 2.5);
       var poleX = lp.x + lnx * lateral, poleZ = lp.z + lnz * lateral;
-      var pole = new THREE.Mesh(poleGeo, poleMat);
-      pole.position.set(poleX, 3.0, poleZ);
-      pole.castShadow = true;
-      group.add(pole);
-      var lamp = new THREE.Mesh(lampGeo, lampMat);
-      lamp.position.set(poleX - lnx * side * 0.8, 5.9, poleZ - lnz * side * 0.8);
-      lamp.lookAt(poleX - lnx * side * 3.0, 0, poleZ - lnz * side * 3.0);
-      group.add(lamp);
-      // 微弱路面照明，距离衰减避免远处过亮
-      var plight = new THREE.PointLight(0xffffee, 0.6, 28, 1.8);
-      plight.position.set(lamp.position.x, 5.5, lamp.position.z);
-      group.add(plight);
+      var postMat = new THREE.Matrix4().makeTranslation(poleX, 3.0, poleZ);
+      lampPostGeos.push(_transformGeometry(lampPostGeoTpl, postMat));
+      // 灯罩：lookAt 朝向道路内侧
+      var lampEye = new THREE.Vector3(poleX - lnx * side * 0.8, 5.9, poleZ - lnz * side * 0.8);
+      var lampTarget = new THREE.Vector3(poleX - lnx * side * 3.0, 0, poleZ - lnz * side * 3.0);
+      var lampM = new THREE.Matrix4();
+      lampM.lookAt(lampEye, lampTarget, new THREE.Vector3(0, 1, 0));
+      // BoxGeometry 默认沿 X，但这里让 Z 指向目标，所以直接平移+旋转即可
+      lampM.setPosition(lampEye);
+      lampHeadGeos.push(_transformGeometry(lampHeadGeoTpl, lampM));
     }
   }
 
@@ -614,6 +656,116 @@ function _buildRoadNetwork(edges) {
       if (d2 < bestD2) { bestD2 = d2; bestJ = aj; }
     }
     _roadCurveNext.push(bestJ);
+  }
+
+  // ── 合并所有 edge 的路面 + 路肩，创建最终 mesh ─────────────────
+  // draw call 从 O(edges) 降到 O(1)，同时共享材质/纹理。
+  if (allRoadPos.length >= 9) {
+    var roadGeo = new THREE.BufferGeometry();
+    roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(allRoadPos, 3));
+    roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(allRoadUV, 2));
+    roadGeo.setIndex(allRoadIdx);
+    roadGeo.computeVertexNormals();
+    var asphaltTex = _makeAsphaltTexture();
+    // world-space UV 已经是 x/4,z/4，repeat 保持 1 即为每 4m 一个纹理周期
+    asphaltTex.repeat.set(1, 1);
+    asphaltTex.wrapS = THREE.RepeatWrapping; asphaltTex.wrapT = THREE.RepeatWrapping;
+    asphaltTex.anisotropy = 8;
+    var roadMat = new THREE.MeshStandardMaterial({
+      map: asphaltTex,
+      color: 0x888888, roughness: 0.92, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.02
+    });
+    var roadMesh = new THREE.Mesh(roadGeo, roadMat);
+    roadMesh.receiveShadow = true;
+    group.add(roadMesh);
+  }
+  if (allShldPos.length >= 9) {
+    var shldGeo = new THREE.BufferGeometry();
+    shldGeo.setAttribute('position', new THREE.Float32BufferAttribute(allShldPos, 3));
+    // world-space UV 用于 bumpMap
+    var shldUV = [];
+    for (var su = 0; su < allShldPos.length; su += 3) {
+      shldUV.push(allShldPos[su] / 6, allShldPos[su + 2] / 6);
+    }
+    shldGeo.setAttribute('uv', new THREE.Float32BufferAttribute(shldUV, 2));
+    shldGeo.setIndex(allShldIdx);
+    shldGeo.computeVertexNormals();
+    var shldTex = _getShoulderTexture();
+    shldTex.repeat.set(1, 1);
+    shldTex.wrapS = THREE.RepeatWrapping; shldTex.wrapT = THREE.RepeatWrapping;
+    shldTex.anisotropy = 4;
+    var shldMesh = new THREE.Mesh(shldGeo,
+      new THREE.MeshStandardMaterial({ map: shldTex, color: 0x999999, roughness: 0.95, metalness: 0.0, bumpMap: shldTex, bumpScale: 0.015 }));
+    shldMesh.receiveShadow = true;
+    group.add(shldMesh);
+  }
+
+  // 合并护栏：post+cap+rail 同材质合并；reflector 单独合并。
+  var guardMat = new THREE.MeshStandardMaterial({ color: 0x7799aa, metalness: 0.55, roughness: 0.35 });
+  var reflectorMat = new THREE.MeshStandardMaterial({ color: 0xffeebb, emissive: 0xffeebb, emissiveIntensity: 0.35, roughness: 0.4 });
+  var allGuardGeos = guardPostGeos.concat(guardCapGeos).concat(guardRailGeos);
+  if (allGuardGeos.length) {
+    var guardMesh = new THREE.Mesh(_mergeGeometries(allGuardGeos), guardMat);
+    guardMesh.castShadow = true;
+    group.add(guardMesh);
+  }
+  if (guardRefGeos.length) {
+    var refMesh = new THREE.Mesh(_mergeGeometries(guardRefGeos), reflectorMat);
+    group.add(refMesh);
+  }
+
+  // 合并路灯：灯杆 + 灯罩分别合并
+  var lampPostMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
+  var lampHeadMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.8 });
+  if (lampPostGeos.length) {
+    var lampPostMesh = new THREE.Mesh(_mergeGeometries(lampPostGeos), lampPostMat);
+    lampPostMesh.castShadow = true;
+    group.add(lampPostMesh);
+  }
+  if (lampHeadGeos.length) {
+    var lampHeadMesh = new THREE.Mesh(_mergeGeometries(lampHeadGeos), lampHeadMat);
+    group.add(lampHeadMesh);
+  }
+
+  // 合并车道线（vertex colors）：所有黄/白、实/虚线合并为 1 个 mesh
+  if (laneMarkPos.length >= 6) {
+    var laneMarkGeo = new THREE.BufferGeometry();
+    laneMarkGeo.setAttribute('position', new THREE.Float32BufferAttribute(laneMarkPos, 3));
+    laneMarkGeo.setAttribute('color', new THREE.Float32BufferAttribute(laneMarkCol, 3));
+    laneMarkGeo.setIndex(laneMarkIdx);
+    laneMarkGeo.computeVertexNormals();
+    var laneMarkMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.5,
+      metalness: 0.0,
+      emissiveIntensity: 0.1
+    });
+    var laneMarkMesh = new THREE.Mesh(laneMarkGeo, laneMarkMat);
+    laneMarkMesh.receiveShadow = false;
+    group.add(laneMarkMesh);
+  }
+
+  // 合并箭头 + 停止线为 1 个白色 emissive mesh
+  var arrowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, emissive: 0xffffff, emissiveIntensity: 0.08 });
+  if (arrowGeos.length) {
+    var arrowMesh = new THREE.Mesh(_mergeGeometries(arrowGeos), arrowMat);
+    group.add(arrowMesh);
+  }
+  if (stopLineGeos.length) {
+    var stopLineMesh = new THREE.Mesh(_mergeGeometries(stopLineGeos), arrowMat);
+    group.add(stopLineMesh);
+  }
+
+  // B.1: 合并路面水坑为 1 个 reflective mesh
+  if (puddleGeos.length) {
+    var puddleMat = new THREE.MeshStandardMaterial({
+      color: 0x222228, roughness: 0.12, metalness: 0.55,
+      transparent: true, opacity: 0.85
+    });
+    var puddleMesh = new THREE.Mesh(_mergeGeometries(puddleGeos), puddleMat);
+    puddleMesh.receiveShadow = true;
+    group.add(puddleMesh);
   }
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
@@ -683,7 +835,13 @@ function _buildRoadNetwork(edges) {
  * 与 road surface ribbon 同技术：等距采样 → 左右顶点 → triangle strip。
  * 宽度 0.12–0.15m，在追逐摄像机距离下清晰可见。
  *
- * @param {THREE.Group} group  父组
+ * 性能：不再直接 group.add，而是把顶点/索引/颜色追加到合并数组，
+ * 所有 edge 的车道线最终合并为 1 个 vertex-colors mesh。
+ *
+ * @param {Array} laneMarkPos  位置合并数组
+ * @param {Array} laneMarkIdx  索引合并数组
+ * @param {Array} laneMarkCol  颜色合并数组
+ * @param {number} laneMarkVertOffset  当前顶点偏移
  * @param {THREE.CatmullRomCurve3} curve  道路曲线
  * @param {number} nSeg  采样段数
  * @param {number} lateralOffset  横向偏移（相对道路中心线，Z 方向，标线中心）
@@ -691,8 +849,9 @@ function _buildRoadNetwork(edges) {
  * @param {number} color  颜色
  * @param {number} y  Y 高度
  * @param {boolean} dashed  true=虚线（4.5m dash + 5.5m gap）
+ * @return {number} 更新后的顶点偏移
  */
-function _addLaneMarkRibbon(group, curve, nSeg, lateralOffset, width, color, y, dashed) {
+function _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, lateralOffset, width, color, y, dashed) {
   var halfW = width / 2;
   var length = curve.getLength();
 
@@ -707,11 +866,12 @@ function _addLaneMarkRibbon(group, curve, nSeg, lateralOffset, width, color, y, 
       if (s0 >= length) break;
       var dashLen = s1 - s0;
       var dSeg = Math.max(2, Math.ceil(dashLen / 1.5));
-      _emitRibbonSegment(group, curve, s0, s1, dSeg, length, lateralOffset, halfW, color, y);
+      laneMarkVertOffset = _emitRibbonSegment(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, s0, s1, dSeg, length, lateralOffset, halfW, color, y);
     }
   } else {
-    _emitRibbonSegment(group, curve, 0, length, nSeg, length, lateralOffset, halfW, color, y);
+    laneMarkVertOffset = _emitRibbonSegment(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, 0, length, nSeg, length, lateralOffset, halfW, color, y);
   }
+  return laneMarkVertOffset;
 }
 
 /**
@@ -736,8 +896,11 @@ function _getRoadTangentAt(x, z) {
   return { found: true, heading: Math.atan2(tan.z, tan.x) };
 }
 
-/** 沿曲线 [s0, s1] 段生成一条 ribbon 并加入 group */
-function _emitRibbonSegment(group, curve, s0, s1, nSeg, totalLen, lateralOffset, halfW, color, y) {
+/** 沿曲线 [s0, s1] 段生成一条 ribbon 并追加到合并数组 */
+function _emitRibbonSegment(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, s0, s1, nSeg, totalLen, lateralOffset, halfW, color, y) {
+  var r = ((color >> 16) & 0xff) / 255;
+  var g = ((color >> 8) & 0xff) / 255;
+  var b = (color & 0xff) / 255;
   var positions = [];
   var indices = [];
   var m = Math.max(2, nSeg);
@@ -756,26 +919,20 @@ function _emitRibbonSegment(group, curve, s0, s1, nSeg, totalLen, lateralOffset,
       indices.push(base + 1, base + 3, base + 2);
     }
   }
-  var geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  // 车道线：白线略带粗糙反光，黄线模拟热熔标线微反光。
-  var isYellow = (color === 0xffcc44 || color === 0xffaa00);
-  var markMat = new THREE.MeshStandardMaterial({
-    color: color,
-    roughness: isYellow ? 0.55 : 0.45,
-    metalness: 0.0,
-    emissive: color,
-    emissiveIntensity: isYellow ? 0.15 : 0.08
-  });
-  var mesh = new THREE.Mesh(geo, markMat);
-  mesh.receiveShadow = false;
-  group.add(mesh);
+  // 追加到全局合并数组（vertex colors），draw call 从每段 1 次降到全部 1 次
+  for (var pi = 0; pi < positions.length; pi += 3) {
+    laneMarkPos.push(positions[pi], positions[pi + 1], positions[pi + 2]);
+    laneMarkCol.push(r, g, b);
+  }
+  for (var ii = 0; ii < indices.length; ii++) {
+    laneMarkIdx.push(indices[ii] + laneMarkVertOffset);
+  }
+  return laneMarkVertOffset + positions.length / 3;
 }
 
-/** 在道路指定 s 位置画一个贴地直行箭头（多个三角形拼接成箭头形状） */
-function _addRoadArrow(group, curve, s, laneWidth, lanes) {
+/** 在道路指定 s 位置画一个贴地直行箭头（多个三角形拼接成箭头形状）。
+ *  把每个箭头片变换后追加到 arrowGeos，由 _buildRoadNetwork 统一合并。 */
+function _addRoadArrow(arrowGeos, curve, s, laneWidth, lanes) {
   var totalLen = curve.getLength();
   if (s >= totalLen) s = totalLen * 0.5;
   var t = s / totalLen;
@@ -783,7 +940,7 @@ function _addRoadArrow(group, curve, s, laneWidth, lanes) {
   var tan = curve.getTangentAt(t);
   var nx = -tan.z, nz = tan.x;
   var y = 0.046;
-  var arrowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, emissive: 0xffffff, emissiveIntensity: 0.08 });
+  var heading = Math.atan2(tan.z, tan.x);
   // 每条车道画一个箭头
   var laneCenters = [];
   for (var li = 0; li < lanes; li++) {
@@ -801,31 +958,31 @@ function _addRoadArrow(group, curve, s, laneWidth, lanes) {
       var sh = shapes[si];
       var cx = pos.x + nx * (c + sh.dz) + tan.x * sh.dx;
       var cz = pos.z + nz * (c + sh.dz) + tan.z * sh.dx;
-      var arrow = new THREE.Mesh(new THREE.PlaneGeometry(sh.w, sh.l), arrowMat);
-      arrow.rotation.x = -Math.PI / 2;
-      arrow.rotation.z = -Math.atan2(tan.z, tan.x);
-      arrow.position.set(cx, y, cz);
-      group.add(arrow);
+      var plane = new THREE.PlaneGeometry(sh.w, sh.l);
+      var m = new THREE.Matrix4();
+      m.makeRotationX(-Math.PI / 2);
+      m.multiply(new THREE.Matrix4().makeRotationZ(-heading));
+      m.setPosition(cx, y, cz);
+      arrowGeos.push(_transformGeometry(plane, m));
     }
   }
 }
 
-/** 在道路指定 s 位置画一条横跨所有车道的停止线 */
-function _addStopLine(group, curve, s, laneWidth, lanes) {
+/** 在道路指定 s 位置画一条横跨所有车道的停止线。
+ *  把几何体追加到 stopLineGeos，由 _buildRoadNetwork 统一合并。 */
+function _addStopLine(stopLineGeos, curve, s, laneWidth, lanes) {
   var totalLen = curve.getLength();
   if (s >= totalLen) s = 0;
   var t = s / totalLen;
   var pos = curve.getPointAt(t);
   var tan = curve.getTangentAt(t);
-  var nx = -tan.z, nz = tan.x;
-  var halfW = lanes * laneWidth / 2;
-  var lineMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, emissive: 0xffffff, emissiveIntensity: 0.08 });
+  var heading = Math.atan2(tan.z, tan.x);
   var lineGeo = new THREE.PlaneGeometry(0.35, lanes * laneWidth);
-  var line = new THREE.Mesh(lineGeo, lineMat);
-  line.rotation.x = -Math.PI / 2;
-  line.rotation.z = -Math.atan2(tan.z, tan.x);
-  line.position.set(pos.x, 0.047, pos.z);
-  group.add(line);
+  var m = new THREE.Matrix4();
+  m.makeRotationX(-Math.PI / 2);
+  m.multiply(new THREE.Matrix4().makeRotationZ(-heading));
+  m.setPosition(pos.x, 0.047, pos.z);
+  stopLineGeos.push(_transformGeometry(lineGeo, m));
 }
 
 // ── Environment: buildings + trees + street props ──
@@ -865,6 +1022,155 @@ function _buildSkyline(scene) {
   grp.add(skylineMesh);
   scene.add(grp);
   _skylineGroup = grp;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// B.1: 雨粒子系统 — 1200 条半透明线段围绕 ego 下落，营造阴雨天气氛围。
+// low 性能档位不创建，避免低端设备帧率下降。
+// ══════════════════════════════════════════════════════════════════════════════
+function _buildRain(scene) {
+  if (_perfTier === 'low' || _rainMesh) return;
+  var count = _RAIN_COUNT;
+  var positions = new Float32Array(count * 6); // 2 vertices × 3 coords per streak
+  var velocities = new Float32Array(count);
+  for (var i = 0; i < count; i++) {
+    var x = (Math.random() - 0.5) * _RAIN_BOX;
+    var z = (Math.random() - 0.5) * _RAIN_BOX;
+    var y = Math.random() * _RAIN_HEIGHT;
+    var len = 0.6 + Math.random() * 0.8;
+    positions[i * 6]     = x; positions[i * 6 + 1] = y;       positions[i * 6 + 2] = z;
+    positions[i * 6 + 3] = x; positions[i * 6 + 4] = y - len; positions[i * 6 + 5] = z;
+    velocities[i] = 12 + Math.random() * 10;
+  }
+  var geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  var mat = new THREE.LineBasicMaterial({
+    color: 0xaaccdd, transparent: true, opacity: 0.35, depthWrite: false
+  });
+  _rainMesh = new THREE.LineSegments(geo, mat);
+  _rainMesh.frustumCulled = false; // 始终跟随 ego 渲染
+  scene.add(_rainMesh);
+  _rainPos = positions;
+  _rainVel = velocities;
+}
+
+/** 每帧更新雨粒子位置：下落、触底后重置到 ego 周围空中 */
+function _updateRain(sx, sz) {
+  if (!_rainMesh || !_rainPos) return;
+  // low 档位隐藏雨效；档位切回时恢复显示
+  if (_perfTier === 'low') {
+    if (_rainMesh.visible) _rainMesh.visible = false;
+    return;
+  }
+  if (!_rainMesh.visible) _rainMesh.visible = true;
+  var count = _RAIN_COUNT;
+  var dt = 0.016; // ~60fps
+  for (var i = 0; i < count; i++) {
+    var len = _rainPos[i * 6 + 1] - _rainPos[i * 6 + 4];
+    var y = _rainPos[i * 6 + 1] - _rainVel[i] * dt;
+    if (y < 0) {
+      var nx = sx + (Math.random() - 0.5) * _RAIN_BOX;
+      var nz = sz + (Math.random() - 0.5) * _RAIN_BOX;
+      var ny = 20 + Math.random() * (_RAIN_HEIGHT - 20);
+      len = 0.6 + Math.random() * 0.8;
+      _rainPos[i * 6]     = nx; _rainPos[i * 6 + 2] = nz;
+      _rainPos[i * 6 + 3] = nx; _rainPos[i * 6 + 5] = nz;
+      _rainPos[i * 6 + 1] = ny;
+      _rainPos[i * 6 + 4] = ny - len;
+    } else {
+      _rainPos[i * 6 + 1] = y;
+      _rainPos[i * 6 + 4] = y - len;
+    }
+  }
+  _rainMesh.geometry.attributes.position.needsUpdate = true;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// B.1: 程序化水面 —— 低洼水域，顶点波动 + 菲涅尔反射，跟随 ego 居中渲染
+// low 档位跳过以保帧率；medium/high 共用同一 mesh，仅细分不同。
+// ══════════════════════════════════════════════════════════════════════════════
+function _buildWater(scene) {
+  if (_waterMesh || _perfTier === 'low') return;
+  var segs = (_perfTier === 'medium') ? 50 : _WATER_SEGS;
+  var geo = new THREE.PlaneGeometry(_WATER_SIZE, _WATER_SIZE, segs, segs);
+  geo.rotateX(-Math.PI / 2);
+
+  var fogCol = scene.fog ? scene.fog.color : new THREE.Color(0xb8d4e8);
+  _waterMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime:   { value: 0 },
+      uColor:  { value: new THREE.Color(0x2a4a5a) },
+      uDeep:   { value: new THREE.Color(0x0f2230) },
+      uFoam:   { value: new THREE.Color(0xcceeff) },
+      uFogCol: { value: fogCol },
+      uFogNear:{ value: scene.fog ? scene.fog.near : 140 },
+      uFogFar: { value: scene.fog ? scene.fog.far : 520 }
+    },
+    vertexShader: [
+      'uniform float uTime;',
+      'varying vec2 vUv;',
+      'varying float vElevation;',
+      'varying vec3 vWorldPos;',
+      'void main() {',
+      '  vUv = uv;',
+      '  vec3 pos = position;',
+      '  float w1 = sin(pos.x * 0.08 + uTime * 1.2) * 0.08;',
+      '  float w2 = sin(pos.z * 0.06 + uTime * 0.9) * 0.07;',
+      '  float w3 = sin((pos.x + pos.z) * 0.12 + uTime * 1.8) * 0.04;',
+      '  pos.y += w1 + w2 + w3;',
+      '  vElevation = w1 + w2 + w3;',
+      '  vWorldPos = (modelMatrix * vec4(pos, 1.0)).xyz;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3 uColor;',
+      'uniform vec3 uDeep;',
+      'uniform vec3 uFoam;',
+      'uniform vec3 uFogCol;',
+      'uniform float uFogNear;',
+      'uniform float uFogFar;',
+      'varying vec2 vUv;',
+      'varying float vElevation;',
+      'varying vec3 vWorldPos;',
+      'void main() {',
+      '  // 基础深浅渐变',
+      '  vec3 col = mix(uDeep, uColor, 0.55 + 0.45 * sin(vUv.x * 12.0 + vUv.y * 8.0));',
+      '  // 浪尖泡沫',
+      '  float foam = smoothstep(0.10, 0.18, vElevation);',
+      '  col = mix(col, uFoam, foam * 0.35);',
+      '  // 简单菲涅尔：视角越平行水面越反光',
+      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
+      '  float fresnel = pow(1.0 - abs(dot(viewDir, vec3(0.0, 1.0, 0.0))), 2.5);',
+      '  col = mix(col, uFoam, fresnel * 0.25);',
+      '  // 雾融合',
+      '  float depth = length(vWorldPos - cameraPosition);',
+      '  float fogFactor = clamp((depth - uFogNear) / (uFogFar - uFogNear), 0.0, 1.0);',
+      '  col = mix(col, uFogCol, fogFactor);',
+      '  gl_FragColor = vec4(col, 0.82 + fresnel * 0.10);',
+      '}'
+    ].join('\n')
+  });
+
+  _waterMesh = new THREE.Mesh(geo, _waterMat);
+  _waterMesh.position.set(0, -0.25, 0);     // 略低于路面，模拟路边低洼水域
+  _waterMesh.receiveShadow = true;
+  _waterMesh.frustumCulled = false;
+  scene.add(_waterMesh);
+}
+
+/** 每帧更新水面波动时间 uniform；low 档位隐藏水面 */
+function _updateWater() {
+  if (!_waterMesh || !_waterMat) return;
+  if (_perfTier === 'low') {
+    if (_waterMesh.visible) _waterMesh.visible = false;
+    return;
+  }
+  if (!_waterMesh.visible) _waterMesh.visible = true;
+  _waterMat.uniforms.uTime.value = _animT;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1038,6 +1344,8 @@ function _buildEnvironment(scene) {
   var lampGeos = [];     // 路灯灯罩
   var trashGeos = [];    // 垃圾桶
   var hydrantGeos = [];  // 消防栓
+  var bushGeos = [];     // B.3: 低矮灌木丛
+  var rockGeos = [];     // B.3: 路边石块/土堆
 
   // Buildings
   for (var b = 0; b < 14; b++) {
@@ -1138,6 +1446,36 @@ function _buildEnvironment(scene) {
     }
   }
 
+  // B.3: 路边灌木丛 —— 树木与建筑之间的中景植被，合并为 1 个 mesh
+  for (var bu = 0; bu < 38; bu++) {
+    var bxu = (bu - 19) * 90 + Math.random() * 50;
+    var bside = (bu % 2 === 0) ? 1 : -1;
+    var bzu = bside * (22 + Math.random() * 28);
+    var nBush = 2 + Math.floor(Math.random() * 3);
+    for (var bb = 0; bb < nBush; bb++) {
+      var r = 0.5 + Math.random() * 0.7;
+      var matBu = new T.Matrix4().makeTranslation(
+        bxu + (Math.random() - 0.5) * 1.6,
+        r * 0.55,
+        bzu + (Math.random() - 0.5) * 1.6
+      );
+      matBu.scale(new T.Vector3(r, r * (0.6 + Math.random() * 0.4), r));
+      bushGeos.push(_transformGeometry(dodecTpl, matBu));
+    }
+  }
+
+  // B.3: 零散石块/土堆，丰富地面细节
+  for (var rk = 0; rk < 24; rk++) {
+    var rx = (rk - 12) * 110 + Math.random() * 60;
+    var rside = (rk % 2 === 0) ? 1 : -1;
+    var rz = rside * (30 + Math.random() * 40);
+    var matR = new T.Matrix4().makeTranslation(rx, 0.15 + Math.random() * 0.15, rz);
+    matR.scale(new T.Vector3(0.4 + Math.random() * 0.6, 0.25 + Math.random() * 0.35, 0.4 + Math.random() * 0.6));
+    // 随机轻微旋转，避免过于规则
+    matR.multiply(new T.Matrix4().makeRotationY(Math.random() * Math.PI));
+    rockGeos.push(_transformGeometry(dodecTpl, matR));
+  }
+
   // 合并并创建 mesh
   var bldMat = new T.MeshStandardMaterial({ color: 0x4a5868, roughness: 0.85 });
   var winMat = new T.MeshStandardMaterial({ color: 0x88aacc, metalness: 0.6, roughness: 0.15, emissive: 0x223344, emissiveIntensity: 0.25, side: T.DoubleSide });
@@ -1147,6 +1485,8 @@ function _buildEnvironment(scene) {
   var lampMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.9 });
   var trashMat = new T.MeshStandardMaterial({ color: 0x446644, roughness: 0.7 });
   var hydrantMat = new T.MeshStandardMaterial({ color: 0xaa2222, roughness: 0.5 });
+  var bushMat = new T.MeshStandardMaterial({ color: 0x3a6b2e, roughness: 0.95 });
+  var rockMat = new T.MeshStandardMaterial({ color: 0x6e6a62, roughness: 0.9 });
 
   function addMerged(geos, mat, castShadow, receiveShadow) {
     if (!geos.length) return;
@@ -1164,6 +1504,8 @@ function _buildEnvironment(scene) {
   addMerged(lampGeos, lampMat, false, false);
   addMerged(trashGeos, trashMat, true, false);
   addMerged(hydrantGeos, hydrantMat, true, false);
+  addMerged(bushGeos, bushMat, true, false);
+  addMerged(rockGeos, rockMat, true, false);
 
   scene.add(env);
   _envGroup = env;
@@ -1284,6 +1626,42 @@ function init3DScene() {
   var skyMesh = new THREE.Mesh(skyGeo, skyMat);
   scene3d.add(skyMesh);
 
+  // B.2: 太阳光晕 billboard —— 位于主光源方向，径向渐变模拟大气散射
+  var sunMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uColor: { value: new THREE.Color(0xfff4e0) },
+      uGlow:  { value: new THREE.Color(0xffaa55) }
+    },
+    vertexShader: [
+      'varying vec2 vUv;',
+      'void main() {',
+      '  vUv = uv;',
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3 uColor;',
+      'uniform vec3 uGlow;',
+      'varying vec2 vUv;',
+      'void main() {',
+      '  vec2 c = vUv - 0.5;',
+      '  float r = length(c);',
+      '  float core = smoothstep(0.12, 0.04, r);',
+      '  float halo = smoothstep(0.45, 0.15, r) * 0.45;',
+      '  vec3 col = mix(uGlow, uColor, core);',
+      '  float alpha = core + halo;',
+      '  gl_FragColor = vec4(col, alpha);',
+      '}'
+    ].join('\n')
+  });
+  var sunSprite = new THREE.Sprite(sunMat);
+  sunSprite.scale.set(36, 36, 1);
+  sunSprite.position.copy(new THREE.Vector3(30, 50, 20).normalize().multiplyScalar(420));
+  scene3d.add(sunSprite);
+
   // Camera — chase cam. Wider FOV keeps the whole car visible on small screens.
   camera3d = new THREE.PerspectiveCamera(60, w / h, 0.2, 500);
 
@@ -1307,6 +1685,9 @@ function init3DScene() {
   renderer3d.shadowMap.enabled = (_perfTier !== 'low');
   renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
   el.appendChild(renderer3d.domElement);
+
+  // C.1: 绑定轨道/点击交互（renderer 创建后 canvas 才存在）
+  _initCameraControls();
 
   // ── 程序化环境贴图：PMREMGenerator 从自建简单场景生成 ──
   // MeshStandardMaterial 需 envMap 才能让 metalness/roughness 产生反射。
@@ -1410,6 +1791,8 @@ function init3DScene() {
   // ── Environment ──
   _buildEnvironment(scene3d);
   _buildSkyline(scene3d);
+  _buildWater(scene3d);
+  _buildRain(scene3d);
   _initTireTrail(scene3d);
 
   // ── Ego vehicle (glTF with programmatic fallback) ──
@@ -1602,12 +1985,152 @@ function _show3DError(msg) {
  *   'medium' = 无 Bloom，保留阴影
  *   'low'    = 无 Bloom，无阴影
  */
-export function setPerfTier(tier) {
+function setPerfTier(tier) {
   if (tier !== 'high' && tier !== 'medium' && tier !== 'low') return;
   _perfTier = tier;
   if (renderer3d) {
     renderer3d.shadowMap.enabled = (_perfTier !== 'low');
   }
+  // B.1: 水体/雨效跟随档位显隐；切到 low 时彻底释放水面几何（重建时按档位细分）
+  if (_waterMesh) {
+    _waterMesh.visible = (_perfTier !== 'low');
+  }
+  if (_rainMesh) {
+    _rainMesh.visible = (_perfTier !== 'low');
+  }
+}
+
+/** C.1: 切换相机模式；index.html 的视角按钮调用此函数 */
+function setCameraMode(mode) {
+  if (['chase', 'top', 'orbit', 'driver', 'front'].indexOf(mode) < 0) return;
+  _camMode = mode;
+  if (mode === 'orbit' && !_orbitState) {
+    _orbitState = { azimuth: Math.PI * 0.15, polar: Math.PI / 3, distance: 28, target: new THREE.Vector3() };
+  }
+  // 切回 chase 时重置平滑相机，避免旧位置突兀过渡
+  if (mode === 'chase' && _cam && _camTarget) {
+    var sx = _dr.smoothX, sz = _dr.smoothZ;
+    _cam.set(sx - 15, 5, sz);
+    _camLook.set(sx + 8, 0.5, sz);
+    _camTarget.set(sx - 15, 5, sz);
+    _camLookTarget.set(sx + 8, 0.5, sz);
+  }
+}
+
+/** C.1: 重置为默认 chase 视角 */
+function resetCamera() {
+  setCameraMode('chase');
+}
+
+/** C.1: 初始化鼠标轨道控制 + NPC 点击检测 */
+function _initCameraControls() {
+  var canvas = renderer3d && renderer3d.domElement;
+  if (!canvas) return;
+  _raycaster = new THREE.Raycaster();
+  _mouse = new THREE.Vector2();
+  var dragMoved = false, downPos = { x: 0, y: 0 };
+
+  canvas.addEventListener('mousedown', function(e) {
+    dragMoved = false;
+    downPos.x = e.clientX; downPos.y = e.clientY;
+    if (_camMode !== 'orbit') return;
+    _orbitDragging = true;
+    _orbitLast.x = e.clientX; _orbitLast.y = e.clientY;
+  });
+  window.addEventListener('mousemove', function(e) {
+    if (Math.abs(e.clientX - downPos.x) > 3 || Math.abs(e.clientY - downPos.y) > 3) dragMoved = true;
+    if (!_orbitDragging) return;
+    var dx = e.clientX - _orbitLast.x;
+    var dy = e.clientY - _orbitLast.y;
+    _orbitLast.x = e.clientX; _orbitLast.y = e.clientY;
+    _orbitState.azimuth -= dx * 0.008;
+    _orbitState.polar = Math.max(0.12, Math.min(Math.PI / 2 - 0.08, _orbitState.polar + dy * 0.008));
+  });
+  window.addEventListener('mouseup', function() { _orbitDragging = false; });
+  canvas.addEventListener('wheel', function(e) {
+    if (_camMode !== 'orbit') return;
+    e.preventDefault();
+    _orbitState.distance *= (e.deltaY > 0) ? 1.08 : 0.92;
+    _orbitState.distance = Math.max(4, Math.min(120, _orbitState.distance));
+  }, { passive: false });
+
+  // C.2: 点击 NPC 显示信息面板（任何模式下都可用）
+  canvas.addEventListener('click', function(e) {
+    if (dragMoved) return;  // 拖拽/滚轮时不触发点击
+    var rect = canvas.getBoundingClientRect();
+    _mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    _mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    _pickNPC();
+  });
+}
+
+/** C.2: Raycast 检测点击的 NPC，命中后弹出信息面板 */
+function _pickNPC() {
+  if (!_raycaster || !camera3d || !_obsPool) return;
+  _raycaster.setFromCamera(_mouse, camera3d);
+  // 收集所有可见障碍物的子 mesh
+  var targets = [];
+  for (var oi = 0; oi < _obsPool.length; oi++) {
+    var om = _obsPool[oi];
+    if (om && om.visible) targets.push(om);
+  }
+  if (!targets.length) return;
+  var hits = _raycaster.intersectObjects(targets, true);
+  if (!hits.length) return;
+  // 找到命中 mesh 所属的最顶层 obs group（_obsPool 都是 scene3d 的直接子对象）
+  var obj = hits[0].object;
+  while (obj.parent && obj.parent !== scene3d) {
+    obj = obj.parent;
+  }
+  var idx = _obsPool.indexOf(obj);
+  if (idx >= 0) _showNPCDetail(idx);
+}
+
+/** C.2: 显示/更新 NPC 信息面板 */
+function _showNPCDetail(idx) {
+  var ow = _obsWorld[idx];
+  if (!ow) return;
+  var panel = _getNPCPanel();
+  var spd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
+  var dist = 0;
+  if (_carGroup) {
+    var dx = ow.x - _carGroup.position.x, dz = ow.z - _carGroup.position.z;
+    dist = Math.sqrt(dx * dx + dz * dz);
+  }
+  var typeName = { car: '轿车', suv: 'SUV', truck: '卡车', pedestrian: '行人', cyclist: '骑行者', cone: '锥桶' }[ow.type] || ow.type;
+  var aiName = { cruise: '巡航', follow: '跟车', stop: '停止', stop_for_tl: '等红灯', etc_approach: 'ETC 接近', branch_sel: '选道', merge: '汇入', yield: '让行' }[ow.ai] || (ow.ai || '—');
+  panel.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<h3 style="color:#58a6ff;font-size:14px;margin:0">' + typeName + ' #' + (ow.id || idx) + '</h3>' +
+      '<button onclick="flowboard.closeNPCDetail()" class="sm" style="color:#f85149">✕</button>' +
+    '</div>' +
+    '<div style="color:#484f58;font-size:11px;line-height:1.7">' +
+      '<div><span style="color:#8b949e">类型:</span> ' + ow.type + '</div>' +
+      '<div><span style="color:#8b949e">速度:</span> <span style="color:#3fb950;font-weight:600">' + spd.toFixed(2) + '</span> m/s</div>' +
+      '<div><span style="color:#8b949e">距离:</span> <span style="color:#d29922;font-weight:600">' + dist.toFixed(1) + '</span> m</div>' +
+      '<div><span style="color:#8b949e">尺寸:</span> ' + (ow.len || 4).toFixed(1) + ' × ' + (ow.wid || 2).toFixed(1) + ' m</div>' +
+      '<div><span style="color:#8b949e">AI 状态:</span> <span style="color:#bc8cff">' + aiName + '</span></div>' +
+      '<div><span style="color:#8b949e">航向:</span> ' + ((ow.heading || 0) * 180 / Math.PI).toFixed(1) + '°</div>' +
+    '</div>';
+  panel.style.display = '';
+}
+
+/** C.2: 获取/创建 NPC 详情面板 DOM */
+function _getNPCPanel() {
+  if (_npcPanel) return _npcPanel;
+  var el = document.getElementById('npc-detail-panel');
+  if (el) { _npcPanel = el; return el; }
+  el = document.createElement('div');
+  el.id = 'npc-detail-panel';
+  el.style.cssText = 'display:none;position:fixed;right:20px;bottom:20px;width:240px;z-index:9000;padding:12px;border-radius:10px;background:#161b22;border:1px solid #252d3a;box-shadow:0 8px 24px rgba(0,0,0,0.5);';
+  document.body.appendChild(el);
+  _npcPanel = el;
+  return el;
+}
+
+/** C.2: 关闭 NPC 信息面板（暴露给 app.js / window.flowboard） */
+function closeNPCDetail() {
+  if (_npcPanel) _npcPanel.style.display = 'none';
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1675,22 +2198,62 @@ function _renderFrame() {
   if (_skylineGroup) _skylineGroup.position.set(sx, 0, sz);
   // 动态胎痕：采样 ego 后轮世界位置
   _updateTireTrail(sx, sz, _dr.smoothHeading, (v && v.speed) || 0);
+  // B.1: 雨粒子跟随 ego 下落
+  _updateRain(sx, sz);
+  // B.1: 水面波动动画
+  _updateWater();
+  // B.1: 水面始终跟随 ego 水平居中，避免边缘穿帮
+  if (_waterMesh) { _waterMesh.position.x = sx; _waterMesh.position.z = sz; }
 
-  // ── Chase camera: behind ego, balanced pitch ──
-  // lookX=8m ahead keeps the road visible stretching into distance
-  // while minimising empty sky above.
-  var dc = _debugCam;
+  // ── Camera: chase / top / orbit / driver / front ──
   var narrow = (renderer3d && renderer3d.domElement && renderer3d.domElement.clientWidth < 700);
-  var back   = dc ? dc.back   : (narrow ? 20 : 15);
-  var height = dc ? dc.height : (narrow ? 6.5 : 5.0);
-  var side   = dc ? (dc.side || 0) : 0;
-  var camLerp= dc ? dc.lerp   : 0.08;
-  _camTarget.set(sx - back, height, sz + side);
-  _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
-  _cam.lerp(_camTarget, camLerp);
-  _camLook.lerp(_camLookTarget, camLerp);
-  camera3d.position.copy(_cam);
-  camera3d.lookAt(_camLook);
+  var dc = _debugCam;
+  if (dc) {
+    // debug-cam override (debug3d.html) — keep legacy behaviour
+    var back   = dc.back   || (narrow ? 20 : 15);
+    var height = dc.height || (narrow ? 6.5 : 5.0);
+    var side   = dc.side || 0;
+    var camLerp= dc.lerp   || 0.08;
+    _camTarget.set(sx - back, height, sz + side);
+    _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
+    _cam.lerp(_camTarget, camLerp);
+    _camLook.lerp(_camLookTarget, camLerp);
+    camera3d.position.copy(_cam);
+    camera3d.lookAt(_camLook);
+  } else if (_camMode === 'top') {
+    camera3d.position.set(sx, 85, sz);
+    camera3d.lookAt(sx + 5, 0, sz);
+  } else if (_camMode === 'driver') {
+    // 驾驶员视角：车顶略后方，看向前方道路
+    var dh = -_dr.smoothHeading;
+    var dcos = Math.cos(dh), dsin = Math.sin(dh);
+    camera3d.position.set(sx - 0.8 * dcos, 1.55, sz - 0.8 * dsin);
+    camera3d.lookAt(sx + 20 * dcos, 0.8, sz + 20 * dsin);
+  } else if (_camMode === 'front') {
+    // 前保险杠视角
+    var fh = -_dr.smoothHeading;
+    var fcos = Math.cos(fh), fsin = Math.sin(fh);
+    camera3d.position.set(sx + 2.0 * fcos, 0.7, sz + 2.0 * fsin);
+    camera3d.lookAt(sx + 25 * fcos, 1.0, sz + 25 * fsin);
+  } else if (_camMode === 'orbit') {
+    // 自由轨道：鼠标拖拽旋转，滚轮缩放
+    _orbitState.target.set(sx, 0, sz);
+    var ox = _orbitState.distance * Math.sin(_orbitState.polar) * Math.cos(_orbitState.azimuth);
+    var oy = _orbitState.distance * Math.cos(_orbitState.polar);
+    var oz = _orbitState.distance * Math.sin(_orbitState.polar) * Math.sin(_orbitState.azimuth);
+    camera3d.position.set(sx + ox, Math.max(1.5, oy), sz + oz);
+    camera3d.lookAt(_orbitState.target);
+  } else {
+    // chase (default)
+    var backC   = narrow ? 20 : 15;
+    var heightC = narrow ? 6.5 : 5.0;
+    _camTarget.set(sx - backC, heightC, sz);
+    _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
+    _cam.lerp(_camTarget, 0.08);
+    _camLook.lerp(_camLookTarget, 0.08);
+    camera3d.position.copy(_cam);
+    camera3d.lookAt(_camLook);
+  }
 
   // Road + environment are STATIC — no scrolling. The camera follows
   // the ego through the world so the road appears to flow past naturally.
@@ -1719,6 +2282,14 @@ function _renderFrame() {
         var distToEgo = Math.sqrt((tx - sx) * (tx - sx) + (tz - sz) * (tz - sz));
         // Bounding-box-aware occlusion: hide only when truly overlapping ego body
         if (distToEgo < L * 0.5 + EGO_HALF_LEN) {
+          om.visible = false;
+          if (lbl) lbl.visible = false;
+          continue;
+        }
+        // A.3: 距离裁剪 — 按性能档位隐藏远距离 NPC，减少 draw call/顶点/阴影开销。
+        // high=250m, medium=180m, low=120m。追逐视角下更远的目标对驾驶决策无意义。
+        var MAX_OBS_DIST = (_perfTier === 'low') ? 120 : (_perfTier === 'medium') ? 180 : 250;
+        if (distToEgo > MAX_OBS_DIST) {
           om.visible = false;
           if (lbl) lbl.visible = false;
           continue;
@@ -2188,4 +2759,4 @@ function update3D() {
 // Exports
 // ══════════════════════════════════════════════════════════════════════════════
 
-export { init3DScene, resize3D, update3D, sceneReady, scene3d, _renderFrame, _applyRoadCurve };
+export { init3DScene, resize3D, update3D, sceneReady, scene3d, _renderFrame, _applyRoadCurve, setCameraMode, resetCamera, closeNPCDetail, setPerfTier };
