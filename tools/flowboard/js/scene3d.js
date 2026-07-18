@@ -314,7 +314,6 @@ function _buildRoadNetwork(edges) {
     var lanes = edge.lanes || 2;
     var laneWidth = edge.lane_width || 3.5;
     var roadWidth = lanes * laneWidth;
-    var roadHalf = roadWidth / 2;
 
     // 记录首尾坐标供 junction 检测
     edgeEnds.push({
@@ -324,6 +323,8 @@ function _buildRoadNetwork(edges) {
     });
 
     // ── 路面 ribbon mesh ──
+    // OpenDRIVE 车道全部在参考线右侧（world y 负方向），而非对称分布。
+    // 左边缘 = 参考线（offset=0），右边缘 = offset = -roadWidth。
     var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
     var positions = [];
     var indices = [];
@@ -334,9 +335,9 @@ function _buildRoadNetwork(edges) {
       // 法线（切线在 XZ 平面内旋转 90°）
       var nx = -tangent.z, nz = tangent.x;
 
-      // 左右边缘点
-      positions.push(pos.x - nx * roadHalf, 0.01, pos.z - nz * roadHalf);
-      positions.push(pos.x + nx * roadHalf, 0.01, pos.z + nz * roadHalf);
+      // 参考线 (offset=0) 和右边缘 (offset = -roadWidth)
+      positions.push(pos.x, 0.01, pos.z);
+      positions.push(pos.x - nx * roadWidth, 0.01, pos.z - nz * roadWidth);
 
       if (si < nSeg) {
         var base = si * 2;
@@ -355,18 +356,18 @@ function _buildRoadNetwork(edges) {
     roadMesh.receiveShadow = true;
     group.add(roadMesh);
 
-    // ── 路肩（道路两侧的浅灰边缘带，比沥青略亮）──
+    // ── 路肩（参考线左侧 + 路面右侧外缘）──
     var shldW = 1.0;
-    var shldHalf = roadHalf + shldW / 2;
     var sPos = [], sIdx = [];
     for (var si2 = 0; si2 <= nSeg; si2++) {
       var t2 = si2 / nSeg;
       var p2 = curve.getPointAt(t2);
       var tan2 = curve.getTangentAt(t2);
       var nx2 = -tan2.z, nz2 = tan2.x;
-      // 左路肩外缘 + 右路肩外缘
-      sPos.push(p2.x - nx2 * shldHalf, 0.02, p2.z - nz2 * shldHalf);
-      sPos.push(p2.x + nx2 * shldHalf, 0.02, p2.z + nz2 * shldHalf);
+      // 左路肩：参考线往左方向 +shldW（nx/nz 指向"右"，取反得左）
+      sPos.push(p2.x + nx2 * shldW, 0.02, p2.z + nz2 * shldW);
+      // 右路肩外缘：路面右边缘再往右 +shldW
+      sPos.push(p2.x - nx2 * (roadWidth + shldW), 0.02, p2.z - nz2 * (roadWidth + shldW));
       if (si2 < nSeg) {
         var b2 = si2 * 2;
         sIdx.push(b2, b2 + 1, b2 + 2);
@@ -382,18 +383,18 @@ function _buildRoadNetwork(edges) {
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
 
-    // ── 车道线：用 ribbon mesh（非 THREE.Line）保证 3D 可见宽度 ──
-    // 中心双黄线（实线，宽 0.15m，间距 0.3m）
+    // ── 车道线（全部在参考线右侧，offset 为负值）──
+    // 参考线双黄线（实线，宽 0.15m，间距 0.3m）
     _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.043);
     _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.043);
-    // 车道分隔虚线（每条车道线，宽 0.12m）
+    // 车道分隔虚线（每条车道线，offset = -li * laneWidth）
     for (var li = 1; li < lanes; li++) {
-      var offset = -roadHalf + li * laneWidth;
+      var offset = -li * laneWidth;
       _addLaneMarkRibbon(group, curve, nSeg, offset, 0.12, 0xffffff, 0.043, true);
     }
-    // 道路边缘白实线（宽 0.15m）
-    _addLaneMarkRibbon(group, curve, nSeg,  roadHalf - 0.06, 0.15, 0xffffff, 0.043);
-    _addLaneMarkRibbon(group, curve, nSeg, -roadHalf + 0.06, 0.15, 0xffffff, 0.043);
+    // 道路边缘白实线（参考线 + 路面右边缘）
+    _addLaneMarkRibbon(group, curve, nSeg,  0.06, 0.15, 0xffffff, 0.043);
+    _addLaneMarkRibbon(group, curve, nSeg, -roadWidth + 0.06, 0.15, 0xffffff, 0.043);
   }
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
