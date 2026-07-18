@@ -7,7 +7,7 @@
 import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight, _buildETCGate } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
-import { initModelCache, buildEgoCar, buildObstacleGroup } from './models.js';
+import { initModelCache, buildEgoCar, buildObstacleGroup, _setVehicleLights } from './models.js';
 
 const THREE = window.THREE;
 
@@ -1431,6 +1431,18 @@ function _renderFrame() {
         egoWheels[wri].rotation.x += roll;
       }
     }
+    // 灯光接入感知/规划链路：
+    // - 刹车灯：vehicle.brake > 0.1 时点亮（来自 vehicle/state）
+    // - 转向灯：metrics.route_lane = -1 左转，+1 右转（来自 planning/trajectory 后缀）
+    // - 大灯：常亮
+    var _egoMetrics = _topoData.metrics || {};
+    var _egoRouteLane = _egoMetrics.route_lane || 0;
+    _setVehicleLights(ego, {
+      brake: (typeof v.brake === 'number') && v.brake > 0.1,
+      turnL: _egoRouteLane < 0,
+      turnR: _egoRouteLane > 0,
+      head: true
+    }, _animT);
   }
 
   // Keep ground + environment near ego (road segments are at fixed world X).
@@ -1550,6 +1562,24 @@ function _renderFrame() {
               obsWheels[owi].rotation.x += obsRoll;
             }
           }
+        }
+
+        // 灯光接入感知链路：NPC 障碍物根据 ai 状态点亮刹车/转向灯
+        // - 刹车灯：ai ∈ {stop, stop_for_tl, yield}
+        // - 转向灯：ai ∈ {branch_sel, merge}，按横向速度方向选边，速度过小双闪
+        if (ow.type === 'car' || ow.type === 'suv' || ow.type === 'truck') {
+          var _ai = ow.ai || '';
+          var _brakeOn = (_ai === 'stop' || _ai === 'stop_for_tl' || _ai === 'yield');
+          var _turnActive = (_ai === 'branch_sel' || _ai === 'merge');
+          var _turnL = false, _turnR = false;
+          if (_turnActive) {
+            if (ow.vz > 0.15) _turnR = true;
+            else if (ow.vz < -0.15) _turnL = true;
+            else { _turnL = true; _turnR = true; }  // 双闪
+          }
+          _setVehicleLights(om, {
+            brake: _brakeOn, turnL: _turnL, turnR: _turnR, head: true
+          }, _animT);
         }
 
         // NOA Phase 5: NPC AI 状态标签（仅车辆类型显示，行人不显示）。

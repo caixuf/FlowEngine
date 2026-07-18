@@ -99,6 +99,21 @@ function _buildVehicleFromGltf(name, gltf) {
     }
     if (wheels.length) group.userData.wheels = wheels;
   }
+  // 灯节点扫描：brakelight_L/R, turnsignal_FL/FR/RL/RR, headlight_L/R。
+  // scene3d.js 通过 material.emissiveIntensity 切换亮灭（接感知/规划链路）。
+  var brakeLights = [], turnSignals = {}, headlights = [];
+  group.traverse(function(c) {
+    if (!c.isMesh) return;
+    var n = c.name || '';
+    if (n.indexOf('brakelight_') === 0) brakeLights.push(c);
+    else if (n.indexOf('turnsignal_') === 0) {
+      turnSignals[n.substring('turnsignal_'.length)] = c;  // FL/FR/RL/RR
+    }
+    else if (n.indexOf('headlight_') === 0) headlights.push(c);
+  });
+  if (brakeLights.length) group.userData.brakeLights = brakeLights;
+  if (Object.keys(turnSignals).length) group.userData.turnSignals = turnSignals;
+  if (headlights.length) group.userData.headlights = headlights;
   return group;
 }
 
@@ -221,16 +236,45 @@ function _relinkWheelUserData(clone) {
     [fl, fr, rl, rr].forEach(function(w) { if (w) wheels.push(w); });
   }
   if (wheels.length) clone.userData.wheels = wheels;
+  // 灯节点引用也需重建（clone 后 userData 引用失效）
+  var brakeLights = [], turnSignals = {}, headlights = [];
+  clone.traverse(function(c) {
+    if (!c.isMesh) return;
+    var n = c.name || '';
+    if (n.indexOf('brakelight_') === 0) brakeLights.push(c);
+    else if (n.indexOf('turnsignal_') === 0) {
+      turnSignals[n.substring('turnsignal_'.length)] = c;
+    }
+    else if (n.indexOf('headlight_') === 0) headlights.push(c);
+  });
+  if (brakeLights.length) clone.userData.brakeLights = brakeLights;
+  if (Object.keys(turnSignals).length) clone.userData.turnSignals = turnSignals;
+  if (headlights.length) clone.userData.headlights = headlights;
 }
 
 /**
  * 将 glTF 车身的 PBR 材质升级为 MeshPhysicalMaterial（clearcoat 车漆），
- * 并整体涂色。仅改 body/cabin/cab/cargo 等车身件，保留 tire/glass 材质。
+ * 并整体涂色。仅改 body/cabin/cab/cargo/hood/trunklid/door_*/wiper_* 等
+ * 车身件；跳过灯节点（brakelight_*/turnsignal_*/headlight_* 保留发光材质）、
+ * 车轮（wheel_* 保持轮胎黑）和玻璃（windshield/rear_window 保持透明）。
  */
 function _upgradeCarPaint(model, color) {
-  var bodyNames = { body: 1, cabin: 1, cab: 1, cargo: 1, rear: 1 };
+  var bodyNames = { body: 1, cabin: 1, cab: 1, cargo: 1, rear: 1, hood: 1, trunklid: 1,
+                    door_FL: 1, door_FR: 1, door_RL: 1, door_RR: 1,
+                    chargeport_cover: 1, wiper_L: 1, wiper_R: 1 };
+  var SKIP_PREFIXES = ['brakelight_', 'turnsignal_', 'headlight_', 'wheel_'];
+  var SKIP_NAMES = { windshield: 1, rear_window: 1 };
+  function shouldSkip(name) {
+    if (!name) return false;
+    if (SKIP_NAMES[name]) return true;
+    for (var i = 0; i < SKIP_PREFIXES.length; i++) {
+      if (name.indexOf(SKIP_PREFIXES[i]) === 0) return true;
+    }
+    return false;
+  }
   model.traverse(function(c) {
     if (!c.isMesh || !c.material) return;
+    if (shouldSkip(c.name)) return;  // 灯/轮/玻璃：保留原材质
     if (c.name && bodyNames[c.name]) {
       // 升级为 MeshPhysicalMaterial 清漆车漆
       var oldMat = c.material;
@@ -244,10 +288,52 @@ function _upgradeCarPaint(model, color) {
       });
       c.material = newMat;
     } else if (c.material && c.material.color) {
-      // 非车身件（tire/glass 等）保留原材质，仅改色
+      // 其他未命名车身件：保留原材质，仅改色
       c.material.color.setHex(color);
     }
   });
+}
+
+/**
+ * _setVehicleLights — 切换车辆灯光状态（接感知 / 规划链路）。
+ * 通过修改 material.emissiveIntensity 控制亮灭，不重建材质。
+ *
+ * @param {THREE.Group} group   车辆 group（含 userData.brakeLights/turnSignals）
+ * @param {object} state        { brake: bool, turnL: bool, turnR: bool, head: bool }
+ * @param {number} blinkPhase   闪烁相位 0..1（转向灯 1.5Hz 闪烁，scene3d.js 传入 _animT）
+ */
+export function _setVehicleLights(group, state, blinkPhase) {
+  if (!group || !group.userData) return;
+  var ud = group.userData;
+  var blinkOn = (blinkPhase !== undefined) ? (Math.sin(blinkPhase * Math.PI * 2 * 1.5) > 0) : true;
+  // 刹车灯：on=2.0, off=0.15
+  if (ud.brakeLights) {
+    var bi = state.brake ? 2.0 : 0.15;
+    for (var i = 0; i < ud.brakeLights.length; i++) {
+      if (ud.brakeLights[i].material) ud.brakeLights[i].material.emissiveIntensity = bi;
+    }
+  }
+  // 转向灯：on 时按 blinkPhase 闪烁，off=0.1
+  if (ud.turnSignals) {
+    var ts = ud.turnSignals;
+    var setSide = function(on, keys) {
+      var intensity = on ? (blinkOn ? 2.2 : 0.1) : 0.1;
+      for (var k = 0; k < keys.length; k++) {
+        if (ts[keys[k]] && ts[keys[k]].material) {
+          ts[keys[k]].material.emissiveIntensity = intensity;
+        }
+      }
+    };
+    setSide(state.turnL, ['FL', 'RL']);
+    setSide(state.turnR, ['FR', 'RR']);
+  }
+  // 大灯：常亮（白天低亮，可扩展为夜间高亮）
+  if (ud.headlights && state.head !== undefined) {
+    var hi = state.head ? 1.5 : 0.4;
+    for (var h = 0; h < ud.headlights.length; h++) {
+      if (ud.headlights[h].material) ud.headlights[h].material.emissiveIntensity = hi;
+    }
+  }
 }
 
 /**

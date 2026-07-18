@@ -275,69 +275,126 @@ MATERIALS = {
             "roughnessFactor": 0.6,
         },
     },
+    # ── 灯光材质（运行时通过 material.emissiveIntensity 切换亮灭）──
+    # 默认 emissiveFactor 较暗（灭灯态），scene3d.js 点亮时拉高 emissiveIntensity
+    "headlight": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.85, 0.85, 0.8, 1.0],
+            "metallicFactor": 0.2,
+            "roughnessFactor": 0.2,
+        },
+        "emissiveFactor": [0.5, 0.5, 0.45],
+    },
+    "brakelight": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.5, 0.05, 0.05, 1.0],
+            "metallicFactor": 0.1,
+            "roughnessFactor": 0.35,
+        },
+        "emissiveFactor": [0.12, 0.0, 0.0],
+    },
+    "turnsignal": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.75, 0.45, 0.05, 1.0],
+            "metallicFactor": 0.1,
+            "roughnessFactor": 0.35,
+        },
+        "emissiveFactor": [0.1, 0.06, 0.0],
+    },
 }
 
 
 # ── 模型规格 ──────────────────────────────────────────────────
 
 MODEL_SPECS = [
+    # ── sedan 精致版：车身件 + 4 车门 + 充电盖 + 雨刮器 + 后备箱盖 +
+    #    前大灯/后刹车灯/4 转向灯 + 圆柱车轮。车头朝 +x（与 _buildSedan 一致）。
+    #    灯节点命名约定被 models.js 扫描建立 userData.brakeLights /
+    #    turnSignals / headlights，scene3d.js 通过 emissiveIntensity 切换亮灭。
     {
         "name": "sedan",
         "builder": build_sedan,
-        "materials": ["car_paint", "glass", "tire"],
+        "materials": ["car_paint", "glass", "tire", "headlight", "brakelight", "turnsignal"],
         "parts": [
-            {"name": "body", "mat": 0,    # car_paint
-             "build_fn": lambda: box_vertices(0.0, 0.25, 0.0, 4.2, 0.5, 2.0)},
-            {"name": "cabin", "mat": 1,   # glass
-             "build_fn": lambda: box_vertices(-0.2, 0.7, 0.0, 1.6, 0.5, 1.4)},
-            {"name": "wheel_FL", "mat": 2,
-             "build_fn": lambda: box_vertices(-1.3, 0.08, -1.1, 0.4, 0.16, 0.3)},
-            {"name": "wheel_FR", "mat": 2,
-             "build_fn": lambda: box_vertices(-1.3, 0.08, 1.1, 0.4, 0.16, 0.3)},
-            {"name": "wheel_RL", "mat": 2,
-             "build_fn": lambda: box_vertices(1.3, 0.08, -1.1, 0.4, 0.16, 0.3)},
-            {"name": "wheel_RR", "mat": 2,
-             "build_fn": lambda: box_vertices(1.3, 0.08, 1.1, 0.4, 0.16, 0.3)},
+            # 车身件 (car_paint, mat 0)
+            {"name": "body",     "mat": 0, "build_fn": lambda: box_vertices(0.0,   0.52,  0.0,  4.2,  0.72, 1.86)},
+            {"name": "cabin",    "mat": 0, "build_fn": lambda: box_vertices(0.05,  1.15,  0.0,  2.15, 0.52, 1.52)},
+            {"name": "hood",     "mat": 0, "build_fn": lambda: box_vertices(1.48,  0.90,  0.0,  1.25, 0.08, 1.52)},
+            {"name": "trunklid", "mat": 0, "build_fn": lambda: box_vertices(-1.58, 0.92,  0.0,  1.05, 0.06, 1.48)},
+            # 4 车门（薄板贴车身侧面）
+            {"name": "door_FL",  "mat": 0, "build_fn": lambda: box_vertices(0.7,   0.62,  0.94, 1.1,  0.85, 0.04)},
+            {"name": "door_FR",  "mat": 0, "build_fn": lambda: box_vertices(0.7,   0.62, -0.94, 1.1,  0.85, 0.04)},
+            {"name": "door_RL",  "mat": 0, "build_fn": lambda: box_vertices(-0.5,  0.62,  0.94, 1.0,  0.85, 0.04)},
+            {"name": "door_RR",  "mat": 0, "build_fn": lambda: box_vertices(-0.5,  0.62, -0.94, 1.0,  0.85, 0.04)},
+            # 充电口盖板（前保险杠左侧小盖板，EV 风格）
+            {"name": "chargeport_cover", "mat": 0, "build_fn": lambda: box_vertices(2.15, 0.62,  0.62, 0.18, 0.18, 0.02)},
+            # 雨刮器臂 x 2（前挡风玻璃上）
+            {"name": "wiper_L",  "mat": 0, "build_fn": lambda: box_vertices(1.05,  1.28,  0.35, 0.5,  0.02, 0.04)},
+            {"name": "wiper_R",  "mat": 0, "build_fn": lambda: box_vertices(1.05,  1.28, -0.35, 0.5,  0.02, 0.04)},
+            # 玻璃 (glass, mat 1)
+            {"name": "windshield",  "mat": 1, "build_fn": lambda: box_vertices(1.10,  1.08, 0.0, 0.06, 0.46, 1.48)},
+            {"name": "rear_window",  "mat": 1, "build_fn": lambda: box_vertices(-1.05, 1.02, 0.0, 0.06, 0.36, 1.38)},
+            # 前大灯 (headlight, mat 3) — 白色发光
+            {"name": "headlight_L", "mat": 3, "build_fn": lambda: box_vertices(2.18, 0.62,  0.58, 0.10, 0.18, 0.42)},
+            {"name": "headlight_R", "mat": 3, "build_fn": lambda: box_vertices(2.18, 0.62, -0.58, 0.10, 0.18, 0.42)},
+            # 后刹车灯 (brakelight, mat 4) — 红色发光
+            {"name": "brakelight_L", "mat": 4, "build_fn": lambda: box_vertices(-2.18, 0.70,  0.55, 0.10, 0.16, 0.42)},
+            {"name": "brakelight_R", "mat": 4, "build_fn": lambda: box_vertices(-2.18, 0.70, -0.55, 0.10, 0.16, 0.42)},
+            # 转向灯 (turnsignal, mat 5) — 橙色发光，前 + 后 × 左右
+            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65,  0.78, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65, -0.78, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70,  0.78, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70, -0.78, 0.08, 0.14, 0.10)},
+            # 车轮（圆柱，轴沿 Z 横向，旋转 rotation.x 实现滚动）
+            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33,  0.93, 0.33, 0.26, "z", 14)},
+            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33, -0.93, 0.33, 0.26, "z", 14)},
+            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33,  0.93, 0.33, 0.26, "z", 14)},
+            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33, -0.93, 0.33, 0.26, "z", 14)},
         ],
     },
+    # ── truck：车头朝 +x，货箱在 -x；圆柱车轮 + 灯节点
     {
         "name": "truck",
-        "materials": ["truck_paint", "glass", "tire"],
+        "materials": ["truck_paint", "glass", "tire", "headlight", "brakelight", "turnsignal"],
         "parts": [
-            {"name": "cab", "mat": 0,
-             "build_fn": lambda: box_vertices(-1.0, 0.4, 0.0, 2.0, 0.8, 2.4)},
-            {"name": "cargo", "mat": 0,
-             "build_fn": lambda: box_vertices(2.5, 1.0, 0.0, 5.0, 2.0, 2.5)},
-            {"name": "windshield", "mat": 1,
-             "build_fn": lambda: box_vertices(-0.5, 0.8, 0.0, 0.8, 0.6, 1.6)},
-            {"name": "wheel_FL", "mat": 2,
-             "build_fn": lambda: box_vertices(-2.0, 0.1, -1.3, 0.5, 0.2, 0.4)},
-            {"name": "wheel_FR", "mat": 2,
-             "build_fn": lambda: box_vertices(-2.0, 0.1, 1.3, 0.5, 0.2, 0.4)},
-            {"name": "wheel_RL", "mat": 2,
-             "build_fn": lambda: box_vertices(3.0, 0.1, -1.3, 0.5, 0.2, 0.4)},
-            {"name": "wheel_RR", "mat": 2,
-             "build_fn": lambda: box_vertices(3.0, 0.1, 1.3, 0.5, 0.2, 0.4)},
+            {"name": "cab",        "mat": 0, "build_fn": lambda: box_vertices( 1.0,  0.55, 0.0,  2.0, 0.9,  2.4)},
+            {"name": "cargo",      "mat": 0, "build_fn": lambda: box_vertices(-2.5,  1.20, 0.0,  5.0, 2.0,  2.5)},
+            {"name": "windshield", "mat": 1, "build_fn": lambda: box_vertices( 0.5,  0.95, 0.0,  0.08, 0.6, 1.6)},
+            {"name": "headlight_L",  "mat": 3, "build_fn": lambda: box_vertices( 1.95, 0.55,  0.70, 0.10, 0.18, 0.40)},
+            {"name": "headlight_R",  "mat": 3, "build_fn": lambda: box_vertices( 1.95, 0.55, -0.70, 0.10, 0.18, 0.40)},
+            {"name": "brakelight_L", "mat": 4, "build_fn": lambda: box_vertices(-4.95, 0.90,  0.70, 0.10, 0.18, 0.40)},
+            {"name": "brakelight_R", "mat": 4, "build_fn": lambda: box_vertices(-4.95, 0.90, -0.70, 0.10, 0.18, 0.40)},
+            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices( 1.95, 0.55,  0.95, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices( 1.95, 0.55, -0.95, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-4.95, 0.90,  0.95, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-4.95, 0.90, -0.95, 0.08, 0.14, 0.10)},
+            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.50, 0.50,  1.10, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.50, 0.50, -1.10, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.50, 0.50,  1.10, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.50, 0.50, -1.10, 0.50, 0.40, "z", 14)},
         ],
     },
+    # ── suv：高车身 + 圆柱车轮 + 灯节点
     {
         "name": "suv",
-        "materials": ["suv_paint", "glass", "tire"],
+        "materials": ["suv_paint", "glass", "tire", "headlight", "brakelight", "turnsignal"],
         "parts": [
-            {"name": "body", "mat": 0,
-             "build_fn": lambda: box_vertices(0.0, 0.4, 0.0, 4.5, 0.8, 2.1)},
-            {"name": "cabin", "mat": 1,
-             "build_fn": lambda: box_vertices(-0.3, 0.9, 0.0, 1.8, 0.6, 1.5)},
-            {"name": "rear", "mat": 1,
-             "build_fn": lambda: box_vertices(1.0, 0.9, 0.0, 1.2, 0.6, 1.5)},
-            {"name": "wheel_FL", "mat": 2,
-             "build_fn": lambda: box_vertices(-1.4, 0.1, -1.15, 0.45, 0.2, 0.35)},
-            {"name": "wheel_FR", "mat": 2,
-             "build_fn": lambda: box_vertices(-1.4, 0.1, 1.15, 0.45, 0.2, 0.35)},
-            {"name": "wheel_RL", "mat": 2,
-             "build_fn": lambda: box_vertices(1.4, 0.1, -1.15, 0.45, 0.2, 0.35)},
-            {"name": "wheel_RR", "mat": 2,
-             "build_fn": lambda: box_vertices(1.4, 0.1, 1.15, 0.45, 0.2, 0.35)},
+            {"name": "body",       "mat": 0, "build_fn": lambda: box_vertices( 0.0,  0.58,  0.0,  4.5, 0.95, 1.90)},
+            {"name": "cabin",      "mat": 0, "build_fn": lambda: box_vertices(-0.3,  1.20,  0.0,  1.8, 0.60, 1.50)},
+            {"name": "rear",       "mat": 0, "build_fn": lambda: box_vertices( 1.0,  1.15,  0.0,  1.2, 0.55, 1.50)},
+            {"name": "windshield", "mat": 1, "build_fn": lambda: box_vertices( 1.10, 1.08,  0.0,  0.06, 0.46, 1.45)},
+            {"name": "headlight_L",  "mat": 3, "build_fn": lambda: box_vertices( 2.25, 0.62,  0.60, 0.10, 0.18, 0.42)},
+            {"name": "headlight_R",  "mat": 3, "build_fn": lambda: box_vertices( 2.25, 0.62, -0.60, 0.10, 0.18, 0.42)},
+            {"name": "brakelight_L", "mat": 4, "build_fn": lambda: box_vertices(-2.25, 0.72,  0.60, 0.10, 0.16, 0.42)},
+            {"name": "brakelight_R", "mat": 4, "build_fn": lambda: box_vertices(-2.25, 0.72, -0.60, 0.10, 0.16, 0.42)},
+            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices( 2.22, 0.66,  0.80, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices( 2.22, 0.66, -0.80, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.22, 0.72,  0.80, 0.08, 0.14, 0.10)},
+            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.22, 0.72, -0.80, 0.08, 0.14, 0.10)},
+            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.40, 0.38,  0.93, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.40, 0.38, -0.93, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.40, 0.38,  0.93, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.40, 0.38, -0.93, 0.38, 0.28, "z", 14)},
         ],
     },
     {
@@ -525,8 +582,15 @@ def generate_all(output_dir: Path) -> None:
         with open(path, "w") as f:
             json.dump(gltf, f, indent=2)
         size_kb = path.stat().st_size / 1024
-        faces = sum(len(p["build_fn"]() ) // 6 // 4 for p in spec["parts"])
-        print(f"  ✓ {spec['name']}.gltf  ({size_kb:.1f} KB, ~{faces} 部件, PBR 材质)")
+        # 统计三角面数：box 风格返回 list[float]（每 4 顶点=2 三角形），
+        # cylinder 等返回 (verts, idx) tuple（直接数 idx/3）。
+        def _face_count(part):
+            r = part["build_fn"]()
+            if isinstance(r, tuple):
+                return len(r[1]) // 3
+            return (len(r) // 6 // 4) * 2
+        faces = sum(_face_count(p) for p in spec["parts"])
+        print(f"  ✓ {spec['name']}.gltf  ({size_kb:.1f} KB, {len(spec['parts'])} 部件, ~{faces} 三角面)")
     print(f"\n  总计 {len(MODEL_SPECS)} 个模型 → {output_dir}")
 
 
