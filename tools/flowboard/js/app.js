@@ -2,10 +2,10 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, closeNPCDetail, setPerfTier } from './scene3d.js';
+import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, closeNPCDetail, setPerfTier } from './scene3d.js';
 import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
 import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
-import { safeCall, reportDiag, clearDiag } from './utils.js';
+import { safeCall, reportDiag, clearDiag, _auditSceneMaterials } from './utils.js';
 import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './deadreckon.js';
 
 /**
@@ -1240,7 +1240,8 @@ window.flowboard = {
   // debug exports (read-only refs for console inspection)
   _dr: _dr,
   _2d: _2dState,
-  _topoData: function () { return topoData; }
+  _topoData: function () { return topoData; },
+  _auditMaterials: function () { return _auditSceneMaterials(scene3d); }
 };
 
 // Chart delegation now lives entirely inside charts.js (onChartTopicChange /

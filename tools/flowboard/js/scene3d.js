@@ -4,7 +4,7 @@
 // scene3d.js — Three.js 3D scene module for ADAS visualization
 // ══════════════════════════════════════════════════════════════════════════════
 
-import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight, _buildETCGate } from './utils.js';
+import { safeCall, reportDiag, _makeBox, _makeRect, _buildSedan, _buildObstacle, _buildTrafficLight, _buildETCGate, _auditSceneMaterials } from './utils.js';
 import { initDeadReckon, tickDeadReckon, _dr } from './deadreckon.js';
 import { init2DFallback } from './scene2d.js';
 import { initModelCache, buildEgoCar, buildObstacleGroup, _setVehicleLights } from './models.js';
@@ -35,6 +35,8 @@ let _cam = null, _camLook = null, _camTarget = null, _camLookTarget = null;
 let _lidarCloud = null;
 let _lidarWorld = [];
 let _obsPool = [], _obsWorld = [];
+/** Per-slot roll/pitch tilt state: {prevT0, prevHeading, prevSpeed, roll, pitch, rollTarget, pitchTarget} */
+let _obsTilt = [];
 let _trafficLightPool = [], _trafficLightWorld = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
@@ -120,11 +122,25 @@ let _perfFrameCount = 0;
 let _perfLastTime = 0;
 let _perfCheckInterval = 60; // 每 60 帧评估一次
 
+/** scene3d.frame 连续失败计数：FPS 采样对渲染异常无感（异常被 catch 的耗时远低于
+ *  真实渲染一帧，_updatePerfTier 会被"虚高的 FPS"骗过），需要单独的异常驱动熔断，
+ *  在连续失败达到阈值时强制降级关闭 Bloom，避免画布永久黑屏。 */
+let _frameFailCount = 0;
+const _FRAME_FAIL_THRESHOLD = 5;
+
 /** Pre-allocated vector/scale objects (avoids per-frame GC pressure) */
 let _tmpV3 = null, _tmpScale = null;
 
 /** Obstacle height lookup (defined once, shared across all _renderFrame calls) */
 const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7, cone: 0.8 };
+/** Obstacle length/width lookup — without these, types missing len/wid in
+ * telemetry (e.g. pedestrians) fall back to vehicle-sized defaults. */
+const _OBS_L = { truck: 7.5, pedestrian: 0.5, cyclist: 1.8, cone: 0.5 };
+const _OBS_W = { truck: 2.3, pedestrian: 0.5, cyclist: 0.6, cone: 0.5 };
+
+/** Ego body-tilt (roll/pitch) state: previous frame's smoothed heading/speed
+ * for differencing, plus the current lerped roll/pitch values. */
+let _egoPrevHeading = null, _egoPrevSpeed = 0, _egoPrevT = 0, _egoRoll = 0, _egoPitch = 0;
 
 /** C.1: Camera modes — chase / top / orbit / driver / front */
 let _camMode = 'chase';
@@ -1829,6 +1845,7 @@ function init3DScene() {
   // NOA Phase 2.3: 池容量 8 → 24，匹配 NOA 24-NPC 场景。
   // 优先使用 glTF 模型（PBR 材质），GLTFLoader 不可用时降级为 BoxGeometry。
   _obsPool = [];
+  _obsTilt = [];
   _obsLabelPool = [];
   _obsLabelLast = [];
   for (var oi = 0; oi < 24; oi++) {
@@ -1958,7 +1975,7 @@ function init3DScene() {
     if (!sceneReady) return;
     if (_glLost) return;               // skip while WebGL context is lost
     if (!renderer3d || !scene3d || !camera3d) return;
-    safeCall('scene3d.frame', function() {
+    var ok = safeCall('scene3d.frame', function() {
       _renderFrame();
       _updatePerfTier();
       // low/medium 关闭 Bloom；high 且 composer 存在才用 Bloom。
@@ -1968,6 +1985,23 @@ function init3DScene() {
         renderer3d.render(scene3d, camera3d);
       }
     });
+    if (ok) {
+      _frameFailCount = 0;
+    } else {
+      _frameFailCount++;
+      var bad = _auditSceneMaterials(scene3d);
+      if (bad.length) {
+        console.error('[scene3d.materials] invalid Color-typed properties found:', bad);
+        var byProp = {};
+        bad.forEach(function(f) { byProp[f.prop] = (byProp[f.prop] || 0) + 1; });
+        var summary = Object.keys(byProp).map(function(p) { return p + '×' + byProp[p]; }).join(', ');
+        reportDiag('scene3d.materials', 'invalid Color property on ' + bad.length + ' material(s): ' + summary);
+      }
+      if (_frameFailCount >= _FRAME_FAIL_THRESHOLD && _perfTier === 'high') {
+        setPerfTier('medium');
+        reportDiag('scene3d.autoDowngrade', 'disabled Bloom after ' + _frameFailCount + ' consecutive frame failures');
+      }
+    }
   }
   anim3D();
   sceneReady = true;
@@ -1976,7 +2010,8 @@ function init3DScene() {
     _show3DError(initErr.message || String(initErr));
   }
   // Phase 4.9: scene3d / camera3d / renderer3d stay module-scoped;
-  // debug access flows through app.js -> window.flowboard._scene3d etc.
+  // debug access flows through explicit window.flowboard debug exports
+  // (e.g. _auditMaterials in app.js), not a direct _scene3d reference.
 }
 
 /** 在 3D 视图区域显示错误信息，方便诊断 */
@@ -2148,6 +2183,25 @@ function closeNPCDetail() {
   if (_npcPanel) _npcPanel.style.display = 'none';
 }
 
+// ── Body tilt (roll/pitch) 视觉物理近似：航向/车速变化 → 横摆角速度/纵向
+// 加速度 → clamp 后的车身倾斜目标值。纯前端估算（读已有遥测），不改
+// flowsim 后端物理。车辆模型前向为局部 +X（见下方 NPC 朝向注释），故
+// roll（绕前向轴，转弯时车身外倾）用 rotation.x，pitch（绕横向轴，刹车
+// 点头/加速下蹲）用 rotation.z；rotation.y 仍是 yaw。
+var TILT_MAX = 0.06;              // clamp 上限，约 3.4°，避免夸张甩动
+var ROLL_GAIN = 0.02, PITCH_GAIN = 0.015;
+function _tiltTargets(dHeadingWrapped, dt, speed, prevSpeed) {
+  if (dt <= 0 || dt > 0.5) return { roll: 0, pitch: 0 };
+  var yawRate = dHeadingWrapped / dt;
+  var accel = (speed - prevSpeed) / dt;
+  var roll = -yawRate * speed * ROLL_GAIN;   // 转弯时车身向外侧倾斜
+  var pitch = accel * PITCH_GAIN;             // 加速抬头/刹车点头
+  return {
+    roll: Math.max(-TILT_MAX, Math.min(TILT_MAX, roll)),
+    pitch: Math.max(-TILT_MAX, Math.min(TILT_MAX, pitch))
+  };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Per-frame render: world-space scene, chase camera
 // Road is STATIC at world origin. Ego moves through the world.
@@ -2183,6 +2237,27 @@ function _renderFrame() {
       for (var wri = 0; wri < egoWheels.length; wri++) {
         egoWheels[wri].rotation.x += roll;
       }
+    }
+    // 车身侧倾/俯仰：用 _dr 逐帧平滑过的航向/车速做帧间差分（本身已连续，
+    // 不需要额外的 tick 检测），算出目标后再 lerp 到当前值。
+    if (_egoPrevHeading === null) {
+      _egoPrevHeading = _dr.smoothHeading;
+      _egoPrevSpeed = _dr.smoothSpeed;
+      _egoPrevT = now;
+    }
+    var egoDt = now - _egoPrevT;
+    if (egoDt > 0) {
+      var egoDh = _dr.smoothHeading - _egoPrevHeading;
+      while (egoDh > Math.PI) egoDh -= 2 * Math.PI;
+      while (egoDh < -Math.PI) egoDh += 2 * Math.PI;
+      var egoTilt = _tiltTargets(egoDh, egoDt, _dr.smoothSpeed, _egoPrevSpeed);
+      _egoRoll += (egoTilt.roll - _egoRoll) * 0.15;
+      _egoPitch += (egoTilt.pitch - _egoPitch) * 0.15;
+      ego.rotation.x = _egoRoll;
+      ego.rotation.z = _egoPitch;
+      _egoPrevHeading = _dr.smoothHeading;
+      _egoPrevSpeed = _dr.smoothSpeed;
+      _egoPrevT = now;
     }
     // 灯光接入感知/规划链路：
     // - 刹车灯：vehicle.brake > 0.1 时点亮（来自 vehicle/state）
@@ -2287,7 +2362,7 @@ function _renderFrame() {
       var ow = _obsWorld[oi];
       var lbl = _obsLabelPool[oi];
       if (ow) {
-        var L = ow.len || DEFAULT_OBS_LEN, W = ow.wid || 2;
+        var L = ow.len || _OBS_L[ow.type] || DEFAULT_OBS_LEN, W = ow.wid || _OBS_W[ow.type] || 2;
         // Type-based real height: trucks tall, pedestrians slim.
         var H = _OBS_H[ow.type] || 1.5;
         // Extrapolate by world speed to current time → 60fps smooth,
@@ -2317,6 +2392,10 @@ function _renderFrame() {
         } else {
           om.position.lerp(_tmpV3, 0.18);
         }
+        // 悬挂起伏：复用 ego 的固定频率正弦效果（见下方 "Car bounce"），
+        // 按 oi 错开相位避免所有 NPC 同步起伏，之前 NPC 完全没有这个效果。
+        var obsBounceSpd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
+        om.position.y = 0.05 + Math.sin(_animT * 6.5 + oi * 1.7) * 0.008 * Math.min(1, obsBounceSpd * 0.12);
         // glTF 模型已是真实尺寸（realScale），跳过 (L,H,W) 缩放；
         // 程序化 _buildObstacle 是 unit-normalized，需 scale.set(L,H,W) 映射到真实尺寸
         if (om.userData.realScale) {
@@ -2337,6 +2416,31 @@ function _renderFrame() {
         while (dy > Math.PI) dy -= 2 * Math.PI;
         while (dy < -Math.PI) dy += 2 * Math.PI;
         om.rotation.y += dy * 0.18;
+
+        // 车身侧倾/俯仰：ow 只在 update3D() tick 更新（非逐帧），用 ow.t0
+        // 变化检测新 tick，算出新目标后再逐帧 lerp，与 om.position.lerp
+        // 同一节奏（纯前端近似，同 ego 逻辑，见 _tiltTargets 定义处）。
+        var ti = _obsTilt[oi] || (_obsTilt[oi] = {
+          prevT0: null, prevHeading: ow.heading, prevSpeed: 0,
+          roll: 0, pitch: 0, rollTarget: 0, pitchTarget: 0
+        });
+        if (ti.prevT0 !== null && ow.t0 !== ti.prevT0) {
+          var obsSpdNow = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
+          var obsTickDt = ow.t0 - ti.prevT0;
+          var obsDh = ow.heading - ti.prevHeading;
+          while (obsDh > Math.PI) obsDh -= 2 * Math.PI;
+          while (obsDh < -Math.PI) obsDh += 2 * Math.PI;
+          var obsTilt2 = _tiltTargets(obsDh, obsTickDt, obsSpdNow, ti.prevSpeed);
+          ti.rollTarget = obsTilt2.roll;
+          ti.pitchTarget = obsTilt2.pitch;
+          ti.prevHeading = ow.heading;
+          ti.prevSpeed = obsSpdNow;
+        }
+        ti.prevT0 = ow.t0;
+        ti.roll += (ti.rollTarget - ti.roll) * 0.15;
+        ti.pitch += (ti.pitchTarget - ti.pitch) * 0.15;
+        om.rotation.x = ti.roll;
+        om.rotation.z = ti.pitch;
 
         var c = (_obsColors[ow.type]) || 0xff9944;
         // Defect 5: 障碍物类型变化时重建外形（轿车 ↔ 胶囊行人 ↔ 圆锥路障），

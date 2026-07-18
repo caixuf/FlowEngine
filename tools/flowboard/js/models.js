@@ -68,21 +68,21 @@ function _buildVehicleFromGltf(name, gltf) {
     });
     var wheels = [];
     if (fl && fr) {
-      // 建立前轴 Group：位于 FL/FR 世界中心，FL/FR 改为相对位置
-      var center = new THREE.Vector3();
-      fl.getWorldPosition(center);
-      var frPos = new THREE.Vector3();
-      fr.getWorldPosition(frPos);
-      center.add(frPos).multiplyScalar(0.5);
+      // 建立前轴 Group：位于 FL/FR 几何中心。注意不能用 getWorldPosition() ——
+      // gen_models.py 生成的 glTF 节点变换是单位矩阵，车轮的真实位置烘在顶点
+      // 数据里，getWorldPosition 恒返回 (0,0,0)，会把转向支点错误地放在车身
+      // 原点，导致转向时车轮绕错误支点画弧线。改用几何包围盒中心（世界空间）。
+      var flCenter = new THREE.Box3().setFromObject(fl).getCenter(new THREE.Vector3());
+      var frCenter = new THREE.Box3().setFromObject(fr).getCenter(new THREE.Vector3());
+      var center = flCenter.clone().add(frCenter).multiplyScalar(0.5);
       var fwGroup = new THREE.Group();
       fwGroup.position.copy(center);
       // 将 FL/FR 从原 parent 移入 fwGroup，调整为相对坐标
-      [fl, fr].forEach(function(w) {
+      [[fl, flCenter], [fr, frCenter]].forEach(function(pair) {
+        var w = pair[0];
+        // 相对 fwGroup 的位置（提前算好，避免 reparent 后 matrixWorld 失效）
+        var wp = pair[1].clone().sub(center);
         if (w.parent) w.parent.remove(w);
-        // 相对 fwGroup 的位置
-        var wp = new THREE.Vector3();
-        w.getWorldPosition(wp);
-        wp.sub(center);
         w.position.copy(wp);
         w.rotation.set(0, 0, 0);  // 重置旋转，滚动动画由 rotation.x 驱动
         fwGroup.add(w);
@@ -210,19 +210,17 @@ function _relinkWheelUserData(clone) {
   });
   var wheels = [];
   if (fl && fr) {
-    // 重建 frontWheels Group（与 _buildVehicleFromGltf 同逻辑）
-    var center = new THREE.Vector3();
-    fl.getWorldPosition(center);
-    var frPos = new THREE.Vector3();
-    fr.getWorldPosition(frPos);
-    center.add(frPos).multiplyScalar(0.5);
+    // 重建 frontWheels Group（与 _buildVehicleFromGltf 同逻辑：用几何包围盒中心，
+    // 不用 getWorldPosition —— 原因见 _buildVehicleFromGltf 内注释）
+    var flCenter = new THREE.Box3().setFromObject(fl).getCenter(new THREE.Vector3());
+    var frCenter = new THREE.Box3().setFromObject(fr).getCenter(new THREE.Vector3());
+    var center = flCenter.clone().add(frCenter).multiplyScalar(0.5);
     var fwGroup = new THREE.Group();
     fwGroup.position.copy(center);
-    [fl, fr].forEach(function(w) {
+    [[fl, flCenter], [fr, frCenter]].forEach(function(pair) {
+      var w = pair[0];
+      var wp = pair[1].clone().sub(center);
       if (w.parent) w.parent.remove(w);
-      var wp = new THREE.Vector3();
-      w.getWorldPosition(wp);
-      wp.sub(center);
       w.position.copy(wp);
       w.rotation.set(0, 0, 0);
       fwGroup.add(w);
@@ -284,7 +282,7 @@ function _upgradeCarPaint(model, color) {
         roughness: oldMat.roughness !== undefined ? oldMat.roughness : 0.25,
         envMapIntensity: 1.1,
         clearcoat: 1.0, clearcoatRoughness: 0.07,
-        sheen: 0.4
+        sheen: new THREE.Color(0.4, 0.4, 0.4)
       });
       c.material = newMat;
     } else if (c.material && c.material.color) {

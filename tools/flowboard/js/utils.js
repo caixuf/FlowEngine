@@ -236,7 +236,7 @@ export function _buildSedan(color, secondaryColor) {
   // 配合 scene.environment 的 PMREM 环境贴图产生高光反射。
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.55, roughness: 0.22, envMapIntensity: 1.1,
-    clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: 0.4
+    clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: new T.Color(0.4, 0.4, 0.4)
   });
   var cabinMat = new T.MeshPhysicalMaterial({
     color: secondaryColor, metalness: 0.4, roughness: 0.28, envMapIntensity: 0.9,
@@ -436,7 +436,7 @@ export function _buildObstacle(type, color) {
   // 车漆用 MeshPhysicalMaterial + clearcoat，与 ego 同材质层级
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
-    clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: 0.3
+    clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: new T.Color(0.3, 0.3, 0.3)
   });
   var glassMat = new T.MeshPhysicalMaterial({
     color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1,
@@ -538,6 +538,48 @@ export function _buildObstacle(type, color) {
   g.add(_buildContactShadow(1.05, 1.0));
 
   return g;
+}
+
+// ── Material sanity audit ────────────────────────────────────────
+/**
+ * _auditSceneMaterials — scan a THREE.Scene for materials whose Color-typed
+ * property holds something other than a real THREE.Color (e.g. a raw number
+ * mistakenly passed where a Color is required, as with the `sheen: 0.4`
+ * MeshPhysicalMaterial bug in _buildSedan/_buildObstacle/models.js). Pure
+ * read — safe to call from devtools or from an error handler.
+ *
+ * @param {THREE.Scene} scene
+ * @returns {Array} up to 20 findings: { objectName, objectType, materialType, materialUuid, prop, value, valueType }
+ */
+export function _auditSceneMaterials(scene) {
+  var COLOR_PROPS = ['color', 'emissive', 'sheen', 'specular', 'sheenColor'];
+  var findings = [];
+  if (!scene || !scene.traverse) return findings;
+  scene.traverse(function(obj) {
+    if (findings.length >= 20) return;
+    if (!(obj.isMesh || obj.isLine || obj.isPoints || obj.isSprite) || !obj.material) return;
+    var mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (var i = 0; i < mats.length; i++) {
+      var m = mats[i];
+      if (!m) continue;
+      for (var j = 0; j < COLOR_PROPS.length; j++) {
+        var prop = COLOR_PROPS[j];
+        var v = m[prop];
+        if (v === null || v === undefined || v.isColor === true) continue;
+        findings.push({
+          objectName: obj.name || '(unnamed)',
+          objectType: obj.type,
+          materialType: m.type,
+          materialUuid: m.uuid,
+          prop: prop,
+          value: typeof v === 'object' ? JSON.stringify(v) : v,
+          valueType: typeof v
+        });
+        if (findings.length >= 20) return;
+      }
+    }
+  });
+  return findings;
 }
 
 // ── Colour map ───────────────────────────────────────────────────
