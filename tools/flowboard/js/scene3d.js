@@ -1054,7 +1054,15 @@ function resize3D() {
 }
 
 function init3DScene() {
-  var el = document.getElementById("scene3d"); if (!el || typeof THREE === "undefined") return;
+  var el = document.getElementById("scene3d");
+  if (!el) return;
+  if (typeof THREE === "undefined") {
+    console.warn("[scene3d] THREE not available — 3D disabled, falling back to 2D");
+    return;
+  }
+  // 立即隐藏 placeholder，确保后续即使出错也不会卡在提示页
+  var msgEl = document.getElementById("scene3d-msg");
+  if (msgEl) msgEl.style.display = "none";
   // Use fallback size when card is collapsed (clientWidth=0)
   var w = el.clientWidth || el.parentElement && el.parentElement.clientWidth || 800;
   var h = el.clientHeight || 400;
@@ -1148,7 +1156,6 @@ function init3DScene() {
   renderer3d.shadowMap.enabled = true;
   renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
   el.appendChild(renderer3d.domElement);
-  document.getElementById("scene3d-msg").style.display = "none";
 
   // ── 程序化环境贴图：PMREMGenerator 从自建简单场景生成 ──
   // MeshStandardMaterial 需 envMap 才能让 metalness/roughness 产生反射。
