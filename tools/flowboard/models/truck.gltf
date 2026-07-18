@@ -95,7 +95,7 @@
             "POSITION": 0,
             "NORMAL": 1
           },
-          "indices": 1,
+          "indices": 2,
           "material": 0
         }
       ],
@@ -105,10 +105,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 2,
-            "NORMAL": 3
+            "POSITION": 3,
+            "NORMAL": 4
           },
-          "indices": 3,
+          "indices": 5,
           "material": 0
         }
       ],
@@ -118,10 +118,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 4,
-            "NORMAL": 5
+            "POSITION": 6,
+            "NORMAL": 7
           },
-          "indices": 5,
+          "indices": 8,
           "material": 1
         }
       ],
@@ -131,10 +131,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 6,
-            "NORMAL": 7
+            "POSITION": 9,
+            "NORMAL": 10
           },
-          "indices": 7,
+          "indices": 11,
           "material": 3
         }
       ],
@@ -144,10 +144,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 8,
-            "NORMAL": 9
+            "POSITION": 12,
+            "NORMAL": 13
           },
-          "indices": 9,
+          "indices": 14,
           "material": 3
         }
       ],
@@ -157,10 +157,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 10,
-            "NORMAL": 11
+            "POSITION": 15,
+            "NORMAL": 16
           },
-          "indices": 11,
+          "indices": 17,
           "material": 4
         }
       ],
@@ -170,10 +170,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 12,
-            "NORMAL": 13
+            "POSITION": 18,
+            "NORMAL": 19
           },
-          "indices": 13,
+          "indices": 20,
           "material": 4
         }
       ],
@@ -183,10 +183,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 14,
-            "NORMAL": 15
+            "POSITION": 21,
+            "NORMAL": 22
           },
-          "indices": 15,
+          "indices": 23,
           "material": 5
         }
       ],
@@ -196,10 +196,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 16,
-            "NORMAL": 17
+            "POSITION": 24,
+            "NORMAL": 25
           },
-          "indices": 17,
+          "indices": 26,
           "material": 5
         }
       ],
@@ -209,10 +209,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 18,
-            "NORMAL": 19
+            "POSITION": 27,
+            "NORMAL": 28
           },
-          "indices": 19,
+          "indices": 29,
           "material": 5
         }
       ],
@@ -222,10 +222,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 20,
-            "NORMAL": 21
+            "POSITION": 30,
+            "NORMAL": 31
           },
-          "indices": 21,
+          "indices": 32,
           "material": 5
         }
       ],
@@ -235,10 +235,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 22,
-            "NORMAL": 23
+            "POSITION": 33,
+            "NORMAL": 34
           },
-          "indices": 23,
+          "indices": 35,
           "material": 2
         }
       ],
@@ -248,10 +248,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 24,
-            "NORMAL": 25
+            "POSITION": 36,
+            "NORMAL": 37
           },
-          "indices": 25,
+          "indices": 38,
           "material": 2
         }
       ],
@@ -261,10 +261,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 26,
-            "NORMAL": 27
+            "POSITION": 39,
+            "NORMAL": 40
           },
-          "indices": 27,
+          "indices": 41,
           "material": 2
         }
       ],

@@ -40,7 +40,7 @@
             "POSITION": 0,
             "NORMAL": 1
           },
-          "indices": 1,
+          "indices": 2,
           "material": 0
         }
       ],
@@ -50,10 +50,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 2,
-            "NORMAL": 3
+            "POSITION": 3,
+            "NORMAL": 4
           },
-          "indices": 3,
+          "indices": 5,
           "material": 1
         }
       ],
@@ -63,10 +63,10 @@
       "primitives": [
         {
           "attributes": {
-            "POSITION": 4,
-            "NORMAL": 5
+            "POSITION": 6,
+            "NORMAL": 7
           },
-          "indices": 5,
+          "indices": 8,
           "material": 0
         }
       ],

@@ -284,7 +284,7 @@ function _upgradeCarPaint(model, color) {
         roughness: oldMat.roughness !== undefined ? oldMat.roughness : 0.25,
         envMapIntensity: 1.1,
         clearcoat: 1.0, clearcoatRoughness: 0.07,
-        sheen: 0.4, sheenColor: 0xffffff
+        sheen: 0.4
       });
       c.material = newMat;
     } else if (c.material && c.material.color) {

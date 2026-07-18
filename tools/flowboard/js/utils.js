@@ -236,7 +236,7 @@ export function _buildSedan(color, secondaryColor) {
   // 配合 scene.environment 的 PMREM 环境贴图产生高光反射。
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.55, roughness: 0.22, envMapIntensity: 1.1,
-    clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: 0.4, sheenColor: 0xffffff
+    clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: 0.4
   });
   var cabinMat = new T.MeshPhysicalMaterial({
     color: secondaryColor, metalness: 0.4, roughness: 0.28, envMapIntensity: 0.9,
@@ -436,7 +436,7 @@ export function _buildObstacle(type, color) {
   // 车漆用 MeshPhysicalMaterial + clearcoat，与 ego 同材质层级
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
-    clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: 0.3, sheenColor: 0xffffff
+    clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: 0.3
   });
   var glassMat = new T.MeshPhysicalMaterial({
     color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1,

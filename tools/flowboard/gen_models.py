@@ -448,7 +448,9 @@ def build_gltf(spec: dict) -> dict:
                 tris.extend([b, b + 1, b + 2, b, b + 2, b + 3])
 
         v_offset = buf.add_floats(verts)
-        # 交叠的索引和顶点
+        # 每个 part 有独立 bufferView（pos/normal 共享一个，indices 独立一个），
+        # bufferView.byteOffset 已指向该 part 在大 buffer 中的起始位置，
+        # 所以索引保持相对值（从 0 开始）即可。
         idx_offset = buf.add_u16s(tris)
 
         # 每个 part 独立 mesh
@@ -483,7 +485,7 @@ def build_gltf(spec: dict) -> dict:
     accessors = []
     _bo = 0
 
-    for mp in mesh_primitives:
+    for mesh_idx, mp in enumerate(mesh_primitives):
         # Position & Normal: 每个顶点 6 floats (x3 + nx3)
         n_verts = mp["pos_accessor"]["count"]
         pos_bytes = n_verts * 6 * 4  # 6 floats × 4 bytes
@@ -548,7 +550,6 @@ def build_gltf(spec: dict) -> dict:
 
         # 更新 mesh 中的 accessor 索引
         # 每个 mesh 有 1 个 primitive，引用 3 个 accessors
-        mesh_idx = len(meshes) - 1
         prim = meshes[mesh_idx]["primitives"][0]
         prim["attributes"]["POSITION"] = len(accessors) - 3
         prim["attributes"]["NORMAL"] = len(accessors) - 2
