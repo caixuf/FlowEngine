@@ -2,7 +2,7 @@
 build/
 build_asan_rel/
 bin/
-lib/
+lib/*
 obj/
 
 # CMake生成的文件
@@ -137,3 +137,6 @@ third_party/tinympc/
 build-*/
 build_*/
 .mcp.json
+
+# 预构建第三方库（CI 环境无子模块时使用）
+!lib/libesminiRMLib.so

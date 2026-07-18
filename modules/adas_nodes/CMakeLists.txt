@@ -134,11 +134,17 @@ target_link_libraries(sim_world ${NODE_LINK_LIBS})
 # 采用 FlowCoroTask（线程池 resume）：物理+NPC AI+碰撞+事件+JSON 序列化单次
 # ~50-200μs，同步 resume 会阻塞消息总线分发线程，故改用线程池 resume。
 # 链接 esminiRMLib（C API，ABI 稳定）做道路网络 Frenet↔World 转换。
+# 优先用预构建库（lib/），其次用子模块构建产物（third_party/esmini/build/）。
 set(ESMINI_ROOT "${FLOW_ROOT}/third_party/esmini")
-set(ESMINI_RMLIB_INCLUDE "${ESMINI_ROOT}/EnvironmentSimulator/Libraries/esminiRMLib")
+# 头文件搜索路径：子模块 → 本地预构建 include（CI 无子模块时走第二条）
+set(ESMINI_RMLIB_INCLUDE
+    "${ESMINI_ROOT}/EnvironmentSimulator/Libraries/esminiRMLib"
+    "${FLOW_ROOT}/include"
+)
 find_library(ESMINI_RMLIB
     NAMES esminiRMLib
-    HINTS "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"
+    HINTS "${FLOW_ROOT}/lib"                                    # 预构建（CI 优先）
+          "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"  # 子模块构建
 )
 add_library(flowsim_node SHARED
     flowsim_node.cpp
