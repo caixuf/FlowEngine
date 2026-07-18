@@ -129,9 +129,9 @@ set -o pipefail  # scoped to this build block only — restored via `set +o pipe
                  # below once both `cmake --build ... | tail -1` calls are done, so
                  # a build failure surfaces (pipeline exit = cmake's, not tail's)
                  # without changing pipe-failure semantics for the rest of the script.
-if ! cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host -j$(nproc) 2>&1 | tail -1; then
-  echo "  ✗ Build failed for flow_launcher/flow_node_host — re-run without the trailing"
-  echo "    'tail -1' filter (cmake --build \"$BUILD_DIR\" --target flow_launcher flow_node_host) to see the full error."
+if ! cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host flowmond -j$(nproc) 2>&1 | tail -1; then
+  echo "  ✗ Build failed for flow_launcher/flow_node_host/flowmond — re-run without the trailing"
+  echo "    'tail -1' filter (cmake --build \"$BUILD_DIR\" --target flow_launcher flow_node_host flowmond) to see the full error."
   exit 1
 fi
 # Also build node plugins. They live in a separate CMake project, so the main

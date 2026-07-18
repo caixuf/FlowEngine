@@ -74,6 +74,8 @@ function setConnStatus(cls, text) {
 function _set3DStaleMessage(show, text) {
   var el = document.getElementById('scene3d-msg');
   if (!el) return;
+  // 若 3D 视图已存在初始化错误提示（WebGL 失败等），保留错误提示，避免被 stale 文案覆盖。
+  if (el.getAttribute('data-init-error') === '1') return;
   // 只在 3D 视图可见且没有严重错误信息时显示 stale 提示
   if (!show) {
     if (el.getAttribute('data-stale') === '1') {
@@ -86,7 +88,7 @@ function _set3DStaleMessage(show, text) {
   el.setAttribute('data-stale', '1');
   el.style.display = '';
   el.style.color = '#d29922';
-  el.innerHTML = '<div style="font-size:32px;margin-bottom:10px">⏳</div>' +
+  el.innerHTML = '<div style="font-size:32px;margin-bottom:10px">...</div>' +
     '<div style="color:#d29922;font-size:14px;font-weight:600;margin-bottom:6px">Waiting for data...</div>' +
     '<div style="color:#8b949e;font-size:11px;font-family:monospace;line-height:1.5;max-width:340px;word-break:break-all">' +
     (text || 'No message from server for a few seconds.') + '</div>';

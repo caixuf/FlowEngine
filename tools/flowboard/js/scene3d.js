@@ -108,6 +108,9 @@ const _WATER_SEGS = 80;           // 细分段数（high 档位）
 /** WebGL context-loss flag — render loop skips while true */
 let _glLost = false;
 
+/** 3D 初始化失败标志 — 防止 stale message 覆盖错误提示 */
+let _3DInitFailed = false;
+
 /** Animation time counter (incremented per frame) */
 let _animT = 0;
 
@@ -1674,7 +1677,17 @@ function init3DScene() {
   } else if (window.innerWidth < 700) {
     _perfTier = 'medium';
   }
-  renderer3d = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  // WebGL 创建：无 GPU/headless/安全策略导致失败时，优雅降级到 2D canvas
+  // 而不是让用户看到空白/等待。
+  try {
+    renderer3d = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  } catch (glErr) {
+    console.warn('[scene3d] WebGL renderer creation failed, falling back to 2D:', glErr);
+    reportDiag('scene3d', 'WebGL unavailable — falling back to 2D scene');
+    try { init2DFallback(); } catch (_) {}
+    _show3DError('WebGL unavailable — switched to 2D fallback. Browser or GPU may not support WebGL.');
+    return;
+  }
   renderer3d.setSize(w, h);
   renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1968,11 +1981,13 @@ function init3DScene() {
 
 /** 在 3D 视图区域显示错误信息，方便诊断 */
 function _show3DError(msg) {
+  _3DInitFailed = true;
   var el = document.getElementById("scene3d-msg");
   if (!el) return;
   el.style.display = "";
   el.style.color = "#f0a0a0";
-  el.innerHTML = '<div style="font-size:40px;margin-bottom:10px">⚠️</div>' +
+  el.setAttribute('data-init-error', '1');
+  el.innerHTML = '<div style="font-size:40px;margin-bottom:10px">!</div>' +
     '<div style="color:#f0a0a0;font-size:14px;font-weight:600;margin-bottom:8px">3D Init Failed</div>' +
     '<div style="color:#f08888;font-size:11px;font-family:monospace;line-height:1.5;max-width:380px;word-break:break-all">' +
     (msg || 'unknown error') + '</div>';
