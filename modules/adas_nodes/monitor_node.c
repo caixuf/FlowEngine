@@ -70,12 +70,6 @@ static struct {
     double road_curve_offset_m;
     volatile int has_road_geometry;
 
-    /* Phase 2: 红绿灯状态缓存（从 road/traffic_lights topic 获取，sim_world 发布）
-     * 直接缓存原始 JSON 文本，在拼装 scene.traffic_lights 时透传给 FlowBoard。
-     * 这样 monitor 不需要解析红绿灯语义，只做数据管道。 */
-    char   traffic_lights_json[512];
-    volatile int has_traffic_lights;
-
     /* Phase 3: scene/frame 缓存（从 flowsim_node 发布）。
      * 只缓存 road_network 部分（entities 由 vehicle/state 覆盖，无需重复）。
      * road_network 含 edges[]，每条 edge 有 nodes[[x,y],...]，供 3D 前端
@@ -266,21 +260,6 @@ static void on_road_geometry(const Message* msg, void* user_data) {
         cJSON_Delete(root);
     }
     g.has_road_geometry = 1;
-}
-
-/* Phase 2: road/traffic_lights 订阅 — 从 sim_world 获取红绿灯状态。
- * 直接缓存原始 JSON 文本（{"lights":[...]}），在拼装 scene.traffic_lights 时
- * 透传给 FlowBoard 3D 渲染。monitor 不解析红绿灯语义，只做数据管道。 */
-static void on_traffic_lights(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    /* 安全拷贝：确保 null 结尾，防止越界 */
-    size_t len = strlen(d);
-    if (len >= sizeof(g.traffic_lights_json)) len = sizeof(g.traffic_lights_json) - 1;
-    memcpy(g.traffic_lights_json, d, len);
-    g.traffic_lights_json[len] = '\0';
-    g.has_traffic_lights = 1;
 }
 
 /* Phase 3: scene/frame 订阅 — 从 flowsim_node 获取完整场景帧。
@@ -637,18 +616,6 @@ static void export_dashboard_json(void) {
         }
     }
 
-    /* Phase 2: 红绿灯状态从 road/traffic_lights topic 获取，透传给 FlowBoard 3D */
-    if (g.has_traffic_lights && g.traffic_lights_json[0] != '\0') {
-        cJSON* tl_root = cJSON_Parse(g.traffic_lights_json);
-        if (tl_root) {
-            cJSON* tl_arr = cJSON_GetObjectItem(tl_root, "lights");
-            if (tl_arr && cJSON_IsArray(tl_arr)) {
-                cJSON_AddItemToObject(scene, "traffic_lights", cJSON_Duplicate(tl_arr, 1));
-            }
-            cJSON_Delete(tl_root);
-        }
-    }
-
     /* NOA Phase 6: 规划轨迹 path 数组透传给 3D 前端。
      * path 是 Frenet 坐标 [[s,d,spd],...]，前端从 ego 当前位置出发沿 heading
      * 方向延伸 s、横向偏移 d 近似绘制世界坐标轨迹线（无 esmini Frenet→World
@@ -875,7 +842,7 @@ static const TaskInterface monitor_vtable = {
 static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
                                    "fusion/latency", "flowengine/node_info",
                                    "planning/trajectory", "road/geometry",
-                                   "road/traffic_lights", "scene/frame", NULL };
+                                   "scene/frame", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -932,7 +899,6 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "fusion/latency", on_fusion_latency, NULL);
     transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
     transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
-    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, NULL);
     /* Phase 3: scene/frame — 从 flowsim_node 获取 road_network 供 3D 多段道路渲染 */
     transport_subscribe(transport, "scene/frame", on_scene_frame, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
@@ -943,7 +909,6 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "vehicle/state",        0x1C0E5A7Eu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/traffic_lights",  0x7E5C0FFEu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "scene/frame",          0x5CE4E011u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 

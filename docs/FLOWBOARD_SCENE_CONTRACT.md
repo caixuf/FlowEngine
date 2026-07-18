@@ -4,9 +4,12 @@
 
 ## 1. 版本
 
-- **版本**: 1.1.0
+- **版本**: 2.0.0
 - **生效日期**: 2026-07-18
-- **变更**: v1.1.0 新增 `entities` 中 `tl`/`etc_gate`/`stop_line` 的 `h`（heading）字段
+- **变更**:
+  - v1.1.0 新增 `entities` 中 `tl`/`etc_gate`/`stop_line` 的 `h`（heading）字段
+  - v1.2.0 `trajectory_path` 每点新增可选第 4 元素 `edge_id`；前端实现跨 edge 链式投影，解决弯道投影不准
+  - v2.0.0 **破坏性变更**：移除 `scene.traffic_lights`（ego-relative fallback）字段，红绿灯统一由 `scene.entities` 中的 `tl`（world 坐标）提供。monitor 不再订阅 `road/traffic_lights` 透传到 scene（该 topic 仍由 sim_world 发布，供 planning/inference/recognition 消费）
 - **维护者**: sim-world / perception / flowboard 三端共同维护
 
 ## 2. 数据链路
@@ -17,17 +20,16 @@ flowsim_node (sim-world)
                                  │
 planning_node                    │
   └── topic: planning/trajectory ┼──► monitor_node ──► /tmp/flow_topology.json ──► flowboard/scene3d.js
-                                 │
+                                 │      (融合 + 归一化)
 sim_world_node                   │
-  └── topic: road/geometry ──────┤      (融合 + 归一化)
-                                 │
-road/traffic_lights ─────────────┘
+  └── topic: road/geometry ──────┘
 ```
 
-- **sim-world 侧（flowsim_node）**：发布 `scene/frame`，包含 `road_network` + `entities`
+- **sim-world 侧（flowsim_node）**：发布 `scene/frame`，包含 `road_network` + `entities`（红绿灯以 `tl` 实体提供，world 坐标）
 - **感知/规划侧**：发布 `vehicle/state`、`planning/trajectory` 等
 - **monitor_node**：将多个 topic 融合为 `metrics.scene`，写入状态文件
 - **flowboard/scene3d.js**：仅消费 `metrics.scene`，不反向影响上游
+- **注**：`road/traffic_lights` topic 仍由 sim_world 发布，供 planning/inference/recognition 消费，但不再流入 `metrics.scene`（v2.0.0 移除）
 
 ## 3. 坐标系约定
 
@@ -98,11 +100,6 @@ road/traffic_lights ─────────────┘
   // 障碍物 fallback（vehicle/state，ego-relative，最多 16 个）
   "obstacles": [
     { "id": 0, "type": "car", "x": 10.0, "y": -1.75, "vx": 0.0, "vy": 0.0, "len": 4.6, "wid": 2.0 }
-  ],
-
-  // 红绿灯 fallback（road/traffic_lights，ego-relative）
-  "traffic_lights": [
-    { "id": 0, "x": 50.0, "y_lane": -1.75, "state": "green", "remain_s": 10.0 }
   ],
 
   // 规划轨迹（Frenet 坐标）
@@ -201,7 +198,7 @@ road/traffic_lights ─────────────┘
 | `state` | string | `"green"`, `"yellow"`, `"red"` |
 | `remain_s` | double | 剩余时间（s） |
 
-**注意**：`scene.entities` 中的 `tl` 是世界坐标。前端目前优先消费 `scene.traffic_lights`（ego-relative），两者存在冗余，未来应统一。
+**注意**：v2.0.0 起，红绿灯统一由 `scene.entities` 中的 `tl`（world 坐标）提供，`scene.traffic_lights`（ego-relative）字段已移除。
 
 #### 5.3.4 ETC 门架（etc_gate）
 
@@ -226,18 +223,23 @@ road/traffic_lights ─────────────┘
 
 ### 5.4 `trajectory_path`
 
-Frenet 坐标数组：`[[s, d, spd], ...]`
+Frenet 坐标数组：`[[s, d, spd], ...]` 或 `[[s, d, spd, edge_id], ...]`（v1.2.0 起第 4 元素可选）
 
 | 元素 | 类型 | 单位 | 说明 |
 |------|------|------|------|
-| `s` | double | m | 沿参考线的纵向距离 |
+| `s` | double | m | 沿参考线的纵向距离（从 ego 当前位置起算） |
 | `d` | double | m | 横向偏移，d > 0 在参考线左侧，d < 0 在右侧 |
 | `spd` | double | m/s | 该点目标速度 |
+| `edge_id` | int? | - | v1.2.0 可选。所在 edge 在 `road_network.edges` 数组中的下标。planning 升级后填充 |
 
-**渲染约定**：
+**渲染约定**（v1.2.0 跨 edge 链式投影）：
 
-- 有 `road_network` 时，前端将 ego 投影到最近 curve，沿 curve 前进 s 米，再横向偏移 d
+- 有 `road_network` 时，前端将 ego 投影到最近 edge，沿 curve 前进 s 米，再横向偏移 d
+- **s 超出当前 edge 剩余长度时**，按邻接表（端点重合 < 1.5m 判定连接）跳到下一条 edge 继续投影，避免弯道末端 clamp 堆积
+- 若某点含 `edge_id`，直接定位到指定 edge 投影（未来 planning 填充后更精确）
 - 无 `road_network` 时，退化为沿 ego heading 直线外推
+
+> 注：planning 当前用单段弯道参考线（`road/geometry`），尚未消费 `road_network`，因此暂不输出 `edge_id`。前端跨 edge 链式投影已能消除弯道堆积；待 planning 重构参考线为多 edge 拼接后，可填充 `edge_id` 进一步对齐。
 
 ## 6. 兼容性规则
 
@@ -250,8 +252,8 @@ Frenet 坐标数组：`[[s, d, spd], ...]`
 
 以下改进需要修改 schema，因此需要 sim-world / planning 配合：
 
-1. **轨迹参考线**：`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准
-2. **红绿灯来源冗余**：`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`
+1. **轨迹参考线**：~~`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准~~ v1.2.0 已修复：前端实现跨 edge 链式投影；planning 输出 `edge_id` 待后续重构参考线后启用
+2. **红绿灯来源冗余**：~~`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`~~ v2.0.0 已修复：移除 `scene.traffic_lights`，红绿灯统一由 `scene.entities` 中的 `tl` 提供
 3. **版本号字段**：建议在 `metrics.scene` 顶层增加 `schema_version` 字段，便于前端做兼容性处理
 
 ## 8. 责任边界

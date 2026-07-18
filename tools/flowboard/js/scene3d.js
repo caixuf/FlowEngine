@@ -62,6 +62,11 @@ let _roadNetworkGroup = null;
 let _lastRoadNetworkKey = "";
 /** 当前道路网络的曲线数组，供交通灯/ETC门架/轨迹线查询最近切线方向。 */
 let _roadCurves = [];
+/** 每条 edge 的长度（与 _roadCurves 一一对应），供轨迹跨 edge 投影按 s 累计切换。 */
+let _roadCurveLens = [];
+/** edge 邻接表：_roadCurveNext[i] = 下一连接 edge 的索引（按首尾端点重合判定），无则 -1。
+ *  规划轨迹 s 超出当前 edge 剩余长度时，按此跳到下一条 edge 继续投影，避免弯道末端 clamp 堆积。 */
+let _roadCurveNext = [];
 
 /** NOA Phase 6: 规划轨迹线（planning/trajectory 的 path 数组渲染）。
  *  从 ego 当前位置出发，沿 heading 方向延伸 s、横向偏移 d 近似转世界坐标。
@@ -343,6 +348,8 @@ function _buildRoadNetwork(edges) {
     _roadNetworkGroup = null;
   }
   _roadCurves = [];
+  _roadCurveLens = [];
+  _roadCurveNext = [];
 
   var group = new THREE.Group();
   var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
@@ -365,6 +372,7 @@ function _buildRoadNetwork(edges) {
     _roadCurves.push(curve);
 
     var length = edge.length || curve.getLength();
+    _roadCurveLens.push(length);
     var lanes = edge.lanes || 2;
     var laneWidth = edge.lane_width || 3.5;
     /* 道路关于参考线对称：总宽度 = 车道数 × 单车道宽。
@@ -562,6 +570,23 @@ function _buildRoadNetwork(edges) {
       plight.position.set(lamp.position.x, 5.5, lamp.position.z);
       group.add(plight);
     }
+  }
+
+  // ── 构建 edge 邻接表：_roadCurveNext[i] = end 最接近某 edge j.start 的 j ──
+  // 用于规划轨迹跨 edge 投影：s 超出当前 edge 剩余长度时跳到下一条 edge。
+  // 容差与 junction 检测一致（端点重合 < 1.5m）。分叉点可能有多条候选，
+  // 取距离最近的一条（主干方向优先）。
+  var NEXT_TOL = 1.5;
+  for (var ai = 0; ai < edgeEnds.length; ai++) {
+    var bestJ = -1, bestD2 = NEXT_TOL * NEXT_TOL;
+    for (var aj = 0; aj < edgeEnds.length; aj++) {
+      if (aj === ai) continue;
+      var ddx = edgeEnds[ai].end.x - edgeEnds[aj].start.x;
+      var ddz = edgeEnds[ai].end.z - edgeEnds[aj].start.z;
+      var d2 = ddx * ddx + ddz * ddz;
+      if (d2 < bestD2) { bestD2 = d2; bestJ = aj; }
+    }
+    _roadCurveNext.push(bestJ);
   }
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
@@ -1531,6 +1556,10 @@ function update3D() {
   // 转世界坐标画线。若已有道路网络曲线，则把 ego 当前位置投影到最近 curve，
   // 沿 curve 前进 s 米并横向偏移 d；否则退化为沿 ego heading 直线外推。
   //
+  // #3 修复：s 超出当前 edge 剩余长度时，按邻接表 _roadCurveNext 跳到下一条 edge
+  // 继续投影，避免弯道末端 clamp 到 edge 尾点导致轨迹堆积。若 path 点含可选
+  // edge_id（schema v1.2 预留，第 4 元素），则直接用指定 edge 投影。
+  //
   // 3D 增强：用 TubeGeometry 替代 Line（LineBasicMaterial.linewidth 在 WebGL
   // 下被忽略恒为 1px），管半径 0.18m 远距离可见；沿管道 UV 做 dash 流动动画。
   if (scn && scn.trajectory_path && scn.trajectory_path.length > 1) {
@@ -1541,8 +1570,8 @@ function update3D() {
       _trajLastKey = tkey;
       // 构建 world 坐标点数组（Vector3）
       var tvec = [];
-      // 尝试把 ego 投影到道路网络曲线
-      var nearCurve = null, nearT = 0;
+      // 把 ego 投影到道路网络曲线，记录起始 edge 索引与 t 参数
+      var nearCurveIdx = -1, nearT = 0;
       if (_roadCurves && _roadCurves.length) {
         var bestD2 = Infinity;
         for (var ci = 0; ci < _roadCurves.length; ci++) {
@@ -1550,7 +1579,7 @@ function update3D() {
           for (var pi = 0; pi < pts.length; pi++) {
             var dx = pts[pi].x - ex, dz = pts[pi].z - ez;
             var d2 = dx * dx + dz * dz;
-            if (d2 < bestD2) { bestD2 = d2; nearCurve = _roadCurves[ci]; nearT = pi / (pts.length - 1); }
+            if (d2 < bestD2) { bestD2 = d2; nearCurveIdx = ci; nearT = pi / (pts.length - 1); }
           }
         }
       }
@@ -1558,12 +1587,32 @@ function update3D() {
         var pt = tpath[ti];
         if (!pt || pt.length < 2) continue;
         var s = pt[0] || 0, d = pt[1] || 0;
+        // 可选 edge_id（schema v1.2 第 4 元素）：直接定位到指定 edge
+        var eid = (pt.length >= 4 && typeof pt[3] === 'number') ? pt[3] : -1;
         var wx, wz;
-        if (nearCurve) {
-          var len = nearCurve.getLength();
-          var t = Math.max(0, Math.min(1, nearT + s / len));
-          var pos = nearCurve.getPointAt(t);
-          var tan = nearCurve.getTangentAt(t);
+        if (nearCurveIdx >= 0) {
+          var curIdx, t0, remain;
+          if (eid >= 0 && eid < _roadCurves.length) {
+            // planning 显式指定 edge_id：从该 edge 起始处投影
+            curIdx = eid; t0 = 0; remain = _roadCurveLens[curIdx] || _roadCurves[curIdx].getLength();
+          } else {
+            // 链式跨 edge：从 ego 所在 edge 的 nearT 起算，按 s 累计切换 edge
+            curIdx = nearCurveIdx; t0 = nearT;
+            remain = (_roadCurveLens[curIdx] || _roadCurves[curIdx].getLength()) * (1 - nearT);
+          }
+          // 按 s 累计找到落点所在 edge（防死循环：最多切 32 条 edge）
+          var sLeft = s, guard = 0;
+          while (sLeft > remain && _roadCurveNext[curIdx] >= 0 && guard < 32) {
+            sLeft -= remain;
+            curIdx = _roadCurveNext[curIdx];
+            t0 = 0;
+            remain = _roadCurveLens[curIdx] || _roadCurves[curIdx].getLength();
+            guard++;
+          }
+          var edgeLen = _roadCurveLens[curIdx] || _roadCurves[curIdx].getLength();
+          var t = Math.max(0, Math.min(1, t0 + sLeft / edgeLen));
+          var pos = _roadCurves[curIdx].getPointAt(t);
+          var tan = _roadCurves[curIdx].getTangentAt(t);
           var nx = -tan.z, nz = tan.x;  // 右侧法线；d>0 在左侧，d<0 在右侧
           wx = pos.x + nx * d;
           wz = pos.z + nz * d;
@@ -1704,32 +1753,18 @@ function update3D() {
     _lidarCloud.geometry.attributes.position.needsUpdate = true;
   }
 
-  // Traffic lights: 优先使用 scene.entities 中的 tl（world 坐标 + heading）。
-  // 无 entities 时 fallback 到 scene.traffic_lights（ego-relative，来自 road/traffic_lights）。
-  if (_trafficLightPool && scn) {
+  // Traffic lights: 统一使用 scene.entities 中的 tl（world 坐标 + heading）。
+  if (_trafficLightPool && scn && scn.entities) {
     var tlIdx = 0;
-    if (scn.entities && scn.entities.length) {
-      for (var ei3 = 0; ei3 < scn.entities.length && tlIdx < _trafficLightPool.length; ei3++) {
-        var ent3 = scn.entities[ei3];
-        if (ent3.type !== 'tl') continue;
-        _trafficLightWorld[tlIdx] = {
-          x: (ent3.x || 0), z: (ent3.y || 0),
-          h: (ent3.h || 0),
-          state: ent3.state || 'green'
-        };
-        tlIdx++;
-      }
-    } else if (scn.traffic_lights) {
-      var lights = scn.traffic_lights;
-      for (var tli = 0; tli < _trafficLightPool.length && tli < lights.length; tli++) {
-        var tl = lights[tli];
-        _trafficLightWorld[tlIdx] = {
-          x: _dr.lastX + (tl.x || 0),
-          z: _dr.lastZ + (tl.y_lane || 0),
-          state: tl.state || 'green'
-        };
-        tlIdx++;
-      }
+    for (var ei3 = 0; ei3 < scn.entities.length && tlIdx < _trafficLightPool.length; ei3++) {
+      var ent3 = scn.entities[ei3];
+      if (ent3.type !== 'tl') continue;
+      _trafficLightWorld[tlIdx] = {
+        x: (ent3.x || 0), z: (ent3.y || 0),
+        h: (ent3.h || 0),
+        state: ent3.state || 'green'
+      };
+      tlIdx++;
     }
     for (; tlIdx < _trafficLightPool.length; tlIdx++) _trafficLightWorld[tlIdx] = null;
   }
