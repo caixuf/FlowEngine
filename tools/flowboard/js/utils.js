@@ -103,6 +103,45 @@ export function _makeRect(w, h, color) {
   );
 }
 
+// ── Contact (underbody) shadow ─────────────────────────────────
+// 程序化软边径向渐变纹理，铺在车底地面模拟 AO 接触阴影，补充
+// DirectionalLight 硬阴影（远处精度下降时尤其重要）。纹理全局共享。
+let _contactShadowTex = null;
+function _getContactShadowTex() {
+  if (_contactShadowTex) return _contactShadowTex;
+  var c = document.createElement('canvas');
+  c.width = 128; c.height = 128;
+  var ctx = c.getContext('2d');
+  var grd = ctx.createRadialGradient(64, 64, 6, 64, 64, 62);
+  grd.addColorStop(0, 'rgba(0,0,0,0.58)');
+  grd.addColorStop(0.55, 'rgba(0,0,0,0.30)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, 128, 128);
+  _contactShadowTex = new THREE.CanvasTexture(c);
+  return _contactShadowTex;
+}
+
+/**
+ * _buildContactShadow — 车底接触阴影 mesh（水平平面，软边径向渐变）。
+ * @param {number} w  阴影纵向宽度（沿车身 X）
+ * @param {number} d  阴影横向深度（沿车身 Z）
+ * @returns {THREE.Mesh}  rotation.x = -π/2 的水平平面，y≈0.015
+ */
+export function _buildContactShadow(w, d) {
+  var mat = new THREE.MeshBasicMaterial({
+    map: _getContactShadowTex(),
+    transparent: true, opacity: 0.75,
+    depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -2
+  });
+  var m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
+  m.rotation.x = -Math.PI / 2;
+  m.position.y = 0.015;
+  m.renderOrder = -1;
+  return m;
+}
+
 // ── Shared car geometry (sedan) ──────────────────────────────────
 // Pre-built geometries reused by every _buildSedan call so we only
 // allocate geometry once. Phase 6 画质升级：增加圆角、车窗、轮毂等细节。
@@ -193,11 +232,22 @@ export function _buildSedan(color, secondaryColor) {
   initCarMesh(); // ensure shared geometries exist
   const T = window.THREE;
   var g = new T.Group();
-  var bodyMat = new T.MeshStandardMaterial({ color: color, metalness: 0.55, roughness: 0.24, envMapIntensity: 1.0 });
-  var cabinMat = new T.MeshStandardMaterial({ color: secondaryColor, metalness: 0.4, roughness: 0.3, envMapIntensity: 0.8 });
-  var glassMat = new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.04, envMapIntensity: 1.3 });
+  // 真实车漆：MeshPhysicalMaterial + clearcoat（清漆层）+ sheen（绒光），
+  // 配合 scene.environment 的 PMREM 环境贴图产生高光反射。
+  var bodyMat = new T.MeshPhysicalMaterial({
+    color: color, metalness: 0.55, roughness: 0.22, envMapIntensity: 1.1,
+    clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: 0.4, sheenColor: 0xffffff
+  });
+  var cabinMat = new T.MeshPhysicalMaterial({
+    color: secondaryColor, metalness: 0.4, roughness: 0.28, envMapIntensity: 0.9,
+    clearcoat: 0.6, clearcoatRoughness: 0.12
+  });
+  var glassMat = new T.MeshPhysicalMaterial({
+    color: 0x223344, metalness: 0.9, roughness: 0.04, envMapIntensity: 1.3,
+    clearcoat: 1.0, clearcoatRoughness: 0.02
+  });
   var blackMat = new T.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
-  var chromeMat = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.75, roughness: 0.18 });
+  var chromeMat = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.85, roughness: 0.14, envMapIntensity: 1.2 });
   var archMat = new T.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.85 });
 
   // Lower body — 主车身带腰线曲面感，离地间隙约 0.16m
@@ -329,6 +379,9 @@ export function _buildSedan(color, secondaryColor) {
   g.add(spotR); g.add(spotR.target);
   g.userData.headlights = [spotL, spotR];
 
+  // 车底接触阴影：软边径向渐变平面，补充 AO 感
+  g.add(_buildContactShadow(4.6, 2.0));
+
   return g;
 }
 
@@ -380,9 +433,16 @@ export function _buildObstacle(type, color) {
   }
 
   // 默认：轿车形（car/truck/cyclist），unit-normalized，scale.set(L,H,W) 映射到真实尺寸
-  var bodyMat = new T.MeshStandardMaterial({ color: color, metalness: 0.45, roughness: 0.28, envMapIntensity: 0.8 });
-  var glassMat = new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.0 });
-  var chromeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.7, roughness: 0.22 });
+  // 车漆用 MeshPhysicalMaterial + clearcoat，与 ego 同材质层级
+  var bodyMat = new T.MeshPhysicalMaterial({
+    color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
+    clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: 0.3, sheenColor: 0xffffff
+  });
+  var glassMat = new T.MeshPhysicalMaterial({
+    color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1,
+    clearcoat: 1.0, clearcoatRoughness: 0.03
+  });
+  var chromeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.8, roughness: 0.18, envMapIntensity: 1.1 });
   var blackMat = new T.MeshStandardMaterial({ color: 0x151515, roughness: 0.8 });
 
   // 车身主体（更多分段，光影更柔和）
@@ -473,6 +533,9 @@ export function _buildObstacle(type, color) {
   }
   makeObsLight(0.3, true); makeObsLight(-0.3, true);
   makeObsLight(0.3, false); makeObsLight(-0.3, false);
+
+  // 车底接触阴影（unit-normalized，随 scale.set(L,H,W) 缩放）
+  g.add(_buildContactShadow(1.05, 1.0));
 
   return g;
 }

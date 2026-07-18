@@ -5,6 +5,12 @@
  * Falls back to programmatic geometry when GLTFLoader is unavailable
  * or a model file fails to load.
  *
+ * glTF 节点约定（gen_models.py 生成）：
+ *   wheel_FL / wheel_FR / wheel_RL / wheel_RR  — 四轮节点
+ *   body / cabin / cab / cargo / torso / head  — 车身/驾驶舱等
+ * 本模块从命名节点建立 userData.frontWheels / wheels，使 glTF 车辆
+ * 与程序化 _buildSedan 一样支持前轮转向 + 全轮滚动动画。
+ *
  * Usage:
  *   import { initModelCache, getModel } from './models.js';
  *   await initModelCache();
@@ -12,7 +18,7 @@
  *   scene.add(sedan);
  */
 
-import { _buildSedan, _buildObstacle } from './utils.js';
+import { _buildSedan, _buildObstacle, _buildContactShadow } from './utils.js';
 
 const THREE = window.THREE;
 
@@ -24,6 +30,77 @@ let _ready = false;
 let _loadError = null;
 
 const MODEL_NAMES = ['sedan', 'truck', 'suv', 'pedestrian'];
+
+/**
+ * 从 glTF 场景建立带 userData 的车辆 Group。
+ * - 保留节点层级与 name（便于按名查找车轮）
+ * - 克隆 material 使每个实例独立可改色
+ * - 扫描 wheel_FL/FR/RL/RR 节点，建立 frontWheels Group + wheels 数组
+ *   frontWheels Group 位于前轴中心，FL/FR 改为相对位置后挂入，
+ *   这样 _renderFrame 的 frontWheels.rotation.y（转向）和 wheels[].rotation.x（滚动）能生效
+ */
+function _buildVehicleFromGltf(name, gltf) {
+  var group = new THREE.Group();
+  // 保留层级：把 gltf.scene 的顶层子节点克隆进来（保留 name）
+  gltf.scene.children.forEach(function(child) {
+    group.add(child.clone());
+  });
+  // 克隆 material（每个实例独立）
+  group.traverse(function(c) {
+    if (c.isMesh && c.material) {
+      c.material = c.material.clone();
+    }
+  });
+
+  group.userData.isVehicle = true;
+  group.userData.modelType = name;
+
+  // 车辆类型才需要建立 wheel userData（行人无轮）
+  if (name !== 'pedestrian') {
+    var fl = null, fr = null, rl = null, rr = null;
+    group.traverse(function(c) {
+      switch (c.name) {
+        case 'wheel_FL': fl = c; break;
+        case 'wheel_FR': fr = c; break;
+        case 'wheel_RL': rl = c; break;
+        case 'wheel_RR': rr = c; break;
+      }
+    });
+    var wheels = [];
+    if (fl && fr) {
+      // 建立前轴 Group：位于 FL/FR 世界中心，FL/FR 改为相对位置
+      var center = new THREE.Vector3();
+      fl.getWorldPosition(center);
+      var frPos = new THREE.Vector3();
+      fr.getWorldPosition(frPos);
+      center.add(frPos).multiplyScalar(0.5);
+      var fwGroup = new THREE.Group();
+      fwGroup.position.copy(center);
+      // 将 FL/FR 从原 parent 移入 fwGroup，调整为相对坐标
+      [fl, fr].forEach(function(w) {
+        if (w.parent) w.parent.remove(w);
+        // 相对 fwGroup 的位置
+        var wp = new THREE.Vector3();
+        w.getWorldPosition(wp);
+        wp.sub(center);
+        w.position.copy(wp);
+        w.rotation.set(0, 0, 0);  // 重置旋转，滚动动画由 rotation.x 驱动
+        fwGroup.add(w);
+        wheels.push(w);
+      });
+      group.add(fwGroup);
+      group.userData.frontWheels = fwGroup;
+      // 后轮直接收集引用（滚动动画用 rotation.x，无需 reparent）
+      if (rl) wheels.push(rl);
+      if (rr) wheels.push(rr);
+    } else {
+      // 未找到命名前轮：收集所有 wheel_* 作为普通轮
+      [fl, fr, rl, rr].forEach(function(w) { if (w) wheels.push(w); });
+    }
+    if (wheels.length) group.userData.wheels = wheels;
+  }
+  return group;
+}
 
 /**
  * Preload all glTF models from /tools/flowboard/models/<name>.gltf.
@@ -45,24 +122,9 @@ export function initModelCache() {
   return new Promise(function(resolve) {
     var loader = new THREE.GLTFLoader();
     var pending = MODEL_NAMES.length;
-    var anyLoaded = false;
 
     function onModelLoaded(name, gltf) {
-      // Extract the scene group; merge all nodes into a single group
-      var group = new THREE.Group();
-      gltf.scene.traverse(function(child) {
-        if (child.isMesh) {
-          // Clone the mesh material so each instance can have its own color
-          var clone = child.clone();
-          clone.material = child.material.clone();
-          group.add(clone);
-        }
-      });
-      // Set userData for type identification
-      group.userData.isVehicle = true;
-      group.userData.modelType = name;
-      _cache[name] = group;
-      anyLoaded = true;
+      _cache[name] = _buildVehicleFromGltf(name, gltf);
       pending--;
       if (pending <= 0) { _ready = true; resolve(); }
     }
@@ -111,24 +173,93 @@ export function getModel(type) {
     // Scale: glTF models are built in meters (1:1 with scene)
     // Reset any pre-applied transforms
     clone.scale.set(1, 1, 1);
+    // clone() 不深拷贝 userData 中的 Group 引用，重建 frontWheels/wheels
+    if (model.userData.frontWheels || model.userData.wheels) {
+      _relinkWheelUserData(clone);
+    }
     return clone;
   }
   return null;
 }
 
+/** clone() 后 userData.frontWheels / wheels 引用失效，按 name 重建。 */
+function _relinkWheelUserData(clone) {
+  var fl = null, fr = null, rl = null, rr = null;
+  clone.traverse(function(c) {
+    switch (c.name) {
+      case 'wheel_FL': fl = c; break;
+      case 'wheel_FR': fr = c; break;
+      case 'wheel_RL': rl = c; break;
+      case 'wheel_RR': rr = c; break;
+    }
+  });
+  var wheels = [];
+  if (fl && fr) {
+    // 重建 frontWheels Group（与 _buildVehicleFromGltf 同逻辑）
+    var center = new THREE.Vector3();
+    fl.getWorldPosition(center);
+    var frPos = new THREE.Vector3();
+    fr.getWorldPosition(frPos);
+    center.add(frPos).multiplyScalar(0.5);
+    var fwGroup = new THREE.Group();
+    fwGroup.position.copy(center);
+    [fl, fr].forEach(function(w) {
+      if (w.parent) w.parent.remove(w);
+      var wp = new THREE.Vector3();
+      w.getWorldPosition(wp);
+      wp.sub(center);
+      w.position.copy(wp);
+      w.rotation.set(0, 0, 0);
+      fwGroup.add(w);
+      wheels.push(w);
+    });
+    clone.add(fwGroup);
+    clone.userData.frontWheels = fwGroup;
+    if (rl) wheels.push(rl);
+    if (rr) wheels.push(rr);
+  } else {
+    [fl, fr, rl, rr].forEach(function(w) { if (w) wheels.push(w); });
+  }
+  if (wheels.length) clone.userData.wheels = wheels;
+}
+
+/**
+ * 将 glTF 车身的 PBR 材质升级为 MeshPhysicalMaterial（clearcoat 车漆），
+ * 并整体涂色。仅改 body/cabin/cab/cargo 等车身件，保留 tire/glass 材质。
+ */
+function _upgradeCarPaint(model, color) {
+  var bodyNames = { body: 1, cabin: 1, cab: 1, cargo: 1, rear: 1 };
+  model.traverse(function(c) {
+    if (!c.isMesh || !c.material) return;
+    if (c.name && bodyNames[c.name]) {
+      // 升级为 MeshPhysicalMaterial 清漆车漆
+      var oldMat = c.material;
+      var newMat = new THREE.MeshPhysicalMaterial({
+        color: color || (oldMat.color ? oldMat.color.getHex() : 0x4488dd),
+        metalness: oldMat.metalness !== undefined ? oldMat.metalness : 0.5,
+        roughness: oldMat.roughness !== undefined ? oldMat.roughness : 0.25,
+        envMapIntensity: 1.1,
+        clearcoat: 1.0, clearcoatRoughness: 0.07,
+        sheen: 0.4, sheenColor: 0xffffff
+      });
+      c.material = newMat;
+    } else if (c.material && c.material.color) {
+      // 非车身件（tire/glass 等）保留原材质，仅改色
+      c.material.color.setHex(color);
+    }
+  });
+}
+
 /**
  * Build a vehicle group for use as ego car.
  * Tries glTF first, falls back to programmatic sedan.
+ * glTF 车辆升级为车漆材质 + 车底接触阴影。
  */
 export function buildEgoCar(color) {
   var model = getModel('sedan');
   if (model) {
-    // Recolor all meshes
-    model.traverse(function(c) {
-      if (c.isMesh && c.material && c.material.color) {
-        c.material.color.setHex(color || 0x4488dd);
-      }
-    });
+    _upgradeCarPaint(model, color || 0x4488dd);
+    model.add(_buildContactShadow(4.6, 2.0));
     return model;
   }
   return _buildSedan(color || 0x4488dd, 0x3377bb);
@@ -137,17 +268,20 @@ export function buildEgoCar(color) {
 /**
  * Build an obstacle group for NPC vehicles/pedestrians.
  * Tries glTF model first, falls back to programmatic box geometry.
+ * glTF 车辆升级为车漆材质 + 车底接触阴影。
  */
 export function buildObstacleGroup(type, color) {
   var model = getModel(type);
   if (model) {
-    // Apply obstacle color
     var c = color || 0xff9944;
-    model.traverse(function(ch) {
-      if (ch.isMesh && ch.material && ch.material.color) {
-        ch.material.color.setHex(c);
-      }
-    });
+    _upgradeCarPaint(model, c);
+    // 行人无车底阴影；车辆加接触阴影
+    if (type !== 'pedestrian') {
+      model.add(_buildContactShadow(4.6, 2.0));
+    }
+    // glTF 模型已是真实尺寸，标记 realScale 让 _renderFrame 跳过 (L,H,W) 缩放
+    // （程序化 _buildObstacle 是 unit-normalized，需 scale.set(L,H,W) 映射）
+    model.userData.realScale = true;
     return model;
   }
   return _buildObstacle(type || 'car', color || 0xff9944);

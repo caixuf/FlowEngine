@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -84,6 +85,74 @@ def box_indices(base: int) -> list[int]:
         b = base + f * 4
         tris.extend([b, b+1, b+2,  b, b+2, b+3])
     return tris  # 36 u16s
+
+
+def cylinder_vertices(cx: float, cy: float, cz: float,
+                      radius: float, height: float, axis: str = "z",
+                      segments: int = 16) -> tuple[list[float], list[int]]:
+    """圆柱体顶点 + 索引（侧面 + 两端面），轴沿 z（车轮横向）。
+
+    返回 (vertices, indices)，vertices 格式与 box_vertices 一致：
+    每顶点 6 float (x,y,z, nx,ny,nz)。
+    axis='z' 时圆柱轴沿 Z（适合车轮，旋转 rotation.x 实现滚动）。
+    """
+    sx, sy, sz = 0.0, 0.0, 0.0
+    if axis == "z":
+        sz = 1.0
+    elif axis == "x":
+        sx = 1.0
+    else:
+        sy = 1.0
+    hz = height / 2
+    verts: list[float] = []
+    # 侧面顶点：2 * segments 个（每端 segments 个）
+    for end in (-1, 1):  # -1 = 负端, +1 = 正端
+        for i in range(segments):
+            ang = (i / segments) * 2 * 3.14159265358979
+            # 在垂直于 axis 的平面内取圆
+            if axis == "z":
+                px = math.cos(ang) * radius
+                py = math.sin(ang) * radius
+                pz = end * hz
+                nx, ny, nz = math.cos(ang), math.sin(ang), 0.0
+            elif axis == "x":
+                py = math.cos(ang) * radius
+                pz = math.sin(ang) * radius
+                px = end * hz
+                nx, ny, nz = 0.0, math.cos(ang), math.sin(ang)
+            else:  # y
+                px = math.cos(ang) * radius
+                pz = math.sin(ang) * radius
+                py = end * hz
+                nx, ny, nz = math.cos(ang), 0.0, math.sin(ang)
+            verts.extend([cx + px, cy + py, cz + pz, nx, ny, nz])
+    base = 0  # 相对索引，调用方需加偏移
+    idx: list[int] = []
+    # 侧面：每段 2 三角形
+    for i in range(segments):
+        i0 = i
+        i1 = (i + 1) % segments
+        i2 = segments + i
+        i3 = segments + ((i + 1) % segments)
+        # 两端绕向相反以保证外法线朝外
+        idx.extend([i0, i2, i1,  i1, i2, i3])
+    # 端面 1（负端，顶点 0..segments-1）三角扇
+    center_neg = segments * 2
+    verts.extend([cx - sx * hz, cy - sy * hz, cz - sz * hz,
+                  -sx, -sy, -sz])
+    for i in range(segments):
+        i0 = i
+        i1 = (i + 1) % segments
+        idx.extend([center_neg, i1, i0])
+    # 端面 2（正端，顶点 segments..2*segments-1）三角扇
+    center_pos = segments * 2 + 1
+    verts.extend([cx + sx * hz, cy + sy * hz, cz + sz * hz,
+                  sx, sy, sz])
+    for i in range(segments):
+        i0 = segments + i
+        i1 = segments + ((i + 1) % segments)
+        idx.extend([center_pos, i0, i1])
+    return verts, idx
 
 def merge_meshes(parts: list[tuple[list[float], list[int]]]) -> tuple[list[float], list[int]]:
     """合并多个 (vertices, indices) 为一个。"""
@@ -306,14 +375,20 @@ def build_gltf(spec: dict) -> dict:
     mesh_primitives = []
     part_names = []
     for part in spec["parts"]:
-        verts = part["build_fn"]()
-        nv = len(verts) // 6
-        idx = list(range(nv))  # 简单索引（每个顶点独立）
-        # 三角形索引：每 4 个顶点 = 2 个三角形
-        tris = []
-        for f in range(nv // 4):
-            b = f * 4
-            tris.extend([b, b+1, b+2,  b, b+2, b+3])
+        result = part["build_fn"]()
+        # build_fn 可返回两种格式：
+        #   - list[float]  : 仅顶点（box 风格，每 4 顶点 = 2 三角形，自动生成索引）
+        #   - (verts, idx) : 顶点 + 自定义索引（cylinder 等非 box 几何）
+        if isinstance(result, tuple):
+            verts, tris = result
+        else:
+            verts = result
+            nv = len(verts) // 6
+            # 三角形索引：每 4 个顶点 = 2 个三角形（box 风格）
+            tris = []
+            for f in range(nv // 4):
+                b = f * 4
+                tris.extend([b, b + 1, b + 2, b, b + 2, b + 3])
 
         v_offset = buf.add_floats(verts)
         # 交叠的索引和顶点
