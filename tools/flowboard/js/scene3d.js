@@ -390,14 +390,9 @@ function _buildRoadNetwork(edges) {
     roadGeo.setIndex(indices);
     roadGeo.computeVertexNormals();
 
-    // 程序化沥青纹理：深灰底 + 随机浅色斑点模拟沥青颗粒
-    var roadTex = _makeAsphaltTexture();
-    roadTex.wrapS = THREE.RepeatWrapping;
-    roadTex.wrapT = THREE.RepeatWrapping;
-    roadTex.repeat.set(length / 6, roadWidth / 4);
-    roadTex.anisotropy = 4;
+    // 沥青路面：深色纯色，粗糙无镜面，强光下仍保持沥青黑灰质感。
     var roadMat = new THREE.MeshStandardMaterial({
-      map: roadTex, color: 0x888888, roughness: 0.92, metalness: 0.01
+      color: 0x1a1d22, roughness: 0.96, metalness: 0.0
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -428,17 +423,10 @@ function _buildRoadNetwork(edges) {
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
 
-    // ── 车道线（对称分布在参考线两侧）──
+    // ── 车道线：只画中心双黄线和道路边缘白实线 ──
     // 中心双黄线（实线）：±0.15m
     _addLaneMarkRibbon(group, curve, nSeg, -0.15, 0.15, 0xffcc44, 0.045);
     _addLaneMarkRibbon(group, curve, nSeg,  0.15, 0.15, 0xffcc44, 0.045);
-    // 内侧车道分隔虚线：±laneWidth, ±2*laneWidth, ...（避开中心双黄线已占区域）
-    for (var li = 1; li <= Math.floor(lanes / 2); li++) {
-      var off = li * laneWidth;
-      if (Math.abs(off - 0.15) < 0.25) continue;  // 避免与双黄线重叠
-      _addLaneMarkRibbon(group, curve, nSeg,  off, 0.12, 0xffffff, 0.045, true);
-      _addLaneMarkRibbon(group, curve, nSeg, -off, 0.12, 0xffffff, 0.045, true);
-    }
     // 道路边缘白实线
     _addLaneMarkRibbon(group, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.045);
     _addLaneMarkRibbon(group, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.045);
