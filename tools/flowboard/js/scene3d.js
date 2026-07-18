@@ -14,6 +14,9 @@ import { curveShiftAt as _curveShiftAt, curveHeadingAt as _curveHeadingAt, getRo
 import { makeLabelSprite as _makeLabelSprite, setLabelSprite as _setLabelSprite } from './scene3d/utils/LabelSprite.js';
 // 分层架构：model 层（拓扑数据、场景快照、路网模型、性能档位）已迁移到 scene3d/model/
 import * as TopologyStore from './scene3d/model/TopologyStore.js';
+import { EgoTiltState, TiltPool } from './scene3d/model/VisualPhysics.js';
+// 分层架构：view 层（道路、环境、车辆等 Three.js 构建器）
+import { buildLegacyRoad, applyRoadCurve } from './scene3d/view/RoadView.js';
 
 const THREE = window.THREE;
 
@@ -52,8 +55,9 @@ let _cam = null, _camLook = null, _camTarget = null, _camLookTarget = null;
 let _lidarCloud = null;
 let _lidarWorld = [];
 let _obsPool = [], _obsWorld = [];
-/** Per-slot roll/pitch tilt state: {prevT0, prevHeading, prevSpeed, roll, pitch, rollTarget, pitchTarget} */
-let _obsTilt = [];
+/** MVC Model: 视觉物理状态（roll/pitch） */
+let _egoTilt = new EgoTiltState();
+let _obsTilt = new TiltPool();
 let _trafficLightPool = [], _trafficLightWorld = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
@@ -155,10 +159,6 @@ const _OBS_H = { truck: 2.8, pedestrian: 1.8, cyclist: 1.7, cone: 0.8 };
 const _OBS_L = { truck: 7.5, pedestrian: 0.5, cyclist: 1.8, cone: 0.5 };
 const _OBS_W = { truck: 2.3, pedestrian: 0.5, cyclist: 0.6, cone: 0.5 };
 
-/** Ego body-tilt (roll/pitch) state: previous frame's smoothed heading/speed
- * for differencing, plus the current lerped roll/pitch values. */
-let _egoPrevHeading = null, _egoPrevSpeed = 0, _egoPrevT = 0, _egoRoll = 0, _egoPitch = 0;
-
 /** C.1: Camera modes — chase / top / orbit / driver / front */
 let _camMode = 'chase';
 let _orbitState = null;   // { azimuth, polar, distance, target }
@@ -184,72 +184,8 @@ function _makeCyl(rTop, rBot, h, segs, color) {
 // ── NOA Phase 5: NPC AI 状态标签 sprite（CanvasTexture） ──
 // 已迁移至 scene3d/utils/LabelSprite.js（makeLabelSprite / setLabelSprite）
 
-// ════════════════════════════════════════════════════════════════════
-// Road builder — 2 lanes × 3.5m, split into 2m segment groups.
-// Each group bundles asphalt + 2 edges + 2 shoulders.
-// Curve shifts group.position.z — NO vertex deformation.
-// SEG_LEN=2m → Z step < 7cm across a 260m/9m curve → smooth.
-// ════════════════════════════════════════════════════════════════════
-function _buildRoad(scene) {
-  var roadGroup = new THREE.Group();
-  var ROAD_LEN   = 3000;
-  var LANE_W     = 3.5;
-  var LANE_N     = 2;
-  var ROAD_HALF  = LANE_W * LANE_N / 2;
-  var MARGIN     = 0.5;
-  var ASPHALT_W  = (ROAD_HALF + MARGIN) * 2;
-  var SHLD_W     = 1.5;
-  var shldZ      = ROAD_HALF + MARGIN + SHLD_W / 2;
-  var SEG_LEN    = 2;
-  var nSeg       = Math.floor(ROAD_LEN / SEG_LEN);
-
-  var aGeo = new THREE.BoxGeometry(SEG_LEN, 0.08, ASPHALT_W, 1, 1, 1);
-  var aMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
-  var eGeo = new THREE.BoxGeometry(SEG_LEN, 0.02, 0.28, 1, 1, 1);
-  var eMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333, roughness: 0.3 });
-  var sGeo = new THREE.BoxGeometry(SEG_LEN, 0.04, SHLD_W, 1, 1, 1);
-  var sMat = new THREE.MeshStandardMaterial({ color: 0x556655, roughness: 1.0 });
-
-  for (var si = -Math.floor(nSeg / 2); si < Math.floor(nSeg / 2); si++) {
-    var cx = si * SEG_LEN + SEG_LEN / 2;
-    var seg = new THREE.Group();
-    seg.position.set(cx, 0, 0);
-    seg.userData.isRoadSeg = true;
-    seg.userData.baseX = cx;
-
-    var a = new THREE.Mesh(aGeo, aMat);
-    a.position.y = 0.01; a.receiveShadow = true;
-    seg.add(a);
-
-    for (var ei = -1; ei <= 1; ei += 2) {
-      var e = new THREE.Mesh(eGeo, eMat);
-      e.position.set(0, 0.048, ei * ROAD_HALF);
-      seg.add(e);
-    }
-    for (var si2 = -1; si2 <= 1; si2 += 2) {
-      var s = new THREE.Mesh(sGeo, sMat);
-      s.position.set(0, 0.02, si2 * shldZ);
-      s.receiveShadow = true;
-      seg.add(s);
-    }
-    roadGroup.add(seg);
-  }
-
-  // Centre double yellow lines (solid, not dashed — highway standard)
-  var clGeo = new THREE.BoxGeometry(ROAD_LEN, 0.02, 0.15, 1, 1, 1);
-  var clMat = new THREE.MeshBasicMaterial({ color: 0xffcc44 });
-  for (var dy = -1; dy <= 1; dy += 2) {
-    var cl = new THREE.Mesh(clGeo, clMat);
-    cl.position.set(0, 0.043, dy * 0.15);
-    cl.userData.isLaneMark = true;
-    roadGroup.add(cl);
-  }
-
-  scene.add(roadGroup);
-  _roadGroup = roadGroup;
-}
-
-// _curveShiftAt / _curveHeadingAt 已迁移至 scene3d/utils/CurveMath.js
+// _buildRoad / applyRoadCurve 已迁移至 MVC View 层 scene3d/view/RoadView.js
+// 场景保留 _applyRoadCurve 包装函数以管理 _lastCurveKey / _curveActive 状态。
 
 function _applyRoadCurve(roadData) {
   if (!roadData) return;
@@ -258,23 +194,7 @@ function _applyRoadCurve(roadData) {
   var key = sx + "," + len + "," + off;
   if (key === _lastCurveKey) return;
   _lastCurveKey = key;
-  if (len <= 0 || Math.abs(off) < 0.01) { _curveActive = false; return; }
-  _curveActive = true;
-  var group = _roadGroup;
-  if (!group) return;
-  group.traverse(function(child) {
-    if (child.userData && child.userData.isRoadSeg) {
-      var bx = child.userData.baseX;
-      child.position.z = _curveShiftAt(bx, sx, len, off);
-      // 绕 Y 轴旋转使 segment 跟随道路切线方向，消除折线感
-      child.rotation.y = _curveHeadingAt(bx, sx, len, off);
-      return;
-    }
-    if (child.userData && child.userData.isLaneMark) {
-      child.position.z = child.userData.baseZ + _curveShiftAt(child.position.x, sx, len, off);
-      return;
-    }
-  });
+  _curveActive = applyRoadCurve(_roadGroup, roadData);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1689,9 +1609,10 @@ function init3DScene() {
   scene3d.add(gnd);
   _groundMesh = gnd;
 
-  // ── Road ──
-  _buildRoad(scene3d);
-  _applyRoadCurve(null);  // prime curve key (no data yet, will apply when scene data arrives)
+  // ── Road (MVC View: RoadView.js) ──
+  _roadGroup = buildLegacyRoad(scene3d);
+  _lastCurveKey = '';     // prime curve key; _applyRoadCurve will deform when data arrives
+  _curveActive = false;
 
   // ── Environment ──
   _buildEnvironment(scene3d);
@@ -1721,7 +1642,8 @@ function init3DScene() {
   // NOA Phase 2.3: 池容量 8 → 24，匹配 NOA 24-NPC 场景。
   // 优先使用 glTF 模型（PBR 材质），GLTFLoader 不可用时降级为 BoxGeometry。
   _obsPool = [];
-  _obsTilt = [];
+  _obsTilt.reset();
+  _egoTilt.reset();
   _obsLabelPool = [];
   _obsLabelLast = [];
   for (var oi = 0; oi < 24; oi++) {
@@ -2059,27 +1981,12 @@ function closeNPCDetail() {
   if (_npcPanel) _npcPanel.style.display = 'none';
 }
 
-// ── Body tilt (roll/pitch) 视觉物理近似：航向/车速变化 → 横摆角速度/纵向
-// 加速度 → clamp 后的车身倾斜目标值。纯前端估算（读已有遥测），不改
-// flowsim 后端物理。车辆模型前向为局部 +X（见下方 NPC 朝向注释），故
-// roll（绕前向轴，转弯时车身外倾）用 rotation.x，pitch（绕横向轴，刹车
-// 点头/加速下蹲）用 rotation.z；rotation.y 仍是 yaw。
-var TILT_MAX = 0.06;              // clamp 上限，约 3.4°，避免夸张甩动
-var ROLL_GAIN = 0.02, PITCH_GAIN = 0.015;
-function _tiltTargets(dHeadingWrapped, dt, speed, prevSpeed) {
-  if (dt <= 0 || dt > 0.5) return { roll: 0, pitch: 0 };
-  var yawRate = dHeadingWrapped / dt;
-  var accel = (speed - prevSpeed) / dt;
-  var roll = -yawRate * speed * ROLL_GAIN;   // 转弯时车身向外侧倾斜
-  var pitch = accel * PITCH_GAIN;             // 加速抬头/刹车点头
-  return {
-    roll: Math.max(-TILT_MAX, Math.min(TILT_MAX, roll)),
-    pitch: Math.max(-TILT_MAX, Math.min(TILT_MAX, pitch))
-  };
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Per-frame render: world-space scene, chase camera
+// Body tilt (roll/pitch) 视觉物理近似已迁移到 MVC Model 层：
+// scene3d/model/VisualPhysics.js
+// 车辆模型前向为局部 +X，roll（转弯外倾）用 rotation.x，
+// pitch（刹车点头/加速抬头）用 rotation.z，yaw 用 rotation.y。
 // Road is STATIC at world origin. Ego moves through the world.
 // Camera follows ego. Other vehicles move independently.
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2114,27 +2021,11 @@ function _renderFrame() {
         egoWheels[wri].rotation.x += roll;
       }
     }
-    // 车身侧倾/俯仰：用 _dr 逐帧平滑过的航向/车速做帧间差分（本身已连续，
-    // 不需要额外的 tick 检测），算出目标后再 lerp 到当前值。
-    if (_egoPrevHeading === null) {
-      _egoPrevHeading = _dr.smoothHeading;
-      _egoPrevSpeed = _dr.smoothSpeed;
-      _egoPrevT = now;
-    }
-    var egoDt = now - _egoPrevT;
-    if (egoDt > 0) {
-      var egoDh = _dr.smoothHeading - _egoPrevHeading;
-      while (egoDh > Math.PI) egoDh -= 2 * Math.PI;
-      while (egoDh < -Math.PI) egoDh += 2 * Math.PI;
-      var egoTilt = _tiltTargets(egoDh, egoDt, _dr.smoothSpeed, _egoPrevSpeed);
-      _egoRoll += (egoTilt.roll - _egoRoll) * 0.15;
-      _egoPitch += (egoTilt.pitch - _egoPitch) * 0.15;
-      ego.rotation.x = _egoRoll;
-      ego.rotation.z = _egoPitch;
-      _egoPrevHeading = _dr.smoothHeading;
-      _egoPrevSpeed = _dr.smoothSpeed;
-      _egoPrevT = now;
-    }
+    // MVC Model: 车身侧倾/俯仰由 VisualPhysics 计算，View 层只读结果。
+    _egoTilt.updateTargets(now, _dr.smoothHeading, _dr.smoothSpeed);
+    var egoTilt = _egoTilt.tick();
+    ego.rotation.x = egoTilt.roll;
+    ego.rotation.z = egoTilt.pitch;
     // 灯光接入感知/规划链路：
     // - 刹车灯：vehicle.brake > 0.1 时点亮（来自 vehicle/state）
     // - 转向灯：metrics.route_lane = -1 左转，+1 右转（来自 planning/trajectory 后缀）
@@ -2293,30 +2184,13 @@ function _renderFrame() {
         while (dy < -Math.PI) dy += 2 * Math.PI;
         om.rotation.y += dy * 0.18;
 
-        // 车身侧倾/俯仰：ow 只在 update3D() tick 更新（非逐帧），用 ow.t0
-        // 变化检测新 tick，算出新目标后再逐帧 lerp，与 om.position.lerp
-        // 同一节奏（纯前端近似，同 ego 逻辑，见 _tiltTargets 定义处）。
-        var ti = _obsTilt[oi] || (_obsTilt[oi] = {
-          prevT0: null, prevHeading: ow.heading, prevSpeed: 0,
-          roll: 0, pitch: 0, rollTarget: 0, pitchTarget: 0
-        });
-        if (ti.prevT0 !== null && ow.t0 !== ti.prevT0) {
-          var obsSpdNow = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
-          var obsTickDt = ow.t0 - ti.prevT0;
-          var obsDh = ow.heading - ti.prevHeading;
-          while (obsDh > Math.PI) obsDh -= 2 * Math.PI;
-          while (obsDh < -Math.PI) obsDh += 2 * Math.PI;
-          var obsTilt2 = _tiltTargets(obsDh, obsTickDt, obsSpdNow, ti.prevSpeed);
-          ti.rollTarget = obsTilt2.roll;
-          ti.pitchTarget = obsTilt2.pitch;
-          ti.prevHeading = ow.heading;
-          ti.prevSpeed = obsSpdNow;
-        }
-        ti.prevT0 = ow.t0;
-        ti.roll += (ti.rollTarget - ti.roll) * 0.15;
-        ti.pitch += (ti.pitchTarget - ti.pitch) * 0.15;
-        om.rotation.x = ti.roll;
-        om.rotation.z = ti.pitch;
+        // MVC Model: 障碍物 roll/pitch 由 VisualPhysics 计算。
+        var obsSpdNow = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
+        var ti = _obsTilt.get(oi);
+        ti.updateTargets(ow.t0, ow.heading, obsSpdNow);
+        var obsTilt = ti.tick();
+        om.rotation.x = obsTilt.roll;
+        om.rotation.z = obsTilt.pitch;
 
         var c = (_obsColors[ow.type]) || 0xff9944;
         // Defect 5: 障碍物类型变化时重建外形（轿车 ↔ 胶囊行人 ↔ 圆锥路障），
