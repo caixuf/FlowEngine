@@ -153,7 +153,7 @@
 - 急刹时车头下沉。
 - NPC 转弯/刹车时也有相同效果。
 
-**状态**：待执行
+**状态**：已完成（2026-07-18）— `scene3d/model/VisualPhysics.js` 已实现 `computeTiltTargets` / `TiltState` / `EgoTiltState` / `TiltPool`，`scene3d.js:1987-1990` 已将其应用到 ego，`scene3d.js:2154-2158` 已应用到 NPC 障碍物。
 
 ---
 

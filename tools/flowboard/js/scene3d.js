@@ -203,48 +203,61 @@ function _applyRoadCurve(roadData) {
 let _asphaltTex = null;
 let _shoulderTex = null;
 
-/** 程序化沥青纹理：深灰底 + 多层噪点 + 随机补丁/裂缝，模拟真实路面。 */
+/** 程序化沥青纹理：深灰底 + 多层噪点 + 随机补丁/裂缝 + 轮胎痕迹，模拟真实路面。 */
 function _makeAsphaltTexture() {
   if (_asphaltTex) return _asphaltTex;
   var canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 512;
   var ctx = canvas.getContext('2d');
-  // 基底：不均匀的深灰
-  ctx.fillStyle = '#26282c'; ctx.fillRect(0, 0, 512, 512);
-  // 大色块补丁（模拟沥青压实不均）
-  for (var p = 0; p < 40; p++) {
+  // 基底：不均匀的深灰（略带蓝调，模拟真实沥青）
+  ctx.fillStyle = '#22242a'; ctx.fillRect(0, 0, 512, 512);
+  // 大色块补丁（模拟沥青压实不均，提高对比度）
+  for (var p = 0; p < 55; p++) {
     var px = Math.random() * 512, py = Math.random() * 512;
-    var pr = 30 + Math.random() * 80;
+    var pr = 25 + Math.random() * 70;
     var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
-    var base = 30 + Math.floor(Math.random() * 25);
-    grd.addColorStop(0, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 4) + ',0.35)');
-    grd.addColorStop(1, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 4) + ',0)');
+    var base = 22 + Math.floor(Math.random() * 35);
+    var isDark = Math.random() > 0.55;
+    var a0 = isDark ? 0.42 : 0.32;
+    grd.addColorStop(0, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 5) + ',' + a0 + ')');
+    grd.addColorStop(1, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 5) + ',0)');
     ctx.fillStyle = grd;
     ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
   }
+  // 轮胎痕迹：两条沿纹理方向的暗带，增加方向感和真实感
+  for (var r = 0; r < 3; r++) {
+    var ry = 120 + r * 140 + (Math.random() - 0.5) * 40;
+    var rw = 18 + Math.random() * 10;
+    var rgrd = ctx.createLinearGradient(0, ry - rw, 0, ry + rw);
+    rgrd.addColorStop(0, 'rgba(16,17,20,0)');
+    rgrd.addColorStop(0.5, 'rgba(16,17,20,0.28)');
+    rgrd.addColorStop(1, 'rgba(16,17,20,0)');
+    ctx.fillStyle = rgrd;
+    ctx.fillRect(0, ry - rw, 512, rw * 2);
+  }
   // 深色颗粒
-  for (var i = 0; i < 6000; i++) {
+  for (var i = 0; i < 8000; i++) {
     var x = Math.random() * 512, y = Math.random() * 512;
-    var shade = Math.floor(Math.random() * 35);
-    ctx.fillStyle = 'rgba(' + (26 + shade) + ',' + (28 + shade) + ',' + (32 + shade) + ',0.55)';
+    var shade = Math.floor(Math.random() * 40);
+    ctx.fillStyle = 'rgba(' + (22 + shade) + ',' + (24 + shade) + ',' + (28 + shade) + ',0.6)';
     ctx.fillRect(x, y, 2, 2);
   }
   // 浅色颗粒/反光碎石
-  for (var j = 0; j < 2500; j++) {
+  for (var j = 0; j < 3500; j++) {
     var x2 = Math.random() * 512, y2 = Math.random() * 512;
-    var sh2 = Math.floor(Math.random() * 45);
-    ctx.fillStyle = 'rgba(' + (70 + sh2) + ',' + (74 + sh2) + ',' + (80 + sh2) + ',0.3)';
+    var sh2 = Math.floor(Math.random() * 55);
+    ctx.fillStyle = 'rgba(' + (75 + sh2) + ',' + (80 + sh2) + ',' + (88 + sh2) + ',0.35)';
     ctx.fillRect(x2, y2, 2, 2);
   }
   // 随机细裂缝
-  ctx.strokeStyle = 'rgba(10,10,12,0.35)';
+  ctx.strokeStyle = 'rgba(8,9,11,0.4)';
   ctx.lineWidth = 1;
-  for (var k = 0; k < 12; k++) {
+  for (var k = 0; k < 16; k++) {
     ctx.beginPath();
     var cx = Math.random() * 512, cy = Math.random() * 512;
     ctx.moveTo(cx, cy);
-    for (var s = 0; s < 4; s++) {
-      cx += (Math.random() - 0.5) * 80; cy += (Math.random() - 0.5) * 80;
+    for (var s = 0; s < 5; s++) {
+      cx += (Math.random() - 0.5) * 70; cy += (Math.random() - 0.5) * 70;
       ctx.lineTo(cx, cy);
     }
     ctx.stroke();
@@ -309,7 +322,7 @@ function _buildRoadNetwork(edges) {
   var laneMarkVertOffset = 0;
   // 护栏/路灯/箭头/停止线模板几何体累积，循环结束后合并
   var guardPostGeos = [], guardCapGeos = [], guardRefGeos = [], guardRailGeos = [];
-  var lampPostGeos = [], lampHeadGeos = [];
+  var lampPostGeos = [], lampHeadGeos = [], lampGlowGeos = [];
   var arrowGeos = [], stopLineGeos = [];
   // B.1: 路面水坑几何体累积，合并为 1 个 reflective mesh
   var puddleGeos = [];
@@ -513,11 +526,15 @@ function _buildRoadNetwork(edges) {
     }
 
     // ── 路灯（两侧交错，每隔 40m）──
-    // 静态灯杆 + emissive 灯罩，不添加 PointLight，避免动态光源数量爆炸。
+    // 静态灯杆 + emissive 灯罩 + 光晕面片，不添加 PointLight，避免动态光源数量爆炸。
     var lampSpacing = 40.0;
     var lampCount = Math.max(1, Math.floor(length / lampSpacing));
-    var lampPostGeoTpl = new THREE.CylinderGeometry(0.08, 0.12, 6.0, 10);
-    var lampHeadGeoTpl = new THREE.BoxGeometry(0.5, 0.12, 0.25);
+    var lampPostGeoTpl = new THREE.CylinderGeometry(0.07, 0.11, 6.0, 10);
+    // 灯罩：外壳（扁盒）+ 发光面板（略大扁盒）
+    var lampHeadGeoTpl = new THREE.BoxGeometry(0.55, 0.14, 0.22);
+    var lampPanelGeoTpl = new THREE.BoxGeometry(0.48, 0.10, 0.30);
+    // 光晕面片：面向道路下方，模拟灯罩在地面的光斑
+    var lampGlowGeoTpl = new THREE.PlaneGeometry(3.2, 3.2);
     for (var li3 = 1; li3 <= lampCount; li3++) {
       var lt = Math.min(1.0, li3 * lampSpacing / length);
       var lp = curve.getPointAt(lt);
@@ -531,11 +548,24 @@ function _buildRoadNetwork(edges) {
       // 灯罩：lookAt 朝向道路内侧
       var lampEye = new THREE.Vector3(poleX - lnx * side * 0.8, 5.9, poleZ - lnz * side * 0.8);
       var lampTarget = new THREE.Vector3(poleX - lnx * side * 3.0, 0, poleZ - lnz * side * 3.0);
+      var headingL = Math.atan2(-ltan.z * side, -ltan.x * side);
       var lampM = new THREE.Matrix4();
-      lampM.lookAt(lampEye, lampTarget, new THREE.Vector3(0, 1, 0));
-      // BoxGeometry 默认沿 X，但这里让 Z 指向目标，所以直接平移+旋转即可
+      lampM.makeRotationY(headingL);
       lampM.setPosition(lampEye);
       lampHeadGeos.push(_transformGeometry(lampHeadGeoTpl, lampM));
+      // 发光面板：略低于外壳，朝向路面
+      var panelM = new THREE.Matrix4();
+      panelM.makeRotationY(headingL);
+      panelM.setPosition(poleX - lnx * side * 0.8, 5.82, poleZ - lnz * side * 0.8);
+      lampHeadGeos.push(_transformGeometry(lampPanelGeoTpl, panelM));
+      // 地面光晕：贴地半透明面片，位于灯罩正下方道路区域
+      var glowX = poleX - lnx * side * 2.0;
+      var glowZ = poleZ - lnz * side * 2.0;
+      var glowM = new THREE.Matrix4();
+      glowM.makeRotationX(-Math.PI / 2);
+      glowM.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ltan.z, ltan.x)));
+      glowM.setPosition(glowX, 0.015, glowZ);
+      lampGlowGeos.push(_transformGeometry(lampGlowGeoTpl, glowM));
     }
   }
 
@@ -571,8 +601,8 @@ function _buildRoadNetwork(edges) {
     asphaltTex.anisotropy = 8;
     var roadMat = new THREE.MeshStandardMaterial({
       map: asphaltTex,
-      color: 0x888888, roughness: 0.92, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.02
+      color: 0xbbbbbb, roughness: 0.88, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.035
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -615,7 +645,11 @@ function _buildRoadNetwork(edges) {
 
   // 合并路灯：灯杆 + 灯罩分别合并
   var lampPostMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.5, roughness: 0.5 });
-  var lampHeadMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.8 });
+  var lampHeadMat = new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 0.9 });
+  var lampGlowMat = new THREE.MeshBasicMaterial({
+    color: 0xffffee, transparent: true, opacity: 0.12,
+    depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
+  });
   if (lampPostGeos.length) {
     var lampPostMesh = new THREE.Mesh(_mergeGeometries(lampPostGeos), lampPostMat);
     lampPostMesh.castShadow = true;
@@ -624,6 +658,11 @@ function _buildRoadNetwork(edges) {
   if (lampHeadGeos.length) {
     var lampHeadMesh = new THREE.Mesh(_mergeGeometries(lampHeadGeos), lampHeadMat);
     group.add(lampHeadMesh);
+  }
+  if (lampGlowGeos.length) {
+    var lampGlowMesh = new THREE.Mesh(_mergeGeometries(lampGlowGeos), lampGlowMat);
+    lampGlowMesh.renderOrder = 1;  // 确保光晕在路面之上
+    group.add(lampGlowMesh);
   }
 
   // 合并车道线（vertex colors）：所有黄/白、实/虚线合并为 1 个 mesh
@@ -635,9 +674,10 @@ function _buildRoadNetwork(edges) {
     laneMarkGeo.computeVertexNormals();
     var laneMarkMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: 0.5,
+      roughness: 0.45,
       metalness: 0.0,
-      emissiveIntensity: 0.1
+      emissive: 0xffffff,
+      emissiveIntensity: 0.18
     });
     var laneMarkMesh = new THREE.Mesh(laneMarkGeo, laneMarkMat);
     laneMarkMesh.receiveShadow = false;
@@ -645,7 +685,7 @@ function _buildRoadNetwork(edges) {
   }
 
   // 合并箭头 + 停止线为 1 个白色 emissive mesh
-  var arrowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, emissive: 0xffffff, emissiveIntensity: 0.08 });
+  var arrowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, emissive: 0xffffff, emissiveIntensity: 0.15 });
   if (arrowGeos.length) {
     var arrowMesh = new THREE.Mesh(_mergeGeometries(arrowGeos), arrowMat);
     group.add(arrowMesh);
