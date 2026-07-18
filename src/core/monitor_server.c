@@ -353,6 +353,26 @@ static void send_response(int fd, const char* status, const char* content_type,
 
 /* ── SSE 流 ──────────────────────────────────────────────── */
 
+/**
+ * Flatten a JSON payload to a single line, in place.
+ *
+ * SSE frames are line-delimited: a raw '\n' inside the payload terminates the
+ * "data:" line, and EventSource silently drops every following line as an
+ * unknown field. The cached dashboard JSON is pretty-printed (cJSON_Print in
+ * monitor_node), so without this the browser receives only the first line —
+ * the 45-byte "{"source":...,"age_sec":0.0," prefix — and the dashboard/3D
+ * view starves ("Waiting for data"). Raw \n/\r/\t bytes in serialized JSON
+ * are always structural whitespace (cJSON escapes them inside strings), so
+ * stripping them is lossless.
+ */
+static void sse_flatten_payload(char* s) {
+    char* wr = s;
+    for (char* rd = s; *rd; rd++) {
+        if (*rd != '\n' && *rd != '\r' && *rd != '\t') *wr++ = *rd;
+    }
+    *wr = '\0';
+}
+
 static void handle_sse(int fd, MonitorServer* ms) {
     const char* sse_header =
         "HTTP/1.1 200 OK\r\n"
@@ -381,6 +401,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
 
         if (first || version != last_version) {
             build_sse_json(ms, buf, sizeof(buf));
+            sse_flatten_payload(buf);
             char frame[MONITOR_HTTP_BUF_SIZE + 32];
             int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
             if (write(fd, frame, (size_t)fl) <= 0) break;
