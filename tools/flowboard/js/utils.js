@@ -105,7 +105,7 @@ export function _makeRect(w, h, color) {
 
 // ── Shared car geometry (sedan) ──────────────────────────────────
 // Pre-built geometries reused by every _buildSedan call so we only
-// allocate BoxGeometry / CylinderGeometry once.
+// allocate geometry once. Phase 6 画质升级：增加圆角、车窗、轮毂等细节。
 const _carGeom = {};
 
 /**
@@ -115,19 +115,76 @@ const _carGeom = {};
 export function initCarMesh() {
   if (_carGeom.body) return; // already initialized
   const T = window.THREE;
-  _carGeom.body = new T.BoxGeometry(4.2, 0.85, 1.85);
-  _carGeom.cabin = new T.BoxGeometry(2.2, 0.55, 1.7);
-  _carGeom.windshield = new T.BoxGeometry(0.15, 0.45, 1.6);
-  _carGeom.rearWindow = new T.BoxGeometry(0.12, 0.35, 1.5);
-  _carGeom.frontBumper = new T.BoxGeometry(0.3, 0.35, 1.75);
-  _carGeom.rearBumper = new T.BoxGeometry(0.25, 0.35, 1.75);
-  _carGeom.wheel = new T.CylinderGeometry(0.32, 0.32, 0.28, 16);
-  _carGeom.headlight = new T.BoxGeometry(0.2, 0.15, 0.3);
-  _carGeom.taillight = new T.BoxGeometry(0.15, 0.15, 0.3);
+  // Phase 6 画质再升级：车身不再是简单方块，而是带腰线的“胶囊”长方体
+  // 更多分段给光影更多变化，模拟引擎盖/腰线的曲面过渡。
+  _carGeom.body = new T.BoxGeometry(4.2, 0.72, 1.86, 6, 1, 4);
+  _carGeom.hood = new T.BoxGeometry(1.25, 0.08, 1.52, 3, 1, 3);
+  _carGeom.trunkDeck = new T.BoxGeometry(1.05, 0.06, 1.52, 3, 1, 3);
+  _carGeom.cabin = new T.BoxGeometry(2.15, 0.52, 1.52, 3, 1, 3);
+  _carGeom.windshield = new T.BoxGeometry(0.06, 0.46, 1.48);
+  _carGeom.rearWindow = new T.BoxGeometry(0.06, 0.36, 1.38);
+  _carGeom.sideWindow = new T.BoxGeometry(1.55, 0.36, 1.56);
+  // 轮拱：黑色弧形遮挡，让车轮不像贴上去的
+  _carGeom.wheelArch = new T.BoxGeometry(0.55, 0.38, 0.28, 2, 1, 1);
+  // 前/后保险杠：带弧度感的宽体
+  _carGeom.frontBumper = new T.BoxGeometry(0.18, 0.35, 1.84, 1, 1, 4);
+  _carGeom.rearBumper = new T.BoxGeometry(0.16, 0.35, 1.84, 1, 1, 4);
+  // 侧裙：降低视觉重心
+  _carGeom.sideSkirt = new T.BoxGeometry(2.6, 0.06, 1.92, 4, 1, 1);
+  // 轮胎：加宽并带胎纹环
+  _carGeom.wheel = new T.CylinderGeometry(0.33, 0.33, 0.26, 24);
+  _carGeom.tread = new T.TorusGeometry(0.33, 0.018, 6, 24);
+  _carGeom.hubcap = new T.CylinderGeometry(0.18, 0.18, 0.27, 16);
+  // 车灯：椭圆透镜造型
+  _carGeom.headlight = new T.BoxGeometry(0.08, 0.16, 0.42, 1, 1, 3);
+  _carGeom.taillight = new T.BoxGeometry(0.06, 0.16, 0.42, 1, 1, 3);
+  _carGeom.mirror = new T.BoxGeometry(0.14, 0.2, 0.1, 1, 1, 2);
+  _carGeom.doorHandle = new T.BoxGeometry(0.12, 0.04, 0.05);
+  _carGeom.grille = new T.BoxGeometry(0.05, 0.26, 1.15, 1, 1, 4);
+  _carGeom.licensePlate = new T.BoxGeometry(0.04, 0.14, 0.42, 1, 1, 3);
+  _carGeom.antenna = new T.CylinderGeometry(0.01, 0.01, 0.45, 6);
 }
 
 /**
- * _buildSedan — build a simple car mesh group from shared geometry.
+ * _buildWheel — helper 构建带轮胎+胎纹+轮毂+5辐条的车轮。
+ */
+function _buildWheel(T) {
+  var wg = new T.Group();
+  var rubberMat = new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.05, roughness: 0.82 });
+  var tire = new T.Mesh(_carGeom.wheel, rubberMat);
+  tire.rotation.z = Math.PI / 2;
+  tire.castShadow = true;
+  wg.add(tire);
+  // 胎纹：两条环增加侧面细节
+  var treadMat = new T.MeshStandardMaterial({ color: 0x0a0a0a, metalness: 0.0, roughness: 0.95 });
+  var tread1 = new T.Mesh(_carGeom.tread, treadMat);
+  tread1.rotation.x = Math.PI / 2; tread1.position.x = 0.07;
+  wg.add(tread1);
+  var tread2 = tread1.clone(); tread2.position.x = -0.07;
+  wg.add(tread2);
+  // 轮毂
+  var hubMat = new T.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.7, roughness: 0.25 });
+  var hub = new T.Mesh(_carGeom.hubcap, hubMat);
+  hub.rotation.z = Math.PI / 2;
+  wg.add(hub);
+  // 5 辐条星形轮毂
+  var spokeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.6, roughness: 0.3 });
+  for (var si = 0; si < 5; si++) {
+    var spoke = new T.Mesh(new T.BoxGeometry(0.28, 0.035, 0.025), spokeMat);
+    spoke.rotation.z = Math.PI / 2;
+    spoke.rotation.x = (Math.PI * 2 / 5) * si;
+    wg.add(spoke);
+  }
+  // 中心盖
+  var cap = new T.Mesh(new T.CylinderGeometry(0.05, 0.05, 0.28, 12), hubMat);
+  cap.rotation.z = Math.PI / 2;
+  wg.add(cap);
+  wg.userData.isWheel = true;
+  return wg;
+}
+
+/**
+ * _buildSedan — build a detailed sedan mesh group.
  * @param {number} color        body colour (e.g. 0x4488dd)
  * @param {number} secondaryColor  roof / cabin colour (e.g. 0x3377bb)
  * @returns {THREE.Group}
@@ -136,74 +193,90 @@ export function _buildSedan(color, secondaryColor) {
   initCarMesh(); // ensure shared geometries exist
   const T = window.THREE;
   var g = new T.Group();
+  var bodyMat = new T.MeshStandardMaterial({ color: color, metalness: 0.55, roughness: 0.24, envMapIntensity: 1.0 });
+  var cabinMat = new T.MeshStandardMaterial({ color: secondaryColor, metalness: 0.4, roughness: 0.3, envMapIntensity: 0.8 });
+  var glassMat = new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.04, envMapIntensity: 1.3 });
+  var blackMat = new T.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
+  var chromeMat = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.75, roughness: 0.18 });
+  var archMat = new T.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.85 });
 
-  // Lower body
-  var body = new T.Mesh(
-    _carGeom.body,
-    new T.MeshStandardMaterial({ color: color, metalness: 0.4, roughness: 0.25 })
-  );
-  body.position.y = 0.85;
-  body.castShadow = true;
-  g.add(body);
+  // Lower body — 主车身带腰线曲面感，离地间隙约 0.16m
+  var body = new T.Mesh(_carGeom.body, bodyMat);
+  body.position.y = 0.52; body.castShadow = true; body.receiveShadow = true; g.add(body);
+
+  // Hood / trunk deck 让侧面有层次
+  var hood = new T.Mesh(_carGeom.hood, bodyMat);
+  hood.position.set(1.48, 0.9, 0); hood.castShadow = true; g.add(hood);
+  var deck = new T.Mesh(_carGeom.trunkDeck, bodyMat);
+  deck.position.set(-1.58, 0.87, 0); deck.castShadow = true; g.add(deck);
 
   // Cabin / roof
-  var cabin = new T.Mesh(
-    _carGeom.cabin,
-    new T.MeshStandardMaterial({ color: secondaryColor, metalness: 0.3, roughness: 0.35 })
-  );
-  cabin.position.set(0.5, 1.45, 0);
-  cabin.castShadow = true;
-  g.add(cabin);
+  var cabin = new T.Mesh(_carGeom.cabin, cabinMat);
+  cabin.position.set(0.05, 1.15, 0); cabin.castShadow = true; g.add(cabin);
 
-  // Windshield — 深色高反射玻璃，配合 PMREM 环境贴图反射天空/地面
-  var ws = new T.Mesh(
-    _carGeom.windshield,
-    new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.05 })
-  );
-  ws.position.set(1.45, 1.3, 0);
-  ws.rotation.z = -0.45;
-  g.add(ws);
-
+  // Windshield
+  var ws = new T.Mesh(_carGeom.windshield, glassMat);
+  ws.position.set(1.1, 1.08, 0); ws.rotation.z = -0.45; g.add(ws);
   // Rear window
-  var rw = new T.Mesh(
-    _carGeom.rearWindow,
-    new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.9, roughness: 0.05 })
-  );
-  rw.position.set(-0.55, 1.25, 0);
-  rw.rotation.z = 0.45;
-  g.add(rw);
+  var rw = new T.Mesh(_carGeom.rearWindow, glassMat);
+  rw.position.set(-1.05, 1.02, 0); rw.rotation.z = 0.42; g.add(rw);
+  // Side windows
+  var sideWin = new T.Mesh(_carGeom.sideWindow, glassMat);
+  sideWin.position.set(0.02, 1.13, 0); g.add(sideWin);
 
-  // Front bumper
-  var fb = new T.Mesh(
-    _carGeom.frontBumper,
-    new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.3, roughness: 0.4 })
-  );
-  fb.position.set(2.25, 0.55, 0);
-  g.add(fb);
+  // Wheel arches — 轮拱黑色内衬，避免车轮像贴图
+  var archPos = [[1.35, 0.95], [-1.35, 0.95]];
+  for (var ai = 0; ai < 2; ai++) {
+    var aL = new T.Mesh(_carGeom.wheelArch, archMat);
+    aL.position.set(archPos[ai][0], 0.34, archPos[ai][1]);
+    g.add(aL);
+    var aR = aL.clone(); aR.position.z = -archPos[ai][1]; g.add(aR);
+  }
 
-  // Rear bumper
-  var rb = new T.Mesh(
-    _carGeom.rearBumper,
-    new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.3, roughness: 0.4 })
-  );
-  rb.position.set(-2.25, 0.55, 0);
-  g.add(rb);
+  // Side skirts
+  var skirt = new T.Mesh(_carGeom.sideSkirt, bodyMat);
+  skirt.position.set(0, 0.12, 0); g.add(skirt);
+
+  // Bumpers
+  var fb = new T.Mesh(_carGeom.frontBumper, chromeMat);
+  fb.position.set(2.2, 0.35, 0); fb.castShadow = true; g.add(fb);
+  var rb = new T.Mesh(_carGeom.rearBumper, chromeMat);
+  rb.position.set(-2.2, 0.35, 0); rb.castShadow = true; g.add(rb);
+
+  // Front grille + license plate
+  var grille = new T.Mesh(_carGeom.grille, blackMat);
+  grille.position.set(2.16, 0.56, 0); g.add(grille);
+  var plateF = new T.Mesh(_carGeom.licensePlate, new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 }));
+  plateF.position.set(2.19, 0.26, 0); g.add(plateF);
+  var plateR = plateF.clone();
+  plateR.position.set(-2.19, 0.26, 0); g.add(plateR);
+
+  // Side mirrors
+  var mL = new T.Mesh(_carGeom.mirror, bodyMat);
+  mL.position.set(1.02, 0.92, 0.98); g.add(mL);
+  var mR = new T.Mesh(_carGeom.mirror, bodyMat);
+  mR.position.set(1.02, 0.92, -0.98); g.add(mR);
+
+  // Door handles
+  var dhL = new T.Mesh(_carGeom.doorHandle, chromeMat);
+  dhL.position.set(0.35, 0.72, 0.95); g.add(dhL);
+  var dhR = new T.Mesh(_carGeom.doorHandle, chromeMat);
+  dhR.position.set(0.35, 0.72, -0.95); g.add(dhR);
+
+  // Antenna
+  var ant = new T.Mesh(_carGeom.antenna, chromeMat);
+  ant.position.set(-0.9, 1.4, 0.55); g.add(ant);
 
   // Wheels (4) — 前轮抽到 frontWheels 子 Group 以支持转向动画
   var wheelPos = [
-    [1.3, 0.35, 1.0], [1.3, 0.35, -1.0],
-    [-1.3, 0.35, 1.0], [-1.3, 0.35, -1.0]
+    [1.35, 0.34, 0.95], [1.35, 0.34, -0.95],
+    [-1.35, 0.34, 0.95], [-1.35, 0.34, -0.95]
   ];
-  var frontWheels = new T.Group();
+  var wheels = [], frontWheels = new T.Group();
   for (var wi = 0; wi < 4; wi++) {
-    var wh = new T.Mesh(
-      _carGeom.wheel,
-      new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.3, roughness: 0.6 })
-    );
-    wh.rotation.z = Math.PI / 2;
+    var wh = _buildWheel(T);
     wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
-    wh.castShadow = true;
-    // 前轮（wi=0,1）加入 frontWheels 子 Group，后轮直接挂车体
+    wheels.push(wh);
     if (wi < 2) {
       frontWheels.add(wh);
     } else {
@@ -212,44 +285,48 @@ export function _buildSedan(color, secondaryColor) {
   }
   g.add(frontWheels);
   g.userData.frontWheels = frontWheels;
+  g.userData.wheels = wheels;
 
-  // Headlights — emissive 触发 Bloom 光晕（threshold=0.85，亮区才发光）
-  var hl = new T.Mesh(
-    _carGeom.headlight,
-    new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.2 })
-  );
-  hl.position.set(2.25, 0.65, 0.5);
-  g.add(hl);
-  var hl2 = hl.clone();
-  hl2.position.z = -0.5;
-  g.add(hl2);
+  // Headlights with chrome bezel
+  var hlMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.7, roughness: 0.12 });
+  var bezelMat = new T.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.6, roughness: 0.25 });
+  function addHeadlight(z) {
+    var bg = new T.Group();
+    var lens = new T.Mesh(_carGeom.headlight, hlMat);
+    var bezel = new T.Mesh(new T.BoxGeometry(0.09, 0.18, 0.46, 1, 1, 3), bezelMat);
+    bezel.position.x = -0.02;
+    bg.add(bezel); bg.add(lens);
+    bg.position.set(2.16, 0.58, z);
+    g.add(bg);
+    return bg;
+  }
+  addHeadlight(0.58); addHeadlight(-0.58);
 
-  // Taillights — 红色 emissive，Bloom 会产生红色光晕
-  var tl = new T.Mesh(
-    _carGeom.taillight,
-    new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.2, roughness: 0.2 })
-  );
-  tl.position.set(-2.25, 0.65, 0.5);
-  g.add(tl);
-  var tl2 = tl.clone();
-  tl2.position.z = -0.5;
-  g.add(tl2);
+  // Taillights
+  var tlMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.7, roughness: 0.12 });
+  function addTaillight(z) {
+    var bg = new T.Group();
+    var lens = new T.Mesh(_carGeom.taillight, tlMat);
+    var bezel = new T.Mesh(new T.BoxGeometry(0.07, 0.18, 0.46, 1, 1, 3), bezelMat);
+    bezel.position.x = 0.02;
+    bg.add(bezel); bg.add(lens);
+    bg.position.set(-2.18, 0.58, z);
+    g.add(bg);
+    return bg;
+  }
+  addTaillight(0.58); addTaillight(-0.58);
 
-  // 车头灯真实照射：两个 SpotLight，低角度投射在路面上形成光锥。
-  // 注意：SpotLight 比较贵，只给 ego 车辆开；NPC 车辆只用 emissive 尾灯。
-  var spotL = new T.SpotLight(0xffffee, 2.5, 45, 0.55, 0.5, 1.2);
-  spotL.position.set(2.25, 0.65, 0.5);
-  spotL.target.position.set(12, 0, 0.5);
-  spotL.castShadow = false;  // 避免性能开销和自阴影条纹
-  g.add(spotL);
-  g.add(spotL.target);
-  var spotR = new T.SpotLight(0xffffee, 2.5, 45, 0.55, 0.5, 1.2);
-  spotR.position.set(2.25, 0.65, -0.5);
-  spotR.target.position.set(12, 0, -0.5);
+  // 车头灯真实照射
+  var spotL = new T.SpotLight(0xffffee, 3.0, 60, 0.45, 0.4, 1.2);
+  spotL.position.set(2.2, 0.54, 0.55);
+  spotL.target.position.set(18, 0, 0.55);
+  spotL.castShadow = false;
+  g.add(spotL); g.add(spotL.target);
+  var spotR = new T.SpotLight(0xffffee, 3.0, 60, 0.45, 0.4, 1.2);
+  spotR.position.set(2.2, 0.54, -0.55);
+  spotR.target.position.set(18, 0, -0.55);
   spotR.castShadow = false;
-  g.add(spotR);
-  g.add(spotR.target);
-  // 把车灯存入 userData，方便外部根据昼夜开关
+  g.add(spotR); g.add(spotR.target);
   g.userData.headlights = [spotL, spotR];
 
   return g;
@@ -302,50 +379,100 @@ export function _buildObstacle(type, color) {
     return g;
   }
 
-  // 默认：轿车形（car/truck/cyclist）
-  var body = new T.Mesh(
-    new T.BoxGeometry(1, 0.6, 1),
-    new T.MeshStandardMaterial({ color: color, metalness: 0.35, roughness: 0.3 })
-  );
-  body.position.y = 0.3;
-  body.castShadow = true;
-  g.add(body);
+  // 默认：轿车形（car/truck/cyclist），unit-normalized，scale.set(L,H,W) 映射到真实尺寸
+  var bodyMat = new T.MeshStandardMaterial({ color: color, metalness: 0.45, roughness: 0.28, envMapIntensity: 0.8 });
+  var glassMat = new T.MeshStandardMaterial({ color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.0 });
+  var chromeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.7, roughness: 0.22 });
+  var blackMat = new T.MeshStandardMaterial({ color: 0x151515, roughness: 0.8 });
 
-  var cabin = new T.Mesh(
-    new T.BoxGeometry(0.55, 0.4, 0.88),
-    new T.MeshStandardMaterial({ color: 0x1a2233, metalness: 0.3, roughness: 0.4 })
-  );
-  cabin.position.set(0.05, 0.8, 0);
-  g.add(cabin);
+  // 车身主体（更多分段，光影更柔和）
+  var body = new T.Mesh(new T.BoxGeometry(1, 0.55, 0.96, 4, 1, 3), bodyMat);
+  body.position.y = 0.31; body.castShadow = true; body.receiveShadow = true; g.add(body);
 
-  var ws = new T.Mesh(
-    new T.BoxGeometry(0.08, 0.28, 0.82),
-    new T.MeshStandardMaterial({ color: 0x334455, metalness: 0.5, roughness: 0.15 })
-  );
-  ws.position.set(0.32, 0.78, 0);
-  g.add(ws);
+  // 引擎盖/后备箱盖
+  var hood = new T.Mesh(new T.BoxGeometry(0.32, 0.07, 0.84, 2, 1, 2), bodyMat);
+  hood.position.set(0.36, 0.57, 0); g.add(hood);
+  var deck = new T.Mesh(new T.BoxGeometry(0.26, 0.05, 0.84, 2, 1, 2), bodyMat);
+  deck.position.set(-0.36, 0.56, 0); g.add(deck);
 
-  // 车轮：unit-normalized，半径约 0.18，厚度 0.08
-  var wheelGeo = new T.CylinderGeometry(0.18, 0.18, 0.08, 14);
-  var wheelMat = new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.2, roughness: 0.7 });
-  var wheelPos = [[0.32, 0.18, 0.42], [0.32, 0.18, -0.42], [-0.32, 0.18, 0.42], [-0.32, 0.18, -0.42]];
-  for (var wi = 0; wi < 4; wi++) {
-    var wh = new T.Mesh(wheelGeo, wheelMat);
-    wh.rotation.z = Math.PI / 2;
-    wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
-    wh.castShadow = true;
-    g.add(wh);
+  // 驾驶舱
+  var cabin = new T.Mesh(new T.BoxGeometry(0.52, 0.34, 0.82, 2, 1, 2), bodyMat);
+  cabin.position.set(0.02, 0.74, 0); cabin.castShadow = true; g.add(cabin);
+
+  // 车窗
+  var sideWin = new T.Mesh(new T.BoxGeometry(0.48, 0.25, 0.86, 1, 1, 1), glassMat);
+  sideWin.position.set(0.02, 0.75, 0); g.add(sideWin);
+  var fWin = new T.Mesh(new T.BoxGeometry(0.05, 0.27, 0.74), glassMat);
+  fWin.position.set(0.28, 0.74, 0); fWin.rotation.z = -0.38; g.add(fWin);
+  var rWin = new T.Mesh(new T.BoxGeometry(0.04, 0.23, 0.68), glassMat);
+  rWin.position.set(-0.24, 0.72, 0); rWin.rotation.z = 0.32; g.add(rWin);
+
+  // 轮拱内衬
+  var archGeo = new T.BoxGeometry(0.16, 0.24, 0.12, 1, 1, 1);
+  var archPos = [[0.34, 0.96], [-0.34, 0.96]];
+  for (var ai2 = 0; ai2 < 2; ai2++) {
+    var aL = new T.Mesh(archGeo, blackMat); aL.position.set(archPos[ai2][0], 0.32, archPos[ai2][1]); g.add(aL);
+    var aR = aL.clone(); aR.position.z = -archPos[ai2][1]; g.add(aR);
   }
 
-  // 前灯/尾灯：unit-normalized，位置在车体四角，emissive 触发 Bloom
-  var headMat = new T.MeshStandardMaterial({ color: 0xffffcc, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.2 });
-  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.8, roughness: 0.2 });
-  var hlGeo = new T.BoxGeometry(0.08, 0.12, 0.18);
-  var tlGeo = new T.BoxGeometry(0.06, 0.12, 0.18);
-  var hl1 = new T.Mesh(hlGeo, headMat); hl1.position.set(0.48, 0.35, 0.32); g.add(hl1);
-  var hl2 = new T.Mesh(hlGeo, headMat); hl2.position.set(0.48, 0.35, -0.32); g.add(hl2);
-  var tl1 = new T.Mesh(tlGeo, tailMat); tl1.position.set(-0.48, 0.35, 0.32); g.add(tl1);
-  var tl2 = new T.Mesh(tlGeo, tailMat); tl2.position.set(-0.48, 0.35, -0.32); g.add(tl2);
+  // 侧裙
+  var skirt = new T.Mesh(new T.BoxGeometry(0.65, 0.04, 0.99, 3, 1, 1), bodyMat);
+  skirt.position.set(0, 0.11, 0); g.add(skirt);
+
+  // 前/后保险杠
+  var fBumper = new T.Mesh(new T.BoxGeometry(0.06, 0.16, 0.98, 1, 1, 3), chromeMat);
+  fBumper.position.set(0.52, 0.26, 0); g.add(fBumper);
+  var rBumper = new T.Mesh(new T.BoxGeometry(0.05, 0.16, 0.98, 1, 1, 3), chromeMat);
+  rBumper.position.set(-0.52, 0.26, 0); g.add(rBumper);
+  // 进气格栅
+  var grille = new T.Mesh(new T.BoxGeometry(0.03, 0.18, 0.55, 1, 1, 2), blackMat);
+  grille.position.set(0.51, 0.35, 0); g.add(grille);
+
+  // 车轮：带胎纹 + 5 辐条 + 中心盖
+  var wheels = [];
+  var wheelGeo = new T.CylinderGeometry(0.17, 0.17, 0.09, 18);
+  var treadGeo = new T.TorusGeometry(0.17, 0.01, 4, 18);
+  var tireMat = new T.MeshStandardMaterial({ color: 0x121212, metalness: 0.05, roughness: 0.85 });
+  var hubGeo = new T.CylinderGeometry(0.095, 0.095, 0.1, 12);
+  var hubMat = new T.MeshStandardMaterial({ color: 0x999999, metalness: 0.55, roughness: 0.35 });
+  var spokeMat = new T.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.5, roughness: 0.4 });
+  var wheelPos = [[0.34, 0.18, 0.41], [0.34, 0.18, -0.41], [-0.34, 0.18, 0.41], [-0.34, 0.18, -0.41]];
+  for (var wi = 0; wi < 4; wi++) {
+    var wg = new T.Group();
+    var tire = new T.Mesh(wheelGeo, tireMat); tire.rotation.z = Math.PI / 2; tire.castShadow = true; wg.add(tire);
+    var t1 = new T.Mesh(treadGeo, tireMat); t1.rotation.x = Math.PI / 2; t1.position.x = 0.025; wg.add(t1);
+    var t2 = t1.clone(); t2.position.x = -0.025; wg.add(t2);
+    var hub = new T.Mesh(hubGeo, hubMat); hub.rotation.z = Math.PI / 2; wg.add(hub);
+    for (var si = 0; si < 5; si++) {
+      var spoke = new T.Mesh(new T.BoxGeometry(0.14, 0.025, 0.02), spokeMat);
+      spoke.rotation.z = Math.PI / 2; spoke.rotation.x = (Math.PI * 2 / 5) * si;
+      wg.add(spoke);
+    }
+    var cap = new T.Mesh(new T.CylinderGeometry(0.03, 0.03, 0.11, 8), hubMat);
+    cap.rotation.z = Math.PI / 2; wg.add(cap);
+    wg.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
+    wg.userData.isWheel = true;
+    wheels.push(wg); g.add(wg);
+  }
+  g.userData.wheels = wheels;
+
+  // 前灯/尾灯（带边框）
+  var headMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.12 });
+  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.6, roughness: 0.12 });
+  var bezelMat2 = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.5, roughness: 0.3 });
+  var hlGeo = new T.BoxGeometry(0.04, 0.1, 0.18, 1, 1, 2);
+  var tlGeo = new T.BoxGeometry(0.035, 0.1, 0.18, 1, 1, 2);
+  function makeObsLight(z, isHead) {
+    var bg = new T.Group();
+    var lens = new T.Mesh(isHead ? hlGeo : tlGeo, isHead ? headMat : tailMat);
+    var bezel = new T.Mesh(new T.BoxGeometry(0.05, 0.11, 0.2, 1, 1, 2), bezelMat2);
+    bezel.position.x = isHead ? -0.01 : 0.01;
+    bg.add(bezel); bg.add(lens);
+    bg.position.set(isHead ? 0.51 : -0.51, 0.38, z);
+    g.add(bg);
+  }
+  makeObsLight(0.3, true); makeObsLight(-0.3, true);
+  makeObsLight(0.3, false); makeObsLight(-0.3, false);
 
   return g;
 }
