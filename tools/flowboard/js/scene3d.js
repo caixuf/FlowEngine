@@ -406,17 +406,22 @@ function _buildRoadNetwork(edges) {
     _roadCurveLens.push(length);
     var lanes = edge.lanes || 2;
     var laneWidth = edge.lane_width || 3.5;
-    /* 道路宽度：
-     *  - 多车道（lanes ≥ 2）：双向对称，每侧 N 条车道 + 路缘余量
-     *  - 单车道（lanes = 1，匝道/加速车道）：单向路，3.8m 半宽（≈1 车道 + 双侧路肩）
-     *    不画中心黄线，避免单车道匝道中间出现"双黄线"的滑稽画面。 */
-    var halfWidth = (lanes >= 2) ? (lanes * laneWidth + 0.3) : (laneWidth + 0.3);
+    var isOneway = !!edge.oneway;
+    /* 道路宽度计算：
+     *  - 双向道路（!isOneway）：lanes = 总车道数（左右对称），单侧车道数 = lanes/2
+     *    半宽 = 单侧车道数 × 车道宽 + 路缘余量
+     *    双向两车道(lanes=2)：半宽 = 1*3.5+0.3 = 3.8m（与旧版硬编码道路一致）
+     *  - 单向道路（isOneway，匝道/加速车道）：lanes = 单向车道数
+     *    半宽 = 车道数 × 车道宽/2 + 双侧路肩余量，不画中心黄线 */
+    var lanesPerSide = isOneway ? lanes : (lanes / 2);
+    var halfWidth = isOneway ? (lanes * laneWidth * 0.5 + 0.6) : (lanesPerSide * laneWidth + 0.3);
 
     // 记录首尾坐标供 junction 检测
     edgeEnds.push({
       start: { x: nodes[0][0], z: nodes[0][1] },
       end:   { x: nodes[nodes.length - 1][0], z: nodes[nodes.length - 1][1] },
-      lanes: lanes, laneWidth: laneWidth, length: length, curve: curve
+      lanes: lanes, laneWidth: laneWidth, length: length, curve: curve,
+      isOneway: isOneway, lanesPerSide: lanesPerSide
     });
 
     // ── 路面 ribbon mesh ──
@@ -478,14 +483,15 @@ function _buildRoadNetwork(edges) {
     shldVertOffset += sPos.length / 3;
 
     // ── 车道线：中心双黄线 + 车道分隔虚线 + 道路边缘白实线 ──
-    // 中心双黄线（实线）：双向道路（lanes ≥ 2）在参考线两侧画双黄线；
+    // 中心双黄线（实线）：双向道路（!isOneway）在参考线两侧画双黄线；
     // 单车道匝道不画中心黄线（单向路无对向分隔）。
-    if (lanes >= 2) {
+    if (!isOneway) {
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -0.12, 0.15, 0xffd633, 0.046);
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  0.12, 0.15, 0xffd633, 0.046);
     }
-    // 车道分隔虚线：每侧 lanes-1 条（lanes 条车道有 lanes-1 个间隔）。
-    for (var li = 1; li < lanes; li++) {
+    // 车道分隔虚线：顺向侧(负方向) lanesPerSide-1 条 + 对向侧(正方向) lanesPerSide-1 条
+    // 顺向车道中心在 -laneWidth/2, -3*laneWidth/2, ...；对向在 +laneWidth/2, +3*laneWidth/2, ...
+    for (var li = 1; li < lanesPerSide; li++) {
       var off = li * laneWidth;
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  off, 0.15, 0xffffff, 0.046, true);
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -off, 0.15, 0xffffff, 0.046, true);

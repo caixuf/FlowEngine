@@ -102,6 +102,7 @@ class Road:
     # esmini 解析后通过 RM_PositionData.z 暴露给 frenet_to_world，再经 scene_pub
     # 透传成 nodes 三元组 [x, y, z]，前端 scene3d.js 用 z 做路面 Y 高度。
     elevation_profile: list = field(default_factory=list)
+    oneway: bool = False  # True=单向道路(不生成对向车道)，False=双向对称
 
 
 @dataclass
@@ -205,12 +206,17 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
         lanes = int(e.get("lanes", e.get("lane_count", 2)))
         lw = float(e.get("lane_width", DEFAULT_LANE_WIDTH))
         sp = float(e.get("speed_limit", DEFAULT_SPEED))
+        oneway = bool(e.get("oneway", False))
         profile = e.get("curvature_profile")
         if profile:
             r, state = build_curve_road_from_profile(
                 eid, etype, profile, lanes, lw, sp, state)
         else:
             r, state = build_straight_road(eid, etype, length, lanes, lw, sp, state)
+        r.oneway = oneway
+        # 匝道(ramp)类道路默认单向
+        if "ramp" in etype.lower():
+            r.oneway = True
         # 高架 elevation_profile 透传（ [{"s":0,"h":0},{"s":250,"h":8}] ）
         r.elevation_profile = list(e.get("elevation_profile") or [])
         roads.append(r)
@@ -454,18 +460,31 @@ def road_to_xml(road: Road) -> ET.Element:
                 "b": "0.0", "c": "0.0", "d": "0.0",
             })
 
-    # 车道：center(参考线 width=0) + right N 条 driving 车道
+    # 判断是否单向道路：匝道(ramp)、加速车道等名称包含 ramp/oneway 或显式 oneway=True
+    is_oneway = ("ramp" in road.name.lower() or
+                 road.lane_count == 1 or
+                 getattr(road, "oneway", False))
+    # 车道：center(参考线 width=0) + right N 条顺向 + left N 条对向(双向道路)
     lanes = ET.SubElement(r, "lanes")
     ls = ET.SubElement(lanes, "laneSection", {"s": "0.0"})
     center = ET.SubElement(ls, "center")
     cl = ET.SubElement(center, "lane", {"id": "0", "type": "none"})
     ET.SubElement(cl, "width", {"a": "0", "b": "0", "c": "0", "d": "0"})
+    # right 侧：顺向车道（id=-1,-2,...,-N）
     right = ET.SubElement(ls, "right")
     for li in range(1, road.lane_count + 1):
         ln = ET.SubElement(right, "lane", {"id": f"-{li}", "type": "driving"})
         ET.SubElement(ln, "width", {
             "a": f"{road.lane_width:.4f}", "b": "0", "c": "0", "d": "0"
         })
+    # left 侧：对向车道（id=+1,+2,...,+N），双向道路才生成
+    if not is_oneway:
+        left = ET.SubElement(ls, "left")
+        for li in range(1, road.lane_count + 1):
+            ln = ET.SubElement(left, "lane", {"id": f"{li}", "type": "driving"})
+            ET.SubElement(ln, "width", {
+                "a": f"{road.lane_width:.4f}", "b": "0", "c": "0", "d": "0"
+            })
     # 限速 via type/speed (OpenDRIVE 用 road type 元素)
     t = ET.SubElement(r, "type", {"s": "0.0", "type": "town"})
     ET.SubElement(t, "speed", {"max": f"{road.speed_limit:.4f}", "unit": "m/s"})

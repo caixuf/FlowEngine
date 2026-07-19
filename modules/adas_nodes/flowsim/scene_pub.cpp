@@ -183,6 +183,9 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
                 cJSON_AddNumberToObject(edge, "lane_width",
                                         (road_lw > 0.0) ? road_lw : cfg.lane_width);
             }
+            /* oneway: 匝道(ramp)为单向道路，其余默认双向对称 */
+            bool is_oneway = (info.str_id.find("ramp") != std::string::npos);
+            cJSON_AddBoolToObject(edge, "oneway", is_oneway);
             cJSON_AddNumberToObject(edge, "length", info.length);
             cJSON_AddItemToArray(edges, edge);
         }
@@ -198,6 +201,7 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
 
         cJSON_AddNumberToObject(edge, "lanes", (double)cfg.lane_count);
         cJSON_AddNumberToObject(edge, "lane_width", cfg.lane_width);
+        cJSON_AddBoolToObject(edge, "oneway", false);  // 旧版直道默认双向
         double total_len = cfg.curve_start_x + cfg.curve_length_m;
         if (total_len < 200.0) total_len = 200.0;
         cJSON_AddNumberToObject(edge, "length", total_len);
