@@ -2266,11 +2266,14 @@ function _renderFrame() {
       fw.rotation.y = v.steer * 0.5;
     }
     // 车轮滚动动画：根据车速绕轮轴旋转
+    // GLTF 车轮 cylinder axis=Z → 用 rotation.z；程序化 _buildSedan axis=X → rotation.x
     var egoWheels = ego.userData.wheels;
     if (egoWheels && v.speed > 0.1) {
       var roll = (v.speed || 0) * 0.016 / 0.32;
       for (var wri = 0; wri < egoWheels.length; wri++) {
-        egoWheels[wri].rotation.x += roll;
+        var w = egoWheels[wri];
+        if (w.userData && w.userData.rollAxis === 'z') w.rotation.z += roll;
+        else w.rotation.x += roll;
       }
     }
     // MVC Model: 车身侧倾/俯仰由 VisualPhysics 计算，View 层只读结果。
@@ -2493,9 +2496,12 @@ function _renderFrame() {
           var obsSpd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
           if (obsSpd > 0.1) {
             // unit-normalized 轮半径 0.17，scale.x = 车长 L，实际轮半径 = 0.17 * L
+            // GLTF 车轮 cylinder axis=Z → rotation.z；程序化 axis=X → rotation.x
             var obsRoll = obsSpd * 0.016 / (0.17 * Math.max(1, L));
             for (var owi = 0; owi < obsWheels.length; owi++) {
-              obsWheels[owi].rotation.x += obsRoll;
+              var owheel = obsWheels[owi];
+              if (owheel.userData && owheel.userData.rollAxis === 'z') owheel.rotation.z += obsRoll;
+              else owheel.rotation.x += obsRoll;
             }
           }
         }

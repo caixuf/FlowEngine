@@ -33,15 +33,22 @@ const MODEL_NAMES = ['sedan', 'truck', 'suv', 'pedestrian'];
 
 /**
  * 从 glTF 场景建立带 userData 的车辆 Group。
- * - 保留节点层级与 name（便于按名查找车轮）
+ * - 保留节点层级与 name（便于按名查找车轮/轴）
  * - 克隆 material 使每个实例独立可改色
- * - 扫描 wheel_FL/FR/RL/RR 节点，建立 frontAxle / rearAxle Group + wheels 数组。
- *   frontAxle Group 位于前轴中心，rearAxle 位于后轴中心，车轮改为相对位置后挂入，
- *   这样 _renderFrame 的 frontAxle.rotation.y（转向绕轴心）和 wheels[].rotation.x（滚动）能生效
+ *
+ * 车辆转向系统已烘进 glTF 节点层级（gen_models.py）：
+ *   axle_front / axle_rear — 带 translation 的 Group 节点（pivot 在轴心）
+ *   wheel_FL/FR/RL/RR      — 挂在 axle 节点下，translation = 相对轴心偏移；
+ *                            wheel 几何居中在原点（cylinder_vertices(0,0,0,...)）。
+ * 因此这里只需按名查找节点并填入 userData，无需 reparent / 重算几何中心 ——
+ * 转向 rotation.y 绕轴心自转（不再画弧线），滚动 rotation.z 绕轮轴自转。
+ *
+ * wheel.userData.rollAxis = 'z' 标记 GLTF 车轮的滚动轴，scene3d.js 据此选
+ * rotation.z（GLTF，cylinder axis=Z）或 rotation.x（程序化 _buildSedan，cylinder axis=X）。
  */
 function _buildVehicleFromGltf(name, gltf) {
   var group = new THREE.Group();
-  // 保留层级：把 gltf.scene 的顶层子节点克隆进来（保留 name）
+  // 保留层级：把 gltf.scene 的顶层子节点克隆进来（保留 name 与 parent/child）
   gltf.scene.children.forEach(function(child) {
     group.add(child.clone());
   });
@@ -58,68 +65,31 @@ function _buildVehicleFromGltf(name, gltf) {
   // 车辆类型才需要建立 wheel userData（行人无轮）
   if (name !== 'pedestrian') {
     var fl = null, fr = null, rl = null, rr = null;
+    var fwGroup = null, rwGroup = null;
     group.traverse(function(c) {
-      switch (c.name) {
-        case 'wheel_FL': fl = c; break;
-        case 'wheel_FR': fr = c; break;
-        case 'wheel_RL': rl = c; break;
-        case 'wheel_RR': rr = c; break;
+      var n = c.name;
+      if (n === 'axle_front') fwGroup = c;
+      else if (n === 'axle_rear') rwGroup = c;
+      else if (n === 'wheel_FL') fl = c;
+      else if (n === 'wheel_FR') fr = c;
+      else if (n === 'wheel_RL') rl = c;
+      else if (n === 'wheel_RR') rr = c;
+    });
+    // 标记 GLTF 车轮滚动轴 = Z（cylinder axis=Z），scene3d.js 据此用 rotation.z 滚动。
+    // 程序化 _buildSedan 的车轮没有此标记，默认走 rotation.x（cylinder axis=X）。
+    [fl, fr, rl, rr].forEach(function(w) {
+      if (w) {
+        if (!w.userData) w.userData = {};
+        w.userData.rollAxis = 'z';
       }
     });
     var wheels = [];
-    if (fl && fr) {
-      // 建立前轴 Group：位于 FL/FR 几何中心。注意不能用 getWorldPosition() ——
-      // gen_models.py 生成的 glTF 节点变换是单位矩阵，车轮的真实位置烘在顶点
-      // 数据里，getWorldPosition 恒返回 (0,0,0)，会把转向支点错误地放在车身
-      // 原点，导致转向时车轮绕错误支点画弧线。改用几何包围盒中心（世界空间）。
-      var flCenter = new THREE.Box3().setFromObject(fl).getCenter(new THREE.Vector3());
-      var frCenter = new THREE.Box3().setFromObject(fr).getCenter(new THREE.Vector3());
-      var fwCenter = flCenter.clone().add(frCenter).multiplyScalar(0.5);
-      var fwGroup = new THREE.Group();
-      fwGroup.name = '_axle_front';
-      fwGroup.position.copy(fwCenter);
-      // 将 FL/FR 从原 parent 移入 fwGroup，调整为相对坐标
-      [[fl, flCenter], [fr, frCenter]].forEach(function(pair) {
-        var w = pair[0];
-        // 相对 fwGroup 的位置（提前算好，避免 reparent 后 matrixWorld 失效）
-        var wp = pair[1].clone().sub(fwCenter);
-        if (w.parent) w.parent.remove(w);
-        w.position.copy(wp);
-        w.rotation.set(0, 0, 0);  // 重置旋转，滚动动画由 rotation.x 驱动
-        fwGroup.add(w);
-        wheels.push(w);
-      });
-      group.add(fwGroup);
-      group.userData.frontAxle = fwGroup;
-      // 后轴 Group：pivot 在后轴中心，后轮相对轴定位
-      if (rl || rr) {
-        var rlCenter = rl ? new THREE.Box3().setFromObject(rl).getCenter(new THREE.Vector3()) : null;
-        var rrCenter = rr ? new THREE.Box3().setFromObject(rr).getCenter(new THREE.Vector3()) : null;
-        var rwCenter = new THREE.Vector3();
-        if (rlCenter && rrCenter) {
-          rwCenter.copy(rlCenter).add(rrCenter).multiplyScalar(0.5);
-        } else if (rlCenter) { rwCenter.copy(rlCenter); }
-        else { rwCenter.copy(rrCenter); }
-        var rwGroup = new THREE.Group();
-        rwGroup.name = '_axle_rear';
-        rwGroup.position.copy(rwCenter);
-        [[rl, rlCenter], [rr, rrCenter]].forEach(function(pair) {
-          var w = pair[0], wc = pair[1];
-          if (!w || !wc) return;
-          var wp = wc.clone().sub(rwCenter);
-          if (w.parent) w.parent.remove(w);
-          w.position.copy(wp);
-          w.rotation.set(0, 0, 0);
-          rwGroup.add(w);
-          wheels.push(w);
-        });
-        group.add(rwGroup);
-        group.userData.rearAxle = rwGroup;
-      }
-    } else {
-      // 未找到命名前轮：收集所有 wheel_* 作为普通轮
-      [fl, fr, rl, rr].forEach(function(w) { if (w) wheels.push(w); });
-    }
+    if (fl) wheels.push(fl);
+    if (fr) wheels.push(fr);
+    if (rl) wheels.push(rl);
+    if (rr) wheels.push(rr);
+    if (fwGroup) group.userData.frontAxle = fwGroup;
+    if (rwGroup) group.userData.rearAxle = rwGroup;
     if (wheels.length) group.userData.wheels = wheels;
   }
   // 灯节点扫描：brakelight_L/R, turnsignal_FL/FR/RL/RR, headlight_L/R。
@@ -221,19 +191,27 @@ export function getModel(type) {
 }
 
 /** clone() 后 userData.frontAxle / rearAxle / wheels 引用失效。
- *  clone 已保留完整层级（_axle_front / _axle_rear 含车轮），
- *  仅需按名查找并重建 userData 引用，无需重建 Group。 */
+ *  clone 已保留完整层级（axle_front / axle_rear 含 wheel_* 子节点），
+ *  仅需按名查找并重建 userData 引用，无需重建 Group。
+ *  同时为新克隆的 wheel_* 节点重新打 rollAxis='z' 标记（GLTF cylinder axis=Z）。 */
 function _relinkWheelUserData(clone) {
   var fwGroup = null, rwGroup = null;
   var fl = null, fr = null, rl = null, rr = null;
   clone.traverse(function(c) {
     var n = c.name;
-    if (n === '_axle_front') fwGroup = c;
-    else if (n === '_axle_rear') rwGroup = c;
+    if (n === 'axle_front') fwGroup = c;
+    else if (n === 'axle_rear') rwGroup = c;
     else if (n === 'wheel_FL') fl = c;
     else if (n === 'wheel_FR') fr = c;
     else if (n === 'wheel_RL') rl = c;
     else if (n === 'wheel_RR') rr = c;
+  });
+  // 为每个 wheel 节点重打 rollAxis='z'（与 _buildVehicleFromGltf 保持一致）
+  [fl, fr, rl, rr].forEach(function(w) {
+    if (w) {
+      if (!w.userData) w.userData = {};
+      w.userData.rollAxis = 'z';
+    }
   });
   var wheels = [];
   if (fwGroup) { clone.userData.frontAxle = fwGroup; if (fl) wheels.push(fl); if (fr) wheels.push(fr); }

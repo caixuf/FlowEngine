@@ -354,14 +354,26 @@ MODEL_SPECS = [
             {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65, -0.82, 0.08, 0.16, 0.12)},
             {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70,  0.82, 0.08, 0.16, 0.12)},
             {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70, -0.82, 0.08, 0.16, 0.12)},
-            # 车轮（圆柱，轴沿 Z 横向，24 段→更圆滑，旋转 rotation.x 实现滚动）
-            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33,  0.93, 0.33, 0.26, "z", 24)},
-            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33, -0.93, 0.33, 0.26, "z", 24)},
-            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33,  0.93, 0.33, 0.26, "z", 24)},
-            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33, -0.93, 0.33, 0.26, "z", 24)},
             # 自动驾驶小蓝灯 ×2 (ads_indicator, mat 6) — 车尾左右，始终亮
             {"name": "ads_indicator_L", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.75, 0.88,  0.48, 0.07, 0.08, "y", 12)},
             {"name": "ads_indicator_R", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.75, 0.88, -0.48, 0.07, 0.08, "y", 12)},
+            # ── 车辆转向系统：前/后轴 Group（pivot 在轴心，无 mesh）──
+            # axleX=1.35, rearAxleX=-1.35, wheelY=0.33, wheelZ=0.93（与 _buildSedan 一致）
+            {"name": "axle_front", "translation": [ 1.35, 0.33, 0.0]},
+            {"name": "axle_rear",  "translation": [-1.35, 0.33, 0.0]},
+            # 车轮（圆柱，轴沿 Z 横向，24 段→更圆滑；几何居中在原点 cylinder_vertices(0,0,0,...)，
+            #       挂在 axle 节点下，translation = 相对轴心的偏移）。
+            #   滚动方向：cylinder axis = Z → rolling 用 rotation.z
+            #   （scene3d.js 通过 wheel.userData.rollAxis='z' 区分 GLTF 车轮）
+            #   转向：父 axle Group 的 rotation.y 绕轴心自转，不再画弧线 → 修复"车轮乱飞"
+            {"name": "wheel_FL", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0,  0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_FR", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0, -0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_RL", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0,  0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_RR", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0, -0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
         ],
     },
     # ── truck：车头朝 +x，货箱在 -x；圆柱车轮 + 灯节点
@@ -380,10 +392,18 @@ MODEL_SPECS = [
             {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices( 1.95, 0.55, -0.95, 0.08, 0.14, 0.10)},
             {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-4.95, 0.90,  0.95, 0.08, 0.14, 0.10)},
             {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-4.95, 0.90, -0.95, 0.08, 0.14, 0.10)},
-            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.50, 0.50,  1.10, 0.50, 0.40, "z", 14)},
-            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.50, 0.50, -1.10, 0.50, 0.40, "z", 14)},
-            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.50, 0.50,  1.10, 0.50, 0.40, "z", 14)},
-            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.50, 0.50, -1.10, 0.50, 0.40, "z", 14)},
+            # ── 车辆转向系统：前/后轴 Group（pivot 在轴心，无 mesh）──
+            {"name": "axle_front", "translation": [ 1.50, 0.50, 0.0]},
+            {"name": "axle_rear",  "translation": [-1.50, 0.50, 0.0]},
+            # 车轮几何居中在原点，挂在 axle 节点下，translation = 相对轴心偏移
+            {"name": "wheel_FL", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0,  1.10],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_FR", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0, -1.10],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_RL", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0,  1.10],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.50, 0.40, "z", 14)},
+            {"name": "wheel_RR", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0, -1.10],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.50, 0.40, "z", 14)},
         ],
     },
     # ── suv：高车身 + 圆柱车轮 + 灯节点
@@ -403,10 +423,18 @@ MODEL_SPECS = [
             {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices( 2.22, 0.66, -0.80, 0.08, 0.14, 0.10)},
             {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.22, 0.72,  0.80, 0.08, 0.14, 0.10)},
             {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.22, 0.72, -0.80, 0.08, 0.14, 0.10)},
-            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.40, 0.38,  0.93, 0.38, 0.28, "z", 14)},
-            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.40, 0.38, -0.93, 0.38, 0.28, "z", 14)},
-            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.40, 0.38,  0.93, 0.38, 0.28, "z", 14)},
-            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.40, 0.38, -0.93, 0.38, 0.28, "z", 14)},
+            # ── 车辆转向系统：前/后轴 Group（pivot 在轴心，无 mesh）──
+            {"name": "axle_front", "translation": [ 1.40, 0.38, 0.0]},
+            {"name": "axle_rear",  "translation": [-1.40, 0.38, 0.0]},
+            # 车轮几何居中在原点，挂在 axle 节点下，translation = 相对轴心偏移
+            {"name": "wheel_FL", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0,  0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_FR", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0, -0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_RL", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0,  0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.38, 0.28, "z", 14)},
+            {"name": "wheel_RR", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0, -0.93],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.38, 0.28, "z", 14)},
         ],
     },
     {
@@ -429,7 +457,15 @@ MODEL_SPECS = [
 # ── glTF 构建器 ──────────────────────────────────────────────
 
 def build_gltf(spec: dict) -> dict:
-    """从规格构建完整 glTF JSON（嵌入 base64 buffers）。"""
+    """从规格构建完整 glTF JSON（嵌入 base64 buffers）。
+
+    支持节点层级（车辆转向系统）：
+      - part 可带 "translation"（节点平移）和 "parent"（父节点名）。
+      - 无 "build_fn" 的 part 视为 Group 节点（仅 transform，无 mesh），
+        例如 axle_front / axle_rear —— 车轮挂在轴下，translation 为相对轴心的偏移。
+      - 有 "build_fn" 的 part 仍是 mesh 节点（保留原行为）。
+    scene.nodes 只列顶层节点（无 parent），子节点通过父节点 "children" 引用。
+    """
     buf = BufferBuilder()
     meshes = []
     materials_list = []
@@ -440,11 +476,15 @@ def build_gltf(spec: dict) -> dict:
         if mat:
             materials_list.append(mat)
 
-    # 构建每个 part 作为一个独立的 mesh primitive
+    # ── 第一阶段：为带 build_fn 的 part 构建 mesh primitive（写入 buffer）──
+    # 没有 build_fn 的 part（如 axle_front/axle_rear）只贡献 transform 节点，不建 mesh。
     mesh_primitives = []
-    part_names = []
+    mesh_idx_by_name: dict[str, int] = {}
     for part in spec["parts"]:
-        result = part["build_fn"]()
+        build_fn = part.get("build_fn")
+        if not build_fn:
+            continue  # group-only node（axle_front / axle_rear 等）
+        result = build_fn()
         # build_fn 可返回两种格式：
         #   - list[float]  : 仅顶点（box 风格，每 4 顶点 = 2 三角形，自动生成索引）
         #   - (verts, idx) : 顶点 + 自定义索引（cylinder 等非 box 几何）
@@ -465,28 +505,25 @@ def build_gltf(spec: dict) -> dict:
         # 所以索引保持相对值（从 0 开始）即可。
         idx_offset = buf.add_u16s(tris)
 
-        # 每个 part 独立 mesh
-        pos_accessor_idx = len(meshes) * 2
-        idx_accessor_idx = pos_accessor_idx + 1
         mat_idx = part["mat"]
-
+        mesh_idx = len(meshes)
+        # pos_accessor_idx / idx_accessor_idx 占位，第二阶段填入真实 accessor 索引
+        pos_accessor_idx = mesh_idx * 2
+        idx_accessor_idx = pos_accessor_idx + 1
         prim = {
             "attributes": {"POSITION": pos_accessor_idx, "NORMAL": pos_accessor_idx + 1},
             "indices": idx_accessor_idx,
             "material": mat_idx,
         }
-
         meshes.append({
             "primitives": [prim],
             "name": part["name"],
         })
-
-        # Accessors 和 bufferViews 在后面全局生成
         mesh_primitives.append({
             "pos_accessor": {"count": len(verts) // 6, "min": [], "max": [], "offset": v_offset},
             "idx_accessor": {"count": len(tris), "offset": idx_offset},
         })
-        part_names.append(part["name"])
+        mesh_idx_by_name[part["name"]] = mesh_idx
 
     # 构建 buffer view 和 accessor
     b64 = buf.to_base64()
@@ -567,14 +604,35 @@ def build_gltf(spec: dict) -> dict:
         prim["attributes"]["NORMAL"] = len(accessors) - 2
         prim["indices"] = len(accessors) - 1
 
-    # 组装 scene
-    node_indices = list(range(len(meshes)))
+    # ── 第二阶段：组装节点树（支持 parent/translation 层级）──
+    # 每个 part 对应一个 node：有 build_fn 的带 mesh 引用，否则只是 transform Group。
+    # 子节点（part 带 "parent"）通过父节点 "children" 数组引用。
+    nodes: list[dict] = []
+    node_idx_by_name: dict[str, int] = {}
+    for part in spec["parts"]:
+        node: dict = {"name": part["name"]}
+        if "translation" in part:
+            node["translation"] = list(part["translation"])
+        if part.get("build_fn"):
+            node["mesh"] = mesh_idx_by_name[part["name"]]
+        nodes.append(node)
+        node_idx_by_name[part["name"]] = len(nodes) - 1
+
+    top_level: list[int] = []
+    for part in spec["parts"]:
+        parent_name = part.get("parent")
+        if parent_name:
+            parent_idx = node_idx_by_name[parent_name]
+            child_idx = node_idx_by_name[part["name"]]
+            nodes[parent_idx].setdefault("children", []).append(child_idx)
+        else:
+            top_level.append(node_idx_by_name[part["name"]])
 
     gltf = {
         "asset": {"version": "2.0", "generator": "FlowEngine gen_models.py"},
         "scene": 0,
-        "scenes": [{"nodes": node_indices}],
-        "nodes": [{"mesh": i, "name": part_names[i]} for i in node_indices],
+        "scenes": [{"nodes": top_level}],
+        "nodes": nodes,
         "meshes": meshes,
         "accessors": accessors,
         "bufferViews": buffer_views,
@@ -597,7 +655,10 @@ def generate_all(output_dir: Path) -> None:
         size_kb = path.stat().st_size / 1024
         # 统计三角面数：box 风格返回 list[float]（每 4 顶点=2 三角形），
         # cylinder 等返回 (verts, idx) tuple（直接数 idx/3）。
+        # 无 build_fn 的 part（axle_front/axle_rear 等 Group 节点）不计面。
         def _face_count(part):
+            if not part.get("build_fn"):
+                return 0
             r = part["build_fn"]()
             if isinstance(r, tuple):
                 return len(r[1]) // 3

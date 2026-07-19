@@ -16,20 +16,20 @@
   ],
   "nodes": [
     {
-      "mesh": 0,
-      "name": "torso"
+      "name": "torso",
+      "mesh": 0
     },
     {
-      "mesh": 1,
-      "name": "head"
+      "name": "head",
+      "mesh": 1
     },
     {
-      "mesh": 2,
-      "name": "leg_L"
+      "name": "leg_L",
+      "mesh": 2
     },
     {
-      "mesh": 3,
-      "name": "leg_R"
+      "name": "leg_R",
+      "mesh": 3
     }
   ],
   "meshes": [
