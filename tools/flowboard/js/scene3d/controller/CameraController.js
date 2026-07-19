@@ -12,7 +12,7 @@
 
 const THREE = window.THREE;
 
-const VALID_MODES = ['chase', 'top', 'orbit', 'driver', 'front'];
+const VALID_MODES = ['chase', 'top', 'orbit', 'driver', 'front', 'map'];
 
 let _camMode = 'chase';
 let _orbitState = null;   // { azimuth, polar, distance, target }

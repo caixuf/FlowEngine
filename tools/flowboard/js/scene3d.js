@@ -2192,6 +2192,14 @@ function setCameraMode(mode) {
       _camLookTarget.set(sx + 8, 0.5, sz);
     }
   });
+  // 切到 map 时拉大 fov 给鸟瞰广角；切走时恢复默认 60。
+  if (camera3d) {
+    if (mode === 'map') {
+      if (camera3d.fov !== 75) { camera3d.fov = 75; camera3d.updateProjectionMatrix(); }
+    } else {
+      if (camera3d.fov !== 60) { camera3d.fov = 60; camera3d.updateProjectionMatrix(); }
+    }
+  }
 }
 
 /** C.1: 重置为默认 chase 视角 */
@@ -2384,6 +2392,17 @@ function _renderFrame() {
     if (_camMode === 'top') {
       camera3d.position.set(sx, 85, sz);
       camera3d.lookAt(sx + 5, 0, sz);
+    } else if (_camMode === 'map') {
+      // 鸟瞰地图模式：高空正俯视，俯瞰整个场景用于预览/检查建模问题。
+      // 相机跟随 ego 但高度 220m，相机正下方对齐 ego（无 lookAt 偏移），
+      // 用更大 fov 拉开视野；用户可在此模式下扫视 ETC/匝道/高架等是否对位。
+      // 配合 OrbitControls 风格的话用户应切到 'orbit'。这里强制俯视固定。
+      camera3d.position.set(sx, 220, sz + 0.001);  // +0.001 避免相机正上方 lookAt NaN
+      camera3d.up.set(0, 1, 0);
+      camera3d.lookAt(sx, 0, sz);
+      // 高空视角临时拉大 fov，让视野更广（恢复时由其他模式覆写）
+      if (camera3d.fov !== 75) camera3d.fov = 75;
+      camera3d.updateProjectionMatrix();
     } else if (_camMode === 'driver') {
       // 驾驶员视角：车顶略后方，看向前方道路
       var dh = -_dr.smoothHeading;
@@ -2651,13 +2670,16 @@ function _renderFrame() {
       if (gw) {
         gm.position.set(gw.x, _getRoadElevationAt(gw.x, gw.z), gw.z);
         gm.visible = true;
-        // ETC 门架 crossbar 沿模型 +Z，应横跨道路（垂直于道路切线）。
+        // ETC 广场模型默认朝向已正确：plaza 是 10m(X=前向) × 16.5m(Z=横跨) 平面，
+        // 4 个收费口沿 +Z 等距排列，垂直于 ego 道路（+X）。因此只需用 -h 把广场
+        // 跟着道路切线旋转即可，**不要**加 π/2 偏移（旧公式 -(h+π/2) 会让 4 个岛
+        // 从横排变竖排 = "ETC 竖着"）。
         if (typeof gw.h === 'number' && gw.h !== 0.0) {
-          gm.rotation.y = -(gw.h + Math.PI / 2);
+          gm.rotation.y = -gw.h;
         } else {
           var gateTan = _getRoadTangentAt(gw.x, gw.z);
           if (gateTan.found) {
-            gm.rotation.y = -(gateTan.heading + Math.PI / 2);
+            gm.rotation.y = -gateTan.heading;
           }
         }
         // 抬杆角度：progress 0→1 映射到 0→75° (1.31 rad)
