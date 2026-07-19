@@ -103,6 +103,13 @@ void apply_collision_response(EntityPool& pool, const std::vector<CollisionPair>
         // 刹车踩下，防止下一 tick 又加速
         a.brake = 1.0; a.throttle = 0.0;
         b.brake = 1.0; b.throttle = 0.0;
+        // 碰撞冷却 2.0s：之前直接把双方速度永久置 0，任何一次接触
+        // 都会让两辆车冻结在原地变路障，长场景越积越多把整条路堵死。
+        // 现在用 crash_cooldown 计时器，>0 期间 step_npc_vehicle 跳过 AI
+        // （保持 speed=0），到 0 后释放 NPC 重新走 AI（ego 也一样，
+        // 但 ego 通常由 control/cmd 驱动，下一帧的油门会立即覆盖 speed）。
+        if (a.is_vehicle()) a.crash_cooldown = 2.0;
+        if (b.is_vehicle()) b.crash_cooldown = 2.0;
     }
 }
 

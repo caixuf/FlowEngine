@@ -103,8 +103,13 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
             double dx = ev.x - npc.x;
             if (dx <= 0 || dx > look_ahead) continue;
 
-            // 同车道判断（横向距离）
-            if (std::fabs(ev.y - npc.y) > 2.0) continue;
+            // 同向车流判定：TL.entity.y 已被改为路缘外立柱位置（±5m 左右），
+            // 而 NPC.y 在车道中心（±1.75m）。两者 sign 一致表示同侧路缘 /
+            // 同向车流，才需要响应本侧红绿灯；异号是对向车流的灯，跳过。
+            // 横向距离阈值放宽到 6.0m 覆盖杆位（5m）与最远同向车道中心（1.75m）
+            // 的最大差。原 2.0m 阈值会过滤掉所有 TL（NPC 看不到红灯 → 闯灯撞 ego）。
+            if (ev.y * npc.y < 0.0) continue;
+            if (std::fabs(ev.y - npc.y) > 6.0) continue;
 
             // 红灯/黄灯：需要减速
             if (ev.type == EntityType::TrafficLight) {

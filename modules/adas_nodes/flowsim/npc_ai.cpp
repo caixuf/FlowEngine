@@ -108,6 +108,18 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
                       FlowRoadNetwork* roads, const Route* route,
                       double ego_route_s) {
+    // 0. 碰撞冷却：crash_cooldown > 0 期间速度强制归零，跳过 AI。
+    //    冷却到期后释放，NPC 重新走 IDM + 路径跟随。原实现永久冻结导致
+    //    任何一次接触都把两辆车钉死成永久路障，长场景越积越多把路堵死。
+    if (npc.crash_cooldown > 0.0) {
+        npc.crash_cooldown -= dt;
+        if (npc.crash_cooldown < 0.0) npc.crash_cooldown = 0.0;
+        npc.speed = 0.0;
+        npc.vx = 0.0; npc.vy = 0.0;
+        npc.throttle = 0.0; npc.brake = 1.0;
+        return;
+    }
+
     // 1. 找前车
     EntityId lead = find_lead(npc, pool, cfg);
     npc.lead_id = lead;

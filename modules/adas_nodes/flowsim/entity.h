@@ -78,6 +78,7 @@ struct Entity {
     AIState    ai_state{AIState::Cruise};
     EntityId   lead_id{INVALID_ENTITY};  /**< 跟车目标 */
     double     follow_gap{1e9};          /**< 当前前车间距 (m) */
+    double     crash_cooldown{0.0};      /**< 碰撞冷却计时器(s)：>0 期间速度归零不参与 AI；=0 后释放 */
 
     /* ── 道路坐标（Frenet）── */
     int    road_id{0};
