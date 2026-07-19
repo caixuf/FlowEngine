@@ -4,6 +4,16 @@
 > 范围：FlowBoard 3D 场景（`tools/flowboard/js/scene3d/`）+ 必要后端透传
 > 前置：黑屏根因已修复，CI 评估器已 PASS（city_to_highway_full，x_delta=441.5m，avg_speed=3.42m/s）
 
+> **本轮进展（2026-07-19）**
+> - ✅ **二次黑屏修复**：MVC 重构 c5e4ba9 在 `_renderFrame` 漏闭合一个 `}`，`scene3d.js`
+>   顶层 `export` 解析失败、整模块不执行 → 全屏黑。已补回（commit a917433）。
+>   A1–B3 的视觉代码（沥青/标线/护栏/树/远山/云/路灯）此前一直被这个黑屏挡住，现已可见。
+> - ✅ **车/NPC 飞出路面根治**：flowsim NPC 原用直线积分不跟道路，路一弯就冲出路网。
+>   已改中央 `Route` + Frenet 沿车道行驶（commit 4f2ddfb）。NPC on-road 5/24→18/24，
+>   evaluator PASS。详见根因分析（本文件外）。
+> - ⏳ **剩余**：#2 车轮乱飞（前端）、A1–B3/相机 视觉调优对标参考图、#6 ego 偏匝道
+>   （planning/control 横向跟随）。
+
 ---
 
 ## 1. 参考目标
