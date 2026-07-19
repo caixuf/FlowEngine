@@ -14,15 +14,17 @@
         "traffic_lights": [{"s": 200, "l": -1.75, "red_s": 15, "yellow_s": 3, "green_s": 12}] },
       { "id": 2, "type": "toll",        "length_m": 150, "lanes": 4, "lane_width": 3.2, "speed_limit": 5.56,
         "etc_gates": [{"s": 100, "l": 0, "open_delay_s": 1.5}] },
-      { "id": 3, "type": "ramp_curve",  "length_m": 250, "lanes": 1, "lane_width": 3.0, "speed_limit": 11.11,
+      { "id": 3, "type": "ramp_curve",  "length_m": 280, "lanes": 1, "lane_width": 3.0, "speed_limit": 11.11,
         "curvature_profile": [
-          {"radius":  350, "arc": 90},
-          {"radius":    0, "arc": 70},
-          {"radius": -350, "arc": 90}
+          {"radius":  0,   "arc": 30},
+          {"radius":  60,  "arc": 94},
+          {"radius":  0,   "arc": 30},
+          {"radius": -60,  "arc": 94},
+          {"radius":  0,   "arc": 32}
         ],
         "elevation_profile": [
           {"s": 0,   "h": 0.0},
-          {"s": 250, "h": 8.0}
+          {"s": 280, "h": 8.0}
         ] },
       { "id": 4, "type": "merge_lane",  "length_m": 200, "lanes": 1, "lane_width": 3.5, "speed_limit": 27.78,
         "elevation_profile": [
