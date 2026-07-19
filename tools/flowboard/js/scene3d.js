@@ -209,33 +209,33 @@ function _makeAsphaltTexture() {
   var canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 512;
   var ctx = canvas.getContext('2d');
-  // 基底：浅灰（参考图主色调）
-  ctx.fillStyle = '#7a7d80'; ctx.fillRect(0, 0, 512, 512);
+  // 基底：中灰沥青（参考图浅灰，但配低光不冲白）
+  ctx.fillStyle = '#55585e'; ctx.fillRect(0, 0, 512, 512);
   // 低对比度大补丁（让路面不那么单调，但不显脏）
-  for (var p = 0; p < 35; p++) {
+  for (var p = 0; p < 40; p++) {
     var px = Math.random() * 512, py = Math.random() * 512;
     var pr = 30 + Math.random() * 80;
     var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
-    var base = 110 + Math.floor(Math.random() * 25);
+    var base = 70 + Math.floor(Math.random() * 25);
     var isDark = Math.random() > 0.5;
-    var a0 = isDark ? 0.18 : 0.12;
+    var a0 = isDark ? 0.20 : 0.14;
     grd.addColorStop(0, 'rgba(' + base + ',' + base + ',' + base + ',' + a0 + ')');
     grd.addColorStop(1, 'rgba(' + base + ',' + base + ',' + base + ',0)');
     ctx.fillStyle = grd;
     ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
   }
-  // 深色颗粒（沥青质感）
-  for (var i = 0; i < 4500; i++) {
+  // 深色骨料颗粒（沥青质感）
+  for (var i = 0; i < 5500; i++) {
     var x = Math.random() * 512, y = Math.random() * 512;
     var shade = Math.floor(Math.random() * 30);
-    ctx.fillStyle = 'rgba(' + (90 + shade) + ',' + (92 + shade) + ',' + (94 + shade) + ',0.35)';
+    ctx.fillStyle = 'rgba(' + (55 + shade) + ',' + (58 + shade) + ',' + (62 + shade) + ',0.4)';
     ctx.fillRect(x, y, 2, 2);
   }
   // 浅色颗粒/反光碎石
-  for (var j = 0; j < 2200; j++) {
+  for (var j = 0; j < 1800; j++) {
     var x2 = Math.random() * 512, y2 = Math.random() * 512;
-    var sh2 = Math.floor(Math.random() * 40);
-    ctx.fillStyle = 'rgba(' + (145 + sh2) + ',' + (148 + sh2) + ',' + (152 + sh2) + ',0.22)';
+    var sh2 = Math.floor(Math.random() * 35);
+    ctx.fillStyle = 'rgba(' + (110 + sh2) + ',' + (114 + sh2) + ',' + (120 + sh2) + ',0.22)';
     ctx.fillRect(x2, y2, 2, 2);
   }
   _asphaltTex = new THREE.CanvasTexture(canvas);
@@ -599,8 +599,8 @@ function _buildRoadNetwork(edges) {
     asphaltTex.anisotropy = 8;
     var roadMat = new THREE.MeshStandardMaterial({
       map: asphaltTex,
-      color: 0xffffff, roughness: 0.82, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.02
+      color: 0xffffff, roughness: 0.88, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.035
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -1181,8 +1181,8 @@ function _updateTireTrail(sx, sz, heading, speed) {
 
   var posAttr = _tireTrailMesh.geometry.attributes.position.array;
   var colAttr = _tireTrailMesh.geometry.attributes.color.array;
-  // 沥青底色（与 _makeAsphaltTexture v2 的 #7a7d80 接近），胎痕从此色渐变到深黑
-  var roadR = 0.478, roadG = 0.490, roadB = 0.502;
+  // 沥青底色（与 _makeAsphaltTexture 的 #55585e 接近），胎痕从此色渐变到深黑
+  var roadR = 0.333, roadG = 0.345, roadB = 0.369;
   var darkR = 0.02, darkG = 0.02, darkB = 0.025;
 
   for (var i = 0; i <= n; i++) {
@@ -1638,8 +1638,8 @@ function init3DScene() {
 
   // Lighting — brighter scene so lane markings are clearly visible
   // 环境贴图已提供基础反射，降低 ambient 避免过曝，让阴影更立体
-  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.32));
-  var sun = new THREE.DirectionalLight(0xfff8ee, 1.75);
+  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.20));
+  var sun = new THREE.DirectionalLight(0xfff8ee, 1.20);
   sun.position.set(30, 50, 20);
   sun.castShadow = true;
   // 阴影相机参数：更大 frustum 覆盖 chase cam 前方 NPC，4096 贴图减少锯齿
@@ -1658,7 +1658,7 @@ function init3DScene() {
   // sun 目标点跟随 ego（在 _renderFrame 里更新 sun.target.position）
   scene3d.add(sun.target);
   // Hemisphere (sky/ground ambient)
-  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.4));
+  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.3));
 
   // ── Ground (large flat plane, matches road length) ──
   /* NOA Phase 6 3D 增强：程序化草地纹理（CanvasTexture），替代纯色地面。
@@ -2147,11 +2147,14 @@ function _renderFrame() {
       camera3d.position.set(sx + ox, Math.max(1.5, oy), sz + oz);
       camera3d.lookAt(_orbitState.target);
     } else {
-      // chase (default)
+      // chase (default) — 按 ego 航向投影，弯道里相机跟车顺弯
       var backC   = narrow ? 20 : 15;
       var heightC = narrow ? 6.5 : 5.0;
-      _camTarget.set(sx - backC, heightC, sz);
-      _camLookTarget.set(sx + (narrow ? 10 : 8), 0.5, sz);
+      var lookFwd = narrow ? 10 : 8;
+      var chH = -_dr.smoothHeading;
+      var ccos = Math.cos(chH), csin = Math.sin(chH);
+      _camTarget.set(sx - backC * ccos, heightC, sz - backC * csin);
+      _camLookTarget.set(sx + lookFwd * ccos, 0.5, sz + lookFwd * csin);
       _cam.lerp(_camTarget, 0.08);
       _camLook.lerp(_camLookTarget, 0.08);
       camera3d.position.copy(_cam);
@@ -2232,9 +2235,11 @@ function _renderFrame() {
         om.rotation.y += dy * 0.18;
 
         // MVC Model: 障碍物 roll/pitch 由 VisualPhysics 计算。
+        // 与 ego 一致：喂平滑后的 yaw（-om.rotation.y）而非后端阶跃航向 ow.heading，
+        // 否则 yawRate=阶跃差/帧dt 被放大 → roll 尖峰 → 车身猛晃。
         var obsSpdNow = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
         var ti = _obsTilt.get(oi);
-        ti.updateTargets(ow.t0, ow.heading, obsSpdNow);
+        ti.updateTargets(now, -om.rotation.y, obsSpdNow);
         var obsTilt = ti.tick();
         om.rotation.x = obsTilt.roll;
         om.rotation.z = obsTilt.pitch;
