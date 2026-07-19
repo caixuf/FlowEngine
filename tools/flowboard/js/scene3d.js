@@ -2157,6 +2157,7 @@ function _renderFrame() {
       camera3d.position.copy(_cam);
       camera3d.lookAt(_camLook);
     }
+  }
 
   // Road + environment are STATIC — no scrolling. The camera follows
   // the ego through the world so the road appears to flow past naturally.
