@@ -348,6 +348,13 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     }
 
     /* 红绿灯 → TrafficLight 实体 */
+    /* 杆位置修正：场景 y_lane 默认 -1.75 是「停止线所在车道中心」（仅用于
+     * 规划/停止线判定），但 3D 渲染里红绿灯杆应放在路缘外侧 +1.5m 退让，
+     * 否则会看到「杆立在路中间」的诡异画面。这里把 entity.y 改为路缘外：
+     *   sign(y_lane) * (road_half_width + 1.5)
+     * road_half_width 取场景默认 2 车道 × 3.5m / 2 = 3.5m（与场景 lane_width
+     * 一致；若未来 road_network 在 ScenarioTrafficLight 暴露 lane_width/lanes，
+     * 这里改读字段即可）。 */
     for (int i = 0; i < sc->traffic_light_count && i < SCENARIO_MAX_TRAFFIC_LIGHTS; i++) {
         const ScenarioTrafficLight* tl = &sc->traffic_lights[i];
         flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::TrafficLight);
@@ -355,7 +362,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         flowsim::Entity& e = g.pool[id];
         e.id = tl->id;
         e.x = tl->x;
-        e.y = tl->y_lane;
+        /* 路缘外位置（杆立柱真实位置）。原 y_lane 仅作 sign 来源，丢弃。 */
+        double road_half_width = 3.5;  /* 默认 2 车道 × 3.5m / 2 */
+        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+        e.y = sign * (road_half_width + 1.5);
         /* 相位时长复用字段（见 scene_events.h 约定） */
         e.throttle = tl->green_s;     /* green 时长 */
         e.brake    = tl->yellow_s;    /* yellow 时长 */

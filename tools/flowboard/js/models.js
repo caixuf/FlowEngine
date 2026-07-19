@@ -92,9 +92,10 @@ function _buildVehicleFromGltf(name, gltf) {
     if (rwGroup) group.userData.rearAxle = rwGroup;
     if (wheels.length) group.userData.wheels = wheels;
   }
-  // 灯节点扫描：brakelight_L/R, turnsignal_FL/FR/RL/RR, headlight_L/R。
+  // 灯节点扫描：brakelight_L/R, turnsignal_FL/FR/RL/RR, headlight_L/R, ads_indicator_L/R。
   // scene3d.js 通过 material.emissiveIntensity 切换亮灭（接感知/规划链路）。
-  var brakeLights = [], turnSignals = {}, headlights = [];
+  // ads_indicator（自动驾驶小蓝灯）由 _setVehicleLights 设为常亮。
+  var brakeLights = [], turnSignals = {}, headlights = [], adsIndicators = [];
   group.traverse(function(c) {
     if (!c.isMesh) return;
     var n = c.name || '';
@@ -103,10 +104,12 @@ function _buildVehicleFromGltf(name, gltf) {
       turnSignals[n.substring('turnsignal_'.length)] = c;  // FL/FR/RL/RR
     }
     else if (n.indexOf('headlight_') === 0) headlights.push(c);
+    else if (n.indexOf('ads_indicator_') === 0) adsIndicators.push(c);
   });
   if (brakeLights.length) group.userData.brakeLights = brakeLights;
   if (Object.keys(turnSignals).length) group.userData.turnSignals = turnSignals;
   if (headlights.length) group.userData.headlights = headlights;
+  if (adsIndicators.length) group.userData.adsIndicators = adsIndicators;
   return group;
 }
 
@@ -218,18 +221,20 @@ function _relinkWheelUserData(clone) {
   if (rwGroup) { clone.userData.rearAxle = rwGroup; if (rl) wheels.push(rl); if (rr) wheels.push(rr); }
   if (!fwGroup && !rwGroup) { [fl, fr, rl, rr].forEach(function(w) { if (w) wheels.push(w); }); }
   if (wheels.length) clone.userData.wheels = wheels;
-  // 灯节点引用也需重建
-  var brakeLights = [], turnSignals = {}, headlights = [];
+  // 灯节点引用也需重建（与 _buildVehicleFromGltf 扫描范围保持一致）
+  var brakeLights = [], turnSignals = {}, headlights = [], adsIndicators = [];
   clone.traverse(function(c) {
     if (!c.isMesh) return;
     var n = c.name || '';
     if (n.indexOf('brakelight_') === 0) brakeLights.push(c);
     else if (n.indexOf('turnsignal_') === 0) turnSignals[n.substring('turnsignal_'.length)] = c;
     else if (n.indexOf('headlight_') === 0) headlights.push(c);
+    else if (n.indexOf('ads_indicator_') === 0) adsIndicators.push(c);
   });
   if (brakeLights.length) clone.userData.brakeLights = brakeLights;
   if (Object.keys(turnSignals).length) clone.userData.turnSignals = turnSignals;
   if (headlights.length) clone.userData.headlights = headlights;
+  if (adsIndicators.length) clone.userData.adsIndicators = adsIndicators;
 }
 
 /**
@@ -312,6 +317,14 @@ export function _setVehicleLights(group, state, blinkPhase) {
     var hi = state.head ? 1.5 : 0.4;
     for (var h = 0; h < ud.headlights.length; h++) {
       if (ud.headlights[h].material) ud.headlights[h].material.emissiveIntensity = hi;
+    }
+  }
+  // 自动驾驶小蓝灯（ads_indicator）：车尾左右各一，量产 ADS 标志，始终亮。
+  // 不受 brake/turn 状态影响，每次 _setVehicleLights 调用时强制拉到 1.4，
+  // 防止 ego/NPC 因状态切换时材质被重置而熄灭。
+  if (ud.adsIndicators) {
+    for (var ai = 0; ai < ud.adsIndicators.length; ai++) {
+      if (ud.adsIndicators[ai].material) ud.adsIndicators[ai].material.emissiveIntensity = 1.4;
     }
   }
 }

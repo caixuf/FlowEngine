@@ -81,6 +81,10 @@ let _obsPool = [], _obsWorld = [];
 let _egoTilt = new EgoTiltState();
 let _obsTilt = new TiltPool();
 let _trafficLightPool = [], _trafficLightWorld = [];
+/** 横向十字路口柏油路 mesh（按 tlIdx 索引，与 _trafficLightPool 对齐）。
+ *  ego 道路沿 +X 方向；每个红绿灯位置画一条短横向柏油路（沿 +Z 方向），
+ *  形成视觉上的十字路口。mesh 不参与物理，仅渲染补丁。 */
+let _crossRoadMeshes = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
 let _composer = null;  /* EffectComposer 引用（Bloom 后处理），为 null 时直渲 */
@@ -287,6 +291,40 @@ function _makeShoulderTexture() {
 }
 
 /**
+ * _ensureCrossRoadAt — 在 (x, z) 位置补一条横向柏油路 mesh，形成视觉十字路口。
+ *
+ * ego 道路沿 +X 方向延伸；红绿灯位置通常就是横向路口中心。这里画一块
+ * PlaneGeometry，长边沿 +Z（横向 24m，覆盖双向 4 车道 + 路肩），
+ * 短边沿 +X（纵向 8m，跨越 ego 道路宽度并稍延出路口）。材质复用柏油
+ * 暗灰色，y=0.02 略高于路面避免 z-fighting。
+ *
+ * 同一 tlIdx 重复调用时仅更新位置；新建时 add 到 scene3d 顶层（生命周期
+ * 与 _roadNetworkGroup 平行，_buildRoadNetwork 重建时一并清理）。
+ */
+function _ensureCrossRoadAt(tlIdx, x, z) {
+  if (!scene3d) return;
+  var existing = _crossRoadMeshes[tlIdx];
+  if (existing) {
+    // 位置变了更新即可
+    if (existing.position.x !== x || existing.position.z !== z) {
+      existing.position.set(x, _getRoadElevationAt(x, z) + 0.02, z);
+    }
+    existing.visible = true;
+    return;
+  }
+  var geo = new THREE.PlaneGeometry(24, 8, 1, 1);  // 24m 横向 × 8m 纵向
+  geo.rotateX(-Math.PI / 2);  // 水平铺路
+  var mat = new THREE.MeshStandardMaterial({
+    color: 0x2a2a2a, roughness: 0.92, metalness: 0.0
+  });
+  var m = new THREE.Mesh(geo, mat);
+  m.position.set(x, _getRoadElevationAt(x, z) + 0.02, z);
+  m.receiveShadow = true;
+  scene3d.add(m);
+  _crossRoadMeshes[tlIdx] = m;
+}
+
+/**
  * _buildRoadNetwork — 从 road_network.edges 构建多段道路网格。
  *
  * 每条 edge 用 CatmullRomCurve3 平滑插值 nodes 控制点，然后沿曲线
@@ -318,6 +356,16 @@ function _buildRoadNetwork(edges) {
     });
     _roadNetworkGroup = null;
   }
+  // 清除旧的横向十字路口补丁 mesh（与 _roadNetworkGroup 生命周期一致）
+  for (var crIdx = 0; crIdx < _crossRoadMeshes.length; crIdx++) {
+    var crOld = _crossRoadMeshes[crIdx];
+    if (crOld) {
+      scene3d.remove(crOld);
+      if (crOld.geometry) crOld.geometry.dispose();
+      if (crOld.material) crOld.material.dispose();
+    }
+  }
+  _crossRoadMeshes = [];
   _roadCurves = [];
   _roadCurveLens = [];
   _roadCurveNext = [];
@@ -2582,6 +2630,10 @@ function _renderFrame() {
             }
           }
         }
+        // 在红绿灯位置补一条横向柏油路，形成视觉十字路口。
+        // mesh 长 24m（沿 ego 横向 Z），宽 8m（沿 ego 纵向 X），稍微高于路面
+        // 避免与 ego 道路 z-fighting。位置已变则更新（停车线推进场景）。
+        _ensureCrossRoadAt(tli2, tlw.x, tlw.z);
       } else {
         tlm.visible = false;
       }
