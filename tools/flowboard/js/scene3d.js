@@ -214,32 +214,35 @@ function _applyRoadCurve(roadData) {
 let _asphaltTex = null;
 let _shoulderTex = null;
 
-/** 程序化沥青纹理 v2：浅灰底 + 细腻噪点，走干净卡通风格（参考图）。 */
+/** 程序化沥青纹理 v3：深色基底 + 骨料颗粒，与草地/路肩形成强对比。
+ *  v2 用 #55585e 中灰底，亮度 ~88，与草地 #5a8a4a 亮度 ~90 几乎相同，
+ *  视觉上"路和地一样亮"，被用户吐槽看不出区别。v3 改为 #1f2126 深沥青
+ *  （亮度 ~33），亮度差 3 倍，从远景到近景都能清晰分辨路面 vs 草地。 */
 function _makeAsphaltTexture() {
   if (_asphaltTex) return _asphaltTex;
   var canvas = document.createElement('canvas');
   canvas.width = 512; canvas.height = 512;
   var ctx = canvas.getContext('2d');
-  // 基底：中灰沥青（参考图浅灰，但配低光不冲白）
-  ctx.fillStyle = '#55585e'; ctx.fillRect(0, 0, 512, 512);
-  // 低对比度大补丁（让路面不那么单调，但不显脏）
-  for (var p = 0; p < 40; p++) {
+  // 基底：深沥青（参考真实新铺沥青 #1a1a1a，略带蓝调避免与路肩棕色混淆）
+  ctx.fillStyle = '#1f2126'; ctx.fillRect(0, 0, 512, 512);
+  // 中等补丁：轮胎磨损/油渍斑（略浅于基底，让路面有层次但不发灰）
+  for (var p = 0; p < 35; p++) {
     var px = Math.random() * 512, py = Math.random() * 512;
     var pr = 30 + Math.random() * 80;
     var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
-    var base = 70 + Math.floor(Math.random() * 25);
+    var base = 38 + Math.floor(Math.random() * 20);
     var isDark = Math.random() > 0.5;
-    var a0 = isDark ? 0.20 : 0.14;
-    grd.addColorStop(0, 'rgba(' + base + ',' + base + ',' + base + ',' + a0 + ')');
-    grd.addColorStop(1, 'rgba(' + base + ',' + base + ',' + base + ',0)');
+    var a0 = isDark ? 0.28 : 0.18;
+    grd.addColorStop(0, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 6) + ',' + a0 + ')');
+    grd.addColorStop(1, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 6) + ',0)');
     ctx.fillStyle = grd;
     ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
   }
-  // 深色骨料颗粒（沥青质感）
+  // 深色骨料颗粒（沥青质感，与基底同色系加深）
   for (var i = 0; i < 5500; i++) {
     var x = Math.random() * 512, y = Math.random() * 512;
-    var shade = Math.floor(Math.random() * 30);
-    ctx.fillStyle = 'rgba(' + (55 + shade) + ',' + (58 + shade) + ',' + (62 + shade) + ',0.4)';
+    var shade = Math.floor(Math.random() * 22);
+    ctx.fillStyle = 'rgba(' + (25 + shade) + ',' + (27 + shade) + ',' + (32 + shade) + ',0.45)';
     ctx.fillRect(x, y, 2, 2);
   }
   // 浅色颗粒/反光碎石
@@ -615,8 +618,9 @@ function _buildRoadNetwork(edges) {
     asphaltTex.anisotropy = 8;
     var roadMat = new THREE.MeshStandardMaterial({
       map: asphaltTex,
-      color: 0xffffff, roughness: 0.88, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.035
+      color: 0xffffff, roughness: 0.62, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.05,
+      envMapIntensity: 0.6  // 略反光，与哑光草地（roughness 0.95）形成质感差异
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -689,10 +693,10 @@ function _buildRoadNetwork(edges) {
     laneMarkGeo.computeVertexNormals();
     var laneMarkMat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      roughness: 0.45,
+      roughness: 0.4,
       metalness: 0.0,
       emissive: 0xffffff,
-      emissiveIntensity: 0.18
+      emissiveIntensity: 0.35  // 提高标线自发光，在深色沥青上更醒目
     });
     var laneMarkMesh = new THREE.Mesh(laneMarkGeo, laneMarkMat);
     laneMarkMesh.receiveShadow = false;
