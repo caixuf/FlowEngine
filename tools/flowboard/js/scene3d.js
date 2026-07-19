@@ -1086,6 +1086,32 @@ function _buildRoadNetwork(edges) {
   scene3d.add(group);
   _roadNetworkGroup = group;
 
+  // ── 根据路网边界框动态扩展地面 ──────────────────────────────
+  // 原 ground 是固定 800×400m，但 city_to_highway_full 场景路网总长 1750m
+  // （urban 0..200 → highway 946..1746，z 还偏移到 40），后半段匝道/高架/高速
+  // 全部悬空在地面之外。这里从 edgeEnds 算出整个路网的 X/Z 边界框，把 _groundMesh
+  // 的 scale/position 调整到覆盖整个路网 + 50m margin，保证 Map 鸟瞰和 chase
+  // 远景都能看到地面而非默认蓝色背景。
+  if (_groundMesh && edgeEnds.length) {
+    var bnMinX = Infinity, bnMaxX = -Infinity, bnMinZ = Infinity, bnMaxZ = -Infinity;
+    for (var bi = 0; bi < edgeEnds.length; bi++) {
+      var bS = edgeEnds[bi].start, bE = edgeEnds[bi].end;
+      bnMinX = Math.min(bnMinX, bS.x, bE.x);
+      bnMaxX = Math.max(bnMaxX, bS.x, bE.x);
+      bnMinZ = Math.min(bnMinZ, bS.z, bE.z);
+      bnMaxZ = Math.max(bnMaxZ, bS.z, bE.z);
+    }
+    var MARGIN = 80;
+    var gW = (bnMaxX - bnMinX) + MARGIN * 2;
+    var gD = (bnMaxZ - bnMinZ) + MARGIN * 2;
+    // 原始 PlaneGeometry(800, 400) 旋转 -π/2 后：scale.x→世界 X，scale.y→世界 Z
+    _groundMesh.scale.set(gW / 800, gD / 400, 1);
+    _groundMesh.position.x = (bnMinX + bnMaxX) / 2;
+    _groundMesh.position.z = (bnMinZ + bnMaxZ) / 2;
+    // 路网固定后 ground 也固定，取消 _renderFrame 里的 chunk 跟随（下面置 null 让跟随判断跳过）
+    _groundMesh.userData.fixed = true;
+  }
+
   // 隐藏旧的静态道路
   if (_roadGroup) _roadGroup.visible = false;
 }
@@ -2385,7 +2411,10 @@ function _renderFrame() {
     _sunLight.target.position.set(sx, 0, 0);
     _sunLight.target.updateMatrixWorld();
   }
-  if (_groundMesh && Math.abs(_groundMesh.position.x - chunkX) > 100) _groundMesh.position.x = chunkX;
+  // ground 跟随：仅在未固定（路网未加载/单段 legacy 道路）时按 chunk 跟随。
+  // 路网已加载后 _buildRoadNetwork 会按整个路网边界框一次性铺满地面并标记
+  // userData.fixed，这里跳过避免覆盖位置。
+  if (_groundMesh && !_groundMesh.userData.fixed && Math.abs(_groundMesh.position.x - chunkX) > 100) _groundMesh.position.x = chunkX;
   if (_envGroup && Math.abs(_envGroup.position.x - chunkX) > 100) _envGroup.position.x = chunkX;
   // 天际线始终跟随 ego 居中（X+Z），保证远景城市在任意位置都环绕地平线
   if (_skylineGroup) _skylineGroup.position.set(sx, 0, sz);
