@@ -347,7 +347,7 @@ function _buildRoadNetwork(edges) {
     edgeEnds.push({
       start: { x: nodes[0][0], z: nodes[0][1] },
       end:   { x: nodes[nodes.length - 1][0], z: nodes[nodes.length - 1][1] },
-      lanes: lanes, length: length, curve: curve
+      lanes: lanes, laneWidth: laneWidth, length: length, curve: curve
     });
 
     // ── 路面 ribbon mesh ──
@@ -725,11 +725,36 @@ function _buildRoadNetwork(edges) {
   }
   // count >= 3 的簇 = junction 连接点；含单车道（匝道）= fork，否则 = merge
   // 简化标记：只保留贴地圆环 + 方向箭头，去掉高立柱和浮动文字，避免卡通感。
+  // fork 拓宽：在分叉点画三角导流岛 + 拓宽渐变段（主干全宽 → 两条匝道起点）。
+  // 解决"匝道直接长在道路上"的视觉问题——真实高速分叉点有物理岛和拓宽过渡。
+  var _islandMat = new THREE.MeshStandardMaterial({
+    color: 0xffcc00, roughness: 0.5, emissive: 0x332200, emissiveIntensity: 0.25,
+    side: THREE.DoubleSide
+  });
+  var _taperMat = new THREE.MeshStandardMaterial({
+    color: 0x2a2a2a, roughness: 0.92, metalness: 0.0
+  });
   for (var ci = 0; ci < clusters.length; ci++) {
     if (clusters[ci].count < 3) continue;
     var kind = clusters[ci].minLanes <= 1 ? 'fork' : 'merge';
     var color = kind === 'fork' ? 0xff8800 : 0x44cc44;
     var jx = clusters[ci].x, jz = clusters[ci].z;
+
+    // 识别该 cluster 关联的 edge：
+    //   incoming = end 在 cluster 处的 edge（主干路，车道数最多）
+    //   connecting = start 在 cluster 处的 edge（匝道，车道数少）
+    var incomingEdge = null, connectingEdges = [];
+    for (var ei = 0; ei < edgeEnds.length; ei++) {
+      var ee = edgeEnds[ei];
+      var dStart2 = (ee.start.x - jx) * (ee.start.x - jx) + (ee.start.z - jz) * (ee.start.z - jz);
+      var dEnd2   = (ee.end.x   - jx) * (ee.end.x   - jx) + (ee.end.z   - jz) * (ee.end.z   - jz);
+      if (dEnd2 < JUNCTION_TOL * JUNCTION_TOL) {
+        if (!incomingEdge || ee.lanes > incomingEdge.lanes) incomingEdge = ee;
+      }
+      if (dStart2 < JUNCTION_TOL * JUNCTION_TOL) {
+        connectingEdges.push(ee);
+      }
+    }
 
     // 贴地圆环
     var ringGeo = new THREE.RingGeometry(2.0, 2.6, 24);
@@ -748,6 +773,111 @@ function _buildRoadNetwork(edges) {
     arrow.rotation.z = kind === 'fork' ? 0 : Math.PI;
     arrow.position.set(jx, 0.08, jz);
     group.add(arrow);
+
+    // ── fork 拓宽：三角导流岛 + 拓宽渐变段 ──
+    // 真实高速分叉点：主干路末尾从全宽渐变收缩，中央有三角物理岛分隔两条匝道入口。
+    if (kind === 'fork' && incomingEdge && connectingEdges.length >= 2 && incomingEdge.curve) {
+      // incoming 末尾切线方向（curve.getTangentAt(1.0) = 末点切线）
+      var inTan;
+      try { inTan = incomingEdge.curve.getTangentAt(1.0); }
+      catch (eTan) { inTan = new THREE.Vector3(1, 0, 0); }
+      var tx = inTan.x, tz = inTan.z;
+      var tlen = Math.sqrt(tx * tx + tz * tz);
+      if (tlen < 0.001) { tx = 1; tz = 0; } else { tx /= tlen; tz /= tlen; }
+      // 法线（切线在 XZ 平面内旋转 90°）
+      var tnx = -tz, tnz = tx;
+      var inLW = incomingEdge.laneWidth || 3.5;
+      var inHalfW = (incomingEdge.lanes * inLW) / 2;
+
+      // (a) 拓宽渐变段：从 cluster 后方 taperLen 处（主干全宽）
+      //     线性收缩到 cluster 处（导流岛尖端宽度 0.6m）
+      //     覆盖主干末尾断崖式宽度跳变，视觉上"主干拓宽过渡到分叉"。
+      var taperLen = 18.0;
+      var taperStartHalf = inHalfW;        // 主干全宽的一半
+      var taperEndHalf = 0.3;              // cluster 处缩为 0.6m 宽（导流岛尖端）
+      var startX = jx - tx * taperLen;
+      var startZ = jz - tz * taperLen;
+      var sL = { x: startX + tnx * taperStartHalf, z: startZ + tnz * taperStartHalf };
+      var sR = { x: startX - tnx * taperStartHalf, z: startZ - tnz * taperStartHalf };
+      var eL = { x: jx + tnx * taperEndHalf, z: jz + tnz * taperEndHalf };
+      var eR = { x: jx - tnx * taperEndHalf, z: jz - tnz * taperEndHalf };
+      var taperGeo = new THREE.BufferGeometry();
+      taperGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+        sL.x, 0.025, sL.z,
+        sR.x, 0.025, sR.z,
+        eL.x, 0.025, eL.z,
+        eR.x, 0.025, eR.z
+      ], 3));
+      taperGeo.setIndex([0, 1, 2, 1, 3, 2]);
+      taperGeo.computeVertexNormals();
+      var taperMesh = new THREE.Mesh(taperGeo, _taperMat);
+      taperMesh.receiveShadow = true;
+      group.add(taperMesh);
+
+      // (b) 三角导流岛：物理分隔两条匝道入口
+      //     底边在 cluster 前方 3m 处，宽 1.6m
+      //     顶点在 cluster 处（指向 incoming 方向）
+      var islandFrontD = 4.0;
+      var islandBackD = 0.5;
+      var islandHalfW = 0.8;
+      var frontX = jx + tx * islandFrontD;
+      var frontZ = jz + tz * islandFrontD;
+      var backX = jx - tx * islandBackD;
+      var backZ = jz - tz * islandBackD;
+      var iFL = { x: frontX + tnx * islandHalfW, z: frontZ + tnz * islandHalfW };
+      var iFR = { x: frontX - tnx * islandHalfW, z: frontZ - tnz * islandHalfW };
+      var iBk = { x: backX, z: backZ };
+      var islandGeo = new THREE.BufferGeometry();
+      islandGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+        iFL.x, 0.15, iFL.z,
+        iFR.x, 0.15, iFR.z,
+        iBk.x, 0.15, iBk.z
+      ], 3));
+      islandGeo.setIndex([0, 1, 2]);
+      islandGeo.computeVertexNormals();
+      var islandMesh = new THREE.Mesh(islandGeo, _islandMat);
+      islandMesh.castShadow = true;
+      islandMesh.receiveShadow = true;
+      group.add(islandMesh);
+
+      // (c) 两条匝道起点的短拓宽段：从 cluster（窄）到匝道全宽
+      //     每条 connecting 在 cluster 处宽度 0.3m，前方 6m 处展开到匝道全宽。
+      //     避免匝道"突然出现"在 cluster。
+      for (var ci2 = 0; ci2 < connectingEdges.length; ci2++) {
+        var ce = connectingEdges[ci2];
+        if (!ce.curve) continue;
+        var cTan;
+        try { cTan = ce.curve.getTangentAt(0.0); }
+        catch (eTan2) { cTan = new THREE.Vector3(1, 0, 0); }
+        var ctx = cTan.x, ctz = cTan.z;
+        var ctlen = Math.sqrt(ctx * ctx + ctz * ctz);
+        if (ctlen < 0.001) { ctx = 1; ctz = 0; } else { ctx /= ctlen; ctz /= ctlen; }
+        var cnx = -ctz, cnz = ctx;
+        var cLW = ce.laneWidth || 3.0;
+        var cHalfW = (ce.lanes * cLW) / 2;
+        var rampTaperLen = 6.0;
+        var cStartX = jx + ctx * 0.5;
+        var cStartZ = jz + ctz * 0.5;
+        var cEndX = jx + ctx * rampTaperLen;
+        var cEndZ = jz + ctz * rampTaperLen;
+        var csL = { x: cStartX + cnx * 0.3, z: cStartZ + cnz * 0.3 };
+        var csR = { x: cStartX - cnx * 0.3, z: cStartZ - cnz * 0.3 };
+        var ceL = { x: cEndX + cnx * cHalfW, z: cEndZ + cnz * cHalfW };
+        var ceR = { x: cEndX - cnx * cHalfW, z: cEndZ - cnz * cHalfW };
+        var rampTaperGeo = new THREE.BufferGeometry();
+        rampTaperGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+          csL.x, 0.025, csL.z,
+          csR.x, 0.025, csR.z,
+          ceL.x, 0.025, ceL.z,
+          ceR.x, 0.025, ceR.z
+        ], 3));
+        rampTaperGeo.setIndex([0, 1, 2, 1, 3, 2]);
+        rampTaperGeo.computeVertexNormals();
+        var rampTaperMesh = new THREE.Mesh(rampTaperGeo, _taperMat);
+        rampTaperMesh.receiveShadow = true;
+        group.add(rampTaperMesh);
+      }
+    }
   }
 
   scene3d.add(group);
@@ -2317,10 +2447,20 @@ function _renderFrame() {
           }
         }
         // 抬杆角度：progress 0→1 映射到 0→75° (1.31 rad)
+        // 多车道收费广场：userData.booms 是 4 个栏杆数组，全部同步抬起
         var boom = gm.userData.boom;
         if (boom) {
           var targetAngle = (gw.progress || 0) * 1.31;
           boom.rotation.y += (targetAngle - boom.rotation.y) * 0.15;
+        }
+        var booms = gm.userData.booms;
+        if (booms && booms.length) {
+          var targetAngleArr = (gw.progress || 0) * 1.31;
+          for (var bi = 0; bi < booms.length; bi++) {
+            if (booms[bi]) {
+              booms[bi].rotation.y += (targetAngleArr - booms[bi].rotation.y) * 0.15;
+            }
+          }
         }
       } else {
         gm.visible = false;

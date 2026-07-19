@@ -699,61 +699,181 @@ export function _buildTrafficLight() {
 
 // ── ETC gate model (Phase 3) ────────────────────────────────────
 /**
- * _buildETCGate — build an ETC toll gate mesh (2 poles + crossbar + boom arm).
+ * _buildETCGate — 多车道 ETC 收费广场（4 个并列收费口 + 入口大标志门架）。
  *
- * Real-world scale. The boom arm is stored in userData.boom so the renderer
- * can rotate it based on the gate's progress (0=closed horizontal, 1=open ~75°).
+ * 真实高速收费广场不是单个 9m 门架横跨整条路，而是把道路拓宽成 4-5 个
+ * 收费岛并列、每车道独立 ETC 栏杆，入口处还有大型标志门架。本函数按
+ * 1:1 真实尺度建模，替代旧的单门架。
  *
- * Coordinate system: X=forward (along road), Y=up, Z=lateral (across road).
- * The gate spans the road laterally: poles at Z=±roadHalf, boom rotates
- * from one pole.
+ * 坐标系：模型默认朝向与旧版一致——
+ *   X = 前向（沿道路，ego 行驶方向）
+ *   Y = 上
+ *   Z = 横向（横跨道路，4 个收费口沿 Z 等距排列）
+ * scene3d 仍用 `gm.rotation.y = -(h + π/2)` 把模型转到与道路切线对齐。
  *
- * @returns {THREE.Group} with userData.boom = boom arm mesh
+ * 4 个栏杆统一收集到 userData.booms 数组，scene3d 同步驱动抬起角度。
+ * 兼容字段 userData.boom 保留第一个栏杆，未升级的调用点仍可用。
+ *
+ * @returns {THREE.Group} with userData.booms = [boom×4], userData.boom = booms[0]
  */
 export function _buildETCGate() {
   const T = window.THREE;
   var g = new T.Group();
 
-  // Two poles at Z = ±4m (covering a 2-lane road of 7m width + margin)
-  var poleGeo = new T.CylinderGeometry(0.15, 0.18, 5.5, 12);
-  var poleMat = new T.MeshStandardMaterial({ color: 0x445566, metalness: 0.5, roughness: 0.4 });
-  for (var pi = 0; pi < 2; pi++) {
-    var pole = new T.Mesh(poleGeo, poleMat);
-    pole.position.set(0, 2.75, pi === 0 ? -4.5 : 4.5);
-    pole.castShadow = true;
-    g.add(pole);
+  // ── 广场参数：4 车道并列收费口 ──
+  var N_BOOTHS = 4;
+  var LANE_W = 3.5;                       // 单车道宽（与 toll 段 3.2m 略宽，符合广场拓宽惯例）
+  var totalWidth = N_BOOTHS * LANE_W;     // 14m
+  var halfW = totalWidth / 2;
+
+  // ── 共享材质 ──
+  var plazaMat    = new T.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.92, metalness: 0.0 });
+  var islandMat   = new T.MeshStandardMaterial({ color: 0xffcc00, roughness: 0.55, emissive: 0x332200, emissiveIntensity: 0.18 });
+  var boothMat    = new T.MeshStandardMaterial({ color: 0xe8e8ec, roughness: 0.55, metalness: 0.1 });
+  var boothRoofMat= new T.MeshStandardMaterial({ color: 0x2255aa, roughness: 0.35, metalness: 0.3, emissive: 0x113355, emissiveIntensity: 0.18 });
+  var glassMat    = new T.MeshStandardMaterial({ color: 0x0a1a2a, metalness: 0.7, roughness: 0.15, emissive: 0x081020, emissiveIntensity: 0.12 });
+  var poleMat     = new T.MeshStandardMaterial({ color: 0x445566, metalness: 0.6, roughness: 0.35 });
+  var signMat     = new T.MeshStandardMaterial({ color: 0x2266aa, emissive: 0x1166aa, emissiveIntensity: 0.55, roughness: 0.3 });
+  var boomMat     = new T.MeshStandardMaterial({ color: 0xffcc00, emissive: 0x442200, emissiveIntensity: 0.35, roughness: 0.4 });
+  // 收费亭 ETC 显示屏（绿色发光小条）
+  var screenMat   = new T.MeshStandardMaterial({ color: 0x00ff66, emissive: 0x00ff66, emissiveIntensity: 0.9, roughness: 0.3 });
+
+  // ── 广场地面（深沥青底，标识收费区域与正常路面区分）──
+  var plaza = new T.Mesh(
+    new T.PlaneGeometry(10.0, totalWidth + 2.5),
+    plazaMat
+  );
+  plaza.rotation.x = -Math.PI / 2;
+  plaza.position.y = 0.02;
+  plaza.receiveShadow = true;
+  g.add(plaza);
+
+  // ── 入口大型标志门架（广场前 3.5m，跨越全部车道）──
+  // 真实收费广场前方总有一块大牌「ETC 收费」预告，强化"广场感"
+  var megaPoleGeo = new T.CylinderGeometry(0.16, 0.20, 7.0, 12);
+  var megaPole1 = new T.Mesh(megaPoleGeo, poleMat);
+  megaPole1.position.set(-3.5, 3.5, -halfW - 0.7);
+  megaPole1.castShadow = true;
+  g.add(megaPole1);
+  var megaPole2 = new T.Mesh(megaPoleGeo, poleMat);
+  megaPole2.position.set(-3.5, 3.5, halfW + 0.7);
+  megaPole2.castShadow = true;
+  g.add(megaPole2);
+  var megaBeam = new T.Mesh(
+    new T.BoxGeometry(0.22, 0.22, totalWidth + 1.6),
+    poleMat
+  );
+  megaBeam.position.set(-3.5, 6.85, 0);
+  megaBeam.castShadow = true;
+  g.add(megaBeam);
+  // 大型 ETC 蓝底标志板（横跨广场顶部）
+  var megaSign = new T.Mesh(
+    new T.BoxGeometry(0.10, 0.85, totalWidth * 0.7),
+    signMat
+  );
+  megaSign.position.set(-3.38, 6.85, 0);
+  g.add(megaSign);
+  // 标志板下方绿色「ETC」发光字条（简化为长条 emissive 绿）
+  var etcText = new T.Mesh(
+    new T.BoxGeometry(0.04, 0.18, totalWidth * 0.45),
+    screenMat
+  );
+  etcText.position.set(-3.30, 6.40, 0);
+  g.add(etcText);
+
+  // ── 共享几何体模板（每车道实例化复用）──
+  var poleGeo   = new T.CylinderGeometry(0.08, 0.10, 5.0, 10);
+  var beamGeo   = new T.BoxGeometry(0.12, 0.12, LANE_W - 0.15);
+  var signGeo   = new T.BoxGeometry(0.06, 0.32, (LANE_W - 0.15) * 0.75);
+  var islandGeo = new T.BoxGeometry(2.0, 0.20, 0.45);
+  var boothGeo  = new T.BoxGeometry(1.7, 2.3, 1.05);
+  var roofGeo   = new T.BoxGeometry(1.85, 0.12, 1.2);
+  var winGeo    = new T.BoxGeometry(0.04, 0.7, 0.85);
+  var screenGeo = new T.BoxGeometry(0.04, 0.18, 0.45);
+
+  var booms = [];  // 4 个栏杆，scene3d 同步驱动抬起
+
+  // ── 4 个并列收费口 ──
+  for (var i = 0; i < N_BOOTHS; i++) {
+    // 第 i 个车道中心 Z（广场中心对称）
+    var zCenter = (i - (N_BOOTHS - 1) / 2) * LANE_W;  // -5.25, -1.75, 1.75, 5.25
+    var poleZ1 = zCenter - LANE_W / 2 + 0.15;  // 左立柱
+    var poleZ2 = zCenter + LANE_W / 2 - 0.15;  // 右立柱
+
+    // (a) 收费岛（车道右侧黄黑警示岛，长 2m × 高 0.2m × 宽 0.45m）
+    var islandZ = zCenter + LANE_W / 2 - 0.25;
+    var island = new T.Mesh(islandGeo, islandMat);
+    island.position.set(0, 0.10, islandZ);
+    island.castShadow = true;
+    island.receiveShadow = true;
+    g.add(island);
+
+    // (b) 收费亭（岛上方小屋 1.7 × 2.3 × 1.05m）
+    var booth = new T.Mesh(boothGeo, boothMat);
+    booth.position.set(0, 1.35, islandZ);
+    booth.castShadow = true;
+    g.add(booth);
+    // 屋顶（蓝色扁壳）
+    var roof = new T.Mesh(roofGeo, boothRoofMat);
+    roof.position.set(0, 2.56, islandZ);
+    g.add(roof);
+    // 窗户（深色玻璃，朝向前方车辆）
+    var win = new T.Mesh(winGeo, glassMat);
+    win.position.set(-0.86, 1.5, islandZ);
+    g.add(win);
+    // ETC 显示屏（绿色发光小条，提示"余额"）
+    var screen = new T.Mesh(screenGeo, screenMat);
+    screen.position.set(-0.88, 1.05, islandZ);
+    g.add(screen);
+
+    // (c) ETC 门架（2 立柱 + 横梁 + 标志板 + 栏杆）
+    var pole1 = new T.Mesh(poleGeo, poleMat);
+    pole1.position.set(0, 2.5, poleZ1);
+    pole1.castShadow = true;
+    g.add(pole1);
+    var pole2 = new T.Mesh(poleGeo, poleMat);
+    pole2.position.set(0, 2.5, poleZ2);
+    pole2.castShadow = true;
+    g.add(pole2);
+
+    // 横梁连接两立柱顶部（高度 4.9m，跨该车道）
+    var beam = new T.Mesh(beamGeo, poleMat);
+    beam.position.set(0, 4.85, zCenter);
+    beam.castShadow = true;
+    g.add(beam);
+
+    // ETC 蓝色标志板（横梁下方）
+    var laneSign = new T.Mesh(signGeo, signMat);
+    laneSign.position.set(0.09, 4.85, zCenter);
+    g.add(laneSign);
+
+    // 栏杆 boom（黄黑警示色，pivot 在 pole1 端，绕 Y 旋转抬起）
+    // 几何体沿 +Z 伸出 boomLen，translate 把 pivot 移到原点
+    var boomLen = LANE_W - 0.35;
+    var boomGeo = new T.BoxGeometry(0.07, 0.07, boomLen);
+    boomGeo.translate(0, 0, boomLen / 2);
+    var boom = new T.Mesh(boomGeo, boomMat);
+    boom.position.set(0, 4.45, poleZ1);
+    boom.castShadow = true;
+    g.add(boom);
+    booms.push(boom);
+
+    // 栏杆末端红色警示灯（小 Sphere emissive 红）
+    var tipLight = new T.Mesh(
+      new T.SphereGeometry(0.06, 8, 6),
+      new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff2222, emissiveIntensity: 0.9 })
+    );
+    tipLight.position.set(0, 4.45, poleZ1 + boomLen);
+    g.add(tipLight);
   }
 
-  // Crossbar: horizontal box connecting pole tops at height 5m
-  var bar = new T.Mesh(
-    new T.BoxGeometry(0.15, 0.15, 9.0),
-    new T.MeshStandardMaterial({ color: 0x445566, metalness: 0.5, roughness: 0.4 })
-  );
-  bar.position.set(0, 5.2, 0);
-  bar.castShadow = true;
-  g.add(bar);
-
-  // Sign panel on crossbar (rectangular plate)
-  var sign = new T.Mesh(
-    new T.BoxGeometry(0.08, 0.6, 3.0),
-    new T.MeshStandardMaterial({ color: 0x2266aa, emissive: 0x113355, roughness: 0.3 })
-  );
-  sign.position.set(0.1, 5.2, 0);
-  g.add(sign);
-
-  // Boom arm: long thin box, pivot at one pole (Z=-4.5)
-  // Rotates around Y axis: 0° = horizontal (closed), 75° = raised (open)
-  var boom = new T.Mesh(
-    new T.BoxGeometry(0.1, 0.1, 8.5),
-    new T.MeshStandardMaterial({ color: 0xffcc00, emissive: 0x332200, roughness: 0.3 })
-  );
-  // Position so one end is at the pivot pole, extends across road to other pole
-  boom.position.set(0, 4.8, 0);
-  // Move geometry so pivot is at one end (Z=-4.5), arm extends to Z=+4
-  boom.geometry.translate(0, 0, 4.25);
-  boom.position.z = -4.5;
-  g.add(boom);
-  g.userData.boom = boom;
+  // ── 兼容字段：userData.boom 保留第一个栏杆（旧 scene3d 调用点兼容）──
+  if (booms.length) {
+    g.userData.boom = booms[0];
+    g.userData.booms = booms;  // 新字段：全部 4 个栏杆，scene3d 同步驱动
+  }
+  // 真实尺寸 1:1 建模（不会被 scene3d 非均匀缩放）
+  g.userData.realScale = true;
 
   return g;
 }
