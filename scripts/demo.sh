@@ -29,6 +29,9 @@ done
 sleep 0.5
 
 DURATION=0  # 0 = 自动从场景 duration_s 读取，设置正数 = 覆盖
+# 默认无限时模式：场景可能跑超过 duration_s（NPC/事件还在继续），
+# 退出由用户 Ctrl+C 触发。需要限时演示时显式传数字：bash demo.sh 60。
+AUTO_DURATION_DEFAULT=0  # 0 = 不限时；改非零则恢复"无字段时默认 60s"旧行为
 OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
@@ -114,9 +117,16 @@ BANNER
    # Auto-detect duration from scenario if not explicitly given
    if [ "$DURATION" -le 0 ] 2>/dev/null; then
      DURATION=$(python3 -c "import json; d=json.load(open('$SCENARIO_ABS')); print(int(d.get('duration_s',0) or 0))" 2>/dev/null || echo 0)
-     [ "$DURATION" -le 0 ] 2>/dev/null && DURATION=60
+     # DURATION 仍 ≤0 时不再默认 60s 限时：场景里的事件/NPC 在 duration_s 之后
+     # 还会继续跑（回收车流、ETC 重复触发等），限时退出会让用户错过后续。
+     # 默认 0 = 不限时，由 Ctrl+C 退出。需要限时显式传数字：bash demo.sh 60。
+     [ "$DURATION" -le 0 ] 2>/dev/null && DURATION=$AUTO_DURATION_DEFAULT
    fi
-   echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
+   if [ "$DURATION" -gt 0 ] 2>/dev/null; then
+     echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
+   else
+     echo "Demo Duration: ∞ (Ctrl+C 退出)   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
+   fi
 echo ""
 
 # ── Build ───────────────────────────────────────────────────

@@ -2236,6 +2236,11 @@ function resetCamera() {
   });
 }
 
+/** map 模式专用：拖远后重新对准 ego 并恢复默认高度。 */
+function resetMapView() {
+  CameraController.resetMapView();
+}
+
 /** C.2: Raycast 检测点击的 NPC，命中后弹出信息面板。
  *  鼠标坐标与 Raycaster 由 CameraController.initCameraControls 在点击时传入。 */
 function _pickNPC(mouse, raycaster) {
@@ -2419,16 +2424,21 @@ function _renderFrame() {
       camera3d.position.set(sx, 85, sz);
       camera3d.lookAt(sx + 5, 0, sz);
     } else if (_camMode === 'map') {
-      // 鸟瞰地图模式：高空正俯视，俯瞰整个场景用于预览/检查建模问题。
-      // 相机跟随 ego 但高度 220m，相机正下方对齐 ego（无 lookAt 偏移），
-      // 用更大 fov 拉开视野；用户可在此模式下扫视 ETC/匝道/高架等是否对位。
-      // 配合 OrbitControls 风格的话用户应切到 'orbit'。这里强制俯视固定。
-      camera3d.position.set(sx, 220, sz + 0.001);  // +0.001 避免相机正上方 lookAt NaN
+      // 鸟瞰地图模式：高空正俯视，用于预览/检查建模问题（ETC/匝道/高架等）。
+      // 交互（CameraController.js 维护 _mapState）：
+      //   - 左键拖拽 → 平移相机（offset.x/z 累积，解除 followEgo）
+      //   - 滚轮 → 调整高度（30-800m，越大视野越广）
+      //   - followEgo=true 时相机跟随 ego；拖拽后自动解除，按 R/Recalc 重新对准
+      // 这里只读取状态并应用，不做交互逻辑——交互在 initCameraControls 里。
+      var _mapState = CameraController.getMapState();
+      var mapH = _mapState.height;
+      var mapCx = _mapState.followEgo ? sx : sx + _mapState.offset.x;
+      var mapCz = _mapState.followEgo ? sz : sz + _mapState.offset.z;
+      camera3d.position.set(mapCx, mapH, mapCz + 0.001);  // +0.001 避免正上方 lookAt NaN
       camera3d.up.set(0, 1, 0);
-      camera3d.lookAt(sx, 0, sz);
-      // 高空视角临时拉大 fov，让视野更广（恢复时由其他模式覆写）
-      if (camera3d.fov !== 75) camera3d.fov = 75;
-      camera3d.updateProjectionMatrix();
+      camera3d.lookAt(mapCx, 0, mapCz);
+      // 高空视角 fov 拉大到 75，让视野更广；高度低时 fov 自动恢复 60（由其他模式覆写）。
+      if (camera3d.fov !== 75) { camera3d.fov = 75; camera3d.updateProjectionMatrix(); }
     } else if (_camMode === 'driver') {
       // 驾驶员视角：车顶略后方，看向前方道路
       var dh = -_dr.smoothHeading;
@@ -3022,4 +3032,4 @@ function update3D() {
 // Exports
 // ══════════════════════════════════════════════════════════════════════════════
 
-export { init3DScene, resize3D, update3D, sceneReady, scene3d, _renderFrame, _applyRoadCurve, setCameraMode, resetCamera, closeNPCDetail, setPerfTier };
+export { init3DScene, resize3D, update3D, sceneReady, scene3d, _renderFrame, _applyRoadCurve, setCameraMode, resetCamera, resetMapView, closeNPCDetail, setPerfTier };
