@@ -147,6 +147,13 @@ export function _buildContactShadow(w, d) {
 // allocate geometry once. Phase 6 画质升级：增加圆角、车窗、轮毂等细节。
 const _carGeom = {};
 
+/* 共享车轴横梁材质（避免每辆车重复创建 MeshStandardMaterial） */
+let _axleBeamMat = null;
+function _getAxleBeamMat(T) {
+  if (!_axleBeamMat) _axleBeamMat = new T.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.3 });
+  return _axleBeamMat;
+}
+
 /**
  * initCarMesh — create shared geometry objects used by _buildSedan.
  * Safe to call multiple times; only allocates on the first call.
@@ -219,6 +226,9 @@ export function initCarMesh() {
   _carGeom.grille = new T.BoxGeometry(0.05, 0.26, 1.15, 1, 1, 4);
   _carGeom.licensePlate = new T.BoxGeometry(0.04, 0.14, 0.42, 1, 1, 3);
   _carGeom.antenna = new T.CylinderGeometry(0.01, 0.01, 0.45, 6);
+  // 车轴横梁（圆柱沿 Z 连接左右轮，radius 0.04，长度 1.9）
+  _carGeom.axleBeam = new T.CylinderGeometry(0.04, 0.04, 1.9, 6);
+  _carGeom.axleBeam.rotateX(Math.PI / 2);
 }
 
 /**
@@ -351,32 +361,50 @@ export function _buildSedan(color, secondaryColor) {
   var ant = new T.Mesh(_carGeom.antenna, chromeMat);
   ant.position.set(-0.9, 1.4, 0.55); g.add(ant);
 
-  // Wheels (4) — 前轮抽到 frontWheels 子 Group 以支持转向动画
-  var wheelPos = [
-    [1.35, 0.34, 0.95], [1.35, 0.34, -0.95],
-    [-1.35, 0.34, 0.95], [-1.35, 0.34, -0.95]
-  ];
-  var wheels = [], frontWheels = new T.Group();
+  // 自动驾驶小蓝灯 ×2（车尾左右，量产 ADS 指示灯，比车顶款更显眼）
+  var adsLightGeo = new T.CylinderGeometry(0.07, 0.08, 0.08, 12);
+  var adsLightMat = new T.MeshStandardMaterial({ color: 0x3388ff, emissive: 0x2277ee, emissiveIntensity: 2.2, roughness: 0.10, metalness: 0.2 });
+  function addAdsLight(z) {
+    var m = new T.Mesh(adsLightGeo, adsLightMat);
+    m.name = 'ads_indicator';
+    m.position.set(-1.75, 0.88, z);
+    g.add(m);
+  }
+  addAdsLight(0.48); addAdsLight(-0.48);
+
+  // Wheels (4) — 前后轴分别建 Group，前轴支持转向动画。
+  // 轴 Group pivot 在轴中心，车轮相对轴定位，rotation.y 转向时车轮绕轴心自转而非绕车身公转。
+  var axleX = 1.35, rearAxleX = -1.35, wheelY = 0.34, wheelZ = 0.95;
+  var wheels = [];
+  var frontAxle = new T.Group();
+  frontAxle.position.set(axleX, wheelY, 0);
+  var rearAxle = new T.Group();
+  rearAxle.position.set(rearAxleX, wheelY, 0);
   for (var wi = 0; wi < 4; wi++) {
     var wh = _buildWheel(T);
-    wh.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
+    var zSign = (wi === 0 || wi === 2) ? wheelZ : -wheelZ;
+    wh.position.set(0, 0, zSign);
+    if (wi < 2) frontAxle.add(wh); else rearAxle.add(wh);
     wheels.push(wh);
-    if (wi < 2) {
-      frontWheels.add(wh);
-    } else {
-      g.add(wh);
-    }
   }
-  g.add(frontWheels);
-  g.userData.frontWheels = frontWheels;
+  // 车轴可视化横梁（共享 geo + mat，避免每车重复创建）
+  frontAxle.add(new T.Mesh(_carGeom.axleBeam, _getAxleBeamMat(T)));
+  rearAxle.add(new T.Mesh(_carGeom.axleBeam, _getAxleBeamMat(T)));
+  g.add(frontAxle);
+  g.add(rearAxle);
+  g.userData.frontAxle = frontAxle;
+  g.userData.rearAxle = rearAxle;
   g.userData.wheels = wheels;
 
-  // Headlights with chrome bezel
+  // Headlights with chrome bezel（lens mesh 加 name 供 _setVehicleLights 查找）
   var hlMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.7, roughness: 0.12 });
   var bezelMat = new T.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.6, roughness: 0.25 });
-  function addHeadlight(z) {
+  var headlightMeshes = [];
+  function addHeadlight(z, side) {
     var bg = new T.Group();
     var lens = new T.Mesh(_carGeom.headlight, hlMat);
+    lens.name = 'headlight_' + side;
+    headlightMeshes.push(lens);
     var bezel = new T.Mesh(new T.BoxGeometry(0.09, 0.18, 0.46, 1, 1, 3), bezelMat);
     bezel.position.x = -0.02;
     bg.add(bezel); bg.add(lens);
@@ -384,13 +412,16 @@ export function _buildSedan(color, secondaryColor) {
     g.add(bg);
     return bg;
   }
-  addHeadlight(0.58); addHeadlight(-0.58);
+  addHeadlight(0.58, 'L'); addHeadlight(-0.58, 'R');
 
-  // Taillights
+  // Taillights（= 刹车灯，name brakelight_ 供 _setVehicleLights 查找）
   var tlMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.7, roughness: 0.12 });
-  function addTaillight(z) {
+  var brakeLightMeshes = [];
+  function addTaillight(z, side) {
     var bg = new T.Group();
     var lens = new T.Mesh(_carGeom.taillight, tlMat);
+    lens.name = 'brakelight_' + side;
+    brakeLightMeshes.push(lens);
     var bezel = new T.Mesh(new T.BoxGeometry(0.07, 0.18, 0.46, 1, 1, 3), bezelMat);
     bezel.position.x = 0.02;
     bg.add(bezel); bg.add(lens);
@@ -398,7 +429,28 @@ export function _buildSedan(color, secondaryColor) {
     g.add(bg);
     return bg;
   }
-  addTaillight(0.58); addTaillight(-0.58);
+  addTaillight(0.58, 'L'); addTaillight(-0.58, 'R');
+
+  // Turn signals（琥珀色，四角，name turnsignal_ 供 _setVehicleLights 查找）
+  var turnMat = new T.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2.0, roughness: 0.10 });
+  var turnGeo = new T.BoxGeometry(0.08, 0.15, 0.30, 1, 1, 2);
+  var turnSignals = {};
+  function addTurnSignal(x, z, key) {
+    var m = new T.Mesh(turnGeo, turnMat);
+    m.name = 'turnsignal_' + key;
+    m.position.set(x, 0.58, z);
+    g.add(m);
+    turnSignals[key] = m;
+  }
+  addTurnSignal(2.15, 0.82, 'FL');
+  addTurnSignal(2.15, -0.82, 'FR');
+  addTurnSignal(-2.16, 0.82, 'RL');
+  addTurnSignal(-2.16, -0.82, 'RR');
+
+  // userData 供 _setVehicleLights 控制 emissiveIntensity（替代 glTF 版按名扫描的结果）
+  g.userData.headlights = headlightMeshes;
+  g.userData.brakeLights = brakeLightMeshes;
+  g.userData.turnSignals = turnSignals;
 
   // 车头灯真实照射（仅 ego 用，NPC 由 _setVehicleLights 切 emissive）
   var spotL = new T.SpotLight(0xffffee, 3.0, 60, 0.45, 0.4, 1.2);
@@ -411,7 +463,6 @@ export function _buildSedan(color, secondaryColor) {
   spotR.target.position.set(18, 0, -0.55);
   spotR.castShadow = false;
   g.add(spotR); g.add(spotR.target);
-  g.userData.headlights = [spotL, spotR];
 
   // 车底接触阴影：软边径向渐变平面，补充 AO 感
   g.add(_buildContactShadow(4.6, 2.0));
@@ -522,15 +573,16 @@ export function _buildObstacle(type, color) {
     var aR = aL.clone(); aR.position.z = -archPos[ai2][1]; g.add(aR);
   }
 
-  // 车轮（真实尺寸，圆柱不会被非均匀缩放压扁）
+  // 车轮 — 前后轴分别建 Group，前轴支持转向动画。
+  // 轴 Group pivot 在轴中心，车轮相对轴定位（同 _buildSedan 模式）。
   var wheels = [];
   var wheelGeo = new T.CylinderGeometry(wheelR, wheelR, wheelW, 20);
   var hubGeo = new T.CylinderGeometry(wheelR * 0.55, wheelR * 0.55, wheelW + 0.01, 14);
   var spokeGeo = new T.BoxGeometry(wheelR * 1.6, 0.035, 0.025);
-  var wheelPositions = [
-    [wFrontX, wheelR, wZ], [wFrontX, wheelR, -wZ],
-    [wRearX, wheelR, wZ], [wRearX, wheelR, -wZ]
-  ];
+  var frontAxle = new T.Group();
+  frontAxle.position.set(wFrontX, wheelR, 0);
+  var rearAxle = new T.Group();
+  rearAxle.position.set(wRearX, wheelR, 0);
   for (var wi = 0; wi < 4; wi++) {
     var wg = new T.Group();
     var tire = new T.Mesh(wheelGeo, tireMat);
@@ -543,10 +595,19 @@ export function _buildObstacle(type, color) {
       spoke.rotation.x = (Math.PI * 2 / 5) * si;
       wg.add(spoke);
     }
-    wg.position.set(wheelPositions[wi][0], wheelPositions[wi][1], wheelPositions[wi][2]);
+    var zSign = (wi === 0 || wi === 2) ? wZ : -wZ;
+    wg.position.set(0, 0, zSign);
     wg.userData.isWheel = true;
-    wheels.push(wg); g.add(wg);
+    wheels.push(wg);
+    if (wi < 2) frontAxle.add(wg); else rearAxle.add(wg);
   }
+  // 车轴可视化横梁（共享 geo + mat）
+  frontAxle.add(new T.Mesh(_carGeom.axleBeam, _getAxleBeamMat(T)));
+  rearAxle.add(new T.Mesh(_carGeom.axleBeam, _getAxleBeamMat(T)));
+  g.add(frontAxle);
+  g.add(rearAxle);
+  g.userData.frontAxle = frontAxle;
+  g.userData.rearAxle = rearAxle;
   g.userData.wheels = wheels;
 
   // 车灯（简化 emissive，不加 SpotLight 避免 24 NPC × 2 灯 = 48 动态光源性能灾难）

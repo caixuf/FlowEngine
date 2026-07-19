@@ -295,11 +295,20 @@ MATERIALS = {
     },
     "turnsignal": {
         "pbrMetallicRoughness": {
-            "baseColorFactor": [0.75, 0.45, 0.05, 1.0],
+            "baseColorFactor": [0.85, 0.50, 0.05, 1.0],
             "metallicFactor": 0.1,
-            "roughnessFactor": 0.35,
+            "roughnessFactor": 0.25,
         },
-        "emissiveFactor": [0.1, 0.06, 0.0],
+        "emissiveFactor": [0.35, 0.18, 0.0],
+    },
+    # 自动驾驶小蓝灯（车尾 x2，量产 ADS 指示灯，始终亮）
+    "ads_indicator": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.15, 0.45, 0.95, 1.0],
+            "metallicFactor": 0.2,
+            "roughnessFactor": 0.10,
+        },
+        "emissiveFactor": [0.15, 0.50, 0.95],
     },
 }
 
@@ -314,7 +323,7 @@ MODEL_SPECS = [
     {
         "name": "sedan",
         "builder": build_sedan,
-        "materials": ["car_paint", "glass", "tire", "headlight", "brakelight", "turnsignal"],
+        "materials": ["car_paint", "glass", "tire", "headlight", "brakelight", "turnsignal", "ads_indicator"],
         "parts": [
             # 车身件 (car_paint, mat 0)
             {"name": "body",     "mat": 0, "build_fn": lambda: box_vertices(0.0,   0.52,  0.0,  4.2,  0.72, 1.86)},
@@ -340,16 +349,19 @@ MODEL_SPECS = [
             # 后刹车灯 (brakelight, mat 4) — 红色发光
             {"name": "brakelight_L", "mat": 4, "build_fn": lambda: box_vertices(-2.18, 0.70,  0.55, 0.10, 0.16, 0.42)},
             {"name": "brakelight_R", "mat": 4, "build_fn": lambda: box_vertices(-2.18, 0.70, -0.55, 0.10, 0.16, 0.42)},
-            # 转向灯 (turnsignal, mat 5) — 橙色发光，前 + 后 × 左右
-            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65,  0.78, 0.08, 0.14, 0.10)},
-            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65, -0.78, 0.08, 0.14, 0.10)},
-            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70,  0.78, 0.08, 0.14, 0.10)},
-            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70, -0.78, 0.08, 0.14, 0.10)},
-            # 车轮（圆柱，轴沿 Z 横向，旋转 rotation.x 实现滚动）
-            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33,  0.93, 0.33, 0.26, "z", 14)},
-            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33, -0.93, 0.33, 0.26, "z", 14)},
-            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33,  0.93, 0.33, 0.26, "z", 14)},
-            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33, -0.93, 0.33, 0.26, "z", 14)},
+            # 转向灯 (turnsignal, mat 5) — 橙色发光，前 + 后 × 左右，加大尺寸更显眼
+            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65,  0.82, 0.08, 0.16, 0.12)},
+            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices(2.16,  0.65, -0.82, 0.08, 0.16, 0.12)},
+            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70,  0.82, 0.08, 0.16, 0.12)},
+            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.16, 0.70, -0.82, 0.08, 0.16, 0.12)},
+            # 车轮（圆柱，轴沿 Z 横向，24 段→更圆滑，旋转 rotation.x 实现滚动）
+            {"name": "wheel_FL", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33,  0.93, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_FR", "mat": 2, "build_fn": lambda: cylinder_vertices( 1.35, 0.33, -0.93, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_RL", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33,  0.93, 0.33, 0.26, "z", 24)},
+            {"name": "wheel_RR", "mat": 2, "build_fn": lambda: cylinder_vertices(-1.35, 0.33, -0.93, 0.33, 0.26, "z", 24)},
+            # 自动驾驶小蓝灯 ×2 (ads_indicator, mat 6) — 车尾左右，始终亮
+            {"name": "ads_indicator_L", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.75, 0.88,  0.48, 0.07, 0.08, "y", 12)},
+            {"name": "ads_indicator_R", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.75, 0.88, -0.48, 0.07, 0.08, "y", 12)},
         ],
     },
     # ── truck：车头朝 +x，货箱在 -x；圆柱车轮 + 灯节点

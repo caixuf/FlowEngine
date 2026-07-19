@@ -1994,9 +1994,9 @@ function init3DScene() {
       _composer.addPass(new THREE.RenderPass(scene3d, camera3d));
       var bloomPass = new THREE.UnrealBloomPass(
         new THREE.Vector2(w, h),
-        0.9,   // strength：车漆/车灯/路面反射的光晕强度（极品飞车风格光泽感）
-        0.5,   // radius：光晕扩散半径
-        0.6    // threshold：降低阈值让更多高光参与 Bloom（车漆反射/玻璃反光都发光）
+        0.65,  // strength：车灯/车漆高光的光晕强度
+        0.4,   // radius：光晕扩散半径
+        0.85   // threshold：仅高亮区域（车灯 emissive/强反光）参与 Bloom，避免整屏泛白
       );
       _composer.addPass(bloomPass);
       // SMAA 抗锯齿（若 CDN 加载了 SMAAPass）；EffectComposer 链路会绕过 WebGLRenderer
@@ -2261,7 +2261,7 @@ function _renderFrame() {
     ego.rotation.y = -_dr.smoothHeading;
     // 前轮转向动画：从 vehicle.steer 读取转向值旋转前轮组
     var v = (_topoData.metrics || {}).vehicle || {};
-    var fw = ego.userData.frontWheels;
+    var fw = ego.userData.frontAxle;
     if (fw && typeof v.steer === 'number') {
       fw.rotation.y = v.steer * 0.5;
     }
