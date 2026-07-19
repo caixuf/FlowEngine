@@ -6,6 +6,25 @@
 
 ---
 
+## 第二轮：车辆动画/灯光/状态修复（已改完，语法通过）
+
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| NPC+ego 轮滚动角速度半径错误 | scene3d.js / utils.js / models.js | 旧代码统一用 `0.17*L`（unit 模型时代遗留）；realScale 模型 scale.x=1，轮半径与车长无关，车轮慢 2~3 倍。现建模时写入 `userData.wheelRadius`（sedan 0.33 / 卡车 0.42 / glTF 按前轮包围盒量取），滚动用 `v·dt / wheelRadius` |
+| 类型切换重建后车轮不转/车灯灭/车身拉伸 | scene3d.js `~2504` | 重建只搬 children 没迁 userData，`wheels` 指向已 dispose 旧轮、`realScale` 不更新。现迁移 8 个键：wheels/frontAxle/rearAxle/brakeLights/turnSignals/headlights/realScale/wheelRadius |
+| NPC 面板 id 不稳定 | scene3d.js update3D | `_obsWorld` 补 `id: ent.id`（面板本就 `ow.id \|\| idx`，之前恒 fallback 槽位号） |
+| 卡车灯光接入 `_setVehicleLights` | utils.js `_buildObstacle` | 灯 mesh 命名 headlight_/brakelight_/turnsignal_ + userData 引用；补四角琥珀转向灯 |
+| NPC 挂 48 个 SpotLight 性能灾难 | utils.js `_buildSedan(addSpots)` | 第三参 false 时不挂 SpotLight；ego 默认 true |
+| 车道中心双黄线弯道消失 | scene3d/view/RoadView.js | `userData.baseZ` 未存 → NaN；已补 |
+| lat→plat ReferenceError | scene3d.js `~478` | 水坑生成崩溃导致道路网络构建中断 |
+| context 恢复后场景不重建 | scene3d.js init | 新 scene 前清空 roadNetwork/water/rain/sky 等模块级引用与缓存键 |
+| 天空球/太阳光晕不随 ego | scene3d.js `_renderFrame` | `_skyMesh`/`_sunSprite` 每帧跟随 ego 位置 |
+
+- 4 个改动文件 `node --check --input-type=module` 全部通过。
+
+---
+
+
 ## 工作树状态（未提交）
 
 `tools/flowboard/js/scene3d.js` 有以下**未提交**改动（黑屏修复、NPC Frenet 已各自单独 commit）：

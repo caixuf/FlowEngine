@@ -84,6 +84,11 @@ function _buildVehicleFromGltf(name, gltf) {
       }
     });
     var wheels = [];
+    // 转向系统已烘进 glTF 节点层级（见 gen_models.py / commit 162e3ea）：
+    // axle_front / axle_rear 作为独立 Group 节点导出，无需运行时再用 Box3
+    // 算 FL/FR 包围盒中心建 pivot。这里只需把 4 个 wheel 节点 push 进 wheels
+    // 供滚动动画使用，并把 axle_front / axle_rear 直接挂到 userData 给 scene3d.js
+    // 的转向逻辑读取。
     if (fl) wheels.push(fl);
     if (fr) wheels.push(fr);
     if (rl) wheels.push(rl);

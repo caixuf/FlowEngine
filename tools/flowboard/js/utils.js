@@ -273,9 +273,13 @@ function _buildWheel(T) {
  * _buildSedan — build a detailed sedan mesh group.
  * @param {number} color        body colour (e.g. 0x4488dd)
  * @param {number} secondaryColor  roof / cabin colour (e.g. 0x3377bb)
+ * @param {boolean} addSpots    是否挂 2 个车头 SpotLight（默认 true）。
+ *                              NPC 必须传 false：24 个 NPC 各 2 灯 = 48 个动态
+ *                              光源会把 forward renderer 的 shader 撑爆。
  * @returns {THREE.Group}
  */
-export function _buildSedan(color, secondaryColor) {
+export function _buildSedan(color, secondaryColor, addSpots) {
+  if (addSpots === undefined) addSpots = true;
   initCarMesh(); // ensure shared geometries exist
   const T = window.THREE;
   var g = new T.Group();
@@ -395,6 +399,8 @@ export function _buildSedan(color, secondaryColor) {
   g.userData.frontAxle = frontAxle;
   g.userData.rearAxle = rearAxle;
   g.userData.wheels = wheels;
+  // 真实轮半径（_carGeom.wheel 半径 0.33），scene3d 滚动动画角速度 = v·dt / r
+  g.userData.wheelRadius = 0.33;
 
   // Headlights with chrome bezel（lens mesh 加 name 供 _setVehicleLights 查找）
   var hlMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.7, roughness: 0.12 });
@@ -609,20 +615,46 @@ export function _buildObstacle(type, color) {
   g.userData.frontAxle = frontAxle;
   g.userData.rearAxle = rearAxle;
   g.userData.wheels = wheels;
+  // 卡车真实轮半径（wheelR = 0.42），scene3d 滚动动画角速度 = v·dt / r
+  g.userData.wheelRadius = wheelR;
 
   // 车灯（简化 emissive，不加 SpotLight 避免 24 NPC × 2 灯 = 48 动态光源性能灾难）
+  // 命名 + userData 引用与 _buildSedan 一致，_setVehicleLights 才能切换刹车/转向/大灯。
   var headMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.2, roughness: 0.2 });
   var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.2, roughness: 0.2 });
   var hlGeo = new T.BoxGeometry(0.08, 0.16, 0.42, 1, 1, 2);
   var tlGeo = new T.BoxGeometry(0.06, 0.16, 0.42, 1, 1, 2);
   var lightX = BL / 2 - 0.04;
-  function makeObsLight(z, isHead) {
+  var headlightMeshes = [], brakeLightMeshes = [];
+  function makeObsLight(z, isHead, side) {
     var m = new T.Mesh(isHead ? hlGeo : tlGeo, isHead ? headMat : tailMat);
+    m.name = (isHead ? 'headlight_' : 'brakelight_') + side;
     m.position.set(isHead ? lightX : -lightX, 0.58, z);
     g.add(m);
+    if (isHead) headlightMeshes.push(m); else brakeLightMeshes.push(m);
   }
-  makeObsLight(0.58, true); makeObsLight(-0.58, true);
-  makeObsLight(0.58, false); makeObsLight(-0.58, false);
+  makeObsLight(0.58, true, 'L'); makeObsLight(-0.58, true, 'R');
+  makeObsLight(0.58, false, 'L'); makeObsLight(-0.58, false, 'R');
+
+  // 转向灯（琥珀色，四角，name turnsignal_ 供 _setVehicleLights 查找）
+  var turnMat = new T.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2.0, roughness: 0.10 });
+  var turnGeo = new T.BoxGeometry(0.08, 0.15, 0.30, 1, 1, 2);
+  var turnSignals = {};
+  function addTruckTurn(x, z, key) {
+    var m = new T.Mesh(turnGeo, turnMat);
+    m.name = 'turnsignal_' + key;
+    m.position.set(x, 0.85, z);
+    g.add(m);
+    turnSignals[key] = m;
+  }
+  addTruckTurn(BL / 2 - 0.02, 1.02, 'FL');
+  addTruckTurn(BL / 2 - 0.02, -1.02, 'FR');
+  addTruckTurn(-BL / 2 + 0.02, 1.02, 'RL');
+  addTruckTurn(-BL / 2 + 0.02, -1.02, 'RR');
+
+  g.userData.headlights = headlightMeshes;
+  g.userData.brakeLights = brakeLightMeshes;
+  g.userData.turnSignals = turnSignals;
 
   // 车底接触阴影（真实尺寸）
   g.add(_buildContactShadow(BL * 1.1, BW * 1.1));
