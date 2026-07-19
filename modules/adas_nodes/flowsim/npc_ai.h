@@ -34,11 +34,15 @@ struct NpcAiConfig {
     double lane_width{3.5};         /**< 车道宽度，用于横向同车道判断 */
     double same_lane_tol{2.0};      /**< 横向同车道容差（m） */
     double look_ahead{80.0};        /**< 前车搜索距离 (m) */
-    double idm_safe_gap_base{3.0};  /**< IDM 静态安全间距 (m) */
-    double idm_safe_gap_time{1.0};  /**< IDM 时间头way (s) → safe_gap = base + v*time */
-    double accel_rate{2.0};         /**< 平稳加速率 (m/s²) */
-    double brake_rate{4.0};         /**< 平稳减速率 (m/s²) */
-    double follow_decel_factor{4.0};/**< IDM 跟车减速强度系数 */
+    /* D4 IDM 参数调优：原 safe_gap_base=3 / time=1.0 / decel=4.0 太激进，
+     * 5m/s 时 safe_gap=8m，10m/s 时 safe_gap=13m。现在 base=5 / time=1.5 / decel=3.0
+     * → 5m/s 时 safe_gap=12.5m，10m/s 时 safe_gap=20m，跟车更柔和、有反应时间，
+     * 不再"前车一动后车跟到死停"。 */
+    double idm_safe_gap_base{5.0};  /**< IDM 静态安全间距 (m) */
+    double idm_safe_gap_time{1.5};  /**< IDM 时间头way (s) → safe_gap = base + v*time */
+    double accel_rate{1.5};         /**< 平稳加速率 (m/s²)，原 2.0 改 1.5 起步更柔 */
+    double brake_rate{3.5};         /**< 平稳减速率 (m/s²)，原 4.0 改 3.5 避免硬刹 */
+    double follow_decel_factor{3.0};/**< IDM 跟车减速强度系数，原 4.0 改 3.0 */
     double ped_boundary{7.8};       /**< 行人横穿边界（路宽，m） */
     double ped_wait_time{3.0};      /**< 行人到边后等待时间 (s) */
 };

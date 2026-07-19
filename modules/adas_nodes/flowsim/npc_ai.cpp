@@ -87,6 +87,31 @@ static double idm_desired_speed(double v, double gap, double target_v,
     return std::max(0.0, v - brake * dt);
 }
 
+/* ── D3 避障换道：检查目标车道是否前后安全可换道 ──
+ * target_offset = 候选车道横向位置（如 ±1.75）
+ * 返回 true 表示目标车道前方 30m + 后方 8m 无同向车，可安全换道。
+ *
+ * 阈值依据：
+ *   - 前 30m：换道后需要足够反应距离，前车太快不换
+ *   - 后 8m：不能贴着后车换道（后车制动距离 ~v*2s，5m/s 时 10m，但 8m 已够避免追尾）
+ */
+static bool lane_change_safe(const Entity& npc, double target_offset,
+                             const EntityPool& pool, const NpcAiConfig& cfg) {
+    for (int i = 0; i < pool.size(); ++i) {
+        const Entity& o = pool[i];
+        if (!o.active || &o == &npc) continue;
+        if (!o.is_vehicle()) continue;
+        if (o.route_dir != npc.route_dir) continue;
+        // 目标车道判定：与 target_offset 横向距离 < same_lane_tol
+        if (std::fabs(o.offset - target_offset) >= cfg.same_lane_tol) continue;
+        // 沿 route 纵向距离
+        double ahead = (o.route_s - npc.route_s) * (double)npc.route_dir;
+        if (ahead > 0.0 && ahead < 30.0 + npc.length) return false;  // 前方有车
+        if (ahead < 0.0 && -ahead < 8.0 + npc.length) return false;  // 后方有车
+    }
+    return true;
+}
+
 /* ── 回收：跑到 route 末端的 NPC 放回 ego 附近，形成持续车流 ──
  * B4: 检查目标点附近是否已有同方向 NPC，被占则再后退一段，避免多车叠在同一点。 */
 static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
@@ -164,6 +189,39 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         npc.follow_gap = gap;
     } else {
         npc.follow_gap = 1e9;
+    }
+
+    // 1.5 D3 避障换道：lead 太近且太慢 → 试图换到相邻车道
+    //    lane_change_timer > 0 时跳过评估（避免频繁换道抖动），只递减计时器。
+    //    条件：本车在 route 上 / 速度 > 2 m/s / lead 速度 < 我速度 * 0.7 / gap < 12m
+    //    候选 offset：±1.75（2 车道道路的两个车道中心），优先反方向换（让路侧错开）
+    //    冷却 4s：换道后 4s 内不评估，足够完成变道视觉过渡。
+    if (npc.lane_change_timer > 0.0) {
+        npc.lane_change_timer -= dt;
+        if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
+    } else if (npc.route_dir > 0 && npc.speed > 2.0 &&
+               lead != INVALID_ENTITY) {
+        const Entity& lead_e = pool[lead];
+        double lead_speed = lead_e.speed;
+        // 对向来车的 speed 是绝对值，方向用 route_dir 校正
+        if (lead_e.route_dir != npc.route_dir) lead_speed = lead_e.speed;
+        double trigger_gap = 10.0 + npc.speed * 1.5;  // 5 m/s → 17.5m, 15 m/s → 32.5m
+        if (gap < trigger_gap && lead_speed < npc.speed * 0.7) {
+            // 候选 offset：当前 offset 取负值（换到对面车道）。
+            // 若当前 |offset| 接近 0（路中心），默认换到 -1.75
+            double cand_a = (npc.offset >= 0.0) ? -1.75 : 1.75;
+            double cand_b = -cand_a;  // 另一方向
+            // 优先 cand_a，若被占则试 cand_b
+            if (lane_change_safe(npc, cand_a, pool, cfg)) {
+                npc.offset = cand_a;
+                npc.lane_change_timer = 4.0;
+            } else if (lane_change_safe(npc, cand_b, pool, cfg)) {
+                npc.offset = cand_b;
+                npc.lane_change_timer = 4.0;
+            }
+            // 换道后 lead 还在原车道 → 下一帧 find_lead 自然找不到，
+            // 状态切回 Cruise，NPC 在新车道加速。
+        }
     }
 
     // 2. 计算 v_desired

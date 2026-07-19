@@ -91,6 +91,9 @@ struct Entity {
     int    route_dir{0};           /**< route 行驶方向：+1 顺行，-1 对向，0=未上route(走旧逻辑) */
     int    route_fail_count{0};    /**< frenet_to_world 连续失败计数（≥5 强制 recycle 防飞出） */
 
+    /* ── NPC 避障换道（让 NPC 不再"堵成一坨"）── */
+    double lane_change_timer{0.0};  /**< 换道冷却计时器 (s)：>0 期间不评估换道，避免频繁抖动 */
+
     /* ── 行人专用 ── */
     double ped_wait_timer{0};      /**< 行人等待计时器 (s) */
     int    ped_parked{0};          /**< 行人是否停在路边 */
