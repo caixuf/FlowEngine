@@ -154,17 +154,54 @@ const _carGeom = {};
 export function initCarMesh() {
   if (_carGeom.body) return; // already initialized
   const T = window.THREE;
-  // Phase 6 画质再升级：车身不再是简单方块，而是带腰线的“胶囊”长方体
-  // 更多分段给光影更多变化，模拟引擎盖/腰线的曲面过渡。
-  _carGeom.body = new T.BoxGeometry(4.2, 0.72, 1.86, 6, 1, 4);
-  _carGeom.hood = new T.BoxGeometry(1.25, 0.08, 1.52, 3, 1, 3);
-  _carGeom.trunkDeck = new T.BoxGeometry(1.05, 0.06, 1.52, 3, 1, 3);
-  _carGeom.cabin = new T.BoxGeometry(2.15, 0.52, 1.52, 3, 1, 3);
-  _carGeom.windshield = new T.BoxGeometry(0.06, 0.46, 1.48);
-  _carGeom.rearWindow = new T.BoxGeometry(0.06, 0.36, 1.38);
-  _carGeom.sideWindow = new T.BoxGeometry(1.55, 0.36, 1.56);
-  // 轮拱：黑色弧形遮挡，让车轮不像贴上去的
-  _carGeom.wheelArch = new T.BoxGeometry(0.55, 0.38, 0.28, 2, 1, 1);
+  // ── 曲面车身（ExtrudeGeometry + Shape + bevel 倒角）──
+  // 替代旧 BoxGeometry 拼装，做出极品飞车风格的平滑腰线/引擎盖/车顶曲线。
+  // body：下半部分（底盘+引擎盖+后备箱），车侧轮廓 splineThru 平滑。
+  // 坐标系：Shape 在 X-Y 平面，X=车长方向(+前/-后)，Y=高度(相对 body 原点)；
+  //         ExtrudeGeometry 沿 +Z 拉伸出车宽，translate Z=-depth/2 居中。
+  _carGeom.body = (function () {
+    var s = new T.Shape();
+    // 车侧轮廓点（逆时针）：前杠底→前杠上→引擎盖→后备箱→后杠→底盘
+    var pts = [
+      new T.Vector2(2.10, -0.36), new T.Vector2(2.22, -0.20),
+      new T.Vector2(2.22, 0.08), new T.Vector2(2.08, 0.30),
+      new T.Vector2(1.45, 0.36), new T.Vector2(-1.20, 0.36),
+      new T.Vector2(-1.95, 0.33), new T.Vector2(-2.12, 0.26),
+      new T.Vector2(-2.22, 0.08), new T.Vector2(-2.22, -0.20),
+      new T.Vector2(-2.10, -0.36)
+    ];
+    s.moveTo(pts[0].x, pts[0].y);
+    s.splineThru(pts.slice(1));
+    s.closePath();
+    var geo = new T.ExtrudeGeometry(s, {
+      depth: 1.86, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.04,
+      bevelSegments: 3, curveSegments: 16, steps: 1
+    });
+    geo.translate(0, 0, -0.93);  // Z 居中（车宽 1.86 / 2）
+    return geo;
+  })();
+  // cabin：上半部分（前挡风+车顶+后挡风），更窄(1.40m)形成车窗框
+  _carGeom.cabin = (function () {
+    var s = new T.Shape();
+    var pts = [
+      new T.Vector2(1.18, -0.27), new T.Vector2(1.05, 0.05),
+      new T.Vector2(0.85, 0.23), new T.Vector2(-0.55, 0.27),
+      new T.Vector2(-0.80, 0.18), new T.Vector2(-0.92, -0.13),
+      new T.Vector2(-1.18, -0.27)
+    ];
+    s.moveTo(pts[0].x, pts[0].y);
+    s.splineThru(pts.slice(1));
+    s.closePath();
+    var geo = new T.ExtrudeGeometry(s, {
+      depth: 1.40, bevelEnabled: true, bevelThickness: 0.03, bevelSize: 0.03,
+      bevelSegments: 2, curveSegments: 12, steps: 1
+    });
+    geo.translate(0, 0, -0.70);  // Z 居中（cabin 宽 1.40 / 2）
+    return geo;
+  })();
+  _carGeom.windshield = new T.BoxGeometry(0.06, 0.50, 1.44);
+  _carGeom.rearWindow = new T.BoxGeometry(0.06, 0.40, 1.34);
+  _carGeom.sideWindow = new T.BoxGeometry(1.55, 0.32, 1.46);
   // 前/后保险杠：带弧度感的宽体
   _carGeom.frontBumper = new T.BoxGeometry(0.18, 0.35, 1.84, 1, 1, 4);
   _carGeom.rearBumper = new T.BoxGeometry(0.16, 0.35, 1.84, 1, 1, 4);
@@ -250,37 +287,34 @@ export function _buildSedan(color, secondaryColor) {
   var chromeMat = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.85, roughness: 0.14, envMapIntensity: 1.2 });
   var archMat = new T.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.85 });
 
-  // Lower body — 主车身带腰线曲面感，离地间隙约 0.16m
+  // ── 曲面车身（ExtrudeGeometry）：body 已含引擎盖/后备箱曲面，无需 hood/trunkDeck ──
   var body = new T.Mesh(_carGeom.body, bodyMat);
   body.position.y = 0.52; body.castShadow = true; body.receiveShadow = true; g.add(body);
 
-  // Hood / trunk deck 让侧面有层次
-  var hood = new T.Mesh(_carGeom.hood, bodyMat);
-  hood.position.set(1.48, 0.9, 0); hood.castShadow = true; g.add(hood);
-  var deck = new T.Mesh(_carGeom.trunkDeck, bodyMat);
-  deck.position.set(-1.58, 0.87, 0); deck.castShadow = true; g.add(deck);
-
-  // Cabin / roof
+  // cabin：车顶曲面（前挡风根→车顶→后挡风根）
   var cabin = new T.Mesh(_carGeom.cabin, cabinMat);
   cabin.position.set(0.05, 1.15, 0); cabin.castShadow = true; g.add(cabin);
 
-  // Windshield
+  // Windshield / Rear window：玻璃薄方块，贴在 body 与 cabin 接缝处
   var ws = new T.Mesh(_carGeom.windshield, glassMat);
-  ws.position.set(1.1, 1.08, 0); ws.rotation.z = -0.45; g.add(ws);
-  // Rear window
+  ws.position.set(1.05, 1.05, 0); ws.rotation.z = -0.55; g.add(ws);
   var rw = new T.Mesh(_carGeom.rearWindow, glassMat);
-  rw.position.set(-1.05, 1.02, 0); rw.rotation.z = 0.42; g.add(rw);
-  // Side windows
+  rw.position.set(-1.00, 1.00, 0); rw.rotation.z = 0.50; g.add(rw);
+  // Side windows：贴在 cabin 侧面（cabin 宽 1.40，body 宽 1.86，玻璃 1.46 略宽于 cabin 露出）
   var sideWin = new T.Mesh(_carGeom.sideWindow, glassMat);
-  sideWin.position.set(0.02, 1.13, 0); g.add(sideWin);
+  sideWin.position.set(0.02, 1.18, 0); g.add(sideWin);
 
-  // Wheel arches — 轮拱黑色内衬，避免车轮像贴图
-  var archPos = [[1.35, 0.95], [-1.35, 0.95]];
-  for (var ai = 0; ai < 2; ai++) {
-    var aL = new T.Mesh(_carGeom.wheelArch, archMat);
-    aL.position.set(archPos[ai][0], 0.34, archPos[ai][1]);
-    g.add(aL);
-    var aR = aL.clone(); aR.position.z = -archPos[ai][1]; g.add(aR);
+  // ── 轮拱改用 TorusGeometry 半圆弧（不再是 Box）──
+  // TorusGeometry(radius=0.40, tube=0.06, arc=π) → 半圆，rotation.y=π/2 让圆环面对 X 轴
+  var archGeo = new T.TorusGeometry(0.40, 0.06, 8, 18, Math.PI);
+  var archPositions = [
+    [1.35, 0.95], [1.35, -0.95], [-1.35, 0.95], [-1.35, -0.95]
+  ];
+  for (var ai = 0; ai < 4; ai++) {
+    var arch = new T.Mesh(archGeo, archMat);
+    arch.rotation.y = Math.PI / 2;  // 圆环从 X-Y 平面转到 Y-Z 平面，法线朝 X
+    arch.position.set(archPositions[ai][0], 0.34, archPositions[ai][1]);
+    g.add(arch);
   }
 
   // Side skirts
@@ -366,7 +400,7 @@ export function _buildSedan(color, secondaryColor) {
   }
   addTaillight(0.58); addTaillight(-0.58);
 
-  // 车头灯真实照射
+  // 车头灯真实照射（仅 ego 用，NPC 由 _setVehicleLights 切 emissive）
   var spotL = new T.SpotLight(0xffffee, 3.0, 60, 0.45, 0.4, 1.2);
   spotL.position.set(2.2, 0.54, 0.55);
   spotL.target.position.set(18, 0, 0.55);
@@ -382,6 +416,8 @@ export function _buildSedan(color, secondaryColor) {
   // 车底接触阴影：软边径向渐变平面，补充 AO 感
   g.add(_buildContactShadow(4.6, 2.0));
 
+  // 真实尺寸 1:1 建模，标记 realScale 让 scene3d 跳过非均匀缩放
+  g.userData.realScale = true;
   return g;
 }
 
@@ -434,12 +470,16 @@ export function _buildObstacle(type, color) {
     return g;
   }
 
-  // ── car/truck：真实尺寸 1:1 建模，标记 realScale 让 scene3d 跳过非均匀缩放 ──
-  // 关键修复：之前 unit-normalized + scale.set(L,H,W) 非均匀缩放会把圆柱形车轮
-  // 压成椭圆（y 半径≠z 半径）。改用真实尺寸建模，scale 保持 (1,1,1)，车轮始终圆。
+  // ── car：直接复用 _buildSedan 的 ExtrudeGeometry 曲面车身（同款车漆/轮拱/车灯）──
+  // 这样 NPC 轿车与 ego 同等画质，避免 NPC 是方块、ego 是曲面的割裂感。
+  if (type === 'car' || type === 'suv') {
+    return _buildSedan(color, color);
+  }
+
+  // ── truck：保留方块货箱建模（卡车货箱本身就是方块，曲面反而失真）──
   g.userData.realScale = true;
 
-  var isTruck = (type === 'truck');
+  var isTruck = true;
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
     clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: new T.Color(0.3, 0.3, 0.3)
@@ -452,25 +492,16 @@ export function _buildObstacle(type, color) {
   var tireMat = new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.05, roughness: 0.82 });
   var hubMat = new T.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.6, roughness: 0.3 });
 
-  // 真实尺寸常量（与 _buildSedan 一致）
-  var BL, BH, BW;       // 车身长/高/宽
-  var wheelR, wheelW;   // 轮子半径/厚度
-  var wFrontX, wRearX, wZ;  // 轮子 x/z 位置
-  if (isTruck) {
-    BL = 7.0; BH = 1.0; BW = 2.2;
-    wheelR = 0.42; wheelW = 0.32;
-    wFrontX = 2.4; wRearX = -2.4; wZ = 0.95;
-  } else {
-    BL = 4.2; BH = 0.72; BW = 1.86;
-    wheelR = 0.33; wheelW = 0.26;
-    wFrontX = 1.35; wRearX = -1.35; wZ = 0.92;
-  }
+  // 卡车真实尺寸常量
+  var BL = 7.0, BH = 1.0, BW = 2.2;
+  var wheelR = 0.42, wheelW = 0.32;
+  var wFrontX = 2.4, wRearX = -2.4, wZ = 0.95;
 
   // 车身主体
   var body = new T.Mesh(new T.BoxGeometry(BL, BH, BW, 4, 1, 3), bodyMat);
   body.position.y = 0.52; body.castShadow = true; body.receiveShadow = true; g.add(body);
 
-  if (isTruck) {
+  {
     // 卡车驾驶室（更高）
     var cab = new T.Mesh(new T.BoxGeometry(2.0, 1.4, BW, 2, 1, 2), bodyMat);
     cab.position.set(BL / 2 - 1.0, 1.2, 0); cab.castShadow = true; g.add(cab);
@@ -480,15 +511,6 @@ export function _buildObstacle(type, color) {
     // 驾驶室车窗
     var tWin = new T.Mesh(new T.BoxGeometry(0.06, 0.5, BW - 0.3), glassMat);
     tWin.position.set(BL / 2 - 0.2, 1.5, 0); g.add(tWin);
-  } else {
-    // 轿车驾驶舱
-    var cabin = new T.Mesh(new T.BoxGeometry(2.0, 0.52, 1.52, 2, 1, 2), bodyMat);
-    cabin.position.set(0.05, 1.15, 0); cabin.castShadow = true; g.add(cabin);
-    // 车窗
-    var ws = new T.Mesh(new T.BoxGeometry(0.06, 0.46, 1.48), glassMat);
-    ws.position.set(1.1, 1.08, 0); ws.rotation.z = -0.45; g.add(ws);
-    var rw = new T.Mesh(new T.BoxGeometry(0.06, 0.36, 1.38), glassMat);
-    rw.position.set(-1.05, 1.02, 0); rw.rotation.z = 0.42; g.add(rw);
   }
 
   // 轮拱内衬

@@ -203,6 +203,12 @@
         onerror="window._bloomUnavailable=true"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"
         onerror="window._bloomUnavailable=true"></script>
+<!-- SMAA 抗锯齿：EffectComposer 链路绕过 WebGLRenderer 硬件 MSAA，需显式 SMAA pass。
+     r128 的 SMAAPass 依赖 3 个 shader 脚本，必须在其之前加载。 -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/SMAAEdgesShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/SMAAWeightsShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/SMAAABlendShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/SMAAPass.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"
         onerror="console.warn('[flowboard] GLTFLoader unavailable — using programmatic geometry')"></script>
 <script src="/tools/d3.v7.min.js"></script>

@@ -336,37 +336,34 @@ export function _setVehicleLights(group, state, blinkPhase) {
 
 /**
  * Build a vehicle group for use as ego car.
- * Tries glTF first, falls back to programmatic sedan.
- * glTF 车辆升级为车漆材质 + 车底接触阴影。
+ * 临时禁用 glTF（gen_models.py 生成的 glTF 是 24 顶点 Box 拼装，画质差），
+ * 直接用程序化 _buildSedan（ExtrudeGeometry 曲面车身 + clearcoat 车漆）。
+ * 等 gen_models.py 重生成高质量曲面 glTF 后可恢复 getModel('sedan') 路径。
  */
 export function buildEgoCar(color) {
-  var model = getModel('sedan');
-  if (model) {
-    _upgradeCarPaint(model, color || 0x4488dd);
-    model.add(_buildContactShadow(4.6, 2.0));
-    return model;
-  }
+  // var model = getModel('sedan');
+  // if (model) {
+  //   _upgradeCarPaint(model, color || 0x4488dd);
+  //   model.add(_buildContactShadow(4.6, 2.0));
+  //   return model;
+  // }
   return _buildSedan(color || 0x4488dd, 0x3377bb);
 }
 
 /**
  * Build an obstacle group for NPC vehicles/pedestrians.
- * Tries glTF model first, falls back to programmatic box geometry.
- * glTF 车辆升级为车漆材质 + 车底接触阴影。
+ * 临时禁用 glTF（同 buildEgoCar 原因），直接用程序化 _buildObstacle。
  */
 export function buildObstacleGroup(type, color) {
-  var model = getModel(type);
-  if (model) {
-    var c = color || 0xff9944;
-    _upgradeCarPaint(model, c);
-    // 行人无车底阴影；车辆加接触阴影
-    if (type !== 'pedestrian') {
-      model.add(_buildContactShadow(4.6, 2.0));
-    }
-    // glTF 模型已是真实尺寸，标记 realScale 让 _renderFrame 跳过 (L,H,W) 缩放
-    // （程序化 _buildObstacle 是 unit-normalized，需 scale.set(L,H,W) 映射）
-    model.userData.realScale = true;
-    return model;
-  }
+  // var model = getModel(type);
+  // if (model) {
+  //   var c = color || 0xff9944;
+  //   _upgradeCarPaint(model, c);
+  //   if (type !== 'pedestrian') {
+  //     model.add(_buildContactShadow(4.6, 2.0));
+  //   }
+  //   model.userData.realScale = true;
+  //   return model;
+  // }
   return _buildObstacle(type || 'car', color || 0xff9944);
 }

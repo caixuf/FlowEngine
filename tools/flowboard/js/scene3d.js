@@ -1713,13 +1713,24 @@ function init3DScene() {
       _composer.addPass(new THREE.RenderPass(scene3d, camera3d));
       var bloomPass = new THREE.UnrealBloomPass(
         new THREE.Vector2(w, h),
-        0.6,   // strength：车灯/反光的光晕强度
-        0.4,   // radius：光晕扩散半径
-        0.85   // threshold：只让高亮区域（车灯/emissive）发光，避免整屏泛白
+        0.9,   // strength：车漆/车灯/路面反射的光晕强度（极品飞车风格光泽感）
+        0.5,   // radius：光晕扩散半径
+        0.6    // threshold：降低阈值让更多高光参与 Bloom（车漆反射/玻璃反光都发光）
       );
       _composer.addPass(bloomPass);
+      // SMAA 抗锯齿（若 CDN 加载了 SMAAPass）；EffectComposer 链路会绕过 WebGLRenderer
+      // 的硬件 MSAA，必须显式加 AA pass 否则画面锯齿严重。
+      if (THREE.SMAAPass) {
+        try {
+          var smaaPass = new THREE.SMAAPass(w, h);
+          smaaPass.renderToScreen = true;
+          _composer.addPass(smaaPass);
+        } catch (smaaErr) {
+          console.warn('[scene3d] SMAA setup failed:', smaaErr);
+        }
+      }
       var copyPass = new THREE.ShaderPass(THREE.CopyShader);
-      copyPass.renderToScreen = true;
+      copyPass.renderToScreen = !THREE.SMAAPass;  // 若有 SMAA 则 SMAA 是最后输出
       _composer.addPass(copyPass);
     } catch (bloomErr) {
       console.warn('[scene3d] Bloom setup failed, falling back to direct render:', bloomErr);
