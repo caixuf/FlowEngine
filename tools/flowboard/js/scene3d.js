@@ -2519,8 +2519,10 @@ function _renderFrame() {
         // 高架 elevation：NPC Y 叠加道路高度，避免高架段 NPC 沉到桥下。
         var _obsElev = _getRoadElevationAt(tx, tz);
         _tmpV3.set(tx, _obsElev + 0.05, tz);
+        var _obsTeleported = false;
         if (!om.visible || om.position.distanceTo(_tmpV3) > 35) {
           om.position.copy(_tmpV3);
+          _obsTeleported = true;  // recycle/远距裁剪复现：位置突变，rotation 也 snap
         } else {
           om.position.lerp(_tmpV3, 0.18);
         }
@@ -2547,7 +2549,15 @@ function _renderFrame() {
         var dy = targetYaw - om.rotation.y;
         while (dy > Math.PI) dy -= 2 * Math.PI;
         while (dy < -Math.PI) dy += 2 * Math.PI;
-        om.rotation.y += dy * 0.18;
+        // recycle / 远距裁剪复现：后端把 NPC 跳到 ego 后方新位置时，heading
+        // 可能与旧位置相差近 π（对向车尤其明显）。此时仍 lerp 0.18 会让 NPC
+        // 在新位置画一个大半圈转过去 → 视觉上"NPC 在原地转圈"。
+        // 位置 snap 时同步 snap rotation，正常行驶仍走 lerp。
+        if (_obsTeleported) {
+          om.rotation.y = targetYaw;
+        } else {
+          om.rotation.y += dy * 0.18;
+        }
 
         // MVC Model: 障碍物 roll/pitch 由 VisualPhysics 计算。
         // 与 ego 一致：喂平滑后的 yaw（-om.rotation.y）而非后端阶跃航向 ow.heading，
