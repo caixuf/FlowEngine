@@ -27,6 +27,7 @@
 namespace flowsim {
 
 struct FlowRoadNetwork;  // 前向声明，避免头文件循环依赖
+class  Route;            // 中央有序 route（见 route.h）
 
 /** NPC AI 配置参数 */
 struct NpcAiConfig {
@@ -44,22 +45,32 @@ struct NpcAiConfig {
 
 /**
  * 单步 NPC 车辆 AI。
- * @param npc       NPC 实体（必须 is_npc_vehicle()）
- * @param pool      实体池（用于找前车）
- * @param dt        时间步长 (s)
- * @param cfg       AI 参数
- * @param roads     可选，路网（用于更新 Frenet 坐标；nullptr 跳过）
+ * @param npc          NPC 实体（必须 is_npc_vehicle()）
+ * @param pool         实体池（用于找前车）
+ * @param dt           时间步长 (s)
+ * @param cfg          AI 参数
+ * @param roads        可选，路网（Frenet↔World；nullptr 跳过）
+ * @param route        可选，中央 route。提供且 npc.route_dir!=0 时走「沿车道
+ *                     Frenet 推进」路径：NPC 严格贴道路几何行驶、过弯/爬匝道
+ *                     自动跟随、到 route 末尾回收到 ego 附近。为空则退回旧的
+ *                     世界系直线积分（steer=0），保证 esmini 缺失时不退化。
+ * @param ego_route_s  ego 在 route 上的累计 s（回收 NPC 时用来放到 ego 附近）
  *
- * 更新 npc.throttle/brake/steer/ai_state/lead_id/follow_gap，
- * 并调 step_bicycle 推进位置。steer 默认 0（直行），车道保持由
- * 外部横向控制负责（与 ego 一致）。
- *
- * 注：roads 为非 const 指针，因 world_to_frenet 会修改 esmini position
- * handle 的内部状态（路网本身不变，但 position 是可变的查询游标）。
+ * 更新 npc.throttle/brake/ai_state/lead_id/follow_gap/位置。
  */
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
-                      FlowRoadNetwork* roads = nullptr);
+                      FlowRoadNetwork* roads = nullptr,
+                      const Route* route = nullptr,
+                      double ego_route_s = 0.0);
+
+/**
+ * 初始化 NPC 的 route 跟随状态（spawn 后调用一次）。
+ * 依据已填好的 npc.road_id / npc.s 定位到 route 累计 s。
+ * @param dir 行驶方向：<0 对向来车(route_dir=-1)，否则顺行(+1)。
+ *            若 npc.road_id 不在 route 上，置 route_dir=0（该 NPC 走旧逻辑）。
+ */
+void npc_init_route(Entity& npc, const Route& route, int dir);
 
 /**
  * 单步行人 AI。

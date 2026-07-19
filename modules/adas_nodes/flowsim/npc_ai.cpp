@@ -7,13 +7,19 @@
  *   if gap_error > 0:  v_desired = min(v + accel_rate*dt, target_v)
  *   else:              v_desired = max(0, v - brake*exp(-gap_error/2)*dt)
  *
- * 前车搜索：同车道（lane_id 匹配 或 |Δy| < tol）、前方（Δx > 0）、最近。
- * 兼容新旧坐标系：lane_id==0 时回退到横向距离判断。
+ * 横向（位置）：NPC 不再用世界系直线积分（那样道路一拐弯车就飞出路网），
+ * 改为沿 **中央 route** 的累计 s 推进，每步 frenet_to_world 反算世界坐标，
+ * 严格贴道路几何行驶；到 route 末端回收到 ego 附近形成持续车流。
+ * esmini/route 缺失时退回旧的直线积分，保证不退化（见 step_npc_vehicle 第 5 步）。
+ *
+ * 前车搜索：同车道（route 模式看横向 offset + 方向；旧模式看 lane_id/Δy），
+ * 前方（route 模式沿 route_s，旧模式沿 Δx）、最近。
  */
 
 #include "npc_ai.h"
 #include "physics.h"
 #include "road_network.h"
+#include "route.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,32 +28,45 @@ namespace flowsim {
 
 /* ── 判断两车是否同车道 ── */
 static bool same_lane(const Entity& a, const Entity& b, const NpcAiConfig& cfg) {
-    // 新格式：都有 road_id > 0 且 lane_id != 0 → 严格匹配
+    // route 模式：同方向 + 横向偏移接近（沿车道行驶，offset 就是车道横向位置）
+    if (a.route_dir != 0 && b.route_dir != 0) {
+        return a.route_dir == b.route_dir &&
+               std::fabs(a.offset - b.offset) < cfg.same_lane_tol;
+    }
+    // 旧格式：road_id/lane_id 严格匹配
     if (a.road_id > 0 && b.road_id > 0 && a.lane_id != 0 && b.lane_id != 0) {
         return a.road_id == b.road_id && a.lane_id == b.lane_id;
     }
-    // 旧格式：横向距离 < 车道宽度/2
+    // 更旧：横向距离 < 容差
     return std::fabs(a.y - b.y) < cfg.same_lane_tol;
 }
 
 /* ── 找同车道最近前车 ── */
 static EntityId find_lead(const Entity& npc, const EntityPool& pool,
                           const NpcAiConfig& cfg) {
-    EntityId best = INVALID_ENTITY;
-    double best_dx = 1e9;
+    EntityId   best     = INVALID_ENTITY;
+    double     best_gap = 1e9;
+    const bool on_route = (npc.route_dir != 0);
     for (int i = 0; i < pool.size(); ++i) {
         const Entity& o = pool[i];
         if (!o.active || &o == &npc) continue;
         if (!o.is_vehicle()) continue;
-        // 只看前车（Δx > 0）
-        double dx = o.x - npc.x;
-        if (dx <= 0) continue;
-        if (dx > cfg.look_ahead) continue;
         if (!same_lane(npc, o, cfg)) continue;
-        // 算到前车后沿的净间距
-        double gap = dx - (o.length * 0.5 + npc.length * 0.5);
-        if (gap < best_dx) {
-            best_dx = gap;
+
+        // 前车相对本车的纵向前方距离（>0 表示在前）
+        double ahead;
+        if (on_route && o.route_dir != 0) {
+            // 沿 route 纵向：顺行看 route_s 更大者，对向(dir=-1)看更小者
+            ahead = (o.route_s - npc.route_s) * (double)npc.route_dir;
+        } else {
+            ahead = o.x - npc.x;  // 旧世界系：沿 x
+        }
+        if (ahead <= 0) continue;
+        if (ahead > cfg.look_ahead) continue;
+
+        double gap = ahead - (o.length * 0.5 + npc.length * 0.5);
+        if (gap < best_gap) {
+            best_gap = gap;
             best = i;
         }
     }
@@ -68,9 +87,27 @@ static double idm_desired_speed(double v, double gap, double target_v,
     return std::max(0.0, v - brake * dt);
 }
 
+/* ── 回收：跑到 route 末端的 NPC 放回 ego 附近，形成持续车流 ── */
+static void recycle_npc(Entity& npc, const Route& route, double ego_route_s) {
+    const double total = route.total_length();
+    // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
+    const double back = 50.0 + (double)(npc.id % 5) * 22.0;
+    double target;
+    if (ego_route_s > 1.0) {
+        target = (npc.route_dir > 0) ? (ego_route_s - back)   // 顺行：回 ego 后方
+                                     : (ego_route_s + back);  // 对向：回 ego 前方(朝 ego 开来)
+    } else {
+        target = (npc.route_dir > 0) ? 0.0 : total;           // ego 未定位：回起/末端
+    }
+    if (target < 0.0)   target = 0.0;
+    if (target > total) target = total;
+    npc.route_s = target;
+}
+
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
-                      FlowRoadNetwork* roads) {
+                      FlowRoadNetwork* roads, const Route* route,
+                      double ego_route_s) {
     // 1. 找前车
     EntityId lead = find_lead(npc, pool, cfg);
     npc.lead_id = lead;
@@ -78,7 +115,12 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     double gap = 1e9;
     if (lead != INVALID_ENTITY) {
         const Entity& lead_e = pool[lead];
-        gap = (lead_e.x - npc.x) - (lead_e.length * 0.5 + npc.length * 0.5);
+        if (npc.route_dir != 0 && lead_e.route_dir != 0) {
+            gap = (lead_e.route_s - npc.route_s) * (double)npc.route_dir
+                  - (lead_e.length * 0.5 + npc.length * 0.5);
+        } else {
+            gap = (lead_e.x - npc.x) - (lead_e.length * 0.5 + npc.length * 0.5);
+        }
         npc.follow_gap = gap;
     } else {
         npc.follow_gap = 1e9;
@@ -88,14 +130,11 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     double v = npc.speed;
     double v_desired;
     if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
-        // 强制停车状态：目标速度 0
         v_desired = 0.0;
     } else if (lead != INVALID_ENTITY && gap < 60.0) {
-        // 有前车且较近：IDM 跟车
         npc.ai_state = AIState::Follow;
         v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
     } else {
-        // 无前车或前车很远：巡航
         npc.ai_state = AIState::Cruise;
         v_desired = npc.target_vx;
     }
@@ -104,19 +143,41 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     double dv = v_desired - v;
     double throttle = 0.0, brake = 0.0;
     if (dv > 0.01) {
-        // 需要加速：throttle 按 dv 比例，上限 1.0
         throttle = std::min(1.0, dv / (cfg.accel_rate * dt + 0.01));
         throttle = std::max(0.2, throttle);  // 起步最低油门
     } else if (dv < -0.01) {
-        // 需要减速：brake 按 |dv| 比例
         brake = std::min(1.0, -dv / (cfg.brake_rate * dt + 0.01));
     }
 
-    // 4. 自行车模型积分（NPC 直行，steer=0；横向控制后续可加车道保持）
+    // 4. 纵向积分：step_bicycle 只用来更新 speed（steer=0），位置随后覆盖
     step_bicycle(npc, dt, throttle, brake, 0.0);
 
-    // 5. 更新 Frenet 坐标（若提供路网）
-    if (roads && roads->loaded()) {
+    // 5. 位置更新
+    if (route && route->ok() && npc.route_dir != 0 && roads) {
+        // ── 中央 Frenet 车道跟随：沿 route 推进 s，反算世界坐标 ──
+        npc.route_s += (double)npc.route_dir * npc.speed * dt;
+        if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
+            (npc.route_dir < 0 && npc.route_s < 0.0)) {
+            recycle_npc(npc, *route, ego_route_s);
+        }
+        int rid = 0, ridx = -1;
+        double s_local = 0.0;
+        route->locate(npc.route_s, rid, s_local, ridx);
+        WorldPos wp;
+        if (roads->frenet_to_world(rid, 0, s_local, npc.offset, wp)) {
+            npc.x = wp.x;
+            npc.y = wp.y;
+            double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
+            while (h >  M_PI) h -= 2.0 * M_PI;
+            while (h < -M_PI) h += 2.0 * M_PI;
+            npc.heading = h;
+            npc.vx = npc.speed * std::cos(h);
+            npc.vy = npc.speed * std::sin(h);
+            npc.road_id = rid;
+            npc.s = s_local;
+        }
+    } else if (roads && roads->loaded()) {
+        // ── 兜底（route/esmini 缺失或该 NPC 不在主 route 上）：旧世界系直线 ──
         FrenetPos f;
         if (roads->world_to_frenet(npc.x, npc.y, f)) {
             npc.road_id = f.road_id;
@@ -125,6 +186,16 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.offset = f.offset;
         }
     }
+}
+
+void npc_init_route(Entity& npc, const Route& route, int dir) {
+    int idx = route.index_of(npc.road_id);
+    if (idx < 0) {
+        npc.route_dir = 0;   // 不在主 route → 走旧逻辑兜底
+        return;
+    }
+    npc.route_dir = (dir < 0) ? -1 : 1;
+    npc.route_s   = route.to_route_s(idx, npc.s);
 }
 
 void step_npc_pedestrian(Entity& ped, double dt, const NpcAiConfig& cfg) {

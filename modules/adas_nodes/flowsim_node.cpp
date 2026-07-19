@@ -39,6 +39,7 @@
 #include "flowsim/collision.h"
 #include "flowsim/scene_events.h"
 #include "flowsim/scene_pub.h"
+#include "flowsim/route.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -99,6 +100,7 @@ struct FlowSimContext {
     flowsim::FlowRoadNetwork  roads;
     flowsim::EntityPool       pool;
     flowsim::NpcAiConfig      ai_cfg;
+    flowsim::Route            route;         // 中央有序 route（NPC 车道跟随，见 route.h）
 
     /* Phase 2.2: scene/frame 发布配置（init 阶段填充，主循环每帧传入） */
     flowsim::ScenePubConfig   scene_pub_cfg;
@@ -334,6 +336,14 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             flowsim::apply_vehicle_defaults(e);
             e.length = (a->len > 0) ? a->len : e.length;
             e.width = (a->wid > 0) ? a->wid : e.width;
+        }
+        /* 中央 route 初始化：新格式 actor + esmini + route 就绪时，让 NPC 车辆
+         * 沿车道 Frenet 行驶（过弯/爬匝道自动跟随）。否则 route_dir 保持 0 走旧逻辑。 */
+        if (a->segment_id >= 0 && g.roads_loaded && g.route.ok() && e.is_npc_vehicle()) {
+            e.road_id = a->segment_id;
+            e.s       = a->s;
+            e.offset  = a->l;
+            flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
         }
     }
 
@@ -662,12 +672,23 @@ protected:
 
             /* ── Step 3: NPC AI ── */
             flowsim::FlowRoadNetwork* roads_ptr = g.roads_loaded ? &g.roads : nullptr;
+            const flowsim::Route* route_ptr =
+                (g.roads_loaded && g.route.ok()) ? &g.route : nullptr;
+            /* ego 在 route 上的累计 s：回收 NPC 时用来放到 ego 附近，形成持续车流 */
+            double ego_route_s = 0.0;
+            if (route_ptr) {
+                flowsim::FrenetPos ef;
+                if (g.roads.world_to_frenet(g.pool[0].x, g.pool[0].y, ef)) {
+                    int ei = g.route.index_of(ef.road_id);
+                    if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
+                }
+            }
             for (int i = 1; i < g.pool.size(); i++) {
                 flowsim::Entity& e = g.pool[i];
                 if (!e.active) continue;
                 if (e.is_npc_vehicle()) {
                     flowsim::step_npc_vehicle(e, g.pool, FLOWSIM_DT_SEC,
-                                              g.ai_cfg, roads_ptr);
+                                              g.ai_cfg, roads_ptr, route_ptr, ego_route_s);
                 } else if (e.type == flowsim::EntityType::Pedestrian) {
                     flowsim::step_npc_pedestrian(e, FLOWSIM_DT_SEC, g.ai_cfg);
                 }
@@ -815,6 +836,12 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                 g.roads_loaded = true;
                 LOG_INFO("flowsim", "esmini road network loaded: %d roads",
                          g.roads.road_count());
+                if (g.route.build(g.roads)) {
+                    LOG_INFO("flowsim", "central route built: %d segments, %.0fm total",
+                             g.route.count(), g.route.total_length());
+                } else {
+                    LOG_WARN("flowsim", "route build failed — NPC lane-follow off (straight fallback)");
+                }
             } else {
                 LOG_WARN("flowsim", "esmini load failed for %s — NPC AI falls back to lateral distance",
                          xodr.c_str());

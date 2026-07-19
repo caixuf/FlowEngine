@@ -150,6 +150,7 @@ add_library(flowsim_node SHARED
     flowsim/collision.cpp
     flowsim/scene_events.cpp
     flowsim/scene_pub.cpp
+    flowsim/route.cpp
 )
 target_compile_definitions(flowsim_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(flowsim_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)

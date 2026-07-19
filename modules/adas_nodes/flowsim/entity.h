@@ -82,8 +82,12 @@ struct Entity {
     /* ── 道路坐标（Frenet）── */
     int    road_id{0};
     int    lane_id{0};
-    double s{0};                   /**< 沿道路纵向距离 */
-    double offset{0};              /**< 相对车道中心横向偏移 */
+    double s{0};                   /**< 沿当前 road 的纵向距离 */
+    double offset{0};              /**< 相对参考线横向偏移（= 车道横向位置） */
+
+    /* ── 中央 route 跟随（NPC 车道行驶，见 npc_ai.cpp / route.h）── */
+    double route_s{0};             /**< 沿中央 route 的累计纵向距离 */
+    int    route_dir{0};           /**< route 行驶方向：+1 顺行，-1 对向，0=未上route(走旧逻辑) */
 
     /* ── 行人专用 ── */
     double ped_wait_timer{0};      /**< 行人等待计时器 (s) */
