@@ -19,9 +19,21 @@
           {"radius":  350, "arc": 90},
           {"radius":    0, "arc": 70},
           {"radius": -350, "arc": 90}
+        ],
+        "elevation_profile": [
+          {"s": 0,   "h": 0.0},
+          {"s": 250, "h": 8.0}
         ] },
-      { "id": 4, "type": "merge_lane",  "length_m": 200, "lanes": 1, "lane_width": 3.5, "speed_limit": 27.78 },
-      { "id": 5, "type": "highway",     "length_m": 800, "lanes": 3, "lane_width": 3.5, "speed_limit": 27.78 }
+      { "id": 4, "type": "merge_lane",  "length_m": 200, "lanes": 1, "lane_width": 3.5, "speed_limit": 27.78,
+        "elevation_profile": [
+          {"s": 0,   "h": 8.0},
+          {"s": 200, "h": 8.0}
+        ] },
+      { "id": 5, "type": "highway",     "length_m": 800, "lanes": 3, "lane_width": 3.5, "speed_limit": 27.78,
+        "elevation_profile": [
+          {"s": 0,   "h": 8.0},
+          {"s": 800, "h": 8.0}
+        ] }
     ],
     "junctions": [
       {
@@ -29,7 +41,11 @@
         "incoming_road": 2,
         "connecting_roads": [
           { "id": 10, "name": "left_ramp",  "length_m": 200, "lanes": 1,
-            "curvature_profile": [{"radius": -60, "arc": 100}] },
+            "curvature_profile": [{"radius": -60, "arc": 100}],
+            "elevation_profile": [
+              {"s": 0,   "h": 0.0},
+              {"s": 200, "h": 8.0}
+            ] },
           { "id": 3,  "name": "right_ramp", "length_m": 250, "lanes": 1, "speed_limit": 11.11,
             "curvature_profile": [
               {"radius":  350, "arc": 90},

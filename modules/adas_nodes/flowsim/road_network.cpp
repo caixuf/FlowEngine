@@ -120,6 +120,7 @@ bool FlowRoadNetwork::frenet_to_world(int road_id, int lane_id, double s, double
     if (RM_GetPositionData(pos_handle_, &pd) < 0) return false;
     out.x = pd.x;
     out.y = pd.y;
+    out.z = pd.z;  // 高架 elevation（OpenDRIVE <elevationProfile>，平地场景恒为 0）
     out.h = pd.h;
     return true;
 }

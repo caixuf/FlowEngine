@@ -97,7 +97,7 @@ constexpr int LEGACY_ROAD_NODES = 8;
  * 从 esmini RoadManager 采样一条道路的参考线节点。
  * @param roads   esmini 网络封装（非 const：frenet_to_world 会更新内部 position 状态）
  * @param index   道路索引 [0, roads.road_count())
- * @param nodes   输出 [x,y] 二元组数组（追加到末尾）
+ * @param nodes   输出 [x,y,z] 三元组数组（追加到末尾），z 为道路 elevation
  * @return true 成功采样；false 表示道路不存在或采样失败
  */
 bool sample_road_nodes(FlowRoadNetwork& roads, int index,
@@ -111,11 +111,14 @@ bool sample_road_nodes(FlowRoadNetwork& roads, int index,
         WorldPos w;
         if (!roads.frenet_to_world(info.id, 0, s, 0.0, w)) {
             /* 中途采样失败：用最后成功点占位，保证 nodes 数组等长 */
-            w.x = 0; w.y = 0;
+            w.x = 0; w.y = 0; w.z = 0;
         }
         cJSON* pt = cJSON_CreateArray();
         cJSON_AddItemToArray(pt, cJSON_CreateNumber(w.x));
         cJSON_AddItemToArray(pt, cJSON_CreateNumber(w.y));
+        /* 第三元素 z 是道路 elevation（高架高度）。平地场景恒为 0，
+         * 与旧版 [x,y] 二元组前端读取 nodes[ni][2] || 0 完全兼容。 */
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(w.z));
         cJSON_AddItemToArray(nodes_array, pt);
     }
     return true;

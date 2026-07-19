@@ -96,6 +96,12 @@ class Road:
     junction_id: int = -1
     predecessor: int = -1   # elementId of predecessor road (<link><predecessor>)
     successor: int = -1     # elementId of successor road (<link><successor>)
+    # 高架 elevation profile：list[{"s": float, "h": float}]，按 s 升序。
+    # 空列表表示该 road 全程贴地（elevation=0），完全向后兼容。
+    # 非空时生成 OpenDRIVE <elevationProfile>，相邻两点之间用线性插值（b=斜率, c=d=0）。
+    # esmini 解析后通过 RM_PositionData.z 暴露给 frenet_to_world，再经 scene_pub
+    # 透传成 nodes 三元组 [x, y, z]，前端 scene3d.js 用 z 做路面 Y 高度。
+    elevation_profile: list = field(default_factory=list)
 
 
 @dataclass
@@ -205,6 +211,8 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
                 eid, etype, profile, lanes, lw, sp, state)
         else:
             r, state = build_straight_road(eid, etype, length, lanes, lw, sp, state)
+        # 高架 elevation_profile 透传（ [{"s":0,"h":0},{"s":250,"h":8}] ）
+        r.elevation_profile = list(e.get("elevation_profile") or [])
         roads.append(r)
         end_states[eid] = state
 
@@ -252,6 +260,7 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
                         cr, cend = build_straight_road(cid, cname, clen, clanes, clw, csp, start_state)
                     cr.junction_id = jid
                     cr.predecessor = incoming
+                    cr.elevation_profile = list(c.get("elevation_profile") or [])
                     roads.append(cr)
                 # 若配置了 target_road，分支末端接续到目标主路
                 tgt = c.get("target_road")
@@ -345,6 +354,45 @@ def road_to_xml(road: Road) -> ET.Element:
             ET.SubElement(geom, "line")
         else:
             ET.SubElement(geom, "arc", {"curvature": f"{g.curvature:.9f}"})
+
+    # 高架 elevationProfile：按 elevation_profile 列表生成分段线性 3 阶多项式。
+    # 相邻两点 (s_i, h_i) → (s_{i+1}, h_{i+1}) 之间：
+    #   a = h_i, b = (h_{i+1} - h_i) / (s_{i+1} - s_i), c = d = 0
+    # 末尾补一个终止点锁定最后一个 h 到 road.length。
+    # 空列表跳过（esmini 默认 elevation=0，向后兼容）。
+    if road.elevation_profile:
+        ep = ET.SubElement(r, "elevationProfile")
+        pts = sorted(road.elevation_profile, key=lambda p: float(p.get("s", 0)))
+        # 起点缺失时补 (0, 0)
+        if not pts or float(pts[0].get("s", 0)) > 1e-6:
+            pts.insert(0, {"s": 0.0, "h": 0.0})
+        for i, p in enumerate(pts):
+            s_i = float(p.get("s", 0))
+            h_i = float(p.get("h", 0))
+            # 计算斜率 b：用下一个点，没有下一个点则 b=0
+            if i + 1 < len(pts):
+                s_next = float(pts[i + 1].get("s", s_i))
+                h_next = float(pts[i + 1].get("h", h_i))
+                ds = s_next - s_i
+                b = (h_next - h_i) / ds if abs(ds) > 1e-9 else 0.0
+            else:
+                b = 0.0
+            ET.SubElement(ep, "elevation", {
+                "s": f"{s_i:.6f}",
+                "a": f"{h_i:.6f}",
+                "b": f"{b:.9f}",
+                "c": "0.0",
+                "d": "0.0",
+            })
+        # 终止点：确保最后一段之后 elevation 保持不变到 road.length
+        last_s = float(pts[-1].get("s", 0))
+        last_h = float(pts[-1].get("h", 0))
+        if last_s < road.length - 1e-6:
+            ET.SubElement(ep, "elevation", {
+                "s": f"{road.length:.6f}",
+                "a": f"{last_h:.6f}",
+                "b": "0.0", "c": "0.0", "d": "0.0",
+            })
 
     # 车道：center(参考线 width=0) + right N 条 driving 车道
     lanes = ET.SubElement(r, "lanes")

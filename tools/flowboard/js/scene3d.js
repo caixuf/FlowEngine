@@ -28,6 +28,26 @@ function _getRoadTangentAt(x, z) {
   return _getRoadTangentAtImpl(_roadCurves, x, z);
 }
 
+// _getRoadElevationAt — 查询世界坐标 (x,z) 处的道路高度（高架 elevation）。
+// 在所有 _roadCurves 上找最近采样点，返回其 Y（曲线高度）。
+// 用于让 ego/障碍物/红绿灯/ETC 门架 Y 跟随高架 elevation 抬升，避免"悬在路面下方"。
+// 平地场景所有曲线 Y=0，返回 0，行为完全向后兼容。
+function _getRoadElevationAt(x, z) {
+  if (!_roadCurves || !_roadCurves.length) return 0;
+  var bestD2 = Infinity, bestY = 0;
+  for (var ci = 0; ci < _roadCurves.length; ci++) {
+    var curve = _roadCurves[ci];
+    if (!curve) continue;
+    var pts = curve.getSpacedPoints(24);
+    for (var pi = 0; pi < pts.length; pi++) {
+      var dx = pts[pi].x - x, dz = pts[pi].z - z;
+      var d2 = dx * dx + dz * dz;
+      if (d2 < bestD2) { bestD2 = d2; bestY = pts[pi].y; }
+    }
+  }
+  return bestY;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Module-level state (replaces former window globals)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -326,9 +346,12 @@ function _buildRoadNetwork(edges) {
     if (!nodes || nodes.length < 2) continue;
 
     // 从 nodes 构建 CatmullRomCurve3 控制点
+    // nodes[ni] = [x, y, z]：z 是道路 elevation（高架高度），平地场景为 0。
+    // 用 z 做 Three.js 的 Y（向上），曲线自然带高度起伏。
     var points = [];
     for (var ni = 0; ni < nodes.length; ni++) {
-      points.push(new THREE.Vector3(nodes[ni][0], 0, nodes[ni][1]));
+      var nodeZ = (nodes[ni].length >= 3) ? (nodes[ni][2] || 0) : 0;
+      points.push(new THREE.Vector3(nodes[ni][0], nodeZ, nodes[ni][1]));
     }
     var curve = new THREE.CatmullRomCurve3(points);
     _roadCurves.push(curve);
@@ -352,6 +375,7 @@ function _buildRoadNetwork(edges) {
 
     // ── 路面 ribbon mesh ──
     // 左边缘 = +halfWidth，右边缘 = -halfWidth（对称）
+    // Y 高度 = pos.y（道路 elevation，高架段 > 0）
     var nSeg = Math.max(4, Math.floor(length / SEG_LEN));
     var positions = [];
     var indices = [];
@@ -365,8 +389,8 @@ function _buildRoadNetwork(edges) {
 
       var lx = pos.x + nx * halfWidth, lz = pos.z + nz * halfWidth;  // 左边缘
       var rx = pos.x - nx * halfWidth, rz = pos.z - nz * halfWidth;  // 右边缘
-      positions.push(lx, 0.01, lz);
-      positions.push(rx, 0.01, rz);
+      positions.push(lx, pos.y + 0.01, lz);
+      positions.push(rx, pos.y + 0.01, rz);
       // world-space UV：所有 edge 共享同一 repeat（4m 一个纹理周期）
       uvs.push(lx / 4, lz / 4);
       uvs.push(rx / 4, rz / 4);
@@ -393,10 +417,10 @@ function _buildRoadNetwork(edges) {
       var tan2 = curve.getTangentAt(t2);
       var nx2 = -tan2.z, nz2 = tan2.x;
       // 内侧与路面同高，外侧降低 0.06m
-      sPos.push(p2.x + nx2 * halfWidth, 0.015, p2.z + nz2 * halfWidth);
-      sPos.push(p2.x + nx2 * (halfWidth + shldW), -0.045, p2.z + nz2 * (halfWidth + shldW));
-      sPos.push(p2.x - nx2 * halfWidth, 0.015, p2.z - nz2 * halfWidth);
-      sPos.push(p2.x - nx2 * (halfWidth + shldW), -0.045, p2.z - nz2 * (halfWidth + shldW));
+      sPos.push(p2.x + nx2 * halfWidth, p2.y + 0.015, p2.z + nz2 * halfWidth);
+      sPos.push(p2.x + nx2 * (halfWidth + shldW), p2.y - 0.045, p2.z + nz2 * (halfWidth + shldW));
+      sPos.push(p2.x - nx2 * halfWidth, p2.y + 0.015, p2.z - nz2 * halfWidth);
+      sPos.push(p2.x - nx2 * (halfWidth + shldW), p2.y - 0.045, p2.z - nz2 * (halfWidth + shldW));
       if (si2 < nSeg) {
         var b2 = si2 * 4;
         sIdx.push(b2, b2 + 1, b2 + 4,  b2 + 1, b2 + 5, b2 + 4);
@@ -448,7 +472,7 @@ function _buildRoadNetwork(edges) {
       var pm = new THREE.Matrix4();
       pm.makeRotationX(-Math.PI / 2);
       pm.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ptan2.z, ptan2.x)));
-      pm.setPosition(ppos2.x + pnx2 * plat, 0.012, ppos2.z + pnz2 * plat);
+      pm.setPosition(ppos2.x + pnx2 * lat, ppos2.y + 0.012, ppos2.z + pnz2 * lat);
       puddleGeos.push(_transformGeometry(puddleGeo, pm));
     }
 
@@ -470,7 +494,7 @@ function _buildRoadNetwork(edges) {
       var gLeft = halfWidth + 0.45, gRight = -(halfWidth + 0.45);
       for (var gside = 0; gside < 2; gside++) {
         var lateral = gside === 0 ? gLeft : gRight;
-        var gpP = new THREE.Vector3(gp.x + gnx * lateral, 0.45, gp.z + gnz * lateral);
+        var gpP = new THREE.Vector3(gp.x + gnx * lateral, gp.y + 0.45, gp.z + gnz * lateral);
         var postMat = new THREE.Matrix4().makeTranslation(gpP.x, gpP.y, gpP.z);
         guardPostGeos.push(_transformGeometry(guardPostGeoTpl, postMat));
         // 立柱顶部盖帽
@@ -490,10 +514,11 @@ function _buildRoadNetwork(edges) {
         var gtan2 = curve.getTangentAt(gt2);
         var gnx2 = -gtan2.z, gnz2 = gtan2.x;
         var railLen = gp.distanceTo(gp2);
+        var gpMidY = (gp.y + gp2.y) / 2;
         for (var gside = 0; gside < 2; gside++) {
           var lateral = gside === 0 ? gLeft : gRight;
-          var gpS = new THREE.Vector3(gp.x + gnx * lateral, 0.62, gp.z + gnz * lateral);
-          var gpE = new THREE.Vector3(gp2.x + gnx2 * lateral, 0.62, gp2.z + gnz2 * lateral);
+          var gpS = new THREE.Vector3(gp.x + gnx * lateral, gp.y + 0.62, gp.z + gnz * lateral);
+          var gpE = new THREE.Vector3(gp2.x + gnx2 * lateral, gp2.y + 0.62, gp2.z + gnz2 * lateral);
           var railM = new THREE.Matrix4();
           // 构造 lookAt 矩阵：Z 轴指向 gpE，Y 轴向上
           var eye = gpS.clone().lerp(gpE, 0.5);
@@ -505,8 +530,8 @@ function _buildRoadNetwork(edges) {
           guardRailGeos.push(_transformGeometry(guardRailGeoTpl, railM));
           // 下横梁
           var railM2 = new THREE.Matrix4();
-          eye = gpS.clone().lerp(gpE, 0.5); eye.y = 0.32;
-          target = gpE.clone(); target.y = 0.32;
+          eye = gpS.clone().lerp(gpE, 0.5); eye.y = gpMidY + 0.32;
+          target = gpE.clone(); target.y = gpMidY + 0.32;
           railM2.lookAt(eye, target, up);
           railM2.multiply(new THREE.Matrix4().makeScale(railLen, 1, 1));
           guardRailGeos.push(_transformGeometry(guardRailGeoTpl, railM2));
@@ -532,11 +557,11 @@ function _buildRoadNetwork(edges) {
       var side = (li3 % 2 === 0) ? 1 : -1;  // 交错
       var lateral = side * (halfWidth + 2.5);
       var poleX = lp.x + lnx * lateral, poleZ = lp.z + lnz * lateral;
-      var postMat = new THREE.Matrix4().makeTranslation(poleX, 3.0, poleZ);
+      var postMat = new THREE.Matrix4().makeTranslation(poleX, lp.y + 3.0, poleZ);
       lampPostGeos.push(_transformGeometry(lampPostGeoTpl, postMat));
       // 灯罩：lookAt 朝向道路内侧
-      var lampEye = new THREE.Vector3(poleX - lnx * side * 0.8, 5.9, poleZ - lnz * side * 0.8);
-      var lampTarget = new THREE.Vector3(poleX - lnx * side * 3.0, 0, poleZ - lnz * side * 3.0);
+      var lampEye = new THREE.Vector3(poleX - lnx * side * 0.8, lp.y + 5.9, poleZ - lnz * side * 0.8);
+      var lampTarget = new THREE.Vector3(poleX - lnx * side * 3.0, lp.y, poleZ - lnz * side * 3.0);
       var headingL = Math.atan2(-ltan.z * side, -ltan.x * side);
       var lampM = new THREE.Matrix4();
       lampM.makeRotationY(headingL);
@@ -545,7 +570,7 @@ function _buildRoadNetwork(edges) {
       // 发光面板：略低于外壳，朝向路面
       var panelM = new THREE.Matrix4();
       panelM.makeRotationY(headingL);
-      panelM.setPosition(poleX - lnx * side * 0.8, 5.82, poleZ - lnz * side * 0.8);
+      panelM.setPosition(poleX - lnx * side * 0.8, lp.y + 5.82, poleZ - lnz * side * 0.8);
       lampHeadGeos.push(_transformGeometry(lampPanelGeoTpl, panelM));
       // 地面光晕：贴地半透明面片，位于灯罩正下方道路区域
       var glowX = poleX - lnx * side * 2.0;
@@ -553,7 +578,7 @@ function _buildRoadNetwork(edges) {
       var glowM = new THREE.Matrix4();
       glowM.makeRotationX(-Math.PI / 2);
       glowM.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ltan.z, ltan.x)));
-      glowM.setPosition(glowX, 0.015, glowZ);
+      glowM.setPosition(glowX, lp.y + 0.015, glowZ);
       lampGlowGeos.push(_transformGeometry(lampGlowGeoTpl, glowM));
     }
   }
@@ -880,6 +905,128 @@ function _buildRoadNetwork(edges) {
     }
   }
 
+  // ── 高架桥墩 + 桥面 ──────────────────────────────────────
+  // 用户要求："高架桥要有桥墩和桥面"。当某条 edge 的曲线采样点 pos.y > 0.5m
+  // （路面高于地面）时，每隔 ~15m 生成一根圆柱桥墩从地面撑到路面底部，
+  // 并在路面下方 0.2m 处铺一块略宽于路面的桥面板（连续 strip），形成完整
+  // 的高架桥结构。匝道/汇入车道/高速主线高架段都会自动生成。
+  var _PIER_SPACING = 15.0;
+  var _PIER_MIN_H = 0.5;       // 低于此高度不立桥墩（贴地段）
+  var _DECK_THICK = 0.30;      // 桥面厚度
+  var _DECK_OVERHANG = 0.4;    // 桥面相对路面两侧外扩（含护栏空间）
+  var pierGeos = [];           // 桥墩几何体（柱身 + 墩帽）
+  var pierCapGeos = [];
+  var deckGeos = [];           // 桥面板（每段一个薄 BoxGeometry）
+  var pierShaftTpl = new THREE.CylinderGeometry(0.45, 0.6, 1.0, 12);
+  var pierCapTpl = new THREE.BoxGeometry(1.6, 0.35, 1.6);
+  for (var bi_e = 0; bi_e < _roadCurves.length; bi_e++) {
+    var bCurve = _roadCurves[bi_e];
+    var bLen = _roadCurveLens[bi_e] || bCurve.getLength();
+    if (bLen < 1) continue;
+    // edge lanes/laneWidth 通过 edgeEnds 找回
+    var bEdge = edgeEnds[bi_e] || {};
+    var bLanes = bEdge.lanes || 2;
+    var bLW = bEdge.laneWidth || 3.5;
+    var bHalfW = (bLanes * bLW) / 2;
+
+    // ── 桥面板：从曲线 t=0..1 采样，每段生成一个梯形 strip（路面下方 0.2m）。
+    //   当某段两端点 pos.y 都 < _PIER_MIN_H 时不生成（贴地段不需要桥面板）。
+    var bNSeg = Math.max(4, Math.floor(bLen / SEG_LEN));
+    for (var bs0 = 0; bs0 < bNSeg; bs0++) {
+      var bt0 = bs0 / bNSeg;
+      var bt1 = (bs0 + 1) / bNSeg;
+      var bp0 = bCurve.getPointAt(bt0);
+      var bp1 = bCurve.getPointAt(bt1);
+      // 跳过贴地段（避免地面路上多一层板）
+      if (bp0.y < _PIER_MIN_H && bp1.y < _PIER_MIN_H) continue;
+      var bTan0 = bCurve.getTangentAt(bt0);
+      var bTan1 = bCurve.getTangentAt(bt1);
+      var bnx0 = -bTan0.z, bnz0 = bTan0.x;
+      var bnx1 = -bTan1.z, bnz1 = bTan1.x;
+      var bDeckY = (bp0.y + bp1.y) / 2 - _DECK_THICK / 2 - 0.18;  // 桥面顶距路面底 ~0.18m
+      // 4 顶点梯形（0=前左, 1=前右, 2=后左, 3=后右；"前后"指 t0/t1）
+      var deckW = bHalfW + _DECK_OVERHANG;
+      var d0lx = bp0.x + bnx0 * deckW, d0lz = bp0.z + bnz0 * deckW;
+      var d0rx = bp0.x - bnx0 * deckW, d0rz = bp0.z - bnz0 * deckW;
+      var d1lx = bp1.x + bnx1 * deckW, d1lz = bp1.z + bnz1 * deckW;
+      var d1rx = bp1.x - bnx1 * deckW, d1rz = bp1.z - bnz1 * deckW;
+      // 桥面用 8 顶点 Box（顶面 + 底面 + 侧面），简化为只画顶面 + 前后端面（厚度感）
+      var deckGeo = new THREE.BufferGeometry();
+      // 8 顶点：顶面 4 + 底面 4
+      var dYt = bDeckY + _DECK_THICK / 2;
+      var dYb = bDeckY - _DECK_THICK / 2;
+      deckGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+        d0lx, dYt, d0lz,  // 0 顶前左
+        d0rx, dYt, d0rz,  // 1 顶前右
+        d1lx, dYt, d1lz,  // 2 顶后左
+        d1rx, dYt, d1rz,  // 3 顶后右
+        d0lx, dYb, d0lz,  // 4 底前左
+        d0rx, dYb, d0rz,  // 5 底前右
+        d1lx, dYb, d1lz,  // 6 底后左
+        d1rx, dYb, d1rz   // 7 底后右
+      ], 3));
+      // 12 三角形：顶面 + 底面 + 4 侧面
+      deckGeo.setIndex([
+        0, 2, 1,  1, 2, 3,   // 顶面
+        4, 5, 6,  5, 7, 6,   // 底面
+        0, 1, 5,  0, 5, 4,   // 前端面
+        2, 7, 3,  2, 6, 7,   // 后端面
+        0, 6, 2,  0, 4, 6,   // 左侧面
+        1, 3, 7,  1, 7, 5    // 右侧面
+      ]);
+      deckGeo.computeVertexNormals();
+      deckGeos.push(deckGeo);
+
+      // ── 桥墩：每段中点立一根（间距约 SEG_LEN × 多段累加），
+      //   为控制密度改为按累计弧长每 _PIER_SPACING 米立一根。
+    }
+    // 按累计弧长均匀布墩（间距 _PIER_SPACING 米），保证弯曲匝道上墩位合理
+    var nPiers = Math.max(0, Math.floor(bLen / _PIER_SPACING) - 1);
+    if (nPiers > 0) {
+      var pierStep = bLen / (nPiers + 1);
+      for (var pbi = 1; pbi <= nPiers; pbi++) {
+        var pierS = pbi * pierStep;
+        var pierT = pierS / bLen;
+        if (pierT > 1) pierT = 1;
+        var pp = bCurve.getPointAt(pierT);
+        if (pp.y < _PIER_MIN_H) continue;  // 贴地无墩
+        // 桥墩高度 = 路面高度 - 桥面厚度 - 墩帽高度 - 0.05 余量
+        var pierTopY = pp.y - _DECK_THICK - 0.05;
+        var pierCapH = 0.35;
+        var pierShaftH = pierTopY - pierCapH;
+        if (pierShaftH < 0.5) continue;
+        // 柱身：CylinderGeometry(rTop=0.45, rBot=0.6, h=1) 居中于原点，
+        // 缩放 Y=pierShaftH 后平移 Y=pierShaftH/2（底面贴地）。
+        // Three.js 矩阵乘法右乘：M = T·S，故先 makeTranslation 再 multiply(S)。
+        var pierMat = new THREE.Matrix4();
+        pierMat.makeTranslation(pp.x, pierShaftH / 2, pp.z);
+        pierMat.multiply(new THREE.Matrix4().makeScale(1, pierShaftH, 1));
+        pierGeos.push(_transformGeometry(pierShaftTpl, pierMat));
+        // 墩帽：Box 1.6×0.35×1.6，位于柱身顶部
+        var capMat = new THREE.Matrix4().makeTranslation(pp.x, pierShaftH + pierCapH / 2, pp.z);
+        pierCapGeos.push(_transformGeometry(pierCapTpl, capMat));
+      }
+    }
+  }
+  // 合并桥墩 + 墩帽为 1 个 mesh（混凝土材质）
+  var pierMatConcrete = new THREE.MeshStandardMaterial({
+    color: 0xb0b0b0, roughness: 0.85, metalness: 0.05
+  });
+  var allPierGeos = pierGeos.concat(pierCapGeos);
+  if (allPierGeos.length) {
+    var pierMesh = new THREE.Mesh(_mergeGeometries(allPierGeos), pierMatConcrete);
+    pierMesh.castShadow = true;
+    pierMesh.receiveShadow = true;
+    group.add(pierMesh);
+  }
+  // 桥面板：暗灰色混凝土材质
+  if (deckGeos.length) {
+    var deckMesh = new THREE.Mesh(_mergeGeometries(deckGeos), pierMatConcrete);
+    deckMesh.castShadow = true;
+    deckMesh.receiveShadow = true;
+    group.add(deckMesh);
+  }
+
   scene3d.add(group);
   _roadNetworkGroup = group;
 
@@ -952,9 +1099,9 @@ function _emitRibbonSegment(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertO
     var pos = curve.getPointAt(t);
     var tan = curve.getTangentAt(t);
     var nx = -tan.z, nz = tan.x;
-    // 左右边缘：沿法线偏移
-    positions.push(pos.x + nx * (lateralOffset - halfW), y, pos.z + nz * (lateralOffset - halfW));
-    positions.push(pos.x + nx * (lateralOffset + halfW), y, pos.z + nz * (lateralOffset + halfW));
+    // 左右边缘：沿法线偏移；Y 用 pos.y + y（y 是离路面的高度，高架段 pos.y > 0）
+    positions.push(pos.x + nx * (lateralOffset - halfW), pos.y + y, pos.z + nz * (lateralOffset - halfW));
+    positions.push(pos.x + nx * (lateralOffset + halfW), pos.y + y, pos.z + nz * (lateralOffset + halfW));
     if (si < m) {
       var base = si * 2;
       indices.push(base, base + 1, base + 2);
@@ -981,7 +1128,7 @@ function _addRoadArrow(arrowGeos, curve, s, laneWidth, lanes) {
   var pos = curve.getPointAt(t);
   var tan = curve.getTangentAt(t);
   var nx = -tan.z, nz = tan.x;
-  var y = 0.046;
+  var y = pos.y + 0.046;  // 叠加高架 elevation，避免高架段箭头悬浮在地面
   var heading = Math.atan2(tan.z, tan.x);
   // 每条车道画一个箭头
   var laneCenters = [];
@@ -1023,7 +1170,7 @@ function _addStopLine(stopLineGeos, curve, s, laneWidth, lanes) {
   var m = new THREE.Matrix4();
   m.makeRotationX(-Math.PI / 2);
   m.multiply(new THREE.Matrix4().makeRotationZ(-heading));
-  m.setPosition(pos.x, 0.047, pos.z);
+  m.setPosition(pos.x, pos.y + 0.047, pos.z);  // 叠加高架 elevation
   stopLineGeos.push(_transformGeometry(lineGeo, m));
 }
 
@@ -2103,7 +2250,10 @@ function _renderFrame() {
 
   // ── Ego car: world-space position (road is STATIC at origin) ──
   if (ego) {
-    ego.position.set(sx, ego.position.y, sz);
+    // 高架 elevation：ego Y 叠加当前道路高度，避免高架段车沉到桥下。
+    // ego.position.y 下方会被 Car bounce 覆盖（基于 elevation + sin 抖动）。
+    var _egoElev = _getRoadElevationAt(sx, sz);
+    ego.position.set(sx, _egoElev, sz);
     ego.rotation.y = -_dr.smoothHeading;
     // 前轮转向动画：从 vehicle.steer 读取转向值旋转前轮组
     var v = (_topoData.metrics || {}).vehicle || {};
@@ -2256,7 +2406,9 @@ function _renderFrame() {
         }
         // Unit-normalised model: group origin at road surface (y=0.05).
         // Children sit at fractions 0-1 so scale.set maps directly to metres.
-        _tmpV3.set(tx, 0.05, tz);
+        // 高架 elevation：NPC Y 叠加道路高度，避免高架段 NPC 沉到桥下。
+        var _obsElev = _getRoadElevationAt(tx, tz);
+        _tmpV3.set(tx, _obsElev + 0.05, tz);
         if (!om.visible || om.position.distanceTo(_tmpV3) > 35) {
           om.position.copy(_tmpV3);
         } else {
@@ -2265,7 +2417,7 @@ function _renderFrame() {
         // 悬挂起伏：复用 ego 的固定频率正弦效果（见下方 "Car bounce"），
         // 按 oi 错开相位避免所有 NPC 同步起伏，之前 NPC 完全没有这个效果。
         var obsBounceSpd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
-        om.position.y = 0.05 + Math.sin(_animT * 6.5 + oi * 1.7) * 0.008 * Math.min(1, obsBounceSpd * 0.12);
+        om.position.y = _obsElev + 0.05 + Math.sin(_animT * 6.5 + oi * 1.7) * 0.008 * Math.min(1, obsBounceSpd * 0.12);
         // realScale 标记：glTF 模型和真实尺寸建模的 _buildObstacle 都跳过 (L,H,W) 缩放；
         // pedestrian/cone 等仍是 unit 模型，需 scale.set(L,H,W) 映射到真实尺寸
         if (om.userData.realScale) {
@@ -2367,8 +2519,8 @@ function _renderFrame() {
         if (lbl) {
           var isVehicle = (ow.type === 'car' || ow.type === 'suv' || ow.type === 'truck');
           if (isVehicle && ow.ai) {
-            // 标签位置：障碍物位置 + 车顶上方
-            lbl.position.set(om.position.x, H + 1.2, om.position.z);
+            // 标签位置：障碍物位置 + 车顶上方（叠加 elevation 跟随高架段）
+            lbl.position.set(om.position.x, om.position.y + H + 1.2, om.position.z);
             // 仅当 ai 状态变化时重建纹理
             if (_obsLabelLast[oi] !== ow.ai) {
               var lblColor = _aiLabelColors[ow.ai] || 0xffffff;
@@ -2396,7 +2548,7 @@ function _renderFrame() {
       var tlm = _trafficLightPool[tli2];
       var tlw = _trafficLightWorld[tli2];
       if (tlw) {
-        tlm.position.set(tlw.x, 0, tlw.z);
+        tlm.position.set(tlw.x, _getRoadElevationAt(tlw.x, tlw.z), tlw.z);
         tlm.visible = true;
         // 交通灯 arm 沿模型 +Z，应横跨道路（垂直于道路切线）。
         // 优先使用 flowsim 发布的 heading，无则按道路切线估算。
@@ -2435,7 +2587,7 @@ function _renderFrame() {
       var gm = _etcGatePool[gi2];
       var gw = _etcGateWorld[gi2];
       if (gw) {
-        gm.position.set(gw.x, 0, gw.z);
+        gm.position.set(gw.x, _getRoadElevationAt(gw.x, gw.z), gw.z);
         gm.visible = true;
         // ETC 门架 crossbar 沿模型 +Z，应横跨道路（垂直于道路切线）。
         if (typeof gw.h === 'number' && gw.h !== 0.0) {
@@ -2478,8 +2630,10 @@ function _renderFrame() {
   }
 
   // ── Car bounce ── (v 已在上方 ego 段声明)
+  // 悬挂起伏叠加在道路 elevation 之上，避免高架段车抖到桥面下方。
   if (ego && v.speed > 0.5) {
-    ego.position.y = 0.05 + Math.sin(_animT * 6.5) * 0.008 * Math.min(1, v.speed * 0.12);
+    var _egoElev2 = _getRoadElevationAt(ego.position.x, ego.position.z);
+    ego.position.y = _egoElev2 + 0.05 + Math.sin(_animT * 6.5) * 0.008 * Math.min(1, v.speed * 0.12);
   }
 }
 

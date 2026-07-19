@@ -29,10 +29,13 @@
 
 namespace flowsim {
 
-/** 世界坐标（OpenDRIVE 全局系，x 纵向 / y 横向 / h 航向角 rad） */
+/** 世界坐标（OpenDRIVE 全局系，x 纵向 / y 横向 / z 高度 / h 航向角 rad）。
+ *  z 是道路 elevation（高架高度），由 esmini 解析 <elevationProfile> 后给出。
+ *  平地场景 z 恒为 0；匝道/高架段 z 随 s 渐变。 */
 struct WorldPos {
     double x{0.0};
     double y{0.0};
+    double z{0.0};
     double h{0.0};
 };
 
