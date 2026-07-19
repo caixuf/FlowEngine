@@ -102,6 +102,17 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s) {
     if (target < 0.0)   target = 0.0;
     if (target > total) target = total;
     npc.route_s = target;
+    // 重置动态状态：之前 recycle 只改 route_s，speed/ai_state/lead_id/crash_cooldown
+    // 残留旧值——刚刹停的车回收后 speed=0 顶在新位置不动；刚撞车冻结的车回收后
+    // crash_cooldown>0 继续冻结；follow 状态的车回收后还在追一辆已不存在的 lead。
+    // 重置后 NPC 在新位置以 Cruise 状态、原 target_vx 起步。
+    npc.speed = 0.0;
+    npc.vx = 0.0; npc.vy = 0.0;
+    npc.throttle = 0.0; npc.brake = 0.0;
+    npc.ai_state = AIState::Cruise;
+    npc.lead_id = INVALID_ENTITY;
+    npc.follow_gap = 1e9;
+    npc.crash_cooldown = 0.0;
 }
 
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
@@ -139,11 +150,15 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     }
 
     // 2. 计算 v_desired
+    // 死区修复：原 `gap < 60.0` 才进 Follow，但 find_lead 的 look_ahead=80m，
+    // 60-80m 内 lead 已写入但 FSM 走 Cruise 全速前进——30 m/s 时这 0.67s 死区
+    // 叠加 IDM 制动距离不足必然追尾。改为只要 find_lead 命中就启用 IDM 跟车，
+    // 远距时 idm_desired_speed 自然返回 target_vx（safe_gap 充足走加速分支）。
     double v = npc.speed;
     double v_desired;
     if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
         v_desired = 0.0;
-    } else if (lead != INVALID_ENTITY && gap < 60.0) {
+    } else if (lead != INVALID_ENTITY) {
         npc.ai_state = AIState::Follow;
         v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
     } else {
