@@ -70,6 +70,9 @@ export function buildLegacyRoad(scene) {
     var cl = new THREE.Mesh(clGeo, clMat);
     cl.position.set(0, 0.043, dy * 0.15);
     cl.userData.isLaneMark = true;
+    // applyRoadCurve 按 baseZ + curveShift 变形；不存 baseZ 会得到
+    // undefined + number = NaN，中心双黄线一弯道就消失。
+    cl.userData.baseZ = dy * 0.15;
     roadGroup.add(cl);
   }
 

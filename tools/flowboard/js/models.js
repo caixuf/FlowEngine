@@ -72,8 +72,12 @@ function _buildVehicleFromGltf(name, gltf) {
       // gen_models.py 生成的 glTF 节点变换是单位矩阵，车轮的真实位置烘在顶点
       // 数据里，getWorldPosition 恒返回 (0,0,0)，会把转向支点错误地放在车身
       // 原点，导致转向时车轮绕错误支点画弧线。改用几何包围盒中心（世界空间）。
-      var flCenter = new THREE.Box3().setFromObject(fl).getCenter(new THREE.Vector3());
+      var flBox = new THREE.Box3().setFromObject(fl);
+      var flCenter = flBox.getCenter(new THREE.Vector3());
       var frCenter = new THREE.Box3().setFromObject(fr).getCenter(new THREE.Vector3());
+      // 真实轮半径（车轮直径沿 Y 轴）：滚动动画角速度 = v·dt / r，
+      // 缺省 0.33（与 _buildSedan 一致）。
+      group.userData.wheelRadius = (flBox.max.y - flBox.min.y) / 2 || 0.33;
       var fwCenter = flCenter.clone().add(frCenter).multiplyScalar(0.5);
       var fwGroup = new THREE.Group();
       fwGroup.name = '_axle_front';

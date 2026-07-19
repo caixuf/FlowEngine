@@ -126,6 +126,10 @@ let _etcGatePool = [], _etcGateWorld = [];
 /** 远处城市天际线：低多边形建筑剪影环，始终跟随 ego 居中，
  *  配合 fog 产生大气透视效果。 */
 let _skylineGroup = null;
+/** 天空渐变球 + 太阳光晕 sprite：同样需跟随 ego（半径 480/420m，
+ *  ego 驶离原点超过该距离后相机会跑出球外，天空退化为纯色背景）。 */
+let _skyMesh = null, _sunSprite = null;
+let _sunDir = null;  /* 归一化的太阳方向（30,50,20），init 时计算一次 */
 
 /** B.1: 雨粒子系统（LineSegments），提升天气氛围 */
 let _rainMesh = null;
@@ -475,7 +479,7 @@ function _buildRoadNetwork(edges) {
       var pm = new THREE.Matrix4();
       pm.makeRotationX(-Math.PI / 2);
       pm.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ptan2.z, ptan2.x)));
-      pm.setPosition(ppos2.x + pnx2 * lat, ppos2.y + 0.012, ppos2.z + pnz2 * lat);
+      pm.setPosition(ppos2.x + pnx2 * plat, ppos2.y + 0.012, ppos2.z + pnz2 * plat);
       puddleGeos.push(_transformGeometry(puddleGeo, pm));
     }
 
@@ -1672,6 +1676,19 @@ function init3DScene() {
 
   // Scene
   scene3d = new THREE.Scene();
+  // 重建场景（webglcontextrestored 等路径）前，必须清空挂在旧 scene 上的
+  // 模块级引用与缓存键，否则：
+  // - _buildRoadNetwork 因 key 相同 early-return，新场景永远没有道路网络；
+  // - _buildWater/_buildRain 因 mesh 引用非空被跳过，新场景没有水面/雨效；
+  // - _renderFrame 继续更新旧 scene 里的 orphan mesh。
+  _roadNetworkGroup = null; _lastRoadNetworkKey = "";
+  _roadCurves = []; _roadCurveLens = []; _roadCurveNext = [];
+  _trajLine = null; _trajLastKey = "";
+  _waterMesh = null; _waterMat = null;
+  _rainMesh = null; _rainPos = null; _rainVel = null;
+  _skylineGroup = null; _skyMesh = null; _sunSprite = null;
+  _lidarWorld = []; _obsWorld = [];
+  _etcGateWorld = []; _trafficLightWorld = [];
   /* NOA Phase 6 3D 增强：程序化天空渐变（天顶→地平线），替代纯色背景。
    * 用大半径 SphereGeometry + BackSide + 自定义 ShaderMaterial 实现，
    * 不依赖 Three.js Sky.js 扩展。fog 颜色与地平线色一致保证远处过渡自然。 */
@@ -1712,6 +1729,7 @@ function init3DScene() {
   });
   var skyMesh = new THREE.Mesh(skyGeo, skyMat);
   scene3d.add(skyMesh);
+  _skyMesh = skyMesh;  /* 供 _renderFrame 跟随 ego 更新 */
 
   // B.2: 太阳光晕 billboard —— 位于主光源方向，径向渐变模拟大气散射
   var sunMat = new THREE.ShaderMaterial({
@@ -1746,8 +1764,10 @@ function init3DScene() {
   });
   var sunSprite = new THREE.Sprite(sunMat);
   sunSprite.scale.set(36, 36, 1);
-  sunSprite.position.copy(new THREE.Vector3(30, 50, 20).normalize().multiplyScalar(420));
+  _sunDir = new THREE.Vector3(30, 50, 20).normalize();
+  sunSprite.position.copy(_sunDir).multiplyScalar(420);
   scene3d.add(sunSprite);
+  _sunSprite = sunSprite;  /* 供 _renderFrame 跟随 ego 更新 */
 
   // Camera — chase cam. Wider FOV keeps the whole car visible on small screens.
   camera3d = new THREE.PerspectiveCamera(60, w / h, 0.2, 500);
@@ -2268,7 +2288,7 @@ function _renderFrame() {
     // 车轮滚动动画：根据车速绕轮轴旋转
     var egoWheels = ego.userData.wheels;
     if (egoWheels && v.speed > 0.1) {
-      var roll = (v.speed || 0) * 0.016 / 0.32;
+      var roll = (v.speed || 0) * 0.016 / (ego.userData.wheelRadius || 0.32);
       for (var wri = 0; wri < egoWheels.length; wri++) {
         egoWheels[wri].rotation.x += roll;
       }
@@ -2305,6 +2325,12 @@ function _renderFrame() {
   if (_envGroup && Math.abs(_envGroup.position.x - chunkX) > 100) _envGroup.position.x = chunkX;
   // 天际线始终跟随 ego 居中（X+Z），保证远景城市在任意位置都环绕地平线
   if (_skylineGroup) _skylineGroup.position.set(sx, 0, sz);
+  // 天空球/太阳光晕同样跟随 ego：球半径 480m 固定在世界原点时，
+  // ego 驶出球外天空退化为纯色背景、太阳光晕被甩在身后。
+  if (_skyMesh) _skyMesh.position.set(sx, 0, sz);
+  if (_sunSprite && _sunDir) {
+    _sunSprite.position.set(sx + _sunDir.x * 420, _sunDir.y * 420, sz + _sunDir.z * 420);
+  }
   // B.1: 雨粒子跟随 ego 下落
   _updateRain(sx, sz);
   // B.1: 水面波动动画
@@ -2476,6 +2502,18 @@ function _renderFrame() {
             }
           }
           while (nm.children.length) om.add(nm.children[0]);
+          // 迁移新模型的 userData 引用（车轮/车轴/车灯/realScale/轮半径），否则：
+          // - om.userData.wheels 仍指向已 dispose 的旧轮 → 新车轮永远不转；
+          // - pedestrian(unit)→car(realScale) 切换后 realScale 不更新 → 车身被
+          //   scale.set(L,H,W) 拉成方块；
+          // - _setVehicleLights 找不到新灯 mesh → 类型切换后车灯全灭。
+          var _udKeys = ['wheels', 'frontAxle', 'rearAxle', 'brakeLights', 'turnSignals',
+            'headlights', 'realScale', 'wheelRadius'];
+          for (var udk = 0; udk < _udKeys.length; udk++) {
+            var _udk = _udKeys[udk];
+            if (nm.userData[_udk] !== undefined) om.userData[_udk] = nm.userData[_udk];
+            else delete om.userData[_udk];
+          }
           om.userData.obsType = ow.type;
           om.userData.obsColor = c;
         }
@@ -2492,8 +2530,11 @@ function _renderFrame() {
         if (obsWheels && (ow.type === 'car' || ow.type === 'suv' || ow.type === 'truck')) {
           var obsSpd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
           if (obsSpd > 0.1) {
-            // unit-normalized 轮半径 0.17，scale.x = 车长 L，实际轮半径 = 0.17 * L
-            var obsRoll = obsSpd * 0.016 / (0.17 * Math.max(1, L));
+            // 角速度 = v·dt / r。r 取建模时写入的 userData.wheelRadius
+            // （_buildSedan 0.33 / 卡车 0.42 / glTF 包围盒量取），缺省 0.33。
+            // 旧的 0.17*L 是 unit 模型时代遗留：realScale 模型 scale.x=1，
+            // 轮半径与车长 L 无关，用它会慢 2~3 倍。
+            var obsRoll = obsSpd * 0.016 / (om.userData.wheelRadius || 0.33);
             for (var owi = 0; owi < obsWheels.length; owi++) {
               obsWheels[owi].rotation.x += obsRoll;
             }
@@ -2834,6 +2875,7 @@ function update3D() {
             ent.type === 'etc_gate' || ent.type === 'stop_line') continue;
         // entities 已是世界坐标，直接用 ent.x/ent.y 作为世界 (x, z)。
         _obsWorld[usedSlots] = {
+          id: ent.id,             // NPC 面板显示稳定 id（否则退化为槽位号，随排序漂移）
           x: (ent.x || 0), z: (ent.y || 0),
           vx: (ent.vx || 0), vz: (ent.vy || 0),
           t0: now,
