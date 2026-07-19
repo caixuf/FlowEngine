@@ -155,101 +155,119 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.follow_gap = 1e9;
     npc.crash_cooldown = 0.0;
     npc.route_fail_count = 0;
+    npc.lane_change_timer = 0.0;
+    npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
 }
 
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
                       FlowRoadNetwork* roads, const Route* route,
                       double ego_route_s) {
-    // 0. 碰撞冷却：crash_cooldown > 0 期间速度强制归零，跳过 AI。
-    //    冷却到期后释放，NPC 重新走 IDM + 路径跟随。原实现永久冻结导致
-    //    任何一次接触都把两辆车钉死成永久路障，长场景越积越多把路堵死。
-    if (npc.crash_cooldown > 0.0) {
+    bool in_crash_cooldown = (npc.crash_cooldown > 0.0);
+    if (in_crash_cooldown) {
         npc.crash_cooldown -= dt;
         if (npc.crash_cooldown < 0.0) npc.crash_cooldown = 0.0;
         npc.speed = 0.0;
-        npc.vx = 0.0; npc.vy = 0.0;
-        npc.throttle = 0.0; npc.brake = 1.0;
-        return;
+        npc.throttle = 0.0;
+        npc.brake = 1.0;
+        /* E3: 不 return！crash_cooldown 期间仍执行 route 位置刷新（offset 平滑
+         * + frenet_to_world），让被碰撞弹偏的车自动回到车道里。之前直接 return
+         * 导致 crash_cooldown 2s 内车停在被推到的错误位置/朝向，冷却结束后
+         * 在路外 world_to_frenet 失败 → 飞出路面。 */
     }
 
-    // 1. 找前车
-    EntityId lead = find_lead(npc, pool, cfg);
-    npc.lead_id = lead;
+    // ── E2: offset → target_offset 平滑插值（换道不瞬移，1.5s 完成 3.5m 变道）──
+    // 变道速率 ≈ 2.3 m/s（3.5m / 1.5s），视觉上是平滑横移，不会突然跳。
+    // 未在变道时 target_offset == offset，插值无变化。
+    if (!in_crash_cooldown && std::fabs(npc.offset - npc.target_offset) > 0.01) {
+        double dir = (npc.target_offset > npc.offset) ? 1.0 : -1.0;
+        double step = 2.3 * dt;  // ≈2.3 m/s 横移速率
+        double remain = std::fabs(npc.target_offset - npc.offset);
+        if (step > remain) step = remain;
+        npc.offset += dir * step;
+    }
 
+    // 1. 找前车（碰撞冷却期间跳过，保持 speed=0）
+    EntityId lead = INVALID_ENTITY;
     double gap = 1e9;
-    if (lead != INVALID_ENTITY) {
-        const Entity& lead_e = pool[lead];
-        if (npc.route_dir != 0 && lead_e.route_dir != 0) {
-            gap = (lead_e.route_s - npc.route_s) * (double)npc.route_dir
-                  - (lead_e.length * 0.5 + npc.length * 0.5);
-        } else {
-            gap = (lead_e.x - npc.x) - (lead_e.length * 0.5 + npc.length * 0.5);
-        }
-        npc.follow_gap = gap;
-    } else {
-        npc.follow_gap = 1e9;
-    }
-
-    // 1.5 D3 避障换道：lead 太近且太慢 → 试图换到相邻车道
-    //    lane_change_timer > 0 时跳过评估（避免频繁换道抖动），只递减计时器。
-    //    条件：本车在 route 上 / 速度 > 2 m/s / lead 速度 < 我速度 * 0.7 / gap < 12m
-    //    候选 offset：±1.75（2 车道道路的两个车道中心），优先反方向换（让路侧错开）
-    //    冷却 4s：换道后 4s 内不评估，足够完成变道视觉过渡。
-    if (npc.lane_change_timer > 0.0) {
-        npc.lane_change_timer -= dt;
-        if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
-    } else if (npc.route_dir > 0 && npc.speed > 2.0 &&
-               lead != INVALID_ENTITY) {
-        const Entity& lead_e = pool[lead];
-        double lead_speed = lead_e.speed;
-        // 对向来车的 speed 是绝对值，方向用 route_dir 校正
-        if (lead_e.route_dir != npc.route_dir) lead_speed = lead_e.speed;
-        double trigger_gap = 10.0 + npc.speed * 1.5;  // 5 m/s → 17.5m, 15 m/s → 32.5m
-        if (gap < trigger_gap && lead_speed < npc.speed * 0.7) {
-            // 候选 offset：当前 offset 取负值（换到对面车道）。
-            // 若当前 |offset| 接近 0（路中心），默认换到 -1.75
-            double cand_a = (npc.offset >= 0.0) ? -1.75 : 1.75;
-            double cand_b = -cand_a;  // 另一方向
-            // 优先 cand_a，若被占则试 cand_b
-            if (lane_change_safe(npc, cand_a, pool, cfg)) {
-                npc.offset = cand_a;
-                npc.lane_change_timer = 4.0;
-            } else if (lane_change_safe(npc, cand_b, pool, cfg)) {
-                npc.offset = cand_b;
-                npc.lane_change_timer = 4.0;
+    if (!in_crash_cooldown) {
+        lead = find_lead(npc, pool, cfg);
+        npc.lead_id = lead;
+        if (lead != INVALID_ENTITY) {
+            const Entity& lead_e = pool[lead];
+            if (npc.route_dir != 0 && lead_e.route_dir != 0) {
+                gap = (lead_e.route_s - npc.route_s) * (double)npc.route_dir
+                      - (lead_e.length * 0.5 + npc.length * 0.5);
+            } else {
+                gap = (lead_e.x - npc.x) - (lead_e.length * 0.5 + npc.length * 0.5);
             }
-            // 换道后 lead 还在原车道 → 下一帧 find_lead 自然找不到，
-            // 状态切回 Cruise，NPC 在新车道加速。
+            npc.follow_gap = gap;
+        } else {
+            npc.follow_gap = 1e9;
         }
     }
 
-    // 2. 计算 v_desired
-    // 死区修复：原 `gap < 60.0` 才进 Follow，但 find_lead 的 look_ahead=80m，
-    // 60-80m 内 lead 已写入但 FSM 走 Cruise 全速前进——30 m/s 时这 0.67s 死区
-    // 叠加 IDM 制动距离不足必然追尾。改为只要 find_lead 命中就启用 IDM 跟车，
-    // 远距时 idm_desired_speed 自然返回 target_vx（safe_gap 充足走加速分支）。
-    double v = npc.speed;
-    double v_desired;
-    if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
-        v_desired = 0.0;
-    } else if (lead != INVALID_ENTITY) {
-        npc.ai_state = AIState::Follow;
-        v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
-    } else {
-        npc.ai_state = AIState::Cruise;
-        v_desired = npc.target_vx;
+    // 1.5 E4 避障换道：只在顺行侧 (l ≤ 0) 内换道，不跨参考线到对向 (l>0)
+    //    候选 offset：从当前 offset 向更负方向（右侧顺行车道）移动 -3.5m，
+    //    以及向参考线方向 +3.5m（不超过 0）。lane_change_safe 检查前后无车。
+    //    换道时设 target_offset，由上面 E2 插值平滑移动。
+    if (!in_crash_cooldown) {
+        if (npc.lane_change_timer > 0.0) {
+            npc.lane_change_timer -= dt;
+            if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
+        } else if (npc.route_dir > 0 && npc.speed > 2.0 &&
+                   lead != INVALID_ENTITY) {
+            const Entity& lead_e = pool[lead];
+            double lead_speed = lead_e.speed;
+            double trigger_gap = 10.0 + npc.speed * 1.5;
+            if (gap < trigger_gap && lead_speed < npc.speed * 0.7) {
+                // 候选：右侧（更负）和左侧（向 0 靠近，但不超过 0）
+                double cand_right = npc.target_offset - 3.5;  // 右移一车道
+                double cand_left  = npc.target_offset + 3.5;  // 左移一车道
+                if (cand_left > 0.0) cand_left = -999;        // 不跨到对向
+                // 先试右移，再试左移
+                double chosen = -999;
+                if (cand_right > -20.0 && lane_change_safe(npc, cand_right, pool, cfg)) {
+                    chosen = cand_right;
+                } else if (cand_left > -900 && lane_change_safe(npc, cand_left, pool, cfg)) {
+                    chosen = cand_left;
+                }
+                if (chosen > -900) {
+                    npc.target_offset = chosen;
+                    npc.lane_change_timer = 4.0;  // 4s 冷却
+                }
+            }
+        }
     }
 
-    // 3. v_desired → throttle/brake
-    double dv = v_desired - v;
-    double throttle = 0.0, brake = 0.0;
-    if (dv > 0.01) {
-        throttle = std::min(1.0, dv / (cfg.accel_rate * dt + 0.01));
-        throttle = std::max(0.2, throttle);  // 起步最低油门
-    } else if (dv < -0.01) {
-        brake = std::min(1.0, -dv / (cfg.brake_rate * dt + 0.01));
+    // 2. 计算 v_desired（碰撞冷却期间 v_desired=0）
+    double v = npc.speed;
+    double v_desired = 0.0;
+    if (!in_crash_cooldown) {
+        if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
+            v_desired = 0.0;
+        } else if (lead != INVALID_ENTITY) {
+            npc.ai_state = AIState::Follow;
+            v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
+        } else {
+            npc.ai_state = AIState::Cruise;
+            v_desired = npc.target_vx;
+        }
     }
+
+    // 3. v_desired → throttle/brake（碰撞冷却期间保持刹车）
+    double throttle = 0.0, brake = in_crash_cooldown ? 1.0 : 0.0;
+    if (!in_crash_cooldown) {
+        double dv = v_desired - v;
+        if (dv > 0.01) {
+            throttle = std::min(1.0, dv / (cfg.accel_rate * dt + 0.01));
+            throttle = std::max(0.2, throttle);
+        } else if (dv < -0.01) {
+            brake = std::min(1.0, -dv / (cfg.brake_rate * dt + 0.01));
+        }
+    }
+    npc.throttle = throttle;
+    npc.brake = brake;
 
     // 4. 纵向积分：step_bicycle 只用来更新 speed（steer=0），位置随后覆盖
     step_bicycle(npc, dt, throttle, brake, 0.0);

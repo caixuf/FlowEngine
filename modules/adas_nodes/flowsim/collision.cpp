@@ -104,30 +104,32 @@ void apply_collision_response(EntityPool& pool, const std::vector<CollisionPair>
         a.brake = 1.0; a.throttle = 0.0;
         b.brake = 1.0; b.throttle = 0.0;
 
-        // B3: 物理分离 — 沿两车中心连线方向把两车推开 overlap/2，避免
-        // 冷却到期后两车仍重叠立即重新碰撞 → 再次冻结的永久路障。
-        double dx = b.x - a.x;
-        double dy = b.y - a.y;
-        double dist = std::hypot(dx, dy);
-        if (dist < 1e-6) { dx = 1.0; dy = 0.0; dist = 1.0; }  // 中心重合兜底
-        // 估算分离距离：用 AABB 最小重叠（保守估计）
-        double aabb_x = (a.length + b.length) * 0.5;
-        double aabb_y = (a.width  + b.width ) * 0.5;
-        double overlap = std::max(aabb_x - std::fabs(dx),
-                                  aabb_y - std::fabs(dy));
-        if (overlap < 0.5) overlap = 0.5;          // 至少推开 0.5m
-        double push = overlap * 0.5 + 0.1;         // 各推一半 + 0.1m buffer
-        double ux = dx / dist, uy = dy / dist;
-        a.x -= ux * push; a.y -= uy * push;
-        b.x += ux * push; b.y += uy * push;
+        // E3: 物理分离改为沿 route_s 纵向推开，不做世界坐标任意方向弹飞。
+        // 原实现沿中心连线推，两车如果有角度差（一个 heading 偏了），推的
+        // 方向偏离道路方向 → 车被推到路外 → crash_cooldown 期间不刷新位置
+        // → 冷却结束后在路外 world_to_frenet 失败 → 飞出路面朝向全乱。
+        // 改为只沿 route 纵向拉开 route_s，横向 offset 和 heading 不动，
+        // 下一帧 frenet_to_world 自然把车放回车道正确位置。
+        if (a.route_dir != 0 && b.route_dir != 0) {
+            double sep = 2.0;  // 纵向拉开 2m（约半辆车长）
+            // route_s 大的往前推，小的往后推
+            if (a.route_s > b.route_s) {
+                a.route_s += sep * (double)a.route_dir;
+                b.route_s -= sep * (double)b.route_dir;
+            } else {
+                b.route_s += sep * (double)b.route_dir;
+                a.route_s -= sep * (double)a.route_dir;
+            }
+        }
+        /* 非 route 模式（route_dir=0）不做分离，让它们自然叠着，
+         * 避免在无路网场景引入任意方向推力。 */
 
-        // 碰撞冷却 2.0s：之前直接把双方速度永久置 0，任何一次接触
-        // 都会让两辆车冻结在原地变路障，长场景越积越多把整条路堵死。
-        // 现在用 crash_cooldown 计时器，>0 期间 step_npc_vehicle 跳过 AI
-        // （保持 speed=0），到 0 后释放 NPC 重新走 AI（ego 也一样，
-        // 但 ego 通常由 control/cmd 驱动，下一帧的油门会立即覆盖 speed）。
-        if (a.is_vehicle()) a.crash_cooldown = 2.0;
-        if (b.is_vehicle()) b.crash_cooldown = 2.0;
+        // 碰撞冷却缩短到 0.5s：原 2.0s 太长，撞一次堵 2 秒整条路就塞死。
+        // 0.5s 够避免同一帧/下一两帧重复碰撞检测，又能快速恢复行驶。
+        // 冷却期间 step_npc_vehicle 仍执行 route 位置刷新（E3 修复），
+        // 车不会停在错误位置。
+        if (a.is_vehicle()) a.crash_cooldown = 0.5;
+        if (b.is_vehicle()) b.crash_cooldown = 0.5;
     }
 }
 

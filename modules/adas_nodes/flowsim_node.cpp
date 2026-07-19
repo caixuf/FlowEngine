@@ -342,14 +342,8 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         if (a->segment_id >= 0 && g.roads_loaded && g.route.ok() && e.is_npc_vehicle()) {
             e.road_id = a->segment_id;
             e.s       = a->s;
-            double init_l = a->l;
-            /* 场景未指定车道 (l=0) 时按 id 错开到 ±1.75（2 车道道路的车道中心）。
-             * 否则多个同向 NPC 全部锁在路中心一条线，前车减速后车只能一路刹到 0，
-             * 看上去就是"堵成一坨"。仅对同向 (vx>0) NPC 生效，对向车保留场景 l。 */
-            if (init_l == 0.0 && a->vx > 0.0) {
-                init_l = ((a->id % 2) == 0) ? 1.75 : -1.75;
-            }
-            e.offset  = init_l;
+            e.offset  = a->l;
+            e.target_offset = a->l;  /* E2: 换道目标 offset 初始 = 当前 offset */
             flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
         }
     }
