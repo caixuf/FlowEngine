@@ -387,8 +387,10 @@ export function _buildSedan(color, secondaryColor) {
 
 // ── Obstacle model ───────────────────────────────────────────────
 /**
- * _buildObstacle — build a unit-normalised obstacle mesh shaped by type
- * (bounding box ≈ 1×1×1; scale with .set(L, H, W) at render time).
+ * _buildObstacle — build an obstacle mesh shaped by type.
+ * car/truck 使用真实尺寸 1:1 建模并标记 g.userData.realScale = true，
+ * 让 scene3d 渲染时跳过非均匀缩放（避免圆柱车轮被压成椭圆）。
+ * pedestrian/cone 仍是 unit 模型，由 scene3d 按各自尺寸缩放。
  * @param {string} type   obstacle type: 'car'/'truck' (sedan), 'pedestrian'
  *                        (capsule), 'cone' (traffic cone); defaults to sedan.
  * @param {number} color  body colour (e.g. 0xff9944). Legacy call signature
@@ -432,8 +434,12 @@ export function _buildObstacle(type, color) {
     return g;
   }
 
-  // 默认：轿车形（car/truck/cyclist），unit-normalized，scale.set(L,H,W) 映射到真实尺寸
-  // 车漆用 MeshPhysicalMaterial + clearcoat，与 ego 同材质层级
+  // ── car/truck：真实尺寸 1:1 建模，标记 realScale 让 scene3d 跳过非均匀缩放 ──
+  // 关键修复：之前 unit-normalized + scale.set(L,H,W) 非均匀缩放会把圆柱形车轮
+  // 压成椭圆（y 半径≠z 半径）。改用真实尺寸建模，scale 保持 (1,1,1)，车轮始终圆。
+  g.userData.realScale = true;
+
+  var isTruck = (type === 'truck');
   var bodyMat = new T.MeshPhysicalMaterial({
     color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
     clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: new T.Color(0.3, 0.3, 0.3)
@@ -442,103 +448,101 @@ export function _buildObstacle(type, color) {
     color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1,
     clearcoat: 1.0, clearcoatRoughness: 0.03
   });
-  var chromeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.8, roughness: 0.18, envMapIntensity: 1.1 });
   var blackMat = new T.MeshStandardMaterial({ color: 0x151515, roughness: 0.8 });
+  var tireMat = new T.MeshStandardMaterial({ color: 0x111111, metalness: 0.05, roughness: 0.82 });
+  var hubMat = new T.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.6, roughness: 0.3 });
 
-  // 车身主体（更多分段，光影更柔和）
-  var body = new T.Mesh(new T.BoxGeometry(1, 0.55, 0.96, 4, 1, 3), bodyMat);
-  body.position.y = 0.31; body.castShadow = true; body.receiveShadow = true; g.add(body);
+  // 真实尺寸常量（与 _buildSedan 一致）
+  var BL, BH, BW;       // 车身长/高/宽
+  var wheelR, wheelW;   // 轮子半径/厚度
+  var wFrontX, wRearX, wZ;  // 轮子 x/z 位置
+  if (isTruck) {
+    BL = 7.0; BH = 1.0; BW = 2.2;
+    wheelR = 0.42; wheelW = 0.32;
+    wFrontX = 2.4; wRearX = -2.4; wZ = 0.95;
+  } else {
+    BL = 4.2; BH = 0.72; BW = 1.86;
+    wheelR = 0.33; wheelW = 0.26;
+    wFrontX = 1.35; wRearX = -1.35; wZ = 0.92;
+  }
 
-  // 引擎盖/后备箱盖
-  var hood = new T.Mesh(new T.BoxGeometry(0.32, 0.07, 0.84, 2, 1, 2), bodyMat);
-  hood.position.set(0.36, 0.57, 0); g.add(hood);
-  var deck = new T.Mesh(new T.BoxGeometry(0.26, 0.05, 0.84, 2, 1, 2), bodyMat);
-  deck.position.set(-0.36, 0.56, 0); g.add(deck);
+  // 车身主体
+  var body = new T.Mesh(new T.BoxGeometry(BL, BH, BW, 4, 1, 3), bodyMat);
+  body.position.y = 0.52; body.castShadow = true; body.receiveShadow = true; g.add(body);
 
-  // 驾驶舱
-  var cabin = new T.Mesh(new T.BoxGeometry(0.52, 0.34, 0.82, 2, 1, 2), bodyMat);
-  cabin.position.set(0.02, 0.74, 0); cabin.castShadow = true; g.add(cabin);
-
-  // 车窗
-  var sideWin = new T.Mesh(new T.BoxGeometry(0.48, 0.25, 0.86, 1, 1, 1), glassMat);
-  sideWin.position.set(0.02, 0.75, 0); g.add(sideWin);
-  var fWin = new T.Mesh(new T.BoxGeometry(0.05, 0.27, 0.74), glassMat);
-  fWin.position.set(0.28, 0.74, 0); fWin.rotation.z = -0.38; g.add(fWin);
-  var rWin = new T.Mesh(new T.BoxGeometry(0.04, 0.23, 0.68), glassMat);
-  rWin.position.set(-0.24, 0.72, 0); rWin.rotation.z = 0.32; g.add(rWin);
+  if (isTruck) {
+    // 卡车驾驶室（更高）
+    var cab = new T.Mesh(new T.BoxGeometry(2.0, 1.4, BW, 2, 1, 2), bodyMat);
+    cab.position.set(BL / 2 - 1.0, 1.2, 0); cab.castShadow = true; g.add(cab);
+    // 货箱
+    var cargo = new T.Mesh(new T.BoxGeometry(BL - 2.5, 1.6, BW - 0.1, 2, 1, 2), blackMat);
+    cargo.position.set(-0.5, 1.3, 0); cargo.castShadow = true; g.add(cargo);
+    // 驾驶室车窗
+    var tWin = new T.Mesh(new T.BoxGeometry(0.06, 0.5, BW - 0.3), glassMat);
+    tWin.position.set(BL / 2 - 0.2, 1.5, 0); g.add(tWin);
+  } else {
+    // 轿车驾驶舱
+    var cabin = new T.Mesh(new T.BoxGeometry(2.0, 0.52, 1.52, 2, 1, 2), bodyMat);
+    cabin.position.set(0.05, 1.15, 0); cabin.castShadow = true; g.add(cabin);
+    // 车窗
+    var ws = new T.Mesh(new T.BoxGeometry(0.06, 0.46, 1.48), glassMat);
+    ws.position.set(1.1, 1.08, 0); ws.rotation.z = -0.45; g.add(ws);
+    var rw = new T.Mesh(new T.BoxGeometry(0.06, 0.36, 1.38), glassMat);
+    rw.position.set(-1.05, 1.02, 0); rw.rotation.z = 0.42; g.add(rw);
+  }
 
   // 轮拱内衬
-  var archGeo = new T.BoxGeometry(0.16, 0.24, 0.12, 1, 1, 1);
-  var archPos = [[0.34, 0.96], [-0.34, 0.96]];
+  var archGeo = new T.BoxGeometry(0.7, 0.38, 0.3, 2, 1, 1);
+  var archPos = [[wFrontX, wZ], [wRearX, wZ]];
   for (var ai2 = 0; ai2 < 2; ai2++) {
-    var aL = new T.Mesh(archGeo, blackMat); aL.position.set(archPos[ai2][0], 0.32, archPos[ai2][1]); g.add(aL);
+    var aL = new T.Mesh(archGeo, blackMat);
+    aL.position.set(archPos[ai2][0], 0.34, archPos[ai2][1]); g.add(aL);
     var aR = aL.clone(); aR.position.z = -archPos[ai2][1]; g.add(aR);
   }
 
-  // 侧裙
-  var skirt = new T.Mesh(new T.BoxGeometry(0.65, 0.04, 0.99, 3, 1, 1), bodyMat);
-  skirt.position.set(0, 0.11, 0); g.add(skirt);
-
-  // 前/后保险杠
-  var fBumper = new T.Mesh(new T.BoxGeometry(0.06, 0.16, 0.98, 1, 1, 3), chromeMat);
-  fBumper.position.set(0.52, 0.26, 0); g.add(fBumper);
-  var rBumper = new T.Mesh(new T.BoxGeometry(0.05, 0.16, 0.98, 1, 1, 3), chromeMat);
-  rBumper.position.set(-0.52, 0.26, 0); g.add(rBumper);
-  // 进气格栅
-  var grille = new T.Mesh(new T.BoxGeometry(0.03, 0.18, 0.55, 1, 1, 2), blackMat);
-  grille.position.set(0.51, 0.35, 0); g.add(grille);
-
-  // 车底接触阴影：unit-normalized，随父级 scale.set(L,H,W) 自动映射为真实尺寸
-  g.add(_buildContactShadow(1.0, 1.0));
-
-  // 车轮：带胎纹 + 5 辐条 + 中心盖
+  // 车轮（真实尺寸，圆柱不会被非均匀缩放压扁）
   var wheels = [];
-  var wheelGeo = new T.CylinderGeometry(0.17, 0.17, 0.09, 18);
-  var treadGeo = new T.TorusGeometry(0.17, 0.01, 4, 18);
-  var tireMat = new T.MeshStandardMaterial({ color: 0x121212, metalness: 0.05, roughness: 0.85 });
-  var hubGeo = new T.CylinderGeometry(0.095, 0.095, 0.1, 12);
-  var hubMat = new T.MeshStandardMaterial({ color: 0x999999, metalness: 0.55, roughness: 0.35 });
-  var spokeMat = new T.MeshStandardMaterial({ color: 0xaaaaaa, metalness: 0.5, roughness: 0.4 });
-  var wheelPos = [[0.34, 0.18, 0.41], [0.34, 0.18, -0.41], [-0.34, 0.18, 0.41], [-0.34, 0.18, -0.41]];
+  var wheelGeo = new T.CylinderGeometry(wheelR, wheelR, wheelW, 20);
+  var hubGeo = new T.CylinderGeometry(wheelR * 0.55, wheelR * 0.55, wheelW + 0.01, 14);
+  var spokeGeo = new T.BoxGeometry(wheelR * 1.6, 0.035, 0.025);
+  var wheelPositions = [
+    [wFrontX, wheelR, wZ], [wFrontX, wheelR, -wZ],
+    [wRearX, wheelR, wZ], [wRearX, wheelR, -wZ]
+  ];
   for (var wi = 0; wi < 4; wi++) {
     var wg = new T.Group();
-    var tire = new T.Mesh(wheelGeo, tireMat); tire.rotation.z = Math.PI / 2; tire.castShadow = true; wg.add(tire);
-    var t1 = new T.Mesh(treadGeo, tireMat); t1.rotation.x = Math.PI / 2; t1.position.x = 0.025; wg.add(t1);
-    var t2 = t1.clone(); t2.position.x = -0.025; wg.add(t2);
-    var hub = new T.Mesh(hubGeo, hubMat); hub.rotation.z = Math.PI / 2; wg.add(hub);
+    var tire = new T.Mesh(wheelGeo, tireMat);
+    tire.rotation.z = Math.PI / 2; tire.castShadow = true; wg.add(tire);
+    var hub = new T.Mesh(hubGeo, hubMat);
+    hub.rotation.z = Math.PI / 2; wg.add(hub);
     for (var si = 0; si < 5; si++) {
-      var spoke = new T.Mesh(new T.BoxGeometry(0.14, 0.025, 0.02), spokeMat);
-      spoke.rotation.z = Math.PI / 2; spoke.rotation.x = (Math.PI * 2 / 5) * si;
+      var spoke = new T.Mesh(spokeGeo, hubMat);
+      spoke.rotation.z = Math.PI / 2;
+      spoke.rotation.x = (Math.PI * 2 / 5) * si;
       wg.add(spoke);
     }
-    var cap = new T.Mesh(new T.CylinderGeometry(0.03, 0.03, 0.11, 8), hubMat);
-    cap.rotation.z = Math.PI / 2; wg.add(cap);
-    wg.position.set(wheelPos[wi][0], wheelPos[wi][1], wheelPos[wi][2]);
+    wg.position.set(wheelPositions[wi][0], wheelPositions[wi][1], wheelPositions[wi][2]);
     wg.userData.isWheel = true;
     wheels.push(wg); g.add(wg);
   }
   g.userData.wheels = wheels;
 
-  // 前灯/尾灯（带边框）
-  var headMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.5, roughness: 0.12 });
-  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.6, roughness: 0.12 });
-  var bezelMat2 = new T.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.5, roughness: 0.3 });
-  var hlGeo = new T.BoxGeometry(0.04, 0.1, 0.18, 1, 1, 2);
-  var tlGeo = new T.BoxGeometry(0.035, 0.1, 0.18, 1, 1, 2);
+  // 车灯（简化 emissive，不加 SpotLight 避免 24 NPC × 2 灯 = 48 动态光源性能灾难）
+  var headMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.2, roughness: 0.2 });
+  var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.2, roughness: 0.2 });
+  var hlGeo = new T.BoxGeometry(0.08, 0.16, 0.42, 1, 1, 2);
+  var tlGeo = new T.BoxGeometry(0.06, 0.16, 0.42, 1, 1, 2);
+  var lightX = BL / 2 - 0.04;
   function makeObsLight(z, isHead) {
-    var bg = new T.Group();
-    var lens = new T.Mesh(isHead ? hlGeo : tlGeo, isHead ? headMat : tailMat);
-    var bezel = new T.Mesh(new T.BoxGeometry(0.05, 0.11, 0.2, 1, 1, 2), bezelMat2);
-    bezel.position.x = isHead ? -0.01 : 0.01;
-    bg.add(bezel); bg.add(lens);
-    bg.position.set(isHead ? 0.51 : -0.51, 0.38, z);
-    g.add(bg);
+    var m = new T.Mesh(isHead ? hlGeo : tlGeo, isHead ? headMat : tailMat);
+    m.position.set(isHead ? lightX : -lightX, 0.58, z);
+    g.add(m);
   }
-  makeObsLight(0.3, true); makeObsLight(-0.3, true);
-  makeObsLight(0.3, false); makeObsLight(-0.3, false);
+  makeObsLight(0.58, true); makeObsLight(-0.58, true);
+  makeObsLight(0.58, false); makeObsLight(-0.58, false);
 
-  // 车底接触阴影（unit-normalized，随 scale.set(L,H,W) 缩放）
-  g.add(_buildContactShadow(1.05, 1.0));
+  // 车底接触阴影（真实尺寸）
+  g.add(_buildContactShadow(BL * 1.1, BW * 1.1));
 
   return g;
 }

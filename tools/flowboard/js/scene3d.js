@@ -103,15 +103,6 @@ let _trajLastKey = "";
 /** Phase 3: ETC gate pool (抬杆门架，从 scene/frame entities 读取) */
 let _etcGatePool = [], _etcGateWorld = [];
 
-/** 动态胎痕 trail：ego 后轮在世界坐标留下的渐隐深色带。
- *  用固定容量 ring buffer + BufferGeometry triangle strip，每帧重写顶点。
- *  vertexColors 从深黑渐变到沥青色，模拟胎痕衰减。 */
-let _tireTrailMesh = null;
-let _trailSamples = [];               // [{lx,lz,rx,rz}, ...]， newest 在前
-const _TRAIL_MAX = 48;                // 最多 48 段采样
-const _TRAIL_GAP = 1.2;               // 采样最小间距（m）
-let _trailLastX = 9999, _trailLastZ = 9999;
-
 /** 远处城市天际线：低多边形建筑剪影环，始终跟随 ego 居中，
  *  配合 fog 产生大气透视效果。 */
 let _skylineGroup = null;
@@ -1126,82 +1117,6 @@ function _updateWater() {
   _waterMat.uniforms.uTime.value = _animT;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 动态胎痕 trail — ego 后轮在世界坐标留下的渐隐深色带
-// 每帧采样后轮世界位置，维护 ring buffer，重写 BufferGeometry
-// ══════════════════════════════════════════════════════════════════════════════
-function _initTireTrail(scene) {
-  var geo = new THREE.BufferGeometry();
-  // (MAX+1) * 2 顶点：每段 2 端点（左轮/右轮），相邻段共享端点
-  var n = (_TRAIL_MAX + 1) * 2;
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-  // triangle strip 索引：每段 2 三角形（6 索引）
-  var idx = [];
-  for (var i = 0; i < _TRAIL_MAX; i++) {
-    idx.push(i * 2, i * 2 + 1, (i + 1) * 2,
-             i * 2 + 1, (i + 1) * 2 + 1, (i + 1) * 2);
-  }
-  geo.setIndex(idx);
-  var mat = new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.6,
-    depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4
-  });
-  _tireTrailMesh = new THREE.Mesh(geo, mat);
-  _tireTrailMesh.renderOrder = -2;
-  _tireTrailMesh.visible = false;
-  scene.add(_tireTrailMesh);
-}
-
-/** 每帧更新胎痕：采样 ego 后轮世界坐标，推入 ring buffer，重写顶点/颜色。
- *  颜色从深黑（新）渐变到沥青底色（旧），模拟胎痕衰减。 */
-function _updateTireTrail(sx, sz, heading, speed) {
-  if (!_tireTrailMesh) return;
-  // 后轮世界坐标：local (-1.35, 0, ±0.92)，heading 旋转后投影
-  // scene3d 中 ego.rotation.y = -heading，故世界旋转 = -heading
-  var cosH = Math.cos(-heading), sinH = Math.sin(-heading);
-  var rx = -1.35, hw = 0.92;
-  var lx = sx + rx * cosH - hw * sinH;
-  var lz = sz + rx * sinH + hw * cosH;
-  var rwx = sx + rx * cosH + hw * sinH;
-  var rwz = sz + rx * sinH - hw * cosH;
-
-  if (speed > 0.5) {
-    var dist = Math.hypot(lx - _trailLastX, lz - _trailLastZ);
-    if (dist > _TRAIL_GAP || _trailSamples.length === 0) {
-      _trailSamples.unshift({ lx: lx, lz: lz, rx: rwx, rz: rwz });
-      _trailLastX = lx; _trailLastZ = lz;
-      if (_trailSamples.length > _TRAIL_MAX) _trailSamples.pop();
-    }
-  }
-
-  var n = _trailSamples.length;
-  _tireTrailMesh.visible = n > 1;
-  if (n < 2) return;
-
-  var posAttr = _tireTrailMesh.geometry.attributes.position.array;
-  var colAttr = _tireTrailMesh.geometry.attributes.color.array;
-  // 沥青底色（与 _makeAsphaltTexture 的 #55585e 接近），胎痕从此色渐变到深黑
-  var roadR = 0.333, roadG = 0.345, roadB = 0.369;
-  var darkR = 0.02, darkG = 0.02, darkB = 0.025;
-
-  for (var i = 0; i <= n; i++) {
-    var s = (i < n) ? _trailSamples[i] : _trailSamples[n - 1];
-    // 顶点 2i = 左轮, 2i+1 = 右轮
-    posAttr[(i * 2) * 3]     = s.lx; posAttr[(i * 2) * 3 + 1]     = 0.02; posAttr[(i * 2) * 3 + 2]     = s.lz;
-    posAttr[(i * 2 + 1) * 3] = s.rx; posAttr[(i * 2 + 1) * 3 + 1] = 0.02; posAttr[(i * 2 + 1) * 3 + 2] = s.rz;
-    // 衰减：i=0 最新（最深），i=MAX 最旧（接近沥青色）
-    var fade = Math.min(1, i / _TRAIL_MAX);
-    var cr = roadR + (darkR - roadR) * (1 - fade);
-    var cg = roadG + (darkG - roadG) * (1 - fade);
-    var cb = roadB + (darkB - roadB) * (1 - fade);
-    colAttr[(i * 2) * 3]     = cr; colAttr[(i * 2) * 3 + 1]     = cg; colAttr[(i * 2) * 3 + 2]     = cb;
-    colAttr[(i * 2 + 1) * 3] = cr; colAttr[(i * 2 + 1) * 3 + 1] = cg; colAttr[(i * 2 + 1) * 3 + 2] = cb;
-  }
-  _tireTrailMesh.geometry.attributes.position.needsUpdate = true;
-  _tireTrailMesh.geometry.attributes.color.needsUpdate = true;
-}
-
 /**
  * _mergeGeometries / _transformGeometry 已迁移至 scene3d/utils/GeometryMerge.js
  * （mergeGeometries / transformGeometry），通过顶部 import 别名引入。
@@ -1696,7 +1611,6 @@ function init3DScene() {
   _buildSkyline(scene3d);
   _buildWater(scene3d);
   _buildRain(scene3d);
-  _initTireTrail(scene3d);
 
   // ── Ego vehicle (glTF with programmatic fallback) ──
   initModelCache().then(function() {
@@ -2096,8 +2010,6 @@ function _renderFrame() {
   if (_envGroup && Math.abs(_envGroup.position.x - chunkX) > 100) _envGroup.position.x = chunkX;
   // 天际线始终跟随 ego 居中（X+Z），保证远景城市在任意位置都环绕地平线
   if (_skylineGroup) _skylineGroup.position.set(sx, 0, sz);
-  // 动态胎痕：采样 ego 后轮世界位置
-  _updateTireTrail(sx, sz, _dr.smoothHeading, (v && v.speed) || 0);
   // B.1: 雨粒子跟随 ego 下落
   _updateRain(sx, sz);
   // B.1: 水面波动动画
@@ -2213,8 +2125,8 @@ function _renderFrame() {
         // 按 oi 错开相位避免所有 NPC 同步起伏，之前 NPC 完全没有这个效果。
         var obsBounceSpd = Math.sqrt((ow.vx || 0) * (ow.vx || 0) + (ow.vz || 0) * (ow.vz || 0));
         om.position.y = 0.05 + Math.sin(_animT * 6.5 + oi * 1.7) * 0.008 * Math.min(1, obsBounceSpd * 0.12);
-        // glTF 模型已是真实尺寸（realScale），跳过 (L,H,W) 缩放；
-        // 程序化 _buildObstacle 是 unit-normalized，需 scale.set(L,H,W) 映射到真实尺寸
+        // realScale 标记：glTF 模型和真实尺寸建模的 _buildObstacle 都跳过 (L,H,W) 缩放；
+        // pedestrian/cone 等仍是 unit 模型，需 scale.set(L,H,W) 映射到真实尺寸
         if (om.userData.realScale) {
           _tmpScale.set(1, 1, 1);
         } else {
