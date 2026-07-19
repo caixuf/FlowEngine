@@ -131,4 +131,69 @@ double Route::to_route_s(int route_idx, double s_local) const {
     return segs_[route_idx].s_start + s_local;
 }
 
+int Route::sample_ahead(FlowRoadNetwork& roads, double route_s_start,
+                        double lookahead, double step_m,
+                        std::vector<RefPathPoint>& out) const {
+    out.clear();
+    if (segs_.empty() || lookahead <= 0.0 || step_m <= 0.0) return 0;
+
+    // 起点 route_s 夹到 [0, total]
+    if (route_s_start < 0.0)      route_s_start = 0.0;
+    if (route_s_start > total_)   route_s_start = total_;
+
+    // 第一遍：采样原始点 (route_s, x, y, h)，跳过 frenet_to_world 失败的点
+    struct Raw { double rs; double x; double y; double h; };
+    std::vector<Raw> raw;
+    raw.reserve(static_cast<size_t>(lookahead / step_m) + 2);
+
+    double rs_end = route_s_start + lookahead;
+    if (rs_end > total_) rs_end = total_;
+
+    for (double rs = route_s_start; rs <= rs_end + 1e-6; rs += step_m) {
+        int rid = 0, ridx = -1;
+        double sl = 0.0;
+        locate(rs, rid, sl, ridx);
+        WorldPos wp;
+        if (!roads.frenet_to_world(rid, 0, sl, 0.0, wp)) continue;
+        raw.push_back({rs, wp.x, wp.y, wp.h});
+        if (rs == rs_end) break;  // 避免浮点循环多采一个
+    }
+    if (raw.size() < 2) {
+        // 至少把所有原始点填进去（即使无法估计 kappa）
+        for (const auto& r : raw) {
+            out.push_back({r.x, r.y, r.h, 0.0, r.rs});
+        }
+        return static_cast<int>(out.size());
+    }
+
+    // 第二遍：中心差分估计曲率 kappa
+    //   相邻两点的转角 dtheta = normalize(h[i+1] - h[i-1])
+    //   弦长 chord = hypot(dx, dy)
+    //   kappa = dtheta / chord
+    // 端点用前向/后向差分
+    auto norm_angle = [](double a) {
+        while (a >  M_PI) a -= 2.0 * M_PI;
+        while (a < -M_PI) a += 2.0 * M_PI;
+        return a;
+    };
+
+    for (size_t i = 0; i < raw.size(); ++i) {
+        double dtheta = 0.0, chord = 0.0;
+        if (i == 0) {
+            dtheta = norm_angle(raw[1].h - raw[0].h);
+            chord  = std::hypot(raw[1].x - raw[0].x, raw[1].y - raw[0].y);
+        } else if (i + 1 == raw.size()) {
+            dtheta = norm_angle(raw[i].h - raw[i - 1].h);
+            chord  = std::hypot(raw[i].x - raw[i - 1].x, raw[i].y - raw[i - 1].y);
+        } else {
+            dtheta = norm_angle(raw[i + 1].h - raw[i - 1].h);
+            chord  = std::hypot(raw[i + 1].x - raw[i - 1].x, raw[i + 1].y - raw[i - 1].y);
+        }
+        double kappa = (chord > 1e-6) ? (dtheta / chord) : 0.0;
+        out.push_back({raw[i].x, raw[i].y, raw[i].h, kappa, raw[i].rs});
+    }
+
+    return static_cast<int>(out.size());
+}
+
 }  // namespace flowsim

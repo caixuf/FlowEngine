@@ -40,6 +40,7 @@
 
 #include <memory>
 #include <atomic>
+#include <vector>
 
 namespace {
 
@@ -187,6 +188,15 @@ struct ControlContext {
     double curve_start_x{0};
     double curve_length_m{0};
     double curve_offset_m{0};
+
+    /* ego route-following 参考路径（从 road/ref_path topic 获取）。
+     * 当 ref_path 非空时，Stanley 横向控制用最近点的 (y, h, kappa) 替代 curve_*
+     * 单段直线参考，让 ego 能跟随多 edge + fork 路网（如匝道分叉）。
+     * 空 ref_path 时回退到 curve_*（兼容旧场景/旧 flowsim）。 */
+    struct RefPt { double x, y, h, kappa, rs; };
+    std::vector<RefPt> ref_path;
+    uint64_t last_ref_path_us{0};
+    pthread_mutex_t ref_path_mtx = PTHREAD_MUTEX_INITIALIZER;
 
     /* NOA Phase 3.4: 弯道曲率前馈权重提升参数。
      * 当道路曲率半径 R ≤ curve_ff_boost_radius_m 时，前馈权重 × curve_ff_boost_factor，
@@ -442,6 +452,87 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     }
 }
 
+/**
+ * on_ref_path — ego route-following 参考路径订阅回调。
+ *
+ * flowsim 每帧采样 ego 前方 100m 内 N 个参考点 [(x,y,h,kappa,rs)]，control_node
+ * 缓存到本地，Stanley 横向控制用最近点替代 curve_* 算 cte/heading/kappa。
+ *
+ * 解析在订阅回调里完成（轻量 cJSON 操作），缓存到 g.ref_path 加 mutex 保护，
+ * 控制循环直接读缓存无需重新解析。
+ */
+static void on_ref_path(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+
+    cJSON* pts = cJSON_GetObjectItemCaseSensitive(root, "points");
+    if (cJSON_IsArray(pts)) {
+        std::vector<ControlContext::RefPt> new_pts;
+        new_pts.reserve(cJSON_GetArraySize(pts));
+        cJSON* pt = nullptr;
+        cJSON_ArrayForEach(pt, pts) {
+            ControlContext::RefPt r{};
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(pt, "x");     if (cJSON_IsNumber(j)) r.x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(pt, "y");     if (cJSON_IsNumber(j)) r.y = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(pt, "h");     if (cJSON_IsNumber(j)) r.h = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(pt, "kappa");  if (cJSON_IsNumber(j)) r.kappa = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(pt, "rs");     if (cJSON_IsNumber(j)) r.rs = j->valuedouble;
+            new_pts.push_back(r);
+        }
+        pthread_mutex_lock(&g.ref_path_mtx);
+        g.ref_path.swap(new_pts);
+        g.last_ref_path_us = clock_now_us();
+        pthread_mutex_unlock(&g.ref_path_mtx);
+    }
+    cJSON_Delete(root);
+}
+
+/**
+ * query_ref_at — 查找 ref_path 中离 (ego_x, ego_y) 最近的参考点。
+ *
+ * 用于 Stanley 横向控制替代 curve_* 单段直线参考：
+ *   - 返回该点的 (y, h, kappa) 让 ego 跟随多 edge + fork 路网（如匝道分叉）
+ *   - ref_path 为空或陈旧 (>500ms 未更新) → 返回 false，调用方回退 curve_*
+ *   - 最近点距离 > 5m（ego 已离开参考路径覆盖范围）→ 返回 false 避免误用
+ *
+ * 注意：ref_path 是 ego 前方 100m 的离散采样（5m 步长），最近点本身略偏 ego
+ * 前方——这对横向控制是合理的（轻微前瞻）。
+ */
+static bool query_ref_at(double ego_x, double ego_y,
+                         double& out_y, double& out_h, double& out_kappa) {
+    if (g.ref_path.empty()) return false;
+    uint64_t now_us = clock_now_us();
+    if (g.last_ref_path_us == 0 ||
+        (now_us > g.last_ref_path_us &&
+         now_us - g.last_ref_path_us > 500000ULL)) return false;
+
+    pthread_mutex_lock(&g.ref_path_mtx);
+    if (g.ref_path.empty()) {
+        pthread_mutex_unlock(&g.ref_path_mtx);
+        return false;
+    }
+    double best_d2 = 1e18;
+    const ControlContext::RefPt* best = nullptr;
+    for (const auto& p : g.ref_path) {
+        double dx = p.x - ego_x;
+        double dy = p.y - ego_y;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) { best_d2 = d2; best = &p; }
+    }
+    if (!best || best_d2 > 25.0 /* >5m, ego 偏离参考 */) {
+        pthread_mutex_unlock(&g.ref_path_mtx);
+        return false;
+    }
+    out_y     = best->y;
+    out_h     = best->h;
+    out_kappa = best->kappa;
+    pthread_mutex_unlock(&g.ref_path_mtx);
+    return true;
+}
+
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
     for (int i = 0; i < MAX_OBS; i++) {
         if (!g.obs_valid[i]) continue;
@@ -513,10 +604,14 @@ protected:
                  * 道路中心线算一个 Stanley 风格转向指令，再做轻刹车保持车流连续。
                  * 该指令沿用主控制器相同的 lat_kp / lat_kd_heading / 一阶低通，
                  * 保证 fallback 与主控制输出在弯道中行为一致。 */
-                double fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
-                                                  g.curve_length_m, g.curve_offset_m);
-                double fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
-                                                              g.curve_length_m, g.curve_offset_m);
+                double fb_road_c = 0.0, fb_road_heading = 0.0, fb_kappa_unused = 0.0;
+                if (!query_ref_at(g.ego_x, g.ego_y, fb_road_c, fb_road_heading, fb_kappa_unused)) {
+                    /* ref_path 不可用 → 回退到 curve_* 单段直线参考 */
+                    fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
+                                              g.curve_length_m, g.curve_offset_m);
+                    fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
+                                                          g.curve_length_m, g.curve_offset_m);
+                }
                 double fb_lat_error = fb_road_c - g.ego_y;
                 double fb_cte_term  = atan2(g.lat_kp * fb_lat_error, fmax(g.current_speed, 3.0));
                 double fb_heading_term = g.lat_kd_heading * (g.ego_heading - fb_road_heading);
@@ -563,8 +658,25 @@ protected:
             if (g.lc_cooldown > 0.0) g.lc_cooldown -= CONTROL_DT_S;
 
             /* 道路中心线在当前 ego_x 处的横向偏移（弯道禁用时恒为 0，下面所有
-             * "相对道路中心"的判断与之前的绝对 y 判断完全等价）。 */
-            double road_c = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+             * "相对道路中心"的判断与之前的绝对 y 判断完全等价）。
+             *
+             * A4 ego route-following: 优先用 ref_path（flowsim 每帧采样 ego 前方
+             * 100m 路网中心线）替代 curve_* 单段直线参考。ref_path 不可用时回退
+             * curve_*，保证旧场景/旧 flowsim 兼容。
+             * road_heading / ref_kappa 缓存给下方 Stanley 块复用，避免重复查询。 */
+            double road_c = 0.0;
+            double ref_road_heading = 0.0;
+            double ref_kappa = 0.0;
+            bool   ref_path_ok = query_ref_at(g.ego_x, g.ego_y,
+                                              road_c, ref_road_heading, ref_kappa);
+            if (!ref_path_ok) {
+                road_c = road_center_y(g.ego_x, g.curve_start_x,
+                                       g.curve_length_m, g.curve_offset_m);
+                ref_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
+                                                       g.curve_length_m, g.curve_offset_m);
+                ref_kappa = road_center_curvature(g.ego_x, g.curve_start_x,
+                                                  g.curve_length_m, g.curve_offset_m);
+            }
             double road_center_limit = g.lane_width - 1.0;
             double half_lane = g.lane_width * 0.5;
 
@@ -898,10 +1010,10 @@ protected:
                     }
                     filter_new = 0.5;                          /* 更激进滤波 */
                 }
-                double road_heading = road_center_heading(g.ego_x, g.curve_start_x,
-                                                            g.curve_length_m, g.curve_offset_m);
+                /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
+                 * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */
                 double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - road_heading);
+                double heading_term = lc_lat_kd * (g.ego_heading - ref_road_heading);
                 /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
                  * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
@@ -911,8 +1023,7 @@ protected:
                  * 急弯（R ≤ curve_ff_boost_radius_m）时权重 ×curve_ff_boost_factor，
                  * 匝道 R=45m 回头弯尤其需要——纯反馈在急弯入口总是滞后。
                  * 直道 / 弯道端点外 κ=0，前馈为 0，与原行为完全一致。 */
-                double kappa = road_center_curvature(g.ego_x, g.curve_start_x,
-                                                     g.curve_length_m, g.curve_offset_m);
+                double kappa = ref_kappa;
                 double ff_weight = 1.0;
                 if (fabs(kappa) > 1e-9) {
                     double R = 1.0 / fabs(kappa);  /* 曲率半径 (m) */
@@ -1027,7 +1138,7 @@ void* control_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", "scene/frame", nullptr };
+static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", "road/ref_path", "scene/frame", nullptr };
 static const char* s_outputs[] = { "control/raw_cmd", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -1209,6 +1320,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_trajectory, nullptr);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
+    transport_subscribe(transport, "road/ref_path", on_ref_path, nullptr);
     transport_subscribe(transport, "scene/frame", on_scene_frame, nullptr);
     transport_advertise(transport, "control/raw_cmd", CONTROLRAW_TYPE_ID);
 
@@ -1219,6 +1331,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/ref_path", 0x7E5A3C11u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "scene/frame",         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);

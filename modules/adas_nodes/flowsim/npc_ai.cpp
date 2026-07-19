@@ -87,8 +87,10 @@ static double idm_desired_speed(double v, double gap, double target_v,
     return std::max(0.0, v - brake * dt);
 }
 
-/* ── 回收：跑到 route 末端的 NPC 放回 ego 附近，形成持续车流 ── */
-static void recycle_npc(Entity& npc, const Route& route, double ego_route_s) {
+/* ── 回收：跑到 route 末端的 NPC 放回 ego 附近，形成持续车流 ──
+ * B4: 检查目标点附近是否已有同方向 NPC，被占则再后退一段，避免多车叠在同一点。 */
+static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
+                        const EntityPool& pool) {
     const double total = route.total_length();
     // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
     const double back = 50.0 + (double)(npc.id % 5) * 22.0;
@@ -98,6 +100,20 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s) {
                                      : (ego_route_s + back);  // 对向：回 ego 前方(朝 ego 开来)
     } else {
         target = (npc.route_dir > 0) ? 0.0 : total;           // ego 未定位：回起/末端
+    }
+    // B4: 防叠车 — 目标点 8m 内若已有同方向 NPC，再后退 12m，最多重试 5 次。
+    // 解决 ego_route_s=0 时所有 NPC 都被回收到 route 起点（target=0）的叠车问题。
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        bool occupied = false;
+        for (int i = 0; i < pool.size(); ++i) {
+            const Entity& o = pool[i];
+            if (!o.active || &o == &npc) continue;
+            if (!o.is_npc_vehicle()) continue;
+            if (o.route_dir != npc.route_dir) continue;
+            if (std::fabs(o.route_s - target) < 8.0) { occupied = true; break; }
+        }
+        if (!occupied) break;
+        target += (npc.route_dir > 0) ? -12.0 : 12.0;
     }
     if (target < 0.0)   target = 0.0;
     if (target > total) target = total;
@@ -113,6 +129,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s) {
     npc.lead_id = INVALID_ENTITY;
     npc.follow_gap = 1e9;
     npc.crash_cooldown = 0.0;
+    npc.route_fail_count = 0;
 }
 
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
@@ -182,10 +199,14 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     // 5. 位置更新
     if (route && route->ok() && npc.route_dir != 0 && roads) {
         // ── 中央 Frenet 车道跟随：沿 route 推进 s，反算世界坐标 ──
+        // B1: 保存推进前的 route_s，frenet_to_world 失败时回滚。
+        //     原实现失败时 route_s 已推进但 npc.x/y 未更新，下一帧 step_bicycle
+        //     会用旧 heading 做世界系直线积分把 NPC 沿切线推离路网 → 飞出。
+        double old_route_s = npc.route_s;
         npc.route_s += (double)npc.route_dir * npc.speed * dt;
         if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
             (npc.route_dir < 0 && npc.route_s < 0.0)) {
-            recycle_npc(npc, *route, ego_route_s);
+            recycle_npc(npc, *route, ego_route_s, pool);
         }
         int rid = 0, ridx = -1;
         double s_local = 0.0;
@@ -202,15 +223,37 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.vy = npc.speed * std::sin(h);
             npc.road_id = rid;
             npc.s = s_local;
+            npc.route_fail_count = 0;  // 成功 → 清零
+        } else {
+            // B1: frenet_to_world 失败。回滚 route_s，速度归零防切线飞出；
+            //     连续失败 ≥5 帧（250ms）强制 recycle。
+            npc.route_s = old_route_s;
+            npc.speed = 0.0;
+            npc.vx = 0.0; npc.vy = 0.0;
+            npc.route_fail_count++;
+            if (npc.route_fail_count >= 5) {
+                recycle_npc(npc, *route, ego_route_s, pool);
+            }
         }
     } else if (roads && roads->loaded()) {
-        // ── 兜底（route/esmini 缺失或该 NPC 不在主 route 上）：旧世界系直线 ──
+        // ── 兜底（route/esmini 缺失或该 NPC 不在主 route 上）──
         FrenetPos f;
         if (roads->world_to_frenet(npc.x, npc.y, f)) {
             npc.road_id = f.road_id;
             npc.lane_id = f.lane_id;
             npc.s = f.s;
             npc.offset = f.offset;
+            // B2: world→frenet→world 回投闭环。原实现只用 world_to_frenet
+            //     更新 Frenet 字段，npc.x/y 仍是 step_bicycle 世界系直线积分结果
+            //     —— 弯道/匝道上车会沿切线飞出。frenet_to_world 把 NPC 投回路面。
+            WorldPos wp;
+            if (roads->frenet_to_world(f.road_id, 0, f.s, f.offset, wp)) {
+                npc.x = wp.x;
+                npc.y = wp.y;
+                npc.heading = wp.h;
+                npc.vx = npc.speed * std::cos(wp.h);
+                npc.vy = npc.speed * std::sin(wp.h);
+            }
         }
     }
 }
@@ -219,6 +262,13 @@ void npc_init_route(Entity& npc, const Route& route, int dir) {
     int idx = route.index_of(npc.road_id);
     if (idx < 0) {
         npc.route_dir = 0;   // 不在主 route → 走旧逻辑兜底
+        return;
+    }
+    // B5: 负 s（actor 放在 road 起点之前，或对向车 road 链上的 s 反向）
+    // 会让 to_route_s 算出负 route_s，多个负 s NPC 被 locate() clamp 到 0
+    // 后全部叠在 route 起点。直接置 route_dir=0 让其走世界系兜底分支。
+    if (npc.s < 0.0) {
+        npc.route_dir = 0;
         return;
     }
     npc.route_dir = (dir < 0) ? -1 : 1;

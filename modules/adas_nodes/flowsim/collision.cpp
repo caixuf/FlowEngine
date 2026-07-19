@@ -103,6 +103,24 @@ void apply_collision_response(EntityPool& pool, const std::vector<CollisionPair>
         // 刹车踩下，防止下一 tick 又加速
         a.brake = 1.0; a.throttle = 0.0;
         b.brake = 1.0; b.throttle = 0.0;
+
+        // B3: 物理分离 — 沿两车中心连线方向把两车推开 overlap/2，避免
+        // 冷却到期后两车仍重叠立即重新碰撞 → 再次冻结的永久路障。
+        double dx = b.x - a.x;
+        double dy = b.y - a.y;
+        double dist = std::hypot(dx, dy);
+        if (dist < 1e-6) { dx = 1.0; dy = 0.0; dist = 1.0; }  // 中心重合兜底
+        // 估算分离距离：用 AABB 最小重叠（保守估计）
+        double aabb_x = (a.length + b.length) * 0.5;
+        double aabb_y = (a.width  + b.width ) * 0.5;
+        double overlap = std::max(aabb_x - std::fabs(dx),
+                                  aabb_y - std::fabs(dy));
+        if (overlap < 0.5) overlap = 0.5;          // 至少推开 0.5m
+        double push = overlap * 0.5 + 0.1;         // 各推一半 + 0.1m buffer
+        double ux = dx / dist, uy = dy / dist;
+        a.x -= ux * push; a.y -= uy * push;
+        b.x += ux * push; b.y += uy * push;
+
         // 碰撞冷却 2.0s：之前直接把双方速度永久置 0，任何一次接触
         // 都会让两辆车冻结在原地变路障，长场景越积越多把整条路堵死。
         // 现在用 crash_cooldown 计时器，>0 期间 step_npc_vehicle 跳过 AI

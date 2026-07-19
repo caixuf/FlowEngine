@@ -494,6 +494,55 @@ static void publish_road_geometry(void) {
     cJSON_Delete(root);
 }
 
+/**
+ * publish_ref_path — ego route-following 参考路径发布。
+ *
+ * 背景：control_node Stanley 横向控制原本依赖全局单段 curve_*（curve_start_x/
+ * curve_length_m/curve_offset_m）算 cte/heading/kappa，road_network 多 edge 场景
+ * 下 curve_* 全零 → 参考线退化为 y=0 直线 → ego 过 fork 后沿直线开进空地。
+ * 本函数从 esmini 路网采样 ego 前方 N 个参考点（含曲率前馈），发布 JSON 给
+ * control_node 替代 curve_* 直线参考。
+ *
+ * 每 cycle 发布（20Hz），与 control_node 控制周期对齐。
+ * 无 route / esmini 加载失败时发布空数组（control_node 检测到空数组回退 curve_*）。
+ */
+static void publish_ref_path(void) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "t_us", (double)clock_now_us());
+
+    cJSON* pts = cJSON_CreateArray();
+    if (g.roads_loaded && g.route.ok()) {
+        /* ego 在 route 上的累计 s：与主循环同样的算法 */
+        const flowsim::Entity& ego = g.pool[0];
+        flowsim::FrenetPos ef;
+        double ego_route_s = 0.0;
+        if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
+            int ei = g.route.index_of(ef.road_id);
+            if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
+        }
+        /* 采样 ego 前方 100m、间距 5m（21 个点）；lookahead 远一些保证
+         * 控制器在高速段（27m/s）每步 1.35m 也有充足前视距离。 */
+        std::vector<flowsim::RefPathPoint> samples;
+        int n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
+        for (int i = 0; i < n; ++i) {
+            const auto& p = samples[i];
+            cJSON* pt = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pt, "x", p.x);
+            cJSON_AddNumberToObject(pt, "y", p.y);
+            cJSON_AddNumberToObject(pt, "h", p.h);
+            cJSON_AddNumberToObject(pt, "kappa", p.kappa);
+            cJSON_AddNumberToObject(pt, "rs", p.route_s);
+            cJSON_AddItemToArray(pts, pt);
+        }
+    }
+    cJSON_AddItemToObject(root, "points", pts);
+    char* s = cJSON_PrintUnformatted(root);
+    transport_publish(g.transport, "road/ref_path",
+                      (const uint8_t*)s, (uint32_t)strlen(s) + 1);
+    free(s);
+    cJSON_Delete(root);
+}
+
 static const char* tl_phase_str(flowsim::TLPhase ph) {
     switch (ph) {
         case flowsim::TLPhase::Green:  return "green";
@@ -734,6 +783,9 @@ protected:
             if (g.cycle % ROAD_GEOMETRY_REPUBLISH_CYCLES == 0) {
                 publish_road_geometry();
             }
+            /* road/ref_path：ego 前方参考路径，每 cycle 发布给 control_node Stanley
+             * 横向控制消费；无 route 时发布空数组（control_node 回退到 curve_*）。 */
+            publish_ref_path();
             publish_traffic_lights();
             publish_vehicle_state(sim_time_us);
             /* scene/frame：完整场景帧 20Hz 给 3D 前端（Phase 2.2） */
@@ -773,6 +825,7 @@ void* flowsim_thread(void*) {
 static const char* s_inputs[]  = { "control/cmd", nullptr };
 static const char* s_outputs[] = {
     "vehicle/state", "road/geometry", "road/traffic_lights",
+    "road/ref_path",
     "sim/tick", "sim/collision", "scene/frame", nullptr
 };
 

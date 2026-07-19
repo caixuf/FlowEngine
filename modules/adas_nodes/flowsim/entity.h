@@ -89,6 +89,7 @@ struct Entity {
     /* ── 中央 route 跟随（NPC 车道行驶，见 npc_ai.cpp / route.h）── */
     double route_s{0};             /**< 沿中央 route 的累计纵向距离 */
     int    route_dir{0};           /**< route 行驶方向：+1 顺行，-1 对向，0=未上route(走旧逻辑) */
+    int    route_fail_count{0};    /**< frenet_to_world 连续失败计数（≥5 强制 recycle 防飞出） */
 
     /* ── 行人专用 ── */
     double ped_wait_timer{0};      /**< 行人等待计时器 (s) */

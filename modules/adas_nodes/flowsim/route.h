@@ -31,6 +31,18 @@ struct RouteSeg {
     double s_start{0.0};   /**< 该段在 route 坐标系里的累计 s 起点 */
 };
 
+/** 参考路径采样点：供 control_node Stanley 横向控制消费。
+ *  - (x, y, h)   世界坐标 + 切线航向 rad
+ *  - kappa      曲率 1/m（数值微分估计，0=直线，正=左弯，负=右弯）
+ *  - route_s    所属 route 累计 s（用于触发分支切换等） */
+struct RefPathPoint {
+    double x{0.0};
+    double y{0.0};
+    double h{0.0};
+    double kappa{0.0};
+    double route_s{0.0};
+};
+
 /**
  * 中央有序 route。单线程构建/查询（与 FlowRoadNetwork 一致）。
  */
@@ -62,6 +74,23 @@ public:
 
     /** (段号, 段内 s) → route 累计 s。参数非法返回 0。 */
     double to_route_s(int route_idx, double s_local) const;
+
+    /**
+     * 在 route 上从 route_s_start 起向前采样 N 个参考点，跨段拼接。
+     * 用于 ego route-following：control_node Stanley 横向控制消费。
+     * 每个点用 frenet_to_world 反算世界坐标 + 航向；曲率 kappa 由
+     * 相邻点弦角 / 弦长数值微分估计（不需要解析几何，对 line/arc 通用）。
+     *
+     * @param roads        路网（frenet→world 用）
+     * @param route_s_start 起点 route 累计 s（夹到 [0, total]）
+     * @param lookahead    前瞻总长 m（采样到 route_s_start + lookahead 或 route 终点）
+     * @param step_m       采样间距 m（默认 5m）
+     * @param out          输出采样点（清空后追加），点数 = ceil(lookahead/step_m)+1
+     * @return 实际采样点数（路网失败/空 route 时返回 0）
+     */
+    int sample_ahead(FlowRoadNetwork& roads, double route_s_start,
+                     double lookahead, double step_m,
+                     std::vector<RefPathPoint>& out) const;
 
 private:
     std::vector<RouteSeg>                segs_;
