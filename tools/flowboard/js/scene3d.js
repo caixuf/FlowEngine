@@ -222,46 +222,35 @@ function _applyRoadCurve(roadData) {
 let _asphaltTex = null;
 let _shoulderTex = null;
 
-/** 程序化沥青纹理 v3：深色基底 + 骨料颗粒，与草地/路肩形成强对比。
- *  v2 用 #55585e 中灰底，亮度 ~88，与草地 #5a8a4a 亮度 ~90 几乎相同，
- *  视觉上"路和地一样亮"，被用户吐槽看不出区别。v3 改为 #1f2126 深沥青
- *  （亮度 ~33），亮度差 3 倍，从远景到近景都能清晰分辨路面 vs 草地。 */
+/** 程序化沥青纹理 v4：干净深灰沥青，细颗粒质感，统一道路材质。
+ *  v3 深色基底(#1f2126)解决了与草地不分的问题，但 5500 个深色颗粒 + 1800 个
+ *  浅色颗粒 + 35 个径向渐变大斑块叠在一起太噪太花，远看像脏地毯不像路面。
+ *  v4 改为：均匀中深灰底 + 细密颗粒（少量细点，尺寸1px），不堆大斑块，
+ *  整体哑光一致，车道线和路标才是视觉焦点。 */
 function _makeAsphaltTexture() {
   if (_asphaltTex) return _asphaltTex;
   var canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 512;
+  canvas.width = 256; canvas.height = 256;
   var ctx = canvas.getContext('2d');
-  // 基底：深沥青（参考真实新铺沥青 #1a1a1a，略带蓝调避免与路肩棕色混淆）
-  ctx.fillStyle = '#1f2126'; ctx.fillRect(0, 0, 512, 512);
-  // 中等补丁：轮胎磨损/油渍斑（略浅于基底，让路面有层次但不发灰）
-  for (var p = 0; p < 35; p++) {
-    var px = Math.random() * 512, py = Math.random() * 512;
-    var pr = 30 + Math.random() * 80;
-    var grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
-    var base = 38 + Math.floor(Math.random() * 20);
-    var isDark = Math.random() > 0.5;
-    var a0 = isDark ? 0.28 : 0.18;
-    grd.addColorStop(0, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 6) + ',' + a0 + ')');
-    grd.addColorStop(1, 'rgba(' + base + ',' + (base + 2) + ',' + (base + 6) + ',0)');
-    ctx.fillStyle = grd;
-    ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+  // 基底：干净中深灰沥青（比 v3 稍亮一点点，避免纯黑死沉）
+  ctx.fillStyle = '#2d2f33'; ctx.fillRect(0, 0, 256, 256);
+  // 细密骨料颗粒（1px 点，稀疏分布，不花）
+  for (var i = 0; i < 2000; i++) {
+    var x = Math.random() * 256, y = Math.random() * 256;
+    var shade = Math.floor(Math.random() * 18) - 9;  // ±9 灰度变化
+    var c = 45 + shade;
+    ctx.fillStyle = 'rgba(' + c + ',' + (c+1) + ',' + (c+3) + ',0.35)';
+    ctx.fillRect(x, y, 1, 1);
   }
-  // 深色骨料颗粒（沥青质感，与基底同色系加深）
-  for (var i = 0; i < 5500; i++) {
-    var x = Math.random() * 512, y = Math.random() * 512;
-    var shade = Math.floor(Math.random() * 22);
-    ctx.fillStyle = 'rgba(' + (25 + shade) + ',' + (27 + shade) + ',' + (32 + shade) + ',0.45)';
-    ctx.fillRect(x, y, 2, 2);
-  }
-  // 浅色颗粒/反光碎石
-  for (var j = 0; j < 1800; j++) {
-    var x2 = Math.random() * 512, y2 = Math.random() * 512;
-    var sh2 = Math.floor(Math.random() * 35);
-    ctx.fillStyle = 'rgba(' + (110 + sh2) + ',' + (114 + sh2) + ',' + (120 + sh2) + ',0.22)';
-    ctx.fillRect(x2, y2, 2, 2);
+  // 极少量浅色反光碎石（稀疏，点缀即可）
+  for (var j = 0; j < 300; j++) {
+    var x2 = Math.random() * 256, y2 = Math.random() * 256;
+    ctx.fillStyle = 'rgba(90,92,96,0.20)';
+    ctx.fillRect(x2, y2, 1, 1);
   }
   _asphaltTex = new THREE.CanvasTexture(canvas);
   _asphaltTex.wrapS = THREE.RepeatWrapping; _asphaltTex.wrapT = THREE.RepeatWrapping;
+  _asphaltTex.anisotropy = 8;
   return _asphaltTex;
 }
 
@@ -318,8 +307,10 @@ function _ensureCrossRoadAt(tlIdx, x, z) {
   }
   var geo = new THREE.PlaneGeometry(24, 8, 1, 1);  // 24m 横向 × 8m 纵向
   geo.rotateX(-Math.PI / 2);  // 水平铺路
+  var crossAsphalt = _makeAsphaltTexture();
   var mat = new THREE.MeshStandardMaterial({
-    color: 0x2a2a2a, roughness: 0.92, metalness: 0.0
+    map: crossAsphalt, color: 0xffffff, roughness: 0.85, metalness: 0.0,
+    bumpMap: crossAsphalt, bumpScale: 0.03
   });
   var m = new THREE.Mesh(geo, mat);
   m.position.set(x, _getRoadElevationAt(x, z) + 0.02, z);
@@ -415,11 +406,11 @@ function _buildRoadNetwork(edges) {
     _roadCurveLens.push(length);
     var lanes = edge.lanes || 2;
     var laneWidth = edge.lane_width || 3.5;
-    /* 道路关于参考线对称：总宽度 = 车道数 × 单车道宽。
-     * 参考线两侧均有车道（ OpenDRIVE lane 0 居中作为分隔基准）。
-     * 旧实现把全部车道放在参考线一侧，导致 ego/车辆经常"悬空"在道路外。 */
-    var roadWidth = lanes * laneWidth;
-    var halfWidth = roadWidth / 2;
+    /* 道路宽度：
+     *  - 多车道（lanes ≥ 2）：双向对称，每侧 N 条车道 + 路缘余量
+     *  - 单车道（lanes = 1，匝道/加速车道）：单向路，3.8m 半宽（≈1 车道 + 双侧路肩）
+     *    不画中心黄线，避免单车道匝道中间出现"双黄线"的滑稽画面。 */
+    var halfWidth = (lanes >= 2) ? (lanes * laneWidth + 0.3) : (laneWidth + 0.3);
 
     // 记录首尾坐标供 junction 检测
     edgeEnds.push({
@@ -486,23 +477,22 @@ function _buildRoadNetwork(edges) {
     for (var sii = 0; sii < sIdx.length; sii++) allShldIdx.push(sIdx[sii] + shldVertOffset);
     shldVertOffset += sPos.length / 3;
 
-    // ── 车道线：中心双黄线 + 多车道时分隔虚线 + 道路边缘白实线 ──
-    // 中心双黄线（实线）：只对双向道路（lanes ≥ 2）绘制，单车道为单向路无需中心线
+    // ── 车道线：中心双黄线 + 车道分隔虚线 + 道路边缘白实线 ──
+    // 中心双黄线（实线）：双向道路（lanes ≥ 2）在参考线两侧画双黄线；
+    // 单车道匝道不画中心黄线（单向路无对向分隔）。
     if (lanes >= 2) {
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -0.12, 0.15, 0xffd633, 0.046);
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  0.12, 0.15, 0xffd633, 0.046);
     }
-    // 多车道分隔虚线：每方向 ≥2 车道时才需要内侧分隔线。
-    // lanes 是双向总车道数，floor(lanes/2) 是单向车道数，避免 3 车道不对称路误画。
-    var perSide = Math.floor(lanes / 2);
-    for (var li = 1; li < perSide; li++) {
+    // 车道分隔虚线：每侧 lanes-1 条（lanes 条车道有 lanes-1 个间隔）。
+    for (var li = 1; li < lanes; li++) {
       var off = li * laneWidth;
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  off, 0.15, 0xffffff, 0.046, true);
       laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -off, 0.15, 0xffffff, 0.046, true);
     }
     // 道路边缘白实线
-    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  halfWidth - 0.06, 0.15, 0xffffff, 0.046);
-    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -halfWidth + 0.06, 0.15, 0xffffff, 0.046);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg,  halfWidth - 0.15, 0.15, 0xffffff, 0.046);
+    laneMarkVertOffset = _addLaneMarkRibbon(laneMarkPos, laneMarkIdx, laneMarkCol, laneMarkVertOffset, curve, nSeg, -halfWidth + 0.15, 0.15, 0xffffff, 0.046);
 
     // ── 路面导向箭头（每条 edge 中段画一个直行箭头）──
     _addRoadArrow(arrowGeos, curve, length * 0.5, laneWidth, lanes);
@@ -511,25 +501,8 @@ function _buildRoadNetwork(edges) {
       _addStopLine(stopLineGeos, curve, 0, laneWidth, lanes);
     }
 
-    // ── B.1: 路面水坑（雨后积水，低 roughness 模拟反射）──
-    // 每条约 0-2 个水坑，沿曲线随机分布，合并后仅 1 个 draw call
-    var nPuddle = Math.floor(Math.random() * 2.2);
-    for (var pi2 = 0; pi2 < nPuddle; pi2++) {
-      var ps = (0.15 + Math.random() * 0.7) * length;
-      var pt2 = ps / length;
-      var ppos2 = curve.getPointAt(pt2);
-      var ptan2 = curve.getTangentAt(pt2);
-      var pnx2 = -ptan2.z, pnz2 = ptan2.x;
-      var plat = (Math.random() - 0.5) * roadWidth * 0.75;
-      var pw2 = 1.0 + Math.random() * 1.2;
-      var pl2 = 1.4 + Math.random() * 1.6;
-      var puddleGeo = new THREE.PlaneGeometry(pw2, pl2);
-      var pm = new THREE.Matrix4();
-      pm.makeRotationX(-Math.PI / 2);
-      pm.multiply(new THREE.Matrix4().makeRotationZ(-Math.atan2(ptan2.z, ptan2.x)));
-      pm.setPosition(ppos2.x + pnx2 * plat, ppos2.y + 0.012, ppos2.z + pnz2 * plat);
-      puddleGeos.push(_transformGeometry(puddleGeo, pm));
-    }
+    // ── 路面水坑已移除：随机反光斑在干净路面上看着像破洞/贴图错误，
+    //    统一哑光沥青更专业。需要雨天效果时再通过后处理或全局 wetness 参数实现。 ──
 
     // ── 道路护栏（两侧）──
     // 波形护栏：圆形立柱 + 上下双横梁 + 反光片，比单一方块真实。
@@ -670,9 +643,8 @@ function _buildRoadNetwork(edges) {
     asphaltTex.anisotropy = 8;
     var roadMat = new THREE.MeshStandardMaterial({
       map: asphaltTex,
-      color: 0xffffff, roughness: 0.62, metalness: 0.0,
-      bumpMap: asphaltTex, bumpScale: 0.05,
-      envMapIntensity: 0.6  // 略反光，与哑光草地（roughness 0.95）形成质感差异
+      color: 0xffffff, roughness: 0.88, metalness: 0.0,
+      bumpMap: asphaltTex, bumpScale: 0.02
     });
     var roadMesh = new THREE.Mesh(roadGeo, roadMat);
     roadMesh.receiveShadow = true;
@@ -694,7 +666,7 @@ function _buildRoadNetwork(edges) {
     shldTex.wrapS = THREE.RepeatWrapping; shldTex.wrapT = THREE.RepeatWrapping;
     shldTex.anisotropy = 4;
     var shldMesh = new THREE.Mesh(shldGeo,
-      new THREE.MeshStandardMaterial({ map: shldTex, color: 0xcccccc, roughness: 0.95, metalness: 0.0, bumpMap: shldTex, bumpScale: 0.01 }));
+      new THREE.MeshStandardMaterial({ map: shldTex, color: 0xffffff, roughness: 0.95, metalness: 0.0 }));
     shldMesh.receiveShadow = true;
     group.add(shldMesh);
   }
@@ -766,16 +738,7 @@ function _buildRoadNetwork(edges) {
     group.add(stopLineMesh);
   }
 
-  // B.1: 合并路面水坑为 1 个 reflective mesh
-  if (puddleGeos.length) {
-    var puddleMat = new THREE.MeshStandardMaterial({
-      color: 0x222228, roughness: 0.12, metalness: 0.55,
-      transparent: true, opacity: 0.85
-    });
-    var puddleMesh = new THREE.Mesh(_mergeGeometries(puddleGeos), puddleMat);
-    puddleMesh.receiveShadow = true;
-    group.add(puddleMesh);
-  }
+  // 水坑已移除（上方注释说明）
 
   // ── NOA Phase 6: 分叉/汇入点检测与标记 ──────────────────────
   // 一个端点被 ≥3 条 edge 共享时判定为 junction（分叉/汇入点）。
@@ -868,7 +831,7 @@ function _buildRoadNetwork(edges) {
       // 法线（切线在 XZ 平面内旋转 90°）
       var tnx = -tz, tnz = tx;
       var inLW = incomingEdge.laneWidth || 3.5;
-      var inHalfW = (incomingEdge.lanes * inLW) / 2;
+      var inHalfW = (incomingEdge.lanes >= 2) ? (incomingEdge.lanes * inLW + 0.3) : (inLW + 0.3);
 
       // (a) 拓宽渐变段：从 cluster 后方 taperLen 处（主干全宽）
       //     线性收缩到 cluster 处（导流岛尖端宽度 0.6m）
@@ -935,7 +898,7 @@ function _buildRoadNetwork(edges) {
         if (ctlen < 0.001) { ctx = 1; ctz = 0; } else { ctx /= ctlen; ctz /= ctlen; }
         var cnx = -ctz, cnz = ctx;
         var cLW = ce.laneWidth || 3.0;
-        var cHalfW = (ce.lanes * cLW) / 2;
+        var cHalfW = (ce.lanes >= 2) ? (ce.lanes * cLW + 0.3) : (cLW + 0.3);
         var rampTaperLen = 6.0;
         var cStartX = jx + ctx * 0.5;
         var cStartZ = jz + ctz * 0.5;
@@ -983,7 +946,7 @@ function _buildRoadNetwork(edges) {
     var bEdge = edgeEnds[bi_e] || {};
     var bLanes = bEdge.lanes || 2;
     var bLW = bEdge.laneWidth || 3.5;
-    var bHalfW = (bLanes * bLW) / 2;
+    var bHalfW = (bLanes >= 2) ? (bLanes * bLW + 0.3) : (bLW + 0.3);
 
     // ── 桥面板：从曲线 t=0..1 采样，每段生成一个梯形 strip（路面下方 0.2m）。
     //   当某段两端点 pos.y 都 < _PIER_MIN_H 时不生成（贴地段不需要桥面板）。
@@ -1212,10 +1175,10 @@ function _addRoadArrow(arrowGeos, curve, s, laneWidth, lanes) {
   var nx = -tan.z, nz = tan.x;
   var y = pos.y + 0.046;  // 叠加高架 elevation，避免高架段箭头悬浮在地面
   var heading = Math.atan2(tan.z, tan.x);
-  // 每条车道画一个箭头
+  // 同向侧车道箭头（lanes 条车道，横向中心偏移为 -(li+0.5)*laneWidth）
   var laneCenters = [];
   for (var li = 0; li < lanes; li++) {
-    laneCenters.push((li + 0.5 - lanes / 2) * laneWidth);
+    laneCenters.push(-(li + 0.5) * laneWidth);
   }
   for (var ci = 0; ci < laneCenters.length; ci++) {
     var c = laneCenters[ci];
@@ -1248,7 +1211,7 @@ function _addStopLine(stopLineGeos, curve, s, laneWidth, lanes) {
   var pos = curve.getPointAt(t);
   var tan = curve.getTangentAt(t);
   var heading = Math.atan2(tan.z, tan.x);
-  var lineGeo = new THREE.PlaneGeometry(0.35, lanes * laneWidth);
+  var lineGeo = new THREE.PlaneGeometry(0.35, 2 * lanes * laneWidth + 0.6);
   var m = new THREE.Matrix4();
   m.makeRotationX(-Math.PI / 2);
   m.multiply(new THREE.Matrix4().makeRotationZ(-heading));
