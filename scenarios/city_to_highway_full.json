@@ -61,6 +61,11 @@
         "incoming_road": 4,
         "target_road": 5
       }
+    ],
+    "cross_roads": [
+      { "name": "cross_urban_1", "at_s":  80, "length_m": 120, "lanes": 2, "lane_width": 3.5, "speed_limit": 11.11, "direction":  1 },
+      { "name": "cross_urban_2", "at_s": 150, "length_m": 120, "lanes": 2, "lane_width": 3.5, "speed_limit": 11.11, "direction":  1 },
+      { "name": "cross_intersection", "at_s": 275, "length_m": 160, "lanes": 3, "lane_width": 3.5, "speed_limit": 11.11, "direction":  1 }
     ]
   },
   "route": [

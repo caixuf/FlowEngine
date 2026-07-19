@@ -313,6 +313,66 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
         r, _ = build_straight_road(0, "urban", 1000.0, 2, DEFAULT_LANE_WIDTH,
                                    DEFAULT_SPEED, RoadState())
         roads.append(r)
+
+    # ── cross_roads：横向交叉道路（十字路口）──────────────────
+    # 每条 cross_road 在主路上某个 s 位置垂直分叉，长度对称向两侧延伸，
+    # 朝向 = 主路 hdg ± π/2（默认 +π/2 = 朝左 / 北方向）。
+    # 这不是 fork/merge junction（esmini junction 拓扑复杂），而是独立的"地面道路"
+    # 直接画在主路垂直方向上——视觉上形成十字路口形状即可，ego 不走 cross_road。
+    # junction_id 保持 -1（普通道路）以保证 OpenDRIVE 合法性：若用 -2 等自定义值
+    # 会要求配对 <junction id="-2"> 元素，esmini 校验失败会拒绝整个 xodr。
+    cross_cfg = rn_cfg.get("cross_roads") or []
+    # 计算主路在 s 位置的全局 (x, y, hdg)。先找主路上 s 落在哪个 edge 内。
+    # 主路 = edges 顺序拼接，每段 length 累加。
+    main_cum_lengths: list[tuple[int, float, float, float, float]] = []  # (edge_id, s_start, s_end, x_start, y_start, hdg_start)
+    cum_s = 0.0
+    cx, cy, chdg = 0.0, 0.0, 0.0
+    for rd in roads:
+        # 只看 edge 主路（junction_id == -1），跳过 fork/merge connecting_road
+        if rd.junction_id != -1:
+            continue
+        # 用第一段几何的起点状态
+        if rd.geoms:
+            g0 = rd.geoms[0]
+            main_cum_lengths.append((rd.id, cum_s, cum_s + rd.length, g0.x, g0.y, g0.hdg))
+        else:
+            main_cum_lengths.append((rd.id, cum_s, cum_s + rd.length, cx, cy, chdg))
+        cum_s += rd.length
+
+    for ci, cc in enumerate(cross_cfg):
+        at_s = float(cc.get("at_s", 0.0))
+        clen = float(cc.get("length_m", 200.0))
+        clanes = int(cc.get("lanes", 2))
+        clw = float(cc.get("lane_width", DEFAULT_LANE_WIDTH))
+        csp = float(cc.get("speed_limit", DEFAULT_SPEED))
+        direction = int(cc.get("direction", 1))  # +1=左/北(+Y), -1=右/南
+        # 找到 at_s 落在哪个主路段，插值出全局 (x, y, hdg)
+        target_state = None
+        for ent in main_cum_lengths:
+            eid, s_start, s_end, ex, ey, ehdg = ent
+            if s_start <= at_s <= s_end + 1e-6:
+                # 沿 ehdg 方向前进 (at_s - s_start) 米
+                offset = at_s - s_start
+                target_state = RoadState(
+                    ex + offset * math.cos(ehdg),
+                    ey + offset * math.sin(ehdg),
+                    ehdg)
+                break
+        if target_state is None:
+            continue
+        # cross_road 起点放在交叉位置，朝向 = 主路 hdg + π/2 * direction
+        cross_hdg = target_state.hdg + (math.pi / 2) * direction
+        # 道路从交叉点向 +hdg 方向延伸 clen/2，向 -hdg 方向延伸 clen/2
+        # 为符合 OpenDRIVE 几何（从 s=0 沿 +s 方向），把起点放在 -clen/2 处
+        start_x = target_state.x - (clen / 2) * math.cos(cross_hdg)
+        start_y = target_state.y - (clen / 2) * math.sin(cross_hdg)
+        cross_state = RoadState(start_x, start_y, cross_hdg)
+        cid = 1000 + ci  # 避免与 edges/junction id 冲突
+        cname = str(cc.get("name", f"cross_road_{ci}"))
+        cr, _ = build_straight_road(cid, cname, clen, clanes, clw, csp, cross_state)
+        # 保持 junction_id = -1（普通道路），避免要求配对 <junction> 元素
+        roads.append(cr)
+
     return roads, junctions
 
 
