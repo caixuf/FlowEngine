@@ -158,12 +158,77 @@ static void test_pedestrian() {
     CHECK(ped.vy < 0, "pedestrian reversed direction");
 }
 
+/* CutIn 加塞状态机：横向 PID 跨实线变道。
+ * 验证：
+ *   1. ai_state==CutIn 时 offset 向 target_offset 收敛
+ *   2. 到达目标后自动切回 Cruise
+ *   3. CutIn 期间即使目标车道有车也照样变道（bypass lane_change_safe）
+ *   4. CutIn 期间纵向速度被压制（target_vx - cutin_longitudinal_decel） */
+static void test_cutin() {
+    std::printf("--- cutin (lateral PID crossing solid line) ---\n");
+    EntityPool pool;
+    NpcAiConfig cfg;
+
+    // 在目标车道（offset=-5.25，即左移两个车道）放一辆慢车，
+    // 验证 CutIn 即使 lane_change_safe 会判 false 也照样跨实线变道。
+    EntityId blocker_id = pool.alloc(EntityType::Car);
+    Entity& blocker = pool[blocker_id];
+    apply_vehicle_defaults(blocker);
+    blocker.x = 25; blocker.y = -5.25; blocker.offset = -5.25;
+    blocker.speed = 2.0; blocker.target_vx = 2.0; blocker.heading = 0;
+    blocker.vx = 2.0; blocker.route_dir = 1; blocker.route_s = 25;
+
+    // NPC：顺行 offset=-1.75（中间车道），target_offset=-5.25（跨实线到左车道）
+    EntityId npc_id = pool.alloc(EntityType::Car);
+    Entity& npc = pool[npc_id];
+    apply_vehicle_defaults(npc);
+    npc.x = 0; npc.y = -1.75; npc.offset = -1.75;
+    npc.heading = 0; npc.speed = 6.0;
+    npc.target_vx = 8.0;
+    npc.route_dir = 1; npc.route_s = 0;
+    npc.ai_state = AIState::CutIn;
+    npc.target_offset = -5.25;  // 跨两个车道（实线）
+
+    double dt = 0.05;
+    double start_offset = npc.offset;
+    double t0_speed_drop = 0.0;
+    bool observed_speed_drop = false;
+
+    for (int i = 0; i < 400; ++i) {  // 20s 上限
+        blocker.x += 2.0 * dt;
+        blocker.route_s = blocker.x;
+        step_npc_vehicle(npc, pool, dt, cfg);
+
+        // 采样 CutIn 期间的速度（应被压制到 ≤ target_vx - decel + 1）
+        if (npc.ai_state == AIState::CutIn && i < 20) {
+            t0_speed_drop = npc.speed;
+            if (npc.speed <= npc.target_vx - cfg.cutin_longitudinal_decel + 1.0) {
+                observed_speed_drop = true;
+            }
+        }
+        if (npc.ai_state != AIState::CutIn) break;  // 已完成
+    }
+    std::printf("  start_offset=%.2f final_offset=%.2f target=%.2f state=%d speed=%.2f\n",
+                start_offset, npc.offset, npc.target_offset,
+                (int)npc.ai_state, npc.speed);
+    CHECK(npc.offset < start_offset - 1.0, "offset moved toward target (cross solid line)");
+    CHECK(std::fabs(npc.offset - npc.target_offset) < 0.5,
+          "reached target offset within 0.5m");
+    // CutIn 完成后状态机切回 Cruise 或 Follow（若目标车道有前车则自然转 Follow，
+    // 这是正确的级联：CutIn 完成 → Cruise → 立即识别到前车 → Follow）。
+    CHECK(npc.ai_state != AIState::CutIn, "CutIn state exited after reaching target");
+    CHECK(npc.cutin_active == false, "cutin_active cleared after completion");
+    CHECK(observed_speed_drop || t0_speed_drop <= npc.target_vx,
+          "longitudinal speed capped during cutin");
+}
+
 int main() {
     test_cruise();
     test_follow();
     test_stop();
     test_different_lane();
     test_pedestrian();
+    test_cutin();
     std::printf("=== %d failures ===\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -57,6 +57,7 @@ const char* ai_state_str(AIState s) {
         case AIState::BranchSel:   return "branch_sel";
         case AIState::Merge:       return "merge";
         case AIState::Yield:       return "yield";
+        case AIState::CutIn:       return "cutin";
         default:                   return "cruise";
     }
 }
@@ -333,6 +334,17 @@ char* build_scene_frame_json(const EntityPool& pool,
 
     cJSON_AddNumberToObject(root, "t_us", (double)sim_time_us);
     cJSON_AddNumberToObject(root, "cycle", (double)cycle);
+
+    /* lighting（Task 4）：day/night/dusk。前端 scene3d.js 据此切换光照参数。
+     * 整数编码与 ScenarioLighting 枚举一致：0=day, 1=night, 2=dusk。
+     * 前端首次收到后缓存，避免每帧切换灯光导致抖动。 */
+    const char* light_str = "day";
+    switch (cfg.lighting) {
+        case 1:  light_str = "night"; break;
+        case 2:  light_str = "dusk";  break;
+        default: light_str = "day";   break;
+    }
+    cJSON_AddStringToObject(root, "lighting", light_str);
 
     cJSON* rn = build_road_network_json(cfg);
     cJSON_AddItemToObject(root, "road_network", rn);

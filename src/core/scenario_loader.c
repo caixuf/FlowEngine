@@ -9,9 +9,14 @@
 #include "logger.h"
 #include <cjson/cJSON.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* NaN 标记：ScenarioActorOverride 的 target_offset/target_vx/vx/vy 未在 JSON 中
+ * 出现时设为 NAN，flowsim_node.cpp 用 isnan() 判断是否覆盖该字段。 */
+#define OVERRIDE_UNDEF  NAN
 
 /* ── 内部：读取整个文件到字符串 ───────────────────────────── */
 
@@ -282,10 +287,106 @@ ScenarioConfig* scenario_load(const char* path) {
         }
     }
 
+    /* lighting（可选，Task 4）：场景全局光照模式。
+     * 缺省 = SCENARIO_LIGHT_DAY（与既有场景完全向后兼容）。
+     * 字符串映射："day"→DAY, "night"→NIGHT, "dusk"→DUSK。 */
+    sc->lighting = SCENARIO_LIGHT_DAY;
+    cJSON* jlight = cJSON_GetObjectItemCaseSensitive(root, "lighting");
+    if (cJSON_IsString(jlight) && jlight->valuestring) {
+        if (strcmp(jlight->valuestring, "night") == 0)
+            sc->lighting = SCENARIO_LIGHT_NIGHT;
+        else if (strcmp(jlight->valuestring, "dusk") == 0)
+            sc->lighting = SCENARIO_LIGHT_DUSK;
+        else
+            sc->lighting = SCENARIO_LIGHT_DAY;
+    }
+
+    /* scenarios[]（可选，Task 3）：顶层工况脚本数组。
+     * 每项含 name / label / trigger{type,value} / actor_overrides[{...}]。
+     * 缺省 = 无脚本（script_count=0），与既有场景完全兼容。
+     * trigger.type 字符串映射：
+     *   "ego_x_gte"   → EGO_X_GTE
+     *   "ego_x_lte"   → EGO_X_LTE
+     *   "time_gte"    → TIME_GTE
+     *   "route_s_gte" → ROUTE_S_GTE
+     * 未识别的 type 字符串按 EGO_X_GTE 处理（最常用场景）。 */
+    cJSON* jscripts = cJSON_GetObjectItemCaseSensitive(root, "scenarios");
+    if (cJSON_IsArray(jscripts)) {
+        int ns = cJSON_GetArraySize(jscripts);
+        if (ns > SCENARIO_MAX_SCRIPTS) ns = SCENARIO_MAX_SCRIPTS;
+        sc->script_count = ns;
+        for (int i = 0; i < ns; i++) {
+            cJSON* js = cJSON_GetArrayItem(jscripts, i);
+            if (!cJSON_IsObject(js)) continue;
+            ScenarioScript* s = &sc->scripts[i];
+            s->fired = false;
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(js, "name");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(s->name, j->valuestring, sizeof(s->name) - 1);
+            j = cJSON_GetObjectItemCaseSensitive(js, "label");
+            if (cJSON_IsString(j) && j->valuestring)
+                strncpy(s->label, j->valuestring, sizeof(s->label) - 1);
+
+            /* trigger */
+            cJSON* jtrig = cJSON_GetObjectItemCaseSensitive(js, "trigger");
+            if (cJSON_IsObject(jtrig)) {
+                cJSON* jt = cJSON_GetObjectItemCaseSensitive(jtrig, "type");
+                s->trigger.type = SCRIPT_TRIGGER_EGO_X_GTE;  /* default */
+                if (cJSON_IsString(jt) && jt->valuestring) {
+                    if (strcmp(jt->valuestring, "ego_x_lte") == 0)
+                        s->trigger.type = SCRIPT_TRIGGER_EGO_X_LTE;
+                    else if (strcmp(jt->valuestring, "time_gte") == 0)
+                        s->trigger.type = SCRIPT_TRIGGER_TIME_GTE;
+                    else if (strcmp(jt->valuestring, "route_s_gte") == 0)
+                        s->trigger.type = SCRIPT_TRIGGER_ROUTE_S_GTE;
+                    else
+                        s->trigger.type = SCRIPT_TRIGGER_EGO_X_GTE;
+                }
+                cJSON* jv = cJSON_GetObjectItemCaseSensitive(jtrig, "value");
+                if (cJSON_IsNumber(jv)) s->trigger.value = jv->valuedouble;
+            }
+
+            /* actor_overrides */
+            cJSON* jov = cJSON_GetObjectItemCaseSensitive(js, "actor_overrides");
+            int nov = 0;
+            if (cJSON_IsArray(jov)) {
+                nov = cJSON_GetArraySize(jov);
+                if (nov > SCENARIO_MAX_OVERRIDES) nov = SCENARIO_MAX_OVERRIDES;
+                for (int k = 0; k < nov; k++) {
+                    cJSON* jovk = cJSON_GetArrayItem(jov, k);
+                    if (!cJSON_IsObject(jovk)) continue;
+                    ScenarioActorOverride* o = &s->overrides[k];
+                    o->target_offset = OVERRIDE_UNDEF;
+                    o->target_vx     = OVERRIDE_UNDEF;
+                    o->vx            = OVERRIDE_UNDEF;
+                    o->vy            = OVERRIDE_UNDEF;
+                    o->ai_state[0]   = '\0';
+                    cJSON* j2;
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "id");
+                    if (cJSON_IsNumber(j2)) o->actor_id = (int)j2->valuedouble;
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "ai_state");
+                    if (cJSON_IsString(j2) && j2->valuestring)
+                        strncpy(o->ai_state, j2->valuestring, sizeof(o->ai_state) - 1);
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "target_offset");
+                    if (cJSON_IsNumber(j2)) o->target_offset = j2->valuedouble;
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "target_vx");
+                    if (cJSON_IsNumber(j2)) o->target_vx = j2->valuedouble;
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "vx");
+                    if (cJSON_IsNumber(j2)) o->vx = j2->valuedouble;
+                    j2 = cJSON_GetObjectItemCaseSensitive(jovk, "vy");
+                    if (cJSON_IsNumber(j2)) o->vy = j2->valuedouble;
+                }
+            }
+            s->override_count = nov;
+        }
+    }
+
     cJSON_Delete(root);
-    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, seed=%u)",
+    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, lighting=%d, %d scripts, seed=%u)",
              sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count,
-             sc->etc_gate_count, sc->stop_line_count, sc->random_seed);
+             sc->etc_gate_count, sc->stop_line_count, (int)sc->lighting, sc->script_count,
+             sc->random_seed);
     return sc;
 }
 
@@ -383,6 +484,50 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         cJSON_AddItemToArray(jlights, jl);
     }
     cJSON_AddItemToObject(root, "traffic_lights", jlights);
+
+    /* lighting（Task 4）*/
+    const char* light_str = "day";
+    switch (scenario->lighting) {
+        case SCENARIO_LIGHT_NIGHT: light_str = "night"; break;
+        case SCENARIO_LIGHT_DUSK:  light_str = "dusk";  break;
+        default:                   light_str = "day";   break;
+    }
+    cJSON_AddStringToObject(root, "lighting", light_str);
+
+    /* scenarios[]（Task 3）*/
+    cJSON* jscripts = cJSON_CreateArray();
+    for (int i = 0; i < scenario->script_count; i++) {
+        const ScenarioScript* s = &scenario->scripts[i];
+        cJSON* js = cJSON_CreateObject();
+        cJSON_AddStringToObject(js, "name",  s->name);
+        if (s->label[0]) cJSON_AddStringToObject(js, "label", s->label);
+        cJSON* jtrig = cJSON_CreateObject();
+        const char* tt_str = "ego_x_gte";
+        switch (s->trigger.type) {
+            case SCRIPT_TRIGGER_EGO_X_LTE:   tt_str = "ego_x_lte";   break;
+            case SCRIPT_TRIGGER_TIME_GTE:    tt_str = "time_gte";    break;
+            case SCRIPT_TRIGGER_ROUTE_S_GTE: tt_str = "route_s_gte"; break;
+            default:                         tt_str = "ego_x_gte";   break;
+        }
+        cJSON_AddStringToObject(jtrig, "type", tt_str);
+        cJSON_AddNumberToObject(jtrig, "value", s->trigger.value);
+        cJSON_AddItemToObject(js, "trigger", jtrig);
+        cJSON* jovs = cJSON_CreateArray();
+        for (int k = 0; k < s->override_count; k++) {
+            const ScenarioActorOverride* o = &s->overrides[k];
+            cJSON* jov = cJSON_CreateObject();
+            cJSON_AddNumberToObject(jov, "id", o->actor_id);
+            if (o->ai_state[0]) cJSON_AddStringToObject(jov, "ai_state", o->ai_state);
+            if (!isnan(o->target_offset)) cJSON_AddNumberToObject(jov, "target_offset", o->target_offset);
+            if (!isnan(o->target_vx))     cJSON_AddNumberToObject(jov, "target_vx",     o->target_vx);
+            if (!isnan(o->vx))            cJSON_AddNumberToObject(jov, "vx",            o->vx);
+            if (!isnan(o->vy))            cJSON_AddNumberToObject(jov, "vy",            o->vy);
+            cJSON_AddItemToArray(jovs, jov);
+        }
+        cJSON_AddItemToObject(js, "actor_overrides", jovs);
+        cJSON_AddItemToArray(jscripts, js);
+    }
+    cJSON_AddItemToObject(root, "scenarios", jscripts);
 
     char* out = cJSON_Print(root);
     cJSON_Delete(root);

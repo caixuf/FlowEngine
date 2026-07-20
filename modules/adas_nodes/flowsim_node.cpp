@@ -250,6 +250,105 @@ static flowsim::EntityType actor_type_to_entity(const char* type) {
     return flowsim::EntityType::Car;
 }
 
+/* ── 工况脚本（Task 3）：触发器评估 + actor_overrides 应用 ──
+ *
+ * 每个仿真 tick 在 NPC AI 之前调用。对每个未触发的脚本评估 trigger：
+ *   ego_x_gte   → ego.x ≥ value
+ *   ego_x_lte   → ego.x ≤ value
+ *   time_gte    → sim_time_s ≥ value
+ *   route_s_gte → ego route 累计 s ≥ value
+ * 触发后把 actor_overrides 应用到 pool 中 actor_id 匹配的实体（一次性，fired=true）。
+ *
+ * ai_state 字符串 → AIState 枚举映射（与 scene_pub.cpp::ai_state_str 反向）。
+ */
+static flowsim::AIState ai_state_from_str(const char* s) {
+    if (!s || !s[0]) return flowsim::AIState::Cruise;
+    if (strcmp(s, "follow") == 0)       return flowsim::AIState::Follow;
+    if (strcmp(s, "stop") == 0)         return flowsim::AIState::Stop;
+    if (strcmp(s, "stop_for_tl") == 0)  return flowsim::AIState::StopForTL;
+    if (strcmp(s, "etc_approach") == 0) return flowsim::AIState::ETCApproach;
+    if (strcmp(s, "branch_sel") == 0)   return flowsim::AIState::BranchSel;
+    if (strcmp(s, "merge") == 0)        return flowsim::AIState::Merge;
+    if (strcmp(s, "yield") == 0)        return flowsim::AIState::Yield;
+    if (strcmp(s, "cutin") == 0)        return flowsim::AIState::CutIn;
+    return flowsim::AIState::Cruise;
+}
+
+static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
+    for (int i = 0; i < g.pool.size(); ++i) {
+        flowsim::Entity& e = g.pool[i];
+        if (e.active && e.id == actor_id) return &e;
+    }
+    return nullptr;
+}
+
+static void apply_actor_override(flowsim::Entity& e,
+                                 const ScenarioActorOverride* o) {
+    if (o->ai_state[0]) {
+        e.ai_state = ai_state_from_str(o->ai_state);
+        /* 进入 CutIn 时初始化 PID 状态，避免残留旧值影响新变道 */
+        if (e.ai_state == flowsim::AIState::CutIn) {
+            e.cutin_pid_integral = 0.0;
+            e.cutin_pid_prev = 0.0;
+            e.cutin_active = true;
+        }
+    }
+    if (!isnan(o->target_offset)) {
+        e.target_offset = o->target_offset;
+    }
+    if (!isnan(o->target_vx)) {
+        e.target_vx = o->target_vx;
+    }
+    if (!isnan(o->vx)) e.vx = o->vx;
+    if (!isnan(o->vy)) e.vy = o->vy;
+}
+
+static void apply_scenario_scripts(double sim_time_s) {
+    if (!g.scenario || g.scenario->script_count <= 0) return;
+    const flowsim::Entity& ego = g.pool[0];
+    /* 预算 ego route_s（route_s_gte 触发器用） */
+    double ego_route_s = -1.0;
+    if (g.route.ok() && g.roads_loaded) {
+        flowsim::FrenetPos ef;
+        if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
+            int ei = g.route.index_of(ef.road_id);
+            if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
+        }
+    }
+    for (int i = 0; i < g.scenario->script_count; ++i) {
+        ScenarioScript* s = &g.scenario->scripts[i];
+        if (s->fired) continue;
+        bool fire = false;
+        switch (s->trigger.type) {
+            case SCRIPT_TRIGGER_EGO_X_GTE:
+                fire = (ego.x >= s->trigger.value); break;
+            case SCRIPT_TRIGGER_EGO_X_LTE:
+                fire = (ego.x <= s->trigger.value); break;
+            case SCRIPT_TRIGGER_TIME_GTE:
+                fire = (sim_time_s >= s->trigger.value); break;
+            case SCRIPT_TRIGGER_ROUTE_S_GTE:
+                if (ego_route_s >= 0.0) fire = (ego_route_s >= s->trigger.value);
+                break;
+        }
+        if (!fire) continue;
+        s->fired = true;
+        LOG_INFO("flowsim", "scenario script '%s' fired (trigger type=%d val=%.2f)",
+                 s->name, (int)s->trigger.type, s->trigger.value);
+        for (int k = 0; k < s->override_count; ++k) {
+            const ScenarioActorOverride* o = &s->overrides[k];
+            flowsim::Entity* e = find_entity_by_actor_id(o->actor_id);
+            if (!e) {
+                LOG_WARN("flowsim", "scenario '%s' override actor id=%d not found in pool",
+                         s->name, o->actor_id);
+                continue;
+            }
+            apply_actor_override(*e, o);
+            LOG_INFO("flowsim", "  override actor id=%d ai_state='%s' target_offset=%.2f target_vx=%.2f",
+                     o->actor_id, o->ai_state, o->target_offset, o->target_vx);
+        }
+    }
+}
+
 static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     g.pool.clear();
 
@@ -730,6 +829,13 @@ protected:
             /* ── Step 2: 场景事件预检查（让 NPC 知道前方红绿灯/ETC） ── */
             flowsim::check_npc_scene_events(g.pool, g.ai_cfg.look_ahead);
 
+            /* ── Step 2.5: 工况脚本（Task 3）—— 触发器评估 + actor_overrides 应用 ──
+             * 必须在 NPC AI 之前：CutIn 触发后 set ai_state+target_offset，
+             * 同 tick step_npc_vehicle 看到 ai_state==CutIn 即进入 PID 横向控制，
+             * 实现一次触发即生效（无 1-tick 延迟）。 */
+            double pre_time_s = (double)(clock_now_us() - g.sim_start_us) / 1e6;
+            apply_scenario_scripts(pre_time_s);
+
             /* ── Step 3: NPC AI ── */
             flowsim::FlowRoadNetwork* roads_ptr = g.roads_loaded ? &g.roads : nullptr;
             const flowsim::Route* route_ptr =
@@ -946,6 +1052,9 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     g.scene_pub_cfg.lane_count     = 2;
     g.scene_pub_cfg.roads          = g.roads_loaded ? &g.roads : nullptr;
     g.scene_pub_cfg.type_id        = SCENE_FRAME_TYPE_ID;
+    /* Task 4：把场景 JSON 的 lighting 字段透传到 scene/frame topic，
+     * 前端 scene3d.js 据此调整 AmbientLight/DirectionalLight/Bloom 阈值。 */
+    g.scene_pub_cfg.lighting       = (int)g.scenario->lighting;
 
     /* 构造协程任务 */
     g.task = std::make_unique<FlowSimTask>(bus, transport);

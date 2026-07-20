@@ -47,6 +47,7 @@ enum class AIState : uint8_t {
     BranchSel,   // 选路（路口分支选择）
     Merge,       // 汇入主路
     Yield,       // 让行
+    CutIn,       // 加塞：横向 PID 跨实线变道（收费站排队场景，target_offset 给目标通道）
 };
 
 /**
@@ -94,6 +95,11 @@ struct Entity {
     /* ── NPC 避障换道（让 NPC 不再"堵成一坨"）── */
     double lane_change_timer{0.0};  /**< 换道冷却计时器 (s)：>0 期间不评估换道，避免频繁抖动 */
     double target_offset{0.0};      /**< E2: 换道目标横向偏移，offset 每帧向此值平滑插值 */
+
+    /* ── CutIn 加塞状态机（横向 PID 跨实线变道）── */
+    double cutin_pid_integral{0.0};  /**< CutIn 横向 PID 积分项（target_offset - offset 的累计误差） */
+    double cutin_pid_prev{0.0};      /**< CutIn 横向 PID 上次误差（用于微分项） */
+    bool   cutin_active{false};      /**< CutIn 是否激活（ai_state==CutIn 时为 true，结束变道后置 false） */
 
     /* ── 行人专用 ── */
     double ped_wait_timer{0};      /**< 行人等待计时器 (s) */
