@@ -86,3 +86,69 @@ the controller is properly damped; without it, overshoot is common.
 **Symptom:** `max_npc_speed > 45 m/s` in evaluator output.
 **Root cause:** `sim_world_node.c` obstacle recycling places NPCs 100-120m ahead
 instantly when they leave the visible range. This is a known simulation artifact, not a control bug.
+
+### Pattern 4: EKF convergence period misinitializes lane side (2026-07)
+**Symptom:** ego drifts from y=-1.75 (left lane) to y>0 (right lane) in the first 0.5s, then ROAD_GUARD triggers.
+**Root cause:** `fusion_node.cpp` EKF initializes with `x0[5] = {0,0,5,0,0}` — y=0, but ego actually starts at y=-1.75.
+Before EKF converges (~10 cycles = 0.5s), fusion reports ego_y≈0. control_node's
+`committed_lane_side = (ego_y < road_c) ? -1 : 1` evaluates to +1 (right lane) at ego_y=0,
+pulling ego toward y=+1.75.
+**Fix:** `control_node.cpp` ~line 706 — only initialize `committed_lane_side` when
+`|ego_y - road_c| > 1.0` (EKF converged). While uncommitted (==0), `cruise_lane_y = ego_y`
+(hold lateral position). Same 1.0m threshold applied to DATA_TIMEOUT fallback target.
+
+### Pattern 5: ref_path heading corruption at junctions (2026-07)
+**Symptom:** ego suddenly turns hard toward a fork/ramp as it approaches a junction (e.g., x=500).
+**Root cause:** esmini's `Route::sample_ahead()` near junctions samples points on a connecting
+road (ramp) whose tangent heading can differ from ego's current heading by ~5 rad.
+Stanley `heading_term = lat_kd_heading * (ego_h - ref_h)` explodes, saturating steer.
+**Fix:** `control_node.cpp` ~line 1048 — normalize `(ref_h - ego_heading)` to [-π,π];
+if `|dh| > 0.5 rad` (≈29°) treat ref_h as invalid and use `ego_heading` (heading_term=0).
+Sharp curve following is handled by `ff_term` (curvature feedforward), not heading_term.
+
+### Pattern 6: NPCs on non-route segments project onto main road (2026-07)
+**Symptom:** NPC placed on a connecting road (e.g., left_ramp segment 10) appears on the main
+road in ego's lane, triggering phantom lane changes or collisions.
+**Root cause:** If NPC's road is not on the main `Route::build()` chain, `npc_init_route()`
+sets `route_dir=0`, falling back to world-frame integration in `npc_ai.cpp` line 314:
+`world_to_frenet → frenet_to_world`. esmini's nearest-road query near junctions can project
+the NPC onto the main road, causing positional drift.
+**Fix:** When designing scenarios, avoid placing NPCs that need to travel long distances on
+connecting roads. Use `vx=0` static vehicles, or move them to a segment on the main route.
+
+### Pattern 7: Negative `s` values in scenario JSON (2026-07)
+**Symptom:** Multiple NPCs stack at the route start point (x≈0), colliding with each other or blocking ego.
+**Root cause:** `npc_init_route()` line 346 — `if (npc.s < 0.0) { npc.route_dir = 0; return; }`
+Negative-s NPCs fall through to world-frame fallback, and esmini may locate them all at the
+nearest road start.
+**Fix:** All `s` values in scenario JSON actors must be ≥ 0. Negative s is semantically invalid
+in OpenDRIVE (no road surface exists before s=0).
+
+## Diagnostic commands
+
+```bash
+# Scan for collision/road-guard/stuck events
+grep -E "COLLISION|ROAD_GUARD|STUCK|INTERVENED" /tmp/flow_launcher_stderr.txt
+
+# Lane change trigger reasons (cur_gap/adj_gap/lead_v/ego pos/target_y)
+grep "LANE CHANGE" /tmp/flow_launcher_stderr.txt
+
+# Ego position snapshots (flowsim prints every 100 cycles)
+grep "flowsim.*ego(" /tmp/flow_launcher_stderr.txt
+
+# Control loop detail (spd/err/thr/brk/st/target_y/lc state)
+grep "control       \] #" /tmp/flow_launcher_stderr.txt | tail -50
+
+# List NPCs currently in ego's lane (find phantom obstacles)
+python3 -c "
+import json
+d = json.load(open('/tmp/flow_topology.json'))
+entities = d['metrics']['scene']['entities']
+ego = [e for e in entities if e['type']=='ego'][0]
+for e in entities:
+    if e.get('type') in ('car','truck'):
+        dx = e['x'] - ego['x']
+        if -10 < dx < 130 and abs(e['y']-ego['y']) < 3:
+            print(f\"id={e['id']:2d} x={e['x']:7.1f} y={e['y']:6.2f} dx={dx:7.1f} spd={e.get('spd',0):.1f}\")
+"
+```

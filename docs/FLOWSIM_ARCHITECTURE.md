@@ -794,3 +794,80 @@ flowsim 已通过 pipeline.json 作为默认仿真节点运行，
 | 重构风险 | 高（全自研） | 低（核心道路模块用开源成熟方案） |
 
 **一句话：把最难的部分（道路网络）交给 esmini，我们只写开源没有的东西（NPC AI + 场景驱动 + 确定性仿真）。这样 2000 行代码就能拿到原本 5000 行的效果，而且 3D 效果能追上 20 年前的游戏。**
+
+## 十二、已知陷阱与场景设计约束（2026-07 实战总结）
+
+> 本节是 `city_to_highway_full.json` 多 edge + fork junction 场景调试过程中踩过的坑。
+> 新场景设计者和 pipeline 调参者必读。
+
+### 12.1 EKF 收敛期与 control_node 初始化的竞态
+
+`fusion_node.cpp` 的 EKF 初值固定为 `x0[5] = {0,0,5,0,0}` — 即 y=0, heading=0, speed=5。
+但实际 ego 起步位置由场景 JSON 的 `ego.y` 决定（如 -1.75）。EKF 需 ~10 个 cycle（0.5s @ 20Hz）
+才能从初值收敛到真实位置。这 0.5s 内 fusion 报告的 ego_y 接近 0，会导致 control_node 中
+所有依赖 ego_y 的初始化逻辑误判：
+
+- `committed_lane_side`：原代码 `(ego_y < road_c) ? -1 : 1` 在 ego_y=0 时判为 +1（右车道）
+- `DATA_TIMEOUT` fallback：原代码同样用 `ego_y < road_c` 选车道
+
+**修复约定：** 所有依赖 ego_y 的车道侧初始化必须加 1.0m 收敛阈值——仅当 `|ego_y - road_c| > 1.0`
+才提交车道侧；否则保持未初始化（committed_lane_side=0），目标 y 退化为 ego_y（横向不动）。
+
+### 12.2 esmini `sample_ahead()` 在 junction 附近的航向腐败
+
+`Route::sample_ahead()` 从 route_s_start 向前采样 100m 参考路径，跨段拼接。但在 fork/merge
+junction 附近，esmini 的 `GetWorldPos()` 可能返回 connecting road（匝道）上的点，其切线航向
+与主路 ego 航向偏差可达 5 rad（≈286°）。
+
+Stanley 控制器的 `heading_term = lat_kd_heading * (ego_h - ref_h)` 对此极为敏感：
+- `lat_kd_heading = 1.35`（pipeline.json 默认）
+- `ego_h = 0.035, ref_h = 5.210` → `heading_term = 1.35 * (-5.175) = -6.99`
+- `steer = cte_term - heading_term ≈ +6.99`（被钳位到 steer_limit）
+
+**修复约定：** control_node 消费 ref_path 时，必须对 `(ref_h - ego_heading)` 做 [-π,π] 归一化
+并设阈值（0.5 rad ≈ 29°）。超阈值视为无效参考，用 ego_heading 替代（heading_term=0）。
+真正的急弯跟随由 `ff_term`（曲率前馈）处理，不依赖 heading_term。
+
+### 12.3 非 route 路段的 NPC 投影陷阱
+
+`Route::build()` 只链出一条主 route（如 urban→intersection→toll→ramp_curve→merge→highway）。
+放在 connecting road（如 left_ramp segment 10）上的 NPC 不在 route 上，`npc_init_route()`
+置 `route_dir=0`，走 `npc_ai.cpp` line 314 的世界系兜底分支：`world_to_frenet → frenet_to_world`。
+
+esmini 在 junction 附近的最近 road 查询可能把 NPC 投影到主路上，造成位置漂移。例如：
+- 场景配置 NPC 17 在 segment 10 (left_ramp) s=30, l=0
+- 实际仿真中 NPC 17 出现在主路 x=500, y=-0.27（ego 车道前方 90m）
+- 触发 control_node 被动变道，与右车道 NPC 碰撞
+
+**场景设计约定：**
+1. 不要在 connecting road 上放置需要长距离行驶的 NPC（vx > 0）
+2. 若必须占位，用 `vx=0` 的静止车辆，或移到主 route 上的 segment
+3. 对向车（vx < 0）可放在对向路段，但需确保该路段不会被 esmini 投影到主路
+
+### 12.4 场景 JSON 的 s 值约束
+
+`npc_init_route()` line 346 显式拒绝负 s：`if (npc.s < 0.0) { npc.route_dir = 0; return; }`。
+负 s 的 NPC 走世界系兜底，多个负 s NPC 可能都被 esmini locate 到最近的 road 起点，互相叠车。
+
+**场景设计约定：** 所有 actor 的 `s` 必须 ≥ 0。OpenDRIVE 语义上 s < 0 表示 road 起点之前，
+不存在路面。若需在 ego 后方放置 NPC，用 ego 起点之前的 segment（如 segment 0 的 s=5 当 ego 在 s=10）。
+
+### 12.5 road_edge_margin 计算公式（evaluator）
+
+`tools/demo_evaluator.py` line 382：
+```python
+road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
+```
+其中 `lane_width` 和 `lane_count` 取场景顶层 `lane` 对象，缺失时默认 `lane_width=3.5, lane_count=2`。
+
+**注意：** 场景 JSON 的 `road_network.edges[].lanes` 和 `lane_width` 是 per-edge 的道路几何参数，
+**不影响 evaluator 的路沿判定**。evaluator 只看顶层 `lane` 对象。若场景没有顶层 `lane` 对象
+（如 `city_to_highway_full.json`），则 margin = `3.5 * 2 * 0.5 - |y| - 1.0 = 2.5 - |y|`，
+即 |y| > 2.5 时判定路沿偏离。
+
+### 12.6 NPC 17 / NPC 19 修复案例（city_to_highway_full.json）
+
+| NPC | 原配置 | 问题 | 修复后 |
+|-----|--------|------|--------|
+| 17 | segment 10 (left_ramp), s=30, vx=7.0 | 走世界系兜底，被投影到主路 x=500, y=-0.27，触发幽灵变道 + 碰撞 | segment 5 (highway), s=600, l=-5.25, vx=15.0（远离 ego 45s 路径） |
+| 19 | segment 3, s=-30 | 负 s 无效，esmini locate 到 road 起点，x=499.6 处出现"停车" | segment 3, s=150（有效正值） |

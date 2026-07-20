@@ -29,4 +29,9 @@
 
 ## 教程文档
 
-`skills/` 目录下 15 篇教程（OOP in C、插件系统、消息总线、IPC、Bag、Clock、Serializer、State Machine、Discovery、Fusion、Coroutine、Demo Evaluator、E2E Learning Loop、Dead Reckoning、SocketCAN Actuator）。
+`skills/` 目录下 16 篇教程（OOP in C、插件系统、消息总线、IPC、Bag、Clock、Serializer、State Machine、Discovery、Fusion、Coroutine、Demo Evaluator、E2E Learning Loop、Dead Reckoning、SocketCAN Actuator、FlowSim 场景设计）。
+
+| Skill | 何时使用 |
+|-------|----------|
+| `12_demo_evaluator.md` | 改动 pipeline 链路节点后跑回归；含 7 种深层故障模式（EKF 收敛、ref_path 航向腐败、NPC 投影陷阱等） |
+| `16_flowsim_scenario_design.md` | 编写或修改 `scenarios/*.json`；多 edge + junction 路网设计、NPC 放置规范 |
