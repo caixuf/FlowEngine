@@ -943,14 +943,18 @@ protected:
                         (ego_on_negative_side && lc_target_y_candidate > road_c + 0.1) ||
                         (!ego_on_negative_side && lc_target_y_candidate < road_c - 0.1);
                     if (g.lane_count > 2 && candidate_on_opposite_side) {
+                        /* 拒绝变道但不清除 blocked：ego 必须继续跟车减速（ACC），
+                         * 而非以全速撞向前方障碍物。早期版本错误地清除 blocked=0，
+                         * 导致 ego 拒绝变道后既不换道也不减速，直接追尾前车
+                         * (CI evaluator collision detected 的根因)。 */
                         LOG_WARN("control",
                                  ">>> LANE CHANGE REJECTED (oncoming): target_y=%.2f crosses road_c=%.2f "
-                                 "into opposite side (lane_count=%d, ego_y=%.2f) — staying on same-direction side",
+                                 "into opposite side (lane_count=%d, ego_y=%.2f) — staying in lane, ACC braking",
                                  lc_target_y_candidate, road_c, g.lane_count, g.ego_y);
                         g.lc_timer = g.blocked_timeout_s;  /* 冷却，避免反复尝试 */
                         route_triggered = 0;
                         overtake_worthwhile = 0;
-                        blocked = 0;
+                        /* 注意：不清除 blocked — 保持 blocked=1 让 ACC 继续减速 */
                     } else {
                     int front_allows_merge = lane_front_allows_merge(lc_target_y_candidate, same_lane_tol, &need_accel);
                     if (front_allows_merge &&

@@ -643,13 +643,16 @@ def collect_samples(duration: int, json_file: Path, interval: float,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     samples: list[dict] = []
     started = time.monotonic()
-    # 缓冲时间：给 demo.sh 构建 node plugins、等待首帧 topology 写入、
-    # 以及正常收尾足够余量。首次运行或 CI 冷启动时 12s 经常不够。
-    deadline = started + duration + 30.0
+    # 缓冲时间：demo.sh 自身总时长 = 构建(0-5s) + wait-for-JSON(最多 15s)
+    # + sleep 1+2 + 监控循环(duration + 每帧 fork python3 ~10s) + cleanup(3-5s)。
+    # 旧值 duration+30s 在冷启动/CI 上经常不够，导致 SIGTERM 截断 demo.sh
+    # 且孤儿进程残留。改为 duration+60s 覆盖最坏情况。
+    deadline = started + duration + 60.0
     first_sample_seen = False
     while proc.poll() is None and time.monotonic() < deadline:
         try:
@@ -664,20 +667,28 @@ def collect_samples(duration: int, json_file: Path, interval: float,
             samples.append(sample)
             if not first_sample_seen:
                 first_sample_seen = True
-                # 收到首个有效样本后再给运行时长 + 15s 收尾缓冲，避免
-                # 刚出数据就被 deadline 截断。
-                deadline = max(deadline, time.monotonic() + duration + 15.0)
+                # 收到首个有效样本后再给运行时长 + 30s 收尾缓冲，
+                # 覆盖 demo.sh 监控循环的 python3 fork 开销 + cleanup。
+                deadline = max(deadline, time.monotonic() + duration + 30.0)
         time.sleep(interval)
 
     if proc.poll() is None:
         print(f"warning: demo.sh still running after {time.monotonic() - started:.1f}s, terminating",
               file=sys.stderr)
-        proc.terminate()
+        # 用进程组信号确保 demo.sh 的子孙进程（flow_launcher / flowmond /
+        # foxglove_bridge / flow_node_host）也被一并清理，避免孤儿残留。
         try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+            os.killpg(os.getpgid(proc.pid), 15)  # SIGTERM
+            proc.wait(timeout=10.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
     output = proc.stdout.read() if proc.stdout else ""
     if output:
         print(output.rstrip())

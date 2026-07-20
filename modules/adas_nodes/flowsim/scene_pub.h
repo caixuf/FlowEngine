@@ -41,6 +41,7 @@
 #include "road_network.h"
 
 #include <cstdint>
+#include <string>
 
 /* 前向声明：transport.h 里的 Transport 结构 */
 struct Transport;
@@ -70,6 +71,14 @@ struct ScenePubConfig {
      * 2=dusk（黄昏）。每帧发布给前端，scene3d.js 据此调整 AmbientLight 等。
      * 来源：scenario_loader 解析 JSON 顶层 "lighting" 字段。 */
     int lighting{0};
+
+    /* ── 性能优化：road_network JSON 缓存 ──
+     * 道路网络在仿真过程中不变（仅 init 阶段加载 xodr），但 build_road_network_json
+     * 每帧调用 sample_road_nodes → roads->frenet_to_world 做全网采样，20Hz 下
+     * 是显著开销（esmini position handle 查询 × road_count × sample_count）。
+     * 首次 build_scene_frame_json 时构建并缓存为 JSON 字符串，后续帧直接用
+     * cJSON_AddRawToObject 复用，避免重复采样。空字符串表示未缓存。 */
+    std::string cached_road_network_json;
 };
 
 /**
