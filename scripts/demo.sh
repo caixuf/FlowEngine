@@ -15,9 +15,9 @@
 # =============================================================================
 set -e
 
-# NOA Phase 6: 默认旗舰场景（城区→ETC→分叉匝道→汇入→高速超车，24 NPC）。
+# 默认旗舰场景：中凯路复合立交场景（含 CutIn 加塞 + 工况脚本 + 夜间光照 + SU7 模型）。
 # 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
-DEFAULT_SCENARIO="scenarios/city_to_highway_full.json"
+DEFAULT_SCENARIO="scenarios/zhongkai_road_full.json"
 
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
