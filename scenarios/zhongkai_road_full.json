@@ -2,7 +2,7 @@
   "name": "zhongkai_road_full",
   "description": "中凯路复合互通：南段沪昆高速高架+U形匝道 → 中段4通道收费站(ETC+Manual) → 北段十字信号平交路口。3 大工况脚本化触发：匝道汇入 / 收费站加塞 / 路口抢行",
   "random_seed": 2026,
-  "duration_s": 150.0,
+  "duration_s": 90.0,
   "lighting": "day",
   "ego": {
     "x": 5.0, "y": -1.75, "heading": 0.0,

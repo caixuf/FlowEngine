@@ -23,7 +23,7 @@ let _orbitLast = { x: 0, y: 0 };
 //   height      = 相机离地高度（决定缩放级别，越大视野越广）
 // 切到 map 模式时按 ego 位置初始化 offset=0；用户拖拽时累积 offset；
 // 切回其它模式不重置，下次回 map 仍保留上次位置（用户体验更好）。
-let _mapState = { offset: { x: 0, z: 0 }, height: 220, followEgo: true };
+let _mapState = { offset: { x: 0, z: 0 }, height: 120, followEgo: true };
 let _mapDragging = false;
 let _mapLast = { x: 0, y: 0 };
 let _raycaster = null;
@@ -61,13 +61,13 @@ export function getOrbitState() { return _orbitState; }
 export function getMapState() { return _mapState; }
 
 /**
- * 重置 map 模式到默认状态：相机重新对准 ego、高度归 220m。
+ * 重置 map 模式到默认状态：相机重新对准 ego、高度归 120m。
  * 用户拖远后想找回 ego 时调这个（按钮/快捷键）。
  */
 export function resetMapView() {
   _mapState.offset.x = 0;
   _mapState.offset.z = 0;
-  _mapState.height = 220;
+  _mapState.height = 120;
   _mapState.followEgo = true;
 }
 

@@ -123,6 +123,9 @@ let _lastCurveKey = "";
  *  当 scene.road_network 存在时，_roadNetworkGroup 取代旧的 _roadGroup。 */
 let _roadNetworkGroup = null;
 let _lastRoadNetworkKey = "";
+/** Map/Orbit 相机用以锁住场景中心（避免 ego 跑到 4km 外时相机被拉走看到空地/白屏）。
+ *  在 _buildRoadNetwork 重建时清空，下次 Map/Orbit 切换时按新路网重算。 */
+let _roadNetworkBBox = null;
 /** 当前道路网络的曲线数组，供交通灯/ETC门架/轨迹线查询最近切线方向。 */
 let _roadCurves = [];
 /** 每条 edge 的长度（与 _roadCurves 一一对应），供轨迹跨 edge 投影按 s 累计切换。 */
@@ -378,6 +381,9 @@ function _buildRoadNetwork(edges) {
   _roadCurves = [];
   _roadCurveLens = [];
   _roadCurveNext = [];
+  /* 路网 bbox：Map/Orbit 相机锚定场景中心用。路网重建时清空，
+   * 首次访问时由 _getRoadNetworkBBox() lazy 计算。 */
+  _roadNetworkBBox = null;
 
   var group = new THREE.Group();
   var SEG_LEN = 3;  // 3m 一段，平衡精度与性能
@@ -429,6 +435,84 @@ function _buildRoadNetwork(edges) {
      *    半宽 = 车道数 × 车道宽/2 + 双侧路肩余量，不画中心黄线 */
     var lanesPerSide = isOneway ? lanes : (lanes / 2);
     var halfWidth = isOneway ? (lanes * laneWidth * 0.5 + 0.6) : (lanesPerSide * laneWidth + 0.3);
+
+    /* 高架段识别：edge 内任一节点 elevation > 2.0m 视为高架（中凯路 road 10
+     * U 形匝道升到 8m）。高架段额外生成桥墩（每 20m 一根 0.8×1×1.2m 立柱
+     * 从 y=0 到路面高）和路面两侧 0.5m 高、0.25m 厚连续矮墙（桥栏）。
+     * 两者都 push 到 guardPostGeos / guardRailGeos，与护栏同材质合并到 1 个
+     * draw call，避免额外 mesh 拖累帧率。 */
+    var isElevated = false;
+    for (var ehi = 0; ehi < points.length; ehi++) {
+      if (points[ehi].y > 2.0) { isElevated = true; break; }
+    }
+    if (isElevated) {
+      var PIER_INTERVAL = 20;  // 桥墩间隔 (m)
+      var PIER_W = 0.8, PIER_D = 1.2, PIER_BASE_W = 1.0;  // 桥墩横截面
+      var nPiers = Math.max(2, Math.floor(length / PIER_INTERVAL) + 1);
+      for (var pi2 = 0; pi2 < nPiers; pi2++) {
+        var pt2 = (pi2 / (nPiers - 1)) * length;
+        var ppos = curve.getPointAt(pt2 / length);
+        var ptan = curve.getTangentAt(pt2 / length);
+        var pnx = -ptan.z, pnz = ptan.x;  // 法线 = 切线在 XZ 平面旋转 90°
+        // 桥墩放在路面两侧边缘内侧 0.5m 处（路缘内）
+        var pierOffset = halfWidth - 0.5;
+        for (var side = -1; side <= 1; side += 2) {
+          var pX = ppos.x + pnx * pierOffset * side;
+          var pZ = ppos.z + pnz * pierOffset * side;
+          var pH = Math.max(0.5, ppos.y);  // 桥墩高度 = 路面高度
+          // 桥墩 BoxGeometry 中心在 (pX, pH/2, pZ)，底面 y=0 顶面 y=pH
+          var pierG = new THREE.BoxGeometry(PIER_W, pH, PIER_D);
+          pierG.translate(pX, pH / 2, pZ);
+          // 桥墩材质（混凝土灰）与护栏统一，便于合并
+          var pierM = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.85, metalness: 0.05 });
+          guardPostGeos.push({ geo: pierG, mat: pierM });
+        }
+      }
+      // 桥栏矮墙：路面两侧各一条 0.5m 高、0.25m 厚连续 ribbon，从路面边缘
+      // 略外扩 0.1m 模拟栏柱占位。沿曲线每 1m 采样一次。
+      var RAIL_H = 0.5, RAIL_T = 0.25;
+      var railOffset = halfWidth + 0.1;
+      for (var side2 = -1; side2 <= 1; side2 += 2) {
+        var railPos = [], railIdx = [];
+        var nRail = Math.max(2, Math.floor(length));
+        var railBase = 0;
+        for (var ri2 = 0; ri2 <= nRail; ri2++) {
+          var rt = ri2 / nRail;
+          var rp = curve.getPointAt(rt);
+          var rtan = curve.getTangentAt(rt);
+          var rnx = -rtan.z, rnz = rtan.x;
+          // 矮墙有厚度：外侧面 = road_edge + (halfWidth+0.35) * normal，
+          //              内侧面 = road_edge + (halfWidth-0.15) * normal
+          var rXout = rp.x + rnx * (halfWidth + 0.35) * side2;
+          var rZout = rp.z + rnz * (halfWidth + 0.35) * side2;
+          var rXin  = rp.x + rnx * (halfWidth - 0.15) * side2;
+          var rZin  = rp.z + rnz * (halfWidth - 0.15) * side2;
+          // 矮墙底面 y=rp.y，顶面 y=rp.y+RAIL_H
+          railPos.push(rXout, rp.y, rZout);                          // 外底
+          railPos.push(rXin,  rp.y, rZin);                            // 内底
+          railPos.push(rXin,  rp.y + RAIL_H, rZin);                   // 内顶
+          railPos.push(rXout, rp.y + RAIL_H, rZout);                  // 外顶
+          if (ri2 < nRail) {
+            var rb = railBase + ri2 * 4;
+            // 底面
+            railIdx.push(rb, rb + 1, rb + 2); railIdx.push(rb, rb + 2, rb + 3);
+            // 顶面
+            railIdx.push(rb, rb + 3, rb + 2); railIdx.push(rb, rb + 2, rb + 1);
+            // 内侧面
+            railIdx.push(rb + 1, rb + 5, rb + 2); railIdx.push(rb + 1, rb + 4, rb + 5);
+            // 外侧面
+            railIdx.push(rb, rb + 3, rb + 7); railIdx.push(rb, rb + 7, rb + 4);
+          }
+        }
+        railBase += (nRail + 1) * 4;
+        var railG = new THREE.BufferGeometry();
+        railG.setAttribute('position', new THREE.Float32BufferAttribute(railPos, 3));
+        railG.setIndex(railIdx);
+        railG.computeVertexNormals();
+        var railM = new THREE.MeshStandardMaterial({ color: 0xb0b0b0, roughness: 0.7, metalness: 0.1 });
+        guardRailGeos.push({ geo: railG, mat: railM });
+      }
+    }
 
     // 记录首尾坐标供 junction 检测
     edgeEnds.push({
@@ -1752,7 +1836,7 @@ function init3DScene() {
   var skyTop = new THREE.Color(0x3a8fd8);    /* 天顶明亮蓝 */
   var skyHorizon = new THREE.Color(0xd6eafa);/* 地平线近白 */
   scene3d.background = skyHorizon;
-  scene3d.fog = new THREE.Fog(0xd6eafa, 180, 650);
+  scene3d.fog = new THREE.Fog(0xd6eafa, 400, 1500);
   var skyGeo = new THREE.SphereGeometry(480, 32, 16);
   var skyMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
@@ -2034,7 +2118,7 @@ function init3DScene() {
   // 每个门架 = 2 立柱 + 横梁 + 可旋转抬杆。progress ∈ [0,1] 控制抬杆角度。
   _etcGatePool = [];
   _etcGateWorld = [];
-  for (var gi = 0; gi < 4; gi++) {
+  for (var gi = 0; gi < 1; gi++) {  // 中凯路 4 通道共用 1 个 mesh（_buildETCGate 已建 4 通道）
     var gate = _buildETCGate();
     gate.visible = false;
     scene3d.add(gate);
@@ -2501,10 +2585,25 @@ function _renderFrame() {
       //   - 滚轮 → 调整高度（30-800m，越大视野越广）
       //   - followEgo=true 时相机跟随 ego；拖拽后自动解除，按 R/Recalc 重新对准
       // 这里只读取状态并应用，不做交互逻辑——交互在 initCameraControls 里。
+      // 路网 bbox 中心：ego 跑到 4km 外时也锁住场景中心，避免看到空地/白屏。
       var _mapState = CameraController.getMapState();
       var mapH = _mapState.height;
-      var mapCx = _mapState.followEgo ? sx : sx + _mapState.offset.x;
-      var mapCz = _mapState.followEgo ? sz : sz + _mapState.offset.z;
+      var mapCx, mapCz;
+      if (_mapState.followEgo) {
+        mapCx = sx; mapCz = sz;
+      } else {
+        // 用路网 bbox 中心（fallback 500, 0）作 Map 相机位置
+        var centerX = 500, centerZ = 0;
+        if (_roadNetworkGroup) {
+          if (!_roadNetworkBBox) _roadNetworkBBox = new THREE.Box3().setFromObject(_roadNetworkGroup);
+          if (_roadNetworkBBox.min.x !== Infinity) {
+            centerX = (_roadNetworkBBox.min.x + _roadNetworkBBox.max.x) / 2;
+            centerZ = (_roadNetworkBBox.min.z + _roadNetworkBBox.max.z) / 2;
+          }
+        }
+        mapCx = centerX + _mapState.offset.x;
+        mapCz = centerZ + _mapState.offset.z;
+      }
       camera3d.position.set(mapCx, mapH, mapCz + 0.001);  // +0.001 避免正上方 lookAt NaN
       camera3d.up.set(0, 1, 0);
       camera3d.lookAt(mapCx, 0, mapCz);
@@ -2523,12 +2622,21 @@ function _renderFrame() {
       camera3d.position.set(sx + 2.0 * fcos, 0.7, sz + 2.0 * fsin);
       camera3d.lookAt(sx + 25 * fcos, 1.0, sz + 25 * fsin);
     } else if (_camMode === 'orbit') {
-      // 自由轨道：鼠标拖拽旋转，滚轮缩放
-      _orbitState.target.set(sx, 0, sz);
+      // 自由轨道：鼠标拖拽旋转，滚轮缩放。
+      // 路网 bbox 中心：ego 跑到 4km 外时 target 也锁场景中心，避免看到空地/白屏。
+      var orbitCx = sx, orbitCz = sz;
+      if (_roadNetworkGroup) {
+        if (!_roadNetworkBBox) _roadNetworkBBox = new THREE.Box3().setFromObject(_roadNetworkGroup);
+        if (_roadNetworkBBox.min.x !== Infinity) {
+          orbitCx = (_roadNetworkBBox.min.x + _roadNetworkBBox.max.x) / 2;
+          orbitCz = (_roadNetworkBBox.min.z + _roadNetworkBBox.max.z) / 2;
+        }
+      }
+      _orbitState.target.set(orbitCx, 0, orbitCz);
       var ox = _orbitState.distance * Math.sin(_orbitState.polar) * Math.cos(_orbitState.azimuth);
       var oy = _orbitState.distance * Math.cos(_orbitState.polar);
       var oz = _orbitState.distance * Math.sin(_orbitState.polar) * Math.sin(_orbitState.azimuth);
-      camera3d.position.set(sx + ox, Math.max(1.5, oy), sz + oz);
+      camera3d.position.set(orbitCx + ox, Math.max(1.5, oy), orbitCz + oz);
       camera3d.lookAt(_orbitState.target);
     } else {
       // chase (default) — 按 ego 航向投影，弯道里相机跟车顺弯
