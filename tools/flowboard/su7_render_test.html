@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>SU7 Render Test</title>
+<style>body{margin:0;background:#0a0a0f;overflow:hidden}canvas{display:block}</style>
+</head><body>
+<div id="err" style="color:red;font-family:monospace;padding:10px"></div>
+<canvas id="c"></canvas>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script type="module">
+import { initCarMesh, _buildSedan } from '/tools/flowboard/js/utils.js';
+try {
+  initCarMesh();
+  const T = window.THREE;
+  const renderer = new T.WebGLRenderer({canvas:document.getElementById('c'), antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(2);
+  renderer.shadowMap.enabled = true;
+  renderer.toneMapping = T.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 2.0;
+  const scene = new T.Scene();
+  scene.background = new T.Color(0x0a0a0f);
+  const cam = new T.PerspectiveCamera(40, innerWidth/innerHeight, 0.1, 100);
+  scene.add(new T.AmbientLight(0x4488ff, 1.0));
+  const dl = new T.DirectionalLight(0xffffff, 2.5);
+  dl.position.set(8, 12, 6);
+  dl.castShadow = true;
+  dl.shadow.mapSize.set(2048, 2048);
+  scene.add(dl);
+  scene.add(new T.HemisphereLight(0x3366aa, 0x112244, 0.6));
+  const ground = new T.Mesh(new T.PlaneGeometry(60, 60), new T.MeshStandardMaterial({color:0x0a0a0f, roughness:0.6, metalness:0.3}));
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+  const car = _buildSedan(0x1a3a5c, 0x142e4a, true);
+  scene.add(car);
+
+  // 多视角渲染
+  const views = {
+    front_three_quarter: {pos: [7, 3.5, 9], look: [0, 0.6, 0]},
+    rear_three_quarter:  {pos: [-7, 3.5, -9], look: [0, 0.6, 0]},
+    side:                {pos: [0, 2, 13], look: [0, 0.6, 0]},
+    rear:                {pos: [-10, 2.5, 0.1], look: [0, 0.7, 0]},
+    top_front:           {pos: [4, 11, 6], look: [0, 0, 0]}
+  };
+  window.__renderView = function(name) {
+    const v = views[name] || views.front_three_quarter;
+    cam.position.set(...v.pos);
+    cam.lookAt(...v.look);
+    renderer.render(scene, cam);
+  };
+  // 默认渲染前侧 3/4
+  window.__renderView(location.hash.replace('#','') || 'front_three_quarter');
+  console.log('RENDER_OK children=', car.children.length);
+} catch(e) {
+  document.getElementById('err').textContent = e.stack || e.message;
+  console.error(e);
+}
+</script>
+</body></html>
