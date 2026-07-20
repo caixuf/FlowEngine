@@ -384,11 +384,23 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
 
     /* Phase 2: ego 持久 road_pos 初始化。
      * 用 world_to_frenet 把场景 ego.x/y 转成 Frenet 后 init esmini position handle。
-     * 失败时 road_pos.ok()==false，主循环走旧 route 逻辑兜底。 */
+     * 失败时 road_pos.ok()==false，主循环走旧 route 逻辑兜底。
+     * 成功时用 esmini 算出的实际 WorldPos 反向覆盖 ego.x/y/heading，保证 ego
+     * 起点严格在 road 0 参考线/车道中心上（场景 x/y 可能是手填的相对值，
+     * 例如中凯路 ego.x=5 含义是沿 road 0 s=5m 而非世界坐标 (5, -1.75)，
+     * 不覆盖会出现在路网外的"鬼影 ego"）。 */
     if (g.roads_loaded) {
         flowsim::FrenetPos fp;
         if (g.roads.world_to_frenet(sc->ego.x, sc->ego.y, fp)) {
-            if (!ego.road_pos.init(g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset)) {
+            if (ego.road_pos.init(g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset)) {
+                /* 用 esmini 算出的 WorldPos 覆盖 ego 初位置（消除"鬼影 ego"） */
+                flowsim::WorldPos wp;
+                if (ego.road_pos.world(wp)) {
+                    ego.x = wp.x;
+                    ego.y = wp.y;
+                    ego.heading = wp.h;
+                }
+            } else {
                 LOG_WARN("flowsim", "ego road_pos.init failed (road=%d lane=%d s=%.1f)",
                          fp.road_id, fp.lane_id, fp.s);
             }

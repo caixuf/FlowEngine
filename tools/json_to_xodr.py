@@ -198,9 +198,26 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
     roads: list[Road] = []
     end_states: dict[int, RoadState] = {}   # road id → 该 road 终点的全局状态
 
-    # 第一遍：顺序构建所有 edge（主路串联），记录每段终点状态供 junction 分支起算。
+    # 第一遍：顺序构建所有 edge，记录每段终点状态供 junction 分支起算。
+    # 同时为前后 edge 串接 successor/predecessor link —— 这是 OpenDRIVE 道路拓扑
+    # 连贯性的核心：缺了这个 NPC 沿 road 0 走到 s=250m 就"撞墙"，不会自动进入
+    # road 1（esmini 把它们当成 5 条独立断头路）。
+    # 注：edges 列表里如果混了 fork connecting_road（id 出现在 junctions[*].connecting_roads
+    # 里），其 predecessor 由 fork 配置接管（line 256-275），这里跳过主路 link。
+    # 因此先建好 edges 拿到 id 集合，但串接 link 时需先知道哪些 id 是 fork connecting_road。
+    junction_conn_ids: set[int] = set()
+    junctions_cfg_pre = rn_cfg.get("junctions") or []
+    for jcfg in junctions_cfg_pre:
+        for c in (jcfg.get("connecting_roads") or []):
+            cid = int(c.get("id", -1))
+            if cid >= 0:
+                junction_conn_ids.add(cid)
+
+    main_edge_ids: list[int] = []
     for i, e in enumerate(edges):
         eid = int(e.get("id", i))
+        # skip_main_link：fork connecting_road 已在 junctions 里接管 link 关系
+        skip_main_link = eid in junction_conn_ids
         etype = str(e.get("type", "road"))
         length = float(e.get("length_m", 0.0))
         lanes = int(e.get("lanes", e.get("lane_count", 2)))
@@ -221,6 +238,26 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
         r.elevation_profile = list(e.get("elevation_profile") or [])
         roads.append(r)
         end_states[eid] = state
+        main_edge_ids.append((eid, skip_main_link))
+
+    # 为顺序拼接的主路 edge 串接 successor/predecessor link（OpenDRIVE 拓扑连贯性）。
+    # 这是仿真世界"车开不出收费广场"等问题的根因：road 0/1/2/3/4 之前完全断头。
+    # 跳过 fork connecting_road（其 link 由 junctions 接管）。
+    main_road_by_id = {r.id: r for r in roads if r.junction_id == -1}
+    for i in range(1, len(main_edge_ids)):
+        prev_id, prev_skip = main_edge_ids[i - 1]
+        curr_id, curr_skip = main_edge_ids[i]
+        if prev_skip or curr_skip:
+            continue
+        if prev_id not in main_road_by_id or curr_id not in main_road_by_id:
+            continue
+        prev_r = main_road_by_id[prev_id]
+        curr_r = main_road_by_id[curr_id]
+        if prev_r.junction_id == -1 and curr_r.junction_id == -1:
+            if prev_r.successor < 0:
+                prev_r.successor = curr_id
+            if curr_r.predecessor < 0:
+                curr_r.predecessor = prev_id
 
     junctions: list[Junction] = []
     junctions_cfg = rn_cfg.get("junctions") or []
