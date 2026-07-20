@@ -1459,7 +1459,224 @@
             });
         });
 
-        // === FILE CONTINUES — awaiting animate() loop & update functions ===
+        // ============================
+        // LIGHT STATE UPDATE
+        // 把 state 中的灯光开关同步到 mesh 的 emissiveIntensity 和 PointLight.intensity
+        // ============================
+        function updateLights() {
+            // 前大灯
+            const hlIntensity = state.headlights ? 1.5 : 0;
+            ['left', 'right'].forEach(side => {
+                if (headlightLenses[side]) headlightLenses[side].material.emissiveIntensity = hlIntensity;
+                if (headlightLights[side]) headlightLights[side].intensity = state.headlights ? 2.5 : 0;
+            });
+
+            // 尾灯（贯穿式 LED 条）
+            const tlIntensity = state.taillights ? 1.0 : 0;
+            taillightBar.material.emissiveIntensity = tlIntensity;
+            taillightPL.intensity = state.taillights ? 1.5 : 0;
+
+            // 雾灯：球体发光 + PointLight + SpotLight 三件套
+            const fogIntensity = state.fogLights ? 2.0 : 0;
+            fogLightMeshes.forEach(m => m.material.emissiveIntensity = fogIntensity);
+            fogLightPLs.forEach(pl => pl.intensity = state.fogLights ? 2.5 : 0);
+            fogSpotLights.forEach(sl => sl.intensity = state.fogLights ? 3.0 : 0);
+
+            // 示宽灯
+            const posIntensity = state.positionLights ? 1.0 : 0;
+            positionLights.forEach(pl => pl.material.emissiveIntensity = posIntensity);
+
+            // 刹车灯
+            const brakeIntensity = state.brakeLights ? 2.5 : 0;
+            brakeLightMeshes.forEach(m => m.material.emissiveIntensity = brakeIntensity);
+            brakeLightPLs.forEach(pl => pl.intensity = state.brakeLights ? 2.0 : 0);
+
+            // 转向灯闪烁（amber，频率 ~1.5Hz）
+            const blinkOn = Math.floor(performance.now() / 333) % 2 === 0;
+            const leftOn = (state.turnLeft || state.hazard) && blinkOn;
+            const rightOn = (state.turnRight || state.hazard) && blinkOn;
+            const turnIntensity = 1.8;
+
+            // 前转向灯
+            ['left', 'right'].forEach(side => {
+                const on = (side === 'left') ? leftOn : rightOn;
+                const grp = headlightGroups[side];
+                if (grp && grp.userData.turnSignalMat) {
+                    grp.userData.turnSignalMat.emissiveIntensity = on ? turnIntensity : 0;
+                }
+                if (frontTurnPLs[side]) frontTurnPLs[side].intensity = on ? 1.5 : 0;
+            });
+            // 后转向灯
+            ['left', 'right'].forEach(side => {
+                const on = (side === 'left') ? leftOn : rightOn;
+                if (rearTurnSignals[side]) {
+                    rearTurnSignals[side].material.emissiveIntensity = on ? turnIntensity : 0;
+                }
+                if (rearTurnPLs[side]) rearTurnPLs[side].intensity = on ? 1.2 : 0;
+            });
+
+            // 智能驾驶蓝灯：呼吸效果
+            const adBreath = state.adMode ? (0.6 + 0.4 * Math.sin(performance.now() * 0.004)) : 0;
+            adLightMesh.material.emissiveIntensity = adBreath * 2.0;
+            adLightPL.intensity = adBreath * 1.5;
+            adRearLightMeshes.forEach(m => m.material.emissiveIntensity = adBreath * 2.0);
+            adRearLightPLs.forEach(pl => pl.intensity = adBreath * 1.2);
+        }
+
+        // ============================
+        // VEHICLE DYNAMICS UPDATE
+        // 简化自行车模型：速度积分 + 前轮转向 + 方向盘旋转可视化
+        // ============================
+        function updateCar(dt) {
+            // 速度向 targetSpeed 平滑收敛（P 控制器）
+            const speedErr = state.targetSpeed - state.speed;
+            state.speed += speedErr * Math.min(dt * 0.6, 1.0);
+
+            // 档位 P/N 或速度接近 0 时强制减速到 0
+            if (state.gear === 'P' || state.gear === 'N') {
+                state.speed *= 0.85;
+                if (Math.abs(state.speed) < 0.1) state.speed = 0;
+            }
+
+            // 方向盘 slider 平滑
+            state.steeringAngle += (state.targetSteeringAngle - state.steeringAngle) * Math.min(dt * 8, 1.0);
+
+            // 智能驾驶模式：自动微调方向回正
+            if (state.adMode) {
+                state.targetSteeringAngle *= 0.92;
+                steeringSlider.value = state.targetSteeringAngle;
+            }
+
+            // 车体移动（D 档前进，R 档后退）
+            const speedMs = state.speed / 3.6;  // km/h → m/s
+            const dir = (state.gear === 'R') ? -1 : 1;
+            const moveDist = speedMs * dt * dir;
+
+            // 简化转向几何：前轮转角 = 方向盘角 / 转向比 (15:1)，限幅 ±35°
+            const steerRad = THREE.MathUtils.clamp(state.steeringAngle * Math.PI / 180 / 15, -0.6, 0.6);
+
+            // Ackermann 简化：车体绕后轴中心旋转
+            if (Math.abs(steerRad) > 0.001 && Math.abs(moveDist) > 0.0001) {
+                const wheelbase = 3.0;
+                const turnRadius = wheelbase / Math.tan(steerRad);
+                const yawDelta = moveDist / turnRadius;
+                carGroup.rotation.y -= yawDelta;
+            }
+            // 沿车头方向平移
+            const forwardX = Math.cos(carGroup.rotation.y);
+            const forwardZ = -Math.sin(carGroup.rotation.y);
+            carGroup.position.x += forwardX * moveDist;
+            carGroup.position.z += forwardZ * moveDist;
+
+            // 活动范围约束（保持在地面网格内）
+            const limit = 45;
+            carGroup.position.x = THREE.MathUtils.clamp(carGroup.position.x, -limit, limit);
+            carGroup.position.z = THREE.MathUtils.clamp(carGroup.position.z, -limit, limit);
+
+            // 车轮自转（角速度 = 速度 / 轮径）
+            const wheelRadius = 0.33;
+            const spinRate = speedMs / wheelRadius;
+            const spinDelta = spinRate * dt * dir;
+            Object.values(wheels).forEach(w => {
+                if (w.spin) w.spin.rotation.x -= spinDelta;
+            });
+
+            // 前轮转向可视化（绕 Y 轴偏转）
+            const frontSteer = steerRad;
+            if (wheels.fl && wheels.fl.group) wheels.fl.group.rotation.y = frontSteer;
+            if (wheels.fr && wheels.fr.group) wheels.fr.group.rotation.y = frontSteer;
+
+            // 方向盘 SVG 旋转（视觉联动）
+            const svgEl = document.getElementById('steeringSvg');
+            if (svgEl) svgEl.style.transform = `rotate(${state.steeringAngle * 3}deg)`;
+
+            // 刹车灯自动联动（减速时点亮）
+            const decelerating = speedErr < -2.0 && Math.abs(state.speed) > 1;
+            if (decelerating) state.brakeLights = true;
+            else if (!document.getElementById('toggleBrakeLights').classList.contains('active') && !decelerating) {
+                state.brakeLights = false;
+            }
+
+            // 电量消耗（极简模型：每秒消耗 0.02%，移动时 ×3）
+            state.battery -= dt * (Math.abs(speedMs) > 0.5 ? 0.06 : 0.02);
+            if (state.battery < 0) state.battery = 0;
+
+            // UI 更新
+            document.getElementById('speedValue').textContent = Math.round(Math.abs(state.speed));
+            document.getElementById('batteryValue').textContent = state.battery.toFixed(0) + '%';
+            document.getElementById('batteryFill').style.width = state.battery + '%';
+
+            // 智能驾驶状态指示
+            const adDot = document.getElementById('adDot');
+            const adText = document.getElementById('adStatusText');
+            if (state.adMode) {
+                adDot.classList.add('active');
+                adText.classList.add('active');
+                adText.textContent = '智能驾驶运行中 · ' + Math.round(Math.abs(state.speed)) + ' km/h';
+            } else {
+                adDot.classList.remove('active');
+                adText.classList.remove('active');
+                adText.textContent = '智能驾驶未启用';
+            }
+        }
+
+        // ============================
+        // RENDER LOOP
+        // ============================
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.1);  // clamp dt 防止切换 tab 后大跳
+
+            updateCar(dt);
+            updateLights();
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // ============================
+        // RESIZE HANDLER
+        // ============================
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ============================
+        // KEYBOARD SHORTCUTS (bonus)
+        // W/S: 加减速, A/D: 转向, Space: 刹车, H: 大灯
+        // ============================
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key === ' ') e.preventDefault();
+        });
+        window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+        setInterval(() => {
+            if (keys['w']) state.targetSpeed = Math.min(state.targetSpeed + 3, 200);
+            if (keys['s']) state.targetSpeed = Math.max(state.targetSpeed - 5, 0);
+            if (keys['a']) {
+                state.targetSteeringAngle = THREE.MathUtils.clamp(state.targetSteeringAngle - 2, -30, 30);
+                steeringSlider.value = state.targetSteeringAngle;
+            }
+            if (keys['d']) {
+                state.targetSteeringAngle = THREE.MathUtils.clamp(state.targetSteeringAngle + 2, -30, 30);
+                steeringSlider.value = state.targetSteeringAngle;
+            }
+            if (keys[' ']) {
+                state.targetSpeed = Math.max(state.targetSpeed - 8, 0);
+                state.brakeLights = true;
+            } else if (!document.getElementById('toggleBrakeLights').classList.contains('active')) {
+                state.brakeLights = false;
+            }
+            if (keys['h']) {
+                keys['h'] = false;  // 防止连按
+                document.getElementById('toggleHeadlights').click();
+            }
+        }, 80);
     </script>
 </body>
 </html>
