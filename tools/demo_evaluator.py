@@ -9,6 +9,7 @@ and missing topic data into repeatable PASS/FAIL checks.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import json
 import math
@@ -48,6 +49,32 @@ SHADOW_INFERENCE_FILES = [
 # Thresholds for shadow_delta = inference_speed - planning_speed (m/s).
 SHADOW_DELTA_WARN = 2.0   # |delta| > this → WARN
 SHADOW_DELTA_FAIL = 5.0   # |delta| > this → FAIL
+
+# ── Task 5：分层识别率 / 预警提前量阈值 ──
+# 真值实体（flowsim scene.entities）与感知障碍（scene.obstacles）匹配距离阈值。
+# 同帧同位置的 truth 与 perceived 距离 ≤ 此值视为"识别成功"。
+PERCEPTION_MATCH_DIST_M = 3.0
+# 单类型识别率低于此阈值 → WARN（提示该类型感知能力下降）。
+PERCEPTION_RATE_WARN = 0.80
+# 单类型识别率低于此阈值 → FAIL（明显漏检，影响安全）。
+PERCEPTION_RATE_FAIL = 0.50
+# TTC 临界阈值：forward gap / ego_speed 低于此值视为"碰撞风险临界事件"，
+# 用于计算预警提前量（系统在临界事件发生前多久就检测到了该障碍）。
+TTC_CRITICAL_S = 3.0
+# 预警提前量低于此阈值 → WARN（感知/规划反应过晚）。
+WARNING_LEAD_WARN_S = 1.0
+# 预警提前量低于此阈值 → FAIL（系统几乎无预警，紧急刹车）。
+WARNING_LEAD_FAIL_S = 0.3
+# 真值实体 type → 分层类别映射（与 flowsim entity.h::EntityType 对齐）。
+TRUTH_TYPE_VEHICLE = {"car", "truck", "suv"}
+TRUTH_TYPE_VRU = {"pedestrian"}  # Vulnerable Road User
+TRUTH_TYPE_INFRA = {"ego", "tl", "etc_gate"}  # 基础设施，不计入识别率
+TRUTH_LAYER_FOR_TYPE = {
+    "car": "vehicle",
+    "truck": "vehicle",
+    "suv": "vehicle",
+    "pedestrian": "vru",
+}
 
 
 def _load_shadow_delta() -> float | None:
@@ -402,6 +429,149 @@ def sign_flips(values: list[float], deadband: float) -> int:
     return flips
 
 
+def _compute_perception_metrics(series: list[dict], timestamps: list[float]) -> dict:
+    """Task 5：分层识别率 + 预警提前量。
+
+    分层识别率（layered recognition rate）：
+        把 truth 实体（flowsim scene.entities）按 type 分两层 — vehicle
+        (car/truck/suv) 与 vru (pedestrian)。对每帧每层每个 truth 实体，
+        在同帧 perceived 障碍（scene.obstacles 转世界坐标后的 obs_world）
+        中查找距离 ≤ PERCEPTION_MATCH_DIST_M 的最近一个；命中即视为"识别成功"。
+        聚合所有帧得 vehicle / vru / overall 三档识别率。
+
+    预警提前量（warning lead time）：
+        对每个 perceived 障碍（按 id 跨帧跟踪），记录其首次被检测到的时刻
+        first_detect_ts；同时按 forward gap / ego_speed 计算 TTC，记录其
+        首次跌破 TTC_CRITICAL_S 的时刻 first_critical_ts。预警提前量 =
+        first_critical_ts - first_detect_ts（值越大说明系统越早检测到危险）。
+        对所有发生临界事件的障碍取平均与最小值。
+
+    返回 dict，所有字段空数据时返回 0/空，不抛异常。
+    """
+    match_d2 = PERCEPTION_MATCH_DIST_M * PERCEPTION_MATCH_DIST_M
+
+    # ── 分层识别率累积器 ──
+    # key = 'vehicle' / 'vru' / 'overall'；value = [matched, total]
+    layer_counts: dict[str, list[int]] = {
+        "vehicle": [0, 0],
+        "vru": [0, 0],
+        "overall": [0, 0],
+    }
+    # 同时按细粒度 type 累积（car/truck/suv/pedestrian），用于诊断输出
+    type_counts: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
+
+    # ── 预警提前量累积器 ──
+    # obs_id → first detection ts（同 id 跨帧去重）
+    first_detect_ts: dict[int, float] = {}
+    # obs_id → first critical TTC ts（首次跌破 TTC_CRITICAL_S）
+    first_critical_ts: dict[int, float] = {}
+    # obs_id → 最小 TTC（用于报告 min_ttc_s）
+    obs_min_ttc: dict[int, float] = {}
+    # 已经记录过 first_critical 的 obs_id 集合，避免重复触发
+    critical_recorded: set[int] = set()
+
+    for i, m in enumerate(series):
+        ts_i = timestamps[i] if i < len(timestamps) else 0.0
+        ego_x = m["x"]
+        # truth 实体：跳过 ego/tl/etc_gate 等基础设施
+        truth = []
+        for ent in m.get("entities", []):
+            if not isinstance(ent, dict):
+                continue
+            etype = str(ent.get("type", "") or "")
+            if etype in TRUTH_TYPE_INFRA or not etype:
+                continue
+            try:
+                truth.append({
+                    "id": ent.get("id"),
+                    "type": etype,
+                    "x": float(ent.get("x", 0.0) or 0.0),
+                    "y": float(ent.get("y", 0.0) or 0.0),
+                })
+            except (TypeError, ValueError):
+                continue
+        # perceived 障碍（obs_world 已是世界坐标）
+        perceived = m.get("obs_world", []) or []
+
+        # 1) 分层识别率
+        for t in truth:
+            layer = TRUTH_LAYER_FOR_TYPE.get(t["type"], "vehicle")
+            layer_counts[layer][1] += 1
+            layer_counts["overall"][1] += 1
+            type_counts[t["type"]][1] += 1
+            best_d2 = match_d2
+            for p in perceived:
+                dx = p["x"] - t["x"]
+                dy = p["y"] - t["y"]
+                d2 = dx * dx + dy * dy
+                if d2 <= best_d2:
+                    best_d2 = d2
+            if best_d2 < match_d2:
+                layer_counts[layer][0] += 1
+                layer_counts["overall"][0] += 1
+                type_counts[t["type"]][0] += 1
+
+        # 2) 预警提前量：对 perceived 障碍跨帧跟踪 + TTC 监测
+        ego_speed = m["speed"]
+        for p in perceived:
+            pid = p.get("id")
+            if pid is None:
+                continue
+            # 首次检测时间戳
+            if pid not in first_detect_ts:
+                first_detect_ts[pid] = ts_i
+            # TTC = forward gap / ego_speed；forward gap 用世界坐标 dx
+            # （perceived 在 ego 前方时 p.x > ego_x）
+            rel_x = p["x"] - ego_x
+            if rel_x <= 0:
+                continue  # 仅前方障碍纳入 TTC
+            if ego_speed > 0.5:
+                ttc = rel_x / ego_speed
+                prev_min = obs_min_ttc.get(pid, math.inf)
+                if ttc < prev_min:
+                    obs_min_ttc[pid] = ttc
+                # 首次跌破临界阈值
+                if ttc < TTC_CRITICAL_S and pid not in critical_recorded:
+                    first_critical_ts[pid] = ts_i
+                    critical_recorded.add(pid)
+
+    # 汇总识别率
+    def _rate(counts: list[int]) -> float:
+        return counts[0] / counts[1] if counts[1] > 0 else 1.0  # 无样本视为 1.0（不影响判定）
+
+    rate_vehicle = _rate(layer_counts["vehicle"])
+    rate_vru = _rate(layer_counts["vru"])
+    rate_overall = _rate(layer_counts["overall"])
+    rate_by_type = {t: _rate(c) for t, c in type_counts.items()}
+
+    # 汇总预警提前量（秒）
+    lead_times: list[float] = []
+    for pid, crit_ts in first_critical_ts.items():
+        det_ts = first_detect_ts.get(pid, crit_ts)
+        lead = crit_ts - det_ts
+        if lead >= 0:  # 异常负值（感知先于真值出现）跳过
+            lead_times.append(lead)
+    avg_lead = statistics.fmean(lead_times) if lead_times else 0.0
+    min_lead = min(lead_times) if lead_times else 0.0
+    min_ttc_overall = min(obs_min_ttc.values()) if obs_min_ttc else math.inf
+    crit_event_count = len(lead_times)
+
+    return {
+        "recognition_rate_vehicle": rate_vehicle,
+        "recognition_rate_vru": rate_vru,
+        "recognition_rate_overall": rate_overall,
+        "recognition_rate_by_type": {t: round(r, 3) for t, r in rate_by_type.items()},
+        "truth_count_vehicle": layer_counts["vehicle"][1],
+        "truth_count_vru": layer_counts["vru"][1],
+        "truth_count_overall": layer_counts["overall"][1],
+        "warning_lead_avg_s": avg_lead,
+        "warning_lead_min_s": min_lead,
+        "critical_event_count": crit_event_count,
+        "min_ttc_s": min_ttc_overall if math.isfinite(min_ttc_overall) else None,
+        "perceived_track_count": len(first_detect_ts),
+    }
+
+
 def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[list[dict], int]:
     try:
         json_file.unlink()
@@ -746,6 +916,46 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 f"shadow_delta elevated: {shadow_delta:+.2f} m/s (warn threshold {SHADOW_DELTA_WARN:.1f} m/s)"
             )
 
+    # ── Task 5：分层识别率 / 预警提前量 ──
+    # truth（flowsim scene.entities）vs perceived（scene.obstacles 转世界坐标）
+    # 的匹配率，按 vehicle / vru 分层；预警提前量 = TTC 跌破临界时刻 - 首次检测时刻。
+    perception = _compute_perception_metrics(series, timestamps)
+    # 分层识别率 FAIL/WARN（仅当该层有足够样本 ≥ 5 帧时才判定，避免小样本噪声）
+    REC_MIN_SAMPLES = 5
+    for layer_name, rate_key, count_key in [
+        ("vehicle", "recognition_rate_vehicle", "truth_count_vehicle"),
+        ("vru", "recognition_rate_vru", "truth_count_vru"),
+    ]:
+        rate = perception[rate_key]
+        n = perception[count_key]
+        if n < REC_MIN_SAMPLES:
+            continue  # 样本不足，跳过判定（仍写入 summary 供诊断）
+        if rate < PERCEPTION_RATE_FAIL:
+            failures.append(
+                f"{layer_name} recognition rate too low: {rate*100:.1f}% "
+                f"({n} truth samples, FAIL < {PERCEPTION_RATE_FAIL*100:.0f}%)"
+            )
+        elif rate < PERCEPTION_RATE_WARN:
+            warnings.append(
+                f"{layer_name} recognition rate degraded: {rate*100:.1f}% "
+                f"({n} truth samples, WARN < {PERCEPTION_RATE_WARN*100:.0f}%)"
+            )
+    # 预警提前量 FAIL/WARN（仅当发生过临界事件时才判定）
+    if perception["critical_event_count"] > 0:
+        min_lead = perception["warning_lead_min_s"]
+        if min_lead < WARNING_LEAD_FAIL_S:
+            failures.append(
+                f"warning lead time too short: min={min_lead:.2f}s "
+                f"({perception['critical_event_count']} critical events, "
+                f"FAIL < {WARNING_LEAD_FAIL_S:.1f}s)"
+            )
+        elif min_lead < WARNING_LEAD_WARN_S:
+            warnings.append(
+                f"warning lead time short: min={min_lead:.2f}s "
+                f"({perception['critical_event_count']} critical events, "
+                f"WARN < {WARNING_LEAD_WARN_S:.1f}s)"
+            )
+
     summary = {
         "scenario": scenario_name or "(unknown)",
         "samples": len(samples),
@@ -783,6 +993,19 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "has_traffic_lights": bool(scenario_lights),
         "red_light_violation": red_light_violation,
         "green_phase_max_stop_s": green_phase_max_stop_s,
+        # Task 5：分层识别率 + 预警提前量
+        "recognition_rate_vehicle": round(perception["recognition_rate_vehicle"], 3),
+        "recognition_rate_vru": round(perception["recognition_rate_vru"], 3),
+        "recognition_rate_overall": round(perception["recognition_rate_overall"], 3),
+        "recognition_rate_by_type": perception["recognition_rate_by_type"],
+        "truth_count_vehicle": perception["truth_count_vehicle"],
+        "truth_count_vru": perception["truth_count_vru"],
+        "truth_count_overall": perception["truth_count_overall"],
+        "warning_lead_avg_s": round(perception["warning_lead_avg_s"], 3),
+        "warning_lead_min_s": round(perception["warning_lead_min_s"], 3),
+        "critical_event_count": perception["critical_event_count"],
+        "min_ttc_s": perception["min_ttc_s"],
+        "perceived_track_count": perception["perceived_track_count"],
     }
     return failures, warnings, summary
 
@@ -831,6 +1054,10 @@ def main() -> int:
             print("topic_freq_hz:")
             for topic, freq in value.items():
                 print(f"  {topic}: {freq:.1f}")
+        elif key == "recognition_rate_by_type":
+            print("recognition_rate_by_type:")
+            for t, r in value.items():
+                print(f"  {t}: {r*100:.1f}%")
         elif isinstance(value, float):
             print(f"{key}: {value:.3f}")
         else:

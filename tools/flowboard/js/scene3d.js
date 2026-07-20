@@ -87,7 +87,21 @@ let _trafficLightPool = [], _trafficLightWorld = [];
 let _crossRoadMeshes = [];
 let _roadGroup = null, _groundMesh = null, _envGroup = null, _carGroup = null;
 let _sunLight = null;  /* DirectionalLight 引用，供 _renderFrame 跟随 ego 更新阴影 */
+let _ambientLight = null;   /* AmbientLight 引用，Task 4 夜间模式下调强度 */
+let _hemiLight = null;      /* HemisphereLight 引用，Task 4 夜间模式下调强度 */
+let _bloomPass = null;      /* UnrealBloomPass 引用，Task 4 夜间模式降低 threshold 凸显车灯 */
 let _composer = null;  /* EffectComposer 引用（Bloom 后处理），为 null 时直渲 */
+
+/* ── Task 4：全局光照模式 ──
+ * _lightingMode 缓存当前已应用的模式（'day'/'night'/'dusk'），避免每帧重复切换。
+ * 来源优先级：URL ?lighting=night（手动覆盖） > scn.lighting（场景 JSON 透传） > 'day'。
+ * 夜间模式：AmbientLight 0.20→0.04，DirectionalLight 1.20→0.15，HemisphereLight 0.3→0.08，
+ *          Bloom threshold 0.85→0.35（让车灯/红绿灯 emissive 形成光晕），
+ *          toneMappingExposure 1.1→1.6（提亮整体画面避免过暗），
+ *          大灯强制高亮（_setVehicleLights 内部 head=true 已默认）。
+ * 黄昏模式：中间值，暖色调（DirectionalLight 色温 0xffaa66）。 */
+let _lightingMode = 'day';
+let _lightingUrlOverride = null;
 
 /** Obstacle type → colour lookup (defined once, shared) */
 const _obsColors = { car: 0xff9944, truck: 0xff4422, pedestrian: 0x33ff88, cyclist: 0x33ddff, cone: 0xff6600 };
@@ -1824,6 +1838,12 @@ function init3DScene() {
   } else if (window.innerWidth < 700) {
     _perfTier = 'medium';
   }
+  // Task 4: URL ?lighting=day|night|dusk 手动覆盖场景光照模式（调试用）。
+  // 非 null 时优先级高于 scn.lighting（场景 JSON 透传字段）。
+  var initLighting = urlParams.get('lighting');
+  if (initLighting === 'day' || initLighting === 'night' || initLighting === 'dusk') {
+    _lightingUrlOverride = initLighting;
+  }
   // WebGL 创建：无 GPU/headless/安全策略导致失败时，优雅降级到 2D canvas
   // 而不是让用户看到空白/等待。
   try {
@@ -1897,7 +1917,8 @@ function init3DScene() {
 
   // Lighting — brighter scene so lane markings are clearly visible
   // 环境贴图已提供基础反射，降低 ambient 避免过曝，让阴影更立体
-  scene3d.add(new THREE.AmbientLight(0xaabbdd, 0.20));
+  _ambientLight = new THREE.AmbientLight(0xaabbdd, 0.20);
+  scene3d.add(_ambientLight);
   var sun = new THREE.DirectionalLight(0xfff8ee, 1.20);
   sun.position.set(30, 50, 20);
   sun.castShadow = true;
@@ -1917,7 +1938,8 @@ function init3DScene() {
   // sun 目标点跟随 ego（在 _renderFrame 里更新 sun.target.position）
   scene3d.add(sun.target);
   // Hemisphere (sky/ground ambient)
-  scene3d.add(new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.3));
+  _hemiLight = new THREE.HemisphereLight(0xaabbdd, 0x554433, 0.3);
+  scene3d.add(_hemiLight);
 
   // ── Ground (large flat plane, matches road length) ──
   /* NOA Phase 6 3D 增强：程序化草地纹理（CanvasTexture），替代纯色地面。
@@ -2055,13 +2077,13 @@ function init3DScene() {
     try {
       _composer = new THREE.EffectComposer(renderer3d);
       _composer.addPass(new THREE.RenderPass(scene3d, camera3d));
-      var bloomPass = new THREE.UnrealBloomPass(
+      _bloomPass = new THREE.UnrealBloomPass(
         new THREE.Vector2(w, h),
         0.65,  // strength：车灯/车漆高光的光晕强度
         0.4,   // radius：光晕扩散半径
         0.85   // threshold：仅高亮区域（车灯 emissive/强反光）参与 Bloom，避免整屏泛白
       );
-      _composer.addPass(bloomPass);
+      _composer.addPass(_bloomPass);
       // SMAA 抗锯齿（若 CDN 加载了 SMAAPass）；EffectComposer 链路会绕过 WebGLRenderer
       // 的硬件 MSAA，必须显式加 AA pass 否则画面锯齿严重。
       if (THREE.SMAAPass) {
@@ -2315,6 +2337,57 @@ function closeNPCDetail() {
 // Road is STATIC at world origin. Ego moves through the world.
 // Camera follows ego. Other vehicles move independently.
 // ══════════════════════════════════════════════════════════════════════════════
+
+/* ── Task 4：全局光照模式切换 ──
+ * 根据 mode（'day'/'night'/'dusk'）调整 AmbientLight / DirectionalLight /
+ * HemisphereLight 强度 + UnrealBloomPass.threshold + toneMappingExposure，
+ * 实现"夜间车灯光晕凸出、黄昏暖色低光"的视觉差异。
+ *
+ * 调用契约：
+ *   - light 引用在 init3DScene() 里已写入 _ambientLight / _sunLight / _hemiLight
+ *   - _bloomPass 可能为 null（CDN 后处理脚本未加载时降级直渲）
+ *   - 重复调用同 mode 是幂等的（_lightingMode 缓存避免冗余切换）
+ *   - renderer3d 必须存在（init3DScene 已完成）
+ */
+function _applyLighting(mode) {
+  if (!renderer3d) return;
+  if (mode !== 'day' && mode !== 'night' && mode !== 'dusk') mode = 'day';
+  if (_lightingMode === mode) return;  /* 幂等：已应用过同模式则跳过 */
+  _lightingMode = mode;
+
+  var ambI, sunI, hemiI, bloomThr, exposure, sunColor, hemiSky, hemiGround;
+  if (mode === 'night') {
+    /* 夜间：环境光极低，平行光当作月光（冷色低强度），Bloom threshold 大幅降低
+     * 让车灯 emissive / 红绿灯自发光形成可见光晕；exposure 提亮避免整体过暗。 */
+    ambI = 0.04;  sunI = 0.15;  hemiI = 0.08;
+    bloomThr = 0.35;  exposure = 1.6;
+    sunColor = 0x7088bb;  hemiSky = 0x223344;  hemiGround = 0x080808;
+  } else if (mode === 'dusk') {
+    /* 黄昏：中间值，平行光暖色（橙红）模拟落日；Bloom threshold 略低于白天。 */
+    ambI = 0.12;  sunI = 0.55;  hemiI = 0.20;
+    bloomThr = 0.55;  exposure = 1.25;
+    sunColor = 0xffaa66;  hemiSky = 0x554433;  hemiGround = 0x221100;
+  } else {
+    /* 白天（默认）：与 init3DScene 初值一致。 */
+    ambI = 0.20;  sunI = 1.20;  hemiI = 0.30;
+    bloomThr = 0.85;  exposure = 1.1;
+    sunColor = 0xfff8ee;  hemiSky = 0xaabbdd;  hemiGround = 0x554433;
+  }
+  if (_ambientLight) { _ambientLight.intensity = ambI; }
+  if (_sunLight) {
+    _sunLight.intensity = sunI;
+    _sunLight.color.setHex(sunColor);
+  }
+  if (_hemiLight) {
+    _hemiLight.intensity = hemiI;
+    _hemiLight.color.setHex(hemiSky);
+    _hemiLight.groundColor.setHex(hemiGround);
+  }
+  if (_bloomPass) {
+    _bloomPass.threshold = bloomThr;
+  }
+  renderer3d.toneMappingExposure = exposure;
+}
 
 function _renderFrame() {
   _animT += 0.016;
@@ -2788,6 +2861,15 @@ function update3D() {
   if (!sceneReady) return;
   var scn = (_topoData.metrics || {}).scene;
   var now = performance.now() / 1000;
+
+  // Task 4: 全局光照模式切换。优先级：URL ?lighting= > scn.lighting > 'day'。
+  // _applyLighting 内部用 _lightingMode 缓存，每帧调用安全（同模式直接 return）。
+  {
+    var lm = 'day';
+    if (_lightingUrlOverride) lm = _lightingUrlOverride;
+    else if (scn && scn.lighting) lm = scn.lighting;
+    _applyLighting(lm);
+  }
 
   // Phase 3: 多段道路网络渲染 — 优先使用 scene/frame 的 road_network
   // （flowsim_node 发布，monitor_node 透传）。无 road_network 时 fallback

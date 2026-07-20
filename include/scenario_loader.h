@@ -78,6 +78,9 @@ extern "C" {
 #define SCENARIO_MAX_TRAFFIC_LIGHTS 4
 #define SCENARIO_MAX_ETC_GATES      4
 #define SCENARIO_MAX_STOP_LINES     4
+#define SCENARIO_MAX_SCRIPTS        8   /* 顶层 scenarios[] 工况脚本数组上限 */
+#define SCENARIO_MAX_OVERRIDES      8   /* 单个工况脚本的 actor_overrides 上限 */
+#define SCENARIO_SCRIPT_LABEL_LEN   48
 
 /* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
 
@@ -171,6 +174,75 @@ typedef struct {
     double heading;         /**< 停止线法向（rad，默认 0 = 垂直于 +X；未配置时 flowsim 可按道路切线估算） */
 } ScenarioStopLine;
 
+/* ── 光照模式（FlowSim v2 中凯路场景新增） ─────────────────── */
+
+/**
+ * 场景全局光照模式。场景 JSON 顶层 "lighting" 字段映射到此枚举。
+ * 缺省 = SCENARIO_LIGHT_DAY（与既有场景完全向后兼容）。
+ * SCENARIO_LIGHT_NIGHT 用于夜间场景：scene3d.js 降低 AmbientLight + DirectionalLight，
+ * 提升车辆 emissive（大灯/尾灯），Bloom 阈值降低凸显发光体。
+ */
+typedef enum {
+    SCENARIO_LIGHT_DAY   = 0,  /**< 白天（默认）：环境光 0.20 + 平行光 1.20 */
+    SCENARIO_LIGHT_NIGHT = 1,  /**< 夜间：环境光 0.04 + 平行光 0.15 + 大灯亮起 */
+    SCENARIO_LIGHT_DUSK  = 2,  /**< 黄昏：环境光 0.12 + 平行光 0.50 + 暖色调 */
+} ScenarioLighting;
+
+/* ── 工况脚本（顶层 scenarios[] 数组，FlowSim v2 新增） ─────── */
+
+/**
+ * 工况触发类型。
+ *   SCRIPT_TRIGGER_EGO_X_GTE : ego 世界 x ≥ value 时触发（顺行经过某点）
+ *   SCRIPT_TRIGGER_EGO_X_LTE : ego 世界 x ≤ value 时触发（对向/回程场景）
+ *   SCRIPT_TRIGGER_TIME_GTE  : 仿真累计时间 ≥ value（s）时触发
+ *   SCRIPT_TRIGGER_ROUTE_S_GTE : ego route 累计 s ≥ value 时触发（含弯道/匝道）
+ */
+typedef enum {
+    SCRIPT_TRIGGER_EGO_X_GTE    = 0,
+    SCRIPT_TRIGGER_EGO_X_LTE    = 1,
+    SCRIPT_TRIGGER_TIME_GTE     = 2,
+    SCRIPT_TRIGGER_ROUTE_S_GTE  = 3,
+} ScriptTriggerType;
+
+typedef struct {
+    ScriptTriggerType type;   /**< 触发类型 */
+    double            value;  /**< 触发阈值（m 或 s） */
+} ScenarioTrigger;
+
+/**
+ * 工况触发时对单个 actor 的属性覆盖。仅列出的字段被覆盖，未列出的保持不变。
+ * 字段语义对应 npc_ai.cpp 的 Entity 字段：
+ *   ai_state       → Entity.ai_state（如 "cutin" 对应 AIState::CutIn）
+ *   target_offset  → Entity.target_offset（CutIn 目标横向位置）
+ *   target_vx      → Entity.target_vx（巡航速度覆盖）
+ *   vx/vy          → 直接设置速度（用于行人横穿）
+ *   active         → 是否激活动画（行人 parked 翻转等，预留）
+ *
+ * ai_state 字符串映射（小写）：cruise/follow/stop/stop_for_tl/etc_approach/
+ * branch_sel/merge/yield/cutin。flowsim_node.cpp 用 flowsim_ai_state_from_str() 解析。
+ */
+typedef struct {
+    int    actor_id;            /**< 被覆盖的 actor id（场景 JSON actors[].id） */
+    char   ai_state[16];        /**< 覆盖 AI 状态（"cutin"/"stop"/"yield"/...），空串 = 不覆盖 */
+    double target_offset;       /**< 覆盖目标横向偏移（m），NaN = 不覆盖 */
+    double target_vx;           /**< 覆盖目标速度（m/s），NaN = 不覆盖 */
+    double vx;                  /**< 直接设置 vx（m/s），NaN = 不覆盖 */
+    double vy;                  /**< 直接设置 vy（m/s），NaN = 不覆盖 */
+} ScenarioActorOverride;
+
+/**
+ * 单个工况脚本：触发器 + 触发时对 actors 的属性覆盖。
+ * fired 字段运行时使用：触发一次后置 true，避免重复触发。
+ */
+typedef struct {
+    char                   name[SCENARIO_NAME_LEN];       /**< 工况名（"toll_cutin" 等） */
+    char                   label[SCENARIO_SCRIPT_LABEL_LEN]; /**< 可读描述 */
+    ScenarioTrigger        trigger;                       /**< 触发条件 */
+    ScenarioActorOverride  overrides[SCENARIO_MAX_OVERRIDES]; /**< 触发时应用的属性覆盖 */
+    int                    override_count;
+    bool                   fired;                         /**< 运行时：是否已触发过（防重复） */
+} ScenarioScript;
+
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
 typedef struct {
@@ -200,6 +272,10 @@ typedef struct {
     int               etc_gate_count;
     ScenarioStopLine  stop_lines[SCENARIO_MAX_STOP_LINES]; /**< 停止线（FlowSim v2 新增） */
     int               stop_line_count;
+    /* ── 中凯路场景新增（Task 3 + Task 4）── */
+    ScenarioLighting  lighting;        /**< 全局光照模式（day/night/dusk，默认 day） */
+    ScenarioScript    scripts[SCENARIO_MAX_SCRIPTS]; /**< 顶层 scenarios[] 工况脚本数组 */
+    int               script_count;
 } ScenarioConfig;
 
 /**

@@ -29,7 +29,7 @@ const _cache = {};
 let _ready = false;
 let _loadError = null;
 
-const MODEL_NAMES = ['sedan', 'truck', 'suv', 'pedestrian'];
+const MODEL_NAMES = ['sedan', 'su7', 'truck', 'suv', 'pedestrian'];
 
 /**
  * 从 glTF 场景建立带 userData 的车辆 Group。
@@ -178,6 +178,7 @@ export function getModel(type) {
   // Map type names to model names
   switch (name) {
     case 'car':    name = 'sedan'; break;
+    case 'su7':    name = 'su7'; break;
     case 'truck':  name = 'truck'; break;
     case 'suv':    name = 'suv'; break;
     case 'pedestrian': name = 'pedestrian'; break;
@@ -251,9 +252,12 @@ function _relinkWheelUserData(clone) {
 function _upgradeCarPaint(model, color) {
   var bodyNames = { body: 1, cabin: 1, cab: 1, cargo: 1, rear: 1, hood: 1, trunklid: 1,
                     door_FL: 1, door_FR: 1, door_RL: 1, door_RR: 1,
-                    chargeport_cover: 1, wiper_L: 1, wiper_R: 1 };
+                    chargeport_cover: 1, wiper_L: 1, wiper_R: 1,
+                    // Task 6: SU7 专属车身件（与 sedan 共用 body/cabin/hood/trunklid）
+                    spoiler: 1, splitter: 1, lidar_bump: 1,
+                    side_skirt_L: 1, side_skirt_R: 1 };
   var SKIP_PREFIXES = ['brakelight_', 'turnsignal_', 'headlight_', 'wheel_', 'ads_indicator'];
-  var SKIP_NAMES = { windshield: 1, rear_window: 1 };
+  var SKIP_NAMES = { windshield: 1, rear_window: 1, side_window_L: 1, side_window_R: 1 };
   function shouldSkip(name) {
     if (!name) return false;
     if (SKIP_NAMES[name]) return true;
@@ -336,11 +340,24 @@ export function _setVehicleLights(group, state, blinkPhase) {
 
 /**
  * Build a vehicle group for use as ego car.
- * 优先使用 glTF（gen_models.py 生成，含命名灯节点 + PBR 材质），
- * GLTFLoader 未就绪时回退到程序化 _buildSedan。
+ *
+ * Task 6：ego 默认使用小米 SU7 模型（gen_models.py 生成的 su7.gltf，
+ * 低趴溜背造型 + 贯穿式尾灯 + 车顶 LiDAR 凸起，海湾蓝金属漆）。
+ * SU7 不可用时回退到 sedan，再不行回退到程序化 _buildSedan。
+ *
+ * 调用方传入的 color 仅用于 sedan fallback 着色；SU7 走 su7_paint 材质
+ * （海湾蓝），_upgradeCarPaint 会识别 SU7 body 件名（body/hood/cabin/
+ * trunklid/spoiler/splitter/lidar_bump/side_skirt_*）并应用清漆车漆升级。
  */
 export function buildEgoCar(color) {
-  var model = getModel('sedan');
+  var model = getModel('su7');
+  if (model) {
+    _upgradeCarPaint(model, 0x1A528C);  // 海湾蓝（与 su7_paint baseColorFactor 对齐）
+    model.add(_buildContactShadow(5.0, 2.0));  // SU7 尺寸 4.95×1.92
+    return model;
+  }
+  // SU7 不可用 → 回退到 sedan
+  model = getModel('sedan');
   if (model) {
     _upgradeCarPaint(model, color || 0x4488dd);
     model.add(_buildContactShadow(4.6, 2.0));

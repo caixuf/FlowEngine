@@ -245,6 +245,26 @@ MATERIALS = {
             "roughnessFactor": 0.25,
         },
     },
+    # ── Task 6：小米 SU7 专属车漆 ──
+    # 海湾蓝（SU7 招牌色）：深蓝高金属感，低粗糙度（光泽漆面）。
+    # 与 sedan 的普通蓝色金属漆区分，凸显 ego 切换为 SU7 后的视觉差异。
+    "su7_paint": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.10, 0.32, 0.55, 1.0],   # 海湾蓝
+            "metallicFactor": 0.9,
+            "roughnessFactor": 0.20,
+        },
+    },
+    # SU7 贯穿式尾灯条：单一连续 LED 光带，跨整个车尾。
+    # 复用 brakelight emissive 调控，但单独定义以便 baseColor 微调（更深红）。
+    "su7_taillight_bar": {
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [0.45, 0.04, 0.04, 1.0],
+            "metallicFactor": 0.1,
+            "roughnessFactor": 0.30,
+        },
+        "emissiveFactor": [0.15, 0.0, 0.0],
+    },
     "glass": {
         "pbrMetallicRoughness": {
             "baseColorFactor": [0.7, 0.8, 0.95, 0.5],    # 半透明浅蓝
@@ -374,6 +394,73 @@ MODEL_SPECS = [
              "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
             {"name": "wheel_RR", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0, -0.93],
              "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.33, 0.26, "z", 24)},
+        ],
+    },
+    # ── Task 6：su7 — 小米 SU7（运动轿车，低趴溜背造型 + 贯穿尾灯 + 车顶激光雷达凸起）
+    # 真实尺寸 4997×1963×1455mm，轴距 3000mm。此处按 1:1 米制构建。
+    # 与 sedan 的差异：车身更长更宽更低（4.95×1.92×1.25）、引擎盖下压、溜背车顶
+    # 平滑过渡到后备厢、贯穿式 LED 尾灯条、车顶 LiDAR 凸起、低扁平率轮胎。
+    # 车头朝 +x；灯节点命名沿用 sedan 约定（headlight_L/R/brakelight_*/turnsignal_*
+    # /ads_indicator_*）让 models.js 自动建立 userData，scene3d.js 灯光切换逻辑复用。
+    {
+        "name": "su7",
+        "materials": ["su7_paint", "glass", "tire", "headlight", "brakelight", "turnsignal",
+                      "ads_indicator", "su7_taillight_bar"],
+        "parts": [
+            # 车身件 (su7_paint, mat 0) — 低趴运动造型
+            {"name": "body",       "mat": 0, "build_fn": lambda: box_vertices( 0.00, 0.45,  0.00, 4.95, 0.55, 1.92)},
+            # 引擎盖（下压式，比 sedan 低 12cm）
+            {"name": "hood",       "mat": 0, "build_fn": lambda: box_vertices( 1.65, 0.75,  0.00, 1.40, 0.06, 1.78)},
+            # 驾驶舱（溜背，车顶向后延伸，比 sedan 矮 22cm）
+            {"name": "cabin",      "mat": 0, "build_fn": lambda: box_vertices(-0.05, 0.98,  0.00, 2.30, 0.42, 1.55)},
+            # 后备厢盖（fastback 溜背，位置低）
+            {"name": "trunklid",   "mat": 0, "build_fn": lambda: box_vertices(-1.95, 0.78,  0.00, 0.85, 0.06, 1.78)},
+            # 后扰流板唇（小鸭尾）
+            {"name": "spoiler",    "mat": 0, "build_fn": lambda: box_vertices(-2.40, 0.82,  0.00, 0.10, 0.04, 1.55)},
+            # 前唇 splitter（前保险杠下进气口下沿）
+            {"name": "splitter",   "mat": 0, "build_fn": lambda: box_vertices( 2.45, 0.22,  0.00, 0.08, 0.04, 1.85)},
+            # 车顶 LiDAR 凸起（SU7 Max 顶置激光雷达特征）
+            {"name": "lidar_bump", "mat": 0, "build_fn": lambda: box_vertices(-0.05, 1.22,  0.00, 0.18, 0.06, 0.20)},
+            # 侧裙 (左右) — 降低视觉重心
+            {"name": "side_skirt_L", "mat": 0, "build_fn": lambda: box_vertices( 0.00, 0.25,  0.96, 3.20, 0.05, 0.04)},
+            {"name": "side_skirt_R", "mat": 0, "build_fn": lambda: box_vertices( 0.00, 0.25, -0.96, 3.20, 0.05, 0.04)},
+            # 玻璃 (glass, mat 1)
+            {"name": "windshield",  "mat": 1, "build_fn": lambda: box_vertices( 1.05, 0.92,  0.00, 0.06, 0.36, 1.48)},
+            {"name": "rear_window",  "mat": 1, "build_fn": lambda: box_vertices(-1.20, 0.88,  0.00, 0.06, 0.32, 1.42)},
+            {"name": "side_window_L", "mat": 1, "build_fn": lambda: box_vertices( 0.10, 1.00,  0.78, 1.85, 0.22, 0.04)},
+            {"name": "side_window_R", "mat": 1, "build_fn": lambda: box_vertices( 0.10, 1.00, -0.78, 1.85, 0.22, 0.04)},
+            # 前大灯 (headlight, mat 3) — 锐利 LED 灯带，左右两片
+            {"name": "headlight_L", "mat": 3, "build_fn": lambda: box_vertices( 2.46, 0.65,  0.62, 0.10, 0.14, 0.52)},
+            {"name": "headlight_R", "mat": 3, "build_fn": lambda: box_vertices( 2.46, 0.65, -0.62, 0.10, 0.14, 0.52)},
+            # 后刹车灯 (brakelight, mat 4) — 左右常规刹车灯
+            {"name": "brakelight_L", "mat": 4, "build_fn": lambda: box_vertices(-2.46, 0.78,  0.55, 0.06, 0.14, 0.40)},
+            {"name": "brakelight_R", "mat": 4, "build_fn": lambda: box_vertices(-2.46, 0.78, -0.55, 0.06, 0.14, 0.40)},
+            # SU7 招牌贯穿式尾灯条 (su7_taillight_bar, mat 7) — 单条横贯车尾
+            # 命名 "brakelight_bar" 让 models.js 自动归入 brakeLights 数组，
+            # 与左右刹车灯同步亮灭（_setVehicleLights 统一拉 emissiveIntensity）。
+            {"name": "brakelight_bar", "mat": 7, "build_fn": lambda: box_vertices(-2.48, 0.78, 0.00, 0.06, 0.10, 1.65)},
+            # 转向灯 (turnsignal, mat 5) — 前后 × 左右
+            {"name": "turnsignal_FL", "mat": 5, "build_fn": lambda: box_vertices( 2.46, 0.66,  0.85, 0.06, 0.10, 0.08)},
+            {"name": "turnsignal_FR", "mat": 5, "build_fn": lambda: box_vertices( 2.46, 0.66, -0.85, 0.06, 0.10, 0.08)},
+            {"name": "turnsignal_RL", "mat": 5, "build_fn": lambda: box_vertices(-2.46, 0.74,  0.85, 0.06, 0.10, 0.08)},
+            {"name": "turnsignal_RR", "mat": 5, "build_fn": lambda: box_vertices(-2.46, 0.74, -0.85, 0.06, 0.10, 0.08)},
+            # 自动驾驶小蓝灯 ×2 (ads_indicator, mat 6) — 车尾左右，始终亮
+            {"name": "ads_indicator_L", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.95, 0.92,  0.50, 0.07, 0.08, "y", 12)},
+            {"name": "ads_indicator_R", "mat": 6, "build_fn": lambda: cylinder_vertices(-1.95, 0.92, -0.50, 0.07, 0.08, "y", 12)},
+            # ── 车辆转向系统：前/后轴 Group（pivot 在轴心，无 mesh）──
+            # 轴距 3.00m（前 +1.50，后 -1.50，与真实 SU7 一致）；轮距 2.00m（半宽 1.00）。
+            # 轮心高度 0.34m（低扁平率轮胎，半径 0.34m 比 sedan 0.33 略大但更扁）。
+            {"name": "axle_front", "translation": [ 1.50, 0.34, 0.0]},
+            {"name": "axle_rear",  "translation": [-1.50, 0.34, 0.0]},
+            # 车轮（24 段圆柱，轴沿 Z；aero 低扁平率设计：半径 0.34, 宽 0.26）
+            {"name": "wheel_FL", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0,  1.00],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.34, 0.26, "z", 24)},
+            {"name": "wheel_FR", "mat": 2, "parent": "axle_front", "translation": [0.0, 0.0, -1.00],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.34, 0.26, "z", 24)},
+            {"name": "wheel_RL", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0,  1.00],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.34, 0.26, "z", 24)},
+            {"name": "wheel_RR", "mat": 2, "parent": "axle_rear",  "translation": [0.0, 0.0, -1.00],
+             "build_fn": lambda: cylinder_vertices(0.0, 0.0, 0.0, 0.34, 0.26, "z", 24)},
         ],
     },
     # ── truck：车头朝 +x，货箱在 -x；圆柱车轮 + 灯节点

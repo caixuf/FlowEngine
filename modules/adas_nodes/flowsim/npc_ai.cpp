@@ -179,7 +179,42 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     // ── E2: offset → target_offset 平滑插值（换道不瞬移，1.5s 完成 3.5m 变道）──
     // 变道速率 ≈ 2.3 m/s（3.5m / 1.5s），视觉上是平滑横移，不会突然跳。
     // 未在变道时 target_offset == offset，插值无变化。
-    if (!in_crash_cooldown && std::fabs(npc.offset - npc.target_offset) > 0.01) {
+    //
+    // CutIn 状态机（ai_state==CutIn）走专属 PID 横向控制，跳过 E2 固定速率：
+    //   u = Kp*e + Ki*∫e + Kd*de/dt   （e = target_offset - offset）
+    //   offset += clamp(u, ±max_lateral_speed) * dt
+    // PID 比 2.3 m/s 固定插值更"激进"且可控（超调后回拉），符合加塞场景；
+    // 同时 bypass lane_change_safe（跨实线变道本就要"硬挤"）。
+    if (!in_crash_cooldown && npc.ai_state == AIState::CutIn) {
+        double err = npc.target_offset - npc.offset;
+        npc.cutin_pid_integral += err * dt;
+        // 积分项防饱和（误差大时积分不持续累积，避免过冲后回拉过度）
+        double int_lim = cfg.cutin_max_lateral_speed / std::max(0.01, cfg.cutin_pid_ki);
+        if (npc.cutin_pid_integral >  int_lim) npc.cutin_pid_integral =  int_lim;
+        if (npc.cutin_pid_integral < -int_lim) npc.cutin_pid_integral = -int_lim;
+        double deriv = (err - npc.cutin_pid_prev) / std::max(1e-4, dt);
+        npc.cutin_pid_prev = err;
+        double u = cfg.cutin_pid_kp * err
+                 + cfg.cutin_pid_ki * npc.cutin_pid_integral
+                 + cfg.cutin_pid_kd * deriv;
+        // 横向速度限幅，防止初帧大误差引起突变
+        if (u >  cfg.cutin_max_lateral_speed) u =  cfg.cutin_max_lateral_speed;
+        if (u < -cfg.cutin_max_lateral_speed) u = -cfg.cutin_max_lateral_speed;
+        double step = u * dt;
+        // 防过冲：剩余距离不足一个 step 时直接收敛到目标
+        double remain = npc.target_offset - npc.offset;
+        if (std::fabs(step) > std::fabs(remain)) step = remain;
+        npc.offset += step;
+        npc.cutin_active = true;
+        // 到达目标通道 → 完成，回 Cruise（清积分项防残留影响下次）
+        if (std::fabs(npc.target_offset - npc.offset) < cfg.cutin_completion_threshold) {
+            npc.offset = npc.target_offset;
+            npc.ai_state = AIState::Cruise;
+            npc.cutin_pid_integral = 0.0;
+            npc.cutin_pid_prev = 0.0;
+            npc.cutin_active = false;
+        }
+    } else if (!in_crash_cooldown && std::fabs(npc.offset - npc.target_offset) > 0.01) {
         double dir = (npc.target_offset > npc.offset) ? 1.0 : -1.0;
         double step = 2.3 * dt;  // ≈2.3 m/s 横移速率
         double remain = std::fabs(npc.target_offset - npc.offset);
@@ -211,7 +246,9 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     //    候选 offset：从当前 offset 向更负方向（右侧顺行车道）移动 -3.5m，
     //    以及向参考线方向 +3.5m（不超过 0）。lane_change_safe 检查前后无车。
     //    换道时设 target_offset，由上面 E2 插值平滑移动。
-    if (!in_crash_cooldown) {
+    //    CutIn 状态机时跳过此块：CutIn 的 target_offset 由场景触发器（scenario_loader）
+    //    一次性给定，E4 自主换道逻辑不应覆盖它。
+    if (!in_crash_cooldown && npc.ai_state != AIState::CutIn) {
         if (npc.lane_change_timer > 0.0) {
             npc.lane_change_timer -= dt;
             if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
@@ -246,6 +283,17 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     if (!in_crash_cooldown) {
         if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
             v_desired = 0.0;
+        } else if (npc.ai_state == AIState::CutIn) {
+            // CutIn 期间：纵向减速 cfg.cutin_longitudinal_decel m/s（避免变道时冲撞侧后车），
+            // 仍按 IDM 跟前车（gap 不足时进一步减速），但上限为 target_vx - decel。
+            double cap = std::max(0.0, npc.target_vx - cfg.cutin_longitudinal_decel);
+            if (lead != INVALID_ENTITY) {
+                v_desired = idm_desired_speed(v, gap, cap, cfg, dt);
+            } else {
+                v_desired = cap;
+            }
+            // 保持 ai_state==CutIn（不要被 lead 分支覆盖成 Follow）
+            npc.ai_state = AIState::CutIn;
         } else if (lead != INVALID_ENTITY) {
             npc.ai_state = AIState::Follow;
             v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);

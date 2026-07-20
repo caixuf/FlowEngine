@@ -45,6 +45,20 @@ struct NpcAiConfig {
     double follow_decel_factor{3.0};/**< IDM 跟车减速强度系数，原 4.0 改 3.0 */
     double ped_boundary{7.8};       /**< 行人横穿边界（路宽，m） */
     double ped_wait_time{3.0};      /**< 行人到边后等待时间 (s) */
+
+    /* ── CutIn 加塞状态机（横向 PID 跨实线变道，收费站排队场景）──
+     * 设计文档 Phase 3.3：Cruise → 接近收费站 → 当前通道 != 目标 → CutIn
+     *   → 横向 PID 跨实线变道，vx 减速 2 m/s
+     *   → 到达目标通道 |offset - target_offset| < threshold → Cruise
+     * 跨实线时 bypass lane_change_safe 检查（避免被前后车阻挡无法变道）。
+     * PID 参数复用 control_node.cpp 调校经验：Kp=1.5（响应足够快），
+     * Ki=0.05（小积分消除稳态误差），Kd=0.4（阻尼抑制超调）。 */
+    double cutin_pid_kp{1.5};           /**< CutIn 横向 PID 比例系数 */
+    double cutin_pid_ki{0.05};          /**< CutIn 横向 PID 积分系数 */
+    double cutin_pid_kd{0.4};           /**< CutIn 横向 PID 微分系数 */
+    double cutin_max_lateral_speed{3.0};/**< CutIn 横向最大速度（m/s），限幅防过冲 */
+    double cutin_completion_threshold{0.15}; /**< CutIn 完成判定阈值：|err|<此值 → 回 Cruise */
+    double cutin_longitudinal_decel{2.0};    /**< CutIn 时纵向速度减幅（m/s），放缓避免冲撞 */
 };
 
 /**
