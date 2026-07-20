@@ -229,6 +229,30 @@ export function initCarMesh() {
   // 车轴横梁（圆柱沿 Z 连接左右轮，radius 0.04，长度 1.9）
   _carGeom.axleBeam = new T.CylinderGeometry(0.04, 0.04, 1.9, 6);
   _carGeom.axleBeam.rotateX(Math.PI / 2);
+
+  // ── SU7 标志性元素几何（贯穿式 LED 尾灯条 + 后扩散器 + 前唇 + 扰流板 + 内饰）──
+  // 贯穿式 LED 尾灯条：长 1.70m，薄 0.08m 高，厚 0.04m，覆盖整个车尾
+  _carGeom.ledTailBar = new T.BoxGeometry(0.04, 0.08, 1.70);
+  // 后扩散器主体 + 前唇 splitter：薄长条
+  _carGeom.diffuser = new T.BoxGeometry(0.15, 0.02, 1.60);
+  _carGeom.splitter = new T.BoxGeometry(0.15, 0.02, 1.98);
+  _carGeom.diffuserFin = new T.BoxGeometry(0.12, 0.06, 0.01);
+  // 小扰流板（lip spoiler）+ 支架
+  _carGeom.lipSpoiler = new T.BoxGeometry(0.08, 0.02, 1.60);
+  _carGeom.spoilerSupport = new T.BoxGeometry(0.03, 0.04, 0.03);
+  // 高位刹车灯（中央，贴后窗下沿）
+  _carGeom.highBrake = new T.BoxGeometry(0.03, 0.025, 0.60);
+  // 雾灯发光球（前杠两侧）
+  _carGeom.fogSphere = new T.SphereGeometry(0.10, 16, 16);
+  _carGeom.fogHousing = new T.BoxGeometry(0.04, 0.16, 0.22);
+  // 内饰：方向盘（torus）+ 座椅 + 仪表盘
+  _carGeom.intWheel = new T.TorusGeometry(0.14, 0.015, 8, 20);
+  _carGeom.seat = new T.BoxGeometry(0.50, 0.45, 0.35);
+  _carGeom.dash = new T.BoxGeometry(0.60, 0.15, 1.50);
+  _carGeom.dashScreen = new T.BoxGeometry(0.02, 0.14, 0.80);
+  // 腰线 / 肩线（车身侧特征线，subtle 高亮条）
+  _carGeom.waistLine = new T.BoxGeometry(3.80, 0.01, 0.005);
+  _carGeom.shoulderLine = new T.BoxGeometry(1.80, 0.008, 0.005);
 }
 
 /**
@@ -421,21 +445,33 @@ export function _buildSedan(color, secondaryColor, addSpots) {
   addHeadlight(0.58, 'L'); addHeadlight(-0.58, 'R');
 
   // Taillights（= 刹车灯，name brakelight_ 供 _setVehicleLights 查找）
-  var tlMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.7, roughness: 0.12 });
+  // SU7 标志性贯穿式 LED 尾灯条：长 1.70m 横贯车尾，左右各保留独立 brakelight_L/R 节点
+  // 供 _setVehicleLights 按侧切换（实际物理是整条同时亮，但保留命名兼容现有灯光状态机）。
+  var tlMat = new T.MeshStandardMaterial({ color: 0xff1a1a, emissive: 0xff1a1a, emissiveIntensity: 1.7, roughness: 0.12 });
+  var tlBarMat = tlMat.clone();  // 贯穿条本体材质（与左右透镜同步切换）
   var brakeLightMeshes = [];
+  // 贯穿 LED 条本体
+  var ledBar = new T.Mesh(_carGeom.ledTailBar, tlBarMat);
+  ledBar.position.set(-2.18, 0.58, 0);
+  ledBar.name = 'brakelight_bar';
+  g.add(ledBar);
+  brakeLightMeshes.push(ledBar);
+  // 左右透镜（与 LED 条同步切换，保留 brakelight_L/R 命名兼容 glTF 扫描逻辑）
   function addTaillight(z, side) {
-    var bg = new T.Group();
     var lens = new T.Mesh(_carGeom.taillight, tlMat);
     lens.name = 'brakelight_' + side;
+    lens.position.set(-2.18, 0.58, z);
+    g.add(lens);
     brakeLightMeshes.push(lens);
-    var bezel = new T.Mesh(new T.BoxGeometry(0.07, 0.18, 0.46, 1, 1, 3), bezelMat);
-    bezel.position.x = 0.02;
-    bg.add(bezel); bg.add(lens);
-    bg.position.set(-2.18, 0.58, z);
-    g.add(bg);
-    return bg;
   }
   addTaillight(0.58, 'L'); addTaillight(-0.58, 'R');
+  // 中央高位刹车灯（贴后窗下沿，SU7 量产车配置）
+  var highBrakeMat = new T.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 1.7, roughness: 0.15 });
+  var highBrake = new T.Mesh(_carGeom.highBrake, highBrakeMat);
+  highBrake.position.set(-1.95, 1.05, 0);
+  highBrake.name = 'brakelight_high';
+  g.add(highBrake);
+  brakeLightMeshes.push(highBrake);
 
   // Turn signals（琥珀色，四角，name turnsignal_ 供 _setVehicleLights 查找）
   var turnMat = new T.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2.0, roughness: 0.10 });
@@ -469,6 +505,85 @@ export function _buildSedan(color, secondaryColor, addSpots) {
   spotR.target.position.set(18, 0, -0.55);
   spotR.castShadow = false;
   g.add(spotR); g.add(spotR.target);
+
+  // ── SU7 外观套件：前雾灯 + 前唇 splitter + 后扩散器 + 鳍片 + 小扰流板 ──
+  // 前雾灯：球状发光体 + 深色外壳（不含 SpotLight，避免 NPC 24 个实例光源爆 shader）
+  var fogMat = new T.MeshStandardMaterial({ color: 0xffdd88, emissive: 0xffdd88, emissiveIntensity: 0, roughness: 0.10, metalness: 0.2 });
+  var fogHousingMat = new T.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
+  function addFogLight(z) {
+    var housing = new T.Mesh(_carGeom.fogHousing, fogHousingMat);
+    housing.position.set(2.16, 0.25, z);
+    g.add(housing);
+    var sphere = new T.Mesh(_carGeom.fogSphere, fogMat.clone());
+    sphere.position.set(2.18, 0.25, z);
+    g.add(sphere);
+  }
+  addFogLight(0.55); addFogLight(-0.55);
+
+  // 前唇 splitter（降低视觉重心，sport package 标配）
+  var splitterMat = new T.MeshStandardMaterial({ color: 0x0a0a15, roughness: 0.5, metalness: 0.7 });
+  var splitter = new T.Mesh(_carGeom.splitter, splitterMat);
+  splitter.position.set(2.18, 0.13, 0);
+  g.add(splitter);
+
+  // 后扩散器 + 5 片垂直鳍片（SU7 后保险杠标志性元素）
+  var diffuser = new T.Mesh(_carGeom.diffuser, splitterMat);
+  diffuser.position.set(-2.18, 0.13, 0);
+  g.add(diffuser);
+  for (var fi = -2; fi <= 2; fi++) {
+    var fin = new T.Mesh(_carGeom.diffuserFin, splitterMat);
+    fin.position.set(-2.12, 0.14, fi * 0.30);
+    g.add(fin);
+  }
+
+  // 小扰流板（lip spoiler，后备箱边缘，SU7 量产车标配）
+  var spoilerMat = new T.MeshStandardMaterial({ color: 0x0a0a15, roughness: 0.3, metalness: 0.8 });
+  var spoiler = new T.Mesh(_carGeom.lipSpoiler, spoilerMat);
+  spoiler.position.set(-1.85, 0.95, 0);
+  g.add(spoiler);
+  // 扰流板支架 ×2
+  [-0.6, 0.6].forEach(function(z) {
+    var support = new T.Mesh(_carGeom.spoilerSupport, spoilerMat);
+    support.position.set(-1.85, 0.93, z);
+    g.add(support);
+  });
+
+  // 车身特征线：腰线（waist line）+ 肩线（shoulder line），subtle 高亮条增加层次感
+  var lineMat = new T.MeshStandardMaterial({ color: 0x88aacc, roughness: 0.1, metalness: 0.95 });
+  var waistL = new T.Mesh(_carGeom.waistLine, lineMat);
+  waistL.position.set(0, 0.58, 0.96); g.add(waistL);
+  var waistR = new T.Mesh(_carGeom.waistLine, lineMat);
+  waistR.position.set(0, 0.58, -0.96); g.add(waistR);
+  var shoulderL = new T.Mesh(_carGeom.shoulderLine, lineMat);
+  shoulderL.position.set(0.1, 1.10, 0.86); g.add(shoulderL);
+  var shoulderR = new T.Mesh(_carGeom.shoulderLine, lineMat);
+  shoulderR.position.set(0.1, 1.10, -0.86); g.add(shoulderR);
+
+  // ── SU7 内饰（透过玻璃可见）：方向盘 + 座椅 + 仪表盘 + 屏幕 ──
+  var interiorMat = new T.MeshStandardMaterial({ color: 0x0a0a12, roughness: 0.9 });
+  var seatMat = new T.MeshStandardMaterial({ color: 0x151520, roughness: 0.9 });
+  // 仪表盘
+  var dash = new T.Mesh(_carGeom.dash, interiorMat);
+  dash.position.set(0.80, 0.75, 0); g.add(dash);
+  // 仪表屏（emissive 蓝色微亮）
+  var screenMat = new T.MeshStandardMaterial({ color: 0x001122, emissive: 0x001133, emissiveIntensity: 0.5, roughness: 0.1, metalness: 0.5 });
+  var screen = new T.Mesh(_carGeom.dashScreen, screenMat);
+  screen.position.set(0.52, 0.80, 0);
+  screen.rotation.y = 0.3;
+  g.add(screen);
+  // 方向盘（torus + 倾斜）
+  var intWheelMat = new T.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+  var intWheel = new T.Mesh(_carGeom.intWheel, intWheelMat);
+  intWheel.position.set(0.70, 0.88, 0);
+  intWheel.rotation.y = Math.PI / 2;
+  intWheel.rotation.x = -0.35;
+  g.add(intWheel);
+  // 座椅 ×2
+  [-0.35, 0.35].forEach(function(z) {
+    var seat = new T.Mesh(_carGeom.seat, seatMat);
+    seat.position.set(-0.05, 0.75, z);
+    g.add(seat);
+  });
 
   // 车底接触阴影：软边径向渐变平面，补充 AO 感
   g.add(_buildContactShadow(4.6, 2.0));
