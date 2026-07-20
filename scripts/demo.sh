@@ -15,9 +15,10 @@
 # =============================================================================
 set -e
 
-# 默认旗舰场景：中凯路复合立交场景（含 CutIn 加塞 + 工况脚本 + 夜间光照 + SU7 模型）。
+# 默认场景：infinite_straight — 10km 双向 2 车道直路 + 5 慢速货车 + 2 快速轿车，
+# 简单可超车的无限循环场景。duration_s=0 → 无限（Ctrl+C 退出）。
 # 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
-DEFAULT_SCENARIO="scenarios/zhongkai_road_full.json"
+DEFAULT_SCENARIO="scenarios/infinite_straight.json"
 
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
