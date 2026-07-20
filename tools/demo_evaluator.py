@@ -339,9 +339,35 @@ def road_center_y(x: float, road: dict | None) -> float:
     return curve_offset_m * (3.0 * t * t - 2.0 * t * t * t)
 
 
-def nearest_lane_error(y: float, lane_width: float = 3.5) -> float:
-    lane_centers = [-lane_width * 0.5, lane_width * 0.5]
-    return min(abs(y - center) for center in lane_centers)
+def lane_center_y(lane_idx: int, lane_count: int, lane_width: float, road_c: float = 0.0) -> float:
+    """Mirror of include/road_geometry.h::lane_center_y() — N 车道中心对称布置。
+    lane_idx: 0=最左, lane_count-1=最右；road_c=道路中心 y 坐标。"""
+    if lane_count <= 1:
+        return road_c
+    return road_c + (lane_idx - (lane_count - 1) * 0.5) * lane_width
+
+
+def lane_idx_from_y(y: float, lane_count: int, lane_width: float, road_c: float = 0.0) -> int:
+    """Mirror of include/road_geometry.h::lane_idx_from_y() — 反推车道索引，
+    clamp 到 [0, lane_count-1]。"""
+    if lane_count <= 1:
+        return 0
+    offset = (y - road_c) / lane_width + (lane_count - 1) * 0.5
+    idx = int(round(offset))
+    if idx < 0:
+        idx = 0
+    if idx >= lane_count:
+        idx = lane_count - 1
+    return idx
+
+
+def nearest_lane_error(y: float, lane_width: float = 3.5, lane_count: int = 2, road_c: float = 0.0) -> float:
+    """ego 横向位置 y（相对道路中心 road_c）到最近车道中心的最小距离。
+    N 车道模型：lane_count=2 时退化为 [-lane_width*0.5, +lane_width*0.5]，与旧实现一致。"""
+    if lane_count <= 1:
+        return abs(y - road_c)
+    lane_centers = [lane_center_y(i, lane_count, lane_width, road_c) for i in range(lane_count)]
+    return min(abs(y - c) for c in lane_centers)
 
 
 def angle_diff(a: float, b: float) -> float:
@@ -405,8 +431,10 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "heading": heading,
         "steer": steer,
         "steer_signed": steer_signed,
-        "lane_error": nearest_lane_error(y_rel, lane_width),
+        "lane_error": nearest_lane_error(y_rel, lane_width, lane_count, 0.0),
         "road_edge_margin": lane_width * lane_count * 0.5 - abs(y_rel) - 1.0,
+        "lane_count": lane_count,
+        "y_rel": y_rel,
         "min_forward_gap": min_forward_gap,
         "min_abs_gap": min_abs_gap,
         "obs_world": obs_world,
@@ -710,13 +738,18 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         prev_ts = ts
     stagnation_duration_s = longest_stagnation
 
-    # ── 变道次数统计（基于 y 显著偏移） ──
-    ys = [m["y"] for m in series]
+    # ── 变道次数统计（基于 y 量化到车道 idx） ──
+    # N 车道模型：用 lane_idx_from_y 把每帧 y_rel 量化到车道索引，
+    # 相邻帧 idx 变化即记一次变道。lane_count=2 时与旧实现等价。
+    # 注：metrics["lane_count"] 取自 road/geometry topic（flowsim 按 ego road_id
+    # 实时发布），中途若切换路段导致 lane_count 变化，按每帧各自的 lane_count 量化。
+    lane_width_default = 3.5
     lane_change_count = 0
     prev_lane = None
-    for y_val in ys:
-        # 左车道中心 y≈-1.75，右车道中心 y≈1.75，lane_width=3.5
-        lane_idx = 0 if y_val < 0 else 1  # 0=左车道 1=右车道
+    for m in series:
+        lc = int(m.get("lane_count", 2) or 2)
+        yr = float(m.get("y_rel", 0.0) or 0.0)
+        lane_idx = lane_idx_from_y(yr, lc, lane_width_default, 0.0)
         if prev_lane is not None and lane_idx != prev_lane:
             lane_change_count += 1
         prev_lane = lane_idx

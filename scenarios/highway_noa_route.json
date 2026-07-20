@@ -28,6 +28,6 @@
   },
   "route": [
     { "trigger_x": 60.0,  "target_lane": 1,  "label": "prepare_exit_move_left" },
-    { "trigger_x": 220.0, "target_lane": -1, "label": "return_main_lane" }
+    { "trigger_x": 220.0, "target_lane": 0,  "label": "return_main_lane" }
   ]
 }

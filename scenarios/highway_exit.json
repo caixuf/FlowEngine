@@ -53,7 +53,7 @@
   "route": [
     { "trigger_x": 80.0,  "target_lane": 1,   "target_speed": 0,   "label": "prepare_exit_move_right" },
     { "trigger_x": 200.0, "target_lane": 1,   "target_speed": 10.0, "label": "ramp_entry_decelerate" },
-    { "trigger_x": 280.0, "target_lane": -1,  "target_speed": 16.0, "label": "merge_to_main_road" }
+    { "trigger_x": 280.0, "target_lane": 0,   "target_speed": 16.0, "label": "merge_to_main_road" }
   ],
   "road": {
     "curve_start_x": 200.0,

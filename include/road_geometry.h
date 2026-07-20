@@ -80,6 +80,42 @@ static inline double road_center_curvature(double x,
     return d2y_dx2 / denom;
 }
 
+/**
+ * 车道中心 y 坐标（多车道通用）。
+ *
+ * N 车道按"中心对称"布置：idx=0 在最左侧，idx=N-1 在最右侧，
+ * 各车道中心相对道路中心 road_c 的偏移为 (idx - (N-1)/2) * lane_width。
+ *
+ * 例：N=2, lane_width=3.5, road_c=0 → idx 0 中心 -1.75，idx 1 中心 +1.75
+ *     N=4, lane_width=3.2, road_c=0 → idx 0/1/2/3 中心 -4.8/-1.6/+1.6/+4.8
+ *
+ * @param lane_idx     车道索引 [0, lane_count-1]
+ * @param lane_count   当前路段可行驶车道数（≥1）
+ * @param lane_width   单车道宽度（m）
+ * @param road_c       道路中心线 y（来自 road_center_y()）
+ */
+static inline double lane_center_y(int lane_idx, int lane_count,
+                                    double lane_width, double road_c) {
+    if (lane_count <= 1) return road_c;
+    return road_c + (lane_idx - (lane_count - 1) * 0.5) * lane_width;
+}
+
+/**
+ * 由 ego 横向 y 反推车道索引 [0, lane_count-1]。
+ *
+ * 用 round 量化到最近车道中心，再 clamp 到合法范围。
+ * 用于 control_node 把 ego_y 转成当前 committed_lane_idx。
+ */
+static inline int lane_idx_from_y(double y, int lane_count,
+                                   double lane_width, double road_c) {
+    if (lane_count <= 1) return 0;
+    double offset = (y - road_c) / lane_width + (lane_count - 1) * 0.5;
+    int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);  /* round */
+    if (idx < 0) idx = 0;
+    if (idx >= lane_count) idx = lane_count - 1;
+    return idx;
+}
+
 #ifdef __cplusplus
 }
 #endif

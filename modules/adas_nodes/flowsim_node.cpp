@@ -725,7 +725,25 @@ static void publish_road_geometry(void) {
     cJSON_AddNumberToObject(root, "curve_length_m", g.curve_length_m);
     cJSON_AddNumberToObject(root, "curve_offset_m", g.curve_offset_m);
     cJSON_AddNumberToObject(root, "lane_width", g.lane_width);
-    cJSON_AddNumberToObject(root, "lane_count", 2);
+    /* 按当前 ego 所在 road 实时查询可行驶车道数。
+     * 旧实现硬编码 lane_count=2，导致 4 车道 toll_plaza / 3 车道 urban 段
+     * control_node 的 cruise_lane_y 算式只能算出 ±half_lane（中间两车道），
+     * ego 永远到不了 +5.25 / -5.25 外侧车道，看起来像"逆行"。
+     * 这里查询失败时回退 2（向后兼容 2 车道场景）。 */
+    int lane_count = 2;
+    if (g.roads_loaded) {
+        const flowsim::Entity& ego = g.pool[0];
+        flowsim::FrenetPos ef;
+        if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
+            int n = g.roads.drivable_lane_count(ef.road_id, ef.s);
+            if (n > 0) lane_count = n;
+        }
+    }
+    cJSON_AddNumberToObject(root, "lane_count", lane_count);
+    /* 同步到 scene_pub_cfg，供 ego fallback 横向控制（lane_keep_ego_fallback）
+     * 和 scene/frame 发布使用，否则它们仍用 init 默认值 2，导致 4 车道场景
+     * ego target_y 算错。 */
+    g.scene_pub_cfg.lane_count = lane_count;
     char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, "road/geometry",
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
@@ -879,9 +897,13 @@ static void internal_cruise_control(flowsim::Entity& ego) {
         ego.throttle = 0.1;
         ego.brake = 0.0;
     }
-    /* 横向：车道保持 — 朝道路中心线 + 目标车道偏移 */
-    double target_y = road_center_y(ego.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m)
-                      + (-g.lane_width * 0.5);  /* 默认左车道中心 */
+    /* 横向：车道保持 — 朝 ego 当前所在车道中心。
+     * 旧实现硬编码 -0.5*lane_width（2 车道左车道中心），是 2 车道假设。
+     * N 车道模型：用 lane_idx_from_y 量化 ego 当前车道 idx，再算该车道中心 y。
+     * 单车道路段（如 ramp_curve）回退到道路中心。 */
+    double rc_y = road_center_y(ego.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+    int ego_lane_idx = lane_idx_from_y(ego.y, g.scene_pub_cfg.lane_count, g.lane_width, rc_y);
+    double target_y = lane_center_y(ego_lane_idx, g.scene_pub_cfg.lane_count, g.lane_width, rc_y);
     double y_err = target_y - ego.y;
     /* 用道路切线航向做前馈 + 横向偏差 P 反馈 */
     double road_h = road_center_heading(ego.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);

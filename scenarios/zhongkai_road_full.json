@@ -79,11 +79,11 @@
     ]
   },
   "route": [
-    { "trigger_x": 0,    "type": "lane_change",   "target_lane": 0,  "label": "city_cruise_south" },
+    { "trigger_x": 0,    "type": "lane_change",   "target_lane": -1, "label": "city_cruise_south" },
     { "trigger_x": 250,  "type": "branch_select", "branch_id": 1,    "label": "enter_toll_etc_2" },
-    { "trigger_x": 350,  "type": "lane_change",   "target_lane": 0,  "target_speed": 8, "label": "exit_toll_to_intersection" },
-    { "trigger_x": 770,  "type": "lane_change",   "target_lane": 0,  "target_speed": 0, "label": "stop_at_red_light" },
-    { "trigger_x": 850,  "type": "lane_change",   "target_lane": 0,  "target_speed": 13, "label": "cross_intersection" }
+    { "trigger_x": 350,  "type": "lane_change",   "target_lane": -1, "target_speed": 8, "label": "exit_toll_to_intersection" },
+    { "trigger_x": 770,  "type": "lane_change",   "target_lane": -1, "target_speed": 0, "label": "stop_at_red_light" },
+    { "trigger_x": 850,  "type": "lane_change",   "target_lane": -1, "target_speed": 13, "label": "cross_intersection" }
   ],
   "traffic_lights": [
     { "id": 0, "x": 560, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0,
