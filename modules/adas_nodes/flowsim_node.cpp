@@ -303,18 +303,31 @@ static void apply_actor_override(flowsim::Entity& e,
     if (!isnan(o->vy)) e.vy = o->vy;
 }
 
+/* Compute ego's cumulative s along the central route.
+ *
+ * 性能优化：ego.road_pos 是本地 esmini position handle，frenet() 查询是 O(1)
+ * 本地操作；而 world_to_frenet 是 O(roads) 全网扫描（遍历所有 road 找最近）。
+ * 主循环每帧原本调用 world_to_frenet 3 次（apply_scenario_scripts /
+ * publish_ref_path / Step 3 NPC AI），20Hz 下 = 60 次/s 冗余全网扫描。
+ *
+ * 此 helper 优先用 ego.road_pos.frenet()（road_pos.ok() 时），仅在 road_pos
+ * 未初始化或查询失败时回退到 world_to_frenet。返回 -1.0 表示 ego 不在 route 上。 */
+static double compute_ego_route_s() {
+    if (!g.route.ok() || !g.roads_loaded) return -1.0;
+    const flowsim::Entity& ego = g.pool[0];
+    flowsim::FrenetPos ef;
+    bool ok = ego.road_pos.ok() ? ego.road_pos.frenet(ef)
+                                 : g.roads.world_to_frenet(ego.x, ego.y, ef);
+    if (!ok) return -1.0;
+    int ei = g.route.index_of(ef.road_id);
+    return (ei >= 0) ? g.route.to_route_s(ei, ef.s) : -1.0;
+}
+
 static void apply_scenario_scripts(double sim_time_s) {
     if (!g.scenario || g.scenario->script_count <= 0) return;
     const flowsim::Entity& ego = g.pool[0];
     /* 预算 ego route_s（route_s_gte 触发器用） */
-    double ego_route_s = -1.0;
-    if (g.route.ok() && g.roads_loaded) {
-        flowsim::FrenetPos ef;
-        if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
-            int ei = g.route.index_of(ef.road_id);
-            if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
-        }
-    }
+    double ego_route_s = compute_ego_route_s();
     /* Phase 2: ego.road_pos.ok() 时也用 road_pos.s() 作为触发条件的 OR 来源。
      * route_s 是沿中央 route 的累计 s（跨 road 段），road_pos.s() 是当前 road
      * 内的局部 s；二者度量的不是同一个量，但 route_s_gte 触发器一般是粗粒度
@@ -769,14 +782,10 @@ static void publish_ref_path(void) {
 
     cJSON* pts = cJSON_CreateArray();
     if (g.roads_loaded && g.route.ok()) {
-        /* ego 在 route 上的累计 s：与主循环同样的算法 */
         const flowsim::Entity& ego = g.pool[0];
-        flowsim::FrenetPos ef;
-        double ego_route_s = 0.0;
-        if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
-            int ei = g.route.index_of(ef.road_id);
-            if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
-        }
+        /* ego 在 route 上的累计 s：用 compute_ego_route_s 复用 road_pos handle */
+        double ego_route_s = compute_ego_route_s();
+        if (ego_route_s < 0.0) ego_route_s = 0.0;  /* 不在 route 上时从起点采样 */
         /* 采样 ego 前方 100m、间距 5m（21 个点）；lookahead 远一些保证
          * 控制器在高速段（27m/s）每步 1.35m 也有充足前视距离。 */
         std::vector<flowsim::RefPathPoint> samples;
@@ -1051,15 +1060,10 @@ protected:
             flowsim::FlowRoadNetwork* roads_ptr = g.roads_loaded ? &g.roads : nullptr;
             const flowsim::Route* route_ptr =
                 (g.roads_loaded && g.route.ok()) ? &g.route : nullptr;
-            /* ego 在 route 上的累计 s：回收 NPC 时用来放到 ego 附近，形成持续车流 */
-            double ego_route_s = 0.0;
-            if (route_ptr) {
-                flowsim::FrenetPos ef;
-                if (g.roads.world_to_frenet(g.pool[0].x, g.pool[0].y, ef)) {
-                    int ei = g.route.index_of(ef.road_id);
-                    if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
-                }
-            }
+            /* ego 在 route 上的累计 s：回收 NPC 时用来放到 ego 附近，形成持续车流。
+             * 用 compute_ego_route_s 复用 road_pos handle，避免每帧 world_to_frenet 全网扫描 */
+            double ego_route_s = compute_ego_route_s();
+            if (ego_route_s < 0.0) ego_route_s = 0.0;  /* 不在 route 上时回退到起点 */
             for (int i = 1; i < g.pool.size(); i++) {
                 flowsim::Entity& e = g.pool[i];
                 if (!e.active) continue;
