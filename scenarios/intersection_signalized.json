@@ -45,7 +45,7 @@
       "yellow_s": 3.0,
       "green_s": 12.0,
       "phase_offset_s": 0.0,
-      "_comment": "ego 车道方向信号灯：停止线 x=50m，红灯 15s + 黄灯 3s + 绿灯 12s = 30s 周期。phase_offset=0 → 启动即红灯（顶层字段保留供 scenario_loader/demo_evaluator 读取，edge.traffic_lights 为新格式镜像）"
+      "_comment": "灯杆在停止线位置（road 0 内 s=50）。flowsim_node.cpp 现已用 esmini world_to_frenet→frenet_to_world 校正，x=50 会被自动吸附到 road 0 参考线/车道中心，所以此坐标即使与路网中心 (s=95) 偏差 45m 也能正确渲染。edge.traffic_lights 为新格式镜像。"
     }
   ],
   "pass_criteria": {

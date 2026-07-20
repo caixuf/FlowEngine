@@ -77,7 +77,8 @@
     { "trigger_x": 1850, "type": "lane_change",   "target_lane": 1,  "label": "return_right" }
   ],
   "traffic_lights": [
-    { "id": 0, "x": 400, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0 }
+    { "id": 0, "x": 275, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0,
+      "_comment": "路口中心：road 1 (s=200~350) 中点 = s=275" }
   ],
   "etc_gates": [
     { "id": 0, "x": 450, "y": 0, "approach_speed": 5.0, "open_range_m": 50 }

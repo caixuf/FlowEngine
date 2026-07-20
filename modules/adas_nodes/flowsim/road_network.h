@@ -125,6 +125,13 @@ public:
      */
     double lane_width(int road_id, int lane_id, double s);
 
+    /**
+     * 查询指定道路在 s 处的可行驶车道数（双向合计）。
+     * 用于 road/traffic_lights spawn 时算 road_half_width（n × lane_width / 2）。
+     * 失败返回 0。
+     */
+    int drivable_lane_count(int road_id, double s);
+
 private:
     bool loaded_{false};
     int  pos_handle_{-1};  /**< RM position handle，构造时创建 */

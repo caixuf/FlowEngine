@@ -86,8 +86,10 @@
     { "trigger_x": 850,  "type": "lane_change",   "target_lane": 0,  "target_speed": 13, "label": "cross_intersection" }
   ],
   "traffic_lights": [
-    { "id": 0, "x": 770, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0 },
-    { "id": 1, "x": 770, "y_lane":  1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0 }
+    { "id": 0, "x": 560, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0,
+      "_comment": "路口中心：road 3 (s=530~590) 中点 = s=560（原 770 是手填错位 210m）" },
+    { "id": 1, "x": 560, "y_lane":  1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0,
+      "_comment": "路口中心：road 3 中点 = s=560" }
   ],
   "etc_gates": [
     { "id": 0, "x": 290, "y": -5.25, "approach_speed": 5.0, "open_range_m": 50 },
@@ -96,8 +98,8 @@
     { "id": 3, "x": 290, "y":  5.25, "approach_speed": 2.0, "open_range_m": 50 }
   ],
   "stop_lines": [
-    { "id": 0, "x": 760, "y": -1.75 },
-    { "id": 1, "x": 760, "y":  1.75 }
+    { "id": 0, "x": 525, "y": -1.75, "_comment": "路口停止线：road 3 起点 s=530 前 5m" },
+    { "id": 1, "x": 525, "y":  1.75, "_comment": "路口停止线：road 3 起点前 5m" }
   ],
   "pass_criteria": {
     "min_distance_m": 200.0,

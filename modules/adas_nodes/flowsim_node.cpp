@@ -507,71 +507,151 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     }
 
     /* 红绿灯 → TrafficLight 实体 */
-    /* 杆位置修正：场景 y_lane 默认 -1.75 是「停止线所在车道中心」（仅用于
-     * 规划/停止线判定），但 3D 渲染里红绿灯杆应放在路缘外侧 +1.5m 退让，
-     * 否则会看到「杆立在路中间」的诡异画面。这里把 entity.y 改为路缘外：
-     *   sign(y_lane) * (road_half_width + 1.5)
-     * road_half_width 取场景默认 2 车道 × 3.5m / 2 = 3.5m（与场景 lane_width
-     * 一致；若未来 road_network 在 ScenarioTrafficLight 暴露 lane_width/lanes，
-     * 这里改读字段即可）。 */
-    for (int i = 0; i < sc->traffic_light_count && i < SCENARIO_MAX_TRAFFIC_LIGHTS; i++) {
-        const ScenarioTrafficLight* tl = &sc->traffic_lights[i];
-        flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::TrafficLight);
-        if (id == flowsim::INVALID_ENTITY) break;
-        flowsim::Entity& e = g.pool[id];
-        e.id = tl->id;
-        e.x = tl->x;
-        /* 路缘外位置（杆立柱真实位置）。原 y_lane 仅作 sign 来源，丢弃。 */
-        double road_half_width = 3.5;  /* 默认 2 车道 × 3.5m / 2 */
-        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-        e.y = sign * (road_half_width + 1.5);
-        /* 相位时长复用字段（见 scene_events.h 约定） */
-        e.throttle = tl->green_s;     /* green 时长 */
-        e.brake    = tl->yellow_s;    /* yellow 时长 */
-        e.steer    = tl->red_s;       /* red 时长 */
-        e.target_vx = tl->phase_offset_s;  /* 相位偏移 */
-        e.heading = tl->heading;
-        /* 未显式配置 heading 时，按道路几何估算切线方向（esmini 优先，
-         * legacy 弯道 fallback），保证弯道场景红绿灯 arm 大致垂直于道路。 */
-        if (e.heading == 0.0) {
-            e.heading = compute_road_heading_at(e.x, e.y);
+    /* 杆位置修正（两层语义）：
+     *   1) 场景 y_lane 是「停止线所在车道中心」的横向偏移（仅用于规划/停止线判定）；
+     *   2) 3D 渲染里红绿灯杆应放在路缘外侧 +1.5m 退让，避免「杆立在路中间」的诡异画面。
+     * 之前 world_half_width 硬编码为 3.5m（2 车道 × 3.5），但中凯路 road 3 是 3 车道
+     * （半宽 5.25m）→ 杆位 y=5.0 实际在中央车道分隔线上。修复：esmini 加载时
+     * 用 RM_GetRoadNumberOfDrivableLanes + RM_GetLaneIdByIndex 反查车道数+宽度
+     * 算 road_half_width；非 finite/esmini 不可用时再 fallback 硬编码。
+     * 此外场景 traffic_lights[*].x 可能是手填的「近似世界坐标」（中凯路 x=770
+     * 实际应在路口中心 x=560）——esmini 加载时用 world_to_frenet 校正 x/y，
+     * 找到最近的 (road_id, s, lane_id, offset) 再 frenet_to_world 反算真值。
+     * 这样无论场景 JSON 用相对值还是手填世界坐标，灯杆永远落在正确车道。 */
+    {
+        /* 缓存：每个 (road_id, s) 位置处的 road_half_width，避免重复 esmini 调用 */
+        double cached_half_width = -1.0;
+        for (int i = 0; i < sc->traffic_light_count && i < SCENARIO_MAX_TRAFFIC_LIGHTS; i++) {
+            const ScenarioTrafficLight* tl = &sc->traffic_lights[i];
+            flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::TrafficLight);
+            if (id == flowsim::INVALID_ENTITY) break;
+            flowsim::Entity& e = g.pool[id];
+            e.id = tl->id;
+            e.throttle = tl->green_s;
+            e.brake    = tl->yellow_s;
+            e.steer    = tl->red_s;
+            e.target_vx = tl->phase_offset_s;
+            e.heading = tl->heading;
+            if (e.heading == 0.0) {
+                e.heading = compute_road_heading_at(tl->x, tl->y_lane);
+            }
+            /* esmini 接管世界坐标：world_to_frenet → 反算真值 */
+            if (g.roads_loaded) {
+                flowsim::FrenetPos fp;
+                /* 用 y_lane 作横向偏移（与 x 一起试探路网最近点） */
+                double probe_y = tl->y_lane;
+                if (g.roads.world_to_frenet(tl->x, probe_y, fp)) {
+                    flowsim::WorldPos wp;
+                    if (g.roads.frenet_to_world(fp.road_id, fp.lane_id, fp.s, fp.offset, wp)) {
+                        e.x = wp.x;
+                        /* y 取自 Frenet 反算的车道外侧 +1.5m 路缘退让 */
+                        if (cached_half_width < 0.0 || fp.road_id != e.road_id) {
+                            /* 现算：esmini 给定 road 在 s 处的可行驶车道总宽 */
+                            int n_drivable = g.roads.drivable_lane_count(fp.road_id, fp.s);
+                            /* 半宽 = (n_drivable * lane_width) / 2，lane_width 取场景默认 */
+                            cached_half_width = (n_drivable * g.lane_width) / 2.0;
+                            e.road_id = fp.road_id;
+                        }
+                        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+                        e.y = sign * (cached_half_width + 1.5);
+                        /* heading 重新用 Frenet 反算的切线 + π/2（灯杆垂直于道路） */
+                        e.heading = wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2);
+                    } else {
+                        /* 反算失败 fallback 到旧逻辑 */
+                        e.x = tl->x;
+                        double road_half_width = 3.5;
+                        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+                        e.y = sign * (road_half_width + 1.5);
+                    }
+                } else {
+                    /* world_to_frenet 失败：场景坐标不在路网附近，fallback */
+                    e.x = tl->x;
+                    double road_half_width = 3.5;
+                    double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+                    e.y = sign * (road_half_width + 1.5);
+                }
+            } else {
+                /* esmini 不可用：旧逻辑 */
+                e.x = tl->x;
+                double road_half_width = 3.5;
+                double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+                e.y = sign * (road_half_width + 1.5);
+            }
         }
     }
 
     /* Phase 4: ETC 门架 → ETCGate 实体（高速收费站抬杆）。
      * scene_events.cpp 的 tick_etc_gates() 根据 ego 距离门架的距离驱动
      * 抬杆动画：远距 closed → 进入 open_range_m 时 opening → 通过后 open。
-     * approach_speed 复用 target_vx 字段，open_range_m 复用 phase_timer 字段。 */
+     * approach_speed 复用 target_vx 字段，open_range_m 复用 phase_timer 字段。
+     * esmini 接管世界坐标：etc_gates[*].x/y 可能是手填的「近似世界坐标」（中凯路
+     * 实际 road 1 起点 (250,0) 但 etc_gates x=290 对应 road 1 内 s=40，y 通道
+     * 中心 ±1.75/±5.25 来自场景车道布局）——esmini 加载时用 world_to_frenet 找
+     * 最近 (road_id, s, offset)，再 frenet_to_world 反算真值。这样 etc_gates
+     * 自动跟随路网几何（弯曲/匝道等），不依赖场景手填精度。 */
     for (int i = 0; i < sc->etc_gate_count && i < SCENARIO_MAX_ETC_GATES; i++) {
         const ScenarioETCGate* eg = &sc->etc_gates[i];
         flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::ETCGate);
         if (id == flowsim::INVALID_ENTITY) break;
         flowsim::Entity& e = g.pool[id];
         e.id = eg->id;
-        e.x = eg->x;
-        e.y = eg->y;
         e.target_vx = eg->approach_speed;   /* ETC 通过目标速度 */
         e.phase_timer = 0.0;                 /* 抬杆进度 [0,1]，初始 closed */
-        /* open_range_m 存到 width 字段（ETCGate 无碰撞包围盒，width 空闲） */
-        e.width = eg->open_range_m;
+        e.width = eg->open_range_m;          /* open_range_m 存到 width 字段 */
         e.ai_state = flowsim::AIState::Stop; /* 初始 closed 状态 */
         e.heading = eg->heading;
+        /* esmini 校正坐标 */
+        if (g.roads_loaded) {
+            flowsim::FrenetPos fp;
+            if (g.roads.world_to_frenet(eg->x, eg->y, fp)) {
+                flowsim::WorldPos wp;
+                if (g.roads.frenet_to_world(fp.road_id, fp.lane_id, fp.s, fp.offset, wp)) {
+                    e.x = wp.x;
+                    e.y = wp.y;
+                    e.heading = wp.h;
+                } else {
+                    e.x = eg->x; e.y = eg->y;
+                }
+            } else {
+                e.x = eg->x; e.y = eg->y;
+            }
+        } else {
+            e.x = eg->x; e.y = eg->y;
+        }
         if (e.heading == 0.0) {
             e.heading = compute_road_heading_at(e.x, e.y);
         }
     }
 
     /* Phase 4: 停止线 → StopLine 实体（路口/ETC 停车位置标记）。
-     * 纯可视化标记，无动力学无状态机，scene_pub 直接序列化位置。 */
+     * 纯可视化标记，无动力学无状态机，scene_pub 直接序列化位置。
+     * esmini 校正坐标：stop_lines[*].x/y 手填值经常和实际路网偏移（与 traffic_lights
+     * 同根因），走 world_to_frenet → frenet_to_world 反算真值。 */
     for (int i = 0; i < sc->stop_line_count && i < SCENARIO_MAX_STOP_LINES; i++) {
         const ScenarioStopLine* sl = &sc->stop_lines[i];
         flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::StopLine);
         if (id == flowsim::INVALID_ENTITY) break;
         flowsim::Entity& e = g.pool[id];
         e.id = sl->id;
-        e.x = sl->x;
-        e.y = sl->y;
         e.heading = sl->heading;
+        /* esmini 校正坐标 */
+        if (g.roads_loaded) {
+            flowsim::FrenetPos fp;
+            if (g.roads.world_to_frenet(sl->x, sl->y, fp)) {
+                flowsim::WorldPos wp;
+                if (g.roads.frenet_to_world(fp.road_id, fp.lane_id, fp.s, fp.offset, wp)) {
+                    e.x = wp.x;
+                    e.y = wp.y;
+                    e.heading = wp.h;
+                } else {
+                    e.x = sl->x; e.y = sl->y;
+                }
+            } else {
+                e.x = sl->x; e.y = sl->y;
+            }
+        } else {
+            e.x = sl->x; e.y = sl->y;
+        }
         if (e.heading == 0.0) {
             e.heading = compute_road_heading_at(e.x, e.y);
         }

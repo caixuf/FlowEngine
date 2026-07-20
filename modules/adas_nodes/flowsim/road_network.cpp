@@ -158,4 +158,14 @@ double FlowRoadNetwork::lane_width(int road_id, int lane_id, double s) {
     return w;
 }
 
+int FlowRoadNetwork::drivable_lane_count(int road_id, double s) {
+    /* RM_GetRoadNumberOfDrivableLanes 在任意 s 处统计 drivable 车道数（双向合计）。
+     * 与 road_info() 不同：road_info 在 s=0 查，drivable_lane_count 可在任意 s 查
+     * （因为 OpenDRIVE 道路车道数可随 s 变化，例如从 3 车道收窄到 2 车道）。
+     * 失败返回 0，调用方需用 fallback 默认值。 */
+    if (!loaded_) return 0;
+    int n = RM_GetRoadNumberOfDrivableLanes((id_t)road_id, s);
+    return (n > 0) ? n : 0;
+}
+
 }  // namespace flowsim
