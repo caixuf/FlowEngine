@@ -1047,8 +1047,25 @@ protected:
                 }
                 /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
                  * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */
+                /* ref_path heading 合理性检查: esmini 在 junction/fork 处可能返回
+                 * 与 ego 当前航向偏差极大的切线方向（如匝道 h≈5 rad 而 ego h≈0）。
+                 * 这种 ref_h 会让 heading_term 爆炸, 反向打满 steer 把 ego 拉向岔路。
+                 * 检测: 将 (ref_h - ego_heading) 归一化到 [-π,π], 若绝对值 > 0.5 rad
+                 * (≈29°) 则视为无效参考, 用 ego_heading 替代 (heading_term=0)。
+                 * 阈值比 π/2 更严: esmini 在路口前 100m 采样的 fork 切线常差 60°+,
+                 * 但直道/缓弯 ref_h 与 ego 航向差 < 15°, 0.5 rad 能区分两者。
+                 * 真正的急弯跟随由下方 ff_term (曲率前馈) 处理, 不依赖 heading_term。 */
+                double ref_h_eff = ref_road_heading;
+                {
+                    double dh = ref_h_eff - g.ego_heading;
+                    while (dh >  M_PI) dh -= 2.0 * M_PI;
+                    while (dh < -M_PI) dh += 2.0 * M_PI;
+                    if (fabs(dh) > 0.5) {
+                        ref_h_eff = g.ego_heading;  /* ref_h 与 ego 航向差 > 29°, 视为无效 */
+                    }
+                }
                 double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - ref_road_heading);
+                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
                 /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
                  * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
