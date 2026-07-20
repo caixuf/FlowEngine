@@ -463,15 +463,15 @@ function _buildRoadNetwork(edges) {
           // 桥墩 BoxGeometry 中心在 (pX, pH/2, pZ)，底面 y=0 顶面 y=pH
           var pierG = new THREE.BoxGeometry(PIER_W, pH, PIER_D);
           pierG.translate(pX, pH / 2, pZ);
-          // 桥墩材质（混凝土灰）与护栏统一，便于合并
-          var pierM = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.85, metalness: 0.05 });
-          guardPostGeos.push({ geo: pierG, mat: pierM });
+          /* 注意：与原护栏一样 push 裸 BufferGeometry（不是 {geo, mat} 对象），
+           * 这样 _mergeGeometries(allGuardGeos) 才能正确处理（line 782-784）。
+           * 桥墩颜色由统一的 guardMat 决定（混凝土灰），与护栏合并为 1 个 draw call。 */
+          guardPostGeos.push(pierG);
         }
       }
       // 桥栏矮墙：路面两侧各一条 0.5m 高、0.25m 厚连续 ribbon，从路面边缘
       // 略外扩 0.1m 模拟栏柱占位。沿曲线每 1m 采样一次。
       var RAIL_H = 0.5, RAIL_T = 0.25;
-      var railOffset = halfWidth + 0.1;
       for (var side2 = -1; side2 <= 1; side2 += 2) {
         var railPos = [], railIdx = [];
         var nRail = Math.max(2, Math.floor(length));
@@ -509,8 +509,9 @@ function _buildRoadNetwork(edges) {
         railG.setAttribute('position', new THREE.Float32BufferAttribute(railPos, 3));
         railG.setIndex(railIdx);
         railG.computeVertexNormals();
-        var railM = new THREE.MeshStandardMaterial({ color: 0xb0b0b0, roughness: 0.7, metalness: 0.1 });
-        guardRailGeos.push({ geo: railG, mat: railM });
+        /* 同样 push 裸 BufferGeometry（不携带材质），由后续 _mergeGeometries 合并
+         * 到统一 guardMat，避免与护栏合并时材质错配。 */
+        guardRailGeos.push(railG);
       }
     }
 
