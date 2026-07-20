@@ -9,6 +9,7 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -130,9 +131,28 @@ static void ekf_update_generic(EkfFusion* ekf,
             A[i*8 + 4 + i] = 1.0;
         }
         for (int col = 0; col < 4; col++) {
-            /* pivot */
+            /* partial pivoting: 在 col 列的 [col,4) 行范围内找绝对值最大的主元 */
+            int piv_row = col;
+            double max_abs = fabs(A[col*8 + col]);
+            for (int row = col + 1; row < 4; row++) {
+                double a = fabs(A[row*8 + col]);
+                if (a > max_abs) { max_abs = a; piv_row = row; }
+            }
+            if (max_abs < 1e-10) {
+                /* 主元接近 0，矩阵奇异，跳过该列（类似 m==2 分支的 det 检查） */
+                fprintf(stderr, "ekf_fusion: 4x4 S matrix near-singular at col %d "
+                                "(pivot=%.3e), inversion skipped\n", col, max_abs);
+                continue;
+            }
+            /* 交换 piv_row 与 col 行（含右侧单位矩阵部分） */
+            if (piv_row != col) {
+                for (int j = 0; j < 8; j++) {
+                    double tmp = A[piv_row*8 + j];
+                    A[piv_row*8 + j] = A[col*8 + j];
+                    A[col*8 + j] = tmp;
+                }
+            }
             double piv = A[col*8 + col];
-            if (fabs(piv) < 1e-10) continue;
             for (int j = 0; j < 8; j++) A[col*8 + j] /= piv;
             for (int row = 0; row < 4; row++) {
                 if (row == col) continue;
@@ -186,6 +206,14 @@ static void ekf_update_generic(EkfFusion* ekf,
     double trace = 0;
     for (int i = 0; i < 5; i++) trace += ekf->P[i*5 + i];
     if (trace > 1e9) ekf->diverged = 1;
+
+    /* 检查状态向量 x 的每个分量是否有限 */
+    for (int i = 0; i < 5; i++) {
+        if (!isfinite(ekf->x[i])) {
+            ekf->diverged = 1;
+            break;
+        }
+    }
 
     ekf->update_count++;
 }
@@ -386,6 +414,8 @@ void ekf_fusion_get_covariance_diag(const EkfFusion* ekf, double diag[EKF_STATE_
 }
 
 void ekf_fusion_reset(EkfFusion* ekf) {
+    /* 清零状态向量，避免 NaN 持续传播 */
+    memset(ekf->x, 0, sizeof(ekf->x));
     memset(ekf->P, 0, sizeof(ekf->P));
     ekf->P[0*5 + 0] = INIT_P_POS_VAR;
     ekf->P[1*5 + 1] = INIT_P_POS_VAR;

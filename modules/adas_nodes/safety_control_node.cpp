@@ -86,6 +86,11 @@ struct SafetyContext {
 SafetyContext g;
 
 double clamp(double value, double lo, double hi) {
+    /* IEEE-754 下 NaN < x 恒为 false，未加防护时 clamp(NaN, 0.0, max_brake) 会
+     * 返回 0.0（不刹车），clamp(NaN, -steer_limit, steer_limit) 会返回 -steer_limit
+     * （一侧打死）。NaN/Inf 输入直接返回 lo（"不刹车/不转向"安全侧）；brake 的
+     * 安全侧在 publish_cmd 里再做一次显式 isfinite 紧急刹车兜底。 */
+    if (!std::isfinite(value)) return lo;
     return std::max(lo, std::min(value, hi));
 }
 
@@ -447,7 +452,12 @@ private:
             /* Low-speed deadlock recovery: if ego has been stuck for too long
              * and the road ahead is clear, ease the brake and allow a small
              * throttle so the planner can creep forward (e.g. stopped at a
-             * red light or blocked during a low-speed lane change). */
+             * red light or blocked during a low-speed lane change).
+             *
+             * 安全复查：恢复前必须确认触发刹停的原因已消失。nearest_same_lane_gap
+             * 只看同车道车辆（横向容差 2.0m），不复查行人/TTC/横穿风险——若 ego
+             * 因行人而正确刹停，行人多等 5 秒（现实常见）就触发恢复，会把车命令
+             * 朝着行人冲过去。故恢复前必须复查行人碰撞、斑马线等待、对向来车 TTC。 */
             static auto last_move_time = std::chrono::steady_clock::now();
             if (state.speed >= 0.5) {
                 last_move_time = std::chrono::steady_clock::now();
@@ -457,12 +467,27 @@ private:
                         std::chrono::steady_clock::now() - last_move_time)
                         .count());
                 if (elapsed_ms > 5000.0) {
-                    double gap = nearest_same_lane_gap(state, params_);
-                    if (gap > 10.0) {
-                        fprintf(stderr, "[safety] low-speed recovery: spd=%.2f gap=%.2f -> brake=%.2f throttle=%.2f\n",
-                                state.speed, gap, cmd.brake, cmd.throttle);
-                        set_changed(cmd.brake, std::min(cmd.brake, 0.30));
-                        set_changed(cmd.throttle, std::max(cmd.throttle, 0.20));
+                    /* 复查行人碰撞风险：行人仍在危险范围内不恢复 */
+                    double ped_gap_recheck = pedestrian_collision_gap(state);
+                    double ped_stop_gap_recheck = std::max(24.0, state.speed * 5.0);
+                    /* 复查斑马线等待：斑马线区域仍有行人不恢复 */
+                    double hold_gap_recheck = pedestrian_crossing_hold_gap(state);
+                    /* 复查对向来车 TTC：参考 413-423 行 oncoming 紧急刹车逻辑 */
+                    double oncoming_dx_recheck = 0.0;
+                    double oncoming_ttc_recheck = min_oncoming_ttc(state, &oncoming_dx_recheck);
+
+                    bool ped_still_dangerous = (ped_gap_recheck < ped_stop_gap_recheck);
+                    bool crossing_still_dangerous = (hold_gap_recheck < 10.0);
+                    bool oncoming_still_dangerous = (oncoming_ttc_recheck < 1.5 || oncoming_dx_recheck < 8.0);
+
+                    if (!ped_still_dangerous && !crossing_still_dangerous && !oncoming_still_dangerous) {
+                        double gap = nearest_same_lane_gap(state, params_);
+                        if (gap > 10.0) {
+                            fprintf(stderr, "[safety] low-speed recovery: spd=%.2f gap=%.2f -> brake=%.2f throttle=%.2f\n",
+                                    state.speed, gap, cmd.brake, cmd.throttle);
+                            set_changed(cmd.brake, std::min(cmd.brake, 0.30));
+                            set_changed(cmd.throttle, std::max(cmd.throttle, 0.20));
+                        }
                     }
                 }
             }
@@ -477,11 +502,23 @@ private:
         /* Binary serialized ControlCmd (serializer path) */
         ::ControlCmd bin;
         bin.seq            = 0;
-        bin.throttle       = (float)cmd.throttle;
-        bin.brake          = (float)cmd.brake;
-        bin.steering       = (float)cmd.steer;
         bin.gear           = GEAR_DRIVE;
-        bin.emergency_stop = cmd.brake > 0.95;
+
+        /* NaN/Inf 兜底：clamp 已把 NaN/Inf 收敛到 lo，但 brake 的 lo=0.0 意味着
+         * "不刹车"，对制动不安全。发布前再做一次显式 isfinite 复查，任一字段
+         * 非有限 → 强制 emergency_stop（brake=1.0, throttle=0.0, steer=0.0）。 */
+        if (!std::isfinite(cmd.throttle) || !std::isfinite(cmd.brake) || !std::isfinite(cmd.steer)) {
+            bin.throttle       = 0.0f;
+            bin.brake          = 1.0f;
+            bin.steering       = 0.0f;
+            bin.emergency_stop = true;
+            fprintf(stderr, "[safety] NaN/Inf in control cmd, forcing emergency stop\n");
+        } else {
+            bin.throttle       = (float)cmd.throttle;
+            bin.brake          = (float)cmd.brake;
+            bin.steering       = (float)cmd.steer;
+            bin.emergency_stop = cmd.brake > 0.95;
+        }
 
         uint8_t buf[32];
         size_t len = sizeof(buf);

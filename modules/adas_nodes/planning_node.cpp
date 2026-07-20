@@ -247,10 +247,14 @@ static void on_fusion(const Message* msg, void* user_data) {
     cJSON* root = cJSON_Parse(d);
     if (root) {
         cJSON* item;
-        if ((item = cJSON_GetObjectItem(root, "x")))       g.ego_x = item->valuedouble;
-        if ((item = cJSON_GetObjectItem(root, "y")))       g.ego_y = item->valuedouble;
-        if ((item = cJSON_GetObjectItem(root, "v")))       g.ego_v = item->valuedouble;
-        if ((item = cJSON_GetObjectItem(root, "heading"))) g.ego_heading = item->valuedouble;
+        item = cJSON_GetObjectItem(root, "x");
+        if (cJSON_IsNumber(item))       g.ego_x = item->valuedouble;
+        item = cJSON_GetObjectItem(root, "y");
+        if (cJSON_IsNumber(item))       g.ego_y = item->valuedouble;
+        item = cJSON_GetObjectItem(root, "v");
+        if (cJSON_IsNumber(item))       g.ego_v = item->valuedouble;
+        item = cJSON_GetObjectItem(root, "heading");
+        if (cJSON_IsNumber(item))       g.ego_heading = item->valuedouble;
         cJSON_Delete(root);
     }
     g.has_fusion = 1;

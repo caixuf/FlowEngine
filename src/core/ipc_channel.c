@@ -106,6 +106,14 @@ struct IpcChannel {
     uint64_t  read_cursor;
     bool      cursor_init;
 
+    /* Subscriber-side drop counter: incremented every time the read cursor
+     * is jumped forward because the subscriber fell behind by more than
+     * queue_depth (drop-oldest broadcast semantics). Mirrors the per-topic
+     * drop_count exposed by message_bus so transport-level QoS/telemetry
+     * can report IPC drops the same way as in-process bus drops. Updated
+     * under ShmHeader::mutex, so the getters below also take that mutex. */
+    uint64_t  drop_count;
+
     CbEntry   callbacks[IPC_MAX_CALLBACKS];
     int       cb_count;
 
@@ -304,8 +312,12 @@ static int try_read_one(IpcChannel* ch, Message* out) {
     }
 
     /* Fell behind further than the ring can hold: skip to the oldest valid
-     * message still present (drop the overwritten ones). */
+     * message still present (drop the overwritten ones). The gap between
+     * the stale cursor and the new window is exactly the number of messages
+     * that have been overwritten and are therefore lost to this subscriber —
+     * accumulate it into drop_count for QoS/telemetry. */
     if (head - ch->read_cursor > depth) {
+        ch->drop_count += (head - depth) - ch->read_cursor;
         ch->read_cursor = head - depth;
     }
 
@@ -432,4 +444,23 @@ void ipc_channel_stop(IpcChannel* ch) {
     if (!ch || !ch->recv_running) return;
     ch->recv_running = false;
     pthread_join(ch->recv_thread, NULL);
+}
+
+/* ── Drop-count telemetry ─────────────────────────────── */
+
+uint64_t ipc_channel_get_drop_count(IpcChannel* ch) {
+    if (!ch || !ch->shm_ptr) return 0;
+    ShmHeader* hdr = get_header(ch);
+    pthread_mutex_lock(&hdr->mutex);
+    uint64_t cnt = ch->drop_count;
+    pthread_mutex_unlock(&hdr->mutex);
+    return cnt;
+}
+
+void ipc_channel_reset_drop_count(IpcChannel* ch) {
+    if (!ch || !ch->shm_ptr) return;
+    ShmHeader* hdr = get_header(ch);
+    pthread_mutex_lock(&hdr->mutex);
+    ch->drop_count = 0;
+    pthread_mutex_unlock(&hdr->mutex);
 }

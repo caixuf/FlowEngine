@@ -125,6 +125,7 @@ typedef struct {
     uint64_t local_delivered;
     uint64_t ipc_delivered;
     uint64_t remote_delivered;
+    uint64_t ipc_dropped;        /**< 本端作为订阅者时, IPC 广播环形缓冲因落后被丢弃的消息累计数 */
 } TransportStats;
 
 void transport_get_stats(Transport* t, TransportStats* stats);

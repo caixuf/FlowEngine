@@ -10,6 +10,7 @@
 #   bash scripts/demo.sh 30           # 30 秒演示
 #   bash scripts/demo.sh --multi      # fork+exec 多进程模式
 #   bash scripts/demo.sh --no-browser # 不打开浏览器
+#   bash scripts/demo.sh --manual     # 游戏模式：终端 WASD 键盘直接驾驶 ego
 #   bash scripts/demo.sh --scenario scenarios/highway_overtake.json  # 指定场景
 # =============================================================================
 set -e
@@ -37,6 +38,7 @@ MULTI_MODE=false
 RECORD_MODE=false
 REPLAY_FILE=""
 SCENARIO=""  # 留空则用 DEFAULT_SCENARIO（旗舰场景）
+MANUAL_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
 LAUNCHER_BIN="$BUILD_DIR/bin/flow_launcher"
@@ -48,6 +50,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-browser) OPEN_BROWSER=false ;;
     --multi) MULTI_MODE=true ;;
+    --manual) MANUAL_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
     --scenario) SCENARIO="$2"; shift ;;
@@ -57,9 +60,22 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# ── Manual mode: 用 pipeline_manual.json 替代默认 pipeline.json ──
+# 游戏模式：删除 planning/control/safety_control/inference，新增 manual_drive
+# 节点（终端 WASD 键盘 → control/cmd）。flowsim 无感知地消费 manual_drive
+# 发布的 ControlCmd 驱动 ego。--manual 与 --scenario 可组合使用。
+if [ "$MANUAL_MODE" = true ]; then
+  PIPELINE="$ROOT/config/pipeline_manual.json"
+fi
+
 # ── Scenario override: patch pipeline.json's scenario_file ──
 # 未指定 --scenario 时用 DEFAULT_SCENARIO（旗舰场景），patch 进临时 pipeline.json。
-PIPELINE_ORIG="$ROOT/config/pipeline.json"
+# --manual 模式下 patch 基底换成 pipeline_manual.json（flowsim 仍读 scenario_file）。
+if [ "$MANUAL_MODE" = true ]; then
+  PIPELINE_ORIG="$ROOT/config/pipeline_manual.json"
+else
+  PIPELINE_ORIG="$ROOT/config/pipeline.json"
+fi
 PIPELINE_TMP=""
 cleanup_pipeline_tmp() {
   [ -n "$PIPELINE_TMP" ] && rm -f "$PIPELINE_TMP"
@@ -126,6 +142,9 @@ BANNER
      echo "Demo Duration: ${DURATION}s   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
    else
      echo "Demo Duration: ∞ (Ctrl+C 退出)   Mode: $([ "$MULTI_MODE" = true ] && echo "Multi-Process" || echo "Single-Process (dlopen)")   Scenario: ${SCENARIO_DISPLAY:-default}"
+   fi
+   if [ "$MANUAL_MODE" = true ]; then
+     echo "  🎮 Manual Drive Mode: WASD=油门/刹车/转向  空格=手刹  q=退出  (pipeline_manual.json)"
    fi
 echo ""
 

@@ -15,6 +15,7 @@
 
 #include "scene_events.h"
 #include "physics.h"
+#include "logger.h"
 
 #include <cmath>
 #include <algorithm>
@@ -54,6 +55,27 @@ void tick_traffic_lights(EntityPool& pool, double sim_time_s) {
             tl.ai_state = AIState::Stop;    // 红灯：停
         }
         tl.phase_timer = T - tp;  // 当前相位剩余时间
+    }
+
+    // 单路口多信号灯相位互斥校验（潜在设计缺口检测）。
+    // 当前场景只有 1 盏灯未触发，但任何新场景在同一路口加第二盏灯就可能
+    // 两个方向同时绿灯。此处只做检测+告警，不实现完整互斥机制。
+    // 路口分组：Entity 上无 junction_id 字段，用相同 x 位置（±1m 容差）近似。
+    for (int i = 0; i < pool.size(); ++i) {
+        const Entity& tl_i = pool[i];
+        if (!tl_i.active || tl_i.type != EntityType::TrafficLight) continue;
+        if (tl_i.phase_state != (int)TLPhase::Green) continue;
+        for (int j = i + 1; j < pool.size(); ++j) {
+            const Entity& tl_j = pool[j];
+            if (!tl_j.active || tl_j.type != EntityType::TrafficLight) continue;
+            if (tl_j.phase_state != (int)TLPhase::Green) continue;
+            if (std::fabs(tl_i.x - tl_j.x) <= 1.0) {
+                LOG_WARN("flowsim",
+                         "tick_traffic_lights: two traffic lights at same junction "
+                         "(x=%.2f) both Green - phase mutex violated",
+                         tl_i.x);
+            }
+        }
     }
 }
 
@@ -117,7 +139,12 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
                     ev.phase_state == (int)TLPhase::Yellow) {
                     if (dx < nearest_block_s) {
                         nearest_block_s = dx;
-                        should_stop = (ev.phase_state == (int)TLPhase::Red);
+                        // 黄灯也减速停车（之前只 Red 置 true，整个 yellow_s=3s
+                        // 阶段 NPC 零减速 → 接近路口时闯黄灯 → 红灯刚亮就冲
+                        // 出去）。简单起见统一 should_stop=true；如需更精细控制
+                        // 可再加 should_slow_down 标志把目标速度降到一半。
+                        should_stop = (ev.phase_state == (int)TLPhase::Red ||
+                                       ev.phase_state == (int)TLPhase::Yellow);
                     }
                 }
             }

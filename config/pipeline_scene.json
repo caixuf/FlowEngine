@@ -138,7 +138,6 @@
         "perception/tracked_objects",
         "perception/lanes",
         "perception/traffic_lights",
-        "perception/traversability",
         "prediction/tracks",
         "road/geometry"
       ],

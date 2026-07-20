@@ -145,6 +145,7 @@ find_library(ESMINI_RMLIB
 add_library(flowsim_node SHARED
     flowsim_node.cpp
     flowsim/road_network.cpp
+    flowsim/road_position.cpp
     flowsim/physics.cpp
     flowsim/npc_ai.cpp
     flowsim/collision.cpp
@@ -245,6 +246,12 @@ target_link_libraries(flowmond_node ${NODE_LINK_LIBS})
 # 依赖 linux/can.h（Linux 内核头自带，无需额外库）。
 add_library(actuator_node SHARED actuator_node.c)
 target_link_libraries(actuator_node ${NODE_LINK_LIBS})
+
+# manual_drive_node: 终端 WASD 键盘侧车工具（游戏模式）
+# 用键盘直接驱动 ego，不依赖感知-融合-规划-控制 AI 链，用于人工验证场景几何。
+# 订阅 stdin（termios raw 模式）→ 发布 control/cmd。配合 config/pipeline_manual.json 使用。
+add_library(manual_drive_node SHARED manual_drive_node.c)
+target_link_libraries(manual_drive_node ${NODE_LINK_LIBS})
 
 # lidar_driver_node: 真实 LiDAR 驱动节点（点云 → DBSCAN → ObstacleList）
 # 真车感知入口，替代仿真用的 perception_node（后者依赖 vehicle/state 真值）。

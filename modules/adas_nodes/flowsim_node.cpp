@@ -315,6 +315,15 @@ static void apply_scenario_scripts(double sim_time_s) {
             if (ei >= 0) ego_route_s = g.route.to_route_s(ei, ef.s);
         }
     }
+    /* Phase 2: ego.road_pos.ok() 时也用 road_pos.s() 作为触发条件的 OR 来源。
+     * route_s 是沿中央 route 的累计 s（跨 road 段），road_pos.s() 是当前 road
+     * 内的局部 s；二者度量的不是同一个量，但 route_s_gte 触发器一般是粗粒度
+     * 「ego 已驶过 X 米」判断，取 max(route_s, road_pos.s()) 让任一来源满足即触发，
+     * 避免旧 route 在 fork 路段失真时触发器永远不 fire。 */
+    double ego_pos_s = -1.0;
+    if (ego.road_pos.ok()) {
+        ego_pos_s = ego.road_pos.s();
+    }
     for (int i = 0; i < g.scenario->script_count; ++i) {
         ScenarioScript* s = &g.scenario->scripts[i];
         if (s->fired) continue;
@@ -327,7 +336,12 @@ static void apply_scenario_scripts(double sim_time_s) {
             case SCRIPT_TRIGGER_TIME_GTE:
                 fire = (sim_time_s >= s->trigger.value); break;
             case SCRIPT_TRIGGER_ROUTE_S_GTE:
-                if (ego_route_s >= 0.0) fire = (ego_route_s >= s->trigger.value);
+                /* route_s 或 road_pos.s() 任一 ≥ value 即触发（OR 语义） */
+                if (ego_route_s >= 0.0 && ego_route_s >= s->trigger.value) {
+                    fire = true;
+                } else if (ego_pos_s >= 0.0 && ego_pos_s >= s->trigger.value) {
+                    fire = true;
+                }
                 break;
         }
         if (!fire) continue;
@@ -367,6 +381,22 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     ego.mass = 1500.0;
     ego.drag_coeff = 0.3;
     flowsim::apply_vehicle_defaults(ego);
+
+    /* Phase 2: ego 持久 road_pos 初始化。
+     * 用 world_to_frenet 把场景 ego.x/y 转成 Frenet 后 init esmini position handle。
+     * 失败时 road_pos.ok()==false，主循环走旧 route 逻辑兜底。 */
+    if (g.roads_loaded) {
+        flowsim::FrenetPos fp;
+        if (g.roads.world_to_frenet(sc->ego.x, sc->ego.y, fp)) {
+            if (!ego.road_pos.init(g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset)) {
+                LOG_WARN("flowsim", "ego road_pos.init failed (road=%d lane=%d s=%.1f)",
+                         fp.road_id, fp.lane_id, fp.s);
+            }
+        } else {
+            LOG_WARN("flowsim", "ego world_to_frenet failed at (%.1f,%.1f) — road_pos off",
+                     sc->ego.x, sc->ego.y);
+        }
+    }
 
     /* Actors → NPC 车辆 / 行人 */
     for (int i = 0; i < sc->actor_count && i < flowsim::MAX_ENTITIES - 1; i++) {
@@ -444,6 +474,23 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             e.offset  = a->l;
             e.target_offset = a->l;  /* E2: 换道目标 offset 初始 = 当前 offset */
             flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
+        }
+
+        /* Phase 2: NPC 持久 road_pos 初始化（与 route 共存）。
+         * 仅对新格式 (segment_id≥0) NPC init：直接用 segment_id/lane_id=0/s/l，
+         * 与现有 NPC frenet_to_world(rid, 0, s, npc.offset) 调用约定一致
+         * （NPC 用 lane_id=0 + offset_from_reference_line 模型，offset 是相对
+         * 参考线的横向位置，非 lane 内 offset）。
+         * 旧格式 (segment_id<0) NPC 不 init road_pos：world_to_frenet 返回的
+         * (lane_id, offset_within_lane) 是 Model B 语义，与 NPC 的 Model A
+         * (lane_id=0 + offset_from_ref) 不一致；且旧格式对向车 route_dir=0
+         * 会导致 step5 航向翻转缺失。让旧格式 NPC 走 world_to_frenet 兜底更安全。
+         * 失败时 road_pos.ok()==false，npc_ai 走旧 route/世界系兜底。 */
+        if (g.roads_loaded && a->segment_id >= 0 && e.is_npc_vehicle()) {
+            if (!e.road_pos.init(g.roads, a->segment_id, 0, a->s, a->l) && a->id <= 2) {
+                LOG_WARN("flowsim", "NPC %d road_pos.init failed — fallback to route/world logic",
+                         a->id);
+            }
         }
     }
 
@@ -623,7 +670,20 @@ static void publish_ref_path(void) {
         /* 采样 ego 前方 100m、间距 5m（21 个点）；lookahead 远一些保证
          * 控制器在高速段（27m/s）每步 1.35m 也有充足前视距离。 */
         std::vector<flowsim::RefPathPoint> samples;
-        int n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
+        int n = 0;
+        /* Phase 2: ego 有 road_pos 时优先用 RoadPosition 采样。
+         * 用 clone 避免污染 ego 主 position（sample_ahead 会推进 handle 状态）。
+         * junction_angle=M_PI 默认直行（后续可从 route step type 映射左/右转）。 */
+        if (ego.road_pos.ok()) {
+            flowsim::RoadPosition tmp = ego.road_pos.clone();
+            if (tmp.ok()) {
+                n = tmp.sample_ahead(g.roads, 100.0, 5.0, M_PI, samples);
+            }
+        }
+        /* fallback：road_pos 未初始化或采样失败 → 旧 route.sample_ahead */
+        if (n == 0) {
+            n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
+        }
         for (int i = 0; i < n; ++i) {
             const auto& p = samples[i];
             cJSON* pt = cJSON_CreateObject();
@@ -825,6 +885,43 @@ protected:
             }
             flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
                                   ego.throttle, ego.brake, ego.steer);
+
+            /* Phase 2: ego 有 road_pos 时用 RoadPosition 推进 + 覆盖世界坐标。
+             * step_bicycle 已更新 ego.speed（throttle/brake 驱动）和 ego.x/y/heading
+             * （世界系自行车模型积分）。若 road_pos.ok()，用 road_pos.advance 沿真实
+             * OpenDRIVE 拓扑推进 ego.speed*dt，再用 road_pos.world() 把 ego.x/y/heading
+             * 覆盖为路网对齐坐标——保证 ego 严格贴路面、过 fork/路口不飞出路网。
+             * junction_angle 暂用 M_PI（直行），后续可从 route step type 映射。
+             * road_pos 不 ok 时保留 step_bicycle 结果（旧逻辑）。 */
+            if (ego.road_pos.ok()) {
+                double dist = ego.speed * FLOWSIM_DT_SEC;
+                if (dist > 0.0) {
+                    if (!ego.road_pos.advance(dist, M_PI)) {
+                        /* 推进失败（路网边界）— 不立即销毁 handle，下一 tick 仍可重试。
+                         * 此处不强制 recycle ego（ego 不回收），只 log 限速。 */
+                        if (g.cycle % 100 == 0) {
+                            LOG_WARN("flowsim", "ego road_pos.advance failed (dist=%.2f)", dist);
+                        }
+                    } else {
+                        flowsim::WorldPos wp;
+                        if (ego.road_pos.world(wp)) {
+                            ego.x = wp.x;
+                            ego.y = wp.y;
+                            ego.heading = wp.h;
+                            ego.vx = ego.speed * std::cos(wp.h);
+                            ego.vy = ego.speed * std::sin(wp.h);
+                        }
+                        /* 同步 Frenet 字段（部分下游逻辑 / 调试日志读 ego.road_id 等） */
+                        flowsim::FrenetPos fp;
+                        if (ego.road_pos.frenet(fp)) {
+                            ego.road_id = fp.road_id;
+                            ego.lane_id = fp.lane_id;
+                            ego.s = fp.s;
+                            ego.offset = fp.offset;
+                        }
+                    }
+                }
+            }
 
             /* ── Step 2: 场景事件预检查（让 NPC 知道前方红绿灯/ETC） ── */
             flowsim::check_npc_scene_events(g.pool, g.ai_cfg.look_ahead);

@@ -385,4 +385,17 @@ void transport_get_stats(Transport* t, TransportStats* stats) {
         stats->remote_published = ns.msgs_sent;
         stats->remote_delivered = ns.msgs_received;
     }
+
+    /* Aggregate per-channel IPC drop counts across all routes owned by this
+     * transport. Only subscriber-side IpcChannels track drops (drop-oldest
+     * broadcast semantics), so this sums the messages this process lost due
+     * to falling behind on any inbound IPC topic. Locks the route table to
+     * safely iterate the channel pointers. */
+    pthread_mutex_lock(&t->mutex);
+    for (int i = 0; i < t->route_count; i++) {
+        if (t->routes[i].ipc_channel) {
+            stats->ipc_dropped += ipc_channel_get_drop_count(t->routes[i].ipc_channel);
+        }
+    }
+    pthread_mutex_unlock(&t->mutex);
 }

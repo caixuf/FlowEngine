@@ -76,6 +76,11 @@ int detect_collisions(const EntityPool& pool, std::vector<CollisionPair>& pairs)
             const Entity& b = pool[j];
             if (!b.active || !b.is_vehicle()) continue;
 
+            // 任一方处于碰撞冷却期 → 跳过该对的碰撞检测。
+            // 否则 detect_collisions 每 tick 仍报告重叠的车对，apply_collision_response
+            // 又把 crash_cooldown 重置为 0.5s → 冷却永远归零不了 → 两车永久卡死重叠。
+            if (a.crash_cooldown > 0.0 || b.crash_cooldown > 0.0) continue;
+
             // Broad-phase: AABB 快速排除
             double dx = std::fabs(a.x - b.x);
             double dy = std::fabs(a.y - b.y);
@@ -120,9 +125,38 @@ void apply_collision_response(EntityPool& pool, const std::vector<CollisionPair>
                 b.route_s += sep * (double)b.route_dir;
                 a.route_s -= sep * (double)a.route_dir;
             }
+        } else {
+            // 非 route 模式：世界系沿碰撞法线分离。
+            // ego.route_dir 全代码库未被初始化（始终 0）；esmini/Route::build()
+            // 失败时所有 NPC route_dir 也为 0。若不做分离，detect_collisions 每
+            // tick 仍把重叠的车判定为碰撞，配合 cooldown 重置 → 永久卡死重叠。
+            //
+            // OBB SAT 不返回穿透深度，用 AABB 重叠量近似。采用 MTV（最小平移
+            // 向量）思路：在 x/y 两轴上选重叠量较小的那根作为分离轴，各推一半
+            // 穿透深度 + 小余量。这样保证一次分离就足以让 broad-phase AABB 不
+            // 再通过（沿该轴完全脱开）。若沿中心连线方向推（task 草案写法），
+            // 当中心连线方向与 max-overlap 轴对齐时，按 min-overlap 量推送无法
+            // 真正脱开 → 下一 tick 仍报碰撞 → cooldown 仍被重置 → 还是卡死。
+            double ax_to_bx = b.x - a.x;
+            double ay_to_by = b.y - a.y;
+            double overlap_x = (a.length + b.length) * 0.5 - std::fabs(ax_to_bx);
+            double overlap_y = (a.width  + b.width ) * 0.5 - std::fabs(ay_to_by);
+            if (overlap_x < 0.0) overlap_x = 0.0;
+            if (overlap_y < 0.0) overlap_y = 0.0;
+            if (overlap_x <= overlap_y) {
+                // 沿 x 轴分离：a 退向 -x，b 进向 +x（按中心连线 x 分量符号）
+                double sign = (ax_to_bx >= 0.0) ? 1.0 : -1.0;
+                double push = overlap_x * 0.5 + 0.01;
+                a.x -= sign * push;
+                b.x += sign * push;
+            } else {
+                // 沿 y 轴分离
+                double sign = (ay_to_by >= 0.0) ? 1.0 : -1.0;
+                double push = overlap_y * 0.5 + 0.01;
+                a.y -= sign * push;
+                b.y += sign * push;
+            }
         }
-        /* 非 route 模式（route_dir=0）不做分离，让它们自然叠着，
-         * 避免在无路网场景引入任意方向推力。 */
 
         // 碰撞冷却缩短到 0.5s：原 2.0s 太长，撞一次堵 2 秒整条路就塞死。
         // 0.5s 够避免同一帧/下一两帧重复碰撞检测，又能快速恢复行驶。

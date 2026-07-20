@@ -28,10 +28,23 @@ typedef struct {
     size_t   buf_cap;
     size_t   buf_len;
 
-    /* Current snapshot being assembled */
+    /* Current snapshot being assembled.
+     *
+     * Reassembly completeness is tracked with a bitmap (received_mask) rather
+     * than a counter, so that a missing middle chunk can never be masked by a
+     * duplicate or out-of-order delivery: completion requires every expected
+     * bit set, exactly. The maximum supported chunk count is 64 (≈4 MB JSON
+     * at DASHBOARD_CHUNK_DATA_SIZE ≈ 65 KB/chunk, far beyond anything the
+     * dashboard produces); larger counts are rejected as malformed.
+     *
+     * last_chunk_len records the payload_len of the idx == count-1 chunk so
+     * the final total length can be computed even if chunks arrive out of
+     * order — completion may be triggered by any chunk, not necessarily the
+     * last one. */
     uint32_t current_seq;
-    int      chunks_received;
+    uint64_t received_mask;
     int      chunks_expected;
+    size_t   last_chunk_len;
 } BridgeSubState;
 
 /* ── Publisher API ──────────────────────────────────────── */
@@ -127,11 +140,13 @@ static void on_raw_chunk(const Message* msg, void* user_data) {
         return;
     }
 
-    /* Multi-chunk: first chunk of a new sequence — allocate/reset buffer */
+    /* Multi-chunk: first chunk of a new sequence — allocate/reset buffer.
+     * Also reset if idx==0 of the same seq arrives again (publisher retry). */
     if (idx == 0 || seq != st->current_seq) {
-        st->current_seq    = seq;
-        st->chunks_received = 0;
-        st->chunks_expected = (int)count;
+        st->current_seq      = seq;
+        st->received_mask    = 0;
+        st->chunks_expected  = (int)count;
+        st->last_chunk_len   = 0;
         st->buf_len = 0;
 
         /* Allocate or grow buffer for the full JSON */
@@ -147,29 +162,52 @@ static void on_raw_chunk(const Message* msg, void* user_data) {
     /* Discard if sequence changed (e.g., dropped a chunk) */
     if (seq != st->current_seq) return;
 
-    /* Copy chunk data into buffer */
+    /* Validate chunk header against the protocol invariant. A count of 0,
+     * a count larger than the bitmap width (64), or an idx outside [0,
+     * count) would all be malformed — drop the chunk rather than risk
+     * writing out of bounds or setting a non-existent bit. */
+    if (count == 0 || count > 64 || idx >= count) return;
+
+    /* Record the last chunk's actual payload length so we can compute the
+     * true total length on completion regardless of arrival order. */
+    if (idx == (uint16_t)count - 1) {
+        st->last_chunk_len = payload_len;
+    }
+
+    /* Copy chunk data into buffer and mark its bit. Copying is idempotent:
+     * a duplicate chunk simply overwrites the same region without affecting
+     * the mask, so duplicates can never falsely trigger completion. */
     size_t offset = (size_t)idx * chunk_data_size;
     if (offset + payload_len <= st->buf_cap) {
         memcpy(st->buf + offset, chunk->data, payload_len);
-        st->chunks_received++;
+        st->received_mask |= (1ULL << idx);
     }
 
-    /* If we have all chunks, null-terminate and deliver */
-    if (st->chunks_received >= st->chunks_expected) {
-        /* Calculate actual total length (last chunk may be shorter) */
-        size_t total_len = st->buf_len;
-        /* Find actual end: the total length is offset + payload_len from the last chunk */
-        total_len = (size_t)(st->chunks_expected - 1) * chunk_data_size + payload_len;
-        st->buf[total_len] = '\0';
+    /* Complete iff every expected chunk bit is set. With the old counter
+     * this would have been `received >= expected`, which a missing middle
+     * chunk plus a later duplicate could satisfy with a gap in the data;
+     * the bitmap makes that impossible. */
+    uint64_t expected_mask = (count == 64) ? ~0ULL : ((1ULL << count) - 1);
+    if (st->received_mask == expected_mask) {
+        /* Total length = full chunks before the last + last chunk's actual
+         * payload length (which may be shorter than chunk_data_size). */
+        size_t total_len = (size_t)(st->chunks_expected - 1) * chunk_data_size
+                           + st->last_chunk_len;
+        if (total_len < st->buf_cap) {
+            st->buf[total_len] = '\0';
+        } else if (st->buf_cap > 0) {
+            st->buf[st->buf_cap - 1] = '\0';
+        }
 
         if (st->callback) {
             st->callback(st->buf, total_len, st->user_data);
         }
 
         /* Reset for next snapshot */
-        st->current_seq = 0;
-        st->chunks_received = 0;
+        st->current_seq     = 0;
+        st->received_mask   = 0;
         st->chunks_expected = 0;
+        st->last_chunk_len  = 0;
         st->buf_len = 0;
     }
 }

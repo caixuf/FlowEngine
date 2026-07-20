@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "road_position.h"
+
 namespace flowsim {
 
 using EntityId = int;
@@ -109,6 +111,20 @@ struct Entity {
     int    phase_state{0};         /**< 红绿灯当前相位：0=绿 1=黄 2=红 */
     double phase_timer{0};         /**< 当前相位剩余时间 (s) */
 
+    /* ── RoadPosition（Task: 地图路由重构）──
+     * 每车持久的 esmini position handle，替代 route_s/route_dir 的单链路由。
+     * ego + 每个 NPC 各自持有独立 handle，用 RM_PositionMoveForward 沿真实
+     * OpenDRIVE 拓扑推进，路口按 junction_angle 选支路。
+     * 非 vehicle 类型（行人/红绿灯/ETC/停止线）不初始化，handle_ 保持 -1。 */
+    RoadPosition road_pos;
+
+    /* 因 RoadPosition 不可拷贝，Entity 显式声明移动语义、删除拷贝 */
+    Entity() = default;
+    Entity(const Entity&) = delete;
+    Entity& operator=(const Entity&) = delete;
+    Entity(Entity&&) noexcept = default;
+    Entity& operator=(Entity&&) noexcept = default;
+
     bool is_vehicle() const {
         return type == EntityType::Car || type == EntityType::SUV ||
                type == EntityType::Truck || type == EntityType::Ego;
@@ -135,6 +151,8 @@ public:
     EntityId alloc(EntityType type) {
         for (int i = 0; i < MAX_ENTITIES; ++i) {
             if (!entities_[i].active) {
+                /* Entity 不可拷贝但可移动；Entity{} 创建临时对象后移动赋值。
+                 * 旧 road_pos handle（如有）在移动赋值时被 RoadPosition::operator= 自动释放。 */
                 entities_[i] = Entity{};
                 entities_[i].active = true;
                 entities_[i].type = type;

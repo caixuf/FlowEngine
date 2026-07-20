@@ -82,6 +82,25 @@ void ipc_channel_stop(IpcChannel* ch);
  */
 int ipc_channel_recv_once(IpcChannel* ch, uint32_t timeout_ms);
 
+/* ── 丢包统计（仅对 Subscriber 端有意义） ─────────────── */
+
+/**
+ * 获取本订阅者累计因落后超过环形缓冲容量而被丢弃的消息数。
+ * 广播环形缓冲采用 drop-oldest 策略：当订阅者读取速度落后于发布者
+ * 超过 queue_depth 时，会跳到最新窗口，期间被覆盖的消息计入此计数器。
+ * 该计数器是 per-IpcChannel（即 per-订阅者进程）的，与同项目进程内
+ * message_bus 的 per-topic drop_count 语义对齐，便于 QoS/遥测上报。
+ * @param ch  通道句柄
+ * @return 累计丢包数（ch 为 NULL 时返回 0）
+ */
+uint64_t ipc_channel_get_drop_count(IpcChannel* ch);
+
+/**
+ * 将丢包计数器清零。常用于统计窗口重置 / 分段上报场景。
+ * @param ch  通道句柄
+ */
+void ipc_channel_reset_drop_count(IpcChannel* ch);
+
 #ifdef __cplusplus
 }
 #endif

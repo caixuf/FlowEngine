@@ -113,9 +113,12 @@ static bool lane_change_safe(const Entity& npc, double target_offset,
 }
 
 /* ── 回收：跑到 route 末端的 NPC 放回 ego 附近，形成持续车流 ──
- * B4: 检查目标点附近是否已有同方向 NPC，被占则再后退一段，避免多车叠在同一点。 */
+ * B4: 检查目标点附近是否已有同方向 NPC，被占则再后退一段，避免多车叠在同一点。
+ * Phase 2: 若 npc.road_pos.ok() 且 roads 可用，回收后用 road_pos.init 重新定位
+ * 到新 (road_id, s_local, offset)，使后续 step5 走 road_pos.advance 分支而非旧
+ * route_s+frenet_to_world。 */
 static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
-                        const EntityPool& pool) {
+                        const EntityPool& pool, FlowRoadNetwork* roads) {
     const double total = route.total_length();
     // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
     const double back = 50.0 + (double)(npc.id % 5) * 22.0;
@@ -157,6 +160,20 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.route_fail_count = 0;
     npc.lane_change_timer = 0.0;
     npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
+
+    /* Phase 2: road_pos 重新 init 到回收点。
+     * route.locate 把 route_s 转成 (road_id, s_local)，再用 npc.offset（保持
+     * 横向车道）init road_pos。失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
+     * 注意：road_pos.init 内部会 RM_DeletePosition 旧 handle 再 RM_CreatePosition，
+     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。 */
+    if (npc.road_pos.ok() && roads && roads->loaded()) {
+        int rid = 0, ridx = -1;
+        double s_local = 0.0;
+        route.locate(npc.route_s, rid, s_local, ridx);
+        if (!npc.road_pos.init(*roads, rid, 0, s_local, npc.offset)) {
+            /* init 失败 — 后续 step5 检查 ok() 时会走旧逻辑兜底 */
+        }
+    }
 }
 
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
@@ -321,7 +338,74 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     step_bicycle(npc, dt, throttle, brake, 0.0);
 
     // 5. 位置更新
-    if (route && route->ok() && npc.route_dir != 0 && roads) {
+    // Phase 2: npc.road_pos.ok() 时优先用 RoadPosition 推进——沿真实 OpenDRIVE
+    // 拓扑 RM_PositionMoveForward，过路口按 junction_angle 选支路，杜绝单链 Route
+    // 在 fork/merge/toll 多通道处丢支路。否则走旧 route/世界系兜底逻辑。
+    if (npc.road_pos.ok() && roads && roads->loaded()) {
+        // ── RoadPosition 推进分支 ──
+        // junction_angle 暂用 M_PI（直行）；BranchSel 状态可后续从 route step
+        // type 映射左/右转。advance 失败（路网边界）→ recycle。
+        double dist = npc.speed * dt;
+        double junc_angle = M_PI;
+        if (npc.ai_state == AIState::BranchSel) {
+            // 路口选支路：暂用直行（后续可从 target_vx 或 route step 决定）
+            junc_angle = M_PI;
+        }
+        bool adv_ok = true;
+        if (dist > 0.0) {
+            adv_ok = npc.road_pos.advance(dist, junc_angle);
+        }
+        if (!adv_ok) {
+            // 推进失败（路网边界）→ recycle 到 ego 附近。
+            // 无 route 可 recycle 时（route.build 失败但 roads 加载成功）停车防飞出：
+            // advance 失败时 esmini position 停在最后有效点，speed=0 让 NPC 不再尝试推进。
+            if (route && route->ok() && npc.route_dir != 0) {
+                recycle_npc(npc, *route, ego_route_s, pool, roads);
+            } else {
+                npc.speed = 0.0;
+                npc.vx = 0.0; npc.vy = 0.0;
+            }
+        } else {
+            // sync 横向 offset 到 road_pos（E2/CutIn 平滑插值后的 npc.offset）
+            // 然后用 road_pos.world() 取路网对齐世界坐标
+            npc.road_pos.set_offset(npc.offset);
+            WorldPos wp;
+            if (npc.road_pos.world(wp)) {
+                npc.x = wp.x;
+                npc.y = wp.y;
+                double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
+                while (h >  M_PI) h -= 2.0 * M_PI;
+                while (h < -M_PI) h += 2.0 * M_PI;
+                npc.heading = h;
+                npc.vx = npc.speed * std::cos(h);
+                npc.vy = npc.speed * std::sin(h);
+            }
+            // 同步 Frenet 字段（same_lane/lane_change_safe 等用 npc.offset 比较，
+            // 但 npc.road_id/lane_id/s 也需更新供下游逻辑/调试使用）
+            FrenetPos fp;
+            if (npc.road_pos.frenet(fp)) {
+                npc.road_id = fp.road_id;
+                npc.lane_id = fp.lane_id;
+                npc.s = fp.s;
+                // 注意：fp.offset 是 lane 内 offset（lane_id=0 时 = npc.offset）。
+                // npc.offset 保持由 E2/CutIn 插值驱动的值，不覆盖。
+            }
+            // route_s 同步：用 route.index_of + to_route_s 把 road_pos 的 (road,s)
+            // 映射回 route 累计 s，让 recycle_npc / find_lead 的 route_s 比较仍有效
+            if (route && route->ok() && npc.route_dir != 0) {
+                int ei = route->index_of(npc.road_id);
+                if (ei >= 0) {
+                    npc.route_s = route->to_route_s(ei, npc.s);
+                    // 越界 → recycle
+                    if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
+                        (npc.route_dir < 0 && npc.route_s < 0.0)) {
+                        recycle_npc(npc, *route, ego_route_s, pool, roads);
+                    }
+                }
+            }
+            npc.route_fail_count = 0;  // 成功 → 清零
+        }
+    } else if (route && route->ok() && npc.route_dir != 0 && roads) {
         // ── 中央 Frenet 车道跟随：沿 route 推进 s，反算世界坐标 ──
         // B1: 保存推进前的 route_s，frenet_to_world 失败时回滚。
         //     原实现失败时 route_s 已推进但 npc.x/y 未更新，下一帧 step_bicycle
@@ -330,7 +414,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         npc.route_s += (double)npc.route_dir * npc.speed * dt;
         if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
             (npc.route_dir < 0 && npc.route_s < 0.0)) {
-            recycle_npc(npc, *route, ego_route_s, pool);
+            recycle_npc(npc, *route, ego_route_s, pool, roads);
         }
         int rid = 0, ridx = -1;
         double s_local = 0.0;
@@ -356,7 +440,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.vx = 0.0; npc.vy = 0.0;
             npc.route_fail_count++;
             if (npc.route_fail_count >= 5) {
-                recycle_npc(npc, *route, ego_route_s, pool);
+                recycle_npc(npc, *route, ego_route_s, pool, roads);
             }
         }
     } else if (roads && roads->loaded()) {
