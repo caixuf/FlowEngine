@@ -964,7 +964,502 @@
             carGroup.add(support);
         });
 
-        // === FILE TRUNCATED HERE — awaiting remaining content ===
+        // ============================
+        // WINDOWS
+        // ============================
+        // Windshield
+        const windshieldGeo = new THREE.PlaneGeometry(1.6, 0.55);
+        const windshield = new THREE.Mesh(windshieldGeo, glassMat);
+        windshield.position.set(1.05, 0.85, 0);
+        windshield.rotation.x = -0.4;
+        carGroup.add(windshield);
+
+        // Rear window
+        const rearWinGeo = new THREE.PlaneGeometry(1.5, 0.45);
+        const rearWin = new THREE.Mesh(rearWinGeo, glassMat);
+        rearWin.position.set(-0.85, 0.85, 0);
+        rearWin.rotation.x = 0.35;
+        carGroup.add(rearWin);
+
+        // Side windows (left)
+        const sideWinGeo = new THREE.PlaneGeometry(2.0, 0.4);
+        const sideWinLeft = new THREE.Mesh(sideWinGeo, glassMat);
+        sideWinLeft.position.set(0.1, 0.87, 0.86);
+        sideWinLeft.rotation.y = 0;
+        carGroup.add(sideWinLeft);
+
+        // Side windows (right)
+        const sideWinRight = new THREE.Mesh(sideWinGeo, glassMat);
+        sideWinRight.position.set(0.1, 0.87, -0.86);
+        sideWinRight.rotation.y = Math.PI;
+        carGroup.add(sideWinRight);
+
+        // ============================
+        // WHEELS (upgraded with bluish rims and red calipers)
+        // ============================
+        const wheels = {};
+        const wheelDetails = [
+            { name: 'fl', x: 1.55, z: 0.95 },
+            { name: 'fr', x: 1.55, z: -0.95 },
+            { name: 'rl', x: -1.55, z: 0.95 },
+            { name: 'rr', x: -1.55, z: -0.95 }
+        ];
+
+        wheelDetails.forEach(wd => {
+            const wheelGroup = new THREE.Group();
+            wheelGroup.position.set(wd.x, 0.33, wd.z);
+
+            // Spin group: all rotating parts go here, self-spins around X axis (car's forward axis)
+            const spinGroup = new THREE.Group();
+            wheelGroup.add(spinGroup);
+
+            // Tire - more segments for smoother look
+            const tireGeo = new THREE.CylinderGeometry(0.33, 0.33, 0.22, 32);
+            const tire = new THREE.Mesh(tireGeo, tireMat);
+            tire.rotation.x = Math.PI / 2;
+            tire.castShadow = true;
+            spinGroup.add(tire);
+
+            // Rim - bluish silver
+            const rimGeo = new THREE.CylinderGeometry(0.24, 0.24, 0.23, 16);
+            const rim = new THREE.Mesh(rimGeo, rimMat);
+            rim.rotation.x = Math.PI / 2;
+            spinGroup.add(rim);
+
+            // Rim center hub
+            const hubGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.24, 12);
+            const hub = new THREE.Mesh(hubGeo, chromeMat);
+            hub.rotation.x = Math.PI / 2;
+            spinGroup.add(hub);
+
+            // Rim spokes (5-spoke pattern)
+            for (let i = 0; i < 5; i++) {
+                const angle = (i / 5) * Math.PI * 2;
+                const spokeGeo = new THREE.BoxGeometry(0.03, 0.16, 0.015);
+                const spoke = new THREE.Mesh(spokeGeo, rimMat);
+                spoke.position.set(0, Math.cos(angle) * 0.13, Math.sin(angle) * 0.13);
+                spoke.rotation.x = angle;
+                spinGroup.add(spoke);
+            }
+
+            // Brake disc
+            const brakeGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.02, 20);
+            const brakeMatLocal = new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.6, metalness: 0.7 });
+            const brake = new THREE.Mesh(brakeGeo, brakeMatLocal);
+            brake.rotation.x = Math.PI / 2;
+            spinGroup.add(brake);
+
+            // Red brake caliper (doesn't spin with wheel)
+            const caliperGeo = new THREE.BoxGeometry(0.03, 0.08, 0.04);
+            const caliper = new THREE.Mesh(caliperGeo, caliperMat);
+            caliper.position.set(0, -0.18, 0);
+            wheelGroup.add(caliper);
+
+            carGroup.add(wheelGroup);
+            wheels[wd.name] = { group: wheelGroup, spin: spinGroup };
+        });
+
+        // ============================
+        // HEADLIGHTS (with fixed turn signals)
+        // ============================
+        const headlightGroups = { left: null, right: null };
+        const headlightLights = { left: null, right: null };
+        const headlightLenses = { left: null, right: null };
+        const frontTurnPLs = { left: null, right: null };
+
+        [-1, 1].forEach(side => {
+            const name = side === -1 ? 'left' : 'right';
+            const hlGroup = new THREE.Group();
+            hlGroup.position.set(2.48, 0.45, side * 0.7);
+
+            // Housing
+            const housingGeo = new THREE.BoxGeometry(0.08, 0.12, 0.32);
+            const housing = new THREE.Mesh(housingGeo, darkMat);
+            hlGroup.add(housing);
+
+            // Lens
+            const lensGeo = new THREE.BoxGeometry(0.02, 0.1, 0.3);
+            const lensMat = new THREE.MeshStandardMaterial({
+                color: 0xfff5e0,
+                emissive: 0xfff5e0,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.9
+            });
+            const lens = new THREE.Mesh(lensGeo, lensMat);
+            lens.position.x = 0.05;
+            hlGroup.add(lens);
+            headlightLenses[name] = lens;
+
+            // PointLight
+            const pl = new THREE.PointLight(0xfff5e0, 0, 12, 2);
+            pl.position.set(0.2, 0, 0);
+            hlGroup.add(pl);
+            headlightLights[name] = pl;
+
+            // Turn signal (amber, part of headlight cluster) - MUCH bigger
+            const tsGeo = new THREE.BoxGeometry(0.03, 0.06, 0.18);
+            const tsMat = new THREE.MeshStandardMaterial({
+                color: 0xffaa00,
+                emissive: 0xffaa00,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.9
+            });
+            const ts = new THREE.Mesh(tsGeo, tsMat);
+            ts.position.set(0.06, -0.1, side * 0.12);
+            hlGroup.add(ts);
+            hlGroup.userData.turnSignalMesh = ts;
+            hlGroup.userData.turnSignalMat = tsMat;
+
+            // Turn signal PointLight for visibility
+            const tsPL = new THREE.PointLight(0xffaa00, 0, 5, 2);
+            tsPL.position.set(0.3, 0, 0);
+            hlGroup.add(tsPL);
+            frontTurnPLs[name] = tsPL;
+
+            carGroup.add(hlGroup);
+            headlightGroups[name] = hlGroup;
+        });
+
+        // ============================
+        // TAILLIGHTS (Full-width LED bar - SU7 signature)
+        // ============================
+        const taillightBarGeo = new THREE.BoxGeometry(0.04, 0.08, 1.7);
+        const taillightBarMat = new THREE.MeshStandardMaterial({
+            color: 0xff1a1a,
+            emissive: 0xff1a1a,
+            emissiveIntensity: 0,
+            transparent: true,
+            opacity: 0.9
+        });
+        const taillightBar = new THREE.Mesh(taillightBarGeo, taillightBarMat);
+        taillightBar.position.set(-2.48, 0.5, 0);
+        carGroup.add(taillightBar);
+
+        // Taillight PointLight
+        const taillightPL = new THREE.PointLight(0xff1a1a, 0, 8, 2);
+        taillightPL.position.set(-2.7, 0.5, 0);
+        carGroup.add(taillightPL);
+
+        // Rear turn signals (bigger, with PointLights)
+        const rearTurnSignals = { left: null, right: null, mat: null };
+        const rearTurnPLs = { left: null, right: null };
+        [-1, 1].forEach(side => {
+            const name = side === -1 ? 'left' : 'right';
+            const rtsGeo = new THREE.BoxGeometry(0.04, 0.06, 0.28);
+            const rtsMat = new THREE.MeshStandardMaterial({
+                color: 0xffaa00,
+                emissive: 0xffaa00,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.9
+            });
+            const rts = new THREE.Mesh(rtsGeo, rtsMat);
+            rts.position.set(-2.47, 0.43, side * 0.65);
+            carGroup.add(rts);
+            rearTurnSignals[name] = rts;
+
+            // Rear turn signal PointLight
+            const rtsPL = new THREE.PointLight(0xffaa00, 0, 4, 2);
+            rtsPL.position.set(-2.55, 0.43, side * 0.65);
+            carGroup.add(rtsPL);
+            rearTurnPLs[name] = rtsPL;
+        });
+
+        // ============================
+        // FOG LIGHTS (大幅增强 - 更大发光体 + 更强光源 + SpotLight光束)
+        // ============================
+        const fogLightMeshes = [];
+        const fogLightPLs = [];
+        const fogSpotLights = [];
+        [-1, 1].forEach(side => {
+            // 大号雾灯光源球体
+            const fogGeo = new THREE.SphereGeometry(0.1, 16, 16);
+            const fogMat = new THREE.MeshStandardMaterial({
+                color: 0xffdd88,
+                emissive: 0xffdd88,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.95
+            });
+            const fog = new THREE.Mesh(fogGeo, fogMat);
+            fog.position.set(2.49, 0.25, side * 0.5);
+            carGroup.add(fog);
+            fogLightMeshes.push(fog);
+
+            // 雾灯外框（深色外壳）
+            const fogHousingGeo = new THREE.BoxGeometry(0.04, 0.16, 0.22);
+            const fogHousing = new THREE.Mesh(fogHousingGeo, darkMat);
+            fogHousing.position.set(2.47, 0.25, side * 0.5);
+            carGroup.add(fogHousing);
+
+            // PointLight 增强范围和强度
+            const fpl = new THREE.PointLight(0xffdd88, 0, 10, 1.5);
+            fpl.position.set(2.55, 0.25, side * 0.5);
+            carGroup.add(fpl);
+            fogLightPLs.push(fpl);
+
+            // SpotLight 前方光束效果
+            const fogSpot = new THREE.SpotLight(0xffdd88, 0, 8, Math.PI / 6, 0.5, 1.5);
+            fogSpot.position.set(2.5, 0.25, side * 0.5);
+            fogSpot.target.position.set(5, -0.3, side * 0.5);
+            carGroup.add(fogSpot);
+            carGroup.add(fogSpot.target);
+            fogSpotLights.push(fogSpot);
+        });
+
+        // ============================
+        // POSITION LIGHTS
+        // ============================
+        const positionLights = [];
+        [-1, 1].forEach(side => {
+            // Front position lights
+            const plGeo = new THREE.SphereGeometry(0.03, 8, 8);
+            const plMat = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                emissive: 0xffffff,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.8
+            });
+            const pl = new THREE.Mesh(plGeo, plMat);
+            pl.position.set(2.5, 0.4, side * 0.85);
+            carGroup.add(pl);
+            positionLights.push(pl);
+
+            // Rear position lights
+            const rplGeo = new THREE.SphereGeometry(0.025, 8, 8);
+            const rplMat = new THREE.MeshStandardMaterial({
+                color: 0xff3333,
+                emissive: 0xff3333,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.8
+            });
+            const rpl = new THREE.Mesh(rplGeo, rplMat);
+            rpl.position.set(-2.5, 0.45, side * 0.85);
+            carGroup.add(rpl);
+            positionLights.push(rpl);
+        });
+
+        // ============================
+        // AUTONOMOUS DRIVING BLUE LIGHT
+        // ============================
+        const adLightGeo = new THREE.SphereGeometry(0.04, 12, 12);
+        const adLightMat = new THREE.MeshStandardMaterial({
+            color: 0x00b4ff,
+            emissive: 0x00b4ff,
+            emissiveIntensity: 0,
+            transparent: true,
+            opacity: 0.9
+        });
+        // 车内仪表台小蓝灯
+        const adLightMesh = new THREE.Mesh(adLightGeo, adLightMat);
+        adLightMesh.position.set(0.3, 1.0, 0);
+        carGroup.add(adLightMesh);
+
+        const adLightPL = new THREE.PointLight(0x00b4ff, 0, 3, 2);
+        adLightPL.position.set(0.3, 1.05, 0);
+        carGroup.add(adLightPL);
+
+        // 尾灯附近左右两个小蓝灯（智能驾驶指示）
+        const adRearLightMeshes = [];
+        const adRearLightPLs = [];
+        [-1, 1].forEach(side => {
+            const adRearGeo = new THREE.SphereGeometry(0.035, 12, 12);
+            const adRearMat = new THREE.MeshStandardMaterial({
+                color: 0x00b4ff,
+                emissive: 0x00b4ff,
+                emissiveIntensity: 0,
+                transparent: true,
+                opacity: 0.9
+            });
+            const adRearMesh = new THREE.Mesh(adRearGeo, adRearMat);
+            adRearMesh.position.set(-2.5, 0.6, side * 0.65);
+            carGroup.add(adRearMesh);
+            adRearLightMeshes.push(adRearMesh);
+
+            const adRearPL = new THREE.PointLight(0x00b4ff, 0, 4, 2);
+            adRearPL.position.set(-2.6, 0.6, side * 0.65);
+            carGroup.add(adRearPL);
+            adRearLightPLs.push(adRearPL);
+        });
+
+        // ============================
+        // BRAKE LIGHTS (刹车灯 - 独立于尾灯，刹车时高亮)
+        // ============================
+        const brakeLightMat = new THREE.MeshStandardMaterial({
+            color: 0xff0000,
+            emissive: 0xff0000,
+            emissiveIntensity: 0,
+            transparent: true,
+            opacity: 0.95
+        });
+        const brakeLightMeshes = [];
+        const brakeLightPLs = [];
+        [-1, 1].forEach(side => {
+            // 刹车灯灯体（尾灯下方独立区域）
+            const brakeGeo = new THREE.BoxGeometry(0.04, 0.05, 0.22);
+            const brake = new THREE.Mesh(brakeGeo, brakeLightMat.clone());
+            brake.position.set(-2.49, 0.44, side * 0.6);
+            carGroup.add(brake);
+            brakeLightMeshes.push(brake);
+
+            // 刹车灯光源
+            const bpl = new THREE.PointLight(0xff0000, 0, 8, 2);
+            bpl.position.set(-2.7, 0.44, side * 0.6);
+            carGroup.add(bpl);
+            brakeLightPLs.push(bpl);
+        });
+        // 中央高位刹车灯
+        const highBrakeGeo = new THREE.BoxGeometry(0.03, 0.025, 0.6);
+        const highBrakeMat = brakeLightMat.clone();
+        const highBrake = new THREE.Mesh(highBrakeGeo, highBrakeMat);
+        highBrake.position.set(-2.1, 1.0, 0);
+        carGroup.add(highBrake);
+        brakeLightMeshes.push(highBrake);
+
+        const highBrakePL = new THREE.PointLight(0xff0000, 0, 6, 2);
+        highBrakePL.position.set(-2.3, 1.0, 0);
+        carGroup.add(highBrakePL);
+        brakeLightPLs.push(highBrakePL);
+
+        // ============================
+        // INTERIOR DETAILS (visible through glass)
+        // ============================
+        // Dashboard
+        const dashGeo = new THREE.BoxGeometry(0.6, 0.15, 1.5);
+        const dash = new THREE.Mesh(dashGeo, interiorMat);
+        dash.position.set(0.8, 0.75, 0);
+        carGroup.add(dash);
+
+        // Dashboard screen
+        const screenGeo = new THREE.BoxGeometry(0.02, 0.14, 0.8);
+        const screenMat = new THREE.MeshStandardMaterial({
+            color: 0x001122,
+            emissive: 0x001133,
+            emissiveIntensity: 0.5,
+            roughness: 0.1,
+            metalness: 0.5
+        });
+        const screen = new THREE.Mesh(screenGeo, screenMat);
+        screen.position.set(0.52, 0.8, 0);
+        screen.rotation.y = 0.3;
+        carGroup.add(screen);
+
+        // Steering wheel interior
+        const intWheelGeo = new THREE.TorusGeometry(0.14, 0.015, 8, 20);
+        const intWheelMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+        const intWheel = new THREE.Mesh(intWheelGeo, intWheelMat);
+        intWheel.position.set(0.7, 0.88, 0);
+        intWheel.rotation.y = Math.PI / 2;
+        intWheel.rotation.x = -0.35;
+        carGroup.add(intWheel);
+
+        // Seats
+        [-0.35, 0.35].forEach(z => {
+            const seatGeo = new THREE.BoxGeometry(0.5, 0.45, 0.35);
+            const seatMatLocal = new THREE.MeshStandardMaterial({ color: 0x151520, roughness: 0.9 });
+            const seat = new THREE.Mesh(seatGeo, seatMatLocal);
+            seat.position.set(-0.05, 0.75, z);
+            carGroup.add(seat);
+        });
+
+        // ============================
+        // STATE
+        // ============================
+        const state = {
+            headlights: false,
+            taillights: false,
+            fogLights: false,
+            positionLights: false,
+            brakeLights: false,
+            turnLeft: false,
+            turnRight: false,
+            hazard: false,
+            adMode: false,
+            steeringAngle: 0,
+            targetSteeringAngle: 0,
+            gear: 'P',
+            speed: 0,
+            targetSpeed: 0,
+            battery: 87
+        };
+
+        // ============================
+        // UI WIRING
+        // ============================
+        function setupToggle(id, stateKey, callback) {
+            const el = document.getElementById(id);
+            el.addEventListener('click', () => {
+                state[stateKey] = !state[stateKey];
+                el.classList.toggle('active', state[stateKey]);
+                if (callback) callback(state[stateKey]);
+            });
+        }
+
+        setupToggle('toggleHeadlights', 'headlights');
+        setupToggle('toggleTaillights', 'taillights');
+        setupToggle('toggleFogLights', 'fogLights');
+        setupToggle('togglePositionLights', 'positionLights');
+        setupToggle('toggleBrakeLights', 'brakeLights');
+        setupToggle('toggleAD', 'adMode');
+
+        // Turn signals
+        const btnTurnLeft = document.getElementById('btnTurnLeft');
+        const btnTurnRight = document.getElementById('btnTurnRight');
+        const btnTurnHazard = document.getElementById('btnTurnHazard');
+
+        function updateTurnButtons() {
+            btnTurnLeft.classList.toggle('active', state.turnLeft);
+            btnTurnRight.classList.toggle('active', state.turnRight);
+            btnTurnHazard.classList.toggle('active', state.hazard);
+        }
+
+        btnTurnLeft.addEventListener('click', () => {
+            state.turnLeft = !state.turnLeft;
+            if (state.turnLeft) { state.turnRight = false; state.hazard = false; }
+            updateTurnButtons();
+        });
+        btnTurnRight.addEventListener('click', () => {
+            state.turnRight = !state.turnRight;
+            if (state.turnRight) { state.turnLeft = false; state.hazard = false; }
+            updateTurnButtons();
+        });
+        btnTurnHazard.addEventListener('click', () => {
+            state.hazard = !state.hazard;
+            if (state.hazard) { state.turnLeft = false; state.turnRight = false; }
+            updateTurnButtons();
+        });
+
+        // Steering slider
+        const steeringSlider = document.getElementById('steeringSlider');
+        steeringSlider.addEventListener('input', (e) => {
+            state.targetSteeringAngle = parseFloat(e.target.value);
+        });
+
+        // Gear buttons
+        document.querySelectorAll('.gear-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.gear-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                state.gear = btn.dataset.gear;
+                document.getElementById('gearValue').textContent = state.gear;
+
+                if (state.gear === 'D') {
+                    state.targetSpeed = 60 + Math.random() * 40;
+                } else if (state.gear === 'R') {
+                    state.targetSpeed = 5 + Math.random() * 5;
+                } else if (state.gear === 'N') {
+                    state.targetSpeed = 0;
+                } else {
+                    state.targetSpeed = 0;
+                }
+            });
+        });
+
+        // === FILE CONTINUES — awaiting animate() loop & update functions ===
     </script>
 </body>
 </html>
