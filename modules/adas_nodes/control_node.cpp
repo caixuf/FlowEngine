@@ -921,6 +921,37 @@ protected:
                     int need_accel = 0;
                     /* NOA 路线触发时用 route_target_y；被动超车用 adjacent_lane_y */
                     double lc_target_y_candidate = route_triggered ? route_target_y : adjacent_lane_y;
+                    /* 防止逆行：多车道（lane_count>2，即顺行侧≥2 条）场景下，
+                     * 禁止 ego 跨过道路中心线 road_c 进入对向车道。
+                     *
+                     * 背景：flowsim_node 发布的 lane_count 是 esmini 的"双向合计"
+                     * 车道数（如 4 车道 = 2 顺行 + 2 对向），而 lane_center_y 用
+                     * 中心对称模型把 N 个 idx 对称布置在 road_c 两侧——idx ≥ N/2
+                     * 的车道实际上是对向车道（y>road_c）。control_node 此前没有
+                     * "不可跨越中心线"约束，导致 ego 被动超车或 NOA 路线变道时
+                     * 可能选到 idx 2/3（y>road_c，对向最内/最外），看起来像逆行。
+                     *
+                     * 2 车道场景（lane_count==2，1 顺 + 1 对）保留旧行为：ego 可以
+                     * 借对向车道超车（前方安全时），因为顺行侧只有 1 条车道，不借
+                     * 对向就无法超车。多车道场景下顺行侧已有 ≥2 条车道，应只在顺行
+                     * 侧内变道，不跨中心线。
+                     *
+                     * 检查：lane_count>2 且候选 y 在 road_c 对侧（与 ego 不同侧）
+                     * 时拒绝变道，进入冷却避免反复尝试。 */
+                    int ego_on_negative_side = (g.ego_y < road_c);
+                    int candidate_on_opposite_side =
+                        (ego_on_negative_side && lc_target_y_candidate > road_c + 0.1) ||
+                        (!ego_on_negative_side && lc_target_y_candidate < road_c - 0.1);
+                    if (g.lane_count > 2 && candidate_on_opposite_side) {
+                        LOG_WARN("control",
+                                 ">>> LANE CHANGE REJECTED (oncoming): target_y=%.2f crosses road_c=%.2f "
+                                 "into opposite side (lane_count=%d, ego_y=%.2f) — staying on same-direction side",
+                                 lc_target_y_candidate, road_c, g.lane_count, g.ego_y);
+                        g.lc_timer = g.blocked_timeout_s;  /* 冷却，避免反复尝试 */
+                        route_triggered = 0;
+                        overtake_worthwhile = 0;
+                        blocked = 0;
+                    } else {
                     int front_allows_merge = lane_front_allows_merge(lc_target_y_candidate, same_lane_tol, &need_accel);
                     if (front_allows_merge &&
                         !lane_has_pedestrian_risk(lc_target_y_candidate, same_lane_tol) &&
@@ -941,6 +972,7 @@ protected:
                         LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
                         g.lc_timer = g.blocked_timeout_s;
                     }
+                    }  /* end else (not oncoming) */
                 }
             } else if (!blocked && g.lc_state == 0) {
                 g.lc_timer = 0;

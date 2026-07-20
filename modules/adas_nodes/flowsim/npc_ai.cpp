@@ -170,8 +170,22 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
         int rid = 0, ridx = -1;
         double s_local = 0.0;
         route.locate(npc.route_s, rid, s_local, ridx);
-        if (!npc.road_pos.init(*roads, rid, 0, s_local, npc.offset)) {
-            /* init 失败 — 后续 step5 检查 ok() 时会走旧逻辑兜底 */
+        if (npc.road_pos.init(*roads, rid, 0, s_local, npc.offset)) {
+            /* 立即同步世界坐标 — 旧实现只 init road_pos 不更新 npc.x/y，
+             * 下一帧 road_pos.world() 才把 npc.x/y 跳到新位置，evaluator
+             * 在两次采样间反算出 45 m/s 的"伪速度"触发 respawn jump 告警。
+             * 这里在 recycle 当帧立即用 road_pos.world() 同步 x/y/heading，
+             * 让 NPC 在新位置以 speed=0 出现，dx/dy 跨帧无跳变。 */
+            WorldPos wp;
+            if (npc.road_pos.world(wp)) {
+                npc.x = wp.x;
+                npc.y = wp.y;
+                double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
+                while (h >  M_PI) h -= 2.0 * M_PI;
+                while (h < -M_PI) h += 2.0 * M_PI;
+                npc.heading = h;
+                /* vx/vy 已在上面清零，保持 0 即可（speed=0） */
+            }
         }
     }
 }

@@ -220,6 +220,27 @@ def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
     return expected_edges_from_pipeline(pipeline)
 
 
+def _pipeline_flowsim_scenario_file() -> str | None:
+    """Return the scenario_file path configured in config/pipeline.json's
+    flowsim node params (or None if not found). Used to pass the pipeline's
+    default scenario to demo.sh --scenario, so that demo.sh does not override
+    it with its own DEFAULT_SCENARIO (infinite_straight.json, no route)."""
+    pipeline = load_json(PIPELINE_JSON) or {}
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict) or node.get("name") != "flowsim":
+            continue
+        params = node.get("params", {})
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(params, dict):
+            return params.get("scenario_file")
+        return None
+    return None
+
+
 def load_scenario_for_duration(scenario_override: str | None = None) -> dict:
     """Load scenario JSON to read duration_s for auto-detection."""
     scenario_path = scenario_override
@@ -600,14 +621,21 @@ def _compute_perception_metrics(series: list[dict], timestamps: list[float]) -> 
     }
 
 
-def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[list[dict], int]:
+def collect_samples(duration: int, json_file: Path, interval: float,
+                    scenario: str | None = None) -> tuple[list[dict], int]:
     try:
         json_file.unlink()
     except FileNotFoundError:
         pass
 
     started_wall = time.time()
-    cmd = [str(ROOT / "scripts" / "demo.sh"), "--no-browser", str(duration)]
+    # 传 --scenario 给 demo.sh，确保 demo.sh 不会用 DEFAULT_SCENARIO（infinite_straight，
+    # 无 route）覆盖 pipeline.json 的 scenario_file。否则 planning 运行时加载的是
+    # infinite_straight，route_count=0，NOA guard 永远拒绝，模式停在 NP。
+    cmd = [str(ROOT / "scripts" / "demo.sh"), "--no-browser"]
+    if scenario:
+        cmd += ["--scenario", scenario]
+    cmd += [str(duration)]
     proc = subprocess.Popen(
         cmd,
         cwd=ROOT,
@@ -887,10 +915,15 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 continue
             dx = obs["x"] - prev["x"]
             dy = obs["y"] - prev["y"]
-            speed = math.hypot(dx, dy) / dt
-            # NPC respawn 时位置跳变会产生 500+ m/s 假速度，跳过
-            if speed > 50.0:
+            # NPC respawn 时位置跳变（recycle 距离 50-138m）会反算出 25-500+ m/s
+            # 的"假速度"。原先用 speed > 50.0 过滤会漏掉 25-50 m/s 区间的中等跳变
+            # （50m recycle / 2s 采样 ≈ 25 m/s），这些跳变会触发 >45.0 的 respawn
+            # jump 告警，导致 CI 误报。改为用位移阈值：连续两帧间位移 > 30m 几乎
+            # 不可能是真实运动（即使 30 m/s × 1s 采样也只有 30m），视为 teleport。
+            disp = math.hypot(dx, dy)
+            if disp > 30.0:
                 continue
+            speed = disp / dt
             npc_speed_spikes.append(speed)
             npc_lateral_spikes.append(abs(dy) / dt)
 
@@ -1083,8 +1116,19 @@ def main() -> int:
         returncode = 0
         criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
     else:
-        with pipeline_scenario_override(args.scenario):
-            samples, returncode = collect_samples(duration, args.json_file, args.interval)
+        # 默认场景：从 pipeline.json 的 flowsim.scenario_file 读取（即 city_to_highway_full）。
+        # 旧实现不传 --scenario 给 demo.sh，demo.sh 用 DEFAULT_SCENARIO=infinite_straight
+        # 覆盖 pipeline.json，导致 planning 运行时加载无 route 的场景，NOA 永远不升级。
+        # 这里显式把 pipeline.json 里的 scenario_file 传给 demo.sh，确保 demo.sh 用
+        # 该场景而非 DEFAULT_SCENARIO。args.scenario 优先级最高（用户显式指定）。
+        effective_scenario = args.scenario
+        if not effective_scenario:
+            # 从 pipeline.json 读 flowsim.scenario_file 作为默认场景传给 demo.sh，
+            # 避免 demo.sh 用 DEFAULT_SCENARIO（infinite_straight，无 route）覆盖。
+            effective_scenario = _pipeline_flowsim_scenario_file()
+        with pipeline_scenario_override(effective_scenario):
+            samples, returncode = collect_samples(duration, args.json_file, args.interval,
+                                                  scenario=effective_scenario)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.

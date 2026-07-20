@@ -113,7 +113,7 @@
     { "id": 20, "segment_id": 5,  "type": "truck","s": 200,  "l": -1.75,"vx": 14.0,"len": 8.0, "wid": 2.4 },
     { "id": 21, "segment_id": 5,  "type": "car",  "s": 250,  "l": 0,    "vx": 26.0,"len": 4.6, "wid": 2.0 },
     { "id": 22, "segment_id": 5,  "type": "car",  "s": 100,  "l": 1.75, "vx": 0,   "len": 4.6, "wid": 2.0 },
-    { "id": 23, "segment_id": 5,  "type": "car",  "s": -50,  "l": 0,    "vx": 22.0,"len": 4.6, "wid": 2.0 },
+    { "id": 23, "segment_id": 5,  "type": "car",  "s": 300,  "l": 0,    "vx": 22.0,"len": 4.6, "wid": 2.0 },
     { "id": 24, "segment_id": 5,  "type": "car",  "s": 400,  "l": -1.75,"vx": 20.0,"len": 4.6, "wid": 2.0 }
   ]
 }
