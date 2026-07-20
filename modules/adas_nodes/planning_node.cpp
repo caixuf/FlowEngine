@@ -83,7 +83,7 @@ struct PlanningContext {
      * 旧约定（{-1=左, 0=无, +1=右}）已废弃，但 scenario JSON 中的旧值仍可通过
      * route_step_target_lane_to_idx() 兼容映射。 */
     int               route_target_lane{-1};
-    double            route_target_speed{0.0};/* 当前路线步骤要求的目标速度（0 = 无改变） */
+    double            route_target_speed{-1.0};/* 当前路线步骤要求的目标速度（-1 = 未设置/无改变，0 = 停车） */
     /* NOA Phase 3.2/3.3: 当前路线步骤类型 + branch_select 选中的 connecting_road id。
      * - route_type 持续下发到 control/monitor，供下游区分普通变道/分支选路/汇入。
      * - current_branch_id 用于 branch_select 后参考路径切换的几何参考（fallback 模式
@@ -477,7 +477,7 @@ protected:
                     g.route_target_lane = lane;
                     g.current_branch_id = step->branch_id;
                     if (step->target_speed > 0.0) g.route_target_speed = step->target_speed;
-                    else                          g.route_target_speed = 0.0;
+                    else                          g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
                     /* 触发参考路径刷新：branch_select 后 ego 进入新的 connecting_road，
                      * 参考路径需重新基于新路段几何构建（fallback 模式下沿用 curve_*
                      * 单段几何，HAVE_FRENET 模式下应切到 branch_id 对应道路采样）。 */
@@ -533,8 +533,17 @@ protected:
                                  "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
                                  g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
                                  step->label[0] ? step->label : "-");
-                    } else {
+                    } else if (step->target_speed == 0.0) {
+                        /* 显式 target_speed=0 表示停车（如 stop_at_red），不再是"未设置"。
+                         * 旧实现用 0.0 表示未设置，与停车语义冲突，导致 stop_at_red
+                         * 步骤的 command_speed 回退到默认巡航速度，ego 不停车。 */
                         g.route_target_speed = 0.0;
+                        LOG_INFO("planning",
+                                 "NOA route step #%d triggered @x=%.0f -> lane=%d STOP (target_speed=0) (%s)",
+                                 g.route_next_idx, g.ego_x, step->target_lane,
+                                 step->label[0] ? step->label : "-");
+                    } else {
+                        g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
                         LOG_INFO("planning",
                                  "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
                                  g.route_next_idx, g.ego_x, step->target_lane,
@@ -554,9 +563,11 @@ protected:
                          g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
             }
 
-            /* NOA 路线步骤可能指定目标速度（如出口匝道减速），覆盖纯粹的巡航速度。
-             * 叠加关系：route_target_speed > 0 时作为最终目标，否则用默认 target_speed。 */
-            double command_speed = (g.route_target_speed > 0.0) ? g.route_target_speed : g.target_speed;
+            /* NOA 路线步骤可能指定目标速度（如出口匝道减速、stop_at_red 停车），覆盖纯粹的巡航速度。
+             * 叠加关系：route_target_speed >= 0 时作为最终目标（含 0=停车），-1=未设置用默认 target_speed。
+             * 旧实现用 > 0.0 判断，导致 target_speed=0（停车）被当作"未设置"回退到巡航速度，
+             * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
+            double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
 
             /* ── NOA Phase 6 merge 闭环：基于 scene/frame 主线来车 gap 决策并入 ──
              * merge_state==1（等 gap）：用 on_scene_frame 缓存的前后 gap 判断
@@ -888,7 +899,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.route_count        = 0;
     g.route_next_idx     = 0;
     g.route_target_lane  = -1;  /* N 车道模型：-1=无目标 */
-    g.route_target_speed = 0.0;
+    g.route_target_speed = -1.0;  /* -1=未设置 */
     /* NOA Phase 3.2/3.3: 路线步骤类型默认 lane_change，branch_id 复位 */
     g.route_type         = ROUTE_LANE_CHANGE;
     g.current_branch_id  = -1;
@@ -937,7 +948,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     }
 
     g.target_speed = g.cfg_target_speed;
-    g.route_target_speed = 0.0;
+    g.route_target_speed = -1.0;  /* -1=未设置 */
 
     /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
      * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（sim_world 发布）。
