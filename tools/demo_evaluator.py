@@ -721,9 +721,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             lane_change_count += 1
         prev_lane = lane_idx
 
-    # Legacy fallback only: if scenario criteria is provided, let pass_criteria govern
-    # speed/progress acceptance instead of hardcoded stagnation thresholds.
-    if not criteria and low_speed_ratio > 0.50 and stagnation_duration_s > 5.0:
+    # Legacy fallback only: if scenario criteria doesn't specify min_avg_speed_mps,
+    # use hardcoded stagnation thresholds to catch deadlocks that pass_criteria
+    # can't express. When min_avg_speed_mps IS set, low-speed is governed by that
+    # check above (more precise than generic stagnation thresholds).
+    if not min_avg_speed and low_speed_ratio > 0.50 and stagnation_duration_s > 5.0:
         failures.append(
             f"low-speed stagnation: {low_speed_ratio*100:.0f}% samples below {low_speed_thresh} m/s, "
             f"longest run {stagnation_duration_s:.1f}s"
@@ -1007,6 +1009,17 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "min_ttc_s": perception["min_ttc_s"],
         "perceived_track_count": perception["perceived_track_count"],
     }
+
+    # ── max_duration_s 超时检查 ──
+    # 场景声明了 max_duration_s (>0) 时，实际运行时长不能超过它。
+    # 这捕获"demo 卡住但 ego 仍在微小前进、碰撞数为 0"的退化场景——
+    # 之前评估器从不检查此字段，所有场景的"超时即 FAIL"语义在 CI 中失效。
+    max_duration = float(criteria.get("max_duration_s", 0.0) or 0.0)
+    if max_duration > 0.0 and summary["duration_s"] > max_duration:
+        failures.append(
+            f"exceeded max duration: {summary['duration_s']:.1f}s > {max_duration:.1f}s"
+        )
+
     return failures, warnings, summary
 
 
