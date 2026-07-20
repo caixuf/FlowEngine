@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小米SU7 智能驾驶仿真器</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            overflow: hidden;
+            font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+            color: #e0e0e0;
+        }
+        #canvas3d {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: 0;
+        }
+
+        /* ===== CONTROL PANEL ===== */
+        .control-panel {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            width: 320px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            background: rgba(10, 10, 20, 0.85);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 105, 0, 0.2);
+            border-radius: 16px;
+            padding: 20px;
+            z-index: 100;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,105,0,0.3) transparent;
+        }
+        .control-panel::-webkit-scrollbar { width: 4px; }
+        .control-panel::-webkit-scrollbar-track { background: transparent; }
+        .control-panel::-webkit-scrollbar-thumb { background: rgba(255,105,0,0.3); border-radius: 2px; }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #ff6900;
+            text-align: center;
+            padding-bottom: 12px;
+            margin-bottom: 16px;
+            border-bottom: 1px solid rgba(255, 105, 0, 0.25);
+            letter-spacing: 1px;
+        }
+        .panel-title span {
+            font-size: 11px;
+            color: rgba(255,255,255,0.35);
+            display: block;
+            margin-top: 4px;
+            font-weight: 400;
+            letter-spacing: 0;
+        }
+
+        .section {
+            margin-bottom: 16px;
+        }
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: rgba(255,255,255,0.5);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 10px;
+            padding-left: 2px;
+        }
+
+        /* Toggle Switch */
+        .toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+        }
+        .toggle-label {
+            font-size: 13px;
+            color: #ccc;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background: #1a1a2e;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.3s;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        .toggle-switch.active {
+            background: #ff6900;
+            border-color: rgba(255,105,0,0.5);
+        }
+        .toggle-switch .toggle-knob {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.3s;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        }
+        .toggle-switch.active .toggle-knob {
+            transform: translateX(20px);
+        }
+        .toggle-switch.blue.active {
+            background: #00b4ff;
+            border-color: rgba(0,180,255,0.5);
+        }
+
+        /* Buttons */
+        .btn-group {
+            display: flex;
+            gap: 6px;
+        }
+        .btn {
+            flex: 1;
+            padding: 8px 4px;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.04);
+            color: #ccc;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+            text-align: center;
+        }
+        .btn:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.2); }
+        .btn.active {
+            background: rgba(255, 105, 0, 0.2);
+            border-color: #ff6900;
+            color: #ff6900;
+        }
+        .btn.amber.active {
+            background: rgba(255, 170, 0, 0.2);
+            border-color: #ffaa00;
+            color: #ffaa00;
+        }
+        .btn.blue.active {
+            background: rgba(0, 180, 255, 0.2);
+            border-color: #00b4ff;
+            color: #00b4ff;
+        }
+
+        /* Steering */
+        .steering-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+        .steering-wheel-visual {
+            width: 100px;
+            height: 100px;
+            position: relative;
+        }
+        .steering-wheel-visual svg {
+            width: 100%;
+            height: 100%;
+            transition: transform 0.15s ease-out;
+        }
+        .steering-slider-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+        }
+        .steering-slider-row label {
+            font-size: 12px;
+            color: #999;
+            min-width: 24px;
+        }
+        .steering-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            background: linear-gradient(to right, #ff6900, #1a1a2e 50%, #ff6900);
+            border-radius: 2px;
+            outline: none;
+        }
+        .steering-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #ff6900;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 8px rgba(255,105,0,0.5);
+        }
+        .steering-slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: #ff6900;
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 8px rgba(255,105,0,0.5);
+        }
+
+        /* Status Display */
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .status-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 10px;
+            padding: 10px;
+            text-align: center;
+        }
+        .status-card.wide {
+            grid-column: 1 / -1;
+        }
+        .status-label {
+            font-size: 10px;
+            color: rgba(255,255,255,0.35);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        .status-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+        }
+        .status-value.orange { color: #ff6900; }
+        .status-value.blue { color: #00b4ff; }
+        .status-value.green { color: #00e676; }
+
+        .battery-bar {
+            width: 100%;
+            height: 6px;
+            background: #1a1a2e;
+            border-radius: 3px;
+            margin-top: 6px;
+            overflow: hidden;
+        }
+        .battery-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00e676, #00b4ff);
+            border-radius: 3px;
+            transition: width 0.5s;
+        }
+
+        /* AD Status */
+        .ad-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: rgba(0,180,255,0.05);
+            border: 1px solid rgba(0,180,255,0.15);
+            border-radius: 10px;
+            margin-top: 6px;
+        }
+        .ad-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #444;
+            transition: all 0.3s;
+        }
+        .ad-dot.active {
+            background: #00b4ff;
+            box-shadow: 0 0 8px #00b4ff, 0 0 16px rgba(0,180,255,0.4);
+        }
+        .ad-status-text {
+            font-size: 12px;
+            color: #888;
+            transition: color 0.3s;
+        }
+        .ad-status-text.active { color: #00b4ff; }
+
+        /* Top Left Brand */
+        .brand {
+            position: fixed;
+            top: 24px;
+            left: 28px;
+            z-index: 100;
+        }
+        .brand-name {
+            font-size: 22px;
+            font-weight: 800;
+            color: #ff6900;
+            letter-spacing: 3px;
+        }
+        .brand-sub {
+            font-size: 11px;
+            color: rgba(255,255,255,0.3);
+            letter-spacing: 2px;
+            margin-top: 2px;
+        }
+
+        /* Bottom hint */
+        .hint {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 11px;
+            color: rgba(255,255,255,0.2);
+            z-index: 100;
+            letter-spacing: 1px;
+        }
+
+        /* Gear selector */
+        .gear-row {
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+        }
+        .gear-btn {
+            width: 40px;
+            height: 34px;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 6px;
+            background: rgba(255,255,255,0.03);
+            color: #888;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .gear-btn:hover { background: rgba(255,255,255,0.06); }
+        .gear-btn.active {
+            background: rgba(255,105,0,0.15);
+            border-color: #ff6900;
+            color: #ff6900;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas3d"></canvas>
+
+    <!-- Brand -->
+    <div class="brand">
+        <div class="brand-name">XIAOMI SU7</div>
+        <div class="brand-sub">AUTONOMOUS DRIVING SIMULATOR</div>
+    </div>
+
+    <!-- Control Panel -->
+    <div class="control-panel">
+        <div class="panel-title">
+            SU7 智能驾驶仿真控制台
+            <span>Xiaomi Autonomous Driving Simulation Console v1.0</span>
+        </div>
+
+        <!-- Status Display -->
+        <div class="section">
+            <div class="section-title">车辆状态</div>
+            <div class="status-grid">
+                <div class="status-card">
+                    <div class="status-label">速度 km/h</div>
+                    <div class="status-value orange" id="speedValue">0</div>
+                </div>
+                <div class="status-card">
+                    <div class="status-label">档位</div>
+                    <div class="status-value" id="gearValue">P</div>
+                </div>
+                <div class="status-card wide">
+                    <div class="status-label">电池电量</div>
+                    <div class="status-value green" id="batteryValue">87%</div>
+                    <div class="battery-bar">
+                        <div class="battery-fill" id="batteryFill" style="width:87%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Gear -->
+        <div class="section">
+            <div class="section-title">档位选择</div>
+            <div class="gear-row">
+                <button class="gear-btn active" data-gear="P">P</button>
+                <button class="gear-btn" data-gear="R">R</button>
+                <button class="gear-btn" data-gear="N">N</button>
+                <button class="gear-btn" data-gear="D">D</button>
+            </div>
+        </div>
+
+        <!-- Light Controls -->
+        <div class="section">
+            <div class="section-title">灯光控制</div>
+            <div class="toggle-row">
+                <span class="toggle-label">前大灯</span>
+                <div class="toggle-switch" id="toggleHeadlights">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <span class="toggle-label">尾灯</span>
+                <div class="toggle-switch" id="toggleTaillights">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <span class="toggle-label">雾灯</span>
+                <div class="toggle-switch" id="toggleFogLights">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <span class="toggle-label">示宽灯</span>
+                <div class="toggle-switch" id="togglePositionLights">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="toggle-row">
+                <span class="toggle-label">刹车灯</span>
+                <div class="toggle-switch" id="toggleBrakeLights">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Turn Signals -->
+        <div class="section">
+            <div class="section-title">转向灯</div>
+            <div class="btn-group">
+                <button class="btn amber" id="btnTurnLeft">左转</button>
+                <button class="btn amber" id="btnTurnHazard">双闪</button>
+                <button class="btn amber" id="btnTurnRight">右转</button>
+            </div>
+        </div>
+
+        <!-- Steering -->
+        <div class="section">
+            <div class="section-title">方向盘控制</div>
+            <div class="steering-container">
+                <div class="steering-wheel-visual">
+                    <svg id="steeringSvg" viewBox="0 0 100 100">
+                        <circle cx="50" cy="50" r="42" fill="none" stroke="#333" stroke-width="4"/>
+                        <circle cx="50" cy="50" r="42" fill="none" stroke="#ff6900" stroke-width="4"
+                            stroke-dasharray="264" stroke-dashoffset="0" opacity="0.4"
+                            id="steeringArc"/>
+                        <circle cx="50" cy="50" r="6" fill="#222" stroke="#444" stroke-width="2"/>
+                        <!-- Spokes -->
+                        <line x1="50" y1="8" x2="50" y2="44" stroke="#555" stroke-width="3" stroke-linecap="round"/>
+                        <line x1="50" y1="50" x2="18" y2="72" stroke="#555" stroke-width="3" stroke-linecap="round"/>
+                        <line x1="50" y1="50" x2="82" y2="72" stroke="#555" stroke-width="3" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="steering-slider-row">
+                    <label>左</label>
+                    <input type="range" class="steering-slider" id="steeringSlider"
+                        min="-30" max="30" value="0" step="1">
+                    <label>右</label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Autonomous Driving -->
+        <div class="section">
+            <div class="section-title">智能驾驶</div>
+            <div class="toggle-row">
+                <span class="toggle-label">智能驾驶模式</span>
+                <div class="toggle-switch blue" id="toggleAD">
+                    <div class="toggle-knob"></div>
+                </div>
+            </div>
+            <div class="ad-status">
+                <div class="ad-dot" id="adDot"></div>
+                <div class="ad-status-text" id="adStatusText">智能驾驶未启用</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hint">鼠标拖拽旋转视角 / 滚轮缩放</div>
+
+    <!-- Three.js Import Map -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ============================
+        // RENDERER
+        // ============================
+        const canvas = document.getElementById('canvas3d');
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 2.2;
+
+        // ============================
+        // SCENE - Navy blue themed
+        // ============================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0d1b2a);
+        scene.fog = new THREE.FogExp2(0x0d1b2a, 0.006);
+
+        // ============================
+        // CAMERA
+        // ============================
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 500);
+        camera.position.set(7, 4, 9);
+
+        const controls = new OrbitControls(camera, canvas);
+        controls.target.set(0, 0.7, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.minDistance = 3;
+        controls.maxDistance = 30;
+        controls.maxPolarAngle = Math.PI / 2.05;
+        controls.update();
+
+        // ============================
+        // LIGHTING - Navy blue complement
+        // ============================
+        // Ambient light
+        const ambientLight = new THREE.AmbientLight(0x2244aa, 1.2);
+        scene.add(ambientLight);
+
+        // Main directional light - slightly warmer
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2.5);
+        dirLight.position.set(8, 12, 6);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(2048, 2048);
+        dirLight.shadow.camera.near = 0.5;
+        dirLight.shadow.camera.far = 50;
+        dirLight.shadow.camera.left = -15;
+        dirLight.shadow.camera.right = 15;
+        dirLight.shadow.camera.top = 15;
+        dirLight.shadow.camera.bottom = -15;
+        scene.add(dirLight);
+
+        // Fill directional - blue fill to complement navy
+        const dirLight2 = new THREE.DirectionalLight(0x4488cc, 1.0);
+        dirLight2.position.set(-6, 8, -4);
+        scene.add(dirLight2);
+
+        // Hemisphere light
+        const hemiLight = new THREE.HemisphereLight(0x3366aa, 0x112244, 0.8);
+        scene.add(hemiLight);
+
+        // ============================
+        // GROUND - Dark navy
+        // ============================
+        const groundSize = 100;
+        const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize);
+        const groundMat = new THREE.MeshStandardMaterial({
+            color: 0x0d1b2a,
+            roughness: 0.4,
+            metalness: 0.3
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Grid
+        const gridHelper = new THREE.GridHelper(groundSize, 80, 0x162a40, 0x12233a);
+        gridHelper.position.y = 0.005;
+        scene.add(gridHelper);
+
+        // Road markings
+        function createRoadMarking(x, z, length, width) {
+            const geo = new THREE.PlaneGeometry(width, length);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x333344, roughness: 0.8 });
+            const m = new THREE.Mesh(geo, mat);
+            m.rotation.x = -Math.PI / 2;
+            m.position.set(x, 0.01, z);
+            scene.add(m);
+        }
+        // Center dashed line
+        for (let i = -20; i <= 20; i += 3) {
+            createRoadMarking(0, i, 1.5, 0.1);
+        }
+        // Side lines
+        createRoadMarking(-2.5, 0, 40, 0.08);
+        createRoadMarking(2.5, 0, 40, 0.08);
+
+        // ============================
+        // ENVIRONMENT - Background buildings for scale
+        // ============================
+        function addBuilding(x, z, w, h, d) {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0x0a1628,
+                roughness: 0.7,
+                metalness: 0.2
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, h / 2, z);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+        }
+        // Distant buildings scattered around
+        addBuilding(-20, -15, 6, 12, 4);
+        addBuilding(-25, -10, 4, 8, 5);
+        addBuilding(-18, -22, 5, 15, 3);
+        addBuilding(20, -18, 7, 10, 5);
+        addBuilding(25, -12, 4, 14, 4);
+        addBuilding(22, -25, 5, 9, 6);
+        addBuilding(-15, 20, 6, 11, 4);
+        addBuilding(-22, 25, 4, 16, 5);
+        addBuilding(18, 22, 5, 13, 4);
+        addBuilding(25, 18, 6, 8, 5);
+        addBuilding(0, -30, 8, 7, 4);
+        addBuilding(-30, 0, 4, 10, 6);
+
+        // ============================
+        // CAR GROUP
+        // ============================
+        const carGroup = new THREE.Group();
+        scene.add(carGroup);
+
+        // ============================
+        // MATERIALS - Navy blue premium scheme
+        // ============================
+        const bodyMat = new THREE.MeshStandardMaterial({
+            color: 0x1a3a5c,
+            roughness: 0.2,
+            metalness: 0.9
+        });
+        const bodyMatDark = new THREE.MeshStandardMaterial({
+            color: 0x142e4a,
+            roughness: 0.25,
+            metalness: 0.85
+        });
+        const glassMat = new THREE.MeshStandardMaterial({
+            color: 0x334466,
+            roughness: 0.05,
+            metalness: 0.3,
+            transparent: true,
+            opacity: 0.35
+        });
+        const darkMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+        const chromeMat = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.1, metalness: 0.95 });
+        const tireMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 });
+        const rimMat = new THREE.MeshStandardMaterial({ color: 0xd0d5dd, roughness: 0.15, metalness: 0.9 });
+        const interiorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a12, roughness: 0.9 });
+
+        // Styling line material - subtle lighter blue metallic
+        const lineMat = new THREE.MeshStandardMaterial({
+            color: 0x88aacc,
+            roughness: 0.1,
+            metalness: 0.95
+        });
+
+        // Dark accent material for splitter/diffuser/spoiler
+        const splitterMat = new THREE.MeshStandardMaterial({ color: 0x0a0a15, roughness: 0.5, metalness: 0.7 });
+
+        // Side sill material
+        const sillMat = new THREE.MeshStandardMaterial({ color: 0x0d1a2a, roughness: 0.3, metalness: 0.8 });
+
+        // Spoiler material
+        const spoilerMat = new THREE.MeshStandardMaterial({ color: 0x0a0a15, roughness: 0.3, metalness: 0.8 });
+
+        // Brake caliper material
+        const caliperMat = new THREE.MeshStandardMaterial({ color: 0xcc2200, roughness: 0.4, metalness: 0.6 });
+
+        // ============================
+        // CAR BODY - Multi-box assembly (NO ExtrudeGeometry)
+        // ============================
+
+        // ---- LOWER BODY (main chassis) ----
+        const lowerBodyGeo = new THREE.BoxGeometry(4.8, 0.5, 1.9);
+        const lowerBody = new THREE.Mesh(lowerBodyGeo, bodyMat);
+        lowerBody.position.set(0, 0.35, 0);
+        lowerBody.castShadow = true;
+        lowerBody.receiveShadow = true;
+        carGroup.add(lowerBody);
+
+        // ---- UPPER CABIN (greenhouse/roof) - 偏后放置，前长后短 ----
+        const cabinGeo = new THREE.BoxGeometry(2.0, 0.55, 1.7);
+        const cabin = new THREE.Mesh(cabinGeo, bodyMatDark);
+        cabin.position.set(-0.1, 0.85, 0);
+        cabin.castShadow = true;
+        carGroup.add(cabin);
+
+        // ---- HOOD (engine cover) - 更长更尖锐的跑车引擎盖 ----
+        const hoodGeo = new THREE.BoxGeometry(2.0, 0.08, 1.85);
+        const hood = new THREE.Mesh(hoodGeo, bodyMat);
+        hood.position.set(1.7, 0.62, 0);
+        hood.rotation.z = 0.06;
+        hood.castShadow = true;
+        carGroup.add(hood);
+
+        // ---- TRUNK - 更短更紧凑 ----
+        const trunkGeo = new THREE.BoxGeometry(0.7, 0.08, 1.85);
+        const trunk = new THREE.Mesh(trunkGeo, bodyMat);
+        trunk.position.set(-1.45, 0.63, 0);
+        trunk.castShadow = true;
+        carGroup.add(trunk);
+
+        // ---- FRONT BUMPER - 更低更宽的前脸 ----
+        const fBumperGeo = new THREE.BoxGeometry(0.15, 0.25, 1.98);
+        const fBumper = new THREE.Mesh(fBumperGeo, darkMat);
+        fBumper.position.set(2.48, 0.28, 0);
+        carGroup.add(fBumper);
+
+        // ---- REAR BUMPER - 更高的后保险杠 ----
+        const rBumperGeo = new THREE.BoxGeometry(0.18, 0.32, 1.95);
+        const rBumper = new THREE.Mesh(rBumperGeo, darkMat);
+        rBumper.position.set(-2.45, 0.32, 0);
+        carGroup.add(rBumper);
+
+        // ---- FRONT GRILLE / INTAKE - 更宽更低的前格栅 ----
+        const grilleGeo = new THREE.BoxGeometry(0.05, 0.1, 1.6);
+        const grille = new THREE.Mesh(grilleGeo, darkMat);
+        grille.position.set(2.5, 0.32, 0);
+        carGroup.add(grille);
+
+        // ---- FRONT LOWER INTAKE - 前唇进气口 ----
+        const fLowerIntakeGeo = new THREE.BoxGeometry(0.06, 0.06, 1.2);
+        const fLowerIntake = new THREE.Mesh(fLowerIntakeGeo, darkMat);
+        fLowerIntake.position.set(2.5, 0.18, 0);
+        carGroup.add(fLowerIntake);
+
+        // ---- REAR DIFFUSER AREA - 后方扩散器口 ----
+        const rDiffuserGeo = new THREE.BoxGeometry(0.06, 0.08, 1.4);
+        const rDiffuser = new THREE.Mesh(rDiffuserGeo, darkMat);
+        rDiffuser.position.set(-2.5, 0.18, 0);
+        carGroup.add(rDiffuser);
+
+        // ---- SILL PANELS (side skirts) - upgraded wider, lower ----
+        const sillGeoNew = new THREE.BoxGeometry(3.8, 0.04, 0.08);
+        [-1, 1].forEach(side => {
+            const sill = new THREE.Mesh(sillGeoNew, sillMat);
+            sill.position.set(0, 0.14, side * 0.99);
+            carGroup.add(sill);
+        });
+
+        // ---- UNDERBODY ----
+        const underGeo = new THREE.BoxGeometry(4.8, 0.04, 1.9);
+        const under = new THREE.Mesh(underGeo, darkMat);
+        under.position.set(0, 0.1, 0);
+        carGroup.add(under);
+
+        // ---- A-PILLAR CONNECTORS (front windshield pillars) ----
+        // Small wedge shapes connecting cabin front face to hood area
+        function createWedge(width, height, depth, pos, rotZ) {
+            // Create a wedge using custom BufferGeometry (triangular prism)
+            const hw = width / 2;
+            const vertices = new Float32Array([
+                // Front face (triangle)
+                -hw, 0, depth / 2,
+                 hw, 0, depth / 2,
+                 hw, height, depth / 2,
+                -hw, 0, depth / 2,
+                 hw, height, depth / 2,
+                -hw, height, depth / 2,
+                // Back face (triangle)
+                -hw, 0, -depth / 2,
+                 hw, height, -depth / 2,
+                 hw, 0, -depth / 2,
+                -hw, 0, -depth / 2,
+                -hw, height, -depth / 2,
+                 hw, height, -depth / 2,
+                // Bottom face
+                -hw, 0, depth / 2,
+                 hw, 0, -depth / 2,
+                 hw, 0, depth / 2,
+                -hw, 0, depth / 2,
+                -hw, 0, -depth / 2,
+                 hw, 0, -depth / 2,
+                // Top slope face
+                -hw, height, depth / 2,
+                 hw, height, depth / 2,
+                 hw, height, -depth / 2,
+                -hw, height, depth / 2,
+                 hw, height, -depth / 2,
+                -hw, height, -depth / 2,
+                // Right side
+                hw, 0, depth / 2,
+                hw, 0, -depth / 2,
+                hw, height, -depth / 2,
+                hw, 0, depth / 2,
+                hw, height, -depth / 2,
+                hw, height, depth / 2,
+                // Left side
+                -hw, 0, -depth / 2,
+                -hw, 0, depth / 2,
+                -hw, height, depth / 2,
+                -hw, 0, -depth / 2,
+                -hw, height, depth / 2,
+                -hw, height, -depth / 2
+            ]);
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+            geo.computeVertexNormals();
+            const mesh = new THREE.Mesh(geo, bodyMat);
+            mesh.position.set(pos.x, pos.y, pos.z);
+            mesh.rotation.z = rotZ || 0;
+            mesh.castShadow = true;
+            return mesh;
+        }
+
+        // A-pillar slope: connects cabin front-top to hood rear-top
+        const aPillarLeft = createWedge(0.06, 0.25, 0.85, { x: 1.16, y: 0.66, z: 0.43 }, 0);
+        carGroup.add(aPillarLeft);
+        const aPillarRight = createWedge(0.06, 0.25, 0.85, { x: 1.16, y: 0.66, z: -0.43 }, 0);
+        carGroup.add(aPillarRight);
+
+        // Front slope connector between hood and lower body front top
+        const frontSlopeLeft = createWedge(0.06, 0.2, 0.85, { x: 2.3, y: 0.5, z: 0.43 }, 0);
+        carGroup.add(frontSlopeLeft);
+        const frontSlopeRight = createWedge(0.06, 0.2, 0.85, { x: 2.3, y: 0.5, z: -0.43 }, 0);
+        carGroup.add(frontSlopeRight);
+
+        // C-pillar slope: connects cabin rear-top to trunk front-top
+        const cPillarLeft = createWedge(0.06, 0.22, 0.85, { x: -0.95, y: 0.66, z: 0.43 }, 0);
+        carGroup.add(cPillarLeft);
+        const cPillarRight = createWedge(0.06, 0.22, 0.85, { x: -0.95, y: 0.66, z: -0.43 }, 0);
+        carGroup.add(cPillarRight);
+
+        // Hood-to-body front edge slope
+        const hoodFrontSlope = new THREE.BoxGeometry(0.3, 0.15, 1.88);
+        const hoodFrontMesh = new THREE.Mesh(hoodFrontSlope, bodyMat);
+        hoodFrontMesh.position.set(2.28, 0.52, 0);
+        hoodFrontMesh.rotation.z = 0.2;
+        hoodFrontMesh.castShadow = true;
+        carGroup.add(hoodFrontMesh);
+
+        // Hood-to-cabin transition (A-pillar top filler)
+        const aPillarTopLeft = new THREE.BoxGeometry(0.15, 0.08, 0.12);
+        const aTopL = new THREE.Mesh(aPillarTopLeft, bodyMat);
+        aTopL.position.set(1.15, 0.83, 0.82);
+        carGroup.add(aTopL);
+        const aTopR = new THREE.Mesh(aPillarTopLeft, bodyMat);
+        aTopR.position.set(1.15, 0.83, -0.82);
+        carGroup.add(aTopR);
+
+        // C-pillar top filler
+        const cTopLeft = new THREE.BoxGeometry(0.15, 0.08, 0.12);
+        const cTopL = new THREE.Mesh(cTopLeft, bodyMat);
+        cTopL.position.set(-0.98, 0.83, 0.82);
+        carGroup.add(cTopL);
+        const cTopR = new THREE.Mesh(cTopLeft, bodyMat);
+        cTopR.position.set(-0.98, 0.83, -0.82);
+        carGroup.add(cTopR);
+
+        // Trunk-to-cabin rear edge slope
+        const trunkRearSlope = new THREE.BoxGeometry(0.25, 0.12, 1.88);
+        const trunkRearMesh = new THREE.Mesh(trunkRearSlope, bodyMat);
+        trunkRearMesh.position.set(-2.05, 0.52, 0);
+        trunkRearMesh.rotation.z = -0.15;
+        trunkRearMesh.castShadow = true;
+        carGroup.add(trunkRearMesh);
+
+        // ---- WHEEL ARCHES (4 semi-circular dark recesses) ----
+        function createWheelArch(x, z, facingZ) {
+            // Semi-cylinder recessed into the body
+            const archGeo = new THREE.CylinderGeometry(0.38, 0.38, 0.25, 16, 1, false, 0, Math.PI);
+            const arch = new THREE.Mesh(archGeo, darkMat);
+            arch.rotation.z = Math.PI / 2;
+            arch.rotation.y = Math.PI / 2;
+            arch.position.set(x, 0.33, z);
+            if (facingZ < 0) {
+                arch.rotation.y = -Math.PI / 2;
+            }
+            carGroup.add(arch);
+        }
+        createWheelArch(1.55, 0.97, 1);
+        createWheelArch(1.55, -0.97, -1);
+        createWheelArch(-1.55, 0.97, 1);
+        createWheelArch(-1.55, -0.97, -1);
+
+        // ============================
+        // STYLING LINES & DETAILS
+        // ============================
+
+        // 1. Character Line / Waist Line (腰线)
+        const waistLineGeo = new THREE.BoxGeometry(3.8, 0.01, 0.005);
+        const waistLineL = new THREE.Mesh(waistLineGeo, lineMat);
+        waistLineL.position.set(0, 0.58, 0.96);
+        carGroup.add(waistLineL);
+        const waistLineR = new THREE.Mesh(waistLineGeo, lineMat);
+        waistLineR.position.set(0, 0.58, -0.96);
+        carGroup.add(waistLineR);
+
+        // 2. Shoulder Line (肩线)
+        const shoulderLineGeo = new THREE.BoxGeometry(1.8, 0.008, 0.005);
+        const shoulderLineL = new THREE.Mesh(shoulderLineGeo, lineMat);
+        shoulderLineL.position.set(0.1, 1.1, 0.86);
+        carGroup.add(shoulderLineL);
+        const shoulderLineR = new THREE.Mesh(shoulderLineGeo, lineMat);
+        shoulderLineR.position.set(0.1, 1.1, -0.86);
+        carGroup.add(shoulderLineR);
+
+        // 3. Door Seam Lines
+        const doorSeamGeo = new THREE.BoxGeometry(0.005, 0.35, 0.003);
+        const frontSeamL = new THREE.Mesh(doorSeamGeo, lineMat);
+        frontSeamL.position.set(0.5, 0.52, 0.955);
+        carGroup.add(frontSeamL);
+        const frontSeamR = new THREE.Mesh(doorSeamGeo, lineMat);
+        frontSeamR.position.set(0.5, 0.52, -0.955);
+        carGroup.add(frontSeamR);
+        const rearSeamL = new THREE.Mesh(doorSeamGeo, lineMat);
+        rearSeamL.position.set(-0.5, 0.52, 0.955);
+        carGroup.add(rearSeamL);
+        const rearSeamR = new THREE.Mesh(doorSeamGeo, lineMat);
+        rearSeamR.position.set(-0.5, 0.52, -0.955);
+        carGroup.add(rearSeamR);
+
+        // 4. Front Splitter / Lip
+        const splitterGeo = new THREE.BoxGeometry(0.15, 0.02, 1.98);
+        const splitter = new THREE.Mesh(splitterGeo, splitterMat);
+        splitter.position.set(2.48, 0.13, 0);
+        carGroup.add(splitter);
+
+        // 5. Rear Diffuser
+        const diffuserGeo = new THREE.BoxGeometry(0.15, 0.02, 1.6);
+        const diffuser = new THREE.Mesh(diffuserGeo, splitterMat);
+        diffuser.position.set(-2.48, 0.13, 0);
+        carGroup.add(diffuser);
+        // Diffuser vertical fins
+        for (let i = -2; i <= 2; i++) {
+            const finGeo = new THREE.BoxGeometry(0.12, 0.06, 0.01);
+            const fin = new THREE.Mesh(finGeo, splitterMat);
+            fin.position.set(-2.42, 0.14, i * 0.3);
+            carGroup.add(fin);
+        }
+
+        // 7. Subtle roof line highlight
+        const roofLineGeo = new THREE.BoxGeometry(1.8, 0.005, 0.005);
+        const roofLine = new THREE.Mesh(roofLineGeo, lineMat);
+        roofLine.position.set(0.1, 1.13, 0);
+        carGroup.add(roofLine);
+
+        // 8. Hood Power Bulge
+        const bulgeGeo = new THREE.BoxGeometry(1.0, 0.03, 0.15);
+        const bulge = new THREE.Mesh(bulgeGeo, bodyMat);
+        bulge.position.set(1.5, 0.65, 0);
+        carGroup.add(bulge);
+
+        // D. Lip Spoiler
+        const spoilerGeo = new THREE.BoxGeometry(0.08, 0.02, 1.6);
+        const spoiler = new THREE.Mesh(spoilerGeo, spoilerMat);
+        spoiler.position.set(-2.1, 0.7, 0);
+        carGroup.add(spoiler);
+        // Spoiler supports
+        [-0.6, 0.6].forEach(z => {
+            const supportGeo = new THREE.BoxGeometry(0.03, 0.04, 0.03);
+            const support = new THREE.Mesh(supportGeo, spoilerMat);
+            support.position.set(-2.1, 0.68, z);
+            carGroup.add(support);
+        });
+
+        // === FILE TRUNCATED HERE — awaiting remaining content ===
+    </script>
+</body>
+</html>
