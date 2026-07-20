@@ -605,14 +605,35 @@ protected:
                  * 该指令沿用主控制器相同的 lat_kp / lat_kd_heading / 一阶低通，
                  * 保证 fallback 与主控制输出在弯道中行为一致。 */
                 double fb_road_c = 0.0, fb_road_heading = 0.0, fb_kappa_unused = 0.0;
-                if (!query_ref_at(g.ego_x, g.ego_y, fb_road_c, fb_road_heading, fb_kappa_unused)) {
-                    /* ref_path 不可用 → 回退到 curve_* 单段直线参考 */
-                    fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
-                                              g.curve_length_m, g.curve_offset_m);
-                    fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
-                                                          g.curve_length_m, g.curve_offset_m);
+                if (g.has_fusion) {
+                    if (!query_ref_at(g.ego_x, g.ego_y, fb_road_c, fb_road_heading, fb_kappa_unused)) {
+                        /* ref_path 不可用 → 回退到 curve_* 单段直线参考 */
+                        fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
+                                                  g.curve_length_m, g.curve_offset_m);
+                        fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
+                                                              g.curve_length_m, g.curve_offset_m);
+                    }
                 }
-                double fb_lat_error = fb_road_c - g.ego_y;
+                /* 关键：目标必须是 ego 所在车道中心 (road_c ± half_lane)，而非道路中心线
+                 * road_c。早期版本用 road_c 作目标，导致 ego 从 y=-1.75 被拉向 y=0，
+                 * 越过中心线后 committed_lane_side 翻转、lc_state 被强制设为 2 并进入
+                 * ROAD_GUARD，最终冲出右侧路沿 (road departure)。
+                 *
+                 * EKF 收敛前 ego_y≈0 (fusion_node EKF 初始 y=0), 此时 (ego_y < road_c)
+                 * 为假, 会把 target 钉成 +1.75 (右车道), 把 ego 从 y=-1.75 拉向右侧。
+                 * 因此在 |ego_y - road_c| < 1.0m (EKF 未收敛) 时, 目标=ego_y (横向不动)。 */
+                double fb_target_y = fb_road_c;
+                if (g.has_fusion) {
+                    double half_lane = g.lane_width * 0.5;
+                    if (g.ego_y - fb_road_c > 1.0) {
+                        fb_target_y = fb_road_c + half_lane;
+                    } else if (g.ego_y - fb_road_c < -1.0) {
+                        fb_target_y = fb_road_c - half_lane;
+                    } else {
+                        fb_target_y = g.ego_y;  /* EKF 未收敛, 横向保持不动 */
+                    }
+                }
+                double fb_lat_error = fb_target_y - g.ego_y;
                 double fb_cte_term  = atan2(g.lat_kp * fb_lat_error, fmax(g.current_speed, 3.0));
                 double fb_heading_term = g.lat_kd_heading * (g.ego_heading - fb_road_heading);
                 double fb_steer = fb_cte_term - fb_heading_term;
@@ -628,7 +649,7 @@ protected:
                 raw.brake    = 0.25f;  /* 温和减速，防止无人加速撞前车 */
                 raw.steering = (float)fb_steer;
                 raw.speed    = (float)g.current_speed;
-                raw.target   = (float)fb_road_c;  /* 跟随道路中心线 (弯道时≠0) */
+                raw.target   = (float)fb_target_y;  /* 跟随 ego 所在车道中心 */
                 raw.error    = (float)fb_lat_error;
                 memset(raw.mode, 0, sizeof(raw.mode));
                 snprintf(raw.mode, sizeof(raw.mode), "DATA_TIMEOUT");
@@ -643,14 +664,14 @@ protected:
                 snprintf(cmd_text, sizeof(cmd_text),
                          "throttle=0.00 brake=0.25 steer=%.4f "
                          "speed=%.1f target=%.1f error=%.1f mode=DATA_TIMEOUT",
-                         fb_steer, g.current_speed, fb_road_c, fb_lat_error);
+                         fb_steer, g.current_speed, fb_target_y, fb_lat_error);
                 transport_publish(transport_, "control/raw_cmd/text",
                                   (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
                 if (g.cycle % 20 == 1) {
-                    LOG_WARN("control", "#%d DATA_TIMEOUT — curve-following fallback "
-                             "(spd=%.1f, steer=%.4f, road_c=%.2f, err=%.2f)",
-                             g.cycle, g.current_speed, fb_steer, fb_road_c, fb_lat_error);
+                    LOG_WARN("control", "#%d DATA_TIMEOUT — lane-following fallback "
+                             "(spd=%.1f, steer=%.4f, target_y=%.2f, err=%.2f)",
+                             g.cycle, g.current_speed, fb_steer, fb_target_y, fb_lat_error);
                 }
                 continue;
             }
@@ -683,15 +704,29 @@ protected:
             /* ── 车道判定加迟滞: 使用"已提交车道", 只有 ego_y 明确越过中心线
              *    ±LANE_HYSTERESIS_M 才切换, 避免 y≈0 处目标车道每帧翻转的抖振 ── */
             if (g.committed_lane_side == 0 && g.ego_x > 0.5) {
-                /* 仅在收到第一帧有效车辆状态后初始化车道侧。
-                 * 首帧 ego_x≈0 时为未初始化数据, 误判会引发跨中心线漂移。 */
-                g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
+                /* 仅在 ego_y 明确偏离道路中心 (EKF 收敛后) 才初始化车道侧。
+                 * fusion_node 的 EKF 初始状态为 y=0, 而场景中 ego 实际从 y=-1.75
+                 * 出发。EKF 收敛前的 1-2 帧 (≈100ms) 会报告 y≈0, 若此时用
+                 * (ego_y < road_c) 初始化会把 committed_lane_side 钉成 +1 (右车道),
+                 * 导致 target_y=+1.75, 把 ego 从 y=-1.75 拉向右侧路沿 (road departure)。
+                 * 阈值 1.0m > EKF 收敛前最大 |y| (~0.5m) 且 < 半车道宽 (1.75m),
+                 * 确保 EKF 收敛后 (|y|=1.75m) 才初始化, 同时不影响真正骑线行驶的场景。 */
+                if (g.ego_y - road_c > 1.0) {
+                    g.committed_lane_side = 1;
+                } else if (g.ego_y - road_c < -1.0) {
+                    g.committed_lane_side = -1;
+                }
+                /* 否则保持 0 (未初始化), 下方 cruise_lane_y 退化为 ego_y (横向保持不动) */
             } else if (g.committed_lane_side < 0 && g.ego_y - road_c > LANE_HYSTERESIS_M) {
                 g.committed_lane_side = 1;
             } else if (g.committed_lane_side > 0 && g.ego_y - road_c < -LANE_HYSTERESIS_M) {
                 g.committed_lane_side = -1;
             }
-            double cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
+            /* committed_lane_side==0 (EKF 未收敛) 时, 目标=当前 ego_y, 横向不动,
+             * 避免在车道侧未确定前把 ego 拉向任意一侧。 */
+            double cruise_lane_y = (g.committed_lane_side == 0)
+                                   ? g.ego_y
+                                   : road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
             double adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
                 g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
