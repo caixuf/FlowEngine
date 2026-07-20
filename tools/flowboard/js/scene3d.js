@@ -1988,6 +1988,31 @@ function init3DScene() {
       scene3d.add(ec);
       _carGroup = ec;
     }
+    // glTF 加载完成后，把 NPC 池里 fallback 程序化 mesh 替换为 glTF 模型。
+    // 初始创建（同步）在 glTF 未就绪时走 _buildObstacle（无 realScale 标记），
+    // 后续 entity type='car' 不触发重建（type 相同），NPC 一直是低多边形。
+    // 此处检测 !realScale 判定 fallback，用对应 glTF 重建。
+    if (_obsPool) {
+      for (var ri = 0; ri < _obsPool.length; ri++) {
+        var oldObs = _obsPool[ri];
+        if (oldObs.userData.realScale) continue;  // 已是 glTF
+        var obsType = oldObs.userData.obsType || 'car';
+        var newObs = buildObstacleGroup(obsType, 0xff9944);
+        if (!newObs) continue;
+        newObs.userData.obsType = obsType;
+        newObs.visible = oldObs.visible;
+        scene3d.remove(oldObs);
+        oldObs.traverse(function(ch) {
+          if (ch.geometry) ch.geometry.dispose();
+          if (ch.material) {
+            if (Array.isArray(ch.material)) ch.material.forEach(function(m) { m.dispose(); });
+            else ch.material.dispose();
+          }
+        });
+        scene3d.add(newObs);
+        _obsPool[ri] = newObs;
+      }
+    }
   });
   var egoCar = buildEgoCar(0x4488dd) || _buildSedan(0x4488dd, 0x3377bb);
   egoCar.position.set(0, 0, 0);
