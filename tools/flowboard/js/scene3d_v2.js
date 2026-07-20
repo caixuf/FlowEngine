@@ -62,9 +62,9 @@ export function resetMapView() { CameraRig.resetMapView(); }
 export function setPerfTier(_tier) { /* v2 暂不做性能分级 */ }
 export function closeNPCDetail() { /* v2 无 NPC 面板 */ }
 
-// v1 export 了 _renderFrame / _applyRoadCurve 给 debug 用，v2 用空函数占位
-// 避免 app.js 或控制台调试代码报 undefined。
-export function _renderFrame() { /* v2 由内部 RAF 循环驱动，外部无需调用 */ }
+// v1 export 了 _applyRoadCurve 给 debug 用，v2 用空函数占位。
+// 注意：_renderFrame 不再 export（v2 由内部 RAF 循环驱动，外部无需调用），
+// 避免与内部渲染循环 function _renderFrame() 重名冲突。
 export function _applyRoadCurve(_road) { /* v2 不支持单段弯道路径，只认 road_network */ }
 
 // ── init3DScene ──────────────────────────────────────────────
@@ -190,6 +190,8 @@ export function update3D() {
 
 // ── 渲染循环 ─────────────────────────────────────────────────
 let _rafId = 0;
+let _lastLightingMode = 'day';
+
 function _startRenderLoop() {
   if (_rafId) cancelAnimationFrame(_rafId);
   _rafId = requestAnimationFrame(_renderFrame);
@@ -238,8 +240,6 @@ function _renderFrame() {
   // 渲染
   renderer.render(scene, camera);
 }
-
-let _lastLightingMode = 'day';
 
 // ── 错误显示 ─────────────────────────────────────────────────
 function _show3DError(msg) {
