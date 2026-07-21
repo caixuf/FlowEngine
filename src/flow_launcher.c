@@ -42,6 +42,7 @@
 #include "config_manager.h"
 #include "bag.h"
 #include "adas_msgs_gen.h"
+#include "crash_handler.h"
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
 
@@ -319,6 +320,8 @@ int main(int argc, char** argv) {
     }
 
     log_init(LOG_INFO, NULL);
+
+    crash_handler_install();
 
     LOG_INFO("launcher", "╔══════════════════════════════════════════╗");
     LOG_INFO("launcher", "║  FlowEngine Launcher v2                  ║");

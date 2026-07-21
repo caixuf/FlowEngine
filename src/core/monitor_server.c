@@ -34,6 +34,11 @@
 #include <signal.h>
 #include <sys/wait.h>
 
+#include "health.h"
+#include "auto_tuner.h"
+#include "clock_service.h"
+#include <cjson/cJSON.h>
+
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
 #define MONITOR_MAX_REMOTE_SRCS   8
@@ -705,6 +710,79 @@ static void handle_client(int fd, MonitorServer* ms) {
             build_sse_json(ms, buf, sizeof(buf));
             send_response(fd, "200 OK", "application/json", buf);
         }
+        close(fd);
+        return;
+    }
+
+    /* ── Debug API ─────────────────────────────────────── */
+
+    /* GET /api/debug/nodes → 节点健康 + 延迟统计 */
+    if (strcmp(path, "/api/debug/nodes") == 0) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON* arr = cJSON_CreateArray();
+
+        HealthSnapshot hsnaps[HEALTH_MAX_NODES];
+        int hn = health_get_all(hsnaps, HEALTH_MAX_NODES);
+        for (int i = 0; i < hn; i++) {
+            cJSON* n = cJSON_CreateObject();
+            cJSON_AddStringToObject(n, "name", hsnaps[i].name);
+            cJSON_AddNumberToObject(n, "status", hsnaps[i].status);
+            cJSON_AddNumberToObject(n, "cycles", (double)hsnaps[i].total_cycles);
+            cJSON_AddNumberToObject(n, "avg_latency_us", (double)hsnaps[i].avg_latency_us);
+            cJSON_AddNumberToObject(n, "p99_latency_us", (double)hsnaps[i].p99_latency_us);
+            cJSON_AddNumberToObject(n, "max_latency_us", (double)hsnaps[i].max_latency_us);
+            cJSON_AddNumberToObject(n, "error_count", (double)hsnaps[i].error_count);
+            cJSON_AddNumberToObject(n, "stall_count", (double)hsnaps[i].stall_count);
+            if (hsnaps[i].status != HEALTH_OK && hsnaps[i].last_error[0]) {
+                cJSON_AddStringToObject(n, "last_error", hsnaps[i].last_error);
+            }
+            cJSON_AddItemToArray(arr, n);
+        }
+        cJSON_AddItemToObject(root, "nodes", arr);
+        cJSON_AddBoolToObject(root, "all_ok", health_is_all_ok());
+
+        char* json = cJSON_PrintUnformatted(root);
+        send_response(fd, "200 OK", "application/json", json);
+        cJSON_free(json);
+        cJSON_Delete(root);
+        close(fd);
+        return;
+    }
+
+    /* GET /api/debug/autotune → 自动调优器状态 */
+    if (strcmp(path, "/api/debug/autotune") == 0) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON* arr = cJSON_CreateArray();
+
+        AutoTuneSnapshot tsnaps[AUTO_TUNE_MAX_NODES];
+        int tn = auto_tuner_get_all(tsnaps, AUTO_TUNE_MAX_NODES);
+        for (int i = 0; i < tn; i++) {
+            cJSON* n = cJSON_CreateObject();
+            cJSON_AddStringToObject(n, "name", tsnaps[i].name);
+            cJSON_AddNumberToObject(n, "strategy", tsnaps[i].strategy);
+            cJSON_AddNumberToObject(n, "current_freq_hz", tsnaps[i].current_freq_hz);
+            cJSON_AddNumberToObject(n, "last_latency_us", tsnaps[i].last_latency_us);
+            cJSON_AddNumberToObject(n, "avg_latency_us", tsnaps[i].avg_latency_us);
+            cJSON_AddNumberToObject(n, "adjustments", (double)tsnaps[i].adjustments);
+            cJSON_AddNumberToObject(n, "min_observed_hz", tsnaps[i].min_observed_hz);
+            cJSON_AddNumberToObject(n, "max_observed_hz", tsnaps[i].max_observed_hz);
+            cJSON_AddItemToArray(arr, n);
+        }
+        cJSON_AddItemToObject(root, "tuners", arr);
+
+        char* json = cJSON_PrintUnformatted(root);
+        send_response(fd, "200 OK", "application/json", json);
+        cJSON_free(json);
+        cJSON_Delete(root);
+        close(fd);
+        return;
+    }
+
+    /* GET /api/debug/params → 所有注册参数及当前值 */
+    if (strcmp(path, "/api/debug/params") == 0) {
+        char buf[MONITOR_HTTP_BUF_SIZE];
+        build_sse_json(ms, buf, sizeof(buf));
+        send_response(fd, "200 OK", "application/json", buf);
         close(fd);
         return;
     }

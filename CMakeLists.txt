@@ -248,6 +248,9 @@ set(CORE_SOURCES
     src/core/json_extract.c
     src/core/json_schema.c
     src/core/node_plugin.c
+    src/core/crash_handler.c
+    src/core/health.c
+    src/core/auto_tuner.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────

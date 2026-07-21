@@ -24,6 +24,7 @@
 #include "stats_bridge.h"
 #include "dashboard_bridge.h"
 #include "logger.h"
+#include "crash_handler.h"
 #include <libgen.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -281,6 +282,7 @@ int main(int argc, char** argv) {
     }
 
     log_init(LOG_INFO, NULL);
+    crash_handler_install();
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
