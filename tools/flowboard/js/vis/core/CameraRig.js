@@ -8,7 +8,11 @@
 const MODES = ['chase', 'map', 'orbit', 'top', 'driver', 'front'];
 
 export function createCameraRig(canvas) {
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 20000);
+  /* 用 canvas 实际尺寸初始化 aspect，而非 window.innerWidth/innerHeight，
+   * 否则 canvas 在卡片内时（如 800x600），aspect 按全屏算会导致画面拉伸。 */
+  const cw = canvas ? canvas.clientWidth : window.innerWidth;
+  const ch = canvas ? canvas.clientHeight : window.innerHeight;
+  const camera = new THREE.PerspectiveCamera(60, cw / Math.max(ch, 1), 0.5, 20000);
   let mode = 'chase';
   let roadBBox = null;
 

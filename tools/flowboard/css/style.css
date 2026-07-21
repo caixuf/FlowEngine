@@ -27,7 +27,12 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .chart-box{flex:1;min-width:280px;height:240px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative;cursor:crosshair}
 .chart-box canvas{width:100%;height:100%;display:block}
 .chart-tooltip{position:absolute;background:#1c2128cc;backdrop-filter:blur(4px);color:#c9d1d9;padding:3px 8px;border-radius:4px;font:10px 'JetBrains Mono',monospace;pointer-events:none;white-space:nowrap;border:1px solid#30363d;display:none;z-index:20}
-#scene3d,#scene2d{height:clamp(260px,32vh,380px)!important}
+/* 3D 场景卡片：独占主区域剩余高度，不再限制在 380px 小框里 */
+#scene3d-card{flex:1;min-height:360px;display:flex;flex-direction:column}
+#scene3d-card .card-body{flex:1;padding:0;display:flex;overflow:hidden}
+#scene3d{flex:1;min-height:360px;background:#090c10;position:relative}
+#scene2d{flex:1;min-height:360px;background:#090c10;position:relative}
+#scene3d canvas,#scene2d canvas{display:block;width:100%;height:100%}
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid#0d1117;font-size:12px}
 .stat-row .label{color:#8b949e;font-size:11px}
 .stat-row .value{font-weight:700;font-size:13px;color:#58a6ff}
@@ -109,14 +114,14 @@ input:focus,select:focus{border-color:#58a6ff}
   #topo{height:300px}
   #detail-panel{width:100vw;right:-100vw}
   /* Keep scene canvases within the visible viewport so the car is never cropped */
-  #scene3d,#scene2d{height:clamp(220px,30vh,320px)!important}
+  #scene3d,#scene2d{min-height:220px}
 }
 @media (max-width:500px){
   #sidebar{padding:8px;gap:6px}
   .mini-stat .val{font-size:14px}
   .card-header h2{font-size:10px}
   button{padding:5px 10px;font-size:10px}
-  #scene3d,#scene2d{height:clamp(180px,26vh,260px)!important}
+  #scene3d,#scene2d{min-height:180px}
 }
 .node-selected circle{filter:brightness(1.3);stroke:#58a6ff!important;stroke-width:3!important}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#1a1f2b;border-radius:3px}
