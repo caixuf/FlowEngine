@@ -567,7 +567,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                             e.road_id = fp.road_id;
                         }
                         double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                        e.y = sign * (cached_half_width + 1.5);
+                        e.y = sign * cached_half_width;
                         /* heading 重新用 Frenet 反算的切线 + π/2（灯杆垂直于道路） */
                         e.heading = wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2);
                     } else {
@@ -575,21 +575,21 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                         e.x = tl->x;
                         double road_half_width = 3.5;
                         double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                        e.y = sign * (road_half_width + 1.5);
+                        e.y = sign * road_half_width;
                     }
                 } else {
                     /* world_to_frenet 失败：场景坐标不在路网附近，fallback */
                     e.x = tl->x;
                     double road_half_width = 3.5;
                     double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                    e.y = sign * (road_half_width + 1.5);
+                    e.y = sign * road_half_width;
                 }
             } else {
                 /* esmini 不可用：旧逻辑 */
                 e.x = tl->x;
                 double road_half_width = 3.5;
                 double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                e.y = sign * (road_half_width + 1.5);
+                e.y = sign * road_half_width;
             }
         }
     }
@@ -637,39 +637,6 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         }
     }
 
-    /* Phase 4: 停止线 → StopLine 实体（路口/ETC 停车位置标记）。
-     * 纯可视化标记，无动力学无状态机，scene_pub 直接序列化位置。
-     * esmini 校正坐标：stop_lines[*].x/y 手填值经常和实际路网偏移（与 traffic_lights
-     * 同根因），走 world_to_frenet → frenet_to_world 反算真值。 */
-    for (int i = 0; i < sc->stop_line_count && i < SCENARIO_MAX_STOP_LINES; i++) {
-        const ScenarioStopLine* sl = &sc->stop_lines[i];
-        flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::StopLine);
-        if (id == flowsim::INVALID_ENTITY) break;
-        flowsim::Entity& e = g.pool[id];
-        e.id = sl->id;
-        e.heading = sl->heading;
-        /* esmini 校正坐标 */
-        if (g.roads_loaded) {
-            flowsim::FrenetPos fp;
-            if (g.roads.world_to_frenet(sl->x, sl->y, fp)) {
-                flowsim::WorldPos wp;
-                if (g.roads.frenet_to_world(fp.road_id, fp.lane_id, fp.s, fp.offset, wp)) {
-                    e.x = wp.x;
-                    e.y = wp.y;
-                    e.heading = wp.h;
-                } else {
-                    e.x = sl->x; e.y = sl->y;
-                }
-            } else {
-                e.x = sl->x; e.y = sl->y;
-            }
-        } else {
-            e.x = sl->x; e.y = sl->y;
-        }
-        if (e.heading == 0.0) {
-            e.heading = compute_road_heading_at(e.x, e.y);
-        }
-    }
 }
 
 /* ── 发布函数 ─────────────────────────────────────────────────── */
@@ -1277,6 +1244,11 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     /* Task 4：把场景 JSON 的 lighting 字段透传到 scene/frame topic，
      * 前端 scene3d.js 据此调整 AmbientLight/DirectionalLight/Bloom 阈值。 */
     g.scene_pub_cfg.lighting       = (int)g.scenario->lighting;
+    /* 道路类型：从 road_network.edges[0].type 提取（如 viaduct_highway），
+     * 用于前端识别场景类型并选择对应的渲染模式。 */
+    if (g.scenario->road.type[0]) {
+        g.scene_pub_cfg.road_type = g.scenario->road.type;
+    }
 
     /* 构造协程任务 */
     g.task = std::make_unique<FlowSimTask>(bus, transport);

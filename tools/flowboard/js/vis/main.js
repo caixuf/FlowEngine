@@ -9,7 +9,7 @@
  *            closeNPCDetail, setPerfTier } from './vis/main.js';
  */
 
-import { createRenderer, createComposer, renderFrame, resize } from './core/Renderer.js';
+import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo } from './core/Renderer.js';
 import { createCameraRig } from './core/CameraRig.js';
 import { createLighting, updateSunShadow } from './core/Lighting.js';
 import { createSkyEnv } from './core/SkyEnv.js';
@@ -127,6 +127,10 @@ if (typeof window !== 'undefined') {
     get ready() { return _ready; },
     get frameCount() { return _frameCount; },
     get lastError() { return _lastRenderErr; },
+    /** 获取渲染性能统计：calls(Draw Call), triangles, geometries, textures */
+    get perf() { return getRendererInfo(_renderer); },
+    /** 重置渲染统计 */
+    resetPerf() { resetRendererInfo(_renderer); },
     /** 手动渲染一帧（调试用） */
     debugRender() {
       if (!_renderer || !_scene) return 'no renderer/scene';

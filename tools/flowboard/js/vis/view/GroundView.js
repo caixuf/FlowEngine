@@ -9,22 +9,21 @@ const GRASS_COLOR = 0x3e6b34;
 export function createGroundView(scene) {
   let mesh = null;
 
-  function build(size = 50000) {
+  function build(size = 20000) {
       if (mesh) {
         scene.remove(mesh);
         mesh.geometry.dispose();
         mesh.material.dispose();
         mesh = null;
       }
-      if (size <= 0) return;  // size=0 = 不建草地（场景自带）
+      if (size <= 0) return;
       const geo = new THREE.PlaneGeometry(size, size);
-      const mat = new THREE.MeshStandardMaterial({
-        color: GRASS_COLOR, roughness: 0.95, metalness: 0.0
-      });
+      const mat = new THREE.MeshLambertMaterial({ color: GRASS_COLOR });
       mesh = new THREE.Mesh(geo, mat);
       mesh.rotation.x = -Math.PI / 2;
       mesh.position.y = -0.05;
       mesh.receiveShadow = true;
+      mesh.frustumCulled = true;
       scene.add(mesh);
     }
 

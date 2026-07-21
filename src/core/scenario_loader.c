@@ -203,6 +203,26 @@ ScenarioConfig* scenario_load(const char* path) {
         if (cJSON_IsNumber(j)) sc->road.curve_offset_m = j->valuedouble;
     }
 
+    /* road_network（可选，FlowSim v2 新格式）：道路网络定义。
+     * 当存在 road_network 时，提取第一条 edge 的 type 字段供前端识别场景类型
+     * （如 viaduct_highway 触发高架场景）。与旧格式 road 字段完全兼容：
+     *   - 有 road_network 无 road → 用 road_network 的 type，road 字段全零（直道）
+     *   - 有 road 无 road_network → 走旧逻辑，type 为空（向后兼容）
+     *   - 两者都有 → type 取 road_network，curve_* 取 road（保留弯道配置） */
+    cJSON* jrn = cJSON_GetObjectItemCaseSensitive(root, "road_network");
+    if (cJSON_IsObject(jrn)) {
+        cJSON* jedges = cJSON_GetObjectItemCaseSensitive(jrn, "edges");
+        if (cJSON_IsArray(jedges) && cJSON_GetArraySize(jedges) > 0) {
+            cJSON* jedge0 = cJSON_GetArrayItem(jedges, 0);
+            if (cJSON_IsObject(jedge0)) {
+                cJSON* jtype = cJSON_GetObjectItemCaseSensitive(jedge0, "type");
+                if (cJSON_IsString(jtype) && jtype->valuestring) {
+                    strncpy(sc->road.type, jtype->valuestring, sizeof(sc->road.type) - 1);
+                }
+            }
+        }
+    }
+
     /* traffic_lights（可选）：红绿灯定义数组。缺省 = 无红绿灯，与既有场景完全兼容。
      * 见 traffic_light.h 的相位状态机。 */
     cJSON* jlights = cJSON_GetObjectItemCaseSensitive(root, "traffic_lights");

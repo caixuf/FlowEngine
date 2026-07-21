@@ -110,6 +110,43 @@ def denormalize(rows: list[list[float]], mean: list[float], scale: list[float]) 
     return [[row[i] * scale[i] + mean[i] for i in range(len(row))] for row in rows]
 
 
+# ── 评估指标 ────────────────────────────────────────────────
+
+def evaluate_model(model, X_norm: list[list[float]], Y_raw: list[list[float]],
+                   y_mean: list[float], y_scale: list[float]) -> dict:
+    n = len(X_norm)
+    if n == 0:
+        return {"sample_count": 0}
+
+    pred_norm = [model.forward(x) for x in X_norm]
+    pred_raw = denormalize(pred_norm, y_mean, y_scale)
+
+    out_dim = len(y_mean)
+    abs_errors = [[abs(pred_raw[i][j] - Y_raw[i][j]) for j in range(out_dim)] for i in range(n)]
+
+    metrics = {
+        "sample_count": n,
+        "schema_version": "flowengine.e2e_eval.v3",
+    }
+
+    for j, name in enumerate(["throttle", "brake", "steer", "lane_change", "confidence"]):
+        if j >= out_dim:
+            break
+        dim_abs = [ae[j] for ae in abs_errors]
+        mae = sum(dim_abs) / n
+        rmse = math.sqrt(sum(e * e for e in dim_abs) / n)
+        max_err = max(dim_abs)
+        metrics[f"mae_{name}"] = mae
+        metrics[f"rmse_{name}"] = rmse
+        metrics[f"max_abs_error_{name}"] = max_err
+
+    all_abs = [e for dim in abs_errors for e in dim]
+    metrics["overall_mae"] = sum(all_abs) / (n * out_dim)
+    metrics["overall_rmse"] = math.sqrt(sum(e * e for e in all_abs) / (n * out_dim))
+
+    return metrics
+
+
 # ── 多隐层 MLP（纯 Python，和 tiny_mlp.h v3 一致）──
 
 class TinyMLP:
@@ -428,6 +465,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--augment", action="store_true",
                         help="启用数据增强")
+    parser.add_argument("--eval", action="store_true",
+                        help="评估模式：加载已有模型，计算指标（跳过训练）")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -500,16 +539,34 @@ def main() -> int:
     else:
         model = TinyMLP(in_dim, hidden_dims, out_dim)
 
-    print(f"\n  模型: {in_dim}→{'→'.join(str(d) for d in model.hidden_dims)}→{out_dim} "
-          f"({model.hidden_count} 隐层)", file=sys.stderr)
-    print(f"  训练: {args.epochs} epoch, lr={args.lr}", file=sys.stderr)
-    losses = train(model, X_norm, Y_norm, args.epochs, args.lr)
-    print(f"  最终 loss: {losses[-1]:.6f}", file=sys.stderr)
+    if args.eval:
+        model, x_mean, x_scale, y_mean, y_scale = load_model(args.output)
+        print(f"\n  评估模式: 加载模型 {args.output} ({model.in_dim}→{'→'.join(str(d) for d in model.hidden_dims)}→{model.out_dim})", file=sys.stderr)
+    else:
+        print(f"\n  模型: {in_dim}→{'→'.join(str(d) for d in model.hidden_dims)}→{out_dim} "
+              f"({model.hidden_count} 隐层)", file=sys.stderr)
+        print(f"  训练: {args.epochs} epoch, lr={args.lr}", file=sys.stderr)
+        losses = train(model, X_norm, Y_norm, args.epochs, args.lr)
+        print(f"  最终 loss: {losses[-1]:.6f}", file=sys.stderr)
 
-    # 导出
-    model.save(args.output, x_mean, x_scale, y_mean, y_scale)
+        model.save(args.output, x_mean, x_scale, y_mean, y_scale)
 
-    # 简要验证
+    # 评估指标计算
+    import math
+    metrics = evaluate_model(model, X_norm, Y_raw, y_mean, y_scale)
+    print("\n  评估指标:", file=sys.stderr)
+    for key, val in metrics.items():
+        if isinstance(val, float):
+            print(f"    {key}: {val:.6f}", file=sys.stderr)
+        else:
+            print(f"    {key}: {val}", file=sys.stderr)
+
+    metrics_path = Path(args.output).parent / "metrics.json"
+    import json as _json
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        _json.dump(metrics, f, indent=2, ensure_ascii=False)
+    print(f"\n  指标已保存: {metrics_path}", file=sys.stderr)
+
     print("\n  验证（取前 5 条样本对比）:", file=sys.stderr)
     for vi in range(min(5, len(X_norm))):
         yp = model.forward(X_norm[vi])

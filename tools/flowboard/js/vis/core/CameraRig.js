@@ -12,7 +12,6 @@ export function createCameraRig(canvas) {
   let mode = 'chase';
   let roadBBox = null;
 
-  // 手动 orbit 参数（鼠标拖拽）
   let orbitYaw = 0, orbitPitch = 0.6, orbitDist = 200;
   let isDragging = false, lastX = 0, lastY = 0;
 
@@ -35,7 +34,6 @@ export function createCameraRig(canvas) {
     }, { passive: false });
   }
 
-  /** 计算路网 bbox 中心（fallback 500,0） */
   function getCenter(roadGroup) {
     if (roadGroup && roadGroup.children.length > 0) {
       if (!roadBBox) roadBBox = new THREE.Box3().setFromObject(roadGroup);
@@ -49,13 +47,12 @@ export function createCameraRig(canvas) {
     return { x: 500, z: 0 };
   }
 
-  /** 更新相机位置 */
   function update(ego, roadGroup, now) {
     let ex = ego ? ego.x : 0;
     const ez = ego ? ego.y : 0;
     const eh = ego ? ego.heading || 0 : 0;
+    const eg = ego ? ego.z || 0 : 0;
 
-    // ── clamp ego 到 road bbox（防止仿真跑出场景后白屏）──
     const c = getCenter(roadGroup);
     if (roadBBox) {
       const padding = 500;
@@ -70,37 +67,37 @@ export function createCameraRig(canvas) {
         const behind = 12, height = 6;
         camera.position.set(
           ex - Math.cos(eh) * behind,
-          height,
+          eg + height,
           ez - Math.sin(eh) * behind
         );
-        camera.lookAt(ex + Math.cos(eh) * 5, 1, ez + Math.sin(eh) * 5);
+        camera.lookAt(ex + Math.cos(eh) * 5, eg + 1, ez + Math.sin(eh) * 5);
         break;
       }
       case 'top': {
-        camera.position.set(ex, 150, ez);
-        camera.lookAt(ex, 0, ez);
+        camera.position.set(ex, eg + 150, ez);
+        camera.lookAt(ex, eg, ez);
         break;
       }
       case 'driver': {
         camera.position.set(
-          ex + Math.cos(eh) * 1.0, 1.5,
+          ex + Math.cos(eh) * 1.0, eg + 1.5,
           ez + Math.sin(eh) * 1.0
         );
-        camera.lookAt(ex + Math.cos(eh) * 20, 1.4, ez + Math.sin(eh) * 20);
+        camera.lookAt(ex + Math.cos(eh) * 20, eg + 1.4, ez + Math.sin(eh) * 20);
         break;
       }
       case 'front': {
         camera.position.set(
-          ex + Math.cos(eh) * 8, 2.0,
+          ex + Math.cos(eh) * 8, eg + 2.0,
           ez + Math.sin(eh) * 8
         );
-        camera.lookAt(ex, 1.0, ez);
+        camera.lookAt(ex, eg + 1.0, ez);
         break;
       }
       case 'map': {
         const c = getCenter(roadGroup);
-        camera.position.set(c.x, 80, c.z);
-        camera.lookAt(c.x, 0, c.z);
+        camera.position.set(c.x, eg + 80, c.z);
+        camera.lookAt(c.x, eg, c.z);
         break;
       }
       case 'orbit': {
@@ -108,10 +105,10 @@ export function createCameraRig(canvas) {
         const cosP = Math.cos(orbitPitch), sinP = Math.sin(orbitPitch);
         camera.position.set(
           c.x + Math.cos(orbitYaw) * orbitDist * cosP,
-          orbitDist * sinP,
+          eg + orbitDist * sinP,
           c.z + Math.sin(orbitYaw) * orbitDist * cosP
         );
-        camera.lookAt(c.x, 0, c.z);
+        camera.lookAt(c.x, eg, c.z);
         break;
       }
     }

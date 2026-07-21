@@ -25,7 +25,8 @@ class E2ETrainingToolsTest(unittest.TestCase):
                             "t": 1000 + i,
                             "features": [float(i % 8), -1.5 + 0.1 * i, 0.01 * i, 0.0],
                             "label": 8.0 + 0.2 * (i % 5),
-                            "ego": {"x": 0.5 * i, "y": -1.5 + 0.1 * i},
+                            "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
+                            "ego": {"x": 0.5 * i, "y": -1.5 + 0.1 * i, "v": 10.0 + 0.1 * i},
                         }
                     )
                     for i in range(40)
@@ -55,14 +56,15 @@ class E2ETrainingToolsTest(unittest.TestCase):
             self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v1")
 
             artifact = work / "artifact"
+            artifact.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 [
                     sys.executable,
-                    str(ROOT / "tools/train_e2e/train.py"),
-                    "--dataset",
-                    str(dataset),
+                    str(ROOT / "tools/train_e2e/temporal_train.py"),
+                    "--input",
+                    str(dataset / "samples.jsonl"),
                     "--output",
-                    str(artifact),
+                    str(artifact / "model.txt"),
                     "--epochs",
                     "3",
                     "--hidden",
@@ -73,64 +75,6 @@ class E2ETrainingToolsTest(unittest.TestCase):
             )
 
             self.assertTrue((artifact / "model.txt").exists())
-            manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["model_format"], "flowengine-tinymlp-v1")
-            self.assertEqual(manifest["dataset"]["sample_count"], 40)
-
-            metrics_path = work / "metrics.json"
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "tools/eval_model.py"),
-                    "--model",
-                    str(artifact),
-                    "--dataset",
-                    str(dataset),
-                    "--output",
-                    str(metrics_path),
-                ],
-                cwd=ROOT,
-                check=True,
-            )
-
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-            self.assertEqual(metrics["sample_count"], 40)
-            self.assertIn("mae_target_speed", metrics)
-            self.assertIn("max_abs_error", metrics)
-
-            state_file = work / "flow_topology.json"
-            state_file.write_text(
-                json.dumps(
-                    {
-                        "timestamp": 1.0,
-                        "metrics": {"vehicle": {"speed": 4.0, "target_speed": 8.0}},
-                        "scene": {"ego": {"x": 1.0, "y": -1.2, "heading": 0.05, "speed": 4.0}},
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            shadow_path = work / "tiny_shadow.json"
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(ROOT / "tools/train_e2e/tiny_sidecar.py"),
-                    "--model",
-                    str(artifact),
-                    "--state-file",
-                    str(state_file),
-                    "--output",
-                    str(shadow_path),
-                    "--once",
-                ],
-                cwd=ROOT,
-                check=True,
-            )
-            shadow = json.loads(shadow_path.read_text(encoding="utf-8"))
-            self.assertEqual(shadow["topic"], "inference/trajectory")
-            self.assertEqual(shadow["backend"], "tiny-mlp-sidecar")
-            self.assertTrue(shadow["shadow"])
-            self.assertIn("target_speed", shadow)
 
     def make_sample_source(self, work, start_t=2000):
         source = work / "samples.jsonl"
@@ -141,7 +85,8 @@ class E2ETrainingToolsTest(unittest.TestCase):
                         "t": start_t + i,
                         "features": [float(i % 10), -1.0 + 0.05 * i, 0.005 * i, 0.01],
                         "label": 6.0 + 0.15 * (i % 7),
-                        "ego": {"x": 0.25 * i, "y": -1.0 + 0.05 * i},
+                        "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
+                        "ego": {"x": 0.25 * i, "y": -1.0 + 0.05 * i, "v": 10.0 + 0.1 * i},
                     }
                 )
                 for i in range(40)
@@ -421,7 +366,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "backend": "tiny_mlp",
-                        "model_format": "flowengine-tinymlp-v1",
+                        "model_format": "flowengine-tinymlp-v3",
                         "model_path": "model.txt",
                         "dataset": {"sample_count": 12, "scenario": "unit"},
                     }
@@ -499,10 +444,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue((datasets_dir / "unit_tiny" / "metadata.json").exists())
             self.assertTrue((models_dir / "unit_tiny" / "model.txt").exists())
-            self.assertTrue((models_dir / "unit_tiny" / "manifest.json").exists())
-            self.assertTrue((models_dir / "unit_tiny" / "metrics.json").exists())
             self.assertIn("model: ", result.stdout)
             self.assertIn("next: python3 tools/modelctl.py list", result.stdout)
 

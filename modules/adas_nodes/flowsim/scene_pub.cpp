@@ -188,6 +188,24 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
             bool is_oneway = (info.str_id.find("ramp") != std::string::npos);
             cJSON_AddBoolToObject(edge, "oneway", is_oneway);
             cJSON_AddNumberToObject(edge, "length", info.length);
+            /* 道路类型：从 cfg.road_type 继承。第一条 edge 携带完整类型信息，
+             * 后续 edge 可根据 name 推断（ramp→ramp_curve，viaduct→viaduct_highway）。 */
+            if (i == 0 && !cfg.road_type.empty()) {
+                cJSON_AddStringToObject(edge, "type", cfg.road_type.c_str());
+            } else {
+                /* 根据 name 推断类型，与 json_to_xodr.py 的命名约定一致 */
+                const char* etype = "road";
+                if (info.str_id.find("ramp") != std::string::npos) {
+                    etype = "ramp_curve";
+                } else if (info.str_id.find("viaduct") != std::string::npos) {
+                    etype = "viaduct_highway";
+                } else if (info.str_id.find("urban") != std::string::npos) {
+                    etype = "urban";
+                } else if (info.str_id.find("cross") != std::string::npos) {
+                    etype = "cross_road";
+                }
+                cJSON_AddStringToObject(edge, "type", etype);
+            }
             cJSON_AddItemToArray(edges, edge);
         }
     } else {
@@ -221,14 +239,14 @@ cJSON* build_ego_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "h", e.heading);
-    cJSON_AddNumberToObject(j, "spd", e.speed);
+    cJSON_AddNumberToObject(j, "heading", e.heading);
+    cJSON_AddNumberToObject(j, "speed", e.speed);
     cJSON_AddNumberToObject(j, "steer", e.steer);
     cJSON_AddNumberToObject(j, "throttle", e.throttle);
     cJSON_AddNumberToObject(j, "brake", e.brake);
-    cJSON_AddNumberToObject(j, "len", e.length);
-    cJSON_AddNumberToObject(j, "wid", e.width);
-    cJSON_AddNumberToObject(j, "tgt", e.target_vx);
+    cJSON_AddNumberToObject(j, "length", e.length);
+    cJSON_AddNumberToObject(j, "width", e.width);
+    cJSON_AddNumberToObject(j, "target_vx", e.target_vx);
     /* vx/vy 用于前端速度向量可视化（弯道时 vy≠0） */
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
@@ -244,11 +262,11 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "h", e.heading);
-    cJSON_AddNumberToObject(j, "spd", e.speed);
-    cJSON_AddNumberToObject(j, "len", e.length);
-    cJSON_AddNumberToObject(j, "wid", e.width);
-    cJSON_AddStringToObject(j, "ai", ai_state_str(e.ai_state));
+    cJSON_AddNumberToObject(j, "heading", e.heading);
+    cJSON_AddNumberToObject(j, "speed", e.speed);
+    cJSON_AddNumberToObject(j, "length", e.length);
+    cJSON_AddNumberToObject(j, "width", e.width);
+    cJSON_AddStringToObject(j, "ai_state", ai_state_str(e.ai_state));
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
     /* 车灯位掩码（同 ego）：CutIn→转向灯，Yield/Stop→双闪，Cruise→随 steer */
@@ -262,7 +280,7 @@ cJSON* build_pedestrian_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "spd", e.speed);
+    cJSON_AddNumberToObject(j, "speed", e.speed);
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
     /* ped_parked 状态供前端区分"站立"vs"行走"动画 */
@@ -276,7 +294,7 @@ cJSON* build_traffic_light_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "h", e.heading);
+    cJSON_AddNumberToObject(j, "heading", e.heading);
     cJSON_AddStringToObject(j, "state", tl_phase_str(e.phase_state));
     cJSON_AddNumberToObject(j, "remain_s", e.phase_timer);
     return j;
@@ -288,20 +306,10 @@ cJSON* build_etc_gate_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "h", e.heading);
+    cJSON_AddNumberToObject(j, "heading", e.heading);
     cJSON_AddStringToObject(j, "state", etc_gate_state_str(e.ai_state));
     /* phase_timer ∈ [0,1] 表示抬杆进度（scene_events.cpp 约定） */
     cJSON_AddNumberToObject(j, "progress", e.phase_timer);
-    return j;
-}
-
-cJSON* build_stop_line_json(const Entity& e) {
-    cJSON* j = cJSON_CreateObject();
-    cJSON_AddStringToObject(j, "type", "stop_line");
-    cJSON_AddNumberToObject(j, "id", (double)e.id);
-    cJSON_AddNumberToObject(j, "x", e.x);
-    cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "h", e.heading);
     return j;
 }
 
@@ -320,7 +328,6 @@ cJSON* build_entities_json(const EntityPool& pool) {
             case EntityType::Pedestrian:   j = build_pedestrian_json(e); break;
             case EntityType::TrafficLight: j = build_traffic_light_json(e); break;
             case EntityType::ETCGate:      j = build_etc_gate_json(e); break;
-            case EntityType::StopLine:     j = build_stop_line_json(e); break;
             default: continue;
         }
         if (j) cJSON_AddItemToArray(arr, j);

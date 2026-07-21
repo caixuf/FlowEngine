@@ -139,7 +139,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 continue
             print(f"  {key:<28} {value:.6f}" if isinstance(value, float) else f"  {key:<28} {value}")
     else:
-        print("\nmetrics : not available (run eval_model.py to generate)")
+        print("\nmetrics : not available (run temporal_train.py with --eval to generate)")
 
     return 0
 
@@ -185,7 +185,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
     print(f"  {'dataset':<{col-2}}  {_fmt_samples(manifest_a):>14}  {_fmt_samples(manifest_b):>14}")
 
     if metrics_a is None and metrics_b is None:
-        print("\n  (no metrics.json in either artifact — run eval_model.py)")
+        print("\n  (no metrics.json in either artifact — run temporal_train.py with --eval)")
         return 0
 
     print()

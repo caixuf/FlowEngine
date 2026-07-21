@@ -84,23 +84,21 @@ export function createVehicleView(scene) {
     const model = getModel(modelName);
     if (!model) return null;
 
-    // ego 车用海湾蓝（buildEgoCar 逻辑），其他车按 BODY_COLORS
-    // models.js 的 _upgradeCarPaint 已在 getModel 内部处理过首次，但 clone 后材质已独立
     return model;
   }
 
   function _updateGltfVehicle(entry, ent, simTime) {
     const { group } = entry;
 
-    // 位姿
-    group.position.set(ent.x, 0, ent.y);
+    // 位姿（使用 z 坐标作为高度，适配高架场景）
+    group.position.set(ent.x, ent.z || 0, ent.y);
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
     // 前轮 steer（axle_front 节点 rotation.y）
     const steer = ent.steer || 0;
     const maxSteerRad = 0.35;
     const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
-    if (group.userData.frontAxle) {
+    if (group.userData.frontAxle && group.userData.frontAxle.rotation) {
       group.userData.frontAxle.rotation.y = steerAngle;
     }
 
@@ -148,23 +146,25 @@ export function createVehicleView(scene) {
     cabin.castShadow = true;
     group.add(cabin);
 
-    // 4 车轮
+    // 4 车轮（InstancedMesh，1 draw call）
     const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.25, 12);
     const wheelMat = getStdMaterial(0x0a0a0a, 0.85, 0.05);
     const wheelPositions = [
-      [ len * 0.32, 0.32,  wid * 0.5],
-      [ len * 0.32, 0.32, -wid * 0.5],
-      [-len * 0.32, 0.32,  wid * 0.5],
-      [-len * 0.32, 0.32, -wid * 0.5],
+      [ len * 0.32, 0.32 + 0.10,  wid * 0.5],
+      [ len * 0.32, 0.32 + 0.10, -wid * 0.5],
+      [-len * 0.32, 0.32 + 0.10,  wid * 0.5],
+      [-len * 0.32, 0.32 + 0.10, -wid * 0.5],
     ];
-    const wheels = [];
-    wheelPositions.forEach((p) => {
-      const w = new THREE.Mesh(wheelGeo, wheelMat);
-      w.rotation.x = Math.PI / 2;
-      w.position.set(p[0], p[1] + 0.10, p[2]);
-      group.add(w);
-      wheels.push(w);
-    });
+    const wheelInst = new THREE.InstancedMesh(wheelGeo, wheelMat, 4);
+    wheelInst.rotation.x = Math.PI / 2;
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < 4; i++) {
+      dummy.position.set(wheelPositions[i][0], wheelPositions[i][1], wheelPositions[i][2]);
+      dummy.updateMatrix();
+      wheelInst.setMatrixAt(i, dummy.matrix);
+    }
+    group.add(wheelInst);
+    const wheels = [wheelInst, wheelInst, wheelInst, wheelInst];
 
     // 车灯 mesh
     const lights = {};
@@ -218,15 +218,33 @@ export function createVehicleView(scene) {
   function _updateProceduralVehicle(entry, ent, simTime) {
     const { group, wheels, lights } = entry;
 
-    group.position.set(ent.x, 0, ent.y);
+    // 位姿（使用 z 坐标作为高度，适配高架场景）
+    group.position.set(ent.x, ent.z || 0, ent.y);
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
-    // 前轮 steer
+    // 前轮 steer（InstancedMesh 需要更新矩阵）
     const steer = ent.steer || 0;
     const maxSteerRad = 0.35;
     const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
-    if (wheels[0]) wheels[0].rotation.y = steerAngle;
-    if (wheels[1]) wheels[1].rotation.y = steerAngle;
+    const len = ent.length || 4.6;
+    const wid = ent.width || 2.0;
+    const wheelInst = wheels[0];
+    if (wheelInst) {
+      const wheelPositions = [
+        [ len * 0.32, 0.32 + 0.10,  wid * 0.5],
+        [ len * 0.32, 0.32 + 0.10, -wid * 0.5],
+        [-len * 0.32, 0.32 + 0.10,  wid * 0.5],
+        [-len * 0.32, 0.32 + 0.10, -wid * 0.5],
+      ];
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < 4; i++) {
+        dummy.position.set(wheelPositions[i][0], wheelPositions[i][1], wheelPositions[i][2]);
+        dummy.rotation.y = (i < 2) ? steerAngle : 0;
+        dummy.updateMatrix();
+        wheelInst.setMatrixAt(i, dummy.matrix);
+      }
+      wheelInst.instanceMatrix.needsUpdate = true;
+    }
 
     // 车灯
     const mask = ent.lights || 0;

@@ -77,7 +77,7 @@ def main() -> int:
             train_cmd.extend(["--hidden", str(args.hidden)])
         run_command(train_cmd)
 
-        # Write a minimal manifest so modelctl.py and eval_model.py can find the artifact.
+        # Write a minimal manifest so modelctl.py can find the artifact.
         import json
         import time as _time
         manifest = {
@@ -109,28 +109,38 @@ def main() -> int:
         print("  next: python3 tools/modelctl.py list")
         return 0
 
-    # ── tiny / torch backend (original path) ─────────────────────────────────
-    run_command(
-        [
+    # ── torch backend ─────────────────────────────────
+    if backend == "torch":
+        run_command(
+            [
+                sys.executable,
+                "tools/dataset/export_e2e_dataset.py",
+                "--input",
+                str(input_path),
+                "--output",
+                str(dataset_dir),
+                "--scenario",
+                args.scenario,
+            ]
+        )
+        train_cmd = [
             sys.executable,
-            "tools/dataset/export_e2e_dataset.py",
-            "--input",
-            str(input_path),
-            "--output",
+            "tools/train_e2e/torch_train.py",
+            "--dataset",
             str(dataset_dir),
-            "--scenario",
-            args.scenario,
+            "--output",
+            str(model_dir),
         ]
-    )
-
-    train_cmd = [
-        sys.executable,
-        "tools/train_e2e/torch_train.py" if backend == "torch" else "tools/train_e2e/train.py",
-        "--dataset",
-        str(dataset_dir),
-        "--output",
-        str(model_dir),
-    ]
+    else:
+        # tiny backend uses temporal_train.py directly (v3)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_txt = model_dir / "model.txt"
+        train_cmd = [
+            sys.executable,
+            "tools/train_e2e/temporal_train.py",
+            "--input", str(input_path),
+            "--output", str(model_txt),
+        ]
     if args.epochs is not None:
         train_cmd.extend(["--epochs", str(args.epochs)])
     if args.hidden is not None:
@@ -139,24 +149,9 @@ def main() -> int:
         train_cmd.extend(["--init-from", str(args.init_from)])
     run_command(train_cmd)
 
-    metrics_path = model_dir / "metrics.json"
-    run_command(
-        [
-            sys.executable,
-            "tools/eval_model.py",
-            "--model",
-            str(model_dir),
-            "--dataset",
-            str(dataset_dir),
-            "--output",
-            str(metrics_path),
-        ]
-    )
-
     print("\nFlowEngine training recipe complete")
     print(f"  dataset: {dataset_dir}")
     print(f"  model:   {model_dir}")
-    print(f"  metrics: {metrics_path}")
     if backend == "tiny":
         print(f"  promote: python3 tools/modelctl.py promote {model_dir}")
     else:

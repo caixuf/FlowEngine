@@ -147,6 +147,7 @@ typedef struct {
     double curve_start_x;   /**< 弯道起点 x（m），默认 0 */
     double curve_length_m;  /**< 弯道长度（m），<=0 = 禁用（直道） */
     double curve_offset_m;  /**< 弯道终点横向偏移（m），默认 0 */
+    char   type[32];        /**< 道路类型（road_network 新格式：viaduct_highway/urban/ramp_curve 等） */
 } ScenarioRoad;
 
 /* ── 红绿灯（可选, 见 traffic_light.h） ────────────────────── */

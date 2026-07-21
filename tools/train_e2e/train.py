@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a lightweight E2E planner artifact without external ML dependencies."""
+"""Train a lightweight E2E planner artifact (v3 temporal-MLP)."""
 
 from __future__ import annotations
 
@@ -10,25 +10,28 @@ import sys
 import time
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[0]
+sys.path.insert(0, str(ROOT))
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools" / "train"))
+from temporal_train import TinyMLP, load_jsonl, build_windows, column_stats, normalize, train  # noqa: E402
 
-import train as tiny_train  # noqa: E402
+
+OUT_DIM = 5
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="FlowEngine E2E training bridge (tiny-MLP backend)")
-    parser.add_argument("--dataset", required=True, help="Dataset directory from export_e2e_dataset.py")
+    parser = argparse.ArgumentParser(description="FlowEngine E2E training (v3)")
+    parser.add_argument("--dataset", required=True, help="Dataset directory")
     parser.add_argument("--output", required=True, help="Artifact output directory")
-    parser.add_argument("--hidden", type=int, default=8)
+    parser.add_argument("--hidden", type=str, default="32")
     parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--lr", type=float, default=0.05)
+    parser.add_argument("--lr", type=float, default=0.001)
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset)
     samples_path = dataset_dir / "samples.jsonl"
     metadata_path = dataset_dir / "metadata.json"
+
     if not samples_path.exists():
         raise SystemExit(f"error: dataset samples not found: {samples_path}")
 
@@ -36,37 +39,54 @@ def main() -> int:
     if metadata_path.exists():
         dataset_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
 
-    feats, labels = tiny_train.load_samples(samples_path)
-    if len(feats) < 10:
-        raise SystemExit(f"error: too few samples ({len(feats)}) in {samples_path}")
+    samples = load_jsonl(samples_path)
+    if not samples:
+        raise SystemExit(f"error: no samples in {samples_path}")
+
+    X_raw, Y_raw = build_windows(samples)
+    if len(X_raw) < 10:
+        raise SystemExit(f"error: too few samples ({len(X_raw)}) in {samples_path}")
+
+    x_mean, x_scale = column_stats(X_raw)
+    y_mean, y_scale = column_stats(Y_raw)
+    X_norm = normalize(X_raw, x_mean, x_scale)
+    Y_norm = normalize(Y_raw, y_mean, y_scale)
+
+    hidden_dims = [int(v) for v in args.hidden.split()]
+    if not hidden_dims:
+        hidden_dims = [32]
+
+    in_dim = len(X_raw[0])
+    out_dim = len(Y_raw[0])
+    model = TinyMLP(in_dim, hidden_dims, out_dim)
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / "model.txt"
 
-    model = tiny_train.train(feats, labels, hidden=args.hidden, epochs=args.epochs, lr=args.lr)
-    tiny_train.export(model, model_path)
+    train(model, X_norm, Y_norm, args.epochs, args.lr)
+    model.save(model_path, x_mean, x_scale, y_mean, y_scale)
 
     manifest = {
-        "artifact_version": "flowengine.e2e_artifact.v1",
+        "artifact_version": "flowengine.e2e_artifact.v3",
         "created_unix_ms": int(time.time() * 1000),
-        "model_format": "flowengine-tinymlp-v1",
+        "model_format": "flowengine-tinymlp-v3",
         "model_path": "model.txt",
-        "backend": "tiny_mlp",
+        "backend": "temporal_mlp",
         "input_schema": {
-            "features": dataset_meta.get("feature_names", ["ego_v", "ego_y", "ego_heading", "ego_yaw_rate"]),
+            "features": dataset_meta.get("feature_names", ["temporal_window_features"]),
         },
         "output_schema": {
-            "labels": dataset_meta.get("label_names", ["target_speed"]),
+            "labels": ["throttle", "brake", "steer", "lane_change", "confidence"],
         },
         "dataset": {
             "path": str(dataset_dir),
             "schema_version": dataset_meta.get("schema_version", "unknown"),
-            "sample_count": len(feats),
+            "sample_count": len(X_raw),
             "scenario": dataset_meta.get("scenario", "unknown"),
         },
         "training": {
-            "hidden": args.hidden,
+            "hidden": hidden_dims,
             "epochs": args.epochs,
             "lr": args.lr,
         },

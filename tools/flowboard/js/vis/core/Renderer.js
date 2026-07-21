@@ -12,7 +12,7 @@ export function createRenderer(canvas) {
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -40,4 +40,25 @@ export function resize(renderer, composer, camera, width, height) {
   if (composer) composer.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+}
+
+/** 获取渲染器性能统计（Draw Call 数、三角形数等）*/
+export function getRendererInfo(renderer) {
+  if (!renderer || !renderer.info) return null;
+  const info = renderer.info;
+  return {
+    calls: info.render.calls,
+    triangles: info.render.triangles,
+    points: info.render.points,
+    lines: info.render.lines,
+    geometries: info.memory.geometries,
+    textures: info.memory.textures,
+  };
+}
+
+/** 重置渲染器统计 */
+export function resetRendererInfo(renderer) {
+  if (renderer && renderer.info) {
+    renderer.info.reset();
+  }
 }

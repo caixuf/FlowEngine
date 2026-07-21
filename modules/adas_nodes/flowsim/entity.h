@@ -172,9 +172,22 @@ public:
         entities_[id].active = false;
     }
 
-    /** 访问实体（无边界检查，调用方保证 id 有效）。 */
-    Entity& operator[](EntityId id) { return entities_[id]; }
-    const Entity& operator[](EntityId id) const { return entities_[id]; }
+    /** 访问实体（带边界检查）。 */
+    Entity& operator[](EntityId id) {
+        if (id < 0 || id >= MAX_ENTITIES) {
+            static Entity invalid_entity;
+            invalid_entity.active = false;
+            return invalid_entity;
+        }
+        return entities_[id];
+    }
+    const Entity& operator[](EntityId id) const {
+        if (id < 0 || id >= MAX_ENTITIES) {
+            static const Entity invalid_entity;
+            return invalid_entity;
+        }
+        return entities_[id];
+    }
 
     /** 已使用的最高索引+1（遍历上界）。 */
     int size() const { return count_; }

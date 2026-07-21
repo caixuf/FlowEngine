@@ -72,6 +72,11 @@ struct ScenePubConfig {
      * 来源：scenario_loader 解析 JSON 顶层 "lighting" 字段。 */
     int lighting{0};
 
+    /* ── 道路类型（FlowSim v2 新格式） ──
+     * 从 road_network.edges[0].type 提取（如 viaduct_highway/urban/ramp_curve），
+     * 用于前端识别场景类型并选择对应的渲染模式。空字符串表示旧格式。 */
+    std::string road_type;
+
     /* ── 性能优化：road_network JSON 缓存 ──
      * 道路网络在仿真过程中不变（仅 init 阶段加载 xodr），但 build_road_network_json
      * 每帧调用 sample_road_nodes → roads->frenet_to_world 做全网采样，20Hz 下
