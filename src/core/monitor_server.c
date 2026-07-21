@@ -30,6 +30,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <sys/time.h>
+#include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
 
@@ -64,6 +65,7 @@ typedef struct {
     uint64_t          cached_json_time_us;
     uint64_t          cached_json_version;  /**< bumped on every fresh dashboard payload */
     pthread_mutex_t   cached_mutex;
+    pthread_cond_t    cached_cond;           /**< signaled when cached_json_version changes */
     /* Count of in-flight per-connection handler threads (e.g. SSE streams).
      * Used so shutdown can wait for them to drain before the struct is freed. */
     volatile int      active_clients;
@@ -385,34 +387,52 @@ static void handle_sse(int fd, MonitorServer* ms) {
     (void)w;
 
     char buf[MONITOR_HTTP_BUF_SIZE];
-    /* Push a new frame only when the underlying dashboard payload actually
-     * changed (tracked by a version counter bumped on each IPC packet), instead
-     * of blindly re-sending the full ~30 KB JSON every 500ms. Re-parsing an
-     * identical blob at a fixed rate spiked the browser main thread and was a
-     * major cause of the dashboard freezing. When idle we keep the connection
-     * warm with a lightweight comment heartbeat. */
-    uint64_t last_version = 0;
-    bool first = true;
-    int ticks_since_send = 0;
-    for (int tick = 0; tick < 3000 && ms->running; tick++) {  /* ~5 min max */
+    /* ── 事件驱动 SSE 推送 (条件变量) ──────────────────────────
+     * 旧代码用 usleep(500000) 轮询，即使 monitor_node 以 10Hz 产出数据，
+     * 浏览器也只能以 2Hz 收到——这是节点界面 "一卡一卡" 的首要根因。
+     *
+     * 新方案：dashboard_bridge 收到新 JSON 时通过 cached_cond 唤醒 SSE 线程，
+     * 数据到达后 50ms 内即可推送到浏览器。空闲时 50ms 超时用于心跳检测。 */
+    uint64_t last_version  = 0;
+    uint64_t last_send_us  = clock_now_us();
+
+    while (ms->running) {
         pthread_mutex_lock(&ms->cached_mutex);
         uint64_t version = ms->cached_json_version;
-        pthread_mutex_unlock(&ms->cached_mutex);
 
-        if (first || version != last_version) {
+        if (version != last_version) {
+            /* 新数据到达：立即构建并推送 */
+            pthread_mutex_unlock(&ms->cached_mutex);
+
             build_sse_json(ms, buf, sizeof(buf));
             sse_flatten_payload(buf);
             char frame[MONITOR_HTTP_BUF_SIZE + 32];
             int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
             if (write(fd, frame, (size_t)fl) <= 0) break;
             last_version = version;
-            first = false;
-            ticks_since_send = 0;
-        } else if (++ticks_since_send >= 20) {  /* ~10s idle → heartbeat */
-            if (write(fd, ": keep-alive\n\n", 14) <= 0) break;
-            ticks_since_send = 0;
+            last_send_us  = clock_now_us();
+        } else {
+            /* 无新数据：等待条件变量信号，50ms 超时用于心跳 */
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 50000000;  /* 50ms */
+            if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+            int ret = pthread_cond_timedwait(&ms->cached_cond, &ms->cached_mutex, &ts);
+            /* timedwait 返回时已重新获取 mutex */
+
+            uint64_t now_us = clock_now_us();
+            if (ret == ETIMEDOUT) {
+                /* 50ms 空闲超时 → 检查是否需要心跳 */
+                uint64_t elapsed = now_us - last_send_us;
+                if (elapsed > 10000000ULL) {  /* ~10s 无数据推送 → 保活 */
+                    pthread_mutex_unlock(&ms->cached_mutex);
+                    if (write(fd, ": keep-alive\n\n", 14) <= 0) break;
+                    last_send_us = now_us;
+                    continue;  /* 跳过 unlock，因为已经 unlock 了 */
+                }
+            }
+            pthread_mutex_unlock(&ms->cached_mutex);
         }
-        usleep(500000);  /* 500ms poll interval */
     }
 }
 
@@ -920,6 +940,7 @@ MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discover
         snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
     pthread_mutex_init(&ms->remote_mutex, NULL);
     pthread_mutex_init(&ms->cached_mutex, NULL);
+    pthread_cond_init(&ms->cached_cond, NULL);
     pthread_mutex_init(&ms->client_mutex, NULL);
     pthread_mutex_init(&ms->freshness_mutex, NULL);
     return ms;
@@ -965,6 +986,7 @@ void monitor_server_destroy(MonitorServer* ms) {
     if (!ms) return;
     if (ms->running) monitor_server_stop(ms);
     pthread_mutex_destroy(&ms->cached_mutex);
+    pthread_cond_destroy(&ms->cached_cond);
     if (ms->cached_json) { free(ms->cached_json); ms->cached_json = NULL; }
     pthread_mutex_destroy(&ms->remote_mutex);
     pthread_mutex_destroy(&ms->client_mutex);
@@ -1021,6 +1043,7 @@ void monitor_server_inject_dashboard_json(MonitorServer* ms,
         ms->cached_json_len = len;
         ms->cached_json_time_us = clock_now_us();
         ms->cached_json_version++;
+        pthread_cond_signal(&ms->cached_cond);  /* wake SSE handler */
     }
 
     pthread_mutex_unlock(&ms->cached_mutex);
