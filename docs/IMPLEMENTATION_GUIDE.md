@@ -177,7 +177,7 @@ remap 回放后目标 topic 在 bus 上出现。
 
 **目标：** 采集 → 离线训练 → 影子推理 → 评估，全在仿真内闭环，**影子模式绝不接管控制**。
 
-**现状：** `modules/adas_nodes/data_recorder_node.c`（Stage 0 采样）、`tools/train/train.py`（离线训练）、
+**现状：** `modules/adas_nodes/data_recorder_node.c`（Stage 0 采样）、`tools/train_e2e/train.py`（离线训练）、
 `modules/adas_nodes/inference_node.c` + `tiny_mlp.h`（Stage 2 影子推理）；架构见 [LEARNING_LOOP.md](LEARNING_LOOP.md)。
 
 **接口/契约：** `tiny_mlp.h` 的推理内核与 `train.py` 导出的权重格式是两端契约（保持一致）。

@@ -15,11 +15,11 @@
 ```
                     ┌──────────────── 离线 ────────────────┐
  fusion/localization │                                       │
- planning/trajectory ┼─► data_recorder_node ─► JSONL 样本 ─► tools/train/train.py
-        (teacher)     │        (Stage 0)                        (Stage 1)
+ planning/trajectory ┼─► data_recorder_node ─► JSONL 样本 ─► tools/train_e2e/train.py
+        (teacher)     │        (Stage 0)                         (Stage 1)
                      │                                              │ 导出 model.txt
                      │                                              ▼
- fusion/localization ┼─────────────► inference_node ◄─── tools/train/model.txt
+ fusion/localization ┼─────────────► inference_node ◄─── models/e2e_tiny/model.txt
         (实时)        │                (Stage 2)
                      │                    │ 影子模式发布
                      │                    ▼
@@ -32,7 +32,7 @@
 
 ## 数据契约 (三方一致)
 
-`features` v1 仍由 `data_recorder_node`、`tools/train/train.py`、`inference_node`
+`features` v1 仍由 `data_recorder_node`、`tools/train_e2e/train.py`、`inference_node`
 共享，用于零依赖 tiny-MLP 与 C 侧推理兼容：
 
 | 项 | 定义 |
@@ -85,7 +85,7 @@ b2 <OUT floats>
 | 组件 | 位置 | 阶段 | 作用 |
 |------|------|------|------|
 | `data_recorder_node` | `modules/adas_nodes/data_recorder_node.c` | 0 | 订阅 topic，按频率落盘 JSONL 训练样本 |
-| `train.py`           | `tools/train/train.py` | 1 | 读样本训练 tiny-MLP，导出 `model.txt`（纯 Python，无需 PyTorch/numpy）|
+| `train.py`           | `tools/train_e2e/train.py` | 1 | 读样本训练 tiny-MLP 或 PyTorch 模型，导出 `model.txt` / `model.pt` |
 | `inference_node`     | `modules/adas_nodes/inference_node.c` | 2 | 加载模型，影子模式发布 `inference/trajectory`；订阅 `model_ota/active` 支持 OTA 热重载 |
 | `tiny_mlp.h`         | `modules/adas_nodes/tiny_mlp.h` | 2/3 | 零依赖推理 + SGD 微调内核（`tiny_mlp_forward` / `tiny_mlp_sgd_step` / `tiny_mlp_save`）|
 | `learner_node`       | `modules/adas_nodes/learner_node.c` | 3 | 车端增量 SGD 微调，资源受限调度，发布 `learner/status` |
@@ -103,7 +103,7 @@ FlowEngine 约定只有两类模型位置：
 
 | 位置 | 用途 |
 |------|------|
-| `tools/train/model.txt` | 当前 C runtime 模型；`demo.sh` 里的 `inference_node` 直接加载它 |
+| `models/e2e_tiny/model.txt` | 当前 C runtime 模型；`demo.sh` 里的 `inference_node` 直接加载它 |
 | `models/<name>/` | 训练产物目录；包含 `manifest.json` 和 `model.txt` 或 `model.pt` |
 
 `models/<name>/model.txt` 是 tiny-MLP artifact，可以提升为 runtime 模型：
@@ -145,10 +145,11 @@ bash scripts/demo.sh --no-browser 12
 无采集数据时，可先用合成数据生成一个演示模型：
 
 ```bash
-python3 tools/train/train.py --synthetic --output tools/train/model.txt
+python3 tools/train_e2e/train.py --synthetic --output models/e2e_tiny_demo
+python3 tools/modelctl.py promote models/e2e_tiny_demo
 ```
 
-仓库已内置一个用合成数据训练好的 `tools/train/model.txt`，因此 `inference_node`
+仓库已内置一个用合成数据训练好的 `models/e2e_tiny/model.txt`，因此 `inference_node`
 开箱即可加载真实模型；若文件缺失，节点会回退到可解释的启发式策略（不报错）。
 
 ## E2E Training Bridge v0.1（无 ONNX 依赖）

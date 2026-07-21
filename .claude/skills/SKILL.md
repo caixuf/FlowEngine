@@ -8,7 +8,7 @@
 |-------|------|----------|
 | **workflow** | `workflow.md` | 任何开发任务的完整流程：设计→执行→测试→迭代→清理→文档 |
 | **verify** | `verify.md` | 改动 pipeline 链路节点后，跑 demo_evaluator 端到端验证 |
-| **debug3d** | `debug3d.md` | 3D 可视化调试：道路渲染、车辆模型、场景加载问题 |
+
 
 ## 编码规范（在 CLAUDE.md 和 workflow skill 中）
 

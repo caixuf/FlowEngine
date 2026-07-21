@@ -36,8 +36,7 @@ FlowEngine 的学习闭环把 demo pipeline 里的 teacher 行为采成 JSONL，
 | C 端推理 | `modules/adas_nodes/inference_node.cpp` | C runtime 推理，**唯一**实现 |
 
 > 任何新训练入口必须在 `tools/train_e2e/` 或顶层 `tools/train_demo_model.py`。
-> ❌ `tools/train/train.py`（sklearn 旧实现）已 deprecated：被 `tools/train_e2e/train.py` 取代
->   详见 [CLAUDE.md 重构铁律](../../CLAUDE.md)「重构/替代 → 同一 commit 删旧」
+> ✅ `tools/train/train.py` 已删除，统一使用 `tools/train_e2e/train.py`
 
 ## 一键训练
 

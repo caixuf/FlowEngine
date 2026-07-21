@@ -98,10 +98,9 @@ export function createCameraRig(canvas) {
         break;
       }
       case 'map': {
-        // 硬编码：路面 world bbox 中心 (-71, 0, 0)，相机放正上方 80m
-        // （诊断：确认路面能被看到后再恢复 getCenter 逻辑）
-        camera.position.set(-71, 80, 0);
-        camera.lookAt(-71, 0, 0);
+        const c = getCenter(roadGroup);
+        camera.position.set(c.x, 80, c.z);
+        camera.lookAt(c.x, 0, c.z);
         break;
       }
       case 'orbit': {

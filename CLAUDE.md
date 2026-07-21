@@ -142,7 +142,7 @@ cJSON_Delete(p);
 
 - 任何「重写 / v2 / 换实现」类改动，新实现与被替代的旧实现必须在**同一个 commit** 内，旧的物理删除
 - ❌ 禁止 `_v2` / `_v3` / `_new` / `_old` / `_bak` 后缀文件并存超过 1 个 commit
-- ❌ 禁止新增与现有入口同名不同实现的第二份脚本（如已有 `tools/train/train.py`，禁止再添加第二个 `tools/train_e2e/train.py` 做相同事情——必须删旧）
+- ❌ 禁止新增与现有入口同名不同实现的第二份脚本（如已有 `tools/train_e2e/train.py`，禁止再添加第二个 `tools/train/train.py` 做相同事情——必须删旧）
 - ✅ 确实要暂留旧路径 → 文件头第一行加注释：
   ```python
   # @deprecated superseded-by=tools/train_e2e/train.py remove-by=2026-08-21

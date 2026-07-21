@@ -6,8 +6,8 @@
 
 | 维度 | 现状 | 证据 |
 |------|------|------|
-| 训练脚本 | 5 份散落 3 处 | `tools/train_demo_model.py`、`tools/train/train.py`、`train_e2e/{train,torch_train,temporal_train}.py` |
-| 学习闭环文档 | 3 份时间不一致 | `docs/LEARNING_LOOP.md`、`docs/E2E_LEARNING_V3_PLAN.md`、`skills/13_e2e_learning_loop.md` |
+| 训练脚本 | 已收敛到 2 份 | `tools/train_demo_model.py`（顶层入口）、`tools/train_e2e/train.py`（canonical）；`tools/train/train.py` 已删除 |
+| 学习闭环文档 | 已收敛到 2 份 | `docs/LEARNING_LOOP.md`、`skills/13_e2e_learning_loop.md`；`docs/E2E_LEARNING_V3_PLAN.md` 已删除 |
 | CLAUDE.md 漂移 | 索引写 `.c` 实际 `.cpp` | line 49 `inference_node.c` → 实际 `inference_node.cpp`（已确认） |
 | 3D 可视化 | 已收敛到 `vis/`（成功案例） | 4 代→1 代，依赖 `tools/flowboard/js/vis/main.js` choke point |
 | 场景文件 | 已清到 2 份 | 删 16 份 + zhongkai_road_full.json 等 |
@@ -32,15 +32,14 @@
 - 13 号 skill 描述学习闭环，未提 `/simplify` 联动
 - **整个 skills/ 目录无 `SKILL.md` 索引文件**（Glob 找不到）
 
-### 2.4 训练脚本分布
+### 2.4 训练脚本分布（已清理）
 ```
-tools/train_demo_model.py            # 已被 train_e2e/ 替代，疑似孤儿
-tools/train/train.py                  # 早期 sklearn 训练
-tools/train_e2e/train.py              # 当前 canonical（按 13 号 skill 描述）
-tools/train_e2e/torch_train.py        # PyTorch artifact
-tools/train_e2e/temporal_train.py     # 时序模型
+tools/train_demo_model.py            # 顶层一键入口，调度 train_e2e/
+tools/train_e2e/train.py              # 当前 canonical（tiny-MLP + PyTorch）
+tools/train_e2e/torch_train.py        # PyTorch artifact（已并入 train.py）
+tools/train_e2e/temporal_train.py     # 时序模型（已并入 train.py）
+tools/train/train.py                  # 已删除（deprecated，被 train_e2e/train.py 取代）
 ```
-5 份里有 3-4 份可能是"做同一件事的不同实现"。
 
 ## 三、具体改动（4 个文件）
 
