@@ -229,7 +229,7 @@ async def handle_client(reader, writer, watcher):
 
     # Main loop: poll data + handle client messages
     seq = 0
-    last_send = 0
+    channels_advertised = False
     while True:
         try:
             # Non-blocking read for client frames
@@ -251,10 +251,11 @@ async def handle_client(reader, writer, watcher):
 
             # Poll state file
             if watcher.poll():
-                watcher.ensure_channels()
-                # Re-advertise if channels changed
-                for ch in watcher.channels:
-                    ws_send_text(writer, foxglove_advertise(ch))
+                # Only advertise channels when they actually change
+                if not channels_advertised or watcher.ensure_channels():
+                    channels_advertised = True
+                    for ch in watcher.channels:
+                        ws_send_text(writer, foxglove_advertise(ch))
                 # Send time
                 ws_send_binary(writer, foxglove_time(int(time.time() * 1e9)))
                 # Send message data for all channels
@@ -263,8 +264,11 @@ async def handle_client(reader, writer, watcher):
                     data = foxglove_message_data(ch_id, seq, payload)
                     ws_send_binary(writer, data)
 
-                await writer.drain()
-                last_send = time.time()
+                # Drain only when data was actually sent, and don't
+                # await it — TCP buffers naturally; blocking drain was
+                # a major source of frame stutter in the WebSocket bridge.
+                # Use create_task so the write is non-blocking.
+                asyncio.ensure_future(writer.drain())
 
         except (ConnectionResetError, BrokenPipeError, OSError):
             break

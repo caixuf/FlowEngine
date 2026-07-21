@@ -751,10 +751,15 @@ static void export_dashboard_json(void) {
         cJSON_AddItemToArray(threads_arr, thr);
     }
 
-    /* ── Print to string and write to file ── */
-    char* json_str = cJSON_Print(root);
+    /* ── Serialize to compact JSON string ──
+     * cJSON_PrintUnformatted 比 cJSON_Print 小 30-40%（无缩进/换行），
+     * SSE 端 sse_flatten_payload 本就会删掉这些空白，两边都省 CPU。
+     * 同时 json_str 直接用于 IPC 发布，不再从磁盘读回——消除每帧一次
+     * 冗余的 fopen/fread/fclose。 */
+    char* json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
+    /* 写入 state_file（foxglove_bridge.py / 文件桥接回退消费） */
     char tmp_path[512];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g.state_file);
     FILE* jf = fopen(tmp_path, "w");
@@ -763,29 +768,13 @@ static void export_dashboard_json(void) {
         fclose(jf);
         rename(tmp_path, g.state_file);
     }
-    cJSON_free(json_str);
 
-    /* Publish the same JSON via IPC dashboard bridge for flowmond */
+    /* Publish via IPC dashboard bridge for flowmond.
+     * 直接用 json_str，无需再次从磁盘读取——消除双重 I/O。 */
     if (g.dashboard_ch) {
-        size_t json_len;
-        char* json_buf = NULL;
-        FILE* rf = fopen(g.state_file, "rb");
-        if (rf) {
-            fseek(rf, 0, SEEK_END);
-            long flen = ftell(rf);
-            fseek(rf, 0, SEEK_SET);
-            if (flen > 0) {
-                json_buf = (char*)malloc((size_t)flen + 1);
-                if (json_buf) {
-                    json_len = fread(json_buf, 1, (size_t)flen, rf);
-                    json_buf[json_len] = '\0';
-                    dashboard_bridge_publish(g.dashboard_ch, json_buf, json_len);
-                    free(json_buf);
-                }
-            }
-            fclose(rf);
-        }
+        dashboard_bridge_publish(g.dashboard_ch, json_str, strlen(json_str));
     }
+    cJSON_free(json_str);
     free(topo_json);
 }
 
