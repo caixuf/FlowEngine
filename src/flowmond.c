@@ -155,12 +155,20 @@ static void* dashboard_bridge_reconnect_fn(void* arg) {
  * bus 数据。当 demo.sh 走文件桥接链路时 (monitor 节点周期性写
  * /tmp/flow_topology.json), 此线程轮询该文件并把内容注入 monitor_server,
  * 使 dashboard 能展示拓扑/场景数据。与上面的 IPC dashboard bridge 互补:
- * IPC 通道提供实时 JSON, 文件桥接作为 standalone 兼容回退。 */
+ * IPC 通道提供实时 JSON, 文件桥接作为 standalone 兼容回退。
+ *
+ * 优化：IPC 正常时（dashboard_age < 2s），文件桥接降为 1Hz 低频巡检，
+ * 减少不必要的 stat+fopen+fread 开销。IPC 断开后自动恢复 5Hz 轮询。 */
 static void* dashboard_file_watcher_fn(void* arg) {
     MonitorServer* ms = (MonitorServer*)arg;
     const char* path = "/tmp/flow_topology.json";
     uint64_t last_mtime = 0;
     while (g_running) {
+        /* IPC 正常时低频巡检，断开后恢复 5Hz */
+        double age = monitor_server_dashboard_age_sec(ms);
+        bool ipc_alive = (age >= 0.0 && age < 2.0);
+        int sleep_us = ipc_alive ? 1000000 : 200000;  /* 1Hz vs 5Hz */
+
         struct stat st;
         if (stat(path, &st) == 0) {
             uint64_t mtime = (uint64_t)st.st_mtime;
@@ -176,7 +184,10 @@ static void* dashboard_file_watcher_fn(void* arg) {
                         if (data) {
                             size_t n = fread(data, 1, (size_t)len, fp);
                             data[n] = '\0';
-                            monitor_server_inject_dashboard_json(ms, data, n);
+                            /* IPC 正常时跳过文件注入，避免重复推送 */
+                            if (!ipc_alive) {
+                                monitor_server_inject_dashboard_json(ms, data, n);
+                            }
                             free(data);
                         }
                     }
@@ -184,7 +195,7 @@ static void* dashboard_file_watcher_fn(void* arg) {
                 }
             }
         }
-        usleep(200000); /* 5Hz */
+        usleep((unsigned int)sleep_us);
     }
     return NULL;
 }

@@ -205,7 +205,129 @@ void scheduler_set_choreo_bus(Scheduler* sched, MessageBus* bus) {
 void scheduler_stop(Scheduler* sched) {
     if (!sched || !sched->running) return;
     sched->running = false;
+
+    /* Wake all choreo waiters so they can exit */
+    pthread_mutex_lock(&sched->mutex);
+    for (int i = 0; i < sched->entry_count; i++) {
+        SchedTaskEntry* e = &sched->entries[i];
+        if (e->active) {
+            pthread_mutex_lock(&e->trigger_mutex);
+            e->active = false;
+            pthread_cond_signal(&e->trigger_cv);
+            pthread_mutex_unlock(&e->trigger_mutex);
+        }
+    }
+    pthread_mutex_unlock(&sched->mutex);
+
+    /* Join workers */
+    if (sched->workers) {
+        for (uint32_t i = 0; i < sched->worker_count; i++) {
+            pthread_join(sched->workers[i], NULL);
+        }
+        free(sched->workers);
+        sched->workers = NULL;
+        sched->worker_count = 0;
+    }
+
     printf("[scheduler] Stopped\n");
+}
+
+/* ── Worker thread: CLASSIC mode round-robin ──────────────── */
+
+typedef struct {
+    Scheduler* sched;
+    uint32_t   worker_id;
+} WorkerArgs;
+
+static void* scheduler_worker_fn(void* arg) {
+    WorkerArgs* wa = (WorkerArgs*)arg;
+    Scheduler* sched = wa->sched;
+    uint32_t wid = wa->worker_id;
+    free(wa);
+
+    char tname[16];
+    snprintf(tname, sizeof(tname), "sched-w%d", wid);
+    pthread_setname_np(pthread_self(), tname);
+
+    /* Round-robin index: each worker starts at a different offset */
+    int start_idx = (int)(wid % (uint32_t)(sched->entry_count > 0 ? sched->entry_count : 1));
+
+    while (sched->running) {
+        bool any_ran = false;
+
+        pthread_mutex_lock(&sched->mutex);
+        int n = sched->entry_count;
+        for (int j = 0; j < n && sched->running; j++) {
+            int idx = (start_idx + j) % n;
+            SchedTaskEntry* e = &sched->entries[idx];
+
+            if (!e->active || !e->task) continue;
+
+            /* RateControl gating */
+            if (!rate_control_acquire(&e->rate_control)) continue;
+
+            /* Grab a reference before unlocking */
+            TaskBase* task = e->task;
+            LatencyTracker* lt = &e->latency;
+            pthread_mutex_unlock(&sched->mutex);
+
+            uint64_t t0 = clock_now_us();
+            if (task->vtable && task->vtable->execute) {
+                task->vtable->execute(task);
+            }
+            latency_tracker_record(lt, clock_now_us() - t0);
+            any_ran = true;
+
+            pthread_mutex_lock(&sched->mutex);
+        }
+        pthread_mutex_unlock(&sched->mutex);
+
+        /* If no task was ready, sleep briefly to avoid busy-waiting */
+        if (!any_ran) {
+            usleep(1000);  /* 1ms */
+        }
+    }
+
+    return NULL;
+}
+
+int scheduler_run_loop(Scheduler* sched) {
+    if (!sched || sched->running) return ERR_INVALID_PARAM;
+    if (sched->entry_count == 0) {
+        printf("[scheduler] No tasks registered, run_loop returns immediately\n");
+        return 0;
+    }
+
+    sched->running = true;
+    uint32_t nw = sched->config.worker_thread_count;
+    if (nw == 0) nw = 1;
+    if (nw > (uint32_t)sched->entry_count) nw = (uint32_t)sched->entry_count;
+
+    sched->workers = (pthread_t*)calloc(nw, sizeof(pthread_t));
+    sched->worker_count = nw;
+
+    printf("[scheduler] run_loop: %u worker(s) for %d tasks (mode=%s)\n",
+           nw, sched->entry_count,
+           sched->config.mode == SCHEDULER_MODE_CHOREO ? "CHOREO" : "CLASSIC");
+
+    for (uint32_t i = 0; i < nw; i++) {
+        WorkerArgs* wa = (WorkerArgs*)malloc(sizeof(WorkerArgs));
+        wa->sched = sched;
+        wa->worker_id = i;
+        pthread_create(&sched->workers[i], NULL, scheduler_worker_fn, wa);
+    }
+
+    /* Block until scheduler_stop() is called */
+    for (uint32_t i = 0; i < nw; i++) {
+        pthread_join(sched->workers[i], NULL);
+    }
+
+    free(sched->workers);
+    sched->workers = NULL;
+    sched->worker_count = 0;
+    sched->running = false;
+
+    return 0;
 }
 
 int scheduler_register_task(Scheduler* sched, TaskBase* task, const char* name) {

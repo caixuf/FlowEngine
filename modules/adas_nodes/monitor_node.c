@@ -788,9 +788,25 @@ static int monitor_execute(TaskBase* task) {
      * 重试，直到连上其它进程创建的共享内存通道（限 120 周期，2Hz≈60s）。 */
     int stats_sub_retry = 0;
 
+    /* RateControl: 通过 scheduler 注册的 rate_control 做频率门控，
+     * 避免 usleep 抖动导致实际频率超过配置值。 */
+    RateControl* rc = NULL;
+    if (g.scheduler && task->task_id >= 0) {
+        rc = scheduler_get_rate_control(g.scheduler, task->task_id);
+    }
+    LatencyTracker* lt = NULL;
+    if (g.scheduler && task->task_id >= 0) {
+        lt = scheduler_get_latency(g.scheduler, task->task_id);
+    }
+
     while (!task->should_stop) {
         usleep((unsigned long)period_us);
         if (task->should_stop) break;
+
+        /* RateControl 门控：若距上次执行不足 period_us，跳过本次 */
+        if (rc && !rate_control_acquire(rc)) continue;
+
+        uint64_t t0 = clock_now_us();
 
         /* 重试 stats bridge subscriber（每个周期试一次，连上即止） */
         if (!g.stats_sub && stats_sub_retry < 120) {
@@ -809,6 +825,9 @@ static int monitor_execute(TaskBase* task) {
         if (g.stats_ch) {
             stats_bridge_publish(g.stats_ch, g.bus, "monitor_node");
         }
+
+        /* Record latency */
+        if (lt) latency_tracker_record(lt, clock_now_us() - t0);
 
         /* 简略控制台输出 */
         uint64_t pub = 0, del = 0, drop = 0;
@@ -856,7 +875,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     snprintf(g.state_file, sizeof(g.state_file), "%s", sf ? sf : "/tmp/flow_topology.json");
 
     /* 解析参数 */
-    g.frequency_hz = 10.0;
+    g.frequency_hz = 5.0;  /* 5Hz: 经 SSE 事件驱动优化后 10Hz 冗余，降频减少 I/O */
     g.lane_width   = 3.5;
     g.lane_count   = 2;
     if (params_json) {

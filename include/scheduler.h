@@ -136,6 +136,21 @@ void scheduler_destroy(Scheduler* scheduler);
 /** Start the scheduler (creates worker threads). */
 int scheduler_start(Scheduler* sched);
 
+/**
+ * Run loop: creates worker threads and runs registered tasks in a
+ * round-robin fashion. Each worker picks tasks, applies RateControl
+ * gating, measures latency, and calls task->execute().
+ *
+ * Blocks until scheduler_stop() is called from another thread.
+ * Call this instead of scheduler_start() when you want the scheduler
+ * to drive task execution (M:N model) rather than each task having
+ * its own dedicated thread.
+ *
+ * @param sched  Scheduler with registered tasks
+ * @return 0 on success, error code on failure
+ */
+int scheduler_run_loop(Scheduler* sched);
+
 /** Set the message bus for choreo trigger routing. */
 void scheduler_set_choreo_bus(Scheduler* sched, MessageBus* bus);
 

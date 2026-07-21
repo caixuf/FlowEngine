@@ -356,6 +356,35 @@ static void send_response(int fd, const char* status, const char* content_type,
 /* ── SSE 流 ──────────────────────────────────────────────── */
 
 /**
+ * Safe write wrapper: handles EPIPE (client disconnected) and EAGAIN
+ * (socket buffer full). Returns -1 on fatal error, 0 on success.
+ * EPIPE is the normal case when a browser tab closes the SSE connection
+ * — we should not SIGPIPE or log-spam on it.
+ */
+static int safe_write(int fd, const void* buf, size_t len) {
+    const char* p = (const char*)buf;
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t w = write(fd, p, remaining);
+        if (w > 0) {
+            p += w;
+            remaining -= (size_t)w;
+        } else if (w == 0) {
+            return -1;  /* EOF — client closed */
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Socket buffer full; brief yield and retry */
+                usleep(1000);
+                continue;
+            }
+            /* EPIPE, ECONNRESET, etc. — client disconnected, normal */
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/**
  * Flatten a JSON payload to a single line, in place.
  *
  * SSE frames are line-delimited: a raw '\n' inside the payload terminates the
@@ -383,8 +412,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
         "Cache-Control: no-cache\r\n"
         "Connection: keep-alive\r\n"
         "\r\n";
-    ssize_t w = write(fd, sse_header, strlen(sse_header));
-    (void)w;
+    if (safe_write(fd, sse_header, strlen(sse_header)) != 0) return;
 
     char buf[MONITOR_HTTP_BUF_SIZE];
     /* ── 事件驱动 SSE 推送 (条件变量) ──────────────────────────
@@ -408,7 +436,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
             sse_flatten_payload(buf);
             char frame[MONITOR_HTTP_BUF_SIZE + 32];
             int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
-            if (write(fd, frame, (size_t)fl) <= 0) break;
+            if (safe_write(fd, frame, (size_t)fl) != 0) break;
             last_version = version;
             last_send_us  = clock_now_us();
         } else {
@@ -426,7 +454,7 @@ static void handle_sse(int fd, MonitorServer* ms) {
                 uint64_t elapsed = now_us - last_send_us;
                 if (elapsed > 10000000ULL) {  /* ~10s 无数据推送 → 保活 */
                     pthread_mutex_unlock(&ms->cached_mutex);
-                    if (write(fd, ": keep-alive\n\n", 14) <= 0) break;
+                    if (safe_write(fd, ": keep-alive\n\n", 14) != 0) break;
                     last_send_us = now_us;
                     continue;  /* 跳过 unlock，因为已经 unlock 了 */
                 }
