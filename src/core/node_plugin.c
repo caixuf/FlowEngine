@@ -2,15 +2,51 @@
  * @file node_plugin.c
  * @brief NodePlugin 托管模式（managed mode）运行时支持
  *
- * node_plugin.h 本身是头文件库（node_announce_self 为 static inline）。
  * node_start_managed() 需要跨编译单元调用调度器 + TaskBase 运行时，
  * 故单独在此实现并链入 libflowengine_core。
+ *
+ * node_announce_self() 也从之前的 static inline 迁移至此，
+ * 避免头文件内联函数需要 include transport.h 造成污染。
  */
 
 #include "node_plugin.h"
 #include "task_interface.h"
 #include "scheduler.h"
+#include "transport.h"
 #include "logger.h"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+void node_announce_self(Transport* transport, const NodePlugin* plugin) {
+    if (!transport || !plugin || !plugin->name) return;
+    char json[1024];
+    int n = snprintf(json, sizeof(json),
+        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"pid\":%d,\"alive\":true,\"topics\":[",
+        plugin->name,
+        plugin->version     ? plugin->version     : "1.0.0",
+        plugin->description ? plugin->description : "",
+        (int)getpid());
+    int need_comma = 0;
+    if (plugin->input_topics) {
+        for (int i = 0; plugin->input_topics[i] && n < (int)sizeof(json)-60; i++) {
+            n += snprintf(json+n, sizeof(json)-n,
+                         "%s{\"topic\":\"%s\",\"role\":\"sub\",\"caps\":2}",
+                         need_comma ? "," : "", plugin->input_topics[i]);
+            need_comma = 1;
+        }
+    }
+    if (plugin->output_topics) {
+        for (int i = 0; plugin->output_topics[i] && n < (int)sizeof(json)-60; i++) {
+            n += snprintf(json+n, sizeof(json)-n,
+                         "%s{\"topic\":\"%s\",\"role\":\"pub\",\"caps\":1}",
+                         need_comma ? "," : "", plugin->output_topics[i]);
+            need_comma = 1;
+        }
+    }
+    n += snprintf(json+n, sizeof(json)-n, "]}");
+    transport_publish(transport, "flowengine/node_info", json, (uint32_t)n + 1);
+}
 
 int node_start_managed(NodePlugin* plugin, Scheduler* sched) {
     if (!plugin || !sched) {
@@ -37,7 +73,7 @@ int node_start_managed(NodePlugin* plugin, Scheduler* sched) {
     /* 2) 派生工作线程：task_start 创建 joinable pthread，在线程内依次调用
      *    vtable->initialize()（若有）、vtable->execute()（节点主循环，应循环
      *    检查 task->should_stop）、vtable->cleanup()（若有）。
-     *    scheduler_start() 只置运行标志不建线程，故真正的执行来自 task_start。 */
+     *    scheduler_start() 启动后台监控线程，定期检查任务延迟和健康状态。 */
     int rc = task_start(plugin->taskbase);
     if (rc != 0) {
         LOG_WARN("node_plugin", "%s: task_start failed (%d)",

@@ -11,6 +11,7 @@
 #include "node_plugin.h"
 #include "sysmonitor.h"
 #include "flow_registry.h"
+#include "topic_registry.h"
 #include "logger.h"
 #include "stats_bridge.h"
 #include "dashboard_bridge.h"
@@ -853,10 +854,10 @@ static const TaskInterface monitor_vtable = {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "perception/obstacles", "vehicle/state",
-                                   "fusion/latency", "flowengine/node_info",
-                                   "planning/trajectory", "road/geometry",
-                                   "scene/frame", NULL };
+static const char* s_inputs[]  = { TOPIC_PERCEPTION_OBSTACLES, TOPIC_VEHICLE_STATE,
+                                   TOPIC_FUSION_LATENCY, TOPIC_FLOWENGINE_NODE_INFO,
+                                   TOPIC_PLANNING_TRAJECTORY, TOPIC_ROAD_GEOMETRY,
+                                   "traffic/traffic_lights", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;
@@ -908,23 +909,23 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.sysmon = sysmonitor_create();
 
     /* 订阅 */
-    transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);
-    transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
-    transport_subscribe(transport, "fusion/latency", on_fusion_latency, NULL);
-    transport_subscribe(transport, "planning/trajectory", on_planning_trajectory, NULL);
-    transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
+    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_obstacles, NULL);
+    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, NULL);
+    transport_subscribe(transport, TOPIC_FUSION_LATENCY, on_fusion_latency, NULL);
+    transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_planning_trajectory, NULL);
+    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, NULL);
     /* Phase 3: scene/frame — 从 flowsim_node 获取 road_network 供 3D 多段道路渲染 */
-    transport_subscribe(transport, "scene/frame", on_scene_frame, NULL);
+    transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
-    transport_subscribe(transport, "flowengine/node_info", on_node_info, NULL);
+    transport_subscribe(transport, TOPIC_FLOWENGINE_NODE_INFO, on_node_info, NULL);
     g.node_info_count = 0;
 
-    discovery_advertise(discovery, "perception/obstacles", 0x0B5A010Eu, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "vehicle/state",        0x1C0E5A7Eu, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "fusion/latency",       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/geometry",        0x80AD5C12u, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "scene/frame",          0x5CE4E011u, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "flowengine/node_info", 0xF10E10F0u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, 0x0B5A010Eu, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_VEHICLE_STATE,        0x1C0E5A7Eu, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_FUSION_LATENCY,       0x1A7E9C01u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY,        0x80AD5C12u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_SCENE_FRAME,          0x5CE4E011u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_FLOWENGINE_NODE_INFO, 0xF10E10F0u, CAP_SUBSCRIBER, 0);
 
     /* Open IPC stats bridge for flowmond (publisher) */
     g.stats_ch = stats_bridge_publisher_open();

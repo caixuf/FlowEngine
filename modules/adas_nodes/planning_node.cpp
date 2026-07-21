@@ -17,6 +17,7 @@
  */
 
 #include "node_plugin.h"
+#include "topic_registry.h"
 #include "state_machine.h"
 #include "scenario_loader.h"
 #include "road_geometry.h"
@@ -828,7 +829,7 @@ protected:
                          route_type_str);
             }
 
-            transport_publish(transport_, "planning/trajectory",
+            transport_publish(transport_, TOPIC_PLANNING_TRAJECTORY,
                               (const uint8_t*)traj_final,
                               (uint32_t)strlen(traj_final) + 1);
             g.plan_count++;
@@ -875,8 +876,8 @@ void* planning_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "vehicle/state", "road/geometry", "road/traffic_lights", "scene/frame", nullptr };
-static const char* s_outputs[] = { "planning/trajectory", nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_VEHICLE_STATE, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, nullptr };
+static const char* s_outputs[] = { TOPIC_PLANNING_TRAJECTORY, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 
@@ -981,24 +982,24 @@ static int planning_init(MessageBus* bus, Transport* transport,
     LOG_INFO("planning", "built without Frenet — using lane-keep fallback");
 #endif
 
-    transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
-    transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
-    transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
-    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, nullptr);
-    transport_subscribe(transport, "scene/frame", on_scene_frame, nullptr);
-    transport_advertise(transport, "planning/trajectory", 0x3A7B1C2Du);
+    transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
+    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
+    transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
+    transport_advertise(transport, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du);
 
-    discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
+    discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
+    discovery_advertise(discovery, TOPIC_VEHICLE_STATE, 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
+    discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/traffic_lights", 0x7E5C0FFEu,
+    discovery_advertise(discovery, TOPIC_ROAD_TRAFFIC_LIGHTS, 0x7E5C0FFEu,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "scene/frame",         0x5CF12A60u,
+    discovery_advertise(discovery, TOPIC_SCENE_FRAME,         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
+    discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);
 
     /* 初始化反射式状态机 */

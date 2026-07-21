@@ -26,17 +26,28 @@
  * 对比旧方式 (e2e_demo.c --role，已移除):
  *   旧: ROLE_MATCH("fusion") → 所有节点代码共享一个进程/文件
  *   新: dlopen("libfusion_node.so") → 节点完全独立，改算法不重编译主程序
+ *
+ * 头文件设计原则：
+ *   - 仅前向声明基础设施类型（MessageBus / Transport / DiscoveryManager /
+ *     Scheduler / TaskBase），不 include 完整头文件，避免 31 个节点插件
+ *     被间接拉入 message_bus.h / transport.h / discovery.h / scheduler.h 的
+ *     全部符号。
+ *   - 节点插件如需使用这些类型的 API，应在自己的 .c/.cpp 中显式 include。
  */
 
-#include "message_bus.h"
-#include "transport.h"
-#include "discovery.h"
-#include "scheduler.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ── 前向声明（替代完整 include） ─────────────────────────────── */
+
+typedef struct MessageBus        MessageBus;
+typedef struct Transport         Transport;
+typedef struct DiscoveryManager  DiscoveryManager;
+typedef struct Scheduler         Scheduler;
+typedef struct TaskBase          TaskBase;
 
 /**
  * 节点插件 ABI 版本。
@@ -159,39 +170,11 @@ int node_start_managed(NodePlugin* plugin, Scheduler* sched);
  *
  * @param transport  节点 init() 注入的 transport 指针
  * @param plugin     节点自身的 NodePlugin 描述符
+ *
+ * 实现位于 src/core/node_plugin.c（libflowengine_core.a），
+ * 所有节点 .so 链接时自动可用。
  */
-#include "transport.h"
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-
-static inline void node_announce_self(Transport* transport, const NodePlugin* plugin) {
-    if (!transport || !plugin || !plugin->name) return;
-    char json[1024];
-    int n = snprintf(json, sizeof(json),
-        "{\"name\":\"%s\",\"version\":\"%s\",\"description\":\"%s\",\"pid\":%d,\"alive\":true,\"topics\":[",
-        plugin->name,
-        plugin->version     ? plugin->version     : "1.0.0",
-        plugin->description ? plugin->description : "",
-        (int)getpid());
-    int need_comma = 0;
-    if (plugin->input_topics) {
-        for (int i = 0; plugin->input_topics[i] && n < (int)sizeof(json)-60; i++) {
-            n += snprintf(json+n, sizeof(json)-n, "%s{\"topic\":\"%s\",\"role\":\"sub\",\"caps\":2}",
-                         need_comma ? "," : "", plugin->input_topics[i]);
-            need_comma = 1;
-        }
-    }
-    if (plugin->output_topics) {
-        for (int i = 0; plugin->output_topics[i] && n < (int)sizeof(json)-60; i++) {
-            n += snprintf(json+n, sizeof(json)-n, "%s{\"topic\":\"%s\",\"role\":\"pub\",\"caps\":1}",
-                         need_comma ? "," : "", plugin->output_topics[i]);
-            need_comma = 1;
-        }
-    }
-    n += snprintf(json+n, sizeof(json)-n, "]}");
-    transport_publish(transport, "flowengine/node_info", json, (uint32_t)n + 1);
-}
+void node_announce_self(Transport* transport, const NodePlugin* plugin);
 
 #ifdef __cplusplus
 }

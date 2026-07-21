@@ -23,6 +23,7 @@
 #include "param_registry.h"
 #include "state_machine.h"
 #include "road_geometry.h"
+#include "topic_registry.h"
 #include "adas_msgs_gen.h"       /* ControlRaw_serialize, CONTROLRAW_TYPE_ID */
 #include "coroutine_task.h"
 #include "logger.h"
@@ -673,7 +674,7 @@ protected:
                 uint8_t raw_buf[64];
                 size_t  raw_len = sizeof(raw_buf);
                 ControlRaw_serialize(&raw, raw_buf, &raw_len);
-                transport_publish(transport_, "control/raw_cmd",
+                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
                                   raw_buf, (uint32_t)raw_len);
 
                 char cmd_text[256];
@@ -681,7 +682,7 @@ protected:
                          "throttle=0.00 brake=0.25 steer=%.4f "
                          "speed=%.1f target=%.1f error=%.1f mode=DATA_TIMEOUT",
                          fb_steer, g.current_speed, fb_target_y, fb_lat_error);
-                transport_publish(transport_, "control/raw_cmd/text",
+                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                                   (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
                 if (g.cycle % 20 == 1) {
@@ -1211,7 +1212,7 @@ protected:
             uint8_t raw_buf[64];
             size_t  raw_len = sizeof(raw_buf);
             ControlRaw_serialize(&raw, raw_buf, &raw_len);
-            transport_publish(transport_, "control/raw_cmd",
+            transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
                               raw_buf, (uint32_t)raw_len);
 
             /* Also publish text format for backward compat (monitor/logging) */
@@ -1221,7 +1222,7 @@ protected:
                      "speed=%.1f target=%.1f error=%.1f mode=%s",
                      throttle, brake, steer,
                      g.current_speed, acc_target, error, mode);
-            transport_publish(transport_, "control/raw_cmd/text",
+            transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
             /* 发布 CTE（横向误差）供 LDW/监控/数据记录用 */
@@ -1231,7 +1232,7 @@ protected:
                 cJSON_AddNumberToObject(cte_root, "speed", g.current_speed);
                 cJSON_AddNumberToObject(cte_root, "seq", g.cycle);
                 char* cte_s = cJSON_PrintUnformatted(cte_root);
-                transport_publish(transport_, "control/cte",
+                transport_publish(transport_, TOPIC_CONTROL_CTE,
                                   (const uint8_t*)cte_s, (uint32_t)strlen(cte_s) + 1);
                 free(cte_s);
                 cJSON_Delete(cte_root);
@@ -1251,7 +1252,7 @@ protected:
                     cJSON_AddNumberToObject(ldw_root, "threshold", g.ldw_threshold);
                     cJSON_AddStringToObject(ldw_root, "side", side);
                     char* ldw_s = cJSON_PrintUnformatted(ldw_root);
-                    transport_publish(transport_, "control/ldw",
+                    transport_publish(transport_, TOPIC_CONTROL_LDW,
                                       (const uint8_t*)ldw_s, (uint32_t)strlen(ldw_s) + 1);
                     free(ldw_s);
                     cJSON_Delete(ldw_root);
@@ -1292,8 +1293,8 @@ void* control_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "vehicle/state", "road/geometry", "road/ref_path", "scene/frame", nullptr };
-static const char* s_outputs[] = { "control/raw_cmd", nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY, TOPIC_VEHICLE_STATE, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_REF_PATH, TOPIC_SCENE_FRAME, nullptr };
+static const char* s_outputs[] = { TOPIC_CONTROL_RAW_CMD, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 
@@ -1472,27 +1473,27 @@ static int control_init(MessageBus* bus, Transport* transport,
     /* Phase 2: 道路几何从 road/geometry topic 获取（sim_world 发布），
      * 不再独立 scenario_load。 */
 
-    transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
-    transport_subscribe(transport, "planning/trajectory", on_trajectory, nullptr);
-    transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
-    transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
-    transport_subscribe(transport, "road/ref_path", on_ref_path, nullptr);
-    transport_subscribe(transport, "scene/frame", on_scene_frame, nullptr);
-    transport_advertise(transport, "control/raw_cmd", CONTROLRAW_TYPE_ID);
+    transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
+    transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
+    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_ref_path, nullptr);
+    transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
+    transport_advertise(transport, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID);
 
-    discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
+    discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "planning/trajectory", 0x3A7B1C2Du,
+    discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7Eu,
+    discovery_advertise(discovery, TOPIC_VEHICLE_STATE, 0x1C0E5A7Eu,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/geometry", 0x80AD5C12u,
+    discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "road/ref_path", 0x7E5A3C11u,
+    discovery_advertise(discovery, TOPIC_ROAD_REF_PATH, 0x7E5A3C11u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "scene/frame",         0x5CF12A60u,
+    discovery_advertise(discovery, TOPIC_SCENE_FRAME,         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "control/raw_cmd", CONTROLRAW_TYPE_ID,
+    discovery_advertise(discovery, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);
 
     g.task = std::make_unique<ControlTask>(bus, transport);

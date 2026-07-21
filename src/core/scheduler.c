@@ -187,9 +187,53 @@ void scheduler_destroy(Scheduler* sched) {
     free(sched);
 }
 
+/* ── 调度器监控线程 ────────────────────────────────────────── */
+
+typedef struct {
+    Scheduler* sched;
+    uint64_t   period_us;
+} SchedMonitorArgs;
+
+static void* scheduler_monitor_fn(void* arg) {
+    SchedMonitorArgs* ma = (SchedMonitorArgs*)arg;
+    Scheduler* sched = ma->sched;
+    uint64_t period_us = ma->period_us;
+    free(ma);
+
+    pthread_setname_np(pthread_self(), "sched-mon");
+
+    while (sched->running) {
+        usleep((unsigned int)period_us);
+        if (!sched->running) break;
+
+        pthread_mutex_lock(&sched->mutex);
+        for (int i = 0; i < sched->entry_count; i++) {
+            SchedTaskEntry* e = &sched->entries[i];
+            if (!e->active) continue;
+
+            LatencyStats ls = latency_tracker_stats(&e->latency);
+            if (ls.avg_us > 50000ULL) {
+                printf("[scheduler] WARN: %s avg_latency=%luus p99=%luus samples=%lu\n",
+                       e->name, (unsigned long)ls.avg_us,
+                       (unsigned long)ls.p99_us, (unsigned long)ls.sample_count);
+            }
+        }
+        pthread_mutex_unlock(&sched->mutex);
+    }
+    return NULL;
+}
+
 int scheduler_start(Scheduler* sched) {
     if (!sched || sched->running) return ERR_INVALID_PARAM;
     sched->running = true;
+
+    /* 启动后台监控线程：周期性检查所有任务的延迟，超阈值时告警 */
+    SchedMonitorArgs* ma = (SchedMonitorArgs*)malloc(sizeof(SchedMonitorArgs));
+    ma->sched = sched;
+    ma->period_us = 5000000ULL;  /* 5s 周期 */
+    pthread_t mon_tid;
+    pthread_create(&mon_tid, NULL, scheduler_monitor_fn, ma);
+    pthread_detach(mon_tid);
 
     printf("[scheduler] Started with %u tasks, %u worker threads (mode=%s)\n",
            sched->entry_count, sched->config.worker_thread_count,

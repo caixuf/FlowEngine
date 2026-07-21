@@ -22,6 +22,7 @@
  */
 
 #include "node_plugin.h"
+#include "topic_registry.h"
 #include "scenario_loader.h"
 #include "road_geometry.h"
 #include "clock_service.h"
@@ -694,7 +695,7 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(vstate, "n_obs", n_obs);
 
     char* s = cJSON_PrintUnformatted(vstate);
-    transport_publish(g.transport, "vehicle/state",
+    transport_publish(g.transport, TOPIC_VEHICLE_STATE,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(vstate);
@@ -726,7 +727,7 @@ static void publish_road_geometry(void) {
      * ego target_y 算错。 */
     g.scene_pub_cfg.lane_count = lane_count;
     char* s = cJSON_PrintUnformatted(root);
-    transport_publish(g.transport, "road/geometry",
+    transport_publish(g.transport, TOPIC_ROAD_GEOMETRY,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(root);
@@ -784,7 +785,7 @@ static void publish_ref_path(void) {
     }
     cJSON_AddItemToObject(root, "points", pts);
     char* s = cJSON_PrintUnformatted(root);
-    transport_publish(g.transport, "road/ref_path",
+    transport_publish(g.transport, TOPIC_ROAD_REF_PATH,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(root);
@@ -825,7 +826,7 @@ static void publish_traffic_lights() {
     }
     cJSON_AddItemToObject(root, "lights", lights);
     char* s = cJSON_PrintUnformatted(root);
-    transport_publish(g.transport, "road/traffic_lights",
+    transport_publish(g.transport, TOPIC_ROAD_TRAFFIC_LIGHTS,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(root);
@@ -836,7 +837,7 @@ static void publish_sim_tick(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(tick, "t_us", (double)sim_time_us);
     cJSON_AddNumberToObject(tick, "cycle", g.cycle);
     char* s = cJSON_PrintUnformatted(tick);
-    transport_publish(g.transport, "sim/tick",
+    transport_publish(g.transport, TOPIC_SIM_TICK,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(tick);
@@ -852,7 +853,7 @@ static void publish_sim_collision(const flowsim::Entity& a, const flowsim::Entit
     cJSON_AddNumberToObject(col, "overlap_y",
         (a.width + b.width) * 0.5 - fabs(a.y - b.y));
     char* s = cJSON_PrintUnformatted(col);
-    transport_publish(g.transport, "sim/collision",
+    transport_publish(g.transport, TOPIC_SIM_COLLISION,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(col);
@@ -906,7 +907,7 @@ protected:
         while (!should_stop()) {
             /* 50ms tick：select_for 等待 control/cmd 或超时（20Hz 节拍）。
              * stop() 触发 cancel_token 立即唤醒，无需外发消息。 */
-            auto res = co_await select_for({"control/cmd"}, FLOWSIM_DT_US);
+            auto res = co_await select_for({TOPIC_CONTROL_CMD}, FLOWSIM_DT_US);
             if (should_stop()) break;
 
             /* 直接从 select_for 返回的消息中解析控制指令，不再依赖
@@ -1118,11 +1119,11 @@ void* flowsim_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "control/cmd", nullptr };
+static const char* s_inputs[]  = { TOPIC_CONTROL_CMD, nullptr };
 static const char* s_outputs[] = {
-    "vehicle/state", "road/geometry", "road/traffic_lights",
-    "road/ref_path",
-    "sim/tick", "sim/collision", "scene/frame", nullptr
+    TOPIC_VEHICLE_STATE, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS,
+    TOPIC_ROAD_REF_PATH,
+    TOPIC_SIM_TICK, TOPIC_SIM_COLLISION, TOPIC_SCENE_FRAME, nullptr
 };
 
 extern NodePlugin s_plugin;
@@ -1218,20 +1219,20 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     g.sim_start_us = 0;  /* sim 时间从 0 起，sim_start_us=0 使 sim_time_s = clock_now_us/1e6 */
 
     /* 订阅 control/cmd */
-    transport_subscribe(transport, "control/cmd", on_control_cmd, nullptr);
-    discovery_advertise(discovery, "control/cmd", CONTROL_CMD_TYPE_ID, CAP_SUBSCRIBER, 0);
+    transport_subscribe(transport, TOPIC_CONTROL_CMD, on_control_cmd, nullptr);
+    discovery_advertise(discovery, TOPIC_CONTROL_CMD, CONTROL_CMD_TYPE_ID, CAP_SUBSCRIBER, 0);
 
     /* 广告输出 topics */
-    transport_advertise(transport, "vehicle/state",       VEHICLE_STATE_TYPE_ID);
-    discovery_advertise(discovery, "vehicle/state",       VEHICLE_STATE_TYPE_ID, CAP_PUBLISHER, 20.0);
-    transport_advertise(transport, "road/geometry",       ROAD_GEOMETRY_TYPE_ID);
-    discovery_advertise(discovery, "road/geometry",       ROAD_GEOMETRY_TYPE_ID, CAP_PUBLISHER, 1.0);
-    transport_advertise(transport, "road/traffic_lights", ROAD_TRAFFIC_LIGHTS_TYPE_ID);
-    transport_advertise(transport, "sim/tick",            SIM_TICK_TYPE_ID);
-    transport_advertise(transport, "sim/collision",       SIM_COLLISION_TYPE_ID);
+    transport_advertise(transport, TOPIC_VEHICLE_STATE,       VEHICLE_STATE_TYPE_ID);
+    discovery_advertise(discovery, TOPIC_VEHICLE_STATE,       VEHICLE_STATE_TYPE_ID, CAP_PUBLISHER, 20.0);
+    transport_advertise(transport, TOPIC_ROAD_GEOMETRY,       ROAD_GEOMETRY_TYPE_ID);
+    discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY,       ROAD_GEOMETRY_TYPE_ID, CAP_PUBLISHER, 1.0);
+    transport_advertise(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, ROAD_TRAFFIC_LIGHTS_TYPE_ID);
+    transport_advertise(transport, TOPIC_SIM_TICK,            SIM_TICK_TYPE_ID);
+    transport_advertise(transport, TOPIC_SIM_COLLISION,       SIM_COLLISION_TYPE_ID);
     /* scene/frame：20Hz 完整场景帧，给 3D 前端用（Phase 2.2 新增） */
-    transport_advertise(transport, "scene/frame",         SCENE_FRAME_TYPE_ID);
-    discovery_advertise(discovery, "scene/frame",         SCENE_FRAME_TYPE_ID, CAP_PUBLISHER, 20.0);
+    transport_advertise(transport, TOPIC_SCENE_FRAME,         SCENE_FRAME_TYPE_ID);
+    discovery_advertise(discovery, TOPIC_SCENE_FRAME,         SCENE_FRAME_TYPE_ID, CAP_PUBLISHER, 20.0);
 
     /* 填充 scene_pub_cfg：roads_loaded 之后才有 esmini 网络指针 */
     g.scene_pub_cfg.curve_start_x  = g.curve_start_x;
