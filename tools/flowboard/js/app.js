@@ -8,6 +8,19 @@ import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTo
 import { safeCall, reportDiag, clearDiag, _auditSceneMaterials } from './utils.js';
 import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './deadreckon.js';
 
+function setText(id, val) {
+  var el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+function setStyle(id, prop, val) {
+  var el = document.getElementById(id);
+  if (el) el.style[prop] = val;
+}
+function showEl(id, show) {
+  var el = document.getElementById(id);
+  if (el) el.style.display = show ? '' : 'none';
+}
+
 /**
  * Phase 4.9: setTopoData fan-out — push the latest topology payload into
  * each renderer module's store.
@@ -636,24 +649,23 @@ function updateMetrics() {
   // Vehicle
   var v = (topoData.metrics||{}).vehicle;
   if (v) {
-    document.getElementById('vehicle-card').style.display = '';
-    document.getElementById('v-speed').textContent = (v.speed||0).toFixed(1);
-    document.getElementById('v-target').textContent = (v.target_speed||0).toFixed(1);
-    document.getElementById('v-throttle').textContent = ((v.throttle||0)*100).toFixed(0)+'%';
-    document.getElementById('v-throttle').style.color = (v.throttle||0) > 0.5 ? '#d29922' : '#3fb950';
-    document.getElementById('v-error').textContent = (v.error||0).toFixed(1);
+    showEl('vehicle-card', true);
+    setText('v-speed', (v.speed||0).toFixed(1));
+    setText('v-target', (v.target_speed||0).toFixed(1));
+    setText('v-throttle', ((v.throttle||0)*100).toFixed(0)+'%');
+    setStyle('v-throttle', 'color', (v.throttle||0) > 0.5 ? '#d29922' : '#3fb950');
+    setText('v-brake', ((v.brake||0)*100).toFixed(0)+'%');
+    setText('v-error', (v.error||0).toFixed(1));
     var driverMode = (topoData.metrics||{}).driver_mode || 'NA:READY';
     var modeColors = {NA:'#8b949e', ACC:'#58a6ff', CP:'#d29922', NP:'#3fb950', NOA:'#bc8cff'};
     var modeTop = driverMode.split(':')[0];
-    var vModeEl = document.getElementById('v-mode');
-    vModeEl.textContent = driverMode;
-    vModeEl.style.color = modeColors[modeTop] || '#bc8cff';
+    setText('v-mode', driverMode);
+    setStyle('v-mode', 'color', modeColors[modeTop] || '#bc8cff');
     var routeLane = (topoData.metrics||{}).route_lane || 0;
-    var vRouteEl = document.getElementById('v-route');
-    vRouteEl.textContent = routeLane === 0 ? '--' : (routeLane > 0 ? '→ right' : '← left');
-    vRouteEl.style.color = routeLane === 0 ? '#484f58' : '#f0883e';
+    setText('v-route', routeLane === 0 ? '--' : (routeLane > 0 ? '→ right' : '← left'));
+    setStyle('v-route', 'color', routeLane === 0 ? '#484f58' : '#f0883e');
   } else {
-    document.getElementById('vehicle-card').style.display = 'none';
+    showEl('vehicle-card', false);
   }
 
   // System resources
