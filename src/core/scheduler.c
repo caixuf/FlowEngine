@@ -154,6 +154,8 @@ struct Scheduler {
     bool             running;
     pthread_t*       workers;
     uint32_t         worker_count;
+    pthread_t        monitor_thread;   /**< 监控线程 ID，用于安全 join */
+    bool             monitor_active;   /**< 监控线程是否活跃 */
 
     /* Choreo: topic → task_id mapping for trigger routing */
     MessageBus*      choreo_bus;         /**< 用于注册触发回调的总线 */
@@ -231,9 +233,8 @@ int scheduler_start(Scheduler* sched) {
     SchedMonitorArgs* ma = (SchedMonitorArgs*)malloc(sizeof(SchedMonitorArgs));
     ma->sched = sched;
     ma->period_us = 5000000ULL;  /* 5s 周期 */
-    pthread_t mon_tid;
-    pthread_create(&mon_tid, NULL, scheduler_monitor_fn, ma);
-    pthread_detach(mon_tid);
+    sched->monitor_active = true;
+    pthread_create(&sched->monitor_thread, NULL, scheduler_monitor_fn, ma);
 
     printf("[scheduler] Started with %u tasks, %u worker threads (mode=%s)\n",
            sched->entry_count, sched->config.worker_thread_count,
@@ -262,6 +263,12 @@ void scheduler_stop(Scheduler* sched) {
         }
     }
     pthread_mutex_unlock(&sched->mutex);
+
+    /* Join monitor thread before joining workers */
+    if (sched->monitor_active) {
+        pthread_join(sched->monitor_thread, NULL);
+        sched->monitor_active = false;
+    }
 
     /* Join workers */
     if (sched->workers) {
