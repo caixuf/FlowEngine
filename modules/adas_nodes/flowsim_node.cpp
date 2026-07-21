@@ -394,6 +394,11 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     ego.mass = 1500.0;
     ego.drag_coeff = 0.3;
     flowsim::apply_vehicle_defaults(ego);
+    /* ego.route_dir 必须设为 1（顺行），否则 NPC 的 same_lane() / find_lead()
+     * 因 route_dir==0 永远不匹配 ego → NPC 看不到 ego 作为前车 → 不减速 →
+     * 追尾 ego（CI evaluator collision 根因）。collision.cpp 的世界系分离
+     * 兜底注释也确认"ego.route_dir 全代码库未被初始化（始终 0）"是历史 bug。 */
+    ego.route_dir = 1;
 
     /* Phase 2: ego 持久 road_pos 初始化。
      * 用 world_to_frenet 把场景 ego.x/y 转成 Frenet 后 init esmini position handle。
@@ -1041,6 +1046,15 @@ protected:
                             ego.lane_id = fp.lane_id;
                             ego.s = fp.s;
                             ego.offset = fp.offset;
+                            /* 同步 ego.route_s：NPC 的 find_lead() 用 (o.route_s - npc.route_s)
+                             * * route_dir 判断前车，ego.route_s 未更新时恒为 0 → NPC 认为 ego
+                             * 在 route 起点（远后方）→ 不把 ego 当前车 → 不减速 → 追尾。
+                             * 配合 ego.route_dir=1（ego 初始化时设置），NPC 现在能正确识别
+                             * ego 为同方向前车并按 IDM 减速跟车。 */
+                            if (g.route.ok()) {
+                                int ei = g.route.index_of(fp.road_id);
+                                if (ei >= 0) ego.route_s = g.route.to_route_s(ei, fp.s);
+                            }
                         }
                     }
                 }

@@ -727,10 +727,14 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     collision_pub = int(topics.get("sim/collision", {}).get("pub", 0) or 0)
     log_text = launcher_log.read_text(encoding="utf-8", errors="ignore") if launcher_log.exists() else ""
-    collision_log_count = len(re.findall(r"COLLISION ego", log_text))
+    collision_log_lines = re.findall(r"COLLISION ego\S*\s+(\S+)", log_text)
+    collision_log_count = len(collision_log_lines)
     no_collision_required = bool(criteria.get("no_collision", True))
     if no_collision_required and (collision_pub > 0 or collision_log_count > 0):
-        failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}")
+        # 提取碰撞对象 ID（如 "entity7"），便于定位是哪个 NPC 与 ego 碰撞
+        entity_ids = ", ".join(collision_log_lines[:5]) if collision_log_lines else "n/a"
+        failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}"
+                        f", entities=[{entity_ids}]")
 
     max_lane_index = max(range(len(series)), key=lambda i: lane_errors[i])
     max_lane_error = lane_errors[max_lane_index]
