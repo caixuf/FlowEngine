@@ -51,18 +51,40 @@ export function init3DScene(canvas) {
     }
   }
 
-  _scene = new THREE.Scene();
-  scene3d = _scene;  // 暴露给 app.js
-  _renderer = createRenderer(canvas);
+  // 检查 Three.js 是否可用
+  if (typeof THREE === 'undefined') {
+    _showInitError('Three.js not loaded. Check network /tools/three.min.js');
+    return null;
+  }
 
-  _cameraRig = createCameraRig(canvas);
+  try {
+    _scene = new THREE.Scene();
+    scene3d = _scene;  // 暴露给 app.js
+    _renderer = createRenderer(canvas);
+  } catch (err) {
+    console.error('[vis] WebGL renderer creation failed:', err);
+    _showInitError('WebGL not available: ' + err.message);
+    return null;
+  }
 
-  _lights = createLighting(_scene);
-  _skyEnv = createSkyEnv(_scene);
-  _director = createSceneDirector(_scene);
-  _director.init();
+  try {
+    _cameraRig = createCameraRig(canvas);
+    _lights = createLighting(_scene);
+    _skyEnv = createSkyEnv(_scene);
+    _director = createSceneDirector(_scene);
+    _director.init();
+  } catch (err) {
+    console.error('[vis] Scene init failed:', err);
+    _showInitError('Scene init failed: ' + err.message);
+    return null;
+  }
 
-  _composer = createComposer(_renderer, _scene, _cameraRig.camera);
+  try {
+    _composer = createComposer(_renderer, _scene, _cameraRig.camera);
+  } catch (err) {
+    console.warn('[vis] Composer creation failed, fallback to direct render:', err.message);
+    _composer = null;
+  }
 
   _ready = true;
   _startRenderLoop();
@@ -76,7 +98,36 @@ export function init3DScene(canvas) {
   _initResizeObserver(canvas);
   resize3D();
 
+  // 初始化后立即触发一次相机更新，确保第一帧就能看到场景
+  try {
+    const store = _director.getStore();
+    const roadGroup = store.isViaduct
+      ? _director.getViaductView().getGroup()
+      : _director.getRoadView().getRoadGroup();
+    _cameraRig.update(store.ego, roadGroup, performance.now());
+  } catch (e) {
+    console.warn('[vis] Initial camera update failed:', e.message);
+  }
+
+  console.log('[vis] 3D scene initialized successfully');
+  console.log('[vis] isViaduct:', _director.getStore().isViaduct);
+  console.log('[vis] ego:', _director.getStore().ego);
+
   return _scene;
+}
+
+/** 显示初始化错误提示 */
+function _showInitError(msg) {
+  const el = document.getElementById('scene3d-msg');
+  if (el) {
+    el.setAttribute('data-init-error', '1');
+    el.style.display = '';
+    el.style.color = '#f85149';
+    el.innerHTML = '<div style="font-size:32px;margin-bottom:10px">⚠</div>' +
+      '<div style="color:#f85149;font-size:14px;font-weight:600;margin-bottom:6px">3D 初始化失败</div>' +
+      '<div style="color:#8b949e;font-size:11px;font-family:monospace;line-height:1.5;max-width:340px;word-break:break-all">' +
+      msg + '</div>';
+  }
 }
 
 /** 监听 canvas 容器尺寸变化，自动 resize */
@@ -98,7 +149,9 @@ function _startRenderLoop() {
     try {
       const now = performance.now();
       const store = _director.getStore();
-      const roadGroup = _director.getRoadView().getRoadGroup();
+      const roadGroup = store.isViaduct
+        ? _director.getViaductView().getGroup()
+        : _director.getRoadView().getRoadGroup();
 
       // ── 死推算：每帧 advance 平滑位置，弥补 SSE 5Hz 离散数据 ──
       tickDeadReckon();
@@ -311,7 +364,11 @@ export function setCameraMode(mode) {
 /** 重置相机 */
 export function resetCamera() {
   if (_cameraRig && _director) {
-    _cameraRig.reset(_director.getRoadView().getRoadGroup());
+    const store = _director.getStore();
+    const roadGroup = store.isViaduct
+      ? _director.getViaductView().getGroup()
+      : _director.getRoadView().getRoadGroup();
+    _cameraRig.reset(roadGroup);
   }
 }
 

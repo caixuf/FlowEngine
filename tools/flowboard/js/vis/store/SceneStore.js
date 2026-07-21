@@ -9,6 +9,7 @@ export function createSceneStore() {
     // ── 道路网络 ──
     roadNetwork: null,        // { edges: [...], hash: string }
     roadHash: '',             // 用于 diff 检测
+    isViaduct: false,         // 是否高架模式
 
     // ── ego ──
     ego: null,                // { x, y, heading, speed, steer, brake, throttle, lights, vx, vy, length, width }
@@ -39,8 +40,13 @@ export function roadNetworkHash(rn) {
 
 /** 获取道路组的中心点坐标 {x, z} */
 export function getCenter(roadGroup) {
-  if (!roadGroup) return { x: 0, z: 0 };
+  if (!roadGroup || !roadGroup.children || roadGroup.children.length === 0) {
+    return { x: 0, z: 0 };
+  }
   const box = new THREE.Box3().setFromObject(roadGroup);
+  if (!isFinite(box.min.x) || !isFinite(box.max.x)) {
+    return { x: 0, z: 0 };
+  }
   return {
     x: (box.min.x + box.max.x) / 2,
     z: (box.min.z + box.max.z) / 2

@@ -27,6 +27,18 @@ export function createSceneDirector(scene) {
   const VIADUCT_VIS_LENGTH = 500;
 
   function init() {
+    groundView.build(20000);
+    const defaultRN = {
+      edges: [{
+        id: 0,
+        type: 'viaduct_highway',
+        lanes: 4,
+        lane_width: 3.5,
+        length: 500,
+        nodes: [[0, 0, 0], [500, 0, 0]]
+      }]
+    };
+    update({ metrics: { scene: { road_network: defaultRN, ego: { x: 50, y: 0, heading: 0, speed: 0, z: 7 }, entities: [] } } });
   }
 
   function update(topoData) {

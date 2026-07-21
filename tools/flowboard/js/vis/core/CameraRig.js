@@ -51,10 +51,10 @@ export function createCameraRig(canvas) {
 
     const c = getCenter(roadGroup);
     let roadBBox = null;
-    if (roadGroup) {
+    if (roadGroup && roadGroup.children && roadGroup.children.length > 0) {
       roadBBox = new THREE.Box3().setFromObject(roadGroup);
     }
-    if (roadBBox) {
+    if (roadBBox && isFinite(roadBBox.min.x) && isFinite(roadBBox.max.x)) {
       const padding = 500;
       const minX = roadBBox.min.x - padding;
       const maxX = roadBBox.max.x + padding;
@@ -125,6 +125,11 @@ export function createCameraRig(canvas) {
     orbitYaw = 0;
     orbitPitch = Math.PI / 4;
     orbitDist = 80;
+
+    if (mode === 'chase' || mode === 'top' || mode === 'driver' || mode === 'front' || mode === 'map') {
+      camera.position.set(c.x - 10, 10, c.z);
+      camera.lookAt(c.x, 0, c.z);
+    }
   }
 
   return { camera, update, setMode, reset };
