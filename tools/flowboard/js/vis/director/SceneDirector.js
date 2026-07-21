@@ -24,7 +24,7 @@ export function createSceneDirector(scene) {
   const viaductView = createViaductView(scene);
   let lastRoadHash = '';
 
-  const VIADUCT_VIS_LENGTH = 200;
+  const VIADUCT_VIS_LENGTH = 500;
 
   function init() {
   }
@@ -49,8 +49,10 @@ export function createSceneDirector(scene) {
         if (isViaduct) {
           const edge0 = rn.edges[0] || {};
           const laneCount = edge0.lanes || 4;
-          groundView.build(0);
-          viaductView.build({ laneCount, length: VIADUCT_VIS_LENGTH, withEnvironment: true });
+          const laneWidth = edge0.lane_width || 3.5;
+          const actualLength = edge0.length || edge0.length_m || VIADUCT_VIS_LENGTH;
+          groundView.build(20000);
+          viaductView.build({ laneCount, laneWidth, length: actualLength, withEnvironment: true });
           roadView.build({ edges: [] });
           store.isViaduct = true;
         } else {

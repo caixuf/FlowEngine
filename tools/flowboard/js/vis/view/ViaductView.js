@@ -11,8 +11,6 @@
 
 import { mergeGeometries } from '../math/GeometryMerge.js';
 
-const LANE_W = 2;
-
 let _mats = null;
 let _geos = null;
 
@@ -408,10 +406,10 @@ function _buildNationalHighway(parent, cx, cz, length, width, laneCount) {
   parent.add(group);
 }
 
-function _createTrees(parent, laneCount) {
+function _createTrees(parent, laneCount, laneWidth) {
   const M = _ensureMaterials();
   const geo = _ensureGeos();
-  const w = laneCount * LANE_W;
+  const w = laneCount * laneWidth;
   const elevatedEdge = w / 2 + 8;
   const nationalOuter = 34 + (w / 2 + 12);
   const nationalInner = 34 - (w / 2 + 11);
@@ -548,9 +546,9 @@ function _createTrees(parent, laneCount) {
   }
 }
 
-function _createBushes(parent, laneCount) {
+function _createBushes(parent, laneCount, laneWidth) {
   const M = _ensureMaterials();
-  const w = laneCount * LANE_W;
+  const w = laneCount * laneWidth;
   const elevatedSafe = w / 2 + 10;
   const nationalSafe = 34 + (w / 2 + 14);
 
@@ -598,16 +596,17 @@ export function createViaductView(scene) {
     }
 
     const laneCount = opts.laneCount || 4;
+    const laneWidth = opts.laneWidth || 3.5;
     const length = opts.length || 200;
-    const width = laneCount * LANE_W;
+    const width = laneCount * laneWidth;
     const withEnv = opts.withEnvironment !== false;
 
     _buildElevatedHighway(group, 0, 0, length, width, 7, laneCount);
     _buildNationalHighway(group, 0, 34, length, width, laneCount);
 
     if (withEnv) {
-      _createTrees(group, laneCount);
-      _createBushes(group, laneCount);
+      _createTrees(group, laneCount, laneWidth);
+      _createBushes(group, laneCount, laneWidth);
     }
 
     built = true;
