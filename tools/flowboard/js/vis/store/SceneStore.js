@@ -36,3 +36,13 @@ export function roadNetworkHash(rn) {
   if (!rn || !rn.edges) return '';
   return rn.edges.map(e => `${e.id||0}_${e.lanes||0}_${e.length||0}`).join('|');
 }
+
+/** 获取道路组的中心点坐标 {x, z} */
+export function getCenter(roadGroup) {
+  if (!roadGroup) return { x: 0, z: 0 };
+  const box = new THREE.Box3().setFromObject(roadGroup);
+  return {
+    x: (box.min.x + box.max.x) / 2,
+    z: (box.min.z + box.max.z) / 2
+  };
+}

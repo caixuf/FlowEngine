@@ -131,6 +131,9 @@ function _startRenderLoop() {
 
 // 调试接口（挂到 window 方便控制台诊断）
 if (typeof window !== 'undefined') {
+  let _wireframeMode = false;
+  let _fpsTimes = [];
+
   window.__vis = {
     get scene() { return _scene; },
     get renderer() { return _renderer; },
@@ -139,8 +142,45 @@ if (typeof window !== 'undefined') {
     get ready() { return _ready; },
     get frameCount() { return _frameCount; },
     get lastError() { return _lastRenderErr; },
+    get wireframe() { return _wireframeMode; },
     /** 获取渲染性能统计：calls(Draw Call), triangles, geometries, textures */
-    get perf() { return getRendererInfo(_renderer); },
+    get perf() {
+      const info = getRendererInfo(_renderer);
+      if (!info) return null;
+      const now = performance.now();
+      _fpsTimes.push(now);
+      _fpsTimes = _fpsTimes.filter(t => now - t < 1000);
+      return { ...info, fps: _fpsTimes.length };
+    },
+    /** 获取当前场景状态 */
+    get store() {
+      return _director ? _director.getStore() : null;
+    },
+    /** 获取道路组 */
+    get roadGroup() {
+      return _director ? _director.getRoadView().getRoadGroup() : null;
+    },
+    /** 获取相机位置和朝向 */
+    get cameraInfo() {
+      const cam = _cameraRig ? _cameraRig.camera : null;
+      if (!cam) return null;
+      return {
+        pos: { x: cam.position.x, y: cam.position.y, z: cam.position.z },
+        fov: cam.fov,
+        near: cam.near,
+        far: cam.far
+      };
+    },
+    /** 获取实体列表 */
+    get entities() {
+      const store = _director ? _director.getStore() : null;
+      return store ? store.entities : [];
+    },
+    /** 获取 ego 状态 */
+    get ego() {
+      const store = _director ? _director.getStore() : null;
+      return store ? store.ego : null;
+    },
     /** 重置渲染统计 */
     resetPerf() { resetRendererInfo(_renderer); },
     /** 手动渲染一帧（调试用） */
@@ -152,7 +192,76 @@ if (typeof window !== 'undefined') {
       } catch (e) {
         return 'render failed: ' + e.message;
       }
-    }
+    },
+    /** 切换 wireframe 模式 */
+    toggleWireframe() {
+      _wireframeMode = !_wireframeMode;
+      _scene.traverse(o => {
+        if (o.material && !o.material.isSpriteMaterial) {
+          o.material.wireframe = _wireframeMode;
+        }
+      });
+      return 'wireframe ' + (_wireframeMode ? 'ON' : 'OFF');
+    },
+    /** 打印场景层级 */
+    printHierarchy(root, depth = 0) {
+      const obj = root || _scene;
+      if (!obj) return;
+      const prefix = '  '.repeat(depth);
+      const type = obj.type || 'Object3D';
+      const name = obj.name || '(unnamed)';
+      console.log(prefix + type + (name ? ' "' + name + '"' : ''));
+      if (obj.children) {
+        obj.children.forEach(c => this.printHierarchy(c, depth + 1));
+      }
+    },
+    /** 显示/隐藏道路 */
+    toggleRoad(show) {
+      const rg = this.roadGroup;
+      if (!rg) return 'no road group';
+      rg.visible = show !== false;
+      return 'road ' + (rg.visible ? 'SHOWN' : 'HIDDEN');
+    },
+    /** 显示/隐藏所有 NPC */
+    toggleNPCs(show) {
+      const store = this.store;
+      if (!store) return 'no store';
+      const vv = _director ? _director.getVehicleView() : null;
+      if (vv) {
+        const npcPool = vv.getNPCPool ? vv.getNPCPool() : null;
+        if (npcPool) {
+          npcPool.forEach(npc => { npc.visible = show !== false; });
+          return 'NPCs ' + (show !== false ? 'SHOWN' : 'HIDDEN');
+        }
+      }
+      return 'no NPC pool';
+    },
+    /** 重置相机位置 */
+    resetCamera() {
+      if (_cameraRig) _cameraRig.reset(this.roadGroup);
+      return 'camera reset';
+    },
+    /** 设置相机模式 */
+    setCameraMode(mode) {
+      if (_cameraRig) _cameraRig.setMode(mode);
+      return 'camera mode: ' + mode;
+    },
+    /** 显示当前渲染器配置 */
+    get rendererConfig() {
+      if (!_renderer) return null;
+      return {
+        pixelRatio: _renderer.getPixelRatio(),
+        shadowMapEnabled: _renderer.shadowMap.enabled,
+        shadowMapType: _renderer.shadowMap.type === THREE.PCFShadowMap ? 'PCF' : 'basic',
+        antialias: true,
+        toneMapping: 'ACESFilmic',
+        outputEncoding: 'sRGB'
+      };
+    },
+    /** 强制重渲染 */
+    forceResize() { resize3D(); },
+    /** 清除所有错误 */
+    clearErrors() { _lastRenderErr = null; }
   };
 }
 
