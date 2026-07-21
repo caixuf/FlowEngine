@@ -355,7 +355,13 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     // Phase 2: npc.road_pos.ok() 时优先用 RoadPosition 推进——沿真实 OpenDRIVE
     // 拓扑 RM_PositionMoveForward，过路口按 junction_angle 选支路，杜绝单链 Route
     // 在 fork/merge/toll 多通道处丢支路。否则走旧 route/世界系兜底逻辑。
-    if (npc.road_pos.ok() && roads && roads->loaded()) {
+    //
+    // 对向 NPC (route_dir < 0) 不能用 road_pos.advance：该 API 只能沿道路 +s 方向
+    // 推进，对向车需要 -s 方向。交给 road_pos 会导致位置前进但朝向翻转（车头朝后
+    // 却向前移动），route_s 只增不减永远不触发回收，最终在路网末端被回收后反复
+    // 出现在 ego 前方——与 ego 同向行驶但 OBB 朝向相反，在窄路段易发生碰撞。
+    // 改走旧 route 分支（route_s += route_dir * speed * dt）正确处理对向后退。
+    if (npc.road_pos.ok() && roads && roads->loaded() && npc.route_dir >= 0) {
         // ── RoadPosition 推进分支 ──
         // junction_angle 暂用 M_PI（直行）；BranchSel 状态可后续从 route step
         // type 映射左/右转。advance 失败（路网边界）→ recycle。
