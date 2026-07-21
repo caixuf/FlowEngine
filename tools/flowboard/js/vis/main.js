@@ -16,7 +16,7 @@ import { createSkyEnv } from './core/SkyEnv.js';
 import { createSceneDirector } from './director/SceneDirector.js';
 import { clearCache } from './core/AssetFactory.js';
 import { initModels } from './view/VehicleView.js';
-import { tickDeadReckon, _dr } from '../../deadreckon.js';
+import { tickDeadReckon, _dr } from '../deadreckon.js';
 
 // ── 模块级状态（只此一处，取代旧架构 51 个 let）──
 let _scene = null;
