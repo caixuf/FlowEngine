@@ -22,14 +22,20 @@ import { getBox, getStdMaterial, createEmissiveMaterial } from '../core/AssetFac
 import { worldToThree, headingToRotationY } from '../math/Coord.js';
 import { initModelCache, getModel, _setVehicleLights } from '../../models.js';
 import { _buildContactShadow } from '../../utils.js';
+// Step 5 重构：纯逻辑（LIGHT_* + deriveLightState）抽到 VehicleLights.js，
+// 零 THREE 依赖，便于 tests/vis_vehicle_lights.test.mjs 直接 import。
+import {
+  LIGHT_TURN_LEFT, LIGHT_TURN_RIGHT, LIGHT_HAZARD,
+  LIGHT_HIGH_BEAM, LIGHT_LOW_BEAM, LIGHT_REVERSE,
+  deriveLightState,
+} from './VehicleLights.js';
 
-// 车灯位掩码
-const LIGHT_TURN_LEFT  = 0x01;
-const LIGHT_TURN_RIGHT = 0x02;
-const LIGHT_HAZARD     = 0x04;
-const LIGHT_HIGH_BEAM  = 0x08;
-const LIGHT_LOW_BEAM   = 0x10;
-const LIGHT_REVERSE    = 0x40;
+// 向后兼容：原调用方从 VehicleView import 这些符号，保持不变。
+export {
+  LIGHT_TURN_LEFT, LIGHT_TURN_RIGHT, LIGHT_HAZARD,
+  LIGHT_HIGH_BEAM, LIGHT_LOW_BEAM, LIGHT_REVERSE,
+  deriveLightState,
+};
 
 // 程序化车灯颜色
 const COLOR_HEAD_LOW  = 0xfff4d6;
@@ -103,15 +109,8 @@ export function createVehicleView(scene) {
       group.userData.frontAxle.rotation.y = steerAngle;
     }
 
-    // 车灯状态（转换位掩码 → models.js 的 state 格式）
-    const mask = ent.lights || 0;
-    const brake = ent.brake || 0;
-    const state = {
-      brake: brake > 0.05,
-      turnL: !!(mask & (LIGHT_TURN_LEFT | LIGHT_HAZARD)),
-      turnR: !!(mask & (LIGHT_TURN_RIGHT | LIGHT_HAZARD)),
-      head: !!(mask & (LIGHT_LOW_BEAM | LIGHT_HIGH_BEAM)),
-    };
+    // 车灯状态（Step 5 重构：调 deriveLightState 纯函数，避免重复逻辑）
+    const state = deriveLightState(ent.lights || 0, ent.brake || 0);
     // 闪烁相位（2Hz = 0.5s 周期，_setVehicleLights 用 1.5Hz）
     const blinkPhase = simTime / 1000;
     _setVehicleLights(group, state, blinkPhase);

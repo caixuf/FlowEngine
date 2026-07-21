@@ -19,15 +19,12 @@ import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
 import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
+// Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
+// 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
+import { validateFrame } from './FrameValidator.js';
 
-/* ── 数据校验辅助 ──────────────────────────────────────────────
- * _warnOnce(key, msg)：同一 key 只 warn 一次，避免 20Hz 刷屏。
- * 校验失败时调用方自行决定回退值（默认仍走原 || 0 逻辑）。 */
-function _typeOf(v) {
-  if (v === null) return 'null';
-  if (Array.isArray(v)) return 'array';
-  return typeof v;
-}
+// 向后兼容：原调用方从 SceneDirector import validateFrame。
+export { validateFrame };
 
 export function createSceneDirector(scene) {
   const store = createSceneStore();
@@ -72,77 +69,16 @@ export function createSceneDirector(scene) {
   }
 
   function update(topoData) {
-    /* ── 校验 1：topoData 必须是 object ── */
-    if (!topoData) return;
-    if (typeof topoData !== 'object') {
-      _warnOnce('topoData.type', 'update() 收到非对象 topoData: ' + _typeOf(topoData) + '，跳过本帧');
+    /* Step 5 重构：校验逻辑下沉到 validateFrame 纯函数，
+     * update() 只负责把校验结果 emit 到 _warnOnce + 实际构建。 */
+    const v = validateFrame(topoData);
+    if (!v.ok) {
+      for (const w of v.warnings) _warnOnce(w.key, w.msg);
       return;
     }
+    for (const w of v.warnings) _warnOnce(w.key, w.msg);
 
-    let frame = topoData;
-    if (topoData.metrics && topoData.metrics.scene) frame = topoData.metrics.scene;
-    else if (topoData.scene) frame = topoData.scene;
-
-    /* ── 校验 2：frame 解包后必须是 object ── */
-    if (typeof frame !== 'object' || frame === null) {
-      _warnOnce('frame.type', 'frame 解包后非对象: ' + _typeOf(frame) + '，跳过本帧');
-      return;
-    }
-
-    const rn = frame.road_network || frame.roads;
-    let skipRoad = false;
-    if (rn) {
-      /* ── 校验 3：road_network 必须是 object ── */
-      if (typeof rn !== 'object' || rn === null) {
-        _warnOnce('road_network.type', 'road_network 非 object: ' + _typeOf(rn) + '，跳过道路重建');
-        skipRoad = true;
-      } else if (rn.edges !== undefined && !Array.isArray(rn.edges)) {
-        /* ── 校验 3b：edges 若发则必须是 array ── */
-        _warnOnce('road_network.edges', 'road_network.edges 非数组: ' + _typeOf(rn.edges) + '，跳过道路重建');
-        skipRoad = true;
-      }
-      /* 校验 4：edges 是数组但为空时，仍允许走 viaduct 分支（edge0={} 兜底）。 */
-    }
-
-    let skipEgo = false;
-    if (frame.ego !== undefined) {
-      const e = frame.ego;
-      /* ── 校验 5：ego 必须是 object ── */
-      if (typeof e !== 'object' || e === null) {
-        _warnOnce('ego.type', 'frame.ego 非 object: ' + _typeOf(e) + '，跳过 ego 更新');
-        skipEgo = true;
-      } else {
-        /* ── 校验 6：ego.x 必须是 finite number；heading / lights 若发则必须是 number ── */
-        if (typeof e.x !== 'number' || !isFinite(e.x)) {
-          _warnOnce('ego.x', 'ego.x 非 finite number: ' + _typeOf(e.x) + '，回退 0（ego 会卡在原点，检查 scene_pub ego JSON）');
-        }
-        if (e.heading !== undefined && typeof e.heading !== 'number') {
-          _warnOnce('ego.heading', 'ego.heading 非 number: ' + _typeOf(e.heading));
-        }
-        if (e.lights !== undefined && typeof e.lights !== 'number') {
-          _warnOnce('ego.lights', 'ego.lights 非 number: ' + _typeOf(e.lights) + '，回退 0（车灯不亮）');
-        }
-      }
-    }
-
-    let skipEntities = false;
-    if (frame.entities !== undefined) {
-      /* ── 校验 7：entities 必须是 array ── */
-      if (!Array.isArray(frame.entities)) {
-        _warnOnce('entities.type', 'frame.entities 非数组: ' + _typeOf(frame.entities) + '，跳过实体更新');
-        skipEntities = true;
-      } else {
-        /* ── 校验 8：每个 entity 必须有 type 字段（仅检查非 ego 实体，与 build 过滤一致）── */
-        let nonEgoIdx = 0;
-        for (const e of frame.entities) {
-          if (!e || e.type === 'ego') continue;
-          if (!e.type) {
-            _warnOnce('entities[' + nonEgoIdx + '].type', 'entity 缺 type 字段，会被各 View 静默丢弃');
-          }
-          nonEgoIdx++;
-        }
-      }
-    }
+    const { frame, rn, skipRoad, skipEgo, skipEntities } = v;
 
     if (rn && !skipRoad) {
       const hash = roadNetworkHash(rn);
