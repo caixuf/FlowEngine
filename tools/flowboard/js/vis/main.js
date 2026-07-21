@@ -16,7 +16,6 @@ import { createSkyEnv } from './core/SkyEnv.js';
 import { createSceneDirector } from './director/SceneDirector.js';
 import { clearCache } from './core/AssetFactory.js';
 import { initModels } from './view/VehicleView.js';
-import { tickDeadReckon, _dr } from '../deadreckon.js';
 
 // ── 模块级状态（只此一处，取代旧架构 51 个 let）──
 let _scene = null;
@@ -154,15 +153,9 @@ function _startRenderLoop() {
         : _director.getRoadView().getRoadGroup();
 
       // ── 死推算：每帧 advance 平滑位置，弥补 SSE 5Hz 离散数据 ──
-      tickDeadReckon();
-
-      // 用死推算平滑值覆盖 ego 位置（原始数据保留在 store.ego._simX 等字段）
-      if (store.ego && _dr.init) {
-        store.ego.x = _dr.smoothX;
-        store.ego.y = _dr.smoothZ;
-        store.ego.heading = _dr.smoothHeading;
-        store.ego.speed = _dr.smoothSpeed;
-      }
+      // Step 2 重构：原直接 import deadreckon + 覆盖 store.ego，违反
+      // Director → Store → View 单向流。现下沉到 director.tickAnimation()。
+      _director.tickAnimation(now);
 
       // 更新车辆（含车灯闪烁需要 simTime）
       _director.getVehicleView().update(store, now);

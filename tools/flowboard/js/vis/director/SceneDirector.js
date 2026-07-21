@@ -16,6 +16,7 @@ import { createConnectorView } from '../view/ConnectorView.js';
 import { createTrafficLightView } from '../view/TrafficLightView.js';
 import { createETCGateView } from '../view/ETCGateView.js';
 import { createViaductView } from '../view/ViaductView.js';
+import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
 
 /* ── 数据校验辅助 ──────────────────────────────────────────────
  * _warnOnce(key, msg)：同一 key 只 warn 一次，避免 20Hz 刷屏。
@@ -238,6 +239,33 @@ export function createSceneDirector(scene) {
     etcGateView.update(store);
   }
 
+  /* ── tickAnimation(now) — 每帧推进死推算 + 把平滑结果写回 store.ego ──
+   *
+   * Step 2 重构：原 main.js 行 104-112 直接 import deadreckon + 覆盖
+   * store.ego.x/y/heading/speed，违反"数据单向流：Director → Store → View"。
+   * 现在此逻辑下沉到 SceneDirector，main.js 只调 director.tickAnimation(now)。
+   *
+   * 数据流：
+   *   app.js sync2DTarget (SSE tick) → updateDeadReckon(x,z,speed,heading) → _dr
+   *   main.js 渲染帧 → director.tickAnimation(now)
+   *     → tickDeadReckon() 推进 _dr.smooth*
+   *     → 把 smooth* 写入 store.ego（覆盖 x/y/heading/speed，保留 _simX 等原始字段）
+   *
+   * 2D（scene2d.js）仍直接调 tickDeadReckon + 读 _dr.smooth*，与 3D 共享同一
+   * _dr 全局单例，保证 3D/2D 视图 ego 位置完全同步。
+   *
+   * @param {number} now 当前 performance.now() 毫秒（保留参数兼容，实际 tickDeadReckon 内部自取）
+   */
+  function tickAnimation(now) {
+    tickDeadReckon();
+    if (store.ego && _dr.init) {
+      store.ego.x = _dr.smoothX;
+      store.ego.y = _dr.smoothZ;
+      store.ego.heading = _dr.smoothHeading;
+      store.ego.speed = _dr.smoothSpeed;
+    }
+  }
+
   function getStore() { return store; }
   function getRoadView() { return roadView; }
   function getGroundView() { return groundView; }
@@ -247,7 +275,7 @@ export function createSceneDirector(scene) {
   function getETCGateView() { return etcGateView; }
   function getViaductView() { return viaductView; }
 
-  return { init, update, getStore, getRoadView, getGroundView, getVehicleView,
+  return { init, update, tickAnimation, getStore, getRoadView, getGroundView, getVehicleView,
            getConnectorView, getTrafficLightView, getETCGateView, getViaductView,
            resetWarnings };
 }
