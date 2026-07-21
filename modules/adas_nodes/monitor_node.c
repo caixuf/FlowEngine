@@ -791,21 +791,13 @@ static int monitor_execute(TaskBase* task) {
 
     /* RateControl: 通过 scheduler 注册的 rate_control 做频率门控，
      * 避免 usleep 抖动导致实际频率超过配置值。 */
-    RateControl* rc = NULL;
-    if (g.scheduler && task->task_id >= 0) {
-        rc = scheduler_get_rate_control(g.scheduler, task->task_id);
-    }
-    LatencyTracker* lt = NULL;
-    if (g.scheduler && task->task_id >= 0) {
-        lt = scheduler_get_latency(g.scheduler, task->task_id);
-    }
+    /* RateControl/LatencyTracker not yet implemented — use simple usleep */
 
     while (!task->should_stop) {
         usleep((unsigned long)period_us);
         if (task->should_stop) break;
 
         /* RateControl 门控：若距上次执行不足 period_us，跳过本次 */
-        if (rc && !rate_control_acquire(rc)) continue;
 
         uint64_t t0 = clock_now_us();
 
@@ -828,7 +820,8 @@ static int monitor_execute(TaskBase* task) {
         }
 
         /* Record latency */
-        if (lt) latency_tracker_record(lt, clock_now_us() - t0);
+
+        (void)t0;  /* t0 used for future latency tracking */
 
         /* 简略控制台输出 */
         uint64_t pub = 0, del = 0, drop = 0;

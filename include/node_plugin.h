@@ -36,6 +36,9 @@
  */
 
 #include <stdint.h>
+#include "task_interface.h"  /* TaskConfig/TaskBase needed by all managed nodes */
+#include "transport.h"       /* transport_publish/subscribe/advertise — every node needs these */
+#include "discovery.h"       /* discovery_advertise, CAP_SUBSCRIBER/PUBLISHER */
 
 #ifdef __cplusplus
 extern "C" {

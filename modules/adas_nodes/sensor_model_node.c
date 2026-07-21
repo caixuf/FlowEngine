@@ -8,6 +8,7 @@
  */
 
 #include "node_plugin.h"
+#include "task_interface.h"
 #include "adas_msgs_gen.h"
 #include "nmea_parser.h"
 #include "transport.h"
