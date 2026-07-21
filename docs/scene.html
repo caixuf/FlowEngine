@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 仿真道路场景</title>
+    <style id="theme-vars">
+:root {
+  --road-primary: #3b82f6;
+  --road-primary-foreground: #ffffff;
+  --road-background: #0f172a;
+  --road-foreground: #f1f5f9;
+  --road-card: #1e293b;
+  --road-card-foreground: #f1f5f9;
+  --road-popover: #1e293b;
+  --road-popover-foreground: #f1f5f9;
+  --road-muted: #334155;
+  --road-muted-foreground: #94a3b8;
+  --road-border: #334155;
+  --road-input: #334155;
+  --road-ring: #3b82f6;
+  --road-radius-sm: 6px;
+  --road-radius-md: 10px;
+  --road-radius-lg: 14px;
+}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--road-background);
+    --color-foreground: var(--road-foreground);
+    --color-card: var(--road-card);
+    --color-card-foreground: var(--road-card-foreground);
+    --color-popover: var(--road-popover);
+    --color-popover-foreground: var(--road-popover-foreground);
+    --color-primary: var(--road-primary);
+    --color-primary-foreground: var(--road-primary-foreground);
+    --color-muted: var(--road-muted);
+    --color-muted-foreground: var(--road-muted-foreground);
+    --color-border: var(--road-border);
+    --color-input: var(--road-input);
+    --color-ring: var(--road-ring);
+    --radius-sm: var(--road-radius-sm);
+    --radius-md: var(--road-radius-md);
+    --radius-lg: var(--road-radius-lg);
+  }
+  @layer base {
+    body { background: var(--road-background); color: var(--road-foreground); }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--road-background); }
+      .text-background { color: var(--road-background); }
+      .border-background { border-color: var(--road-background); }
+      .bg-foreground { background-color: var(--road-foreground); }
+      .text-foreground { color: var(--road-foreground); }
+      .bg-card { background-color: var(--road-card); }
+      .text-card-foreground { color: var(--road-card-foreground); }
+      .bg-popover { background-color: var(--road-popover); }
+      .text-popover-foreground { color: var(--road-popover-foreground); }
+      .bg-primary { background-color: var(--road-primary); }
+      .text-primary { color: var(--road-primary); }
+      .bg-muted { background-color: var(--road-muted); }
+      .text-muted-foreground { color: var(--road-muted-foreground); }
+      .bg-border { background-color: var(--road-border); }
+      .border-border { border-color: var(--road-border); }
+      .bg-input { background-color: var(--road-input); }
+      .bg-ring { background-color: var(--road-ring); }
+    </style>
+</head>
+<body class="font-sans antialiased">
+    <div id="canvas-container"></div>
+
+    <div class="fixed top-4 left-1/2 -translate-x-1/2 z-10 px-5 py-2.5 bg-card/80 backdrop-blur-md border border-border rounded-full shadow-lg">
+      <div class="flex items-center gap-2.5">
+        <i data-lucide="route" class="w-4 h-4 text-primary"></i>
+        <span class="text-sm font-medium text-card-foreground">3D 高架与国道场景</span>
+        <span class="text-xs text-muted-foreground hidden sm:inline">· 鼠标拖拽旋转 · 滚轮缩放</span>
+      </div>
+    </div>
+
+    <div class="fixed top-4 right-4 z-10 w-64 bg-card/90 backdrop-blur-md border border-border rounded-xl shadow-xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-border flex items-center gap-2">
+        <i data-lucide="settings-2" class="w-4 h-4 text-primary"></i>
+        <span class="text-sm font-semibold text-card-foreground">场景控制</span>
+      </div>
+      <div class="p-4 space-y-4">
+        <div>
+          <label class="text-xs text-muted-foreground mb-1.5 block">时间</label>
+          <input type="range" id="time-of-day" min="0" max="100" value="60" class="w-full">
+          <div class="flex justify-between text-[10px] text-muted-foreground mt-1">
+            <span>日出</span><span>正午</span><span>日落</span><span>夜晚</span>
+          </div>
+        </div>
+        <div>
+          <label class="text-xs text-muted-foreground mb-1.5 block">雾气浓度</label>
+          <input type="range" id="fog-density" min="0" max="100" value="30" class="w-full">
+        </div>
+        <div>
+          <label class="text-xs text-muted-foreground mb-1.5 block">树木密度</label>
+          <input type="range" id="tree-density" min="0" max="100" value="60" class="w-full">
+        </div>
+        <div>
+          <label class="text-xs text-muted-foreground mb-1.5 block">车道数量</label>
+          <div class="flex gap-2">
+            <button data-lanes="2" class="lane-btn flex-1 py-1.5 text-xs rounded-md bg-muted text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors">双向2车道</button>
+            <button data-lanes="4" class="lane-btn flex-1 py-1.5 text-xs rounded-md bg-primary text-primary-foreground">双向4车道</button>
+          </div>
+        </div>
+        <div class="flex items-center justify-between pt-2 border-t border-border">
+          <span class="text-xs text-muted-foreground">自动旋转</span>
+          <button id="auto-rotate-toggle" class="w-10 h-5 rounded-full bg-muted relative transition-colors">
+            <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-muted-foreground transition-transform"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="fixed bottom-4 left-4 z-10 flex gap-2">
+      <div class="px-3 py-2 bg-card/80 backdrop-blur-md border border-border rounded-lg">
+        <div class="text-[10px] text-muted-foreground uppercase tracking-wider">FPS</div>
+        <div id="fps-counter" class="text-sm font-semibold text-card-foreground">60</div>
+      </div>
+    </div>
+
+    <div class="fixed bottom-4 right-4 z-10">
+      <button id="reset-view" class="flex items-center gap-2 px-4 py-2 bg-card/90 backdrop-blur-md border border-border rounded-lg hover:bg-muted/80 transition-colors text-sm text-card-foreground">
+        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+        重置视角
+      </button>
+    </div>
+
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; }
+      #canvas-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+      #canvas-container canvas { display: block; }
+      input[type="range"] {
+        -webkit-appearance: none; appearance: none;
+        height: 4px; background: var(--road-muted); border-radius: 2px; outline: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 14px; height: 14px; background: var(--road-primary); border-radius: 50%; cursor: pointer;
+      }
+      input[type="range"]::-moz-range-thumb {
+        width: 14px; height: 14px; background: var(--road-primary); border-radius: 50%; cursor: pointer; border: none;
+      }
+    </style>
+
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+    </script>
+
+    <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let scene, camera, renderer, controls;
+    let skyDome;
+    let sunLight, ambientLight, hemiLight;
+    let roadGroup;
+    let envGroup;
+    let laneCount = 4;
+    let treeDensity = 0.7;
+    let autoRotate = false;
+
+    const LANE_W = 2; // 每车道宽度
+    const defaultCameraPos = new THREE.Vector3(55, 35, 85);
+    const defaultTarget = new THREE.Vector3(0, 4, 15);
+
+    let frameCount = 0;
+    let lastTime = performance.now();
+
+    const MAT = {};
+    let CONCRETE_DARK, METAL_RAIL;
+
+    function initMaterials() {
+      MAT.road = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.85, metalness: 0.02, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+      MAT.roadDark = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9, metalness: 0.01, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+      MAT.lineWhite = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      MAT.lineYellow = new THREE.MeshStandardMaterial({ color: 0xffd700, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+      MAT.concrete = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.75, metalness: 0.1 });
+      CONCRETE_DARK = new THREE.MeshStandardMaterial({ color: 0x7a7a7a, roughness: 0.8, metalness: 0.05 });
+      METAL_RAIL = new THREE.MeshStandardMaterial({ color: 0xa8a8a8, roughness: 0.35, metalness: 0.55 });
+      MAT.grass = new THREE.MeshStandardMaterial({ color: 0x4a7a35, roughness: 0.95 });
+      MAT.pole = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.55, metalness: 0.3 });
+      MAT.lampGlow = new THREE.MeshStandardMaterial({ color: 0xfff0c0, emissive: 0xffcc66, emissiveIntensity: 0.8 });
+      MAT.treeTrunk = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
+      MAT.treeLeaf = new THREE.MeshStandardMaterial({ color: 0x3a8032, roughness: 0.85 });
+      MAT.treeLeafDark = new THREE.MeshStandardMaterial({ color: 0x2d5e27, roughness: 0.9 });
+      MAT.treeLeafLight = new THREE.MeshStandardMaterial({ color: 0x4a9a40, roughness: 0.8 });
+      MAT.dirt = new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+      MAT.glassBarrier = new THREE.MeshStandardMaterial({
+        color: 0x88bbee, transparent: true, opacity: 0.3, roughness: 0.1, metalness: 0.5
+      });
+      MAT.curb = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.8 });
+    }
+
+    init();
+    animate();
+
+    function init() {
+      initMaterials();
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87ceeb);
+      scene.fog = new THREE.Fog(0x87ceeb, 80, 320);
+
+      camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 600);
+      camera.position.copy(defaultCameraPos);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.maxPolarAngle = Math.PI / 2.05;
+      controls.minDistance = 5;
+      controls.maxDistance = 300;
+      controls.target.copy(defaultTarget);
+      controls.autoRotateSpeed = 0.4;
+
+      setupLighting();
+      createSky();
+      createGround();
+      buildRoads();
+      buildEnvironment();
+
+      window.addEventListener('resize', onWindowResize);
+      setupUI();
+
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+
+    function setupLighting() {
+      hemiLight = new THREE.HemisphereLight(0x9ed4ff, 0x4a7c3a, 0.5);
+      scene.add(hemiLight);
+      ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+      scene.add(ambientLight);
+      sunLight = new THREE.DirectionalLight(0xfff5e0, 1.1);
+      sunLight.position.set(50, 70, 30);
+      sunLight.castShadow = true;
+      sunLight.shadow.mapSize.set(2048, 2048);
+      sunLight.shadow.camera.near = 0.5;
+      sunLight.shadow.camera.far = 300;
+      sunLight.shadow.camera.left = -120;
+      sunLight.shadow.camera.right = 120;
+      sunLight.shadow.camera.top = 120;
+      sunLight.shadow.camera.bottom = -120;
+      sunLight.shadow.bias = -0.0005;
+      sunLight.shadow.normalBias = 0.02;
+      scene.add(sunLight);
+    }
+
+    function createSky() {
+      const skyGeo = new THREE.SphereGeometry(500, 32, 16);
+      const skyMat = new THREE.ShaderMaterial({
+        uniforms: {
+          topColor: { value: new THREE.Color(0x1e90ff) },
+          bottomColor: { value: new THREE.Color(0xbfe4ff) },
+          offset: { value: 33 },
+          exponent: { value: 0.6 }
+        },
+        vertexShader: `varying vec3 vW; void main(){vec4 w=modelMatrix*vec4(position,1.);vW=w.xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+        fragmentShader: `uniform vec3 t;uniform vec3 b;uniform float o;uniform float e;varying vec3 vW;void main(){float h=normalize(vW+o).y;gl_FragColor=vec4(mix(b,t,max(pow(max(h,0.),e),0.)),1.);}`,
+        side: THREE.BackSide
+      });
+      skyDome = new THREE.Mesh(skyGeo, skyMat);
+      scene.add(skyDome);
+    }
+
+    function createGround() {
+      const geo = new THREE.PlaneGeometry(900, 900, 90, 90);
+      const pos = geo.attributes.position;
+      // 道路走廊（世界坐标z位置和半宽），这些区域地面压平
+      const corridors = [
+        { z: 0,  halfW: 22 },   // 高架下方及周边
+        { z: 34, halfW: 20 },   // 国道及周边
+      ];
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const y = pos.getY(i); // 旋转前y对应旋转后的-z
+        // 旋转后世界坐标的z = -y
+        const worldZ = -y;
+        let inCorridor = false;
+        for (const c of corridors) {
+          if (Math.abs(worldZ - c.z) < c.halfW && Math.abs(x) < 110) {
+            inCorridor = true;
+            break;
+          }
+        }
+        if (inCorridor) {
+          pos.setZ(i, 0);
+        } else {
+          const d = Math.sqrt(x * x + y * y);
+          const falloff = Math.min(1, Math.max(0, (d - 30) / 40));
+          const n = (Math.sin(x * 0.02) * Math.cos(y * 0.022) * 0.6
+                  + Math.sin(x * 0.05 + 1.3) * 0.15) * falloff;
+          pos.setZ(i, n);
+        }
+      }
+      geo.computeVertexNormals();
+      const ground = new THREE.Mesh(geo, MAT.grass);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+    }
+
+    // ========== 重建道路 ==========
+    function rebuildRoads() {
+      if (roadGroup) {
+        scene.remove(roadGroup);
+        disposeGroup(roadGroup);
+      }
+      roadGroup = new THREE.Group();
+      buildElevatedHighway(roadGroup, 0, 0, 200, laneCount * LANE_W, 7);
+      buildNationalHighway(roadGroup, 0, 34, 200, laneCount * LANE_W);
+      scene.add(roadGroup);
+    }
+
+    function buildEnvironment() {
+      if (envGroup) {
+        scene.remove(envGroup);
+        disposeGroup(envGroup);
+      }
+      envGroup = new THREE.Group();
+      createTrees(envGroup);
+      createBushes(envGroup);
+      scene.add(envGroup);
+    }
+
+    function disposeGroup(g) {
+      g.traverse(obj => {
+        if (obj.geometry) obj.geometry.dispose();
+      });
+    }
+
+    function buildRoads() {
+      rebuildRoads();
+    }
+
+    // ========== 标线工具 ==========
+    function makeLineGeo(length, width) {
+      const geo = new THREE.PlaneGeometry(length, width);
+      geo.rotateX(-Math.PI / 2);
+      return geo;
+    }
+
+    function makeMarkings(length, width, lanes, height) {
+      const group = new THREE.Group();
+      const laneW = width / lanes;
+      const y = height + 0.02;
+      const perSide = lanes / 2;
+
+      const edgeGeo = makeLineGeo(length, 0.12);
+      for (let side of [-1, 1]) {
+        const edge = new THREE.Mesh(edgeGeo, MAT.lineWhite);
+        edge.position.set(0, y, side * (width / 2 - 0.3));
+        group.add(edge);
+      }
+
+      if (lanes === 2) {
+        // 双向2车道：单黄中心实线
+        const centerLine = new THREE.Mesh(makeLineGeo(length, 0.12), MAT.lineYellow);
+        centerLine.position.set(0, y, 0);
+        group.add(centerLine);
+      }
+
+      if (lanes >= 4) {
+        const yGeo = makeLineGeo(length, 0.15);
+        for (let side of [-1, 1]) {
+          const line = new THREE.Mesh(yGeo, MAT.lineYellow);
+          line.position.set(0, y, side * 0.2);
+          group.add(line);
+        }
+      }
+
+      const dashLen = 4;
+      const dashGap = 6;
+      const dashCount = Math.floor(length / (dashLen + dashGap));
+      const dashGeo = makeLineGeo(dashLen, 0.1);
+
+      for (let side = -1; side <= 1; side += 2) {
+        for (let l = 1; l < perSide; l++) {
+          const offset = side * laneW * l;
+          for (let i = 0; i < dashCount; i++) {
+            const x = -length / 2 + i * (dashLen + dashGap) + dashLen / 2;
+            const dash = new THREE.Mesh(dashGeo, MAT.lineWhite);
+            dash.position.set(x, y, offset);
+            group.add(dash);
+          }
+        }
+      }
+      return group;
+    }
+
+    // ========== 护栏 ==========
+    function makeGuardrail(length, height, sideOffset, postSpacing = 3) {
+      const group = new THREE.Group();
+      const railH = 0.75;
+      const postCount = Math.floor(length / postSpacing);
+      const postGeo = new THREE.BoxGeometry(0.07, railH, 0.07);
+      const z = sideOffset;
+
+      for (let i = 0; i < postCount; i++) {
+        const x = -length / 2 + i * postSpacing + postSpacing / 2;
+        const post = new THREE.Mesh(postGeo, METAL_RAIL);
+        post.position.set(x, height + railH / 2, z);
+        post.castShadow = true;
+        group.add(post);
+      }
+
+      const beamGeo = new THREE.BoxGeometry(length, 0.15, 0.05);
+      [railH - 0.08, railH - 0.4].forEach(yOff => {
+        const beam = new THREE.Mesh(beamGeo, METAL_RAIL);
+        beam.position.set(0, height + yOff, z);
+        beam.castShadow = true;
+        group.add(beam);
+      });
+
+      for (let i = 0; i < postCount; i++) {
+        const x = -length / 2 + i * postSpacing + postSpacing / 2;
+        const block = new THREE.Mesh(
+          new THREE.BoxGeometry(0.12, 0.25, 0.18), METAL_RAIL
+        );
+        const sideSign = sideOffset > 0 ? 1 : -1;
+        block.position.set(x, height + railH - 0.2, z - sideSign * 0.1);
+        group.add(block);
+      }
+      return group;
+    }
+
+    // ========== 路灯 ==========
+    function buildTallLamp(x, z, side) {
+      const group = new THREE.Group();
+      const h = 9;
+
+      const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.28, 0.3, 8), CONCRETE_DARK
+      );
+      base.position.set(x, 0.15, z);
+      base.castShadow = true; base.receiveShadow = true;
+      group.add(base);
+
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.07, 0.12, h, 8), MAT.pole
+      );
+      pole.position.set(x, 0.3 + h/2, z);
+      pole.castShadow = true;
+      group.add(pole);
+
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.1, 0.03, 6, 12), MAT.pole
+      );
+      ring.position.set(x, h - 1, z);
+      ring.rotation.x = Math.PI / 2;
+      group.add(ring);
+
+      const armLen = 2;
+      const arm = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.06, armLen, 8), MAT.pole
+      );
+      arm.position.set(x - side * armLen/2, h - 0.4, z);
+      arm.rotation.z = side * 0.15;
+      arm.castShadow = true;
+      group.add(arm);
+
+      const lampHead = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 0.18, 0.4), MAT.pole
+      );
+      lampHead.position.set(x - side * armLen - side * 0.2, h - 0.6, z);
+      lampHead.rotation.z = side * 0.1;
+      lampHead.castShadow = true;
+      group.add(lampHead);
+
+      const glow = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.85, 0.35), MAT.lampGlow
+      );
+      glow.rotation.x = Math.PI / 2;
+      glow.position.set(x - side * armLen - side * 0.2, h - 0.7, z);
+      glow.rotation.z = side * 0.1;
+      group.add(glow);
+
+      return group;
+    }
+
+    function buildShortLamp(x, z, side, baseH) {
+      const group = new THREE.Group();
+      const h = 3.5;
+
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05, 0.07, h, 8), MAT.pole
+      );
+      pole.position.set(x, baseH + h/2, z);
+      pole.castShadow = true;
+      group.add(pole);
+
+      const armLen = 1;
+      const arm = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.03, 0.05, armLen, 6), MAT.pole
+      );
+      arm.position.set(x - side * armLen/2, baseH + h - 0.2, z);
+      arm.rotation.z = side * 0.15;
+      arm.castShadow = true;
+      group.add(arm);
+
+      const lampHead = new THREE.Mesh(
+        new THREE.BoxGeometry(0.6, 0.15, 0.25), MAT.pole
+      );
+      lampHead.position.set(x - side * armLen - side * 0.1, baseH + h - 0.35, z);
+      lampHead.rotation.z = side * 0.1;
+      lampHead.castShadow = true;
+      group.add(lampHead);
+
+      const glow = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.55, 0.22), MAT.lampGlow
+      );
+      glow.rotation.x = Math.PI / 2;
+      glow.position.set(x - side * armLen - side * 0.1, baseH + h - 0.43, z);
+      glow.rotation.z = side * 0.1;
+      group.add(glow);
+
+      return group;
+    }
+
+    // ========== 高架 ==========
+    function buildElevatedHighway(parent, cx, cz, length, width, height) {
+      const group = new THREE.Group();
+
+      // 路面
+      const surf = new THREE.Mesh(
+        new THREE.BoxGeometry(length, 0.25, width), MAT.roadDark
+      );
+      surf.position.set(cx, height + 0.125, cz);
+      surf.castShadow = true; surf.receiveShadow = true;
+      group.add(surf);
+
+      const top = new THREE.Mesh(
+        new THREE.PlaneGeometry(length - 0.2, width - 0.2), MAT.road
+      );
+      top.rotation.x = -Math.PI / 2;
+      top.position.set(cx, height + 0.26, cz);
+      group.add(top);
+
+      const markings = makeMarkings(length - 4, width - 0.5, laneCount, height + 0.26);
+      markings.position.set(cx, 0, cz);
+      group.add(markings);
+
+      // 箱梁
+      const deck = new THREE.Mesh(
+        new THREE.BoxGeometry(length + 1, 0.6, width + 2), CONCRETE_DARK
+      );
+      deck.position.set(cx, height - 0.1, cz);
+      deck.castShadow = true; deck.receiveShadow = true;
+      group.add(deck);
+
+      // 护栏
+      group.add(makeGuardrail(length - 4, height + 0.25, cz - (width/2 + 0.8), 2.5));
+      group.add(makeGuardrail(length - 4, height + 0.25, cz + (width/2 + 0.8), 2.5));
+
+      // 隔音屏障
+      [-1, 1].forEach(side => {
+        const barrier = new THREE.Mesh(
+          new THREE.BoxGeometry(length - 10, 2, 0.04), MAT.glassBarrier
+        );
+        barrier.position.set(cx, height + 0.25 + 1.5, cz + side * (width/2 + 1.2));
+        group.add(barrier);
+      });
+
+      // 桥墩
+      const pillarSpacing = 16;
+      const pillarCount = Math.floor(length / pillarSpacing);
+      for (let i = 0; i <= pillarCount; i++) {
+        const px = -length/2 + i * pillarSpacing;
+
+        const cap = new THREE.Mesh(
+          new THREE.BoxGeometry(3, 0.5, width + 4), MAT.concrete
+        );
+        cap.position.set(cx + px, height - 0.35, cz);
+        cap.castShadow = true; cap.receiveShadow = true;
+        group.add(cap);
+
+        [-1, 1].forEach(side => {
+          const pillar = new THREE.Mesh(
+            new THREE.BoxGeometry(1.2, height - 0.9, 1.2), MAT.concrete
+          );
+          pillar.position.set(cx + px, (height - 0.9)/2, cz + side * (width/2 + 0.3));
+          pillar.castShadow = true; pillar.receiveShadow = true;
+          group.add(pillar);
+
+          const line = new THREE.Mesh(
+            new THREE.BoxGeometry(1.25, 0.05, 1.25), CONCRETE_DARK
+          );
+          line.position.set(cx + px, 1.5, cz + side * (width/2 + 0.3));
+          group.add(line);
+
+          const footing = new THREE.Mesh(
+            new THREE.BoxGeometry(2, 0.3, 2), CONCRETE_DARK
+          );
+          footing.position.set(cx + px, 0.15, cz + side * (width/2 + 0.3));
+          footing.receiveShadow = true;
+          group.add(footing);
+        });
+      }
+
+      // 端部挡墙
+      [-1, 1].forEach(side => {
+        const endX = cx + side * length / 2;
+        const wall = new THREE.Mesh(
+          new THREE.BoxGeometry(0.6, 1.2, width + 1.5), CONCRETE_DARK
+        );
+        wall.position.set(endX - side * 0.3, height + 0.85, cz);
+        wall.castShadow = true;
+        group.add(wall);
+      });
+
+      // 路灯
+      const lampSpacing = 20;
+      const lampCount = Math.floor((length - 10) / lampSpacing);
+      for (let i = 0; i <= lampCount; i++) {
+        const lx = -length/2 + 5 + i * lampSpacing;
+        [-1, 1].forEach(side => {
+          group.add(buildShortLamp(cx + lx, cz + side * (width/2 + 1), side, height + 0.25));
+        });
+      }
+
+      parent.add(group);
+    }
+
+    // ========== 国道（地面平行道路）==========
+    function buildNationalHighway(parent, cx, cz, length, width) {
+      const group = new THREE.Group();
+      const ROAD_Y = 0.40; // 路面标高
+      const SUBBASE_H = 0.40;
+      const subBaseW = width + 8;
+
+      // 路基主体（碎石垫层）
+      const subBase = new THREE.Mesh(
+        new THREE.BoxGeometry(length, SUBBASE_H, subBaseW),
+        new THREE.MeshStandardMaterial({ color: 0x8B7355, roughness: 1 })
+      );
+      subBase.position.set(cx, SUBBASE_H / 2, cz);
+      subBase.receiveShadow = true;
+      group.add(subBase);
+
+      // 路肩（左右各一条，不覆盖路面）
+      const shoulderW = 2.0;
+      [-1, 1].forEach(side => {
+        const sh = new THREE.Mesh(
+          new THREE.PlaneGeometry(length, shoulderW), MAT.dirt
+        );
+        sh.rotation.x = -Math.PI / 2;
+        sh.position.set(cx, ROAD_Y + 0.02, cz + side * (width/2 + shoulderW/2));
+        sh.receiveShadow = true;
+        group.add(sh);
+      });
+
+      // 路面
+      const road = new THREE.Mesh(
+        new THREE.PlaneGeometry(length, width), MAT.road
+      );
+      road.rotation.x = -Math.PI / 2;
+      road.position.set(cx, ROAD_Y + 0.04, cz);
+      road.receiveShadow = true;
+      group.add(road);
+
+      // 路缘石（路面与路肩之间）
+      const curbH = 0.15;
+      const curbGeo = new THREE.BoxGeometry(length, curbH, 0.2);
+      [-1, 1].forEach(side => {
+        const curb = new THREE.Mesh(curbGeo, MAT.curb);
+        curb.position.set(cx, ROAD_Y + curbH/2, cz + side * (width/2 + 0.1));
+        curb.castShadow = true; curb.receiveShadow = true;
+        group.add(curb);
+      });
+
+      // 标线
+      const markings = makeMarkings(length - 2, width - 0.3, laneCount, ROAD_Y + 0.04);
+      markings.position.set(cx, 0, cz);
+      group.add(markings);
+
+      // 排水沟（路基外侧）
+      [-1, 1].forEach(side => {
+        const ditch = new THREE.Mesh(
+          new THREE.BoxGeometry(length, 0.2, 0.6),
+          new THREE.MeshStandardMaterial({ color: 0x5A5A5A, roughness: 0.9 })
+        );
+        ditch.position.set(cx, -0.05, cz + side * (subBaseW/2 + 2.0));
+        ditch.receiveShadow = true;
+        group.add(ditch);
+      });
+
+      // 波形梁护栏（路肩外侧）
+      group.add(makeGuardrail(length - 4, ROAD_Y, cz - (width/2 + shoulderW + 0.4), 3));
+      group.add(makeGuardrail(length - 4, ROAD_Y, cz + (width/2 + shoulderW + 0.4), 3));
+
+      // 路灯（双侧，25米间距）
+      const lampSpacing = 25;
+      const lampCount = Math.floor(length / lampSpacing);
+      for (let i = 0; i <= lampCount; i++) {
+        const x = -length/2 + i * lampSpacing;
+        [-1, 1].forEach(side => {
+          group.add(buildTallLamp(cx + x, cz + side * (width/2 + shoulderW + 2.5), side));
+        });
+      }
+
+      parent.add(group);
+    }
+
+    // ========== 环境 ==========
+    function createTrees(parent) {
+      const group = new THREE.Group();
+      const w = laneCount * LANE_W;
+      // 道路净空边界（基于路基/护栏/排水沟最外沿）
+      const elevatedEdge = w/2 + 8;            // 高架护栏外
+      const nationalOuter = 34 + (w/2 + 12);   // 国道排水沟外
+      const nationalInner = 34 - (w/2 + 11);   // 国道靠高架侧排水沟外
+      const elevatedInner = w/2 + 8;           // 高架靠国道侧
+
+      // 国道南侧行道树
+      for (let i = 0; i < 35; i++) {
+        const x = -95 + i * 5.5 + (Math.random() - 0.5) * 2;
+        const z = nationalOuter + 5 + Math.random() * 10;
+        const s = 0.6 + Math.random() * 0.5;
+        makeTree(x, z, s, group);
+      }
+
+      // 高架北侧行道树
+      for (let i = 0; i < 35; i++) {
+        const x = -95 + i * 5.5 + (Math.random() - 0.5) * 2;
+        const z = -(elevatedEdge + 5) - Math.random() * 10;
+        const s = 0.6 + Math.random() * 0.5;
+        makeTree(x, z, s, group);
+      }
+
+      // 高架与国道之间的绿化带（只有低矮灌木和小树苗）
+      const gapZ1 = elevatedInner;
+      const gapZ2 = nationalInner;
+      if (gapZ2 > gapZ1 + 4) {
+        for (let i = 0; i < 50; i++) {
+          const x = -95 + Math.random() * 190;
+          const z = gapZ1 + Math.random() * (gapZ2 - gapZ1);
+          if (Math.random() < 0.7) {
+            const s = 0.15 + Math.random() * 0.2;
+            const bush = new THREE.Mesh(
+              new THREE.SphereGeometry(s, 6, 4), MAT.treeLeaf
+            );
+            bush.position.set(x, s * 0.4, z);
+            bush.scale.y = 0.4;
+            bush.castShadow = true;
+            group.add(bush);
+          } else {
+            const s = 0.2 + Math.random() * 0.2;
+            makeTree(x, z, s, group);
+          }
+        }
+      }
+
+      // 远处树林（避开道路走廊）
+      const roadNoGoZ1 = -15;   // 高架北侧安全边界
+      const roadNoGoZ2 = 50;    // 国道南侧安全边界
+      for (let i = 0; i < 500; i++) {
+        const x = -250 + Math.random() * 500;
+        let z;
+        const r = Math.random();
+        if (r < 0.3) z = -(30 + Math.random() * 120);       // 极北
+        else if (r < 0.6) z = 55 + Math.random() * 130;     // 极南
+        else {
+          z = -160 + Math.random() * 320;
+          if (z > roadNoGoZ1 && z < roadNoGoZ2) {
+            z = (Math.random() < 0.5) ? roadNoGoZ1 - Math.random()*15 : roadNoGoZ2 + Math.random()*15;
+          }
+        }
+        const distFromCenter = Math.sqrt(x*x + (z-17)*(z-17));
+        if (distFromCenter < 55) continue;
+        const s = 0.7 + Math.random() * 0.7;
+        makeTreeSimple(x, z, s, group);
+      }
+
+      parent.add(group);
+    }
+
+    function makeTree(x, z, scale, group) {
+      const tree = new THREE.Group();
+      const trunkH = 2 * scale;
+      const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.12 * scale, 0.2 * scale, trunkH, 6), MAT.treeTrunk
+      );
+      trunk.position.y = trunkH/2;
+      trunk.castShadow = true;
+      tree.add(trunk);
+
+      const colors = [MAT.treeLeafDark, MAT.treeLeaf, MAT.treeLeafLight];
+      const sizes = [1.5*scale, 1.2*scale, 0.85*scale];
+      const heights = [trunkH+0.8*scale, trunkH+1.8*scale, trunkH+2.5*scale];
+      for (let i = 0; i < 3; i++) {
+        const leaf = new THREE.Mesh(
+          new THREE.ConeGeometry(sizes[i], 1.6*scale, 7), colors[i]
+        );
+        leaf.position.y = heights[i];
+        leaf.castShadow = true;
+        tree.add(leaf);
+      }
+      tree.position.set(x, 0, z);
+      tree.rotation.y = Math.random() * Math.PI * 2;
+      group.add(tree);
+    }
+
+    function makeTreeSimple(x, z, scale, group) {
+      const tree = new THREE.Group();
+      const trunkH = 2 * scale;
+      const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.1*scale, 0.18*scale, trunkH, 5), MAT.treeTrunk
+      );
+      trunk.position.y = trunkH/2;
+      trunk.castShadow = true;
+      tree.add(trunk);
+      const leaf = new THREE.Mesh(
+        new THREE.ConeGeometry(1.4*scale, 2*scale, 5), MAT.treeLeafDark
+      );
+      leaf.position.y = trunkH + scale;
+      leaf.castShadow = true;
+      tree.add(leaf);
+      tree.position.set(x, 0, z);
+      group.add(tree);
+    }
+
+    function createBushes(parent) {
+      const group = new THREE.Group();
+      const w = laneCount * LANE_W;
+      // 路边灌木（远离路面和路基排水沟）
+      const elevatedSafe = w/2 + 10;
+      const nationalSafe = 34 + (w/2 + 14);
+      for (let i = 0; i < 30; i++) {
+        const x = -95 + Math.random() * 190;
+        const side = Math.random() < 0.5 ? -1 : 1;
+        let z;
+        if (side < 0) z = -(elevatedSafe + Math.random() * 8);
+        else z = nationalSafe + Math.random() * 8;
+        const s = 0.2 + Math.random() * 0.3;
+        const bush = new THREE.Mesh(
+          new THREE.SphereGeometry(s, 7, 5), MAT.treeLeaf
+        );
+        bush.position.set(x, s*0.5, z);
+        bush.scale.y = 0.6;
+        bush.castShadow = true;
+        group.add(bush);
+      }
+      parent.add(group);
+    }
+
+    // ========== UI ==========
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function setupUI() {
+      document.getElementById('time-of-day').addEventListener('input', e => updateTime(e.target.value / 100));
+
+      document.getElementById('fog-density').addEventListener('input', e => {
+        const d = e.target.value / 100;
+        scene.fog.near = 40 + (1-d) * 60;
+        scene.fog.far = 150 + d * 220;
+      });
+
+      document.getElementById('tree-density').addEventListener('input', e => {
+        treeDensity = e.target.value / 100;
+      });
+
+      document.querySelectorAll('.lane-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const newLanes = parseInt(btn.dataset.lanes);
+          if (newLanes === laneCount) return;
+          laneCount = newLanes;
+          document.querySelectorAll('.lane-btn').forEach(b => {
+            b.classList.remove('bg-primary', 'text-primary-foreground');
+            b.classList.add('bg-muted', 'text-muted-foreground');
+          });
+          btn.classList.remove('bg-muted', 'text-muted-foreground');
+          btn.classList.add('bg-primary', 'text-primary-foreground');
+          rebuildRoads();
+          buildEnvironment();
+        });
+      });
+
+      const art = document.getElementById('auto-rotate-toggle');
+      art.addEventListener('click', () => {
+        autoRotate = !autoRotate;
+        controls.autoRotate = autoRotate;
+        const thumb = art.querySelector('span');
+        if (autoRotate) {
+          art.classList.add('bg-primary'); art.classList.remove('bg-muted');
+          thumb.style.transform = 'translateX(20px)';
+        } else {
+          art.classList.remove('bg-primary'); art.classList.add('bg-muted');
+          thumb.style.transform = 'translateX(0)';
+        }
+      });
+
+      document.getElementById('reset-view').addEventListener('click', () => {
+        camera.position.copy(defaultCameraPos);
+        controls.target.copy(defaultTarget);
+        controls.update();
+      });
+    }
+
+    function updateTime(t) {
+      let topC, botC, sunC, sunI, ambI, fogC, sunX, sunY;
+      if (t < 0.25) {
+        const f = t/0.25;
+        topC = new THREE.Color(0xff7b33).lerp(new THREE.Color(0x1e90ff), f);
+        botC = new THREE.Color(0xffd4a3).lerp(new THREE.Color(0xbfe4ff), f);
+        sunC = new THREE.Color(0xff8c42).lerp(new THREE.Color(0xfff5e0), f);
+        sunI = 0.3+f*0.8; ambI = 0.15+f*0.15;
+        fogC = new THREE.Color(0xffb380).lerp(new THREE.Color(0x87ceeb), f);
+        sunX = -60+f*90; sunY = 5+f*55;
+      } else if (t < 0.5) {
+        const f = (t-0.25)/0.25;
+        topC = new THREE.Color(0x1e90ff); botC = new THREE.Color(0xbfe4ff);
+        sunC = new THREE.Color(0xfff5e0); sunI = 1.1; ambI = 0.3;
+        fogC = new THREE.Color(0x87ceeb);
+        sunX = 30-f*20; sunY = 60+f*5;
+      } else if (t < 0.75) {
+        const f = (t-0.5)/0.25;
+        topC = new THREE.Color(0x1e90ff).lerp(new THREE.Color(0xff5533), f);
+        botC = new THREE.Color(0xbfe4ff).lerp(new THREE.Color(0xffcc80), f);
+        sunC = new THREE.Color(0xfff5e0).lerp(new THREE.Color(0xff6b35), f);
+        sunI = 1.1-f*0.7; ambI = 0.3-f*0.15;
+        fogC = new THREE.Color(0x87ceeb).lerp(new THREE.Color(0xff9966), f);
+        sunX = 10-f*70; sunY = 65-f*45;
+      } else {
+        const f = (t-0.75)/0.25;
+        topC = new THREE.Color(0xff5533).lerp(new THREE.Color(0x0a0a2e), f);
+        botC = new THREE.Color(0xffcc80).lerp(new THREE.Color(0x1a1a3e), f);
+        sunC = new THREE.Color(0xff6b35).lerp(new THREE.Color(0x6b7db3), f);
+        sunI = 0.4-f*0.25; ambI = 0.15-f*0.08;
+        fogC = new THREE.Color(0xff9966).lerp(new THREE.Color(0x1a1a3e), f);
+        sunX = -60+f*20; sunY = 20-f*12;
+      }
+      skyDome.material.uniforms.topColor.value.copy(topC);
+      skyDome.material.uniforms.bottomColor.value.copy(botC);
+      sunLight.color.copy(sunC);
+      sunLight.intensity = sunI;
+      sunLight.position.set(sunX, sunY, 30);
+      ambientLight.intensity = ambI;
+      scene.fog.color.copy(fogC);
+      scene.background.copy(fogC);
+      hemiLight.color.copy(topC);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      frameCount++;
+      const now = performance.now();
+      if (now - lastTime >= 1000) {
+        document.getElementById('fps-counter').textContent = frameCount;
+        frameCount = 0;
+        lastTime = now;
+      }
+      renderer.render(scene, camera);
+    }
+    </script>
+</body>
+</html>

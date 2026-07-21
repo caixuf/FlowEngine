@@ -11,14 +11,13 @@
 #   bash scripts/demo.sh --multi      # fork+exec 多进程模式
 #   bash scripts/demo.sh --no-browser # 不打开浏览器
 #   bash scripts/demo.sh --manual     # 游戏模式：终端 WASD 键盘直接驾驶 ego
-#   bash scripts/demo.sh --scenario scenarios/highway_overtake.json  # 指定场景
+#   bash scripts/demo.sh --scenario scenarios/zhongkai_road_full.json  # 指定场景
 # =============================================================================
 set -e
 
-# 默认场景：infinite_straight — 10km 双向 2 车道直路 + 5 慢速货车 + 2 快速轿车，
-# 简单可超车的无限循环场景。duration_s=0 → 无限（Ctrl+C 退出）。
+# 默认场景：200m 高架+国道复合场景，单 ego 无 NPC（基础设施验证）
 # 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
-DEFAULT_SCENARIO="scenarios/infinite_straight.json"
+DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
 
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \

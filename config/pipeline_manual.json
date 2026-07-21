@@ -69,7 +69,7 @@
           }
         }
       ],
-      "params": "{\"init_speed\": 5.0, \"target_speed\": 12.0, \"frequency_hz\": 50.0, \"random_seed\": 42, \"scenario_file\": \"scenarios/city_to_highway_full.json\"}"
+      "params": "{\"init_speed\": 5.0, \"target_speed\": 12.0, \"frequency_hz\": 50.0, \"random_seed\": 42, \"scenario_file\": \"scenarios/zhongkai_road_full.json\"}"
     },
     {
       "name": "sensor_model",

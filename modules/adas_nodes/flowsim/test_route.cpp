@@ -7,8 +7,10 @@
 //   4. 到 route 末端触发回收（route_s 绕回）
 //
 // 用法：./test_route <scene.xodr>
-//   默认 /tmp/flowsim_city_to_highway_full.xodr（demo 跑一次即生成；
-//   或 python3 tools/json_to_xodr.py scenarios/city_to_highway_full.json -o <path>）。
+// xodr 路径优先级：命令行参数 > 环境变量 FLOWENGINE_TEST_XODR >
+//   /tmp/flowsim_zhongkai_road_full.xodr（demo 跑一次即生成；
+//   或 python3 tools/json_to_xodr.py scenarios/<scene>.json -o <path>）。
+// 不硬编码场景名：未传参且环境变量未设置时，友好报错退出。
 
 #include "flowsim/route.h"
 #include "flowsim/road_network.h"
@@ -30,7 +32,15 @@ static int failures = 0;
 static bool approx(double a, double b, double eps) { return std::fabs(a - b) < eps; }
 
 int main(int argc, char** argv) {
-    const char* xodr = argc > 1 ? argv[1] : "/tmp/flowsim_city_to_highway_full.xodr";
+    const char* xodr = argc > 1 ? argv[1] : getenv("FLOWENGINE_TEST_XODR");
+    if (!xodr) {
+        std::printf("FAIL: xodr path not specified.\n"
+                    "Usage: %s <scene.xodr>\n"
+                    "   or: export FLOWENGINE_TEST_XODR=/tmp/flowsim_<scene>.xodr\n"
+                    "Generate xodr: python3 tools/json_to_xodr.py scenarios/<scene>.json -o <path>\n",
+                    argv[0]);
+        return 2;
+    }
     std::printf("=== Route + NPC lane-follow test on %s ===\n", xodr);
 
     FlowRoadNetwork roads;

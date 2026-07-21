@@ -1,0 +1,367 @@
+/**
+ * VehicleView.js — 车辆渲染（gltf 优先 + 程序化 fallback）
+ *
+ * 车灯位掩码（vehicle_lights.h）：
+ *   bit0=左转 0x01, bit1=右转 0x02, bit2=双闪 0x04,
+ *   bit3=远光 0x08, bit4=近光 0x10, bit6=倒车 0x40, bit7=雾灯 0x80
+ * 刹车灯由 brake 字段驱动（不在 lights 位掩码里）。
+ *
+ * 资产来源：
+ *   - gltf 模型（models.js 加载 su7/sedan/suv/truck/pedestrian）
+ *   - 程序化几何体（AssetFactory BoxGeometry/CylinderGeometry）
+ *
+ * gltf 模型节点约定（gen_models.py 生成）：
+ *   wheel_FL/FR/RL/RR + axle_front/rear — 车轮 + 前轴转向
+ *   brakelight_L/R + brakelight_bar — 刹车灯 + 贯穿式尾灯（SU7）
+ *   turnsignal_FL/FR/RL/RR — 转向灯
+ *   headlight_L/R — 大灯
+ *   ads_indicator_L/R — 自动驾驶小蓝灯（常亮）
+ */
+
+import { getBox, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
+import { headingToRotationY } from '../math/Coord.js';
+import { initModelCache, getModel, _setVehicleLights } from '../../models.js';
+import { _buildContactShadow } from '../../utils.js';
+
+// 车灯位掩码
+const LIGHT_TURN_LEFT  = 0x01;
+const LIGHT_TURN_RIGHT = 0x02;
+const LIGHT_HAZARD     = 0x04;
+const LIGHT_HIGH_BEAM  = 0x08;
+const LIGHT_LOW_BEAM   = 0x10;
+const LIGHT_REVERSE    = 0x40;
+
+// 程序化车灯颜色
+const COLOR_HEAD_LOW  = 0xfff4d6;
+const COLOR_HEAD_HIGH = 0xffffff;
+const COLOR_TAIL      = 0xff2020;
+const COLOR_TURN      = 0xffaa20;
+const COLOR_REVERSE   = 0xffffff;
+
+// 程序化车身颜色（按 type）
+const BODY_COLORS = {
+  ego: 0x1A528C,       // ego：海湾蓝（与 SU7 一致）
+  car: 0x58a6ff,
+  suv: 0xbc8cff,
+  truck: 0xd29922,
+  default: 0x8b949e,
+};
+
+// type → gltf 模型名映射
+const GLTF_TYPE_MAP = {
+  ego: 'su7',        // ego 用 SU7
+  car: 'sedan',
+  suv: 'suv',
+  truck: 'truck',
+};
+
+let _gltfReady = false;
+let _gltfInitStarted = false;
+
+/** 异步预加载 gltf 模型（main.js init3DScene 时调一次） */
+export function initModels() {
+  if (_gltfInitStarted) return;
+  _gltfInitStarted = true;
+  initModelCache().then(() => {
+    _gltfReady = true;
+    console.log('[vis] gltf models ready');
+  }).catch(err => {
+    console.warn('[vis] gltf models load failed, fallback to procedural:', err.message);
+  });
+}
+
+export function createVehicleView(scene) {
+  const pool = new Map();
+  let _upgradedToGltf = false;   // gltf 异步就绪后是否已把程序化车升级过一次
+
+  // ═══════════════════════════════════════════════════════
+  // gltf 车辆构建
+  // ═══════════════════════════════════════════════════════
+
+  function _createGltfVehicle(ent) {
+    const type = ent.type || 'car';
+    const modelName = GLTF_TYPE_MAP[type] || 'sedan';
+    const model = getModel(modelName);
+    if (!model) return null;
+
+    // ego 车用海湾蓝（buildEgoCar 逻辑），其他车按 BODY_COLORS
+    // models.js 的 _upgradeCarPaint 已在 getModel 内部处理过首次，但 clone 后材质已独立
+    return model;
+  }
+
+  function _updateGltfVehicle(entry, ent, simTime) {
+    const { group } = entry;
+
+    // 位姿
+    group.position.set(ent.x, 0, ent.y);
+    group.rotation.y = headingToRotationY(ent.heading || 0);
+
+    // 前轮 steer（axle_front 节点 rotation.y）
+    const steer = ent.steer || 0;
+    const maxSteerRad = 0.35;
+    const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    if (group.userData.frontAxle) {
+      group.userData.frontAxle.rotation.y = steerAngle;
+    }
+
+    // 车灯状态（转换位掩码 → models.js 的 state 格式）
+    const mask = ent.lights || 0;
+    const brake = ent.brake || 0;
+    const state = {
+      brake: brake > 0.05,
+      turnL: !!(mask & (LIGHT_TURN_LEFT | LIGHT_HAZARD)),
+      turnR: !!(mask & (LIGHT_TURN_RIGHT | LIGHT_HAZARD)),
+      head: !!(mask & (LIGHT_LOW_BEAM | LIGHT_HIGH_BEAM)),
+    };
+    // 闪烁相位（2Hz = 0.5s 周期，_setVehicleLights 用 1.5Hz）
+    const blinkPhase = simTime / 1000;
+    _setVehicleLights(group, state, blinkPhase);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 程序化车辆构建（fallback）
+  // ═══════════════════════════════════════════════════════
+
+  function _createProceduralVehicle(ent) {
+    const group = new THREE.Group();
+    const len = ent.length || 4.6;
+    const wid = ent.width || 2.0;
+    const bodyH = 1.4;
+    const type = ent.type || 'car';
+    const bodyColor = BODY_COLORS[type] || BODY_COLORS.default;
+
+    // 车身
+    const bodyGeo = getBox(len, bodyH, wid);
+    const bodyMat = getStdMaterial(bodyColor, 0.6, 0.1);
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.y = 0.7 + 0.10;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+
+    // 车窗
+    const cabinLen = len * 0.55;
+    const cabinGeo = getBox(cabinLen, 0.7, wid * 0.95);
+    const cabinMat = getStdMaterial(0x1a1a2a, 0.2, 0.5);
+    const cabin = new THREE.Mesh(cabinGeo, cabinMat);
+    cabin.position.set(-len * 0.05, 0.7 + bodyH * 0.5 + 0.35, 0);
+    cabin.castShadow = true;
+    group.add(cabin);
+
+    // 4 车轮
+    const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.25, 12);
+    const wheelMat = getStdMaterial(0x0a0a0a, 0.85, 0.05);
+    const wheelPositions = [
+      [ len * 0.32, 0.32,  wid * 0.5],
+      [ len * 0.32, 0.32, -wid * 0.5],
+      [-len * 0.32, 0.32,  wid * 0.5],
+      [-len * 0.32, 0.32, -wid * 0.5],
+    ];
+    const wheels = [];
+    wheelPositions.forEach((p) => {
+      const w = new THREE.Mesh(wheelGeo, wheelMat);
+      w.rotation.x = Math.PI / 2;
+      w.position.set(p[0], p[1] + 0.10, p[2]);
+      group.add(w);
+      wheels.push(w);
+    });
+
+    // 车灯 mesh
+    const lights = {};
+    const lampSize = 0.18;
+    const lampGeo = getBox(lampSize, lampSize, lampSize * 1.5);
+
+    const headLMat = createEmissiveMaterial(COLOR_HEAD_LOW, 1.0);
+    const headRMat = createEmissiveMaterial(COLOR_HEAD_LOW, 1.0);
+    const headL = new THREE.Mesh(lampGeo, headLMat);
+    const headR = new THREE.Mesh(lampGeo, headRMat);
+    headL.position.set(len * 0.49, 0.7 + 0.1,  wid * 0.4);
+    headR.position.set(len * 0.49, 0.7 + 0.1, -wid * 0.4);
+    group.add(headL, headR);
+    lights.headLMat = headLMat; lights.headRMat = headRMat;
+
+    const tailLMat = createEmissiveMaterial(COLOR_TAIL, 0.5);
+    const tailRMat = createEmissiveMaterial(COLOR_TAIL, 0.5);
+    const tailL = new THREE.Mesh(lampGeo, tailLMat);
+    const tailR = new THREE.Mesh(lampGeo, tailRMat);
+    tailL.position.set(-len * 0.49, 0.7 + 0.1,  wid * 0.4);
+    tailR.position.set(-len * 0.49, 0.7 + 0.1, -wid * 0.4);
+    group.add(tailL, tailR);
+    lights.tailLMat = tailLMat; lights.tailRMat = tailRMat;
+
+    const turnGeo = getBox(0.15, 0.12, 0.2);
+    const turnFLMat = createEmissiveMaterial(COLOR_TURN, 0.0);
+    const turnFRMat = createEmissiveMaterial(COLOR_TURN, 0.0);
+    const turnRLMat = createEmissiveMaterial(COLOR_TURN, 0.0);
+    const turnRRMat = createEmissiveMaterial(COLOR_TURN, 0.0);
+    const turnFL = new THREE.Mesh(turnGeo, turnFLMat);
+    const turnFR = new THREE.Mesh(turnGeo, turnFRMat);
+    const turnRL = new THREE.Mesh(turnGeo, turnRLMat);
+    const turnRR = new THREE.Mesh(turnGeo, turnRRMat);
+    turnFL.position.set( len * 0.49, 0.7 + 0.35,  wid * 0.45);
+    turnFR.position.set( len * 0.49, 0.7 + 0.35, -wid * 0.45);
+    turnRL.position.set(-len * 0.49, 0.7 + 0.35,  wid * 0.45);
+    turnRR.position.set(-len * 0.49, 0.7 + 0.35, -wid * 0.45);
+    group.add(turnFL, turnFR, turnRL, turnRR);
+    lights.turnFLMat = turnFLMat; lights.turnFRMat = turnFRMat;
+    lights.turnRLMat = turnRLMat; lights.turnRRMat = turnRRMat;
+
+    const revMat = createEmissiveMaterial(COLOR_REVERSE, 0.0);
+    const rev = new THREE.Mesh(lampGeo, revMat);
+    rev.position.set(-len * 0.49, 0.7 + 0.3, 0);
+    group.add(rev);
+    lights.revMat = revMat;
+
+    return { group, wheels, lights, useGltf: false };
+  }
+
+  function _updateProceduralVehicle(entry, ent, simTime) {
+    const { group, wheels, lights } = entry;
+
+    group.position.set(ent.x, 0, ent.y);
+    group.rotation.y = headingToRotationY(ent.heading || 0);
+
+    // 前轮 steer
+    const steer = ent.steer || 0;
+    const maxSteerRad = 0.35;
+    const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    if (wheels[0]) wheels[0].rotation.y = steerAngle;
+    if (wheels[1]) wheels[1].rotation.y = steerAngle;
+
+    // 车灯
+    const mask = ent.lights || 0;
+    const brake = ent.brake || 0;
+    const turnLeft  = (mask & LIGHT_TURN_LEFT)  || (mask & LIGHT_HAZARD);
+    const turnRight = (mask & LIGHT_TURN_RIGHT) || (mask & LIGHT_HAZARD);
+    const lowBeam   = mask & LIGHT_LOW_BEAM;
+    const highBeam  = mask & LIGHT_HIGH_BEAM;
+    const reverse   = mask & LIGHT_REVERSE;
+
+    const blinkOn = Math.floor(simTime / 250) % 2 === 0;
+    const turnIntensity = blinkOn ? 1.5 : 0.0;
+
+    if (highBeam) {
+      lights.headLMat.emissive.setHex(COLOR_HEAD_HIGH);
+      lights.headRMat.emissive.setHex(COLOR_HEAD_HIGH);
+      lights.headLMat.emissiveIntensity = 2.0;
+      lights.headRMat.emissiveIntensity = 2.0;
+    } else if (lowBeam) {
+      lights.headLMat.emissive.setHex(COLOR_HEAD_LOW);
+      lights.headRMat.emissive.setHex(COLOR_HEAD_LOW);
+      lights.headLMat.emissiveIntensity = 1.2;
+      lights.headRMat.emissiveIntensity = 1.2;
+    } else {
+      lights.headLMat.emissiveIntensity = 0.0;
+      lights.headRMat.emissiveIntensity = 0.0;
+    }
+
+    const tailIntensity = brake > 0.05 ? 2.5 : 0.4;
+    lights.tailLMat.emissiveIntensity = tailIntensity;
+    lights.tailRMat.emissiveIntensity = tailIntensity;
+
+    lights.turnFLMat.emissiveIntensity = turnLeft  ? turnIntensity : 0.0;
+    lights.turnRLMat.emissiveIntensity = turnLeft  ? turnIntensity : 0.0;
+    lights.turnFRMat.emissiveIntensity = turnRight ? turnIntensity : 0.0;
+    lights.turnRRMat.emissiveIntensity = turnRight ? turnIntensity : 0.0;
+
+    lights.revMat.emissiveIntensity = reverse ? 1.5 : 0.0;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // 统一入口
+  // ═══════════════════════════════════════════════════════
+
+  function _createVehicle(ent) {
+    let entry;
+    // gltf 优先（ego 用 SU7，其他用 sedan/suv/truck）
+    if (_gltfReady) {
+      const gltfModel = _createGltfVehicle(ent);
+      if (gltfModel) {
+        scene.add(gltfModel);
+        entry = { group: gltfModel, wheels: [], lights: null, useGltf: true };
+      }
+    }
+    if (!entry) {
+      // fallback 程序化
+      entry = _createProceduralVehicle(ent);
+      scene.add(entry.group);
+    }
+
+    // 车底接触阴影（gltf + 程序化都加）
+    // 尺寸按车身长宽，沿用 utils.js 默认 opacity 0.75
+    const len = ent.length || 4.6;
+    const wid = ent.width || 2.0;
+    const shadow = _buildContactShadow(len * 1.05, wid * 1.15);
+    entry.group.add(shadow);  // 作为车的子节点，跟随位姿
+    entry.shadow = shadow;
+    return entry;
+  }
+
+  function _updateVehicle(entry, ent, simTime) {
+    if (entry.useGltf) {
+      _updateGltfVehicle(entry, ent, simTime);
+    } else {
+      _updateProceduralVehicle(entry, ent, simTime);
+    }
+    // shadow 是 group 子节点，position/rotation 自动跟随，无需手动同步
+  }
+
+  /** 主更新入口：diff 同步 entity 池 */
+  function update(store, simTime) {
+    // gltf 车辆模型异步加载：首帧建车时 _gltfReady 多半还是 false，ego 被建成
+    // 程序化 box。等 gltf 就绪后清空一次池，让所有车重建为 gltf（su7 等）。
+    // 一次性，之后不再重建，避免每帧抖动。
+    if (_gltfReady && !_upgradedToGltf) {
+      _upgradedToGltf = true;
+      clear();
+    }
+
+    const all = [];
+    if (store.ego) {
+      all.push({ id: 'ego', type: 'ego', ...store.ego });
+    }
+    if (store.entities) {
+      for (const e of store.entities) {
+        const t = e.type;
+        if (t === 'ego' || t === 'car' || t === 'suv' || t === 'truck') {
+          all.push(e);
+        }
+      }
+    }
+
+    // 删除消失的
+    const aliveIds = new Set(all.map(e => e.id));
+    for (const [id, entry] of pool.entries()) {
+      if (!aliveIds.has(id)) {
+        scene.remove(entry.group);
+        pool.delete(id);
+      }
+    }
+
+    // 创建/更新。
+    // 注意：gltf 模型异步加载，加载完成前用程序化 fallback。
+    //       加载完成后，已存在的程序化车不会自动升级为 gltf（避免抖动），
+    //       新创建的车才会用 gltf。场景刷新（hash 变）时 vehicleView 不重建，
+    //       所以如需强制升级 gltf，需要 clear() 重建。
+    for (const ent of all) {
+      let entry = pool.get(ent.id);
+      if (!entry) {
+        entry = _createVehicle(ent);
+        pool.set(ent.id, entry);
+      }
+      _updateVehicle(entry, ent, simTime);
+    }
+  }
+
+  /** 清空所有车辆（强制升级 gltf 时调） */
+  function clear() {
+    for (const [, entry] of pool) {
+      scene.remove(entry.group);
+    }
+    pool.clear();
+  }
+
+  function getVehicleCount() { return pool.size; }
+
+  return { update, clear, getVehicleCount };
+}

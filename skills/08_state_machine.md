@@ -111,9 +111,9 @@ demo 里的一次性示例）：
   状态机（`lane_rear_safe`/`lane_has_pedestrian_risk`）主动发起变道
   （日志标记为 `NOA_ROUTE`），从而实现"导航驱动的主动变道"而非仅有的
   "障碍物触发的被动超车"。
-- 默认 demo 场景 (`pedestrian_crossing.json`) 没有 `route` 字段，所以模式最高
+- 默认 demo 场景 (`infinite_straight.json`) 没有 `route` 字段，所以模式最高
   只能到 `NP`（NOA 的 guard 会一直拒绝），行为与升级前保持一致；
-  `scenarios/highway_noa_route.json` 提供了一个演示 NOA 主动变道的示例场景。
+  `scenarios/zhongkai_road_full.json` 提供了一个演示 NOA 主动变道的示例场景。
 
 ## API 速查
 

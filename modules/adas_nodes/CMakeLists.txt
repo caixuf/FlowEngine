@@ -151,6 +151,7 @@ add_library(flowsim_node SHARED
     flowsim/collision.cpp
     flowsim/scene_events.cpp
     flowsim/scene_pub.cpp
+    flowsim/actor/VehicleActor.cpp
     flowsim/route.cpp
 )
 target_compile_definitions(flowsim_node PRIVATE FLOWCORO_INTEGRATION)

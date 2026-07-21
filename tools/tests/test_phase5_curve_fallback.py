@@ -12,7 +12,7 @@ or the C fallback) is caught immediately.
 
 The test only verifies the *steering sign and magnitude* on a few
 representative curve positions — not the closed-loop dynamics, which
-remain covered by ``scenarios/curve_road.json`` regression runs.
+remain covered by ``scenarios/zhongkai_road_full.json`` regression runs.
 """
 from __future__ import annotations
 

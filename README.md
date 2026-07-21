@@ -141,7 +141,7 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
 
 ## Pipeline
 
-默认配置（`config/pipeline.json`）启动 **11 个插件节点**，默认场景为弯道巡航（`scenarios/curve_road.json`）：
+默认配置（`config/pipeline.json`）启动 **11 个插件节点**，默认场景为中凯路全场景（`scenarios/zhongkai_road_full.json`）：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|

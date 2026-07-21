@@ -24,6 +24,21 @@ FlowEngine 的学习闭环把 demo pipeline 里的 teacher 行为采成 JSONL，
 | `/tmp/flow_topology.json` | demo runtime 状态，sidecar 从这里读 shadow inference 输入 |
 | `/tmp/flow_torch_inference.json` | PyTorch sidecar 输出 |
 
+## Canonical 入口（其他脚本禁止并存）
+
+| 用途 | canonical 路径 | 替代关系 |
+|------|----------------|----------|
+| 一站式训练（采+训） | `tools/train_demo_model.py` | 顶层入口，可调度 train_e2e/ 下的 backend |
+| Tiny-MLP 训练 | `tools/train_e2e/train.py` | 唯一 tiny-MLP 训练入口 |
+| PyTorch artifact | `tools/train_e2e/torch_train.py` | 唯一 PyTorch artifact 训练入口 |
+| 时序模型 | `tools/train_e2e/temporal_train.py` | 唯一时序模型训练入口 |
+| Sidecar 入口 | `tools/train_e2e/{tiny_sidecar,torch_sidecar}.py` | 唯一旁路推理入口 |
+| C 端推理 | `modules/adas_nodes/inference_node.cpp` | C runtime 推理，**唯一**实现 |
+
+> 任何新训练入口必须在 `tools/train_e2e/` 或顶层 `tools/train_demo_model.py`。
+> ❌ `tools/train/train.py`（sklearn 旧实现）已 deprecated：被 `tools/train_e2e/train.py` 取代
+>   详见 [CLAUDE.md 重构铁律](../../CLAUDE.md)「重构/替代 → 同一 commit 删旧」
+
 ## 一键训练
 
 ```bash

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# @deprecated superseded-by=tools/train_e2e/train.py remove-by=2026-08-21
 """
 train.py — 车端学习闭环 · Stage 1: 离线训练桥接
 

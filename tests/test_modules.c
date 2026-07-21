@@ -902,47 +902,78 @@ static void test_scenario_load_null(void) {
     PASS();
 }
 
-/* Helper: construct path relative to repo root (CWD during test run).
- * `filename` must be a plain basename (no path separators or traversal). */
-static void make_scenario_path(char* buf, size_t bufsz, const char* filename) {
-    /* CMake sets the working directory to the build directory; the scenario
-     * files are at <repo>/scenarios/.  Use the compile-time PROJECT_SOURCE_DIR
-     * macro when available, otherwise fall back to a relative path. */
-#ifdef PROJECT_SOURCE_DIR
-    snprintf(buf, bufsz, "%s/scenarios/%s", PROJECT_SOURCE_DIR, filename);
-#else
-    snprintf(buf, bufsz, "scenarios/%s", filename);
-#endif
+/* ── Scenario Loader 测试夹具 ──────────────────────────────
+ * 单元测试不应依赖 scenarios/ 目录的具体场景文件（那是集成测试的事）。
+ * 这里用内嵌 JSON 字符串写到 /tmp 临时文件，测 scenario_loader 的解析能力。
+ * 场景回归由 tools/scenario_regression.py + scenarios/suite.json 负责。
+ */
+
+static const char* TEST_SCENARIO_BASIC =
+    "{\n"
+    "  \"name\": \"test_basic\",\n"
+    "  \"description\": \"unit test fixture\",\n"
+    "  \"random_seed\": 42,\n"
+    "  \"duration_s\": 60.0,\n"
+    "  \"ego\": {\"x\": 0.0, \"y\": -1.75, \"heading\": 0.0, \"init_speed\": 5.0},\n"
+    "  \"actors\": [\n"
+    "    {\"id\": 0, \"type\": \"car\", \"x\": 35.0, \"y\": -1.75, \"vx\": 7.0, \"vy\": 0.0, \"len\": 4.6, \"wid\": 2.0},\n"
+    "    {\"id\": 1, \"type\": \"pedestrian\", \"x\": 50.0, \"y\": -3.0, \"vx\": 0.0, \"vy\": 1.0, \"len\": 0.5, \"wid\": 0.5}\n"
+    "  ],\n"
+    "  \"pass_criteria\": {\"no_collision\": true, \"max_duration_s\": 60.0, \"min_avg_speed_mps\": 5.0}\n"
+    "}\n";
+
+static const char* TEST_SCENARIO_ROUTE =
+    "{\n"
+    "  \"name\": \"test_route\",\n"
+    "  \"random_seed\": 11,\n"
+    "  \"ego\": {\"x\": 0.0, \"y\": -1.75, \"init_speed\": 12.0},\n"
+    "  \"actors\": [],\n"
+    "  \"route\": [\n"
+    "    {\"trigger_x\": 60.0, \"target_lane\": 1,  \"label\": \"lane_change_right\"},\n"
+    "    {\"trigger_x\": 120.0, \"target_lane\": -1, \"label\": \"return_left\"}\n"
+    "  ],\n"
+    "  \"pass_criteria\": {\"no_collision\": true}\n"
+    "}\n";
+
+/* 把 JSON 字符串写到 /tmp 临时文件，返回路径（静态缓冲区，调用者立即使用）。
+ * 失败时返回 NULL。文件由调用者负责删除。 */
+static const char* _write_fixture(const char* tag, const char* json) {
+    static char path[256];
+    snprintf(path, sizeof(path), "/tmp/flowengine_test_%s.json", tag);
+    FILE* fp = fopen(path, "w");
+    if (!fp) return NULL;
+    fputs(json, fp);
+    fclose(fp);
+    return path;
 }
 
-static void test_scenario_load_pedestrian_crossing(void) {
-    char path[512];
-    make_scenario_path(path, sizeof(path), "pedestrian_crossing.json");
+static void test_scenario_load_basic(void) {
+    const char* path = _write_fixture("basic", TEST_SCENARIO_BASIC);
+    ASSERT(path != NULL, "fixture write failed");
 
-    TEST("scenario_load pedestrian_crossing.json succeeds");
+    TEST("scenario_load fixture (basic) succeeds");
     ScenarioConfig* sc = scenario_load(path);
-    ASSERT(sc != NULL, "scenario_load should succeed for pedestrian_crossing.json");
+    ASSERT(sc != NULL, "scenario_load should succeed for basic fixture");
 
     TEST("scenario name matches");
-    ASSERT(strcmp(sc->name, "pedestrian_crossing") == 0,
+    ASSERT(strcmp(sc->name, "test_basic") == 0,
            "name mismatch: got '%s'", sc->name);
 
     TEST("scenario random_seed is 42");
     ASSERT(sc->random_seed == 42u, "random_seed should be 42 (got %u)", sc->random_seed);
 
-    TEST("scenario actor_count is 4");
-    ASSERT_EQ(sc->actor_count, 4, "actor_count wrong");
+    TEST("scenario actor_count is 2");
+    ASSERT_EQ(sc->actor_count, 2, "actor_count wrong");
 
-    TEST("scenario actor[0] is car at s=35");
+    TEST("scenario actor[0] is car at x=35");
     ASSERT(strcmp(sc->actors[0].type, "car") == 0,
            "actor[0] type should be 'car' (got '%s')", sc->actors[0].type);
-    /* 场景迁移到新格式后 x/y 改为 s/l（segment_id 坐标系），值不变 */
-    ASSERT(fabs(sc->actors[0].s - 35.0) < 0.01,
-           "actor[0].s should be 35.0 (got %.2f)", sc->actors[0].s);
+    ASSERT(fabs(sc->actors[0].x - 35.0) < 0.01,
+           "actor[0].x should be 35.0 (got %.2f)", sc->actors[0].x);
 
-    TEST("scenario actor[2] is pedestrian");
-    ASSERT(strcmp(sc->actors[2].type, "pedestrian") == 0,
-           "actor[2] type should be 'pedestrian' (got '%s')", sc->actors[2].type);
+    TEST("scenario actor[1] is pedestrian");
+    ASSERT(strcmp(sc->actors[1].type, "pedestrian") == 0,
+           "actor[1] type should be 'pedestrian' (got '%s')", sc->actors[1].type);
 
     TEST("scenario ego initial state");
     ASSERT(fabs(sc->ego.y - (-1.75)) < 0.01,
@@ -954,71 +985,46 @@ static void test_scenario_load_pedestrian_crossing(void) {
     ASSERT(sc->criteria.no_collision, "no_collision should be true");
 
     scenario_free(sc);
+    remove(path);
     PASS();
 }
 
-static void test_scenario_load_highway_overtake(void) {
-    char path[512];
-    make_scenario_path(path, sizeof(path), "highway_overtake.json");
+static void test_scenario_load_with_route(void) {
+    const char* path = _write_fixture("route", TEST_SCENARIO_ROUTE);
+    ASSERT(path != NULL, "fixture write failed");
 
-    TEST("scenario_load highway_overtake.json succeeds");
+    TEST("scenario_load fixture (route) succeeds");
     ScenarioConfig* sc = scenario_load(path);
-    ASSERT(sc != NULL, "scenario_load should succeed for highway_overtake.json");
+    ASSERT(sc != NULL, "scenario_load should succeed for route fixture");
 
-    TEST("scenario highway_overtake name matches");
-    ASSERT(strcmp(sc->name, "highway_overtake") == 0,
-           "name mismatch: got '%s'", sc->name);
-
-    TEST("scenario highway_overtake has actors");
-    ASSERT(sc->actor_count > 0, "actor_count should be > 0 (got %d)", sc->actor_count);
-
-    TEST("scenario highway_overtake has no route (backward compatible)");
-    ASSERT(sc->route_count == 0, "route_count should default to 0 (got %d)", sc->route_count);
-
-    scenario_free(sc);
-    PASS();
-}
-
-static void test_scenario_load_noa_route(void) {
-    char path[512];
-    make_scenario_path(path, sizeof(path), "highway_noa_route.json");
-
-    TEST("scenario_load highway_noa_route.json succeeds");
-    ScenarioConfig* sc = scenario_load(path);
-    ASSERT(sc != NULL, "scenario_load should succeed for highway_noa_route.json");
-
-    TEST("scenario noa_route has 2 route steps");
+    TEST("scenario route fixture has 2 route steps");
     ASSERT_EQ(sc->route_count, 2, "route_count wrong");
 
-    TEST("scenario noa_route step[0] trigger_x/target_lane");
+    TEST("scenario route step[0] trigger_x/target_lane");
     ASSERT(sc->route[0].trigger_x == 60.0, "trigger_x mismatch (got %.1f)", sc->route[0].trigger_x);
     ASSERT_EQ(sc->route[0].target_lane, 1, "target_lane mismatch");
 
-    TEST("scenario noa_route step[1] returns to origin lane");
-    ASSERT_EQ(sc->route[1].target_lane, 0, "target_lane mismatch (new convention: 0=leftmost idx)");
+    TEST("scenario route step[1] returns to origin lane");
+    ASSERT_EQ(sc->route[1].target_lane, -1, "target_lane mismatch");
 
     scenario_free(sc);
+    remove(path);
     PASS();
 }
 
 static void test_scenario_to_json(void) {
-    char path[512];
-    make_scenario_path(path, sizeof(path), "pedestrian_crossing.json");
+    const char* path = _write_fixture("tojson", TEST_SCENARIO_BASIC);
+    ASSERT(path != NULL, "fixture write failed");
 
     ScenarioConfig* sc = scenario_load(path);
-    if (!sc) {
-        /* If file is not accessible from the test working dir, skip gracefully */
-        TEST("scenario_to_json (skip: file not found)");
-        PASS();
-        return;
-    }
+    ASSERT(sc != NULL, "scenario_load should succeed for to_json fixture");
 
     TEST("scenario_to_json returns non-NULL");
     char* json = scenario_to_json(sc);
     ASSERT(json != NULL, "scenario_to_json should return non-NULL");
 
     TEST("scenario_to_json contains name field");
-    ASSERT(strstr(json, "pedestrian_crossing") != NULL,
+    ASSERT(strstr(json, "test_basic") != NULL,
            "JSON output should contain scenario name");
 
     TEST("scenario_to_json contains actors array");
@@ -1027,6 +1033,7 @@ static void test_scenario_to_json(void) {
 
     free(json);
     scenario_free(sc);
+    remove(path);
     PASS();
 }
 
@@ -1226,9 +1233,8 @@ int main(void) {
     /* ── Scenario Loader ────────────────────── */
     printf("\n═══ Scenario Loader ═══\n");
     test_scenario_load_null();
-    test_scenario_load_pedestrian_crossing();
-    test_scenario_load_highway_overtake();
-    test_scenario_load_noa_route();
+    test_scenario_load_basic();
+    test_scenario_load_with_route();
     test_scenario_to_json();
     test_scenario_free_null();
 

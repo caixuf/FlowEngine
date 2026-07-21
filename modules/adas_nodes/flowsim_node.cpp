@@ -39,6 +39,7 @@
 #include "flowsim/collision.h"
 #include "flowsim/scene_events.h"
 #include "flowsim/scene_pub.h"
+#include "flowsim/actor/VehicleActor.h"   /* 车灯信号派生（Phase 1 重构）*/
 #include "flowsim/route.h"
 
 #include <stdlib.h>
@@ -1095,6 +1096,12 @@ protected:
             double sim_time_s = (double)(clock_now_us() - g.sim_start_us) / 1e6;
             flowsim::tick_traffic_lights(g.pool, sim_time_s);
             flowsim::tick_etc_gates(g.pool, ego, FLOWSIM_DT_SEC);
+
+            /* ── Step 5.5: 车灯信号派生 ──
+             * 从 ego 的 steer/brake/speed 和 NPC 的 ai_state 派生车灯位掩码，
+             * 写入 Entity.lights。scene_pub 序列化为 JSON "lights" 字段传给前端。
+             * 在 scene_pub 之前调用，确保当前帧 lights 已更新。 */
+            flowsim::VehicleActor::update_all_lights(g.pool, sim_time_s);
 
             /* ── Step 6: 推进逻辑时钟 ── */
             clock_advance_us(FLOWSIM_DT_US);

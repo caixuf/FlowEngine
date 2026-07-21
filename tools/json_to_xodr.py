@@ -26,8 +26,8 @@ FlowSim v2 用 esmini RoadManager 处理道路网络，esmini 吃 OpenDRIVE (.xo
 向后兼容：无 road/road_network 字段时输出单条 1000m 直道（ego 默认场景）。
 
 用法:
-  python3 tools/json_to_xodr.py scenarios/highway_exit.json -o /tmp/highway_exit.xodr
-  python3 tools/json_to_xodr.py scenarios/city_to_highway.json   # 输出到 stdout
+  python3 tools/json_to_xodr.py scenarios/zhongkai_road_full.json -o /tmp/zhongkai.xodr
+  python3 tools/json_to_xodr.py scenarios/infinite_straight.json   # 输出到 stdout
 """
 from __future__ import annotations
 

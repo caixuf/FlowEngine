@@ -1,0 +1,26 @@
+{
+  "name": "straight_road",
+  "description": "无 NPC 单 ego 直路：200m 高架双向 4 车道（Y=7）+ 平行国道（Y=0.4, Z=34）。ego 在高架左车道匀速行驶。",
+  "random_seed": 137,
+  "duration_s": 0,
+  "ego": {
+    "x": 5.0,
+    "y": -1.0,
+    "heading": 0.0,
+    "init_speed": 10.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "viaduct_highway",
+        "length_m": 1000,
+        "lanes": 4,
+        "lane_width": 2.0,
+        "speed_limit": 22.0
+      }
+    ]
+  },
+  "actors": []
+}

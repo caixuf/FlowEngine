@@ -176,7 +176,7 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
             }
             cJSON_AddItemToObject(edge, "nodes", nodes);
 
-            cJSON_AddNumberToObject(edge, "lanes", (double)info.drivable_lanes);
+            cJSON_AddNumberToObject(edge, "lanes", (double)(info.drivable_lanes / 2));
             /* 从 esmini 查询该 road 第一条行驶车道的实际宽度；
              * 查询失败或为 0 时退回 cfg.lane_width（默认 3.5m）。 */
             {
@@ -232,6 +232,9 @@ cJSON* build_ego_json(const Entity& e) {
     /* vx/vy 用于前端速度向量可视化（弯道时 vy≠0） */
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
+    /* 车灯位掩码（vehicle_lights.h）：bit0=左转 bit1=右转 bit2=双闪
+     * bit3=远光 bit4=近光 bit6=倒车 bit7=雾灯。刹车灯由 brake 字段驱动。 */
+    cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
     return j;
 }
 
@@ -248,6 +251,8 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddStringToObject(j, "ai", ai_state_str(e.ai_state));
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
+    /* 车灯位掩码（同 ego）：CutIn→转向灯，Yield/Stop→双闪，Cruise→随 steer */
+    cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
     return j;
 }
 

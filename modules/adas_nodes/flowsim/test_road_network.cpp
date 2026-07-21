@@ -2,7 +2,7 @@
 // 验证：加载、道路查询、frenet↔world 转换、限速、车道宽度。
 //
 // 用法：./test_road_network <scene.xodr>
-// 期望场景：highway_exit.xodr（含 2 段道路，road0 直道 200m，road1 弯道 120m）
+// 期望场景：zhongkai_road_full.xodr（含多段道路，含直道+弯道+路口）
 
 #include "flowsim/road_network.h"
 

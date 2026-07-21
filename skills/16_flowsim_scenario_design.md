@@ -121,7 +121,7 @@ road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
 
 ## 已知良好场景参考
 
-- `scenarios/city_to_highway_full.json` — 6 edge + 2 junction + 24 NPC，已通过 evaluator
+- `scenarios/zhongkai_road_full.json` — 多 edge + junction + NPC，已通过 evaluator
   - 关键修复：NPC 17 从 segment 10 移到 segment 5；NPC 19 的 s 从 -30 改为 150
   - NPC 1-6 在 segment 0 的 l=-5.25 / -8.75（避开 ego 车道）
   - NPC 14 在 segment 2 的 l=1.75（右车道，不挡 ego）

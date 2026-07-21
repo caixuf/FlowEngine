@@ -7,7 +7,7 @@
  *
  * 场景文件格式（JSON）：
  * {
- *   "name": "pedestrian_crossing",
+ *   "name": "infinite_straight",
  *   "description": "...",
  *   "random_seed": 42,
  *   "duration_s": 60.0,

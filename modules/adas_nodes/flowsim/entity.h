@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "road_position.h"
+#include "vehicle_lights.h"
 
 namespace flowsim {
 
@@ -68,6 +69,7 @@ struct Entity {
     double target_vx{0};           /**< AI 目标纵向速度 */
     double steer{0};               /**< 当前方向盘转角 (rad) */
     double throttle{0}, brake{0};  /**< 油门/刹车 [0,1] */
+    VehicleLights lights;          /**< 车灯状态（位掩码），由 control/actor 写入，scene_pub 发布 */
 
     /* ── Vehicle 参数（Car/SUV/Truck）── */
     double length{4.6}, width{2.0};

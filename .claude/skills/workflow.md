@@ -85,15 +85,33 @@ cd build && ctest -LE "benchmark|manual|stability|integration" --output-on-failu
 - [ ] `memory/` 是否需要记录关键决策？
 - [ ] git commit message 是否描述了"做了什么、为什么、影响范围"？
 
-## 七、提交（Commit）
+## 七、提交（Commit）— Refactor 类必含 `Removed:` 段
 
 ```bash
 git add -A
 git commit -m "<type>: <简短描述>
 
-<详细说明改了什么、为什么、怎么验证的>
+<详细说明改什么、为什么、怎么验证的>
+
+Removed:
+- <被物理删除的旧文件/函数>  (superseded-by <新实现>)
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
+
+**Removed: 段规则**：
+- 重构/替代类（commit type 含 `refactor` 或含 `v2`/`v3`/`rewrite`/`replace`）**必填**：
+  - 至少一行 `Removed: - <path> (superseded-by <new>)`
+  - 纯新增无替代 → 必须显式写 `Removed: none (纯新增, 无替代)` 并给理由
+  - 留空 → review 打回
+- 纯 `feat` / `fix` / `chore` / `docs` / `test` → 段可省略
+
+**review 检查**：
+```bash
+git log --format=%B -1 HEAD | grep -E '^Removed:|^Co-Authored' | head -1
+```
+refactor 类若只有 `Co-Authored` 而无 `Removed` → 打回。
+
+**为什么是必填**：删除之所以没发生，是因为"加法比减法安全"的默认心理。让 `Removed:` 段从可选美德变成 commit 必填字段，空着要解释——见 CLAUDE.md "重构/替代 → 同一 commit 删旧" 硬规范。
 
 Commit type: `feat` / `fix` / `docs` / `refactor` / `test` / `chore`

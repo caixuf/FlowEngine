@@ -2,7 +2,7 @@
 //
 // 验证 libflowsim_node.so 能替换 libsim_world.so 跑通旧场景：
 //   1. dlopen 加载 + node_get_plugin ABI 校验
-//   2. node_init 用真实场景文件初始化（pedestrian_crossing.json）
+//   2. node_init 用真实场景文件初始化
 //   3. node_start 启动 20Hz 主循环
 //   4. 订阅 vehicle/state + road/geometry + sim/tick + scene/frame
 //   5. 等 ~500ms（~10 个 tick）收集消息
@@ -13,8 +13,9 @@
 //      - scene/frame: t_us/cycle/road_network/entities (Phase 2.2 新增)
 //   7. node_stop + node_cleanup 干净退出
 //
-// 用法：./test_flowsim_regression [scenario.json]
-// 默认场景：scenarios/pedestrian_crossing.json
+// 用法：./test_flowsim_regression [scenario.json] [libflowsim_node.so]
+// 场景路径优先级：命令行参数 > 环境变量 FLOWENGINE_SCENARIO > 报错退出
+// （不硬编码场景名，避免与 scenarios/ 目录耦合）
 
 #include "node_plugin.h"
 #include "message_bus.h"
@@ -195,9 +196,16 @@ static void validate_scene_frame(const CapturedMsg& m) {
 
 int main(int argc, char** argv) {
     const char* scenario = argc > 1 ? argv[1]
-                          : "scenarios/pedestrian_crossing.json";
+                          : getenv("FLOWENGINE_SCENARIO");
     const char* libpath  = argc > 2 ? argv[2]
                           : "/workspace/build/lib/libflowsim_node.so";
+    if (!scenario) {
+        std::printf("FAIL: scenario not specified.\n"
+                    "Usage: %s <scenario.json> [libflowsim_node.so]\n"
+                    "   or: export FLOWENGINE_SCENARIO=scenarios/xxx.json\n",
+                    argv[0]);
+        return 2;
+    }
 
     std::printf("=== flowsim regression test (Phase 2.3) ===\n");
     std::printf("library: %s\n", libpath);
