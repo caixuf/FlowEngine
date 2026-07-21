@@ -16,6 +16,8 @@ import { createConnectorView } from '../view/ConnectorView.js';
 import { createTrafficLightView } from '../view/TrafficLightView.js';
 import { createETCGateView } from '../view/ETCGateView.js';
 import { createViaductView } from '../view/ViaductView.js';
+import { createStreetlightView } from '../view/StreetlightView.js';
+import { createBarrierView } from '../view/BarrierView.js';
 import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
 
 /* ── 数据校验辅助 ──────────────────────────────────────────────
@@ -36,6 +38,8 @@ export function createSceneDirector(scene) {
   const trafficLightView = createTrafficLightView(scene);
   const etcGateView = createETCGateView(scene);
   const viaductView = createViaductView(scene);
+  const streetlightView = createStreetlightView(scene);
+  const barrierView = createBarrierView(scene);
   let lastRoadHash = '';
 
   /* 已 warn 过的字段 key 集合，避免 20Hz × N 字段刷屏。
@@ -158,10 +162,18 @@ export function createSceneDirector(scene) {
           groundView.build(20000);
           viaductView.build({ laneCount, laneWidth, length: actualLength, withEnvironment: true });
           roadView.build({ edges: [] });
+          /* Step 4：高架场景路灯/护栏由 ViaductView 内置，StreetlightView /
+           * BarrierView 在普通 edge 上不放置（内部跳过 viaduct_highway），
+           * 此处显式 clear 一遍保证切换场景时不残留。 */
+          streetlightView.build({ edges: [] });
+          barrierView.build({ edges: [] });
           store.isViaduct = true;
         } else {
           roadView.build(rn);
           groundView.build(20000);
+          /* Step 4：普通道路场景，路灯 + 护栏从 roadNetwork 自动布局。 */
+          streetlightView.build(rn);
+          barrierView.build(rn);
           store.isViaduct = false;
         }
 
@@ -274,8 +286,10 @@ export function createSceneDirector(scene) {
   function getTrafficLightView() { return trafficLightView; }
   function getETCGateView() { return etcGateView; }
   function getViaductView() { return viaductView; }
+  function getStreetlightView() { return streetlightView; }
+  function getBarrierView() { return barrierView; }
 
   return { init, update, tickAnimation, getStore, getRoadView, getGroundView, getVehicleView,
            getConnectorView, getTrafficLightView, getETCGateView, getViaductView,
-           resetWarnings };
+           getStreetlightView, getBarrierView, resetWarnings };
 }
