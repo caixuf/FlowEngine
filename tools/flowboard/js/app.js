@@ -411,6 +411,24 @@ function updateTopo(data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 场景切换
+// ═══════════════════════════════════════════════════════════════
+
+function switchSceneView(view) {
+  const scene3dEl = document.getElementById('scene3d');
+  const scene2dEl = document.getElementById('scene2d');
+
+  if (view === '3d') {
+    if (scene3dEl) scene3dEl.style.display = '';
+    if (scene2dEl) scene2dEl.style.display = 'none';
+  } else if (view === '2d') {
+    if (scene3dEl) scene3dEl.style.display = 'none';
+    if (scene2dEl) scene2dEl.style.display = '';
+    init2DFallback();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // 连接状态
 // ═══════════════════════════════════════════════════════════════
 
@@ -442,6 +460,12 @@ function doSimulate() {
       driver_mode:"ACC",
       vehicle:{speed:28.5,target_speed:33.0,throttle:0.92,brake:0,x:65.0,error:4.5},
       scene: {
+        road_network: {
+          edges: [
+            { id: 0, type: "highway", name: "highway", length_m: 2000, lanes: 4, lane_width: 3.5,
+              speed_limit: 33.0, nodes: [[0, 0, 0], [2000, 0, 0]] }
+          ]
+        },
         ego: { x: 65.0, y: 0, heading: 0.0, speed: 28.5, steer: 0.02, brake: 0, throttle: 0.92 },
         entities: [
           { id: 1, type: 'car',   x: 45.0, y:  3.5, heading: 0.0, speed: 25.0, length: 4.6, width: 2.0 },

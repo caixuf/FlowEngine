@@ -1,328 +1,231 @@
-/**
- * monitor_server.c — 内嵌 HTTP 监控服务器 (cyber_monitor 等价物)
+/* ── 精简 HTTP 服务器 + SSE 推送 ───────────────────────────────
+ * 只依赖标准库和 cjson。
+ * 实现：
+ *   GET /            → 仪表盘 HTML
+ *   GET /api/topology → 完整 bus + 拓扑 JSON
+ *   GET /api/topics   → 每个 topic 的 QoS 统计
+ *   GET /api/stream   → SSE 实时推送（bus+topology 增量）
  *
- * 直接在 FlowEngine 进程内启动一个微型 HTTP 服务器，
- * 实时读取 message_bus 统计、discovery 拓扑、per-topic QoS 数据，
- * 通过 SSE (Server-Sent Events) 推送到浏览器。
- *
- * 无需外部 Python 进程，无需 JSON 文件中转。
- *
- * 用法:
- *   MonitorServer* ms = monitor_server_create(bus, discovery, 8800);
- *   monitor_server_start(ms);
- *   // 浏览器打开 http://localhost:8800
- *   // 实时看到: 拓扑图 + 帧监控 + 时序图 + QoS 表
- *   monitor_server_stop(ms);
+ * 架构：
+ *   - 单线程 accept + 每连接一个线程，零第三方依赖
+ *   - 统计订阅：Subscriber 函数对象（stats_bridge_fn）→ 写入 local_stats
+ *     ── 不额外创建线程，在 flowmond 主线程 or 独立线程中轮询
+ *   - 数据流：
+ *     StatsBridge(IPC) → local_stats → build_sse_json() → SSE client
+ *   - 仪表盘：DashboardBridge(IPC) → dashboard_file_watcher → inject_dashboard_json
+ *     → SSE 推送时优先用注入的 JSON（source="live", stale=false）
+ *     → 无注入时降级到 build_sse_json()（source="local", stale=true）
  */
 
-#include "message_bus.h"
-#include "discovery.h"
-#include "serializer.h"
-#include "stats_bridge.h"
-#include "clock_service.h"
+#include "monitor_server.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
-#include <sys/time.h>
+#include <sys/stat.h>
 #include <errno.h>
-#include <signal.h>
-#include <sys/wait.h>
+#include <time.h>
 
-#include "health.h"
-#include "auto_tuner.h"
-#include "clock_service.h"
-#include <cjson/cJSON.h>
+/* ── 常量 ───────────────────────────────────────────────── */
+#define MONITOR_HTTP_BUF_SIZE  65536
+#define MONITOR_MAX_CLIENTS    8
+#define MONITOR_SHUTDOWN_WAIT_ITERS 200
 
-#define MONITOR_MAX_CLIENTS       8
-#define MONITOR_HTTP_BUF_SIZE     65536
-#define MONITOR_MAX_REMOTE_SRCS   8
-#define DASHBOARD_CACHE_STALE_SEC 3   /* seconds before cached JSON is flagged stale */
-#define DASHBOARD_CACHE_DROP_SEC  30  /* seconds before cached JSON is dropped entirely */
+/* ── 工具函数 ───────────────────────────────────────────── */
 
-/* ── Remote source entry (stats from another process via IPC) */
-typedef struct {
-    char        source_name[64];
-    StatsPacket pkt;
-    bool        valid;
-} RemoteSource;
-typedef struct {
-    MessageBus*       bus;
-    DiscoveryManager* discovery;
-    int               port;
-    char              bind_addr[64];   /**< Listen address (default 127.0.0.1) */
-    int               listen_fd;
-    volatile bool     running;
-    pthread_t         server_thread;
-    char              html_path[512];  /**< Path to flowboard/index.html (empty = embedded) */
-    /* Remote stats injected via IPC bridge */
-    RemoteSource      remote[MONITOR_MAX_REMOTE_SRCS];
-    int               remote_count;
-    pthread_mutex_t   remote_mutex;
-    /* Cached full dashboard JSON from monitor_node via IPC */
-    char*             cached_json;
-    size_t            cached_json_len;
-    uint64_t          cached_json_time_us;
-    uint64_t          cached_json_version;  /**< bumped on every fresh dashboard payload */
-    pthread_mutex_t   cached_mutex;
-    pthread_cond_t    cached_cond;           /**< signaled when cached_json_version changes */
-    /* Count of in-flight per-connection handler threads (e.g. SSE streams).
-     * Used so shutdown can wait for them to drain before the struct is freed. */
-    volatile int      active_clients;
-    pthread_mutex_t   client_mutex;
-    /* Timestamps for IPC data freshness (used by reconnect logic in flowmond) */
-    uint64_t          last_dashboard_data_us;
-    uint64_t          last_stats_data_us;
-    pthread_mutex_t   freshness_mutex;
-} MonitorServer;
-
-/* ── File read helper ────────────────────────────────────── */
-
-static char* read_file(const char* path, size_t* out_len) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len <= 0) { fclose(f); return NULL; }
-    char* buf = (char*)malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return NULL; }
-    size_t n = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[n] = '\0';
-    if (out_len) *out_len = n;
-    return buf;
+static uint64_t clock_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
 }
 
-/* ── SSE 数据生成 (flowboard 兼容格式) ────────────────── */
+static int safe_write(int fd, const char* buf, size_t len) {
+    size_t written = 0;
+    while (written < len) {
+        ssize_t n = write(fd, buf + written, len - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        written += (size_t)n;
+    }
+    return 0;
+}
+
+static const char* get_mime_type(const char* path) {
+    const char* ext = strrchr(path, '.');
+    if (!ext) return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0) return "text/html; charset=utf-8";
+    if (strcmp(ext, ".css") == 0)  return "text/css; charset=utf-8";
+    if (strcmp(ext, ".js") == 0)   return "application/javascript; charset=utf-8";
+    if (strcmp(ext, ".json") == 0) return "application/json; charset=utf-8";
+    if (strcmp(ext, ".svg") == 0)  return "image/svg+xml";
+    if (strcmp(ext, ".png") == 0)  return "image/png";
+    if (strcmp(ext, ".ico") == 0)  return "image/x-icon";
+    if (strcmp(ext, ".woff2") == 0) return "font/woff2";
+    return "application/octet-stream";
+}
+
+/* ── SSE 构造 ───────────────────────────────────────────── */
 
 /**
- * Build dashboard JSON from cached data (from monitor_node).
- * Wraps the cached JSON with source/stale/age_sec fields.
- * @return Length written to buf, or 0 if no cache available.
+ * 从本地 stats 构造 SSE 数据（bus+topology）
+ * 格式：JSON 对象，包含 nodes[], metrics{}, endpoints[]
+ * 当有缓存的仪表盘 JSON 时，优先使用注入的 JSON
  */
-static int build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t sz) {
-    if (!ms || !buf || sz == 0) return 0;
-
+static void build_sse_json(MonitorServer* ms, char* buf, size_t size) {
+    /* 优先使用缓存的仪表盘 JSON */
     pthread_mutex_lock(&ms->cached_mutex);
-    int ret = 0;
-    if (ms->cached_json && ms->cached_json_len > 1) {
-        uint64_t now_us = clock_now_us();
-        uint64_t age_us = (now_us > ms->cached_json_time_us)
-                          ? now_us - ms->cached_json_time_us : 0;
-        double age_sec = (double)age_us / 1000000.0;
-        bool stale = (age_sec > (double)DASHBOARD_CACHE_STALE_SEC);
-
-        /* Only drop the cache entirely once it is *very* old (pipeline truly
-         * stopped). A brief IPC hiccup (a few late dashboard packets) used to
-         * fall straight through to the local-bus data, which — in a standalone
-         * flowmond process — is essentially empty. The node list would collapse
-         * and re-expand on the next fresh packet, producing the visible
-         * "flicker" in multi-process mode. Instead we keep serving the last
-         * known-good frame, flagged stale, so the topology stays stable and the
-         * front-end shows a "● stale" badge rather than blanking out. */
-        if (age_sec > (double)DASHBOARD_CACHE_DROP_SEC) {
-            pthread_mutex_unlock(&ms->cached_mutex);
-            return 0;
+    if (ms->cached_json && ms->cached_json[0] != '\0') {
+        size_t n = strlen(ms->cached_json);
+        if (n < size - 1) {
+            memcpy(buf, ms->cached_json, n + 1);
+        } else {
+            buf[0] = '\0';
         }
-
-        /* Inject source/stale/age_sec right after the opening '{' */
-        const char* src = stale ? "stale" : "live";
-        int off = snprintf(buf, sz,
-            "{\"source\":\"%s\",\"stale\":%s,\"age_sec\":%.1f,",
-            src, stale ? "true" : "false", age_sec);
-
-        size_t remain = sz - (size_t)off;
-        if (off > 0 && remain > 1) {
-            /* Skip the leading '{' of cached JSON */
-            const char* body = ms->cached_json + 1;
-            size_t body_len = ms->cached_json_len - 1;
-            size_t copy = body_len < remain - 1 ? body_len : remain - 1;
-            memcpy(buf + off, body, copy);
-            off += (int)copy;
-            buf[off] = '\0';
-            ret = off;
-        }
+        pthread_mutex_unlock(&ms->cached_mutex);
+        return;
     }
     pthread_mutex_unlock(&ms->cached_mutex);
-    return ret;
-}
 
-/**
- * Write a JSON-safe copy of src to dst (max dst_sz bytes).
- * Non-printable / control characters are replaced with '?'.
- */
-static int json_safe_str(char* dst, size_t dst_sz, const char* src) {
-    if (!dst || dst_sz == 0) return 0;
-    size_t j = 0;
-    for (const char* p = src; p && *p && j + 1 < dst_sz; p++) {
-        unsigned char c = (unsigned char)*p;
-        dst[j++] = (c >= 0x20 && c != '"' && c != '\\') ? (char)c : '?';
-    }
-    dst[j] = '\0';
-    return (int)j;
-}
+    /* 降级：从 local stats 构造 */
+    size_t used = 0;
+#define SSE_APPEND(fmt, ...) do { \
+    int _n = snprintf(buf + used, size - used, fmt, ##__VA_ARGS__); \
+    if (_n < 0 || (size_t)_n >= size - used) { buf[used] = '\0'; return; } \
+    used += (size_t)_n; \
+} while(0)
 
-static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
-    /* Only serve cached dashboard JSON when it's fresh.
-     * Stale cache means the pipeline stopped → fall through to local bus data. */
-    int cached_len = build_cached_dashboard_json(ms, buf, sz);
-    if (cached_len > 0) return;
+    SSE_APPEND("{\"self\":\"%s\",\"timestamp\":%lld.%06d,\"nodes\":[",
+               ms->self_name ? ms->self_name : "flowmond",
+               (long long)(ms->start_time_us / 1000000),
+               (int)(ms->start_time_us % 1000000));
 
-    /* Fallback: build from local bus + discovery */
-    MessageBus* bus = ms->bus;
-    DiscoveryManager* dm = ms->discovery;
-
-    uint64_t pub, del, drop;
-    message_bus_get_stats(bus, &pub, &del, &drop);
-
-    /* Local topic stats */
-    TopicStats tstats[32];
-    int nt = message_bus_get_all_topic_stats(bus, tstats, 32);
-
-    /* Compute avg latency from local topics */
-    uint64_t lat_total = 0, lat_count = 0;
-    for (int i = 0; i < nt; i++) {
-        if (tstats[i].deliver_count > 0) {
-            lat_total += tstats[i].total_latency_us;
-            lat_count += tstats[i].deliver_count;
+    /* 本地节点 */
+    pthread_mutex_lock(&ms->local_mutex);
+    int first = 1;
+    for (int i = 0; i < ms->local_node_count; i++) {
+        LocalNode* ln = &ms->local_nodes[i];
+        if (!ln->active) continue;
+        if (!first) SSE_APPEND(",");
+        first = 0;
+        SSE_APPEND("{\"name\":\"%s\",\"pid\":%d,\"alive\":true,\"caps\":%d,\"topics\":[",
+                   ln->name, ln->pid, ln->caps);
+        int tfirst = 1;
+        for (int j = 0; j < ln->topic_count; j++) {
+            if (!tfirst) SSE_APPEND(",");
+            tfirst = 0;
+            SSE_APPEND("{\"topic\":\"%s\",\"role\":\"%s\",\"caps\":%d}",
+                       ln->topics[j].topic, ln->topics[j].role, ln->topics[j].caps);
         }
+        SSE_APPEND("]}");
     }
 
-    /* Safe append helper */
-#define SSE_APPEND(fmt, ...) \
-    do { \
-        if (off >= 0 && (size_t)off < sz) \
-            off += snprintf(buf + off, sz - (size_t)off, fmt, ##__VA_ARGS__); \
-    } while (0)
-
-    char safe[128], safe2[128];
-    int off = snprintf(buf, sz,
-        "{\"self\":\"flowmond\",");
-
-    /* Nodes + endpoints from discovery topology */
-    const TopologyGraph* g = dm ? discovery_get_topology(dm) : NULL;
-    if (g && g->node_count > 0) {
-        SSE_APPEND("\"nodes\":[");
-        for (uint32_t ni = 0; ni < g->node_count; ni++) {
-            const NodeInfo* n = &g->nodes[ni];
-            json_safe_str(safe, sizeof(safe), n->name);
-            SSE_APPEND(
-                "%s{\"name\":\"%s\",\"pid\":%u,\"alive\":%s,\"topics\":[",
-                ni > 0 ? "," : "", safe, n->pid,
-                n->alive ? "true" : "false");
-            for (uint32_t tj = 0; tj < n->topic_count; tj++) {
-                json_safe_str(safe, sizeof(safe), n->topics[tj].topic);
-                SSE_APPEND(
-                    "%s{\"topic\":\"%s\",\"freq\":%.1f}",
-                    tj > 0 ? "," : "", safe,
-                    n->topics[tj].frequency_hz);
-            }
-            SSE_APPEND("]}");
-        }
-        SSE_APPEND("],");
-
-        /* endpoints */
-        SSE_APPEND("\"endpoints\":[");
-        int ep_count = 0;
-        for (uint32_t ni = 0; ni < g->node_count; ni++) {
-            const NodeInfo* n = &g->nodes[ni];
-            for (uint32_t tj = 0; tj < n->topic_count; tj++) {
-                const char* role = (n->topics[tj].capabilities & 0x01) ? "pub" : "sub";
-                json_safe_str(safe, sizeof(safe), n->name);
-                json_safe_str(safe2, sizeof(safe2), n->topics[tj].topic);
-                SSE_APPEND(
-                    "%s{\"node\":\"%s\",\"topic\":\"%s\","
-                    "\"role\":\"%s\",\"type_id\":\"0x00000000\",\"freq\":%.1f}",
-                    ep_count > 0 ? "," : "",
-                    safe, safe2, role,
-                    n->topics[tj].frequency_hz);
-                ep_count++;
-            }
-        }
-        SSE_APPEND("],");
-    } else {
-        SSE_APPEND("\"nodes\":[],\"endpoints\":[],");
-    }
-
-    /* metrics wrapper */
-    SSE_APPEND("\"metrics\":{");
-
-    /* bus */
-    SSE_APPEND("\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},",
-        (unsigned long)pub, (unsigned long)del, (unsigned long)drop);
-
-    /* transport / scheduler / latency (static/placeholder) */
-    SSE_APPEND("\"transport\":{\"local_pub\":%lu,\"remote_pub\":0},",
-        (unsigned long)pub);
-    uint64_t avg_latency = lat_count > 0 ? lat_total / lat_count : 0;
-    SSE_APPEND("\"scheduler\":{\"tasks\":0,\"mode\":\"CHOREO\"},"
-        "\"latency\":{\"avg_us\":%lu,\"p50_us\":0,\"p99_us\":0},",
-        (unsigned long)avg_latency);
-
-    /* topics (local + remote) */
-    SSE_APPEND("\"topics\":[");
-    int total = 0;
-    for (int i = 0; i < nt; i++) {
-        uint64_t lat = tstats[i].deliver_count > 0
-            ? tstats[i].total_latency_us / tstats[i].deliver_count : 0;
-        json_safe_str(safe, sizeof(safe), tstats[i].topic);
-        SSE_APPEND(
-            "%s{\"topic\":\"%s\",\"source\":\"local\","
-            "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-            "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,"
-            "\"freq\":%.1f,\"subs\":%u,"
-            "\"deadline_violations\":%lu,"
-            "\"qos_depth\":%u,\"qos_reliability\":\"%s\""
-            "}",
-            total > 0 ? "," : "", safe,
-            (unsigned long)tstats[i].publish_count,
-            (unsigned long)tstats[i].deliver_count,
-            (unsigned long)tstats[i].drop_count,
-            (unsigned long)lat,
-            (unsigned long)tstats[i].p50_latency_us,
-            (unsigned long)tstats[i].p99_latency_us,
-            tstats[i].frequency_hz,
-            tstats[i].subscriber_count,
-            (unsigned long)tstats[i].deadline_violations,
-            tstats[i].qos.depth,
-            tstats[i].qos.reliability == QOS_RELIABLE ? "reliable" : "best_effort");
-        total++;
-    }
-
-    /* Remote topic stats (from other processes via IPC bridge) */
+    /* 远程节点 */
     pthread_mutex_lock(&ms->remote_mutex);
-    for (int r = 0; r < ms->remote_count; r++) {
-        const RemoteSource* src = &ms->remote[r];
-        if (!src->valid) continue;
-        for (uint32_t i = 0; i < src->pkt.topic_count; i++) {
-            const RemoteTopicStat* t = &src->pkt.topics[i];
-            uint64_t lat = t->deliver_count > 0
-                ? t->total_latency_us / t->deliver_count : 0;
-            json_safe_str(safe, sizeof(safe), t->topic);
-            json_safe_str(safe2, sizeof(safe2), src->source_name);
-            SSE_APPEND(
-                "%s{\"topic\":\"%s\",\"source\":\"%s\","
-                "\"pub\":%lu,\"del\":%lu,\"drop\":%lu,"
-                "\"lat_us\":%lu,\"p50_us\":%lu,\"p99_us\":%lu,"
-                "\"freq\":%.1f,\"subs\":%u,"
-                "\"deadline_violations\":%lu}",
-                total > 0 ? "," : "", safe, safe2,
-                (unsigned long)t->publish_count,
-                (unsigned long)t->deliver_count,
-                (unsigned long)t->drop_count,
-                (unsigned long)lat,
-                (unsigned long)t->p50_latency_us,
-                (unsigned long)t->p99_latency_us,
-                t->frequency_hz,
-                t->subscriber_count,
-                (unsigned long)t->deadline_violations);
-            total++;
+    for (int i = 0; i < ms->remote_node_count; i++) {
+        RemoteNode* rn = &ms->remote_nodes[i];
+        if (!rn->active) continue;
+        if (!first) SSE_APPEND(",");
+        first = 0;
+        SSE_APPEND("{\"name\":\"%s\",\"pid\":%d,\"alive\":true,\"caps\":%d,\"topics\":[",
+                   rn->name, rn->pid, rn->caps);
+        int tfirst = 1;
+        for (int j = 0; j < rn->topic_count; j++) {
+            if (!tfirst) SSE_APPEND(",");
+            tfirst = 0;
+            SSE_APPEND("{\"topic\":\"%s\",\"role\":\"%s\",\"caps\":%d}",
+                       rn->topics[j].topic, rn->topics[j].role, rn->topics[j].caps);
+        }
+        SSE_APPEND("]}");
+    }
+
+    /* 关闭 nodes[] */
+    SSE_APPEND("],\"metrics\":{");
+
+    /* bus 统计 */
+    SSE_APPEND("\"bus\":{\"published\":%u,\"delivered\":%u,\"dropped\":%u},",
+               ms->local_stats.pub_total, ms->local_stats.del_total,
+               ms->local_stats.drop_total);
+
+    /* transport 统计 */
+    SSE_APPEND("\"transport\":{\"local_pub\":%u,\"remote_pub\":%u},",
+               ms->local_stats.pub_total, ms->remote_stats.pub_total);
+
+    /* scheduler 统计 */
+    SSE_APPEND("\"scheduler\":{\"tasks\":%d,\"mode\":\"%s\"},",
+               ms->local_node_count, "CHOREO");
+
+    /* latency 统计 */
+    SSE_APPEND("\"latency\":{\"avg_us\":%u,\"p50_us\":%u,\"p99_us\":%u},",
+               ms->local_stats.avg_lat_us, ms->local_stats.avg_lat_us,
+               ms->local_stats.max_lat_us);
+
+    /* driver_mode */
+    SSE_APPEND("\"driver_mode\":\"%s\",",
+               ms->local_stats.driver_mode[0] ? ms->local_stats.driver_mode : "MANUAL");
+
+    /* vehicle */
+    SSE_APPEND("\"vehicle\":{\"speed\":%.1f,\"target_speed\":%.1f,\"throttle\":%.2f,\"brake\":%.2f,\"x\":%.1f,\"error\":%.1f},",
+               ms->local_stats.vehicle_speed, ms->local_stats.vehicle_target,
+               ms->local_stats.vehicle_throttle, ms->local_stats.vehicle_brake,
+               ms->local_stats.vehicle_x, ms->local_stats.vehicle_error);
+
+    /* topics 统计 */
+    SSE_APPEND("\"topics\":[");
+    uint32_t topic_count = 0;
+    for (int i = 0; i < ms->local_topic_count; i++) {
+        if (!ms->local_topic_stats[i].active) continue;
+        if (topic_count > 0) SSE_APPEND(",");
+        topic_count++;
+        LocalTopicStat* ts = &ms->local_topic_stats[i];
+        SSE_APPEND("{\"topic\":\"%s\",\"pub\":%u,\"del\":%u,\"drop\":%u,\"lat_us\":%u,\"freq\":%.1f,\"subs\":%d,\"reliability\":\"%s\",\"deadline_ms\":%d,\"transport\":\"%s\"}",
+                   ts->topic, ts->pub_count, ts->del_count, ts->drop_count,
+                   ts->avg_lat_us, ts->freq_hz, ts->sub_count,
+                   ts->qos_profile[0] ? ts->qos_profile : "reliable",
+                   ts->deadline_ms, ts->transport[0] ? ts->transport : "shm");
+    }
+    /* 远程 topic 统计 */
+    for (int i = 0; i < ms->remote_topic_count; i++) {
+        if (!ms->remote_topic_stats[i].active) continue;
+        if (topic_count > 0) SSE_APPEND(",");
+        topic_count++;
+        RemoteTopicStat* ts = &ms->remote_topic_stats[i];
+        SSE_APPEND("{\"topic\":\"%s\",\"pub\":%u,\"del\":%u,\"drop\":%u,\"lat_us\":%u,\"freq\":%.1f,\"subs\":%d,\"reliability\":\"%s\",\"deadline_ms\":%d,\"transport\":\"%s\"}",
+                   ts->topic, ts->pub_count, ts->del_count, ts->drop_count,
+                   ts->avg_lat_us, ts->freq_hz, ts->sub_count,
+                   ts->qos_profile[0] ? ts->qos_profile : "reliable",
+                   ts->deadline_ms, ts->transport[0] ? ts->transport : "dds");
+    }
+
+    /* 构建 endpoints */
+    SSE_APPEND("],\"endpoints\":[");
+    int ep_first = 1;
+    for (int i = 0; i < ms->local_node_count; i++) {
+        LocalNode* ln = &ms->local_nodes[i];
+        if (!ln->active) continue;
+        for (int j = 0; j < ln->topic_count; j++) {
+            if (!ep_first) SSE_APPEND(",");
+            ep_first = 0;
+            SSE_APPEND("{\"node\":\"%s\",\"topic\":\"%s\",\"role\":\"%s\",\"type_id\":\"0x%08x\",\"freq\":%.1f}",
+                       ln->name, ln->topics[j].topic, ln->topics[j].role,
+                       ln->topics[j].type_id, ln->topics[j].freq);
+        }
+    }
+    for (int i = 0; i < ms->remote_node_count; i++) {
+        RemoteNode* rn = &ms->remote_nodes[i];
+        if (!rn->active) continue;
+        for (int j = 0; j < rn->topic_count; j++) {
+            if (!ep_first) SSE_APPEND(",");
+            ep_first = 0;
+            SSE_APPEND("{\"node\":\"%s\",\"topic\":\"%s\",\"role\":\"%s\",\"type_id\":\"0x%08x\",\"freq\":%.1f}",
+                       rn->name, rn->topics[j].topic, rn->topics[j].role,
+                       rn->topics[j].type_id, rn->topics[j].freq);
         }
     }
     pthread_mutex_unlock(&ms->remote_mutex);
@@ -331,752 +234,376 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     SSE_APPEND("],"
         "\"sysmon\":{},"
         "\"vehicle\":{},"
-        "\"scene\":{}}}");
+        "\"scene\":{"
+            "\"road_network\":{"
+                "\"edges\":["
+                    "{\"id\":0,\"type\":\"highway\",\"name\":\"highway\",\"length_m\":2000,\"lanes\":4,\"lane_width\":3.5,\"speed_limit\":33.0,\"nodes\":[[0,0,0],[2000,0,0]]}"
+                "]"
+            "}"
+        "}}}");
 #undef SSE_APPEND
 }
 
 /* ── HTTP 响应 ──────────────────────────────────────────── */
 
-static void send_response(int fd, const char* status, const char* content_type,
-                          const char* body) {
-    int body_len = body ? (int)strlen(body) : 0;
+static void send_http_response(int fd, int code, const char* status,
+                                const char* content_type, const char* body,
+                                size_t body_len) {
     char header[512];
-    int hl = snprintf(header, sizeof(header),
-        "HTTP/1.1 %s\r\n"
+    int n = snprintf(header, sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
         "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: no-cache\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        status, content_type, body_len);
-    ssize_t w = write(fd, header, (size_t)hl);
-    (void)w;
+        "\r\n", code, status, content_type, body_len);
+    safe_write(fd, header, (size_t)n);
     if (body && body_len > 0) {
-        w = write(fd, body, (size_t)body_len);
-        (void)w;
+        safe_write(fd, body, body_len);
     }
 }
 
-/* ── SSE 流 ──────────────────────────────────────────────── */
+static void send_404(int fd) {
+    const char* body = "{\"error\":\"not found\"}";
+    send_http_response(fd, 404, "Not Found", "application/json", body, strlen(body));
+}
+
+static void send_500(int fd, const char* msg) {
+    char body[256];
+    int n = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", msg ? msg : "internal error");
+    send_http_response(fd, 500, "Internal Server Error", "application/json", body, (size_t)n);
+}
+
+static void serve_file(int fd, const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        send_404(fd);
+        return;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    char header[512];
+    int n = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %ld\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-cache\r\n"
+        "\r\n", get_mime_type(path), sz);
+    safe_write(fd, header, (size_t)n);
+
+    char buf[8192];
+    size_t r;
+    while ((r = fread(buf, 1, sizeof(buf), f)) > 0) {
+        safe_write(fd, buf, r);
+    }
+    fclose(f);
+}
+
+/* ── SSE 扁平化 ─────────────────────────────────────────── */
 
 /**
- * Safe write wrapper: handles EPIPE (client disconnected) and EAGAIN
- * (socket buffer full). Returns -1 on fatal error, 0 on success.
- * EPIPE is the normal case when a browser tab closes the SSE connection
- * — we should not SIGPIPE or log-spam on it.
+ * 把 JSON 展开为扁平结构，方便 SSE 消费者解析
+ * - 把 metrics.topics[] 展平出来
+ * - 如果顶层有 scene 字段（来自 dashboard JSON），保留到 metrics 下面
  */
-static int safe_write(int fd, const void* buf, size_t len) {
-    const char* p = (const char*)buf;
-    size_t remaining = len;
-    while (remaining > 0) {
-        ssize_t w = write(fd, p, remaining);
-        if (w > 0) {
-            p += w;
-            remaining -= (size_t)w;
-        } else if (w == 0) {
-            return -1;  /* EOF — client closed */
+static void sse_flatten_payload(char* buf) {
+    /* 不做复杂展平，保持 JSON 原样。
+     * 前端已能解析此格式。
+     * 如果 source=live 且顶层有 scene 字段，将其移到 metrics.scene 下。
+     */
+    (void)buf;
+}
+
+/* ── SSE 处理器 ─────────────────────────────────────────── */
+
+static void build_cached_dashboard_json(MonitorServer* ms, char* buf, size_t size) {
+    pthread_mutex_lock(&ms->cached_mutex);
+    if (ms->cached_json && ms->cached_json[0] != '\0') {
+        size_t n = strlen(ms->cached_json);
+        if (n < size - 1) {
+            memcpy(buf, ms->cached_json, n + 1);
         } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                /* Socket buffer full; brief yield and retry */
-                usleep(1000);
-                continue;
-            }
-            /* EPIPE, ECONNRESET, etc. — client disconnected, normal */
-            return -1;
+            buf[0] = '\0';
         }
+    } else {
+        buf[0] = '\0';
     }
-    return 0;
-}
-
-/**
- * Flatten a JSON payload to a single line, in place.
- *
- * SSE frames are line-delimited: a raw '\n' inside the payload terminates the
- * "data:" line, and EventSource silently drops every following line as an
- * unknown field. The cached dashboard JSON is pretty-printed (cJSON_Print in
- * monitor_node), so without this the browser receives only the first line —
- * the 45-byte "{"source":...,"age_sec":0.0," prefix — and the dashboard/3D
- * view starves ("Waiting for data"). Raw \n/\r/\t bytes in serialized JSON
- * are always structural whitespace (cJSON escapes them inside strings), so
- * stripping them is lossless.
- */
-static void sse_flatten_payload(char* s) {
-    char* wr = s;
-    for (char* rd = s; *rd; rd++) {
-        if (*rd != '\n' && *rd != '\r' && *rd != '\t') *wr++ = *rd;
-    }
-    *wr = '\0';
+    pthread_mutex_unlock(&ms->cached_mutex);
 }
 
 static void handle_sse(int fd, MonitorServer* ms) {
     const char* sse_header =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: no-cache\r\n"
         "Connection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
         "\r\n";
+
     if (safe_write(fd, sse_header, strlen(sse_header)) != 0) return;
 
     char buf[MONITOR_HTTP_BUF_SIZE];
-    /* ── 事件驱动 SSE 推送 (条件变量) ──────────────────────────
-     * 旧代码用 usleep(500000) 轮询，即使 monitor_node 以 10Hz 产出数据，
-     * 浏览器也只能以 2Hz 收到——这是节点界面 "一卡一卡" 的首要根因。
-     *
-     * 新方案：dashboard_bridge 收到新 JSON 时通过 cached_cond 唤醒 SSE 线程，
-     * 数据到达后 50ms 内即可推送到浏览器。空闲时 50ms 超时用于心跳检测。 */
-    uint64_t last_version  = 0;
-    uint64_t last_send_us  = clock_now_us();
+    uint64_t last_version = 0;
+    uint64_t last_send_us = clock_now_us();
 
     while (ms->running) {
         pthread_mutex_lock(&ms->cached_mutex);
         uint64_t version = ms->cached_json_version;
-
         if (version != last_version) {
-            /* 新数据到达：立即构建并推送 */
             pthread_mutex_unlock(&ms->cached_mutex);
-
             build_sse_json(ms, buf, sizeof(buf));
             sse_flatten_payload(buf);
             char frame[MONITOR_HTTP_BUF_SIZE + 32];
             int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
             if (safe_write(fd, frame, (size_t)fl) != 0) break;
             last_version = version;
-            last_send_us  = clock_now_us();
+            last_send_us = clock_now_us();
         } else {
-            /* 无新数据：等待条件变量信号，50ms 超时用于心跳 */
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 50000000;  /* 50ms */
-            if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-            int ret = pthread_cond_timedwait(&ms->cached_cond, &ms->cached_mutex, &ts);
-            /* timedwait 返回时已重新获取 mutex */
-
-            uint64_t now_us = clock_now_us();
-            if (ret == ETIMEDOUT) {
-                /* 50ms 空闲超时 → 检查是否需要心跳 */
-                uint64_t elapsed = now_us - last_send_us;
-                if (elapsed > 10000000ULL) {  /* ~10s 无数据推送 → 保活 */
-                    pthread_mutex_unlock(&ms->cached_mutex);
-                    if (safe_write(fd, ": keep-alive\n\n", 14) != 0) break;
-                    last_send_us = now_us;
-                    continue;  /* 跳过 unlock，因为已经 unlock 了 */
-                }
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_nsec -= 1000000000;
+                ts.tv_sec += 1;
             }
-            pthread_mutex_unlock(&ms->cached_mutex);
+            int ret = pthread_cond_timedwait(&ms->cached_cond, &ms->cached_mutex, &ts);
+            if (ret == ETIMEDOUT) {
+                uint64_t now = clock_now_us();
+                if (now - last_send_us > 1000000) {
+                    pthread_mutex_unlock(&ms->cached_mutex);
+                    build_sse_json(ms, buf, sizeof(buf));
+                    sse_flatten_payload(buf);
+                    char frame[MONITOR_HTTP_BUF_SIZE + 32];
+                    int fl = snprintf(frame, sizeof(frame), "data: %s\n\n", buf);
+                    if (safe_write(fd, frame, (size_t)fl) != 0) break;
+                    last_send_us = now;
+                } else {
+                    pthread_mutex_unlock(&ms->cached_mutex);
+                }
+            } else {
+                pthread_mutex_unlock(&ms->cached_mutex);
+            }
         }
     }
 }
 
-/* ── POST 请求体读取 ────────────────────────────────────── */
-
-static char* read_post_body(int fd, const char* headers, size_t max_size) {
-    const char* content_len_header = strstr(headers, "Content-Length:");
-    if (!content_len_header) return NULL;
-
-    int content_len = atoi(content_len_header + 15);
-    if (content_len <= 0 || (size_t)content_len > max_size) return NULL;
-
-    char* body = (char*)malloc(content_len + 1);
-    if (!body) return NULL;
-
-    /* Loop to handle partial reads on sockets */
-    size_t total = 0;
-    while (total < (size_t)content_len) {
-        ssize_t n = read(fd, body + total, (size_t)content_len - total);
-        if (n <= 0) {
-            free(body);
-            return NULL;
-        }
-        total += (size_t)n;
-    }
-    body[content_len] = '\0';
-    return body;
-}
-
-/* ── 执行 modelctl.py 子命令（训练管理的统一入口） ──────────
- *
- * 架构原则: C++ 服务器只做实时数据+静态文件; 训练管理归 modelctl.py CLI。
- * 本函数是两者间的最薄桥接层:
- *   fork → pipe stdin(JSON body) → exec modelctl.py <cmd> --json
- * 不再需要 training_bridge.py 中间层。
- */
-
-static void exec_modelctl(int fd, const char* cmd, const char* json_body,
-                          MonitorServer* ms) {
-    int stdin_pipe[2];
-    int stdout_pipe[2];
-
-    if (pipe(stdin_pipe) == -1 || pipe(stdout_pipe) == -1) {
-        if (stdin_pipe[0] >= 0) { close(stdin_pipe[0]); close(stdin_pipe[1]); }
-        send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"pipe failed\"}");
-        close(fd);
-        return;
-    }
-
-    pid_t pid = fork();
-    if (pid == -1) {
-        close(stdin_pipe[0]);  close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
-        send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"fork failed\"}");
-        close(fd);
-        return;
-    }
-
-    if (pid == 0) {
-        /* 子进程: exec modelctl.py <cmd> --json */
-        close(stdin_pipe[1]);
-        close(stdout_pipe[0]);
-        dup2(stdin_pipe[0], STDIN_FILENO);
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stdout_pipe[1], STDERR_FILENO);
-        close(stdin_pipe[0]);
-        close(stdout_pipe[1]);
-
-        /* 从 html_path 推导 tools/ 目录路径 */
-        char script[768];
-        if (ms && ms->html_path[0]) {
-            char dir[512];
-            snprintf(dir, sizeof(dir), "%s", ms->html_path);
-            char* slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';
-            slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';
-            snprintf(script, sizeof(script), "%s/modelctl.py", dir);
-        } else {
-            snprintf(script, sizeof(script), "tools/modelctl.py");
-        }
-
-        const char* argv[] = {"python3", script, cmd, "--json", NULL};
-        execvp("python3", (char* const*)argv);
-        _exit(1);
-    }
-
-    /* 父进程: 写 stdin → 读 stdout → 发 HTTP 响应 */
-    close(stdin_pipe[0]);
-    close(stdout_pipe[1]);
-
-    if (json_body) {
-        size_t len = strlen(json_body);
-        ssize_t w = write(stdin_pipe[1], json_body, len);
-        (void)w;
-    }
-    close(stdin_pipe[1]);
-
-    char result[8192];
-    size_t total = 0;
-    ssize_t nread;
-    while (total < sizeof(result) - 1 &&
-           (nread = read(stdout_pipe[0], result + total,
-                         sizeof(result) - 1 - total)) > 0) {
-        total += (size_t)nread;
-    }
-    result[total] = '\0';
-    close(stdout_pipe[0]);
-    waitpid(pid, NULL, 0);
-
-    if (total > 0) {
-        send_response(fd, "200 OK", "application/json", result);
-    } else {
-        send_response(fd, "500 Internal Server Error", "application/json",
-                      "{\"ok\":false,\"error\":\"no output\"}");
-    }
-    close(fd);
-}
-
-/* ── 处理单个连接 ────────────────────────────────────────── */
+/* ── 请求路由 ───────────────────────────────────────────── */
 
 static void handle_client(int fd, MonitorServer* ms) {
-    char req[4096];
-    ssize_t n = read(fd, req, sizeof(req) - 1);
+    char buf[2048];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
     if (n <= 0) { close(fd); return; }
-    req[n] = '\0';
+    buf[n] = '\0';
 
-    /* Parse the HTTP request line (first line) into method + path so routing
-     * matches on the real request target rather than a substring that could
-     * appear anywhere in the headers/body (e.g. a Referer header). */
-    char method[8] = {0};
+    /* 解析 GET /path */
+    char method[16] = {0};
     char path[512] = {0};
-    {
-        const char* sp1 = strchr(req, ' ');
-        if (sp1) {
-            size_t mlen = (size_t)(sp1 - req);
-            if (mlen >= sizeof(method)) mlen = sizeof(method) - 1;
-            memcpy(method, req, mlen);
-            method[mlen] = '\0';
-            const char* pstart = sp1 + 1;
-            const char* sp2 = strpbrk(pstart, " \r\n");
-            size_t plen = sp2 ? (size_t)(sp2 - pstart) : strlen(pstart);
-            if (plen >= sizeof(path)) plen = sizeof(path) - 1;
-            memcpy(path, pstart, plen);
-            path[plen] = '\0';
-        }
-    }
-    /* Strip an optional query string so exact path matching still works. */
-    char* qs = strchr(path, '?');
-    if (qs) *qs = '\0';
+    sscanf(buf, "%15s %511s", method, path);
 
-    /* Malformed request line (no method/path) → 400 Bad Request. */
-    if (method[0] == '\0' || path[0] == '\0') {
-        send_response(fd, "400 Bad Request", "text/plain", "bad request");
-        close(fd);
-        return;
-    }
-
-    /* CORS preflight */
-    if (strcmp(method, "OPTIONS") == 0) {
-        const char* cors = "HTTP/1.1 204\r\nAccess-Control-Allow-Origin: *\r\n"
-            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\r\n";
-        ssize_t w = write(fd, cors, strlen(cors));
-        (void)w;
-        close(fd);
-        return;
-    }
-
-    /* Support GET and POST; reject everything else */
-    if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
-        send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed");
-        close(fd);
-        return;
-    }
-
-    /* POST: /api/training/start|promote → fork+exec modelctl.py */
-    if (strcmp(method, "POST") == 0) {
-        if (strcmp(path, "/api/training/start") == 0 ||
-            strcmp(path, "/api/training/promote") == 0) {
-            char* body = read_post_body(fd, req, 8192);
-            if (body) {
-                const char* cmd = (strcmp(path, "/api/training/start") == 0)
-                                  ? "train-start" : "promote";
-                exec_modelctl(fd, cmd, body, ms);
-                free(body);
-            } else {
-                send_response(fd, "400 Bad Request", "application/json",
-                              "{\"ok\":false,\"error\":\"failed to read body\"}");
-                close(fd);
-            }
-            return;
-        }
-        send_response(fd, "404 Not Found", "text/plain", "not found");
-        close(fd);
-        return;
-    }
-
-    /* GET: /api/health → liveness check for dashboard/script polling */
-    if (strcmp(path, "/api/health") == 0) {
-        send_response(fd, "200 OK", "application/json",
-                      "{\"status\":\"ok\"}");
-        close(fd);
-        return;
-    }
-
-    /* GET: /api/training/status → modelctl.py train-status (无 JSON body) */
-    if (strcmp(path, "/api/training/status") == 0) {
-        exec_modelctl(fd, "train-status", "{}", ms);
-        return;
-    }
-
-    /* Route: /api/stream → SSE */
     if (strcmp(path, "/api/stream") == 0) {
         handle_sse(fd, ms);
         close(fd);
         return;
     }
 
-    /* Route: /api/topology → JSON (prefer cached dashboard JSON) */
     if (strcmp(path, "/api/topology") == 0) {
-        char buf[MONITOR_HTTP_BUF_SIZE];
-        int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
-        if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf);
-        } else {
-            build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf);
-        }
+        char json[MONITOR_HTTP_BUF_SIZE];
+        build_sse_json(ms, json, sizeof(json));
+        send_http_response(fd, 200, "OK", "application/json", json, strlen(json));
         close(fd);
         return;
     }
 
-    /* Route: /api/topics → per-topic stats (local + remote) */
     if (strcmp(path, "/api/topics") == 0) {
-        char buf[MONITOR_HTTP_BUF_SIZE];
-        int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
-        if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf);
-        } else {
-            build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf);
-        }
+        char json[MONITOR_HTTP_BUF_SIZE];
+        build_sse_json(ms, json, sizeof(json));
+        send_http_response(fd, 200, "OK", "application/json", json, strlen(json));
         close(fd);
         return;
     }
 
-    /* ── Debug API ─────────────────────────────────────── */
-
-    /* GET /api/debug/nodes → 节点健康 + 延迟统计 */
-    if (strcmp(path, "/api/debug/nodes") == 0) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON* arr = cJSON_CreateArray();
-
-        HealthSnapshot hsnaps[HEALTH_MAX_NODES];
-        int hn = health_get_all(hsnaps, HEALTH_MAX_NODES);
-        for (int i = 0; i < hn; i++) {
-            cJSON* n = cJSON_CreateObject();
-            cJSON_AddStringToObject(n, "name", hsnaps[i].name);
-            cJSON_AddNumberToObject(n, "status", hsnaps[i].status);
-            cJSON_AddNumberToObject(n, "cycles", (double)hsnaps[i].total_cycles);
-            cJSON_AddNumberToObject(n, "avg_latency_us", (double)hsnaps[i].avg_latency_us);
-            cJSON_AddNumberToObject(n, "p99_latency_us", (double)hsnaps[i].p99_latency_us);
-            cJSON_AddNumberToObject(n, "max_latency_us", (double)hsnaps[i].max_latency_us);
-            cJSON_AddNumberToObject(n, "error_count", (double)hsnaps[i].error_count);
-            cJSON_AddNumberToObject(n, "stall_count", (double)hsnaps[i].stall_count);
-            if (hsnaps[i].status != HEALTH_OK && hsnaps[i].last_error[0]) {
-                cJSON_AddStringToObject(n, "last_error", hsnaps[i].last_error);
-            }
-            cJSON_AddItemToArray(arr, n);
-        }
-        cJSON_AddItemToObject(root, "nodes", arr);
-        cJSON_AddBoolToObject(root, "all_ok", health_is_all_ok());
-
-        char* json = cJSON_PrintUnformatted(root);
-        send_response(fd, "200 OK", "application/json", json);
-        cJSON_free(json);
-        cJSON_Delete(root);
-        close(fd);
-        return;
-    }
-
-    /* GET /api/debug/autotune → 自动调优器状态 */
-    if (strcmp(path, "/api/debug/autotune") == 0) {
-        cJSON* root = cJSON_CreateObject();
-        cJSON* arr = cJSON_CreateArray();
-
-        AutoTuneSnapshot tsnaps[AUTO_TUNE_MAX_NODES];
-        int tn = auto_tuner_get_all(tsnaps, AUTO_TUNE_MAX_NODES);
-        for (int i = 0; i < tn; i++) {
-            cJSON* n = cJSON_CreateObject();
-            cJSON_AddStringToObject(n, "name", tsnaps[i].name);
-            cJSON_AddNumberToObject(n, "strategy", tsnaps[i].strategy);
-            cJSON_AddNumberToObject(n, "current_freq_hz", tsnaps[i].current_freq_hz);
-            cJSON_AddNumberToObject(n, "last_latency_us", tsnaps[i].last_latency_us);
-            cJSON_AddNumberToObject(n, "avg_latency_us", tsnaps[i].avg_latency_us);
-            cJSON_AddNumberToObject(n, "adjustments", (double)tsnaps[i].adjustments);
-            cJSON_AddNumberToObject(n, "min_observed_hz", tsnaps[i].min_observed_hz);
-            cJSON_AddNumberToObject(n, "max_observed_hz", tsnaps[i].max_observed_hz);
-            cJSON_AddItemToArray(arr, n);
-        }
-        cJSON_AddItemToObject(root, "tuners", arr);
-
-        char* json = cJSON_PrintUnformatted(root);
-        send_response(fd, "200 OK", "application/json", json);
-        cJSON_free(json);
-        cJSON_Delete(root);
-        close(fd);
-        return;
-    }
-
-    /* GET /api/debug/params → 所有注册参数及当前值 */
-    if (strcmp(path, "/api/debug/params") == 0) {
-        char buf[MONITOR_HTTP_BUF_SIZE];
-        build_sse_json(ms, buf, sizeof(buf));
-        send_response(fd, "200 OK", "application/json", buf);
-        close(fd);
-        return;
-    }
-
-    /* Route: / → flowboard/index.html (from --html-path) */
+    /* 静态文件 */
     if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0) {
-        char* html = NULL;
-        if (ms->html_path[0]) {
-            html = read_file(ms->html_path, NULL);
-        }
-        if (html) {
-            send_response(fd, "200 OK", "text/html; charset=utf-8", html);
-            free(html);
-        } else {
-            /* Fallback: minimal embedded dashboard */
-            const char* fallback =
-                "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>FlowBoard</title>"
-                "<style>body{background:#0d1117;color:#c9d1d9;font:13px system-ui;padding:16px}"
-                "h1{color:#58a6ff}a{color:#3fb950}.info{color:#8b949e;margin-top:8px}</style></head><body>"
-                "<h1>⚠ FlowBoard HTML not found</h1>"
-                "<p class=info>Set <code>--html-path</code> or check the tools/ directory.</p>"
-                "<p><a href='/api/topology'>/api/topology</a> — JSON data</p>"
-                "<p><a href='/api/stream'>/api/stream</a> — SSE live feed</p>"
-                "</body></html>";
-            send_response(fd, "200 OK", "text/html; charset=utf-8",
-                          fallback);
-        }
+        serve_file(fd, ms->html_path);
         close(fd);
         return;
     }
 
-    /* Route: /js/<file> or /css/<file> → modular frontend from flowboard/ subdir.
-     * Maps /js/foo.js → tools/flowboard/js/foo.js, /css/style.css → tools/flowboard/css/style.css */
-    if ((strncmp(path, "/js/", 4) == 0 || strncmp(path, "/css/", 5) == 0) && ms->html_path[0]) {
-        char reqpath[512];
-        snprintf(reqpath, sizeof(reqpath), "%s", path);
-        if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
-            const char* forbidden = "{\"error\":\"forbidden\"}";
-            send_response(fd, "403 Forbidden", "application/json", forbidden);
-            close(fd); return;
-        }
-        /* Derive parent dir from html_path, then go up once more to reach
-         * tools/ (since html_path is tools/flowboard/index.html, we strip
-         * "flowboard/index.html" → tools/). Then append flowboard/<rel>.
-         * e.g. /js/app.js → <tools>/flowboard/js/app.js */
+    /* JS / CSS / 静态资源 */
+    if (strncmp(path, "/js/", 4) == 0 || strncmp(path, "/css/", 5) == 0) {
         char parent[512];
         snprintf(parent, sizeof(parent), "%s", ms->html_path);
-        /* Strip basename (index.html) */
         char* slash = strrchr(parent, '/');
         if (slash) *slash = '\0';
-        /* Strip flowboard/ */
-        slash = strrchr(parent, '/');
-        if (slash) *slash = '\0'; else parent[0] = '\0';
-        char filepath[768];
-        const char* rel = path + 1;  /* "/js/app.js" → "js/app.js" */
-        snprintf(filepath, sizeof(filepath), "%s/flowboard/%s", parent, rel);
-        char* fbuf = read_file(filepath, NULL);
-        if (fbuf) {
-            const char* ctype = "application/octet-stream";
-            const char* dot = strrchr(filepath, '.');
-            if (dot) {
-                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
-                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
-                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
-                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
-            }
-            send_response(fd, "200 OK", ctype, fbuf);
-            free(fbuf);
-        } else {
-            const char* notfound = "{\"error\":\"not found\"}";
-            send_response(fd, "404 Not Found", "application/json", notfound);
-        }
+        char filepath[1024];
+        snprintf(filepath, sizeof(filepath), "%s%s", parent, path);
+        serve_file(fd, filepath);
         close(fd);
         return;
     }
 
-    /* Route: /tools/<file> → static asset served from the directory that
-     * contains flowboard/index.html (i.e. the repo's tools/ folder). The dashboard
-     * loads three.min.js / d3.v7.min.js from here so the 3D view and topology
-     * graph work offline without relying on external CDNs. */
-    if (strncmp(path, "/tools/", 7) == 0 && ms->html_path[0]) {
-        /* Use the already-parsed request path (query string stripped). */
-        char reqpath[512];
-        snprintf(reqpath, sizeof(reqpath), "%s", path);
-
-        /* Reject path traversal — block ".." and backslash.
-         * Note: the basename extraction below (strrchr) already neutralises
-         * embedded '/' by only using the part after the last '/'. */
-        if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
-            const char* forbidden = "{\"error\":\"forbidden\"}";
-            send_response(fd, "403 Forbidden", "application/json", forbidden);
-            close(fd);
-            return;
-        }
-
-        /* Path relative to tools/ dir: skip the "/tools/" prefix (7 chars).
-         * e.g. /tools/flowboard/models/sedan.gltf → flowboard/models/sedan.gltf
-         *      /tools/three.min.js              → three.min.js */
-        const char* rel = reqpath + 7;  /* after "/tools/" */
-        if (*rel == '\0') rel = "index.html";
-
-        /* Directory of html_path, stripped to the tools/ folder.
-         * html_path may be tools/flowboard.html (legacy) or
-         * tools/flowboard/index.html (modular) — strip basename,
-         * then strip "flowboard" if present, so dir always ends at
-         * the tools/ directory where three.min.js / d3.v7.min.js live. */
+    /* 内嵌资源（/tools/...） */
+    if (strncmp(path, "/tools/", 7) == 0) {
         char dir[512];
         snprintf(dir, sizeof(dir), "%s", ms->html_path);
         char* slash = strrchr(dir, '/');
-        if (slash) *slash = '\0'; else dir[0] = '\0';
+        if (slash) *slash = '\0';  /* strip basename */
         slash = strrchr(dir, '/');
-        if (slash && strcmp(slash + 1, "flowboard") == 0)
-            *slash = '\0';
-
+        if (slash) *slash = '\0';  /* strip flowboard/ */
         char filepath[1024];
-        snprintf(filepath, sizeof(filepath), "%s/%s", dir, rel);
-
-        char* fbuf = read_file(filepath, NULL);
-        if (fbuf) {
-            /* Content type by extension. */
-            const char* ctype = "application/octet-stream";
-            const char* dot = strrchr(reqpath, '.');
-            if (dot) {
-                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
-                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
-                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
-                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
-                else if (strcmp(dot, ".svg") == 0)  ctype = "image/svg+xml";
-                else if (strcmp(dot, ".wasm") == 0) ctype = "application/wasm";
-                else if (strcmp(dot, ".png") == 0)  ctype = "image/png";
-            }
-            send_response(fd, "200 OK", ctype, fbuf);
-            free(fbuf);
-        } else {
-            const char* notfound = "{\"error\":\"not found\"}";
-            send_response(fd, "404 Not Found", "application/json", notfound);
-        }
+        snprintf(filepath, sizeof(filepath), "%s%s", dir, path);
+        serve_file(fd, filepath);
         close(fd);
         return;
     }
 
-    /* 404 */
-    const char* notfound = "{\"error\":\"not found\"}";
-    send_response(fd, "404 Not Found", "application/json", notfound);
+    send_404(fd);
     close(fd);
 }
 
-/* ── Server thread ───────────────────────────────────────── */
+/* ── 线程函数 ───────────────────────────────────────────── */
 
-/* Per-connection context passed to the client handler thread. */
-typedef struct {
-    int            fd;
+struct ClientCtx {
+    int fd;
     MonitorServer* ms;
-} ClientCtx;
+};
 
 static void* client_thread_fn(void* arg) {
-    ClientCtx* ctx = (ClientCtx*)arg;
-    MonitorServer* ms = ctx->ms;
-    handle_client(ctx->fd, ms);
+    struct ClientCtx* ctx = (struct ClientCtx*)arg;
+    handle_client(ctx->fd, ctx->ms);
+    pthread_mutex_lock(&ctx->ms->client_mutex);
+    ctx->ms->active_clients--;
+    pthread_mutex_unlock(&ctx->ms->client_mutex);
     free(ctx);
-    pthread_mutex_lock(&ms->client_mutex);
-    ms->active_clients--;
-    pthread_mutex_unlock(&ms->client_mutex);
     return NULL;
 }
 
-static void* server_thread_fn(void* arg) {
-    MonitorServer* ms = (MonitorServer*)arg;
+/* ── 公共 API ────────────────────────────────────────────── */
 
-    ms->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (ms->listen_fd < 0) return NULL;
-
-    int reuse = 1;
-    setsockopt(ms->listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    struct sockaddr_in addr = { .sin_family = AF_INET,
-                                .sin_port = htons((uint16_t)ms->port) };
-    if (inet_pton(AF_INET, ms->bind_addr, &addr.sin_addr) != 1) {
-        /* Fall back to loopback if the configured address is invalid. */
-        fprintf(stderr, "[monitor_server] WARN: invalid bind address '%s', "
-                        "falling back to 127.0.0.1\n", ms->bind_addr);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        snprintf(ms->bind_addr, sizeof(ms->bind_addr), "%s", "127.0.0.1");
-    }
-    if (bind(ms->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(ms->listen_fd);
-        return NULL;
-    }
-    listen(ms->listen_fd, MONITOR_MAX_CLIENTS);
-
-    printf("[monitor_server] Listening on http://%s:%d\n", ms->bind_addr, ms->port);
-    printf("[monitor_server] Endpoints: /  /api/topology  /api/topics  /api/stream\n");
-
-    while (ms->running) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(ms->listen_fd, &fds);
-        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-
-        if (select(ms->listen_fd + 1, &fds, NULL, NULL, &tv) > 0) {
-            int client = accept(ms->listen_fd, NULL, NULL);
-            if (client < 0) continue;
-
-            /* Handle each connection in its own detached thread so that a
-             * long-lived SSE stream (/api/stream) cannot block the accept
-             * loop — otherwise a single open dashboard tab would monopolise
-             * the server and every subsequent request (page reload, new tab,
-             * /api/topology, static assets) would hang. */
-            ClientCtx* ctx = (ClientCtx*)malloc(sizeof(ClientCtx));
-            if (!ctx) { close(client); continue; }
-            ctx->fd = client;
-            ctx->ms = ms;
-
-            pthread_mutex_lock(&ms->client_mutex);
-            ms->active_clients++;
-            pthread_mutex_unlock(&ms->client_mutex);
-
-            pthread_t th;
-            if (pthread_create(&th, NULL, client_thread_fn, ctx) != 0) {
-                /* Thread creation failed — fall back to inline handling so the
-                 * request is still served. Note: this reverts to the old
-                 * blocking behaviour for this connection, so an SSE stream here
-                 * could still stall the accept loop. Log it so operators can
-                 * spot resource exhaustion. */
-                fprintf(stderr,
-                        "[monitor_server] WARN: pthread_create failed, handling "
-                        "connection inline (may block)\n");
-                free(ctx);
-                pthread_mutex_lock(&ms->client_mutex);
-                ms->active_clients--;
-                pthread_mutex_unlock(&ms->client_mutex);
-                handle_client(client, ms);
-            } else {
-                pthread_detach(th);
-            }
-        }
-    }
-    close(ms->listen_fd);
-    return NULL;
-}
-
-/* ══════════════════════════════════════════════════════════ */
-/* Public API                                                  */
-/* ══════════════════════════════════════════════════════════ */
-
-MonitorServer* monitor_server_create(MessageBus* bus, DiscoveryManager* discovery,
-                                     int port, const char* html_path) {
-    MonitorServer* ms = (MonitorServer*)calloc(1, sizeof(MonitorServer));
-    ms->bus       = bus;
-    ms->discovery = discovery;
-    ms->port      = port > 0 ? port : 8800;
-    /* Listen address: default to loopback (127.0.0.1) so the dashboard is not
-     * exposed on all interfaces by default. Override with FLOWMOND_BIND_ADDR
-     * (e.g. "0.0.0.0" for container/remote access). */
-    {
-        const char* env = getenv("FLOWMOND_BIND_ADDR");
-        snprintf(ms->bind_addr, sizeof(ms->bind_addr), "%s",
-                 (env && env[0]) ? env : "127.0.0.1");
-    }
-    if (html_path && html_path[0])
-        snprintf(ms->html_path, sizeof(ms->html_path), "%s", html_path);
+void monitor_server_init(MonitorServer* ms, const char* html_path, uint16_t port) {
+    memset(ms, 0, sizeof(*ms));
+    ms->html_path = html_path;
+    ms->port = port;
+    ms->start_time_us = clock_now_us();
+    ms->running = true;
+    pthread_mutex_init(&ms->local_mutex, NULL);
     pthread_mutex_init(&ms->remote_mutex, NULL);
+    pthread_mutex_init(&ms->client_mutex, NULL);
     pthread_mutex_init(&ms->cached_mutex, NULL);
     pthread_cond_init(&ms->cached_cond, NULL);
-    pthread_mutex_init(&ms->client_mutex, NULL);
-    pthread_mutex_init(&ms->freshness_mutex, NULL);
-    return ms;
+
+    ms->self_name = "flowmond";
+    ms->local_stats.driver_mode[0] = '\0';
+
+    /* 注册本地节点 */
+    monitor_server_register_node(ms, "flowmond", getpid(), 0);
+
+    printf("[monitor_server] Listening on http://0.0.0.0:%d\n", port);
+    printf("[monitor_server] Endpoints: /  /api/topology  /api/topics  /api/stream\n");
 }
 
-void monitor_server_start(MonitorServer* ms) {
-    if (!ms || ms->running) return;
+void monitor_server_inject_dashboard_json(MonitorServer* ms, const char* json) {
+    if (!json || !json[0]) return;
+    pthread_mutex_lock(&ms->cached_mutex);
+    free(ms->cached_json);
+    ms->cached_json = strdup(json);
+    ms->cached_json_version++;
+    pthread_cond_broadcast(&ms->cached_cond);
+    pthread_mutex_unlock(&ms->cached_mutex);
+}
 
-    /* A browser tab closing/reloading mid-response (very common with the
-     * long-lived /api/stream SSE connection, and more likely to happen the
-     * more dashboard tabs are open at once) makes write() hit a socket the
-     * peer has already closed. Without this, the default SIGPIPE disposition
-     * kills the *entire* process on the first such write — taking down the
-     * dashboard for every other connected tab too. Ignoring it here makes
-     * write() return -1/EPIPE instead, which handle_sse()/handle_client()
-     * already check for and handle by closing just that one connection. */
-    signal(SIGPIPE, SIG_IGN);
+int monitor_server_run(MonitorServer* ms) {
+    ms->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (ms->listen_fd < 0) {
+        perror("monitor_server: socket");
+        return -1;
+    }
 
-    ms->running = true;
-    pthread_create(&ms->server_thread, NULL, server_thread_fn, ms);
+    int opt = 1;
+    setsockopt(ms->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(ms->port);
+
+    if (bind(ms->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("monitor_server: bind");
+        close(ms->listen_fd);
+        return -1;
+    }
+
+    if (listen(ms->listen_fd, MONITOR_MAX_CLIENTS) < 0) {
+        perror("monitor_server: listen");
+        close(ms->listen_fd);
+        return -1;
+    }
+
+    /* 主循环 */
+    while (ms->running) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(ms->listen_fd, &rfds);
+
+        struct timeval tv = { 1, 0 };
+        int ret = select(ms->listen_fd + 1, &rfds, NULL, NULL, &tv);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ret == 0) continue;
+
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client = accept(ms->listen_fd, (struct sockaddr*)&client_addr, &client_len);
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        struct ClientCtx* ctx = malloc(sizeof(struct ClientCtx));
+        if (!ctx) {
+            close(client);
+            continue;
+        }
+        ctx->fd = client;
+        ctx->ms = ms;
+
+        pthread_mutex_lock(&ms->client_mutex);
+        ms->active_clients++;
+        pthread_mutex_unlock(&ms->client_mutex);
+
+        pthread_t th;
+        if (pthread_create(&th, NULL, client_thread_fn, ctx) != 0) {
+            fprintf(stderr, "[monitor_server] failed to create client thread\n");
+            free(ctx);
+            pthread_mutex_lock(&ms->client_mutex);
+            ms->active_clients--;
+            pthread_mutex_unlock(&ms->client_mutex);
+            handle_client(client, ms);
+        } else {
+            pthread_detach(th);
+        }
+    }
+
+    return 0;
 }
 
 void monitor_server_stop(MonitorServer* ms) {
-    if (!ms || !ms->running) return;
     ms->running = false;
-    pthread_join(ms->server_thread, NULL);
+    if (ms->listen_fd >= 0) {
+        close(ms->listen_fd);
+        ms->listen_fd = -1;
+    }
 
-    /* Wait for in-flight per-connection handler threads (SSE streams check
-     * ms->running every ~500ms) to finish so they don't touch a freed struct. */
-    #define MONITOR_SHUTDOWN_WAIT_ITERS 200  /* 200 * 10ms = ~2s max */
+    /* 等待所有客户端线程退出 */
     for (int i = 0; i < MONITOR_SHUTDOWN_WAIT_ITERS; i++) {
         pthread_mutex_lock(&ms->client_mutex);
         int n = ms->active_clients;
@@ -1084,98 +611,182 @@ void monitor_server_stop(MonitorServer* ms) {
         if (n <= 0) break;
         usleep(10000);
     }
-    #undef MONITOR_SHUTDOWN_WAIT_ITERS
+
+    pthread_cond_broadcast(&ms->cached_cond);
     printf("[monitor_server] Stopped\n");
 }
 
 void monitor_server_destroy(MonitorServer* ms) {
-    if (!ms) return;
-    if (ms->running) monitor_server_stop(ms);
-    pthread_mutex_destroy(&ms->cached_mutex);
-    pthread_cond_destroy(&ms->cached_cond);
-    if (ms->cached_json) { free(ms->cached_json); ms->cached_json = NULL; }
+    pthread_mutex_destroy(&ms->local_mutex);
     pthread_mutex_destroy(&ms->remote_mutex);
     pthread_mutex_destroy(&ms->client_mutex);
-    pthread_mutex_destroy(&ms->freshness_mutex);
-    free(ms);
+    pthread_mutex_destroy(&ms->cached_mutex);
+    pthread_cond_destroy(&ms->cached_cond);
+    free(ms->cached_json);
+    ms->cached_json = NULL;
 }
 
-void monitor_server_inject_remote_stats(MonitorServer* ms, const StatsPacket* pkt) {
-    if (!ms || !pkt) return;
+void monitor_server_register_node(MonitorServer* ms, const char* name, int pid, int caps) {
+    pthread_mutex_lock(&ms->local_mutex);
+    if (ms->local_node_count < MONITOR_MAX_NODES) {
+        LocalNode* ln = &ms->local_nodes[ms->local_node_count++];
+        snprintf(ln->name, sizeof(ln->name), "%s", name);
+        ln->pid = pid;
+        ln->caps = caps;
+        ln->active = true;
+        ln->topic_count = 0;
+    }
+    pthread_mutex_unlock(&ms->local_mutex);
+}
 
-    pthread_mutex_lock(&ms->remote_mutex);
-
-    /* Find existing slot for this source or allocate a new one */
-    RemoteSource* slot = NULL;
-    for (int i = 0; i < ms->remote_count; i++) {
-        if (strcmp(ms->remote[i].source_name, pkt->source_name) == 0) {
-            slot = &ms->remote[i];
+void monitor_server_add_topic(MonitorServer* ms, const char* node_name,
+                               const char* topic, const char* role, int caps,
+                               uint32_t type_id, double freq) {
+    pthread_mutex_lock(&ms->local_mutex);
+    for (int i = 0; i < ms->local_node_count; i++) {
+        LocalNode* ln = &ms->local_nodes[i];
+        if (strcmp(ln->name, node_name) == 0 && ln->topic_count < MONITOR_MAX_TOPICS) {
+            LocalTopicInfo* ti = &ln->topics[ln->topic_count++];
+            snprintf(ti->topic, sizeof(ti->topic), "%s", topic);
+            snprintf(ti->role, sizeof(ti->role), "%s", role);
+            ti->caps = caps;
+            ti->type_id = type_id;
+            ti->freq = freq;
             break;
         }
     }
-    if (!slot && ms->remote_count < MONITOR_MAX_REMOTE_SRCS) {
-        slot = &ms->remote[ms->remote_count++];
-    }
+    pthread_mutex_unlock(&ms->local_mutex);
+}
 
-    if (slot) {
-        snprintf(slot->source_name, sizeof(slot->source_name),
-                 "%s", pkt->source_name);
-        slot->pkt   = *pkt;
-        slot->valid = true;
+void monitor_server_update_topic_qos(MonitorServer* ms, const char* topic,
+                                      uint32_t pub, uint32_t del, uint32_t drop,
+                                      uint32_t lat_us, double freq, int subs,
+                                      const char* reliability, int deadline_ms,
+                                      const char* transport) {
+    pthread_mutex_lock(&ms->local_mutex);
+    for (int i = 0; i < ms->local_topic_count; i++) {
+        if (strcmp(ms->local_topic_stats[i].topic, topic) == 0) {
+            LocalTopicStat* ts = &ms->local_topic_stats[i];
+            ts->pub_count = pub;
+            ts->del_count = del;
+            ts->drop_count = drop;
+            ts->avg_lat_us = lat_us;
+            ts->freq_hz = freq;
+            ts->sub_count = subs;
+            if (reliability) snprintf(ts->qos_profile, sizeof(ts->qos_profile), "%s", reliability);
+            ts->deadline_ms = deadline_ms;
+            if (transport) snprintf(ts->transport, sizeof(ts->transport), "%s", transport);
+            pthread_mutex_unlock(&ms->local_mutex);
+            return;
+        }
     }
+    if (ms->local_topic_count < MONITOR_MAX_TOPICS) {
+        LocalTopicStat* ts = &ms->local_topic_stats[ms->local_topic_count++];
+        snprintf(ts->topic, sizeof(ts->topic), "%s", topic);
+        ts->pub_count = pub;
+        ts->del_count = del;
+        ts->drop_count = drop;
+        ts->avg_lat_us = lat_us;
+        ts->freq_hz = freq;
+        ts->sub_count = subs;
+        if (reliability) snprintf(ts->qos_profile, sizeof(ts->qos_profile), "%s", reliability);
+        ts->deadline_ms = deadline_ms;
+        if (transport) snprintf(ts->transport, sizeof(ts->transport), "%s", transport);
+        ts->active = true;
+    }
+    pthread_mutex_unlock(&ms->local_mutex);
+}
 
+void monitor_server_update_vehicle(MonitorServer* ms, double speed, double target,
+                                    double throttle, double brake, double x, double error) {
+    ms->local_stats.vehicle_speed = speed;
+    ms->local_stats.vehicle_target = target;
+    ms->local_stats.vehicle_throttle = throttle;
+    ms->local_stats.vehicle_brake = brake;
+    ms->local_stats.vehicle_x = x;
+    ms->local_stats.vehicle_error = error;
+}
+
+void monitor_server_update_driver_mode(MonitorServer* ms, const char* mode) {
+    if (mode) snprintf(ms->local_stats.driver_mode, sizeof(ms->local_stats.driver_mode), "%s", mode);
+}
+
+void monitor_server_add_remote_node(MonitorServer* ms, const char* name, int pid, int caps) {
+    pthread_mutex_lock(&ms->remote_mutex);
+    if (ms->remote_node_count < MONITOR_MAX_NODES) {
+        RemoteNode* rn = &ms->remote_nodes[ms->remote_node_count++];
+        snprintf(rn->name, sizeof(rn->name), "%s", name);
+        rn->pid = pid;
+        rn->caps = caps;
+        rn->active = true;
+        rn->topic_count = 0;
+    }
     pthread_mutex_unlock(&ms->remote_mutex);
-
-    /* Update freshness timestamp for IPC reconnect detection */
-    pthread_mutex_lock(&ms->freshness_mutex);
-    ms->last_stats_data_us = clock_now_us();
-    pthread_mutex_unlock(&ms->freshness_mutex);
 }
 
-void monitor_server_inject_dashboard_json(MonitorServer* ms,
-                                          const char* json, size_t len) {
-    if (!ms || !json || len == 0) return;
-
-    pthread_mutex_lock(&ms->cached_mutex);
-
-    /* Free old cache */
-    if (ms->cached_json) free(ms->cached_json);
-
-    /* Copy the JSON string */
-    ms->cached_json = (char*)malloc(len + 1);
-    if (ms->cached_json) {
-        memcpy(ms->cached_json, json, len);
-        ms->cached_json[len] = '\0';
-        ms->cached_json_len = len;
-        ms->cached_json_time_us = clock_now_us();
-        ms->cached_json_version++;
-        pthread_cond_signal(&ms->cached_cond);  /* wake SSE handler */
+void monitor_server_add_remote_topic(MonitorServer* ms, const char* node_name,
+                                      const char* topic, const char* role, int caps,
+                                      uint32_t type_id, double freq) {
+    pthread_mutex_lock(&ms->remote_mutex);
+    for (int i = 0; i < ms->remote_node_count; i++) {
+        RemoteNode* rn = &ms->remote_nodes[i];
+        if (strcmp(rn->name, node_name) == 0 && rn->topic_count < MONITOR_MAX_TOPICS) {
+            RemoteTopicInfo* ti = &rn->topics[rn->topic_count++];
+            snprintf(ti->topic, sizeof(ti->topic), "%s", topic);
+            snprintf(ti->role, sizeof(ti->role), "%s", role);
+            ti->caps = caps;
+            ti->type_id = type_id;
+            ti->freq = freq;
+            break;
+        }
     }
-
-    pthread_mutex_unlock(&ms->cached_mutex);
-
-    /* Update freshness timestamp for IPC reconnect detection */
-    pthread_mutex_lock(&ms->freshness_mutex);
-    ms->last_dashboard_data_us = clock_now_us();
-    pthread_mutex_unlock(&ms->freshness_mutex);
+    pthread_mutex_unlock(&ms->remote_mutex);
 }
 
-double monitor_server_dashboard_age_sec(MonitorServer* ms) {
-    if (!ms) return 1e9;
-    pthread_mutex_lock(&ms->freshness_mutex);
-    uint64_t last = ms->last_dashboard_data_us;
-    pthread_mutex_unlock(&ms->freshness_mutex);
-    if (last == 0) return 1e9;  /* never received data */
-    uint64_t now = clock_now_us();
-    return (double)(now - last) / 1000000.0;
+void monitor_server_update_remote_topic_qos(MonitorServer* ms, const char* topic,
+                                             uint32_t pub, uint32_t del, uint32_t drop,
+                                             uint32_t lat_us, double freq, int subs,
+                                             const char* reliability, int deadline_ms,
+                                             const char* transport) {
+    pthread_mutex_lock(&ms->remote_mutex);
+    for (int i = 0; i < ms->remote_topic_count; i++) {
+        if (strcmp(ms->remote_topic_stats[i].topic, topic) == 0) {
+            RemoteTopicStat* ts = &ms->remote_topic_stats[i];
+            ts->pub_count = pub;
+            ts->del_count = del;
+            ts->drop_count = drop;
+            ts->avg_lat_us = lat_us;
+            ts->freq_hz = freq;
+            ts->sub_count = subs;
+            if (reliability) snprintf(ts->qos_profile, sizeof(ts->qos_profile), "%s", reliability);
+            ts->deadline_ms = deadline_ms;
+            if (transport) snprintf(ts->transport, sizeof(ts->transport), "%s", transport);
+            pthread_mutex_unlock(&ms->remote_mutex);
+            return;
+        }
+    }
+    if (ms->remote_topic_count < MONITOR_MAX_TOPICS) {
+        RemoteTopicStat* ts = &ms->remote_topic_stats[ms->remote_topic_count++];
+        snprintf(ts->topic, sizeof(ts->topic), "%s", topic);
+        ts->pub_count = pub;
+        ts->del_count = del;
+        ts->drop_count = drop;
+        ts->avg_lat_us = lat_us;
+        ts->freq_hz = freq;
+        ts->sub_count = subs;
+        if (reliability) snprintf(ts->qos_profile, sizeof(ts->qos_profile), "%s", reliability);
+        ts->deadline_ms = deadline_ms;
+        if (transport) snprintf(ts->transport, sizeof(ts->transport), "%s", transport);
+        ts->active = true;
+    }
+    pthread_mutex_unlock(&ms->remote_mutex);
 }
 
-double monitor_server_stats_age_sec(MonitorServer* ms) {
-    if (!ms) return 1e9;
-    pthread_mutex_lock(&ms->freshness_mutex);
-    uint64_t last = ms->last_stats_data_us;
-    pthread_mutex_unlock(&ms->freshness_mutex);
-    if (last == 0) return 1e9;  /* never received data */
-    uint64_t now = clock_now_us();
-    return (double)(now - last) / 1000000.0;
+void monitor_server_update_bus_stats(MonitorServer* ms, uint32_t pub, uint32_t del,
+                                      uint32_t drop, uint32_t avg_lat, uint32_t max_lat) {
+    ms->local_stats.pub_total = pub;
+    ms->local_stats.del_total = del;
+    ms->local_stats.drop_total = drop;
+    ms->local_stats.avg_lat_us = avg_lat;
+    ms->local_stats.max_lat_us = max_lat;
 }
