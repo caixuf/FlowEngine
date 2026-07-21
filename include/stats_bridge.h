@@ -47,12 +47,6 @@ extern "C" {
 /** Maximum topics included in one StatsPacket */
 #define STATS_BRIDGE_MAX_TOPICS  16
 
-/** Maximum topics for monitor server (for compatibility) */
-#define MONITOR_MAX_TOPICS       STATS_BRIDGE_MAX_TOPICS
-
-/** Maximum nodes for monitor server */
-#define MONITOR_MAX_NODES        8
-
 /** IPC ring-buffer depth (packets) */
 #define STATS_BRIDGE_QUEUE_DEPTH 8
 
@@ -70,115 +64,7 @@ typedef struct {
     double   frequency_hz;
     uint32_t subscriber_count;
     uint32_t reserved;          /**< Alignment padding */
-    uint32_t pub_count;         /**< Alias for publish_count (monitor_server compatibility) */
-    uint32_t del_count;         /**< Alias for deliver_count (monitor_server compatibility) */
-    uint32_t avg_lat_us;        /**< Alias for p50_latency_us (monitor_server compatibility) */
-    double   freq_hz;           /**< Alias for frequency_hz (monitor_server compatibility) */
-    uint32_t sub_count;         /**< Alias for subscriber_count (monitor_server compatibility) */
-    char     qos_profile[32];   /**< QoS reliability profile (monitor_server) */
-    int32_t  deadline_ms;       /**< Deadline in ms (monitor_server) */
-    char     transport[32];     /**< Transport type (monitor_server) */
-    bool     active;            /**< Whether this entry is active (monitor_server) */
 } RemoteTopicStat;
-
-/* ── Monitor Server internal structures ──────────────────── */
-
-typedef struct {
-    char     topic[64];
-    char     role[16];
-    int      caps;
-    uint32_t type_id;
-    double   freq;
-} LocalTopicInfo;
-
-typedef struct {
-    char     topic[64];
-    char     role[16];
-    int      caps;
-    uint32_t type_id;
-    double   freq;
-} RemoteTopicInfo;
-
-typedef struct {
-    char            name[64];
-    int             pid;
-    int             caps;
-    bool            active;
-    int             topic_count;
-    LocalTopicInfo  topics[MONITOR_MAX_TOPICS];
-} LocalNode;
-
-typedef struct {
-    char             name[64];
-    int              pid;
-    int              caps;
-    bool             active;
-    int              topic_count;
-    RemoteTopicInfo  topics[MONITOR_MAX_TOPICS];
-} RemoteNode;
-
-typedef struct {
-    char     topic[64];
-    uint32_t pub_count;
-    uint32_t del_count;
-    uint32_t drop_count;
-    uint32_t avg_lat_us;
-    double   freq_hz;
-    int      sub_count;
-    char     qos_profile[32];
-    int      deadline_ms;
-    char     transport[32];
-    bool     active;
-} LocalTopicStat;
-
-typedef struct {
-    uint32_t pub_total;
-    uint32_t del_total;
-    uint32_t drop_total;
-    uint32_t avg_lat_us;
-    uint32_t max_lat_us;
-    uint32_t vehicle_speed;
-    uint32_t vehicle_target;
-    uint32_t vehicle_throttle;
-    uint32_t vehicle_brake;
-    uint32_t vehicle_x;
-    uint32_t vehicle_error;
-    char     driver_mode[32];
-} LocalStats;
-
-typedef struct {
-    uint32_t pub_total;
-    uint32_t del_total;
-    uint32_t drop_total;
-} RemoteStats;
-
-typedef struct MonitorServer {
-    char*             self_name;
-    char              html_path[512];
-    uint16_t          port;
-    int               listen_fd;
-    volatile bool     running;
-    uint64_t          start_time_us;
-    pthread_t         server_thread;
-    pthread_mutex_t   local_mutex;
-    pthread_mutex_t   remote_mutex;
-    pthread_mutex_t   client_mutex;
-    pthread_mutex_t   cached_mutex;
-    pthread_cond_t    cached_cond;
-    int               active_clients;
-    char*             cached_json;
-    uint64_t          cached_json_version;
-    LocalStats        local_stats;
-    RemoteStats       remote_stats;
-    int               local_node_count;
-    LocalNode         local_nodes[MONITOR_MAX_NODES];
-    int               remote_node_count;
-    RemoteNode        remote_nodes[MONITOR_MAX_NODES];
-    int               local_topic_count;
-    LocalTopicStat    local_topic_stats[MONITOR_MAX_TOPICS];
-    int               remote_topic_count;
-    RemoteTopicStat   remote_topic_stats[MONITOR_MAX_TOPICS];
-} MonitorServer;
 
 /* ── Stats packet sent over IPC ─────────────────────────── */
 

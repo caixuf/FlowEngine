@@ -411,24 +411,6 @@ function updateTopo(data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 场景切换
-// ═══════════════════════════════════════════════════════════════
-
-function switchSceneView(view) {
-  const scene3dEl = document.getElementById('scene3d');
-  const scene2dEl = document.getElementById('scene2d');
-
-  if (view === '3d') {
-    if (scene3dEl) scene3dEl.style.display = '';
-    if (scene2dEl) scene2dEl.style.display = 'none';
-  } else if (view === '2d') {
-    if (scene3dEl) scene3dEl.style.display = 'none';
-    if (scene2dEl) scene2dEl.style.display = '';
-    init2DFallback();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
 // 连接状态
 // ═══════════════════════════════════════════════════════════════
 
