@@ -19,7 +19,7 @@
  */
 
 import { getBox, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
-import { headingToRotationY } from '../math/Coord.js';
+import { worldToThree, headingToRotationY } from '../math/Coord.js';
 import { initModelCache, getModel, _setVehicleLights } from '../../models.js';
 import { _buildContactShadow } from '../../utils.js';
 
@@ -90,8 +90,9 @@ export function createVehicleView(scene) {
   function _updateGltfVehicle(entry, ent, simTime) {
     const { group } = entry;
 
-    // 位姿（使用 z 坐标作为高度，适配高架场景）
-    group.position.set(ent.x, ent.z || 0, ent.y);
+    // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
+    // 不再内联 position.set(ent.x, ent.z||0, ent.y)）
+    group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
     // 前轮 steer（axle_front 节点 rotation.y）
@@ -218,8 +219,9 @@ export function createVehicleView(scene) {
   function _updateProceduralVehicle(entry, ent, simTime) {
     const { group, wheels, lights } = entry;
 
-    // 位姿（使用 z 坐标作为高度，适配高架场景）
-    group.position.set(ent.x, ent.z || 0, ent.y);
+    // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
+    // 不再内联 position.set(ent.x, ent.z||0, ent.y)）
+    group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
     // 前轮 steer（InstancedMesh 需要更新矩阵）

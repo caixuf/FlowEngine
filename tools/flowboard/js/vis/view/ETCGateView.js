@@ -15,6 +15,7 @@
  */
 
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
+import { worldToThree } from '../math/Coord.js';
 
 const N_BOOTHS = 4;
 const LANE_W = 3.5;
@@ -193,7 +194,7 @@ export function createETCGateView(scene) {
         entry = _createETCGate();
         pool.set(ent.id, entry);
       }
-      entry.group.position.set(ent.x || 0, 0, ent.y || 0);
+      entry.group.position.set(...worldToThree(ent.x || 0, ent.y || 0, 0));
       _setBoomState(entry, ent.state);
     }
   }

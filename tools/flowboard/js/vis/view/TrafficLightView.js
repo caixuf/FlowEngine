@@ -9,6 +9,7 @@
  */
 
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
+import { worldToThree } from '../math/Coord.js';
 
 const RED = 0xff0000, YELLOW = 0xffaa00, GREEN = 0x00ff00;
 const LAMP_Y = [4.6, 4.3, 4.0];  // 红/黄/绿的 Y 坐标
@@ -110,7 +111,7 @@ export function createTrafficLightView(scene) {
         pool.set(ent.id, entry);
       }
       // 位姿：放在路边（entity.y 是横向偏移，加偏移到路肩）
-      entry.group.position.set(ent.x, 0, ent.y);
+      entry.group.position.set(...worldToThree(ent.x, ent.y, 0));
       _setLight(entry, ent.state);
     }
   }

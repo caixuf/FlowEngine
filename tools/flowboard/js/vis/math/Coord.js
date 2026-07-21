@@ -1,18 +1,31 @@
 /**
  * Coord.js — ENU 世界坐标 ↔ THREE 世界系映射
+ *
+ * Step 3 重构：本文件是 ENU→THREE 转换的单一来源，所有 view 应改用
+ * worldToThree(...) 而不是内联手写 [x, z || 0, y] 模式。
+ *
  * FlowEngine 仿真用 ENU（x=East, y=North, z=Up elevation）。
  * THREE 默认 y=up，所以映射：world(x,y,z) → three(x, z, y)。
+ *
+ * 用法：
+ *   import { worldToThree, headingToRotationY } from '../math/Coord.js';
+ *   group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
+ *   group.rotation.y = headingToRotationY(ent.heading || 0);
+ *
+ * 注意：sampleEdgeNodes（Curve.js）内部已做 ENU→THREE 交换，所以
+ * 经过 sampleEdgeNodes 输出的点已经是 THREE 坐标，不要再调 worldToThree。
  */
+
 /** ENU 世界坐标 (x=East, y=North, z=Up) → THREE (x, z, y)
- *  @deprecated 当前 view 模块各自内联手写映射，这个 helper 是死代码。
- *  下次重构时让所有 view 改用本函数，并删除内联的 [x, z || 0, y] 模式。
- *  不要在现有 view 里引用此函数。 */
+ *  @param {number} x  ENU East（前向）
+ *  @param {number} y  ENU North（侧向）
+ *  @param {number} [z=0]  ENU Up（高度）
+ *  @returns {[number, number, number]}  [three.x, three.y(up), three.z] */
 export function worldToThree(x, y, z = 0) {
   return [x, z, y];
 }
 
-/** THREE.Vector3 版本
- *  @deprecated 同 worldToThree，未被任何 view 引用。 */
+/** THREE.Vector3 版本（少用，优先 worldToThree + spread） */
 export function toVec3(x, y, z = 0) {
   return new THREE.Vector3(x, z, y);
 }
