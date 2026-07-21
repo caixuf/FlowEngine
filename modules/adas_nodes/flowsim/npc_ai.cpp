@@ -355,7 +355,14 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     // Phase 2: npc.road_pos.ok() 时优先用 RoadPosition 推进——沿真实 OpenDRIVE
     // 拓扑 RM_PositionMoveForward，过路口按 junction_angle 选支路，杜绝单链 Route
     // 在 fork/merge/toll 多通道处丢支路。否则走旧 route/世界系兜底逻辑。
-    if (npc.road_pos.ok() && roads && roads->loaded()) {
+    //
+    // 对向 NPC (route_dir < 0) 不能用 road_pos.advance：该 API 只能沿道路 +s 方向
+    // 推进，对向车需要 -s 方向。交给 road_pos 会导致位置前进但朝向翻转（车头朝后
+    // 却向前移动），route_s 只增不减永远不触发回收，最终在路网末端被回收后反复
+    // 出现在 ego 前方——与 ego 同向行驶但 OBB 朝向相反，在窄路段易发生碰撞。
+    // 改走旧 route 分支（route_s += route_dir * speed * dt）正确处理对向后退，
+    // 到达 route 起点时直接停用（不 recycle，见下方说明）。
+    if (npc.road_pos.ok() && roads && roads->loaded() && npc.route_dir >= 0) {
         // ── RoadPosition 推进分支 ──
         // junction_angle 暂用 M_PI（直行）；BranchSel 状态可后续从 route step
         // type 映射左/右转。advance 失败（路网边界）→ recycle。
@@ -421,14 +428,25 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         }
     } else if (route && route->ok() && npc.route_dir != 0 && roads) {
         // ── 中央 Frenet 车道跟随：沿 route 推进 s，反算世界坐标 ──
+        // 对向 NPC (route_dir<0) 走此分支（road_pos.advance 不支持 -s 方向）。
         // B1: 保存推进前的 route_s，frenet_to_world 失败时回滚。
         //     原实现失败时 route_s 已推进但 npc.x/y 未更新，下一帧 step_bicycle
         //     会用旧 heading 做世界系直线积分把 NPC 沿切线推离路网 → 飞出。
         double old_route_s = npc.route_s;
         npc.route_s += (double)npc.route_dir * npc.speed * dt;
-        if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
-            (npc.route_dir < 0 && npc.route_s < 0.0)) {
+        // 顺行 NPC (route_dir>0) 到达 route 末端 → recycle 到 ego 后方形成持续车流。
+        // 对向 NPC (route_dir<0) 到达 route 起点 → 直接停用，不 recycle。
+        //   原因：recycle_npc 把对向车放到 ego 前方 (ego_route_s + back)，但 ego
+        //   可能在高速公路（单向 3 车道，半宽 5.25m），对向车 offset=+5.5/+8.0
+        //   超出高速路半宽 → 被回收到路外/对向不存在车道，与同向 NPC 冲撞并把
+        //   ego 推出路缘（实测 d4ac6b0 commit 引入 entity21/23/24 三次碰撞 +
+        //   2.12m road departure）。对向车是单次事件（迎面驶过后不再相关），
+        //   停用比错误回收更安全。
+        if (npc.route_dir > 0 && npc.route_s > route->total_length()) {
             recycle_npc(npc, *route, ego_route_s, pool, roads);
+        } else if (npc.route_dir < 0 && npc.route_s < 0.0) {
+            npc.active = false;
+            return;
         }
         int rid = 0, ridx = -1;
         double s_local = 0.0;
@@ -448,12 +466,17 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.route_fail_count = 0;  // 成功 → 清零
         } else {
             // B1: frenet_to_world 失败。回滚 route_s，速度归零防切线飞出；
-            //     连续失败 ≥5 帧（250ms）强制 recycle。
+            //     顺行 NPC 连续失败 ≥5 帧（250ms）强制 recycle；
+            //     对向 NPC 连续失败 ≥5 帧直接停用（同样避免错误回收）。
             npc.route_s = old_route_s;
             npc.speed = 0.0;
             npc.vx = 0.0; npc.vy = 0.0;
             npc.route_fail_count++;
             if (npc.route_fail_count >= 5) {
+                if (npc.route_dir < 0) {
+                    npc.active = false;
+                    return;
+                }
                 recycle_npc(npc, *route, ego_route_s, pool, roads);
             }
         }
