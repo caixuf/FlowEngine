@@ -995,7 +995,7 @@ static void test_scenario_load_noa_route(void) {
     ASSERT_EQ(sc->route[0].target_lane, 1, "target_lane mismatch");
 
     TEST("scenario noa_route step[1] returns to origin lane");
-    ASSERT_EQ(sc->route[1].target_lane, -1, "target_lane mismatch");
+    ASSERT_EQ(sc->route[1].target_lane, 0, "target_lane mismatch (new convention: 0=leftmost idx)");
 
     scenario_free(sc);
     PASS();

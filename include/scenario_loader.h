@@ -127,7 +127,15 @@ typedef enum {
 typedef struct {
     double        trigger_x;     /**< ego x 越过此值触发（m） */
     RouteStepType type;          /**< 步骤类型（默认 ROUTE_LANE_CHANGE） */
-    int           target_lane;   /**< 目标车道方向: -1=初始车道一侧(y<0), +1=对侧相邻车道(y>0) */
+    /* 目标车道。
+     * 新语义（N 车道模型）: 0..N-1=目标车道索引（0=最左, N-1=最右），-1=无目标。
+     * 旧语义（2 车道模型）: -1=左车道(y<0), 0=无目标, +1=右车道(y>0)。
+     * control_node 接收时按当前 lane_count 做兼容映射：
+     *   - 旧值 +1（若 lane_count==2）→ idx 1（右车道）
+     *   - 旧值 -1（若 lane_count==2）→ idx 0（左车道）
+     *   - 旧值 0 → idx -1（无目标）
+     * 新场景应直接写 0..N-1 索引。 */
+    int           target_lane;
     int           branch_id;     /**< ROUTE_BRANCH_SELECT: connecting_road 的 id（fork 选路） */
     double        target_speed;  /**< 目标速度（m/s），0 = 不改变当前目标速度（可选项，用于出口匝道减速等） */
     char          label[SCENARIO_ROUTE_LABEL_LEN]; /**< 可读描述（可选） */

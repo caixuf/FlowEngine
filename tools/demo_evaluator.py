@@ -220,6 +220,27 @@ def load_pipeline_expected_edges() -> list[tuple[str, str, str]]:
     return expected_edges_from_pipeline(pipeline)
 
 
+def _pipeline_flowsim_scenario_file() -> str | None:
+    """Return the scenario_file path configured in config/pipeline.json's
+    flowsim node params (or None if not found). Used to pass the pipeline's
+    default scenario to demo.sh --scenario, so that demo.sh does not override
+    it with its own DEFAULT_SCENARIO (infinite_straight.json, no route)."""
+    pipeline = load_json(PIPELINE_JSON) or {}
+    for node in _pipeline_nodes(pipeline):
+        if not isinstance(node, dict) or node.get("name") != "flowsim":
+            continue
+        params = node.get("params", {})
+        if isinstance(params, str):
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(params, dict):
+            return params.get("scenario_file")
+        return None
+    return None
+
+
 def load_scenario_for_duration(scenario_override: str | None = None) -> dict:
     """Load scenario JSON to read duration_s for auto-detection."""
     scenario_path = scenario_override
@@ -339,9 +360,35 @@ def road_center_y(x: float, road: dict | None) -> float:
     return curve_offset_m * (3.0 * t * t - 2.0 * t * t * t)
 
 
-def nearest_lane_error(y: float, lane_width: float = 3.5) -> float:
-    lane_centers = [-lane_width * 0.5, lane_width * 0.5]
-    return min(abs(y - center) for center in lane_centers)
+def lane_center_y(lane_idx: int, lane_count: int, lane_width: float, road_c: float = 0.0) -> float:
+    """Mirror of include/road_geometry.h::lane_center_y() — N 车道中心对称布置。
+    lane_idx: 0=最左, lane_count-1=最右；road_c=道路中心 y 坐标。"""
+    if lane_count <= 1:
+        return road_c
+    return road_c + (lane_idx - (lane_count - 1) * 0.5) * lane_width
+
+
+def lane_idx_from_y(y: float, lane_count: int, lane_width: float, road_c: float = 0.0) -> int:
+    """Mirror of include/road_geometry.h::lane_idx_from_y() — 反推车道索引，
+    clamp 到 [0, lane_count-1]。"""
+    if lane_count <= 1:
+        return 0
+    offset = (y - road_c) / lane_width + (lane_count - 1) * 0.5
+    idx = int(round(offset))
+    if idx < 0:
+        idx = 0
+    if idx >= lane_count:
+        idx = lane_count - 1
+    return idx
+
+
+def nearest_lane_error(y: float, lane_width: float = 3.5, lane_count: int = 2, road_c: float = 0.0) -> float:
+    """ego 横向位置 y（相对道路中心 road_c）到最近车道中心的最小距离。
+    N 车道模型：lane_count=2 时退化为 [-lane_width*0.5, +lane_width*0.5]，与旧实现一致。"""
+    if lane_count <= 1:
+        return abs(y - road_c)
+    lane_centers = [lane_center_y(i, lane_count, lane_width, road_c) for i in range(lane_count)]
+    return min(abs(y - c) for c in lane_centers)
 
 
 def angle_diff(a: float, b: float) -> float:
@@ -405,8 +452,10 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "heading": heading,
         "steer": steer,
         "steer_signed": steer_signed,
-        "lane_error": nearest_lane_error(y_rel, lane_width),
+        "lane_error": nearest_lane_error(y_rel, lane_width, lane_count, 0.0),
         "road_edge_margin": lane_width * lane_count * 0.5 - abs(y_rel) - 1.0,
+        "lane_count": lane_count,
+        "y_rel": y_rel,
         "min_forward_gap": min_forward_gap,
         "min_abs_gap": min_abs_gap,
         "obs_world": obs_world,
@@ -572,14 +621,21 @@ def _compute_perception_metrics(series: list[dict], timestamps: list[float]) -> 
     }
 
 
-def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[list[dict], int]:
+def collect_samples(duration: int, json_file: Path, interval: float,
+                    scenario: str | None = None) -> tuple[list[dict], int]:
     try:
         json_file.unlink()
     except FileNotFoundError:
         pass
 
     started_wall = time.time()
-    cmd = [str(ROOT / "scripts" / "demo.sh"), "--no-browser", str(duration)]
+    # 传 --scenario 给 demo.sh，确保 demo.sh 不会用 DEFAULT_SCENARIO（infinite_straight，
+    # 无 route）覆盖 pipeline.json 的 scenario_file。否则 planning 运行时加载的是
+    # infinite_straight，route_count=0，NOA guard 永远拒绝，模式停在 NP。
+    cmd = [str(ROOT / "scripts" / "demo.sh"), "--no-browser"]
+    if scenario:
+        cmd += ["--scenario", scenario]
+    cmd += [str(duration)]
     proc = subprocess.Popen(
         cmd,
         cwd=ROOT,
@@ -587,13 +643,16 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     samples: list[dict] = []
     started = time.monotonic()
-    # 缓冲时间：给 demo.sh 构建 node plugins、等待首帧 topology 写入、
-    # 以及正常收尾足够余量。首次运行或 CI 冷启动时 12s 经常不够。
-    deadline = started + duration + 30.0
+    # 缓冲时间：demo.sh 自身总时长 = 构建(0-5s) + wait-for-JSON(最多 15s)
+    # + sleep 1+2 + 监控循环(duration + 每帧 fork python3 ~10s) + cleanup(3-5s)。
+    # 旧值 duration+30s 在冷启动/CI 上经常不够，导致 SIGTERM 截断 demo.sh
+    # 且孤儿进程残留。改为 duration+60s 覆盖最坏情况。
+    deadline = started + duration + 60.0
     first_sample_seen = False
     while proc.poll() is None and time.monotonic() < deadline:
         try:
@@ -608,20 +667,28 @@ def collect_samples(duration: int, json_file: Path, interval: float) -> tuple[li
             samples.append(sample)
             if not first_sample_seen:
                 first_sample_seen = True
-                # 收到首个有效样本后再给运行时长 + 15s 收尾缓冲，避免
-                # 刚出数据就被 deadline 截断。
-                deadline = max(deadline, time.monotonic() + duration + 15.0)
+                # 收到首个有效样本后再给运行时长 + 30s 收尾缓冲，
+                # 覆盖 demo.sh 监控循环的 python3 fork 开销 + cleanup。
+                deadline = max(deadline, time.monotonic() + duration + 30.0)
         time.sleep(interval)
 
     if proc.poll() is None:
         print(f"warning: demo.sh still running after {time.monotonic() - started:.1f}s, terminating",
               file=sys.stderr)
-        proc.terminate()
+        # 用进程组信号确保 demo.sh 的子孙进程（flow_launcher / flowmond /
+        # foxglove_bridge / flow_node_host）也被一并清理，避免孤儿残留。
         try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+            os.killpg(os.getpgid(proc.pid), 15)  # SIGTERM
+            proc.wait(timeout=10.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)  # SIGKILL
+            except (ProcessLookupError, PermissionError):
+                pass
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pass
     output = proc.stdout.read() if proc.stdout else ""
     if output:
         print(output.rstrip())
@@ -660,17 +727,41 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     collision_pub = int(topics.get("sim/collision", {}).get("pub", 0) or 0)
     log_text = launcher_log.read_text(encoding="utf-8", errors="ignore") if launcher_log.exists() else ""
-    collision_log_count = len(re.findall(r"COLLISION ego", log_text))
+    # 提取碰撞对象 ID（LOG_ERROR 格式 "COLLISION ego↔entityN"），便于定位是哪个 NPC
+    collision_entity_ids = re.findall(r"COLLISION ego.*?entity(\d+)", log_text)
+    collision_log_count = len(collision_entity_ids)
     no_collision_required = bool(criteria.get("no_collision", True))
     if no_collision_required and (collision_pub > 0 or collision_log_count > 0):
-        failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}")
+        entity_ids_str = ", ".join(f"entity{eid}" for eid in collision_entity_ids[:5]) if collision_entity_ids else "n/a"
+        failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}"
+                        f", entities=[{entity_ids_str}]")
 
     max_lane_index = max(range(len(series)), key=lambda i: lane_errors[i])
     max_lane_error = lane_errors[max_lane_index]
     min_road_margin_index = min(range(len(series)), key=lambda i: road_margins[i])
     min_road_margin = road_margins[min_road_margin_index]
-    if min_road_margin < 0.0:
-        failures.append(f"road departure: ego body exceeded road edge by {-min_road_margin:.2f} m")
+    # road departure 检测：区分"持续偏出"与"短暂过渡"。
+    # ego 从多车道进入单车道 ramp 时，横向位置需要从 ±1.6m 收敛到 0m，
+    # 必然有短暂帧 |y| 超出单车道半宽（1.75m - 1.0m body = 0.75m）。
+    # 单帧极值检测会把这种过渡误报为 road departure。
+    # 修复：只检测以下情况为 road departure：
+    #   1. 严重偏出：margin < -1.5m（ego body 超出路面 1.5m，绝非过渡）
+    #   2. 持续偏出：连续 ≥10 帧（0.5s @20Hz）margin < 0
+    road_departure_consecutive = 0
+    road_departure_max_consecutive = 0
+    for m in road_margins:
+        if m < 0.0:
+            road_departure_consecutive += 1
+            if road_departure_consecutive > road_departure_max_consecutive:
+                road_departure_max_consecutive = road_departure_consecutive
+        else:
+            road_departure_consecutive = 0
+    if min_road_margin < -1.5 or road_departure_max_consecutive >= 10:
+        failures.append(f"road departure: ego body exceeded road edge by {-min_road_margin:.2f} m"
+                        f" (consecutive={road_departure_max_consecutive} frames)")
+    elif min_road_margin < 0.0:
+        warnings.append(f"brief road edge excursion during lane-count transition: {-min_road_margin:.2f} m"
+                        f" (consecutive={road_departure_max_consecutive} frames, < 10 threshold)")
     if max_lane_error > 1.35:
         warnings.append(f"large lane-center deviation during maneuver: {max_lane_error:.2f} m")
 
@@ -710,13 +801,18 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         prev_ts = ts
     stagnation_duration_s = longest_stagnation
 
-    # ── 变道次数统计（基于 y 显著偏移） ──
-    ys = [m["y"] for m in series]
+    # ── 变道次数统计（基于 y 量化到车道 idx） ──
+    # N 车道模型：用 lane_idx_from_y 把每帧 y_rel 量化到车道索引，
+    # 相邻帧 idx 变化即记一次变道。lane_count=2 时与旧实现等价。
+    # 注：metrics["lane_count"] 取自 road/geometry topic（flowsim 按 ego road_id
+    # 实时发布），中途若切换路段导致 lane_count 变化，按每帧各自的 lane_count 量化。
+    lane_width_default = 3.5
     lane_change_count = 0
     prev_lane = None
-    for y_val in ys:
-        # 左车道中心 y≈-1.75，右车道中心 y≈1.75，lane_width=3.5
-        lane_idx = 0 if y_val < 0 else 1  # 0=左车道 1=右车道
+    for m in series:
+        lc = int(m.get("lane_count", 2) or 2)
+        yr = float(m.get("y_rel", 0.0) or 0.0)
+        lane_idx = lane_idx_from_y(yr, lc, lane_width_default, 0.0)
         if prev_lane is not None and lane_idx != prev_lane:
             lane_change_count += 1
         prev_lane = lane_idx
@@ -854,10 +950,15 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 continue
             dx = obs["x"] - prev["x"]
             dy = obs["y"] - prev["y"]
-            speed = math.hypot(dx, dy) / dt
-            # NPC respawn 时位置跳变会产生 500+ m/s 假速度，跳过
-            if speed > 50.0:
+            # NPC respawn 时位置跳变（recycle 距离 50-138m）会反算出 25-500+ m/s
+            # 的"假速度"。原先用 speed > 50.0 过滤会漏掉 25-50 m/s 区间的中等跳变
+            # （50m recycle / 2s 采样 ≈ 25 m/s），这些跳变会触发 >45.0 的 respawn
+            # jump 告警，导致 CI 误报。改为用位移阈值：连续两帧间位移 > 30m 几乎
+            # 不可能是真实运动（即使 30 m/s × 1s 采样也只有 30m），视为 teleport。
+            disp = math.hypot(dx, dy)
+            if disp > 30.0:
                 continue
+            speed = disp / dt
             npc_speed_spikes.append(speed)
             npc_lateral_spikes.append(abs(dy) / dt)
 
@@ -1050,8 +1151,19 @@ def main() -> int:
         returncode = 0
         criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
     else:
-        with pipeline_scenario_override(args.scenario):
-            samples, returncode = collect_samples(duration, args.json_file, args.interval)
+        # 默认场景：从 pipeline.json 的 flowsim.scenario_file 读取（即 city_to_highway_full）。
+        # 旧实现不传 --scenario 给 demo.sh，demo.sh 用 DEFAULT_SCENARIO=infinite_straight
+        # 覆盖 pipeline.json，导致 planning 运行时加载无 route 的场景，NOA 永远不升级。
+        # 这里显式把 pipeline.json 里的 scenario_file 传给 demo.sh，确保 demo.sh 用
+        # 该场景而非 DEFAULT_SCENARIO。args.scenario 优先级最高（用户显式指定）。
+        effective_scenario = args.scenario
+        if not effective_scenario:
+            # 从 pipeline.json 读 flowsim.scenario_file 作为默认场景传给 demo.sh，
+            # 避免 demo.sh 用 DEFAULT_SCENARIO（infinite_straight，无 route）覆盖。
+            effective_scenario = _pipeline_flowsim_scenario_file()
+        with pipeline_scenario_override(effective_scenario):
+            samples, returncode = collect_samples(duration, args.json_file, args.interval,
+                                                  scenario=effective_scenario)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.

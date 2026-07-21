@@ -69,16 +69,19 @@
     ]
   },
   "route": [
-    { "trigger_x": 0,    "type": "lane_change",   "target_lane": 0,  "label": "city_cruise" },
-    { "trigger_x": 340,  "type": "lane_change",   "target_lane": 0,  "target_speed": 0,  "label": "stop_at_red" },
+    { "trigger_x": 0,    "type": "lane_change",   "target_lane": -1, "label": "city_cruise" },
+    { "trigger_x": 340,  "type": "lane_change",   "target_lane": -1, "target_speed": 0,  "label": "stop_at_red" },
     { "trigger_x": 500,  "type": "branch_select", "branch_id": 3,   "label": "take_right_ramp" },
     { "trigger_x": 900,  "type": "merge",         "target_lane": 1, "target_speed": 28, "label": "merge_highway" },
-    { "trigger_x": 1600, "type": "lane_change",   "target_lane": -1, "target_speed": 28, "label": "overtake_left" },
+    { "trigger_x": 1600, "type": "lane_change",   "target_lane": 0,  "target_speed": 28, "label": "overtake_left" },
     { "trigger_x": 1850, "type": "lane_change",   "target_lane": 1,  "label": "return_right" }
   ],
   "traffic_lights": [
-    { "id": 0, "x": 275, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 0,
-      "_comment": "路口中心：road 1 (s=200~350) 中点 = s=275" }
+    { "id": 0, "x": 275, "y_lane": -1.75, "heading": 0, "red_s": 15, "yellow_s": 3, "green_s": 12, "phase_offset_s": 15,
+      "_comment": "路口中心：road 1 (s=200~350) 中点 = s=275。phase_offset=15 使 t=15~27s 为绿灯，ego 以 ~11m/s 行驶 265m 约在 t=24s 到达 x=275（绿灯期），避免闯红灯" }
+  ],
+  "stop_lines": [
+    { "x": 270, "y": -1.75, "lane": -1 }
   ],
   "etc_gates": [
     { "id": 0, "x": 450, "y": 0, "approach_speed": 5.0, "open_range_m": 50 }
@@ -113,7 +116,7 @@
     { "id": 20, "segment_id": 5,  "type": "truck","s": 200,  "l": -1.75,"vx": 14.0,"len": 8.0, "wid": 2.4 },
     { "id": 21, "segment_id": 5,  "type": "car",  "s": 250,  "l": 0,    "vx": 26.0,"len": 4.6, "wid": 2.0 },
     { "id": 22, "segment_id": 5,  "type": "car",  "s": 100,  "l": 1.75, "vx": 0,   "len": 4.6, "wid": 2.0 },
-    { "id": 23, "segment_id": 5,  "type": "car",  "s": -50,  "l": 0,    "vx": 22.0,"len": 4.6, "wid": 2.0 },
+    { "id": 23, "segment_id": 5,  "type": "car",  "s": 300,  "l": 0,    "vx": 22.0,"len": 4.6, "wid": 2.0 },
     { "id": 24, "segment_id": 5,  "type": "car",  "s": 400,  "l": -1.75,"vx": 20.0,"len": 4.6, "wid": 2.0 }
   ]
 }

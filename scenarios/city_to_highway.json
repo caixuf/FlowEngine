@@ -179,31 +179,31 @@
   "route": [
     {
       "trigger_x": 30.0,
-      "target_lane": 0,
+      "target_lane": -1,
       "target_speed": 0,
       "label": "city_cruise"
     },
     {
       "trigger_x": 200.0,
-      "target_lane": 0,
+      "target_lane": -1,
       "target_speed": 8.0,
       "label": "approach_etc_decelerate"
     },
     {
       "trigger_x": 350.0,
-      "target_lane": 0,
+      "target_lane": -1,
       "target_speed": 8.33,
       "label": "ramp_curve_entry"
     },
     {
       "trigger_x": 650.0,
-      "target_lane": 0,
+      "target_lane": -1,
       "target_speed": 25.0,
       "label": "highway_merge_accelerate"
     },
     {
       "trigger_x": 900.0,
-      "target_lane": 0,
+      "target_lane": -1,
       "target_speed": 30.0,
       "label": "highway_cruise"
     }

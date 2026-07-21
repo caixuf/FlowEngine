@@ -78,8 +78,12 @@ struct PlanningContext {
     ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS];
     int               route_count{0};
     int               route_next_idx{0};    /* 下一条待触发的路线指令 */
-    int               route_target_lane{0}; /* 当前路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
-    double            route_target_speed{0.0};/* 当前路线步骤要求的目标速度（0 = 无改变） */
+    /* 当前路线要求的目标车道索引。
+     * 语义：-1=无目标（保持当前车道），0..N-1=目标车道索引（0=最左, N-1=最右）。
+     * 旧约定（{-1=左, 0=无, +1=右}）已废弃，但 scenario JSON 中的旧值仍可通过
+     * route_step_target_lane_to_idx() 兼容映射。 */
+    int               route_target_lane{-1};
+    double            route_target_speed{-1.0};/* 当前路线步骤要求的目标速度（-1 = 未设置/无改变，0 = 停车） */
     /* NOA Phase 3.2/3.3: 当前路线步骤类型 + branch_select 选中的 connecting_road id。
      * - route_type 持续下发到 control/monitor，供下游区分普通变道/分支选路/汇入。
      * - current_branch_id 用于 branch_select 后参考路径切换的几何参考（fallback 模式
@@ -99,7 +103,7 @@ struct PlanningContext {
     double merge_gap_front{1e9};
     double merge_gap_rear{1e9};
     double merge_min_gap{30.0};
-    int    merge_hold_lane{0};
+    int    merge_hold_lane{-1};  /* N 车道模型：-1=无, 0..N-1=暂存的目标车道 idx */
     volatile int has_scene_frame{0};
 
     /* Frenet 规划器 */
@@ -225,9 +229,11 @@ static void update_reference_path(double start_x) {
     const int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
         wx[i] = start_x + (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
-        /* 弯道时参考路径跟随道路中心线；curve_length_m<=0 时 road_center_y()
-         * 恒为 0，与既有直线参考路径完全一致。 */
-        wy[i] = -1.75 + road_center_y(wx[i], g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+        /* 参考路径沿道路中心线（d=0 表示 ego 在道路中心）。
+         * 旧实现把参考线放在 y=-1.75（2 车道左车道中心），是 2 车道硬假设；
+         * N 车道模型下参考线应放在道路中心，由 control 节点决定具体目标车道。
+         * curve_length_m<=0 时 road_center_y() 恒为 0，与既有直线参考路径完全一致。 */
+        wy[i] = road_center_y(wx[i], g.curve_start_x, g.curve_length_m, g.curve_offset_m);
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
     g.ref_path_start_x = start_x;
@@ -463,12 +469,15 @@ protected:
                 switch (step->type) {
                 case ROUTE_BRANCH_SELECT: {
                     /* 分叉选路：选中 branch_id 指定的 connecting_road。
-                     * target_lane 缺省 -1（右匝道方向）；若场景显式指定则用场景值。 */
+                     * target_lane 缺省 -1（右匝道方向，新模型用 lane_count-1 表示"最右"，
+                     * 但 planning 不知 lane_count，直接透传 -1，control 收到时按
+                     * "无目标"处理，让 ego 沿道路中心行驶直到下一条路线步骤）。
+                     * 场景显式指定的 target_lane（无论新旧语义）直接透传。 */
                     int lane = (step->target_lane != 0) ? step->target_lane : -1;
                     g.route_target_lane = lane;
                     g.current_branch_id = step->branch_id;
                     if (step->target_speed > 0.0) g.route_target_speed = step->target_speed;
-                    else                          g.route_target_speed = 0.0;
+                    else                          g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
                     /* 触发参考路径刷新：branch_select 后 ego 进入新的 connecting_road，
                      * 参考路径需重新基于新路段几何构建（fallback 模式下沿用 curve_*
                      * 单段几何，HAVE_FRENET 模式下应切到 branch_id 对应道路采样）。 */
@@ -482,11 +491,13 @@ protected:
                 case ROUTE_MERGE: {
                     /* 加速车道汇入：强制 target_speed（加速到主路速度）+ target_lane
                      * （汇入后车道方向）。control 节点在 merge 状态下做 gap 检查 +
-                     * 加速 + 横向汇入。target_lane 缺省 +1（汇入左侧主路）。
+                     * 加速 + 横向汇入。target_lane 缺省 +1（旧语义"右"，新模型下
+                     * control 会把 +1 当作旧值并按 lane_count 映射到 idx=0=最左，
+                     * 符合"汇入主路左侧"的实际语义）。
                      *
                      * NOA Phase 6 merge 闭环：进入 merge 后先置 state=1（等 gap），
                      * 主循环根据 scene/frame 的主线来车 gap 决策何时下发并入。
-                     * gap 不足期间 route_target_lane 暂存到 merge_hold_lane 并置 0
+                     * gap 不足期间 route_target_lane 暂存到 merge_hold_lane 并置 -1
                      * （不下发变道），control 保持当前车道跟车巡航。 */
                     int lane = (step->target_lane != 0) ? step->target_lane : 1;
                     g.route_target_lane = lane;
@@ -511,7 +522,9 @@ protected:
                 }
                 case ROUTE_LANE_CHANGE:
                 default: {
-                    /* 普通变道：原行为，设 target_lane + target_speed */
+                    /* 普通变道：原行为，设 target_lane + target_speed。
+                     * step->target_lane 直接透传给 control，由 control 按 lane_count
+                     * 做兼容映射（旧 ±1 → 新 0..N-1）。 */
                     g.route_target_lane = step->target_lane;
                     g.current_branch_id = -1;
                     if (step->target_speed > 0.0) {
@@ -520,8 +533,17 @@ protected:
                                  "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
                                  g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
                                  step->label[0] ? step->label : "-");
-                    } else {
+                    } else if (step->target_speed == 0.0) {
+                        /* 显式 target_speed=0 表示停车（如 stop_at_red），不再是"未设置"。
+                         * 旧实现用 0.0 表示未设置，与停车语义冲突，导致 stop_at_red
+                         * 步骤的 command_speed 回退到默认巡航速度，ego 不停车。 */
                         g.route_target_speed = 0.0;
+                        LOG_INFO("planning",
+                                 "NOA route step #%d triggered @x=%.0f -> lane=%d STOP (target_speed=0) (%s)",
+                                 g.route_next_idx, g.ego_x, step->target_lane,
+                                 step->label[0] ? step->label : "-");
+                    } else {
+                        g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
                         LOG_INFO("planning",
                                  "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
                                  g.route_next_idx, g.ego_x, step->target_lane,
@@ -541,9 +563,11 @@ protected:
                          g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
             }
 
-            /* NOA 路线步骤可能指定目标速度（如出口匝道减速），覆盖纯粹的巡航速度。
-             * 叠加关系：route_target_speed > 0 时作为最终目标，否则用默认 target_speed。 */
-            double command_speed = (g.route_target_speed > 0.0) ? g.route_target_speed : g.target_speed;
+            /* NOA 路线步骤可能指定目标速度（如出口匝道减速、stop_at_red 停车），覆盖纯粹的巡航速度。
+             * 叠加关系：route_target_speed >= 0 时作为最终目标（含 0=停车），-1=未设置用默认 target_speed。
+             * 旧实现用 > 0.0 判断，导致 target_speed=0（停车）被当作"未设置"回退到巡航速度，
+             * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
+            double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
 
             /* ── NOA Phase 6 merge 闭环：基于 scene/frame 主线来车 gap 决策并入 ──
              * merge_state==1（等 gap）：用 on_scene_frame 缓存的前后 gap 判断
@@ -563,8 +587,8 @@ protected:
                              "NOA merge gap OK front=%.0f rear=%.0f -> commit lane=%d",
                              gf, gr, g.merge_hold_lane);
                 } else {
-                    /* gap 不足：跟车巡航，不下发变道 */
-                    g.route_target_lane = 0;
+                    /* gap 不足：跟车巡航，不下发变道（N 车道模型：-1=无目标） */
+                    g.route_target_lane = -1;
                     /* 前 gap < 60m 时按 3s TTC 限速跟随前车 */
                     if (gf < 60.0 && gf > 0.0) {
                         double follow_speed = (gf - 5.0) / 3.0;  /* (gap-5m)/3s */
@@ -706,10 +730,12 @@ protected:
 
 #ifdef HAVE_FRENET
             {
-                /* 弯道参考路径在 y=-1.75 + road_center_y，所以 Frenet d 应是
-                 * ego_y - (-1.75 + road_center_y(ego_x)) = ego_y + 1.75 - road_center_y(ego_x) */
+                /* Frenet 参考路径沿道路中心线（d=0 = 道路中心），
+                 * ego_d = ego_y - road_center_y(ego_x) = ego_y - rc_y。
+                 * 旧实现基准是 y=-1.75（2 车道左车道中心），现在改为道路中心，
+                 * d_out=0 表示 ego 在道路中心，control 节点决定具体目标车道。 */
                 double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
-                double ego_d = g.ego_y + 1.75 - rc_y;  /* 相对 y=-1.75 的偏移（弯道修正） */
+                double ego_d = g.ego_y - rc_y;  /* 相对道路中心的偏移（弯道修正） */
                 n_wp = frenet_plan(g.frenet,
                     g.ego_x, ego_d, g.ego_v,
                     command_speed,
@@ -722,7 +748,7 @@ protected:
                 int n = 10;              /* 10 个路径点 */
                 for (int i = 0; i < n; i++) {
                     s_out[i] = g.ego_x + horizon * (double)i / (double)(n - 1);
-                    d_out[i] = 0.0;     /* 保持参考线（y=-1.75） */
+                    d_out[i] = 0.0;     /* 保持参考线（道路中心，d=0） */
                     spd_out[i] = command_speed;
                 }
                 n_wp = n;
@@ -872,8 +898,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     g.route_count        = 0;
     g.route_next_idx     = 0;
-    g.route_target_lane  = 0;
-    g.route_target_speed = 0.0;
+    g.route_target_lane  = -1;  /* N 车道模型：-1=无目标 */
+    g.route_target_speed = -1.0;  /* -1=未设置 */
     /* NOA Phase 3.2/3.3: 路线步骤类型默认 lane_change，branch_id 复位 */
     g.route_type         = ROUTE_LANE_CHANGE;
     g.current_branch_id  = -1;
@@ -922,7 +948,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     }
 
     g.target_speed = g.cfg_target_speed;
-    g.route_target_speed = 0.0;
+    g.route_target_speed = -1.0;  /* -1=未设置 */
 
     /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
      * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（sim_world 发布）。

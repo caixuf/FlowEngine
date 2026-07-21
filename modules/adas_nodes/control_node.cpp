@@ -130,7 +130,11 @@ struct ControlContext {
     double ego_x{0}, ego_y{0};
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
-    int    route_lane{0};      /* NOA 导航路线要求的目标车道: 0=无, -1=y<0一侧, +1=y>0一侧 */
+    /* NOA 导航路线要求的目标车道索引。
+     * 语义：-1=无目标（保持当前车道），0..N-1=目标车道索引。
+     * 旧约定（{-1=左, 0=无, +1=右}）已被多车道模型取代，planning 下发时
+     * 会做兼容映射（详见 planning_node.cpp 的 route_target_lane 注释）。 */
+    int    route_lane{-1};
 
     /* 障碍物数据 (从 vehicle/state 解析) */
     double obs_x[MAX_OBS]{}, obs_y[MAX_OBS]{}, obs_vx[MAX_OBS]{};
@@ -151,7 +155,9 @@ struct ControlContext {
     double lc_cooldown{0};
     double lc_origin_y{0};
     double lc_target_y{0};
+    int    lc_target_idx{-1};   /* 变道目标车道索引（变道发起时记录，完成时 commit 到 committed_lane_side） */
     double lane_width{3.5};
+    int    lane_count{2};       /* 当前 ego 所在路段可行驶车道数（从 road/geometry 实时订阅） */
     double blocked_timeout_s{0};
 
     /* NOA 超车调优参数（原硬编码，现可配置 + pipeline.json 即时生效） */
@@ -169,8 +175,11 @@ struct ControlContext {
     double ldw_cooldown{2.0};            /* 告警冷却期 (s)，避免刷屏 */
     double ldw_last_warn_time{0};        /* 上次告警时间 (s) */
 
-    /* 车道迟滞 + 死锁恢复状态 */
-    int    committed_lane_side{0};  /* 0=未初始化 -1=左车道(负y) +1=右车道(正y) */
+    /* 车道迟滞 + 死锁恢复状态。
+     * 字段名保留 committed_lane_side 以减少 diff，但语义已改为
+     * committed_lane_idx: -1=未初始化, 0..N-1=车道索引（0=最左, N-1=最右）。
+     * 旧约定 {-1=左, 0=未初始化, +1=右} 在 N 车道模型下不够用，已废弃。 */
+    int    committed_lane_side{-1};
     double stuck_timer{0};          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
     double speed_zero_timer{0};     /* 全域速度死锁: 无论 y 位置, 速度持续为0的累计时间 (秒) */
 
@@ -287,7 +296,15 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
     {
         const char* p = strstr(d, "route_lane=");
-        if (p) sscanf(p + 11, "%d", &g.route_lane);
+        if (p) {
+            int v = -1;
+            sscanf(p + 11, "%d", &v);
+            /* 兼容旧约定：planning 仍可能下发 0=无目标（旧 2 车道场景）。
+             * 新约定下 -1=无目标，0=第 0 车道（最左）。仅在 lane_count==2 且
+             * |v|<=1 时把旧 0 映射为 -1；多车道场景下 0 是合法车道索引，原样保留。 */
+            if (g.lane_count == 2 && v >= -1 && v <= 1 && v == 0) v = -1;
+            g.route_lane = v;
+        }
     }
 
     g.has_planning = 1;
@@ -448,6 +465,8 @@ static void on_road_geometry(const Message* msg, void* user_data) {
         if (cJSON_IsNumber(j)) g.curve_offset_m = j->valuedouble;
         j = cJSON_GetObjectItemCaseSensitive(root, "lane_width");
         if (cJSON_IsNumber(j)) g.lane_width = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(root, "lane_count");
+        if (cJSON_IsNumber(j) && j->valuedouble >= 1.0) g.lane_count = (int)j->valuedouble;
         cJSON_Delete(root);
     }
 }
@@ -583,7 +602,6 @@ protected:
         const double same_lane_tol = 2.0;
         const double time_headway  = 1.4;
         const double min_gap       = 5.0;
-        const double ref_y         = -1.75;  /* Frenet 参考路径在左车道中心 */
 
         while (!should_stop()) {
             /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
@@ -614,21 +632,19 @@ protected:
                                                               g.curve_length_m, g.curve_offset_m);
                     }
                 }
-                /* 关键：目标必须是 ego 所在车道中心 (road_c ± half_lane)，而非道路中心线
-                 * road_c。早期版本用 road_c 作目标，导致 ego 从 y=-1.75 被拉向 y=0，
+                /* 关键：目标必须是 ego 所在车道中心，而非道路中心线 road_c。
+                 * 早期版本用 road_c 作目标，导致 ego 从 y=-1.75 被拉向 y=0，
                  * 越过中心线后 committed_lane_side 翻转、lc_state 被强制设为 2 并进入
                  * ROAD_GUARD，最终冲出右侧路沿 (road departure)。
                  *
-                 * EKF 收敛前 ego_y≈0 (fusion_node EKF 初始 y=0), 此时 (ego_y < road_c)
-                 * 为假, 会把 target 钉成 +1.75 (右车道), 把 ego 从 y=-1.75 拉向右侧。
-                 * 因此在 |ego_y - road_c| < 1.0m (EKF 未收敛) 时, 目标=ego_y (横向不动)。 */
+                 * N 车道模型：用 lane_idx_from_y 算出 ego 当前所在车道 idx，
+                 * 再用 lane_center_y 算该车道中心 y。EKF 未收敛（|ego_y - road_c| < 1.0m）
+                 * 时 target=ego_y（横向不动），避免被拉向任意一侧。 */
                 double fb_target_y = fb_road_c;
                 if (g.has_fusion) {
-                    double half_lane = g.lane_width * 0.5;
-                    if (g.ego_y - fb_road_c > 1.0) {
-                        fb_target_y = fb_road_c + half_lane;
-                    } else if (g.ego_y - fb_road_c < -1.0) {
-                        fb_target_y = fb_road_c - half_lane;
+                    if (fabs(g.ego_y - fb_road_c) > 1.0) {
+                        int fb_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, fb_road_c);
+                        fb_target_y = lane_center_y(fb_idx, g.lane_count, g.lane_width, fb_road_c);
                     } else {
                         fb_target_y = g.ego_y;  /* EKF 未收敛, 横向保持不动 */
                     }
@@ -698,40 +714,67 @@ protected:
                 ref_kappa = road_center_curvature(g.ego_x, g.curve_start_x,
                                                   g.curve_length_m, g.curve_offset_m);
             }
-            double road_center_limit = g.lane_width - 1.0;
+            /* N 车道模型下的"半路宽"——ego 允许的横向范围。
+             * 旧实现用 lane_width - 1.0 等价于"半车道宽 - 1m"，是 2 车道假设下的
+             * ROAD_GUARD 触发阈值。N 车道模型下应改为"半路宽 - 1m"。 */
+            double half_road = g.lane_count * g.lane_width * 0.5;
+            double road_center_limit = half_road - 1.0;
             double half_lane = g.lane_width * 0.5;
 
-            /* ── 车道判定加迟滞: 使用"已提交车道", 只有 ego_y 明确越过中心线
-             *    ±LANE_HYSTERESIS_M 才切换, 避免 y≈0 处目标车道每帧翻转的抖振 ── */
-            if (g.committed_lane_side == 0 && g.ego_x > 0.5) {
-                /* 仅在 ego_y 明确偏离道路中心 (EKF 收敛后) 才初始化车道侧。
-                 * fusion_node 的 EKF 初始状态为 y=0, 而场景中 ego 实际从 y=-1.75
-                 * 出发。EKF 收敛前的 1-2 帧 (≈100ms) 会报告 y≈0, 若此时用
-                 * (ego_y < road_c) 初始化会把 committed_lane_side 钉成 +1 (右车道),
-                 * 导致 target_y=+1.75, 把 ego 从 y=-1.75 拉向右侧路沿 (road departure)。
-                 * 阈值 1.0m > EKF 收敛前最大 |y| (~0.5m) 且 < 半车道宽 (1.75m),
-                 * 确保 EKF 收敛后 (|y|=1.75m) 才初始化, 同时不影响真正骑线行驶的场景。 */
-                if (g.ego_y - road_c > 1.0) {
-                    g.committed_lane_side = 1;
-                } else if (g.ego_y - road_c < -1.0) {
-                    g.committed_lane_side = -1;
+            /* ── 车道判定加迟滞: 使用"已提交车道 idx", 只有 ego_y 明确越过当前
+             *    车道中心 ±LANE_HYSTERESIS_M 才重算 idx, 避免 y≈车道线处每帧翻转。
+             *
+             *    N 车道模型：committed_lane_side（实为 committed_lane_idx）
+             *    用 lane_idx_from_y 量化 ego_y 到最近车道中心 idx。
+             *    EKF 未收敛时（|ego_y - road_c| < 1.0m）保持 idx=-1（未初始化），
+             *    cruise_lane_y 退化为 ego_y（横向不动），避免被拉向任意一侧。 */
+            if (g.committed_lane_side < 0 && g.ego_x > 0.5) {
+                /* 仅在 ego_y 明确偏离道路中心 (EKF 收敛后) 才初始化车道 idx。
+                 * fusion_node EKF 初始 y=0, 场景 ego 实际从 y=-1.75 出发；
+                 * 收敛前 |ego_y - road_c| < 1.0m，此时不初始化。 */
+                if (fabs(g.ego_y - road_c) > 1.0) {
+                    g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
+                                                            g.lane_width, road_c);
                 }
-                /* 否则保持 0 (未初始化), 下方 cruise_lane_y 退化为 ego_y (横向保持不动) */
-            } else if (g.committed_lane_side < 0 && g.ego_y - road_c > LANE_HYSTERESIS_M) {
-                g.committed_lane_side = 1;
-            } else if (g.committed_lane_side > 0 && g.ego_y - road_c < -LANE_HYSTERESIS_M) {
-                g.committed_lane_side = -1;
+                /* 否则保持 -1（未初始化），下方 cruise_lane_y 退化为 ego_y */
+            } else if (g.committed_lane_side >= 0) {
+                /* 已初始化：用迟滞判定是否切换到相邻车道。
+                 * 当前车道中心 y 与 ego_y 的偏差超过 LANE_HYSTERESIS_M 才重算 idx。 */
+                int cur_idx = g.committed_lane_side;
+                double cur_center = lane_center_y(cur_idx, g.lane_count, g.lane_width, road_c);
+                if (fabs(g.ego_y - cur_center) > half_lane) {
+                    /* 已越过当前车道边界 → 量化到新车道 */
+                    int new_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
+                    if (new_idx != cur_idx) g.committed_lane_side = new_idx;
+                }
             }
-            /* committed_lane_side==0 (EKF 未收敛) 时, 目标=当前 ego_y, 横向不动,
+            /* committed_lane_side<0 (EKF 未收敛) 时, 目标=当前 ego_y, 横向不动,
              * 避免在车道侧未确定前把 ego 拉向任意一侧。 */
-            double cruise_lane_y = (g.committed_lane_side == 0)
+            double cruise_lane_y = (g.committed_lane_side < 0)
                                    ? g.ego_y
-                                   : road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
-            double adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
+                                   : lane_center_y(g.committed_lane_side, g.lane_count,
+                                                   g.lane_width, road_c);
+            /* 相邻车道 y：N 车道下有 N-1 个邻车道，这里默认选"右侧邻车道"（idx+1），
+             * 用于被动超车评估。NOA 主动变道由 route_lane 显式指定 idx，
+             * 不依赖 adjacent_lane_y 的镜像假设。
+             * 最右车道（idx==lane_count-1）无右邻，回退到左邻（idx-1）。
+             * lane_lead_gap 等函数仍接收绝对 y，无需改签名。 */
+            int adj_idx = g.committed_lane_side + 1;
+            if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
+            if (adj_idx < 0) adj_idx = 0;  /* 单车道场景 */
+            double adjacent_lane_y = (g.committed_lane_side < 0)
+                                     ? g.ego_y
+                                     : lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
-                g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
-                cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
-                adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
+                /* 接近路沿 → 强制收敛到最近车道，触发 ROAD_GUARD-style 恢复 */
+                g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
+                                                        g.lane_width, road_c);
+                cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
+                                               g.lane_width, road_c);
+                adj_idx = g.committed_lane_side + 1;
+                if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
+                if (adj_idx < 0) adj_idx = 0;
+                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
                 g.lc_state = 2;
                 g.lc_timer = 0.0;
             }
@@ -744,9 +787,14 @@ protected:
                 g.stuck_timer = 0.0;
             }
             if (g.stuck_timer > STUCK_RECOVER_S) {
-                g.committed_lane_side = (g.ego_y < road_c) ? -1 : 1;
-                cruise_lane_y = road_c + ((g.committed_lane_side < 0) ? -half_lane : half_lane);
-                adjacent_lane_y = 2.0 * road_c - cruise_lane_y;
+                g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
+                                                        g.lane_width, road_c);
+                cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
+                                               g.lane_width, road_c);
+                adj_idx = g.committed_lane_side + 1;
+                if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
+                if (adj_idx < 0) adj_idx = 0;
+                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
                 g.lc_state     = 0;
                 g.lc_attempted = 0;
                 g.lc_cooldown  = 0.0;
@@ -817,18 +865,22 @@ protected:
             }
 
             /* ── NOA: 导航路线驱动的主动变道 ──
-             * planning 节点仅在 NOA 模式下才会下发非零 route_lane（见 planning_node.cpp
+             * planning 节点仅在 NOA 模式下才会下发 route_lane≥0（见 planning_node.cpp
              * 的 "route_lane=" 字段）；这里与被动超车共用同一套安全检查
              * （rear/front gap、行人风险）和执行状态机，区别只是触发原因不是
              * "前车太慢"而是"导航路线要求换道"（如提前变道以便驶出）。
-             * route_lane 与 committed_lane_side 使用相同的符号约定（-1 = y<0 一侧，
-             * +1 = y>0 一侧，见 scenario_loader.h 的 ScenarioRouteStep 注释），
-             * 可以直接比较，无需换算。 */
+             *
+             * N 车道模型：route_lane 与 committed_lane_side（实为 idx）都是 0..N-1
+             * 索引，可以直接比较。-1=无目标。NOA 变道目标 y 用 lane_center_y 算出，
+             * 替代旧的 adjacent_lane_y 镜像假设。 */
             int route_triggered = 0;
-            if (!blocked && g.route_lane != 0 && g.route_lane != g.committed_lane_side &&
+            double route_target_y = cruise_lane_y;  /* NOA 触发时被覆盖 */
+            if (!blocked && g.route_lane >= 0 && g.route_lane != g.committed_lane_side &&
                 g.lc_state == 0 && g.lc_cooldown <= 0.0) {
-                if (!lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
-                    lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
+                /* 计算 NOA 目标车道中心 y */
+                route_target_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c);
+                if (!lane_has_pedestrian_risk(route_target_y, same_lane_tol) &&
+                    lane_rear_safe(route_target_y, same_lane_tol)) {
                     overtake_worthwhile = 1;
                     blocked = 1;
                     route_triggered = 1;
@@ -850,25 +902,67 @@ protected:
             if (acc_target > g.cfg_cruise_speed) acc_target = g.cfg_cruise_speed;
             if (g.current_speed > g.cfg_cruise_speed + 1.0) acc_target = g.cfg_cruise_speed - 1.0;
 
-            /* ── 自适应变道状态机 ── */
+            /* ── 自适应变道状态机 ──
+             * effective_target_y 钳到路宽 [road_c - half_road, road_c + half_road]，
+             * 不再钳到单车道边界（旧 2 车道假设）。N 车道下 ego 可以到达任何车道。 */
             double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
-                effective_target_y = (g.ego_y < road_c) ? road_c - g.lane_width * 0.5 : road_c + g.lane_width * 0.5;
+                /* 接近路沿 → 收敛到最近车道中心（不再硬钳到 ±half_lane） */
+                int emerg_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
+                effective_target_y = lane_center_y(emerg_idx, g.lane_count, g.lane_width, road_c);
                 if (acc_target > 6.0) acc_target = 6.0;
             }
-            if (effective_target_y > road_c + g.lane_width * 0.5) effective_target_y = road_c + g.lane_width * 0.5;
-            if (effective_target_y < road_c - g.lane_width * 0.5) effective_target_y = road_c - g.lane_width * 0.5;
+            if (effective_target_y > road_c + half_road) effective_target_y = road_c + half_road;
+            if (effective_target_y < road_c - half_road) effective_target_y = road_c - half_road;
 
             if (blocked && g.lc_state == 0) {
                 g.lc_timer += CONTROL_DT_S;
                 if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
                     int need_accel = 0;
-                    int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &need_accel);
+                    /* NOA 路线触发时用 route_target_y；被动超车用 adjacent_lane_y */
+                    double lc_target_y_candidate = route_triggered ? route_target_y : adjacent_lane_y;
+                    /* 防止逆行：多车道（lane_count>2，即顺行侧≥2 条）场景下，
+                     * 禁止 ego 跨过道路中心线 road_c 进入对向车道。
+                     *
+                     * 背景：flowsim_node 发布的 lane_count 是 esmini 的"双向合计"
+                     * 车道数（如 4 车道 = 2 顺行 + 2 对向），而 lane_center_y 用
+                     * 中心对称模型把 N 个 idx 对称布置在 road_c 两侧——idx ≥ N/2
+                     * 的车道实际上是对向车道（y>road_c）。control_node 此前没有
+                     * "不可跨越中心线"约束，导致 ego 被动超车或 NOA 路线变道时
+                     * 可能选到 idx 2/3（y>road_c，对向最内/最外），看起来像逆行。
+                     *
+                     * 2 车道场景（lane_count==2，1 顺 + 1 对）保留旧行为：ego 可以
+                     * 借对向车道超车（前方安全时），因为顺行侧只有 1 条车道，不借
+                     * 对向就无法超车。多车道场景下顺行侧已有 ≥2 条车道，应只在顺行
+                     * 侧内变道，不跨中心线。
+                     *
+                     * 检查：lane_count>2 且候选 y 在 road_c 对侧（与 ego 不同侧）
+                     * 时拒绝变道，进入冷却避免反复尝试。 */
+                    int ego_on_negative_side = (g.ego_y < road_c);
+                    int candidate_on_opposite_side =
+                        (ego_on_negative_side && lc_target_y_candidate > road_c + 0.1) ||
+                        (!ego_on_negative_side && lc_target_y_candidate < road_c - 0.1);
+                    if (g.lane_count > 2 && candidate_on_opposite_side) {
+                        /* 拒绝变道但不清除 blocked：ego 必须继续跟车减速（ACC），
+                         * 而非以全速撞向前方障碍物。早期版本错误地清除 blocked=0，
+                         * 导致 ego 拒绝变道后既不换道也不减速，直接追尾前车
+                         * (CI evaluator collision detected 的根因)。 */
+                        LOG_WARN("control",
+                                 ">>> LANE CHANGE REJECTED (oncoming): target_y=%.2f crosses road_c=%.2f "
+                                 "into opposite side (lane_count=%d, ego_y=%.2f) — staying in lane, ACC braking",
+                                 lc_target_y_candidate, road_c, g.lane_count, g.ego_y);
+                        g.lc_timer = g.blocked_timeout_s;  /* 冷却，避免反复尝试 */
+                        route_triggered = 0;
+                        overtake_worthwhile = 0;
+                        /* 注意：不清除 blocked — 保持 blocked=1 让 ACC 继续减速 */
+                    } else {
+                    int front_allows_merge = lane_front_allows_merge(lc_target_y_candidate, same_lane_tol, &need_accel);
                     if (front_allows_merge &&
-                        !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
-                        lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
+                        !lane_has_pedestrian_risk(lc_target_y_candidate, same_lane_tol) &&
+                        lane_rear_safe(lc_target_y_candidate, same_lane_tol)) {
                         g.lc_origin_y = cruise_lane_y;
-                        g.lc_target_y = adjacent_lane_y;
+                        g.lc_target_y = lc_target_y_candidate;
+                        g.lc_target_idx = route_triggered ? g.route_lane : adj_idx;
                         effective_target_y = g.lc_target_y;
                         if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
                         g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
@@ -882,6 +976,7 @@ protected:
                         LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
                         g.lc_timer = g.blocked_timeout_s;
                     }
+                    }  /* end else (not oncoming) */
                 }
             } else if (!blocked && g.lc_state == 0) {
                 g.lc_timer = 0;
@@ -891,15 +986,19 @@ protected:
              * 不强制回原车道（避免回切与慢车重叠），但主动检查原始车道前方是否已清空，
              * 若清空则安全返回，比被动等待 lc_stable_wait_s 秒 + 冷却是更自然的驾驶行为。
              * NOA 路线驱动时（route_triggered 历史），回原车道可能由下一条路线步骤触发，
-             * 此处只处理无路线步骤时的自主回切。 */
-            double original_lane_y = 2.0 * road_c - cruise_lane_y;
+             * 此处只处理无路线步骤时的自主回切。
+             *
+             * N 车道模型：original_lane_idx 用变道发起时的 lc_target_idx 推回，
+             * 不再用 2.0*road_c - cruise_lane_y 镜像（只在 2 车道对称时正确）。 */
+            int original_lane_idx = (g.lc_target_idx >= 0) ? g.lc_target_idx : g.committed_lane_side;
+            double original_lane_y = lane_center_y(original_lane_idx, g.lane_count, g.lane_width, road_c);
             if (g.lc_state == 2) {
                 g.lc_wait += CONTROL_DT_S;
                 if (g.lc_wait > g.lc_stable_wait_s && g.lc_cooldown <= 0.0) {
                     /* NOA 模式中（driving_mode 以 "NOA" 开头），路线步骤会接管变道决策，
                      * 主动回切逻辑不应干预，避免在出口路段提前返回原车道。 */
                     int in_noa_mode = (strncmp(g.driving_mode, "NOA", 3) == 0);
-                    if (!in_noa_mode && (g.route_lane == 0 || g.route_lane == g.committed_lane_side)) {
+                    if (!in_noa_mode && (g.route_lane < 0 || g.route_lane == g.committed_lane_side)) {
                         /* 无 NOA 路线约束：评估是否可安全返回原始车道。
                          * 条件：原始车道前车间距 > 安全间距的 1.5 倍（说明已清空），
                          * 且后方无风险、无行人风险。 */
@@ -909,9 +1008,10 @@ protected:
                                             !lane_has_pedestrian_risk(original_lane_y, same_lane_tol) &&
                                             lane_rear_safe(original_lane_y, same_lane_tol);
                         if (can_return) {
-                            /* 发起回切：设置 lc_state=3 (right return) */
+                            /* 发起回切：设置 lc_state=3 (return) */
                             g.lc_origin_y = cruise_lane_y;
                             g.lc_target_y = original_lane_y;
+                            g.lc_target_idx = original_lane_idx;
                             effective_target_y = g.lc_target_y;
                             g.lc_state = 3;
                             g.lc_wait = 0.0;
@@ -933,9 +1033,11 @@ protected:
                 }
             }
 
-            /* 检测变道完成 (横向偏差 < LC_COMPLETE_THRESH, 收紧防完成后振荡) */
+            /* 检测变道完成 (横向偏差 < LC_COMPLETE_THRESH, 收紧防完成后振荡)。
+             * N 车道模型：直接 commit lc_target_idx（变道目标 idx）到 committed_lane_side。 */
             if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
-                g.committed_lane_side = (g.lc_target_y < road_c) ? -1 : 1;
+                g.committed_lane_side = (g.lc_target_idx >= 0) ? g.lc_target_idx
+                                                                : lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
                 g.lc_state = 2; g.lc_wait = 0;
                 statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
                 LOG_INFO("control", ">>> lane change complete");
@@ -1217,7 +1319,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.ego_x = g.ego_y = 0.0;
     g.lane_d = 0.0;
     g.driving_mode[0] = '\0';
-    g.route_lane = 0;
+    g.route_lane = -1;  /* N 车道模型：-1=无目标 */
 
     for (int i = 0; i < MAX_OBS; i++) {
         g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = 0.0;
@@ -1238,10 +1340,12 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lc_cooldown = 0.0;
     g.lc_origin_y = 0.0;
     g.lc_target_y = 0.0;
+    g.lc_target_idx = -1;
     g.lane_width = 3.5;
+    g.lane_count = 2;  /* 默认 2 车道，flowsim 发布 road/geometry 时会按 ego road_id 实时更新 */
     g.blocked_timeout_s = 0.0;
 
-    g.committed_lane_side = 0;
+    g.committed_lane_side = -1;  /* N 车道模型：-1=未初始化 */
     g.stuck_timer = 0.0;
     g.speed_zero_timer = 0.0;
 

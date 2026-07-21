@@ -346,8 +346,30 @@ char* build_scene_frame_json(const EntityPool& pool,
     }
     cJSON_AddStringToObject(root, "lighting", light_str);
 
-    cJSON* rn = build_road_network_json(cfg);
-    cJSON_AddItemToObject(root, "road_network", rn);
+    /* road_network JSON 缓存：道路网络在仿真过程中不变，首次构建后缓存为
+     * 字符串，后续帧用 cJSON_AddRawToObject 复用（strdup 开销远小于全网采样）。
+     * 性能：build_road_network_json 调用 sample_road_nodes → frenet_to_world
+     * 做 esmini position 查询，20Hz × road_count × sample_count 是显著开销。 */
+    if (cfg.cached_road_network_json.empty()) {
+        cJSON* rn = build_road_network_json(cfg);
+        if (rn) {
+            char* rn_str = cJSON_PrintUnformatted(rn);
+            cJSON_Delete(rn);
+            if (rn_str) {
+                cfg.cached_road_network_json = rn_str;
+                free(rn_str);
+            }
+        }
+    }
+    if (!cfg.cached_road_network_json.empty()) {
+        /* cJSON_AddRawToObject 会 strdup 字符串并作为 raw 子项添加，
+         * cJSON_Delete(root) 时随 root 一起释放，无内存泄漏。 */
+        cJSON_AddRawToObject(root, "road_network", cfg.cached_road_network_json.c_str());
+    } else {
+        /* 缓存失败（极少见，如首次 build 返回 nullptr）→ 降级为直接构建 */
+        cJSON* rn = build_road_network_json(cfg);
+        if (rn) cJSON_AddItemToObject(root, "road_network", rn);
+    }
 
     cJSON* entities = build_entities_json(pool);
     cJSON_AddItemToObject(root, "entities", entities);
