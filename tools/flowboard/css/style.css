@@ -27,13 +27,17 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .chart-box{flex:1;min-width:280px;height:240px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative;cursor:crosshair}
 .chart-box canvas{width:100%;height:100%;display:block}
 .chart-tooltip{position:absolute;background:#1c2128cc;backdrop-filter:blur(4px);color:#c9d1d9;padding:3px 8px;border-radius:4px;font:10px 'JetBrains Mono',monospace;pointer-events:none;white-space:nowrap;border:1px solid#30363d;display:none;z-index:20}
-/* 3D 场景卡片：固定最小高度，不参与 flex 伸缩（flex-shrink:0）。
- * 页面有 overflow-y:auto 滚动，无需挤压 3D 视图去迁就下方图表。 */
+/* 3D 场景卡片：固定 16:9 aspect ratio + 显式高度，避免父级
+ * (#main 有 overflow-y:auto) 计算高度时把 card 挤压出"上方黑色未渲染区"。
+ * aspect-ratio 让浏览器自动算 height，无需 JS 介入。
+ * min-height 480 保证即使在很窄的视口下 3D 区域仍可看。 */
 #scene3d-card{flex-shrink:0;display:flex;flex-direction:column;min-height:520px}
 #scene3d-card .card-body{flex:1;min-height:480px;padding:0;display:flex;overflow:hidden}
-#scene3d{flex:1;min-height:480px;background:#090c10;position:relative}
-#scene2d{flex:1;min-height:480px;background:#090c10;position:relative}
-#scene3d canvas,#scene2d canvas{display:block;width:100%;height:100%}
+#scene3d{flex:1;min-height:480px;background:#5588aa;position:relative;aspect-ratio:16/9;width:100%}
+#scene2d{flex:1;min-height:480px;background:#090c10;position:relative;aspect-ratio:16/9;width:100%}
+/* canvas 显式 width/height: 100% + display:block，避免 inline canvas
+ * 底部 4px 空隙和 css 高度与 setSize 物理 height 不一致 */
+#scene3d canvas,#scene2d canvas{display:block;width:100%!important;height:100%!important}
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid#0d1117;font-size:12px}
 .stat-row .label{color:#8b949e;font-size:11px}
 .stat-row .value{font-weight:700;font-size:13px;color:#58a6ff}
