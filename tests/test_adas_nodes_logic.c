@@ -59,7 +59,7 @@ static int parse_imu_line_for_test(const char* line, ImuData* out) {
     if (!line || !out) return -1;
 
     const char* p = line;
-    while (*p == ' ' || *p == '\t') p;
+    while (*p == ' ' || *p == '\t') p++;                 /* 跳过前导空白 */
     if (*p == '\0' || *p == '\r' || *p == '\n') return -1;
 
     float v[7];
@@ -282,27 +282,36 @@ static void test_slam_circle_pose_t0(void) {
 }
 
 static void test_slam_circle_pose_quarter(void) {
-    TEST("slam dry-run circle at t=π/2s: (0, R), heading=π");
-    /* t = poses_published / publish_hz, want t = π/2 ≈ 1.5708s
-     * publish_hz=20 → poses_published = 20 * π/2 ≈ 31.4 → 不整数。
-     * 用 poses_published=31 近似，t=1.55s。 */
+    TEST("slam dry-run circle at t≈π/2s: near top of circle, on-circle");
+    /* 20Hz 离散采样无法精确命中 t=π/2≈1.5708s（需 poses_published=31.4），
+     * 取最近的整数样本 poses_published=31 → t=1.55s。
+     * 此时 x=10*cos(1.55)≈0.208, y=10*sin(1.55)≈9.998 —— 量化误差是
+     * 采样的固有性质，不是 bug。改用「在圆上」不变量 + 位置方向断言更稳健。 */
     Pose2D pose;
     slam_dry_run_circle_pose(31, 20, 10.0f, &pose);
-    /* x = 10*cos(1.55) ≈ 0.0208, y = 10*sin(1.55) ≈ 9.99998 */
-    ASSERT(pose.y > 9.99, "y should be near R at quarter circle (got %.4f)", pose.y);
-    ASSERT(fabs(pose.x) < 0.05, "x should be near 0 at quarter circle (got %.4f)", pose.x);
+    /* 不变量：x² + y² = R²，对任意 t 恒成立（验证圆参数化正确） */
+    float r2 = pose.x * pose.x + pose.y * pose.y;
+    ASSERT_NEAR(r2, 100.0f, 0.1f, "should be on circle of radius 10 (|pos|²=%.4f)", r2);
+    /* 方向断言：四分之一圈处 y 接近峰值 R，x 接近 0 */
+    ASSERT(pose.y > 9.9f, "y should be near R=10 at quarter circle (got %.4f)", pose.y);
+    ASSERT(fabs(pose.x) < 0.3f, "x should be near 0 at quarter circle (got %.4f)", pose.x);
     PASS();
 }
 
 static void test_slam_circle_pose_full_loop(void) {
-    TEST("slam dry-run circle at t=2πs: back to start");
-    /* t = 2π ≈ 6.2832s, publish_hz=20 → poses_published = 126 */
+    TEST("slam dry-run circle at t≈2πs: returns near start");
+    /* 2π≈6.2832s，20Hz 下最近整数样本 poses_published=126 → t=6.3s。
+     * sin(6.3)=0.0168 → y=0.168（量化误差，非 bug）。用 on-circle 不变量
+     * +「回到起点附近」断言。 */
     Pose2D pose_start, pose_end;
     slam_dry_run_circle_pose(0, 20, 10.0f, &pose_start);
     slam_dry_run_circle_pose(126, 20, 10.0f, &pose_end);
-    /* x = 10*cos(2π) = 10, y = 10*sin(2π) ≈ 0 */
-    ASSERT_NEAR(pose_end.x, 10.0, 0.01, "x should return to R after full loop");
-    ASSERT(fabs(pose_end.y) < 0.01, "y should return to ~0 after full loop (got %.4f)", pose_end.y);
+    /* 不变量：绕一圈后仍在圆上 */
+    float r2 = pose_end.x * pose_end.x + pose_end.y * pose_end.y;
+    ASSERT_NEAR(r2, 100.0f, 0.1f, "should still be on circle after full loop (|pos|²=%.4f)", r2);
+    /* 回到起点附近（x≈R, y≈0），容差容纳 20Hz 量化误差（≤0.25m） */
+    ASSERT_NEAR(pose_end.x, 10.0f, 0.3f, "x should return near R after full loop");
+    ASSERT(fabs(pose_end.y) < 0.3f, "y should return near 0 after full loop (got %.4f)", pose_end.y);
     PASS();
 }
 
