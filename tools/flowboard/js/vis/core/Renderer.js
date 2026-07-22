@@ -12,10 +12,14 @@ export function createRenderer(canvas) {
   });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFShadowMap;
+  /* PCFSoftShadowMap：比 PCF 多采样插值，阴影边缘更柔和，
+   * 配合小 frustum（±90m, 1024 贴图）性能开销可接受。 */
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.0;
+  /* exposure 1.0 → 1.1：让金属漆反射高光更通透，画面整体更"亮"。
+   * ACESFilmic 对高光做胶片压缩，1.1 不会过曝，只是把中灰往上抬一点。 */
+  renderer.toneMappingExposure = 1.1;
 
   return renderer;
 }

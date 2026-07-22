@@ -72,6 +72,14 @@ export function init3DScene(canvas) {
     _skyEnv = createSkyEnv(_scene);
     _director = createSceneDirector(_scene);
     _director.init();
+    /* 烘焙 PMREM 环境贴图：把当前 scene（天空色 + hemisphere 灯光渐变）
+     * 烘成预滤波 mipmap 环境贴图，赋给 scene.environment。
+     * 这是 PBR 金属漆"活过来"的关键 —— 没有 envMap，metalness=0.9 +
+     * clearcoat=1.0 的 SU7 海湾蓝看起来就是深蓝塑料；有了 envMap，
+     * 车身反射天空渐变高光，立刻像真车漆。
+     * 用 fromScene 而非 HDR 文件：无需外部资产，纯色天空+hemi 渐变
+     * 足够提供反射；路/车是动态加的，不该烘进去。 */
+    _bakeEnvironment(_renderer, _scene);
   } catch (err) {
     console.error('[vis] Scene init failed:', err);
     _showInitError('Scene init failed: ' + err.message);
@@ -113,6 +121,25 @@ export function init3DScene(canvas) {
   console.log('[vis] ego:', _director.getStore().ego);
 
   return _scene;
+}
+
+/** 烘焙 PMREM 环境贴图并赋给 scene.environment。
+ *  在 createLighting + createSkyEnv 之后调用一次：此时 scene 已有
+ *  background（天空色）+ hemisphere light（天空→地面渐变），
+ *  PMREMGenerator.fromScene 把它们烘成预滤波 mipmap 环境贴图。
+ *  所有 PBR 材质（含 glTF 车身的 MeshPhysicalMaterial clearcoat 车漆）
+ *  会自动从 scene.environment 采样反射，无需逐材质设 envMap。
+ *  烘焙完立即 dispose PMREMGenerator（一次性资源）。 */
+function _bakeEnvironment(renderer, scene) {
+  if (!THREE.PMREMGenerator) {
+    console.warn('[vis] PMREMGenerator unavailable, PBR reflections disabled');
+    return;
+  }
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const envRT = pmrem.fromScene(scene, 0.04);
+  scene.environment = envRT.texture;
+  pmrem.dispose();
 }
 
 /** 显示初始化错误提示 */
@@ -296,7 +323,8 @@ if (typeof window !== 'undefined') {
       return {
         pixelRatio: _renderer.getPixelRatio(),
         shadowMapEnabled: _renderer.shadowMap.enabled,
-        shadowMapType: _renderer.shadowMap.type === THREE.PCFShadowMap ? 'PCF' : 'basic',
+        shadowMapType: _renderer.shadowMap.type === THREE.PCFSoftShadowMap ? 'PCFSoft'
+                     : _renderer.shadowMap.type === THREE.PCFShadowMap ? 'PCF' : 'basic',
         antialias: true,
         toneMapping: 'ACESFilmic',
         outputEncoding: 'sRGB'
