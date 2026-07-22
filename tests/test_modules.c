@@ -1170,6 +1170,80 @@ static void test_nmea_invalid_coord(void) {
     PASS();
 }
 
+/* ── NMEA UTC → epoch 微秒转换 ─────────────────────────────── */
+
+static void test_nmea_utc_epoch_known(void) {
+    TEST("nmea_utc_to_epoch_us: 2000-01-01 00:00:00 = 946684800e6 μs");
+    /* 2000-01-01 00:00:00 UTC 是已知 epoch: 946684800 s */
+    uint64_t ts = nmea_utc_to_epoch_us("000000", "010100");
+    ASSERT_EQ(ts, 946684800000000ULL, "2000-01-01 epoch mismatch");
+    PASS();
+}
+
+static void test_nmea_utc_epoch_1994(void) {
+    TEST("nmea_utc_to_epoch_us: 1994-03-23 12:35:19 = 764426119e6 μs");
+    /* RMC 测试句里的日期 230394=1994-03-23, 时间 123519=12:35:19
+     * days_from_civil(1994,3,23)=8847 → 8847*86400=764380800
+     * + 12*3600+35*60+19 = 45319 → 总 764426119 s */
+    uint64_t ts = nmea_utc_to_epoch_us("123519", "230394");
+    ASSERT_EQ(ts, 764426119000000ULL, "1994-03-23 epoch mismatch");
+    PASS();
+}
+
+static void test_nmea_utc_epoch_subsecond(void) {
+    TEST("nmea_utc_to_epoch_us: 亚秒精度 (.500 = +500000 μs)");
+    uint64_t ts0 = nmea_utc_to_epoch_us("120000", "010100");
+    uint64_t ts1 = nmea_utc_to_epoch_us("120000.500", "010100");
+    ASSERT(ts1 - ts0 == 500000ULL, "sub-second diff should be 500000 μs (got %llu)",
+          (unsigned long long)(ts1 - ts0));
+    PASS();
+}
+
+static void test_nmea_utc_rejects_garbage(void) {
+    TEST("nmea_utc_to_epoch_us: rejects malformed input");
+    ASSERT_EQ(nmea_utc_to_epoch_us("", "010100"), 0ULL, "empty time should fail");
+    ASSERT_EQ(nmea_utc_to_epoch_us("120000", ""), 0ULL, "empty date should fail");
+    ASSERT_EQ(nmea_utc_to_epoch_us("ABCDEF", "010100"), 0ULL, "non-numeric time");
+    ASSERT_EQ(nmea_utc_to_epoch_us("120000", "0101"), 0ULL, "short date");
+    ASSERT_EQ(nmea_utc_to_epoch_us("250000", "010100"), 0ULL, "hour>23");
+    ASSERT_EQ(nmea_utc_to_epoch_us("120000", "320100"), 0ULL, "day>31");
+    ASSERT_EQ(nmea_utc_to_epoch_us("120000", "011300"), 0ULL, "month>12");
+    PASS();
+}
+
+static void test_nmea_rmc_sets_gnss_timestamp(void) {
+    TEST("nmea RMC sets timestamp_us from GNSS UTC");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    GpsData g;
+    /* 标准 RMC 测试句: 时间 123519, 日期 230394 */
+    int rc = nmea_parse_line(&p,
+        "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A", &g);
+    ASSERT_EQ(rc, NMEA_OK, "RMC parse failed");
+    ASSERT(p.has_gnss_time, "has_gnss_time should be true after RMC");
+    ASSERT_EQ(g.timestamp_us, 764426119000000ULL, "GNSS timestamp mismatch");
+    PASS();
+}
+
+static void test_nmea_gga_reuses_rmc_date(void) {
+    TEST("nmea GGA reuses cached RMC date for timestamp");
+    NmeaParser p;
+    nmea_parser_init(&p);
+    /* 先发 RMC 缓存日期 */
+    nmea_parse_line(&p,
+        "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A", NULL);
+    ASSERT(p.has_gnss_time, "RMC should set has_gnss_time");
+    /* 再发 GGA，用 GGA 的时间 + 缓存的日期 */
+    GpsData g;
+    int rc = nmea_parse_line(&p,
+        "$GPGGA,123520,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*4D", &g);
+    ASSERT_EQ(rc, NMEA_OK, "GGA parse failed");
+    /* GGA 时间 123520 = 12:35:20, 日期复用 230394 → epoch 应比 RMC 的多 1 秒 */
+    ASSERT(g.timestamp_us == 764426119000000ULL + 1000000ULL,
+           "GGA should reuse RMC date (got %llu)", (unsigned long long)g.timestamp_us);
+    PASS();
+}
+
 int main(void) {
     printf("\n╔══════════════════════════════════════════╗\n");
     printf("║  FlowEngine Unit Tests                    ║\n");
@@ -1250,6 +1324,15 @@ int main(void) {
     test_nmea_non_nmea();
     test_nmea_merge();
     test_nmea_invalid_coord();
+
+    /* ── NMEA UTC → epoch ─────────────────── */
+    printf("\n═══ NMEA GNSS Timestamp ═══\n");
+    test_nmea_utc_epoch_known();
+    test_nmea_utc_epoch_1994();
+    test_nmea_utc_epoch_subsecond();
+    test_nmea_utc_rejects_garbage();
+    test_nmea_rmc_sets_gnss_timestamp();
+    test_nmea_gga_reuses_rmc_date();
 
     /* ── Summary ────────────────────────────── */
     printf("\n═══════════════════════════════════\n");

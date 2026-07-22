@@ -61,12 +61,22 @@ typedef struct {
     bool     has_velocity;    /**< 是否已获得过有效速度/航向 */
     uint32_t sentences_ok;    /**< 成功解析的语句计数 */
     uint32_t sentences_bad;   /**< 解析失败（校验/格式）的语句计数 */
+    char     last_date[7];    /**< 最近一次 RMC 日期 "ddmmyy\0"，供 GGA 复用 */
+    bool     has_gnss_time;   /**< 是否已获得有效 GNSS UTC 时间戳（timestamp_us 可信） */
 } NmeaParser;
 
 /* ── API ─────────────────────────────────────────────────────── */
 
 /** 初始化解析器（清零状态） */
 void nmea_parser_init(NmeaParser* p);
+
+/**
+ * 将 NMEA UTC 时间 + 日期转换为 UNIX epoch 微秒。
+ * @param time_field NMEA 时间字段 "hhmmss.ss"（如 "123519.000"）
+ * @param date_field NMEA 日期字段 "ddmmyy"（如 "230394" = 1994-03-23）
+ * @return 微秒级 epoch（UTC）；任一字段非法返回 0
+ */
+uint64_t nmea_utc_to_epoch_us(const char* time_field, const char* date_field);
 
 /**
  * 计算 NMEA 语句的校验和（'$' 与 '*' 之间所有字符的 XOR）。

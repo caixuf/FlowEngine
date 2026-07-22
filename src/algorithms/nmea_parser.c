@@ -98,6 +98,52 @@ static bool msg_type_is(const char* id, const char* type3) {
     return strncmp(id + (len - 3), type3, 3) == 0;
 }
 
+/* ── NMEA UTC → UNIX epoch 微秒 ──────────────────────────────
+ * Howard Hinnant 的 days_from_civil 算法（proleptic Gregorian，紧凑且正确）。
+ * 输入：公历 y-m-d，输出：自 1970-01-01 的天数（可为负）。 */
+static int64_t days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (int64_t)era * 146097 + (int64_t)doe - 719468;
+}
+
+uint64_t nmea_utc_to_epoch_us(const char* time_field, const char* date_field) {
+    if (!time_field || !date_field || !*time_field || !*date_field) return 0;
+
+    /* 时间字段 "hhmmss.ss" — 至少 6 位数字 */
+    if (strlen(time_field) < 6) return 0;
+    for (int i = 0; i < 6; i++) {
+        if (time_field[i] < '0' || time_field[i] > '9') return 0;
+    }
+    unsigned hh = (time_field[0]-'0')*10 + (time_field[1]-'0');
+    unsigned mm = (time_field[2]-'0')*10 + (time_field[3]-'0');
+    double ss = atof(time_field + 4);
+    if (hh > 23 || mm > 59 || ss < 0.0 || ss >= 60.0) return 0;
+
+    /* 日期字段 "ddmmyy" — 必须 6 位数字 */
+    if (strlen(date_field) < 6) return 0;
+    for (int i = 0; i < 6; i++) {
+        if (date_field[i] < '0' || date_field[i] > '9') return 0;
+    }
+    unsigned dd = (date_field[0]-'0')*10 + (date_field[1]-'0');
+    unsigned mo = (date_field[2]-'0')*10 + (date_field[3]-'0');
+    unsigned yy = (date_field[4]-'0')*10 + (date_field[5]-'0');
+    /* NMEA 2 位年：80-99 = 1980-1999，00-79 = 2000-2079 */
+    int year = (yy >= 80) ? (int)(1900 + yy) : (int)(2000 + yy);
+    if (dd < 1 || dd > 31 || mo < 1 || mo > 12) return 0;
+
+    int64_t days = days_from_civil(year, mo, dd);
+    /* 整数部分用 int64 防止精度丢失，亚秒部分用 double（< 6e7，精度足够） */
+    int64_t epoch_us = days * 86400LL * 1000000LL
+                     + (int64_t)hh * 3600LL * 1000000LL
+                     + (int64_t)mm * 60LL * 1000000LL
+                     + (int64_t)(ss * 1000000.0);
+    return (uint64_t)epoch_us;
+}
+
 int nmea_parse_line(NmeaParser* p, const char* line, GpsData* out) {
     if (!p || !line) return NMEA_ERR_ARG;
 
@@ -164,6 +210,14 @@ int nmea_parse_line(NmeaParser* p, const char* line, GpsData* out) {
                 double hdop = atof(fields[8]);
                 if (hdop > 0.0) p->last.accuracy_m = (float)(hdop * HDOP_TO_METERS);
             }
+            /* GGA 有时间无日期：若之前 RMC 提供过日期，复用之打 GNSS 时间戳 */
+            if (p->last_date[0] != '\0') {
+                uint64_t ts = nmea_utc_to_epoch_us(fields[1], p->last_date);
+                if (ts > 0) {
+                    p->last.timestamp_us = ts;
+                    p->has_gnss_time = true;
+                }
+            }
         }
     } else if (msg_type_is(id, "RMC")) {
         /* RMC: 0=id 1=utc 2=status 3=lat 4=NS 5=lon 6=EW 7=spd(kn) 8=course 9=date ... */
@@ -189,6 +243,17 @@ int nmea_parse_line(NmeaParser* p, const char* line, GpsData* out) {
                 p->last.heading_deg = (float)atof(fields[8]);
                 p->has_velocity = true;
                 updated = true;
+            }
+            /* RMC 同时有 UTC 时间(fields[1]) + 日期(fields[9])，打 GNSS 时间戳 */
+            if (nf > 9 && fields[9][0] != '\0') {
+                uint64_t ts = nmea_utc_to_epoch_us(fields[1], fields[9]);
+                if (ts > 0) {
+                    p->last.timestamp_us = ts;
+                    p->has_gnss_time = true;
+                    /* 缓存日期供后续 GGA 复用（GGA 只有时间没有日期） */
+                    strncpy(p->last_date, fields[9], 6);
+                    p->last_date[6] = '\0';
+                }
             }
         }
     } else {
