@@ -81,23 +81,30 @@ static inline double road_center_curvature(double x,
 }
 
 /**
- * 车道中心 y 坐标（多车道通用）。
+ * 车道中心 y 坐标（多车道通用，靠右行驶 v2）。
  *
- * N 车道按"中心对称"布置：idx=0 在最左侧，idx=N-1 在最右侧，
- * 各车道中心相对道路中心 road_c 的偏移为 (idx - (N-1)/2) * lane_width。
+ * 靠右行驶（heading=0 时车头朝 +X 东，物理右侧 = -y）：
+ *   side_offset = 0 时，符号已翻转，使得 idx=0 为最左（+y），idx=N-1 为最右（-y）；
+ *   side_offset < 0 时，车道组整体向 -y 侧偏移，实现"行车道偏在中心线一侧"。
  *
- * 例：N=2, lane_width=3.5, road_c=0 → idx 0 中心 -1.75，idx 1 中心 +1.75
- *     N=4, lane_width=3.2, road_c=0 → idx 0/1/2/3 中心 -4.8/-1.6/+1.6/+4.8
+ * 公式：road_c + side_offset - (lane_idx - (N-1)/2) * lane_width
+ *
+ * 例：N=4, lane_width=3.5, road_c=0, side_offset=0
+ *       idx 0/1/2/3 中心 +5.25/+1.75/-1.75/-5.25（最右= -y，匹配靠右行驶）
+ *     N=4, lane_width=3.5, road_c=0, side_offset=-7.0
+ *       idx 0/1/2/3 中心 -1.75/-5.25/-8.75/-12.25（全部在 -y 侧，偏置后不压黄线）
  *
  * @param lane_idx     车道索引 [0, lane_count-1]
- * @param lane_count   当前路段可行驶车道数（≥1）
+ * @param lane_count   当前路段可行驶车道数（≥1，双向合计或顺行方向车道数）
  * @param lane_width   单车道宽度（m）
  * @param road_c       道路中心线 y（来自 road_center_y()）
+ * @param side_offset  车道组整体偏移（m），0=关于 road_c 对称，负值=向 -y 侧偏移
  */
 static inline double lane_center_y(int lane_idx, int lane_count,
-                                    double lane_width, double road_c) {
+                                    double lane_width, double road_c,
+                                    double side_offset) {
     if (lane_count <= 1) return road_c;
-    return road_c + (lane_idx - (lane_count - 1) * 0.5) * lane_width;
+    return road_c + side_offset - (lane_idx - (lane_count - 1) * 0.5) * lane_width;
 }
 
 /**
@@ -105,11 +112,14 @@ static inline double lane_center_y(int lane_idx, int lane_count,
  *
  * 用 round 量化到最近车道中心，再 clamp 到合法范围。
  * 用于 control_node 把 ego_y 转成当前 committed_lane_idx。
+ *
+ * @param side_offset  与 lane_center_y 相同的 side_offset 值
  */
 static inline int lane_idx_from_y(double y, int lane_count,
-                                   double lane_width, double road_c) {
+                                   double lane_width, double road_c,
+                                   double side_offset) {
     if (lane_count <= 1) return 0;
-    double offset = (y - road_c) / lane_width + (lane_count - 1) * 0.5;
+    double offset = (road_c + side_offset - y) / lane_width + (lane_count - 1) * 0.5;
     int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);  /* round */
     if (idx < 0) idx = 0;
     if (idx >= lane_count) idx = lane_count - 1;

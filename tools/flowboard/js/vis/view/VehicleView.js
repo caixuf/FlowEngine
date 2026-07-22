@@ -101,17 +101,43 @@ export function createVehicleView(scene) {
     group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
-    // 前轮 steer（axle_front 节点 rotation.y）
+    // ── 车轮自转 + 转向平滑 ──
+    const speed = ent.speed || 0;
+    const WHEEL_RADIUS = 0.35;  // glTF 模型车轮半径 ≈ 0.35m
+    const dt = 0.05;
+
+    if (entry._wheelSpin === undefined) entry._wheelSpin = 0;
+    entry._wheelSpin += speed * dt / WHEEL_RADIUS;
+
+    // 转向平滑
     const steer = ent.steer || 0;
     const maxSteerRad = 0.35;
-    const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    const targetSteer = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    if (entry._smoothSteer === undefined) entry._smoothSteer = 0;
+    const STEER_LERP = 0.3;
+    entry._smoothSteer += (targetSteer - entry._smoothSteer) * STEER_LERP;
+
+    // 前轮转向：旋转 axle_front 节点
     if (group.userData.frontAxle && group.userData.frontAxle.rotation) {
-      group.userData.frontAxle.rotation.y = steerAngle;
+      group.userData.frontAxle.rotation.y = entry._smoothSteer;
+    }
+
+    // 车轮自转：遍历 wheel_* 节点，绕其本地 Z 轴旋转（glTF cylinder axis=Z）
+    if (entry._wheelNodes === undefined) {
+      entry._wheelNodes = [];
+      group.traverse(function(c) {
+        if (c.name && c.name.indexOf('wheel_') === 0) {
+          entry._wheelNodes.push(c);
+        }
+      });
+    }
+    for (let w = 0; w < entry._wheelNodes.length; w++) {
+      entry._wheelNodes[w].rotation.z = entry._wheelSpin;
     }
 
     // 车灯状态（Step 5 重构：调 deriveLightState 纯函数，避免重复逻辑）
     const state = deriveLightState(ent.lights || 0, ent.brake || 0);
-    // 闪烁相位（2Hz = 0.5s 周期，_setVehicleLights 用 1.5Hz）
+    // 闪烁相位（1.5Hz，与 _setVehicleLights 一致）
     const blinkPhase = simTime / 1000;
     _setVehicleLights(group, state, blinkPhase);
   }
@@ -223,42 +249,65 @@ export function createVehicleView(scene) {
     group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
-    // 前轮 steer（InstancedMesh 需要更新矩阵）
+    // ── 车轮自转 + 转向平滑 ──
+    const speed = ent.speed || 0;
+    const WHEEL_RADIUS = 0.32;
+    const dt = 0.05;  // 20Hz 仿真 ≈ 50ms 帧间隔，用固定步长避免帧率耦合
+
+    // 车轮累计旋转角度（rad）
+    if (entry._wheelSpin === undefined) entry._wheelSpin = 0;
+    entry._wheelSpin += speed * dt / WHEEL_RADIUS;
+
+    // 转向平滑：lerp 向目标值，避免跳变
     const steer = ent.steer || 0;
     const maxSteerRad = 0.35;
-    const steerAngle = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    const targetSteer = Math.max(-maxSteerRad, Math.min(maxSteerRad, steer * 1.5));
+    if (entry._smoothSteer === undefined) entry._smoothSteer = 0;
+    const STEER_LERP = 0.3;  // 每帧逼近 30%
+    entry._smoothSteer += (targetSteer - entry._smoothSteer) * STEER_LERP;
+
     const len = ent.length || 4.6;
     const wid = ent.width || 2.0;
     const wheelInst = wheels[0];
     if (wheelInst) {
       const wheelPositions = [
-        [ len * 0.32, 0.32 + 0.10,  wid * 0.5],
-        [ len * 0.32, 0.32 + 0.10, -wid * 0.5],
-        [-len * 0.32, 0.32 + 0.10,  wid * 0.5],
-        [-len * 0.32, 0.32 + 0.10, -wid * 0.5],
+        [ len * 0.32, 0.32 + 0.10,  wid * 0.5],   // FL
+        [ len * 0.32, 0.32 + 0.10, -wid * 0.5],   // FR
+        [-len * 0.32, 0.32 + 0.10,  wid * 0.5],   // RL
+        [-len * 0.32, 0.32 + 0.10, -wid * 0.5],   // RR
       ];
       const dummy = new THREE.Object3D();
       for (let i = 0; i < 4; i++) {
         dummy.position.set(wheelPositions[i][0], wheelPositions[i][1], wheelPositions[i][2]);
-        dummy.rotation.y = (i < 2) ? steerAngle : 0;
+        // CylinderGeometry 默认轴=Y，wheelInst.rotation.x=PI/2 让轴=Z。
+        // 所以：rotation.y=steer(转向), rotation.z=spin(自转)
+        dummy.rotation.set(0, (i < 2) ? entry._smoothSteer : 0, entry._wheelSpin);
         dummy.updateMatrix();
         wheelInst.setMatrixAt(i, dummy.matrix);
       }
       wheelInst.instanceMatrix.needsUpdate = true;
     }
 
-    // 车灯
-    const mask = ent.lights || 0;
-    const brake = ent.brake || 0;
-    const turnLeft  = (mask & LIGHT_TURN_LEFT)  || (mask & LIGHT_HAZARD);
-    const turnRight = (mask & LIGHT_TURN_RIGHT) || (mask & LIGHT_HAZARD);
-    const lowBeam   = mask & LIGHT_LOW_BEAM;
-    const highBeam  = mask & LIGHT_HIGH_BEAM;
-    const reverse   = mask & LIGHT_REVERSE;
+    // ── 车灯（统一用 deriveLightState + _setVehicleLights 逻辑）──
+    const state = deriveLightState(ent.lights || 0, ent.brake || 0);
+    const blinkPhase = simTime / 1000;
 
-    const blinkOn = Math.floor(simTime / 250) % 2 === 0;
+    // 刹车灯强度渐变
+    if (entry._brakeIntensity === undefined) entry._brakeIntensity = 0;
+    const targetBrake = state.brake ? 2.5 : 0.4;
+    const BRAKE_FADE = 0.4;  // 刹车灯渐变速度
+    entry._brakeIntensity += (targetBrake - entry._brakeIntensity) * BRAKE_FADE;
+    lights.tailLMat.emissiveIntensity = entry._brakeIntensity;
+    lights.tailRMat.emissiveIntensity = entry._brakeIntensity;
+
+    // 转向灯：1.5Hz 正弦闪烁，与 glTF _setVehicleLights 一致
+    const blinkOn = Math.sin(blinkPhase * Math.PI * 2 * 1.5) > 0;
     const turnIntensity = blinkOn ? 1.5 : 0.0;
 
+    // 大灯
+    const mask = ent.lights || 0;
+    const lowBeam   = mask & LIGHT_LOW_BEAM;
+    const highBeam  = mask & LIGHT_HIGH_BEAM;
     if (highBeam) {
       lights.headLMat.emissive.setHex(COLOR_HEAD_HIGH);
       lights.headRMat.emissive.setHex(COLOR_HEAD_HIGH);
@@ -274,15 +323,14 @@ export function createVehicleView(scene) {
       lights.headRMat.emissiveIntensity = 0.0;
     }
 
-    const tailIntensity = brake > 0.05 ? 2.5 : 0.4;
-    lights.tailLMat.emissiveIntensity = tailIntensity;
-    lights.tailRMat.emissiveIntensity = tailIntensity;
-
+    const turnLeft  = state.turnL;
+    const turnRight = state.turnR;
     lights.turnFLMat.emissiveIntensity = turnLeft  ? turnIntensity : 0.0;
     lights.turnRLMat.emissiveIntensity = turnLeft  ? turnIntensity : 0.0;
     lights.turnFRMat.emissiveIntensity = turnRight ? turnIntensity : 0.0;
     lights.turnRRMat.emissiveIntensity = turnRight ? turnIntensity : 0.0;
 
+    const reverse = mask & LIGHT_REVERSE;
     lights.revMat.emissiveIntensity = reverse ? 1.5 : 0.0;
   }
 

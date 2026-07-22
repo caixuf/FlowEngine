@@ -880,8 +880,8 @@ static void internal_cruise_control(flowsim::Entity& ego) {
      * N 车道模型：用 lane_idx_from_y 量化 ego 当前车道 idx，再算该车道中心 y。
      * 单车道路段（如 ramp_curve）回退到道路中心。 */
     double rc_y = road_center_y(ego.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
-    int ego_lane_idx = lane_idx_from_y(ego.y, g.scene_pub_cfg.lane_count, g.lane_width, rc_y);
-    double target_y = lane_center_y(ego_lane_idx, g.scene_pub_cfg.lane_count, g.lane_width, rc_y);
+    int ego_lane_idx = lane_idx_from_y(ego.y, g.scene_pub_cfg.lane_count, g.lane_width, rc_y, 0.0);
+    double target_y = lane_center_y(ego_lane_idx, g.scene_pub_cfg.lane_count, g.lane_width, rc_y, 0.0);
     double y_err = target_y - ego.y;
     /* 用道路切线航向做前馈 + 横向偏差 P 反馈 */
     double road_h = road_center_heading(ego.x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);

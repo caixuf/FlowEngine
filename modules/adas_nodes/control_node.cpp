@@ -644,8 +644,8 @@ protected:
                 double fb_target_y = fb_road_c;
                 if (g.has_fusion) {
                     if (fabs(g.ego_y - fb_road_c) > 1.0) {
-                        int fb_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, fb_road_c);
-                        fb_target_y = lane_center_y(fb_idx, g.lane_count, g.lane_width, fb_road_c);
+                        int fb_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, fb_road_c, 0.0);
+                        fb_target_y = lane_center_y(fb_idx, g.lane_count, g.lane_width, fb_road_c, 0.0);
                     } else {
                         fb_target_y = g.ego_y;  /* EKF 未收敛, 横向保持不动 */
                     }
@@ -735,17 +735,17 @@ protected:
                  * 收敛前 |ego_y - road_c| < 1.0m，此时不初始化。 */
                 if (fabs(g.ego_y - road_c) > 1.0) {
                     g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                            g.lane_width, road_c);
+                                                            g.lane_width, road_c, 0.0);
                 }
                 /* 否则保持 -1（未初始化），下方 cruise_lane_y 退化为 ego_y */
             } else if (g.committed_lane_side >= 0) {
                 /* 已初始化：用迟滞判定是否切换到相邻车道。
                  * 当前车道中心 y 与 ego_y 的偏差超过 LANE_HYSTERESIS_M 才重算 idx。 */
                 int cur_idx = g.committed_lane_side;
-                double cur_center = lane_center_y(cur_idx, g.lane_count, g.lane_width, road_c);
+                double cur_center = lane_center_y(cur_idx, g.lane_count, g.lane_width, road_c, 0.0);
                 if (fabs(g.ego_y - cur_center) > half_lane) {
                     /* 已越过当前车道边界 → 量化到新车道 */
-                    int new_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
+                    int new_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
                     if (new_idx != cur_idx) g.committed_lane_side = new_idx;
                 }
             }
@@ -754,7 +754,7 @@ protected:
             double cruise_lane_y = (g.committed_lane_side < 0)
                                    ? g.ego_y
                                    : lane_center_y(g.committed_lane_side, g.lane_count,
-                                                   g.lane_width, road_c);
+                                                   g.lane_width, road_c, 0.0);
             /* 相邻车道 y：N 车道下有 N-1 个邻车道，这里默认选"右侧邻车道"（idx+1），
              * 用于被动超车评估。NOA 主动变道由 route_lane 显式指定 idx，
              * 不依赖 adjacent_lane_y 的镜像假设。
@@ -765,17 +765,17 @@ protected:
             if (adj_idx < 0) adj_idx = 0;  /* 单车道场景 */
             double adjacent_lane_y = (g.committed_lane_side < 0)
                                      ? g.ego_y
-                                     : lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
+                                     : lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
                 /* 接近路沿 → 强制收敛到最近车道，触发 ROAD_GUARD-style 恢复 */
                 g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                        g.lane_width, road_c);
+                                                        g.lane_width, road_c, 0.0);
                 cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
-                                               g.lane_width, road_c);
+                                               g.lane_width, road_c, 0.0);
                 adj_idx = g.committed_lane_side + 1;
                 if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
                 if (adj_idx < 0) adj_idx = 0;
-                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
+                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
                 g.lc_state = 2;
                 g.lc_timer = 0.0;
             }
@@ -789,13 +789,13 @@ protected:
             }
             if (g.stuck_timer > STUCK_RECOVER_S) {
                 g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                        g.lane_width, road_c);
+                                                        g.lane_width, road_c, 0.0);
                 cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
-                                               g.lane_width, road_c);
+                                               g.lane_width, road_c, 0.0);
                 adj_idx = g.committed_lane_side + 1;
                 if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
                 if (adj_idx < 0) adj_idx = 0;
-                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c);
+                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
                 g.lc_state     = 0;
                 g.lc_attempted = 0;
                 g.lc_cooldown  = 0.0;
@@ -879,7 +879,7 @@ protected:
             if (!blocked && g.route_lane >= 0 && g.route_lane != g.committed_lane_side &&
                 g.lc_state == 0 && g.lc_cooldown <= 0.0) {
                 /* 计算 NOA 目标车道中心 y */
-                route_target_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c);
+                route_target_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c, 0.0);
                 if (!lane_has_pedestrian_risk(route_target_y, same_lane_tol) &&
                     lane_rear_safe(route_target_y, same_lane_tol)) {
                     overtake_worthwhile = 1;
@@ -909,8 +909,8 @@ protected:
             double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
                 /* 接近路沿 → 收敛到最近车道中心（不再硬钳到 ±half_lane） */
-                int emerg_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
-                effective_target_y = lane_center_y(emerg_idx, g.lane_count, g.lane_width, road_c);
+                int emerg_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
+                effective_target_y = lane_center_y(emerg_idx, g.lane_count, g.lane_width, road_c, 0.0);
                 if (acc_target > 6.0) acc_target = 6.0;
             }
             if (effective_target_y > road_c + half_road) effective_target_y = road_c + half_road;
@@ -992,7 +992,7 @@ protected:
              * N 车道模型：original_lane_idx 用变道发起时的 lc_target_idx 推回，
              * 不再用 2.0*road_c - cruise_lane_y 镜像（只在 2 车道对称时正确）。 */
             int original_lane_idx = (g.lc_target_idx >= 0) ? g.lc_target_idx : g.committed_lane_side;
-            double original_lane_y = lane_center_y(original_lane_idx, g.lane_count, g.lane_width, road_c);
+            double original_lane_y = lane_center_y(original_lane_idx, g.lane_count, g.lane_width, road_c, 0.0);
             if (g.lc_state == 2) {
                 g.lc_wait += CONTROL_DT_S;
                 if (g.lc_wait > g.lc_stable_wait_s && g.lc_cooldown <= 0.0) {
@@ -1038,7 +1038,7 @@ protected:
              * N 车道模型：直接 commit lc_target_idx（变道目标 idx）到 committed_lane_side。 */
             if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
                 g.committed_lane_side = (g.lc_target_idx >= 0) ? g.lc_target_idx
-                                                                : lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c);
+                                                                : lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
                 g.lc_state = 2; g.lc_wait = 0;
                 statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
                 LOG_INFO("control", ">>> lane change complete");

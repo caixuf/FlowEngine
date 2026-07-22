@@ -360,20 +360,24 @@ def road_center_y(x: float, road: dict | None) -> float:
     return curve_offset_m * (3.0 * t * t - 2.0 * t * t * t)
 
 
-def lane_center_y(lane_idx: int, lane_count: int, lane_width: float, road_c: float = 0.0) -> float:
-    """Mirror of include/road_geometry.h::lane_center_y() — N 车道中心对称布置。
-    lane_idx: 0=最左, lane_count-1=最右；road_c=道路中心 y 坐标。"""
+def lane_center_y(lane_idx: int, lane_count: int, lane_width: float, road_c: float = 0.0,
+                  side_offset: float = 0.0) -> float:
+    """Mirror of include/road_geometry.h::lane_center_y() — 靠右行驶 v2。
+    lane_idx: 0=最左, lane_count-1=最右；road_c=道路中心 y 坐标。
+    side_offset: 车道组整体偏移（0=关于 road_c 对称，负值=向 -y 偏移）。"""
     if lane_count <= 1:
         return road_c
-    return road_c + (lane_idx - (lane_count - 1) * 0.5) * lane_width
+    return road_c + side_offset - (lane_idx - (lane_count - 1) * 0.5) * lane_width
 
 
-def lane_idx_from_y(y: float, lane_count: int, lane_width: float, road_c: float = 0.0) -> int:
+def lane_idx_from_y(y: float, lane_count: int, lane_width: float, road_c: float = 0.0,
+                    side_offset: float = 0.0) -> int:
     """Mirror of include/road_geometry.h::lane_idx_from_y() — 反推车道索引，
-    clamp 到 [0, lane_count-1]。"""
+    clamp 到 [0, lane_count-1]。
+    side_offset: 与 lane_center_y 相同的 side_offset 值。"""
     if lane_count <= 1:
         return 0
-    offset = (y - road_c) / lane_width + (lane_count - 1) * 0.5
+    offset = (road_c + side_offset - y) / lane_width + (lane_count - 1) * 0.5
     idx = int(round(offset))
     if idx < 0:
         idx = 0
