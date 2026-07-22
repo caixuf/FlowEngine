@@ -864,7 +864,7 @@ static void publish_traffic_lights() {
         cJSON* light = cJSON_CreateObject();
         cJSON_AddNumberToObject(light, "id", e.id);
         cJSON_AddNumberToObject(light, "x", e.x);
-        cJSON_AddNumberToObject(light, "y_lane", e.y);
+        cJSON_AddNumberToObject(light, "y_lane", e.width);  /* e.width = lane center y, 非 pole y */
         flowsim::TLPhase ph = static_cast<flowsim::TLPhase>(e.phase_state);
         cJSON_AddStringToObject(light, "state", tl_phase_str(ph));
         cJSON_AddNumberToObject(light, "remain_s", e.phase_timer);

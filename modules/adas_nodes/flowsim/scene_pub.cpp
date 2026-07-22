@@ -253,6 +253,8 @@ cJSON* build_ego_json(const Entity& e) {
     /* 车灯位掩码（vehicle_lights.h）：bit0=左转 bit1=右转 bit2=双闪
      * bit3=远光 bit4=近光 bit6=倒车 bit7=雾灯。刹车灯由 brake 字段驱动。 */
     cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
+    /* AI 状态字符串（ego 通常为空，兜底给空串） */
+    cJSON_AddStringToObject(j, "ai_state", ai_state_str(e.ai_state));
     return j;
 }
 
@@ -269,6 +271,9 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddStringToObject(j, "ai_state", ai_state_str(e.ai_state));
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
+    cJSON_AddNumberToObject(j, "steer", e.steer);
+    cJSON_AddNumberToObject(j, "brake", e.brake);
+    cJSON_AddNumberToObject(j, "throttle", e.throttle);
     /* 车灯位掩码（同 ego）：CutIn→转向灯，Yield/Stop→双闪，Cruise→随 steer */
     cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
     return j;
