@@ -169,7 +169,7 @@ static struct {
  *   - left_jpeg/left_jpeg_size：左图 JPEG 压缩数据 + 有效字节数
  *   - depth_data/depth_count：80×60=4800 个 float 深度（米），depth_count=4800
  *   - baseline_m/fov_deg：相机标定参数
- *   - timestamp_us：由调用处用 (uint32_t)(clock_now_us() & 0xFFFFFFFFu) 填充
+ *   - timestamp_us：由调用处用 clock_now_us() 填充（uint64，已迁移不再回绕）
  *
  * @param out  输出 StereoFrame（调用前已 memset=0）
  * @return 0 成功，-1 失败（硬件错误/无数据）
@@ -216,8 +216,9 @@ static int read_stereo_frame(StereoFrame* out) {
     if (oakd_capture_stereo(out, g.jpeg_quality, g.device_id) != 0) {
         return -1;
     }
-    /* 桥接函数已填好图像/深度字段，补时间戳与标定参数 */
-    out->timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
+    /* 桥接函数已填好图像/深度字段，补时间戳与标定参数
+     * timestamp_us 已升为 uint64（msg schema 迁移），不再 32 位回绕。 */
+    out->timestamp_us = clock_now_us();
     out->baseline_m = (float)g.baseline_m;
     out->fov_deg = (float)g.fov_deg;
     return 0;
@@ -273,7 +274,7 @@ static int read_stereo_frame(StereoFrame* out) {
         out->depth_count = (uint32_t)(DW * DH);  /* 4800 */
     }
 
-    out->timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
+    out->timestamp_us = clock_now_us();
     return 0;
 #endif
 }

@@ -51,6 +51,7 @@ struct GpsData {
     float    speed_mps      # 速度（m/s）
     float    heading_deg    # 航向角（度，北偏东）
     float    accuracy_m     # 定位精度（米，1-sigma）
+    uint64   timestamp_us   # 采样时间戳（微秒；采集时刻优先，无 GNSS 时用主机钟）
 }
 
 # IMU 原始数据（6 轴：加速度 + 陀螺仪）
@@ -63,7 +64,7 @@ struct ImuData {
     float    gyro_x         # 陀螺仪 X 轴（rad/s）
     float    gyro_y         # 陀螺仪 Y 轴（rad/s）
     float    gyro_z         # 陀螺仪 Z 轴（rad/s，即 yaw_rate）
-    uint32   timestamp_us   # 采样时间戳（CLOCK_MONOTONIC，微秒）
+    uint64   timestamp_us   # 采样时间戳（微秒，uint64 不回绕）
     float    temperature    # 温度（℃，部分模块提供，用于温漂补偿）
 }
 
@@ -89,7 +90,7 @@ struct Pose2D {
 struct StereoFrame {
     uint32   width          # 图像宽度（像素）
     uint32   height         # 图像高度（像素）
-    uint32   timestamp_us   # 采样时间戳（CLOCK_MONOTONIC，微秒）
+    uint64   timestamp_us   # 采样时间戳（微秒，uint64 不回绕）
     uint32   left_jpeg_size # 左图 JPEG 数据有效字节数
     uint32   depth_count    # 深度数据有效浮点数个数 (width/4 * height/4 降采样)
     float    baseline_m     # 双目基线长度（米），OAK-D≈0.075, ZED2≈0.12

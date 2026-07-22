@@ -236,8 +236,11 @@ static int imu_execute(TaskBase* task) {
 
         if (!ok) continue;
 
-        /* 填充时间戳 + 序列化 + 发布到 sensor/imu */
-        imu.timestamp_us = (uint32_t)(clock_now_us() & 0xFFFFFFFFu);
+        /* 填充时间戳 + 序列化 + 发布到 sensor/imu
+         * timestamp_us 已升为 uint64（msg schema 迁移），不再 32 位回绕。
+         * TODO(roadmap): 当前仍是「主机到达时刻」，真车应改为采集时刻
+         * （IMU 自带 sample counter + 主机钟纪律，或硬件时间戳）。 */
+        imu.timestamp_us = clock_now_us();
         uint8_t buf[64];
         size_t  len = 0;
         if (ImuData_serialize(&imu, buf, &len) == 0 && len > 0) {

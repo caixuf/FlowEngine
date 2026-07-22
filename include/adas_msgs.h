@@ -37,6 +37,7 @@ typedef struct {
     float  speed_mps;        /**< 速度（m/s） */
     float  heading_deg;      /**< 航向角（度，北偏东） */
     float  accuracy_m;       /**< 定位精度（米，1-sigma） */
+    uint64_t timestamp_us;   /**< 采样时间戳（微秒；与 adas_msgs.msg schema 同步） */
 } GpsData;
 
 /* ── 感知输出 ────────────────────────────────────────────── */

@@ -58,6 +58,7 @@
 #include "logger.h"
 #include "serial_port.h"
 #include "nmea_parser.h"
+#include "clock_service.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -144,6 +145,11 @@ static int gps_execute(TaskBase* task) {
         int rc = nmea_parse_line(&g.parser, line, &gps);
         if (rc == NMEA_OK) {
             g.sentences_parsed++;
+            /* 填充采样时间戳（msg schema 新增字段，uint64 不回绕）。
+             * TODO(roadmap): 当前仍是「主机到达时刻」，真车应改用 NMEA RMC/GGA
+             * 自带的 GNSS UTC 时间（nmea_parser 已解析 utc 但未暴露），做采集
+             * 时刻时间戳 + 1PPS 纪律主机钟。 */
+            gps.timestamp_us = clock_now_us();
             /* 序列化 + 发布到 sensor/gps */
             uint8_t buf[64];
             size_t  len = 0;
