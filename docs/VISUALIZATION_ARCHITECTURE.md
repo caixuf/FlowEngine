@@ -168,6 +168,126 @@ GET /api/health    → 探活: {status, source, age_sec}
 
 ---
 
+## 数据流：从仿真到 3D 渲染的完整链路
+
+### 架构演进：旧 → 新
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  flowsim_node (C++ 仿真引擎)                                     │
+│                                                                  │
+│  ┌─────────────────────┐   ┌──────────────────────────────────┐ │
+│  │ vehicle/state (旧)   │   │ scene/frame (新, scene_pub 模块) │ │
+│  │ = publish_vehicle_   │   │ = publish_scene_frame()         │ │
+│  │   state() 直接发布    │   │   通过 scene_pub.cpp 结构化发布  │ │
+│  │                     │   │                                  │ │
+│  │ ego: {x,y,spd,hdg,  │   │ road_network: {edges:[...]}     │ │
+│  │       thr,brk,tgt,st}│   │ entities: [{type:"ego",x,y,     │ │
+│  │ ox0..ox15: 16 NPC   │   │   heading,speed,steer,throttle,  │ │
+│  │ max, 无 lights/     │   │   brake,lights,length,width,     │ │
+│  │ ai_state/heading    │   │   vx,vy,target_vx},              │ │
+│  │                     │   │   {type:"car",...ai_state,...}    │ │
+│  │                     │   │   {type:"traffic_light",...}     │ │
+│  │                     │   │   ...]  ]                        │ │
+│  └─────────┬───────────┘   └──────────────┬───────────────────┘ │
+│            │                              │                      │
+└────────────┼──────────────────────────────┼──────────────────────┘
+             │                              │
+             ▼                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  monitor_node (C, 10Hz)                                          │
+│                                                                  │
+│  on_scene_frame():                    on_vehicle_state():        │
+│   ├─ 缓存 road_network  JSON           ├─ 缓存 vehicle/state JSON│
+│   ├─ 缓存 entities 数组 JSON           └─ 提取 ego_road_id      │
+│   └─ 从 entities 提取 ego JSON ★                               │
+│                                                                  │
+│  export_dashboard_json():                                        │
+│    scene.ego = {                                                 │
+│      x, y, heading, speed, steer     ← vehicle/state (真值)     │
+│      lights, brake, throttle,        ← scene/frame ego (merge)  │
+│      vx, vy, target_vx,                                         │
+│      length, width, ai_state         ← scene/frame ego (merge)  │
+│    }                                                             │
+│    scene.entities = [...]            ← scene/frame entities     │
+│    scene.road_network = {...}        ← scene/frame road_network  │
+│    scene.obstacles = [...]           ← vehicle/state (fallback) │
+│                                                                  │
+│  输出 → /tmp/flow_topology.json (原子 rename)                    │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  flowmond :8800                                                  │
+│  ├─ /api/topology  → 读取 flow_topology.json + 注入 source/stale │
+│  └─ /api/stream    → SSE 推送（含心跳 + 三态标记）                │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ HTTP SSE
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  FlowBoard 前端 (SceneDirector)                                  │
+│                                                                  │
+│  store.ego = {                                                   │
+│    x, y, z (=viaductOffset), heading, speed,                    │
+│    steer, brake, throttle,                                       │
+│    lights,     ← 驱动 VehicleView 车灯闪烁 (VehicleLights.js)    │
+│    vx, vy,     ← 驱动速度矢量可视化                              │
+│    length, width, ai_state                                       │
+│  }                                                               │
+│  store.entities = entities.filter(e => e.type !== 'ego')         │
+│    → 每个 entity 含 lights, ai_state, brake 等完整字段           │
+│                                                                  │
+│  VehicleView.update():                                           │
+│    deriveLightState(ent.lights, ent.brake)                       │
+│    → 左转灯 / 右转灯 / 双闪 / 刹车灯 / 近光 / 远光              │
+│    → 更新 Three.js mesh 材质 emissive / opacity                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 数据字段契约
+
+#### scene.ego（monitor_node 合并输出）
+
+| 字段 | 来源 | 类型 | 说明 |
+|------|------|------|------|
+| x, y | vehicle/state | float64 | 世界坐标（物理仿真真值） |
+| heading | vehicle/state | float64 | 朝向弧度（物理仿真真值） |
+| speed | vehicle/state | float64 | 车速 m/s（物理仿真真值） |
+| steer | vehicle/state | float64 | 方向盘转角（物理仿真真值） |
+| lights | scene/frame | int32 | 车灯位掩码：bit0=左转, bit1=右转, bit2=双闪, bit3=远光, bit4=近光, bit6=倒车, bit7=雾灯 |
+| brake | scene/frame | float64 | 刹车量 0..1 |
+| throttle | scene/frame | float64 | 油门量 0..1 |
+| vx, vy | scene/frame | float64 | 速度分量 m/s |
+| target_vx | scene/frame | float64 | 巡航目标速度 m/s |
+| length, width | scene/frame | float64 | 车身尺寸 m |
+| ai_state | scene/frame | string | AI 状态（ego 通常为空） |
+
+#### scene.entities[i]（scene/frame 透传）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| type | string | "car"/"truck"/"suv"/"pedestrian"/"traffic_light"/"etc_gate"/"stop_line" |
+| ai_state | string | NPC AI 状态："Cruise"/"Follow"/"CutIn"/"Yield"/"Stop"/"Overtake"/"Parked" |
+| lights | int32 | 车灯位掩码（同 ego） |
+| x, y, heading, speed | float64 | 世界坐标 + 朝向 + 速度 |
+| vx, vy | float64 | 速度分量 |
+| length, width | float64 | 尺寸 |
+| steer, brake, throttle | float64 | 控制量 |
+| state | string | 红绿灯 phase："green"/"yellow"/"red" |
+| progress | float64 | 红绿灯剩余时间 s |
+| parked | bool | 行人是否停止 |
+| remain_s | float64 | ETC 门架剩余时间 |
+
+#### 旧架构问题（已修复）
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| ego 无车灯渲染 | monitor_node 从 vehicle/state 提取 ego，该 topic 无 lights 字段 | 从 scene/frame entities 提取 ego JSON，合并到 scene.ego |
+| ego 无刹车灯/油门动画 | 同上，无 brake/throttle/vx/vy | 同上 |
+| NPC 车灯渲染 | scene/frame entities 已包含 lights，但旧障碍物池从 vehicle/state 走 | 前端优先消费 scene.entities，scene.obstacles 仅作 fallback |
+
+---
+
 ## 第二部分：前端 vis/ 模块树架构
 
 > 这是本系统的核心架构。借鉴 Qt QObject 对象树 + 单向依赖思路，解决
