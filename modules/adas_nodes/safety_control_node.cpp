@@ -43,6 +43,8 @@ struct ControlCmd {
     double target{0.0};
     double error{0.0};
     std::string mode{"RAW"};
+    int    turn_signal{0};   /* 0=off, 1=left, 2=right */
+    bool   hazard{false};
 };
 
 struct VehicleState {
@@ -125,6 +127,8 @@ ControlCmd parse_control_cmd(const Message& msg) {
             cmd.target   = raw.target;
             cmd.error    = raw.error;
             cmd.mode     = raw.mode;
+            cmd.turn_signal = (int)raw.turn_signal;
+            cmd.hazard      = raw.hazard;
             return cmd;
         }
     }
@@ -139,6 +143,12 @@ ControlCmd parse_control_cmd(const Message& msg) {
     scan_double(text, "target=", &cmd.target);
     scan_double(text, "error=", &cmd.error);
     cmd.mode = scan_mode(text);
+    /* 灯光指令：turn_signal 和 hazard 从 text 解析 */
+    {
+        double ts = 0, hz = 0;
+        if (scan_double(text, "turn_signal=", &ts)) cmd.turn_signal = (int)ts;
+        if (scan_double(text, "hazard=", &hz))     cmd.hazard = (hz != 0.0);
+    }
     return cmd;
 }
 
@@ -528,6 +538,8 @@ private:
             bin.steering       = (float)cmd.steer;
             bin.emergency_stop = cmd.brake > 0.95;
         }
+        bin.turn_signal = (uint8_t)cmd.turn_signal;
+        bin.hazard      = cmd.hazard;
 
         uint8_t buf[32];
         size_t len = sizeof(buf);

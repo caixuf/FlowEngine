@@ -167,6 +167,8 @@ struct ControlRaw {
     float    target         # 目标速度 (m/s)
     float    error          # 速度误差 (m/s)
     char     mode[24]       # 模式字符串: ACCEL/BRAKE/HOLD/ROAD_GUARD等
+    uint8    turn_signal    # 转向灯指令：0=off, 1=left, 2=right（planning/control 决策下发）
+    bool     hazard         # 双闪灯指令（紧急停车 / 碰撞时 planning/control 决策下发）
 }
 
 struct ControlCmd {
@@ -176,4 +178,6 @@ struct ControlCmd {
     float    steering       # 转向角（rad）：正值右转，负值左转，范围约 ±0.22 rad，actuator 负责归一化
     Gear     gear           # 档位
     bool     emergency_stop # 紧急制动标志
+    uint8    turn_signal    # 转向灯指令：0=off, 1=left, 2=right（planning/control 决策下发，意图先行）
+    bool     hazard         # 双闪灯指令（紧急停车 / 碰撞时 planning/control 决策下发）
 }

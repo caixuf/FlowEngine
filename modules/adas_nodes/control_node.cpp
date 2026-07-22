@@ -1196,6 +1196,25 @@ protected:
                 g.prev_steer = steer;
             }
 
+            /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
+             * 转向灯：变道中根据目标车道方向打灯，非 steer 反推。
+             *   turn_signal: 0=off, 1=left, 2=right
+             * 双闪：紧急停车 / 碰撞时点亮。 */
+            uint8_t turn_signal = 0;
+            bool    hazard      = false;
+            if (g.lc_state == 1 || g.lc_state == 3) {
+                /* 变道中或回切中：根据目标 y 相对当前车道中心的方向判断 */
+                if (g.lc_target_y < g.lc_origin_y) {
+                    turn_signal = 1;  /* left */
+                } else if (g.lc_target_y > g.lc_origin_y) {
+                    turn_signal = 2;  /* right */
+                }
+            }
+            /* 紧急制动时开双闪（ROAD_GUARD / collision recovery） */
+            if (strcmp(mode, "ROAD_GUARD") == 0 && brake > 0.6) {
+                hazard = true;
+            }
+
             /* ── 发布控制指令 (二进制序列化 ControlRaw) ── */
             ControlRaw raw;
             raw.seq      = g.cycle;
@@ -1205,6 +1224,8 @@ protected:
             raw.speed    = (float)g.current_speed;
             raw.target   = (float)acc_target;
             raw.error    = (float)error;
+            raw.turn_signal = turn_signal;
+            raw.hazard   = hazard;
             memset(raw.mode, 0, sizeof(raw.mode));
             snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
 
@@ -1218,9 +1239,11 @@ protected:
             char cmd_text[256];
             snprintf(cmd_text, sizeof(cmd_text),
                      "throttle=%.2f brake=%.2f steer=%.4f "
-                     "speed=%.1f target=%.1f error=%.1f mode=%s",
+                     "speed=%.1f target=%.1f error=%.1f mode=%s "
+                     "turn_signal=%d hazard=%d",
                      throttle, brake, steer,
-                     g.current_speed, acc_target, error, mode);
+                     g.current_speed, acc_target, error, mode,
+                     (int)turn_signal, (int)hazard);
             transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 

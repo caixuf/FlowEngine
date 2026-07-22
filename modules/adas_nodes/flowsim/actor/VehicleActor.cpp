@@ -24,27 +24,17 @@ static bool is_night(double sim_time_s) {
 }
 
 void VehicleActor::update_ego_lights(Entity& ego, double sim_time_s) {
-    ego.lights.clear();
-
-    /* 转向灯：steer 正值右转，负值左转 */
-    if (ego.steer > STEER_TURN_THRESHOLD) {
-        ego.lights.set_turn_right(true);
-    } else if (ego.steer < -STEER_TURN_THRESHOLD) {
-        ego.lights.set_turn_left(true);
-    }
-
-    /* 倒车灯：速度极低且横向速度为负（简化判据，真实应看挡位信号） */
-    if (ego.speed < SPEED_REVERSE_THRESHOLD && ego.speed > -0.1) {
-        /* 近乎停止时不打倒车灯 — 需要挡位 R 信号才能准确判断。
-         * 当前 sim 无挡位建模，暂不启用倒车灯，保留接口。 */
-    }
+    /* 注意：ego.lights 的 turn_signal / hazard 已在 flowsim_node 主循环中
+     * 从 ControlCmd（决策下发）设置，此处不覆盖、不清除。VehicleActor 只补充
+     * 非决策类灯光：夜间近光灯、倒车灯等。 */
 
     /* 近光灯：夜间自动开启 */
     if (is_night(sim_time_s)) {
         ego.lights.set_low_beam(true);
     }
 
-    /* 刹车灯不占 lights 位：VehicleView 直接读 ego.brake > 0.1 判断 */
+    /* 倒车灯：暂不启用（需要挡位 R 信号），保留接口。
+     * 刹车灯不占 lights 位：VehicleView 直接读 ego.brake > 0.1 判断。 */
 }
 
 void VehicleActor::update_npc_lights(Entity& npc) {

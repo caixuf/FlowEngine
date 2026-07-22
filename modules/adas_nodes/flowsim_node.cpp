@@ -127,6 +127,9 @@ struct FlowSimContext {
     std::atomic<double> ego_throttle{0};
     std::atomic<double> ego_brake{0};
     std::atomic<double> ego_steer{0};
+    /* 灯光指令（control_node 决策下发，意图先行） */
+    std::atomic<uint8_t> ego_turn_signal{0};
+    std::atomic<bool>    ego_hazard{false};
 
     /* 统计 */
     uint32_t          cycle{0};
@@ -154,6 +157,8 @@ static void on_control_cmd(const Message* msg, void* user_data) {
             g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
             g.ego_brake.store(bin.brake, std::memory_order_relaxed);
             g.ego_steer.store(bin.steering, std::memory_order_relaxed);
+            g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
+            g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
             g.has_control_input.store(1, std::memory_order_relaxed);
             g.last_control_cmd_us.store(clock_now_us(), std::memory_order_relaxed);
             return;
@@ -922,6 +927,8 @@ protected:
                     g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
                     g.ego_brake.store(bin.brake, std::memory_order_relaxed);
                     g.ego_steer.store(bin.steering, std::memory_order_relaxed);
+                    g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
+                    g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
                     g.last_control_cmd_us.store(clock_now_us(),
                         std::memory_order_relaxed);
                     use_internal_cruise = false;
@@ -974,6 +981,17 @@ protected:
                 ego.throttle = g.ego_throttle.load(std::memory_order_relaxed);
                 ego.brake    = g.ego_brake.load(std::memory_order_relaxed);
                 ego.steer    = g.ego_steer.load(std::memory_order_relaxed);
+            }
+            /* 灯光指令：从 ControlCmd 决策下发（意图先行），非 steer 反推。
+             * 在 VehicleActor::update_all_lights 之前设置，VehicleActor 只补
+             * 夜间近光灯等非决策灯光。 */
+            {
+                uint8_t ts = g.ego_turn_signal.load(std::memory_order_relaxed);
+                bool    hz = g.ego_hazard.load(std::memory_order_relaxed);
+                ego.lights.clear();
+                if (ts == 1)      ego.lights.set_turn_left(true);
+                else if (ts == 2) ego.lights.set_turn_right(true);
+                if (hz)           ego.lights.set_hazard(true);
             }
             flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
                                   ego.throttle, ego.brake, ego.steer);
