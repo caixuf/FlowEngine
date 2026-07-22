@@ -5,6 +5,11 @@
 
 import { getCenter } from '../store/SceneStore.js';
 
+/* 流畅专题：复用单个 Box3，替代每帧 new THREE.Box3().setFromObject()。
+ * roadGroup 在 roadHash 变化时才重建，setFromObject 每帧重新算只是为
+ * clamp ego 的 x 边界，没必要每帧分配新对象。 */
+const _roadBBox = new THREE.Box3();
+
 export function createCameraRig(canvas) {
   const camera = new THREE.PerspectiveCamera(
     55,                                    // FOV
@@ -49,15 +54,18 @@ export function createCameraRig(canvas) {
     const eh = ego ? ego.heading || 0 : 0;
     const eg = ego ? ego.z || 0 : 0;
 
-    const c = getCenter(roadGroup);
-    let roadBBox = null;
+    // 流畅专题：原先这里每帧 const c = getCenter(roadGroup) 但 c 在所有
+    // switch 分支里都被各自的 const c 覆盖，属于死代码 + 白算一次 Box3。
+    // map/orbit 分支需要时各自调 getCenter（已走 SceneStore WeakMap 缓存）。
+    let hasBBox = false;
     if (roadGroup && roadGroup.children && roadGroup.children.length > 0) {
-      roadBBox = new THREE.Box3().setFromObject(roadGroup);
+      _roadBBox.setFromObject(roadGroup);
+      hasBBox = isFinite(_roadBBox.min.x) && isFinite(_roadBBox.max.x);
     }
-    if (roadBBox && isFinite(roadBBox.min.x) && isFinite(roadBBox.max.x)) {
+    if (hasBBox) {
       const padding = 500;
-      const minX = roadBBox.min.x - padding;
-      const maxX = roadBBox.max.x + padding;
+      const minX = _roadBBox.min.x - padding;
+      const maxX = _roadBBox.max.x + padding;
       if (ex < minX) ex = minX;
       else if (ex > maxX) ex = maxX;
     }

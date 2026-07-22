@@ -129,10 +129,15 @@ set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     flowcoro
     GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
-    GIT_TAG        732ff92f72384245043a424e9369ebf0f6aeb204
+    GIT_TAG        86070751c911318afbb756b5b80eec2fec1e703d
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(flowcoro)
+# flowcoro main(8607075) 起新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
+# 纯 C 节点 / FFI 宿主可直接 #include <flowcoro/c_api.h> 调用
+# flowcoro_pool_create / flowcoro_pool_submit / flowcoro_task_wait /
+# flowcoro_alloc / flowcoro_shutdown。C 接口实现随 flowcoro_net 静态库一起产出，
+# 链接 flowcoro_net 即可拿到 C ABI 符号。
 
 # ── Eigen3 (header-only linear algebra, for Frenet planner) ──
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)

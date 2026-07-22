@@ -64,6 +64,14 @@ const GLTF_TYPE_MAP = {
 let _gltfReady = false;
 let _gltfInitStarted = false;
 
+/* 流畅专题：消除每帧分配。
+ * - _dummyObj：InstancedMesh 写矩阵用的复用 Object3D（原先每车每帧 new 一个）。
+ * - _frameDt / _lastFrameMs：真实帧间隔，替代写死的 dt=0.05，让车轮自转
+ *   与帧率解耦（60fps / 144fps 表现一致，且断流后不会累积超大角度）。 */
+const _dummyObj = new THREE.Object3D();
+let _frameDt = 0.05;     // 首帧兜底，避免 0 导致车轮不转
+let _lastFrameMs = 0;
+
 /** 异步预加载 gltf 模型（main.js init3DScene 时调一次） */
 export function initModels() {
   if (_gltfInitStarted) return;
@@ -93,7 +101,7 @@ export function createVehicleView(scene) {
     return model;
   }
 
-  function _updateGltfVehicle(entry, ent, simTime) {
+  function _updateGltfVehicle(entry, ent, simTime, dt) {
     const { group } = entry;
 
     // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
@@ -104,7 +112,6 @@ export function createVehicleView(scene) {
     // ── 车轮自转 + 转向平滑 ──
     const speed = ent.speed || 0;
     const WHEEL_RADIUS = 0.35;  // glTF 模型车轮半径 ≈ 0.35m
-    const dt = 0.05;
 
     if (entry._wheelSpin === undefined) entry._wheelSpin = 0;
     entry._wheelSpin += speed * dt / WHEEL_RADIUS;
@@ -241,7 +248,7 @@ export function createVehicleView(scene) {
     return { group, wheels, lights, useGltf: false };
   }
 
-  function _updateProceduralVehicle(entry, ent, simTime) {
+  function _updateProceduralVehicle(entry, ent, simTime, dt) {
     const { group, wheels, lights } = entry;
 
     // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
@@ -252,7 +259,6 @@ export function createVehicleView(scene) {
     // ── 车轮自转 + 转向平滑 ──
     const speed = ent.speed || 0;
     const WHEEL_RADIUS = 0.32;
-    const dt = 0.05;  // 20Hz 仿真 ≈ 50ms 帧间隔，用固定步长避免帧率耦合
 
     // 车轮累计旋转角度（rad）
     if (entry._wheelSpin === undefined) entry._wheelSpin = 0;
@@ -270,21 +276,37 @@ export function createVehicleView(scene) {
     const wid = ent.width || 2.0;
     const wheelInst = wheels[0];
     if (wheelInst) {
-      const wheelPositions = [
-        [ len * 0.32, 0.32 + 0.10,  wid * 0.5],   // FL
-        [ len * 0.32, 0.32 + 0.10, -wid * 0.5],   // FR
-        [-len * 0.32, 0.32 + 0.10,  wid * 0.5],   // RL
-        [-len * 0.32, 0.32 + 0.10, -wid * 0.5],   // RR
-      ];
-      const dummy = new THREE.Object3D();
-      for (let i = 0; i < 4; i++) {
-        dummy.position.set(wheelPositions[i][0], wheelPositions[i][1], wheelPositions[i][2]);
-        // CylinderGeometry 默认轴=Y，wheelInst.rotation.x=PI/2 让轴=Z。
-        // 所以：rotation.y=steer(转向), rotation.z=spin(自转)
-        dummy.rotation.set(0, (i < 2) ? entry._smoothSteer : 0, entry._wheelSpin);
-        dummy.updateMatrix();
-        wheelInst.setMatrixAt(i, dummy.matrix);
-      }
+      // 流畅专题：复用模块级 _dummyObj + 内联四轮位姿，消除每帧 new
+      // Object3D() + wheelPositions 数组分配（N 车 × 60fps 的 GC 压力）。
+      // 顺序与原数组一致：FL, FR, RL, RR；前轮(i<2)走 _smoothSteer，后轮走 0。
+      // CylinderGeometry 默认轴=Y，wheelInst.rotation.x=PI/2 让轴=Z：
+      // rotation.y=steer(转向), rotation.z=spin(自转)。
+      const halfLen = len * 0.32;
+      const halfWid = wid * 0.5;
+      const wy = 0.32 + 0.10;
+      const spin = entry._wheelSpin;
+      const steerFront = entry._smoothSteer;
+      const dummy = _dummyObj;
+      // FL
+      dummy.position.set(halfLen, wy, halfWid);
+      dummy.rotation.set(0, steerFront, spin);
+      dummy.updateMatrix();
+      wheelInst.setMatrixAt(0, dummy.matrix);
+      // FR
+      dummy.position.set(halfLen, wy, -halfWid);
+      dummy.rotation.set(0, steerFront, spin);
+      dummy.updateMatrix();
+      wheelInst.setMatrixAt(1, dummy.matrix);
+      // RL
+      dummy.position.set(-halfLen, wy, halfWid);
+      dummy.rotation.set(0, 0, spin);
+      dummy.updateMatrix();
+      wheelInst.setMatrixAt(2, dummy.matrix);
+      // RR
+      dummy.position.set(-halfLen, wy, -halfWid);
+      dummy.rotation.set(0, 0, spin);
+      dummy.updateMatrix();
+      wheelInst.setMatrixAt(3, dummy.matrix);
       wheelInst.instanceMatrix.needsUpdate = true;
     }
 
@@ -364,17 +386,26 @@ export function createVehicleView(scene) {
     return entry;
   }
 
-  function _updateVehicle(entry, ent, simTime) {
+  function _updateVehicle(entry, ent, simTime, dt) {
     if (entry.useGltf) {
-      _updateGltfVehicle(entry, ent, simTime);
+      _updateGltfVehicle(entry, ent, simTime, dt);
     } else {
-      _updateProceduralVehicle(entry, ent, simTime);
+      _updateProceduralVehicle(entry, ent, simTime, dt);
     }
     // shadow 是 group 子节点，position/rotation 自动跟随，无需手动同步
   }
 
   /** 主更新入口：diff 同步 entity 池 */
   function update(store, simTime) {
+    // 流畅专题：用真实帧间隔替代写死 dt=0.05。clamp [0,0.1] 防后台
+    // 切走回来后车轮累积超大角度。首帧 _lastFrameMs=0 时保留默认 0.05。
+    if (_lastFrameMs) {
+      var d = (simTime - _lastFrameMs) / 1000;
+      if (d > 0 && d < 0.1) _frameDt = d;
+      else if (d >= 0.1) _frameDt = 0.1;
+    }
+    _lastFrameMs = simTime;
+
     // gltf 车辆模型异步加载：首帧建车时 _gltfReady 多半还是 false，ego 被建成
     // 程序化 box。等 gltf 就绪后清空一次池，让所有车重建为 gltf（su7 等）。
     // 一次性，之后不再重建，避免每帧抖动。
@@ -416,7 +447,7 @@ export function createVehicleView(scene) {
         entry = _createVehicle(ent);
         pool.set(ent.id, entry);
       }
-      _updateVehicle(entry, ent, simTime);
+      _updateVehicle(entry, ent, simTime, _frameDt);
     }
   }
 

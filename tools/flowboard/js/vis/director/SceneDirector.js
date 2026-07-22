@@ -18,7 +18,11 @@ import { createETCGateView } from '../view/ETCGateView.js';
 import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
-import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
+import {
+  tickDeadReckon, _dr,
+  updateEntityDeadReckon, tickEntityDeadReckon, getEntitySmooth,
+  pruneEntities, resetEntities,
+} from '../core/DeadReckon.js';
 import * as ViewRegistry from '../core/ViewRegistry.js';
 import { createLayer } from '../core/Layer.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
@@ -169,6 +173,8 @@ export function createSceneDirector(scene) {
         lastRoadHash = hash;
         store.roadNetwork = rn;
         store.roadHash = hash;
+        // 切场景：清空 NPC 平滑状态，避免旧场景 NPC id 复用时位置串味。
+        resetEntities();
       }
     }
 
@@ -218,7 +224,7 @@ export function createSceneDirector(scene) {
       store.entities = frame.entities.filter(e => e && e.type !== 'ego').map((e) => {
         /* 校验 8 由本函数上面完成，这里只构建。type 缺失的 entity 仍会被
          * 各 View 静默丢弃（与原行为一致）。 */
-        return {
+        const ent = {
           id: e.id,
           type: e.type,
           x: e.x || 0,
@@ -240,7 +246,14 @@ export function createSceneDirector(scene) {
           remain_s: e.remain_s || 0,
           parked: e.parked || false,
         };
+        /* 流畅专题：把真值喂进多实体 dead reckon Map。tickAnimation 每帧
+         * 会用平滑后的 x/y/heading/speed 覆盖上面的真值，让 NPC 在 SSE
+         * 5Hz 离散帧之间平滑插值，不再每帧 snap 跳变。 */
+        updateEntityDeadReckon(ent.id, ent.x, ent.y, ent.speed, ent.heading);
+        return ent;
       });
+      /* 清理消失的 NPC，防止 Map 无限增长。 */
+      pruneEntities(new Set(store.entities.map(e => e.id)));
     }
 
     /* 动态 View 不在 update() 里调，统一由 tickAnimation(now) 每帧走 Layer 树
@@ -280,6 +293,24 @@ export function createSceneDirector(scene) {
       store.ego.heading = _dr.smoothHeading;
       store.ego.speed = _dr.smoothSpeed;
       store.ego.z = egoZ;
+    }
+    /* 流畅专题：NPC 与 ego 同构的 dead reckon。
+     * now 是 performance.now() 毫秒，转秒喂给 entity tick（与 ego 路径
+     * 的 performance.now()/1000 一致）。tick 后用平滑值覆盖 store.entities
+     * 的 x/y/heading/speed，VehicleView 读到的就是插值后位姿。
+     * 首帧（entity 刚 init）smooth 已 snap 到真值，不会从原点 lerp。 */
+    if (store.entities && store.entities.length) {
+      tickEntityDeadReckon(now / 1000);
+      for (let i = 0; i < store.entities.length; i++) {
+        const ent = store.entities[i];
+        const sm = getEntitySmooth(ent.id);
+        if (sm) {
+          ent.x = sm.x;
+          ent.y = sm.y;
+          ent.heading = sm.heading;
+          ent.speed = sm.speed;
+        }
+      }
     }
     /* Layer 树递归 update：agent(vehicle) + infra(trafficLight, etcGate) */
     rootLayer.update(store, now);

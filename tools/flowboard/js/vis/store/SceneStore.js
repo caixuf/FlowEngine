@@ -39,17 +39,30 @@ export function roadNetworkHash(rn) {
   return rn.edges.map(e => `${e.id||0}_${e.lanes||0}_${e.length||0}`).join('|');
 }
 
-/** 获取道路组的中心点坐标 {x, z} */
+/**
+ * 获取道路组的中心点坐标 {x, z}。
+ * 流畅专题：roadGroup 只在 roadHash 变化时重建（SceneDirector.update 里
+ * 新建对象），所以中心点可按 roadGroup 引用缓存（WeakMap）。原先每次调用
+ * 都 new THREE.Box3().setFromObject() 遍历整棵路树，CameraRig 每帧调
+ * 1~3 次 → 60fps 下显著 GC 压力。重建后旧 roadGroup 被 GC，缓存条目自动
+ * 回收，无需手动失效。
+ */
+const _centerCache = new WeakMap();
+const _centerBox = new THREE.Box3();
 export function getCenter(roadGroup) {
   if (!roadGroup || !roadGroup.children || roadGroup.children.length === 0) {
     return { x: 0, z: 0 };
   }
-  const box = new THREE.Box3().setFromObject(roadGroup);
-  if (!isFinite(box.min.x) || !isFinite(box.max.x)) {
+  const cached = _centerCache.get(roadGroup);
+  if (cached) return cached;
+  _centerBox.setFromObject(roadGroup);
+  if (!isFinite(_centerBox.min.x) || !isFinite(_centerBox.max.x)) {
     return { x: 0, z: 0 };
   }
-  return {
-    x: (box.min.x + box.max.x) / 2,
-    z: (box.min.z + box.max.z) / 2
+  const center = {
+    x: (_centerBox.min.x + _centerBox.max.x) / 2,
+    z: (_centerBox.min.z + _centerBox.max.z) / 2
   };
+  _centerCache.set(roadGroup, center);
+  return center;
 }

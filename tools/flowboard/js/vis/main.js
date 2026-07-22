@@ -392,9 +392,16 @@ export function update3D(topoData) {
   _director.update(topoData);
 }
 
-/** 设置 topology 数据（app.js setTopoData fan-out） */
+/**
+ * 设置 topology 数据（app.js setTopoData fan-out）。
+ * 流畅专题：原先 setTopoData 直接调 update3D → _director.update，而
+ * app.js updateAll 又单独 safeCall('scene3d', update3D) 再调一次，导致
+ * 每个 SSE tick 触发两次 _director.update（双倍 CPU + store.entities 重写
+ * 双倍 GC）。现改为只缓存数据引用，director 更新统一由 update3D 单点驱动。
+ * _lastTopoData 仍在这里刷新，方便调试 / 未来读侧使用。
+ */
 export function setTopoData(data) {
-  update3D(data);
+  _lastTopoData = data;
 }
 
 /** 场景是否就绪 */
