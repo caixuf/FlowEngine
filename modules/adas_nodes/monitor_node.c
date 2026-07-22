@@ -850,6 +850,7 @@ static const TaskInterface monitor_vtable = {
 static const char* s_inputs[]  = { TOPIC_PERCEPTION_OBSTACLES, TOPIC_VEHICLE_STATE,
                                    TOPIC_FUSION_LATENCY, TOPIC_FLOWENGINE_NODE_INFO,
                                    TOPIC_PLANNING_TRAJECTORY, TOPIC_ROAD_GEOMETRY,
+                                   TOPIC_SCENE_FRAME,
                                    "traffic/traffic_lights", NULL };
 static const char* s_outputs[] = { NULL };
 
