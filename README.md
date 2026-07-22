@@ -2,9 +2,10 @@
 
 > 面向自动驾驶与机器人的仿真优先中间件框架 —— C11 内核、C++20 协程外壳、插件化架构。
 >
-> **定位：** FlowEngine 是一个*仿真优先、可复现的实验平台*。它明确**不**面向实车部署（不追车规量产、
-> 不接真实 ECU/CAN、不追硬实时或功能安全认证）。所有能力——感知、融合、规划、控制、学习——
-> 都在**仿真内**被运行、观察、测试、回放与评分。
+> **定位：** FlowEngine 是一个*仿真优先、可复现的实验平台*。核心能力——感知、融合、规划、控制、学习——
+> 首先在**仿真内**被运行、观察、测试、回放与评分；通过纯逻辑单测、schema 迁移与统一时间戳语义，
+> 逐步向真车部署演进。当前阶段不追车规量产认证，但已开始整理真车部署 Roadmap
+> （GNSS 纪律时钟、PTP、MCU 安全层等），详见 [docs/REAL_VEHICLE_ROADMAP.md](docs/REAL_VEHICLE_ROADMAP.md)。
 
 [![CI](https://github.com/caixuf/FlowEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/caixuf/FlowEngine/actions)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -24,9 +25,9 @@
 | **执行** | Coroutine Scheduler（FIFO + CPU 亲和 + 限频）、Choreo DAG 模式、可取消协程原语（发布/订阅 · select · timer · req-reply，含超时与优雅取消） |
 | **内省** | 反射式状态机、UDP 服务发现、拓扑追踪、SysMonitor |
 | **元信息** | FlowRegistry（tasks/topics/types/plugins/schemas）、ParamRegistry（int/float/bool/string，支持热重载） |
-| **数据** | 类型安全序列化（IDL + 代码生成）、Bag v2 录制/回放、MCAP 格式、数据融合（EKF）、Schema 校验 |
+| **数据** | 类型安全序列化（IDL + 代码生成）、Bag v2 录制/回放、MCAP 格式、数据融合（EKF）、Schema 校验；全链路 `timestamp_us` 统一为 `uint64`（GNSS 采集时刻优先、主机钟回退） |
 | **QoS** | Per-topic QoS（深度 + 丢弃策略 + deadline + reliability）、Topic 统计（频率、延迟 p50/p99、订阅者） |
-| **感知** | DBSCAN LiDAR 聚类、Kalman 跟踪、EKF 传感器融合、NMEA GPS 解析器、nuScenes 数据集加载器 |
+| **感知** | DBSCAN LiDAR 聚类、Kalman 跟踪、EKF 传感器融合、NMEA 0183 GPS 解析器（RMC/GGA，GNSS UTC → epoch μs 采集时刻）、IMU ASCII 行解析、nuScenes 数据集加载器 |
 | **规划** | Frenet 最优轨迹（变道/超车）、PID 控制（纵向 + 横向） |
 | **安全** | 基于 FlowCoro 协程的安全包络（TTC / 横向交叉 / 行人保护） |
 | **运维** | 统一日志器（毫秒时间戳）、flowctl CLI、FlowBoard Dashboard（Three.js 3D + 2D）、flowmond 监控守护进程（IPC 桥接 + 文件桥接）、跨进程 IPC Stats Bridge + Topic Bridge、CI/CD |
@@ -55,7 +56,7 @@
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────────┘ │
 ├──────────────────────────────────────────────────────────────────────┤
 │                     ADAS Pipeline (dlopen plugins)                     │
-│  sim_world → sensor_model → perception → fusion → planning → control │
+│  flowsim → sensor_model → perception → fusion → planning → control   │
 │    → safety_control → inference → data_recorder → learner → model_ota│
 │    → monitor                                                         │
 └──────────────────────────────────────────────────────────────────────┘
@@ -121,7 +122,7 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
   ║                                                          ║
   ╚══════════════════════════════════════════════════════════╝
 
-  ┌─ SimWorld ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐
+  ┌─ FlowSim ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐
   │  dynamics      DBSCAN          EKF          Frenet       PID     │
   └──────────────────────────────────────────────────────────────────┘
 
@@ -141,17 +142,17 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
 
 ## Pipeline
 
-默认配置（`config/pipeline.json`）启动 **11 个插件节点**，默认场景为中凯路全场景（`scenarios/zhongkai_road_full.json`）：
+默认配置（`config/pipeline.json`）启动 **12 个插件节点**，默认场景为高架直路（`scenarios/straight_road.json`，1000m 双向 4 车道高架 + 平行国道）：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
-| `sim_world` | `libsim_world.so` | 50Hz | 车辆动力学 + 障碍物模拟 + 场景加载 |
+| `flowsim` | `libflowsim_node.so` | 50Hz | 车辆动力学 + 障碍物模拟 + 场景加载（原 `sim_world` 已合并升级） |
 | `sensor_model` | `libsensor_model.so` | 20Hz | LiDAR/GPS/Camera 传感器模型（FOV/遮挡/噪声） |
 | `perception` | `libperception_node.so` | 10Hz | DBSCAN 点云聚类 + 目标检测 |
 | `fusion` | `libfusion_node.so` | 20Hz | EKF 传感器融合（定位 + 时间对齐） |
 | `planning` | `libplanning_node.so` | 20Hz | Frenet 最优轨迹规划（变道/超车） |
-| `control` | `libcontrol_node.so` | 50Hz | PID 纵横向控制 + Stanley 转向 |
-| `safety_control` | `libsafety_control_node.so` | 协程 | FlowCoro 安全包围盒（TTC/横向/行人） |
+| `control` | `libcontrol_node.so` | 50Hz | PID 纵向控制 + 横向 Stanley 转向 |
+| `safety_control` | `libsafety_control_node.so` | 协程 | FlowCoro 安全包络（TTC / 横向交叉 / 行人保护） |
 | `inference` | `libinference_node.so` | 20Hz | tiny-MLP 影子推理（shadow mode，不执行） |
 | `data_recorder` | `libdata_recorder_node.so` | 20Hz | 训练样本采集（模仿学习 JSONL） |
 | `learner` | `liblearner_node.so` | 0.5Hz | 车端增量 SGD 微调（full/partial） |
@@ -194,6 +195,17 @@ flowctl param get <name>        # 获取参数
 可视化由统一的 C 监控守护进程 `flowmond` 提供，同时启用 IPC 桥接（首选）与
 文件桥接（回退）两条数据链路。前端 `tools/flowboard/index.html` 由 flowmond 通过
 `--html-path` 加载并托管。
+
+3D 场景基于 vis/ 模块树（Layer + ViewRegistry 插件化，受 Qt 对象树启发）：
+- 插件化 View：ground/road/viaduct/vehicle/npc/streetlight/barrier/obstacle 等独立 View，
+  单个 View 抛错不影响整体渲染；
+- Layer 树：env/road/agent/infra 4 个语义层递归 update；
+- 车辆渲染：优先加载 glTF（SU7 海湾蓝金属漆），回退程序化几何体；
+- 渲染管线：PMREM 环境贴图烘焙 + ShaderMaterial 渐变天空 + Fog 地平线融合 + PCFSoft 阴影 + ACESFilmic tone mapping；
+- 高架 wrap：wrap 周期与高架实际 build 长度强制一致，消除 500m/1000m 接缝。
+
+详见 [docs/VIS_MODULE_GUIDE.md](docs/VIS_MODULE_GUIDE.md) 与
+[docs/TROUBLESHOOTING_3D_DASHBOARD.md](docs/TROUBLESHOOTING_3D_DASHBOARD.md)。
 
 ```bash
 # 终端 1：监控守护进程（加载前端，启用 IPC 桥接 + 文件桥接回退）
@@ -325,25 +337,16 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 ## 场景套件
 
-13 JSON 场景定义，覆盖典型自动驾驶场景：
+当前仓库提供 1 个参考场景，场景系统正在扩展中：
 
 | 场景 | 描述 |
 |------|------|
-| `curve_road.json` | 弯道巡航（当前默认场景） |
-| `highway_overtake.json` | 高速超车 |
-| `pedestrian_crossing.json` | 行人横穿 |
-| `congestion_follow.json` | 拥堵跟车 |
-| `cutin.json` | 车辆切入 |
-| `ghost_pedestrian.json` | 鬼探头行人 |
-| `highway_exit.json` | 高速出口 |
-| `highway_noa_route.json` | 高速 NOA 路线 |
-| `intersection_unprotected.json` | 无保护路口 |
-| `multi_pedestrian.json` | 多行人场景 |
-| `obstacle_avoid.json` | 障碍物避让 |
-| `roadwork_zone.json` | 施工区 |
-| `suite.json` | 场景测试集（批量回归用） |
+| `straight_road.json` | 无 NPC 单 ego 直路：1000m 高架双向 4 车道（Y=7）+ 平行国道（Y=0.4, Z=34），用于验证感知-融合-规划-控制链路与 FlowBoard 3D 渲染 |
 
-> 每个场景有对应的 `tests/baseline/*.json` 回归基线。
+更多典型场景（弯道、超车、行人横穿、cut-in、鬼探头、高速出口、无保护路口等）已列入
+[docs/REAL_VEHICLE_ROADMAP.md](docs/REAL_VEHICLE_ROADMAP.md) 可视化/仿真打磨章节，
+将逐步补全。回归基线系统与 `tests/baseline/*.json` 正在建设中，目前使用
+`tools/demo_evaluator.py` 对每次运行做在线评分。
 
 ---
 
