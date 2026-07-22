@@ -77,8 +77,10 @@ export function createSkyEnv(scene, isNight = false) {
   scene.background = horizon.clone();
   const { dome, mat } = buildSkyDome(top, horizon, bottom);
   scene.add(dome);
-  /* 雾色 = 地平线色：远处路/树自然融入天空，远景不"断" */
-  scene.fog = new THREE.Fog(horizon, 150, 600);
+  /* 雾色 = 地平线色：远处路/树自然融入天空，远景不"断"
+   * FogExp2：指数衰减比线性 Fog 更自然，远景不会突然"断"在某个距离。
+   * density 0.0008：~500m 开始明显，~1000m 接近天空色，匹配天空球半径。 */
+  scene.fog = new THREE.FogExp2(horizon, 0.0008);
   return { dome, mat, color: horizon, isNight };
 }
 

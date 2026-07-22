@@ -184,9 +184,14 @@
 
 <div id="toast">Copied!</div>
 
-<script src="/tools/three.min.js"></script>
-<script src="/tools/flowboard/GLTFLoader.js"
-        onerror="console.warn('[flowboard] GLTFLoader unavailable — using programmatic geometry')"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 <script src="/tools/d3.v7.min.js"></script>
 <script>
   // C.1: 视角按钮 active 状态切换
@@ -197,6 +202,7 @@
     if (btn) btn.classList.add('active');
   }
 </script>
-<script type="module" src="js/app.js?v=20260721camera"></script>
+<script type="module" src="js/bootstrap.js"></script>
+<script type="module" src="js/app.js?v=20260722esm"></script>
 </body>
 </html>

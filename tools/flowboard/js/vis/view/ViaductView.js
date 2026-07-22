@@ -21,21 +21,23 @@ function _ensureMaterials() {
     roadDark: new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9, metalness: 0.01 }),
     lineWhite: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 }),
     lineYellow: new THREE.MeshStandardMaterial({ color: 0xffd700, roughness: 0.6 }),
-    concrete: new THREE.MeshLambertMaterial({ color: 0x9a9a9a }),
-    concreteDark: new THREE.MeshLambertMaterial({ color: 0x7a7a7a }),
-    metalRail: new THREE.MeshLambertMaterial({ color: 0xa8a8a8 }),
-    grass: new THREE.MeshLambertMaterial({ color: 0x4a7a35 }),
-    pole: new THREE.MeshLambertMaterial({ color: 0x3a3a3a }),
+    /* r160: MeshLambertMaterial 不响应 IBL（scene.environment），
+     * 改用 MeshStandardMaterial 让 HDRI 反弹光照能照亮水泥/草地/护栏。 */
+    concrete: new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.9 }),
+    concreteDark: new THREE.MeshStandardMaterial({ color: 0x7a7a7a, roughness: 0.9 }),
+    metalRail: new THREE.MeshStandardMaterial({ color: 0xa8a8a8, roughness: 0.4, metalness: 0.8 }),
+    grass: new THREE.MeshStandardMaterial({ color: 0x4a7a35, roughness: 0.95 }),
+    pole: new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.8 }),
     lampGlow: new THREE.MeshStandardMaterial({ color: 0xfff0c0, emissive: 0xffcc66, emissiveIntensity: 0.8 }),
-    treeTrunk: new THREE.MeshLambertMaterial({ color: 0x5c4033 }),
-    treeLeaf: new THREE.MeshLambertMaterial({ color: 0x3a8032 }),
-    treeLeafDark: new THREE.MeshLambertMaterial({ color: 0x2d5e27 }),
-    treeLeafLight: new THREE.MeshLambertMaterial({ color: 0x4a9a40 }),
-    dirt: new THREE.MeshLambertMaterial({ color: 0x8b7355 }),
+    treeTrunk: new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 }),
+    treeLeaf: new THREE.MeshStandardMaterial({ color: 0x3a8032, roughness: 0.95 }),
+    treeLeafDark: new THREE.MeshStandardMaterial({ color: 0x2d5e27, roughness: 0.95 }),
+    treeLeafLight: new THREE.MeshStandardMaterial({ color: 0x4a9a40, roughness: 0.95 }),
+    dirt: new THREE.MeshStandardMaterial({ color: 0x8b7355, roughness: 0.95 }),
     glassBarrier: new THREE.MeshStandardMaterial({
       color: 0x88bbee, transparent: true, opacity: 0.3, roughness: 0.1, metalness: 0.5
     }),
-    curb: new THREE.MeshLambertMaterial({ color: 0x888888 }),
+    curb: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.85 }),
   };
   return _mats;
 }

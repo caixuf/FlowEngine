@@ -116,7 +116,8 @@
       "library_path": "build/lib/libperception_node.so",
       "auto_start": true,
       "subscribe": [
-        "vehicle/state"
+        "vehicle/state",
+        "sensor/lidar"
       ],
       "publish": [
         {

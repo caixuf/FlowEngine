@@ -123,13 +123,14 @@ export function init3DScene(canvas) {
   return _scene;
 }
 
-/** 烘焙 PMREM 环境贴图并赋给 scene.environment。
- *  在 createLighting + createSkyEnv 之后调用一次：此时 scene 已有
- *  background（天空色）+ hemisphere light（天空→地面渐变），
- *  PMREMGenerator.fromScene 把它们烘成预滤波 mipmap 环境贴图。
- *  所有 PBR 材质（含 glTF 车身的 MeshPhysicalMaterial clearcoat 车漆）
- *  会自动从 scene.environment 采样反射，无需逐材质设 envMap。
- *  烘焙完立即 dispose PMREMGenerator（一次性资源）。 */
+/** 烘焙环境贴图并赋给 scene.environment。
+ *  Phase 1 HDRI：优先加载真实 HDRI（CC0 Poly Haven），失败则回退到
+ *  PMREMGenerator.fromScene（纯色天空 + 半球光渐变烘成环境贴图）。
+ *
+ *  真实 HDRI 优势：
+ *  - 金属漆反射真实天空（云、建筑、树影），不是纯色渐变
+ *  - 玻璃/车窗通透感更好（有真实环境可折射）
+ *  - 立体感更强（GTAO + HDRI = 接近真实渲染） */
 function _bakeEnvironment(renderer, scene) {
   if (!THREE.PMREMGenerator) {
     console.warn('[vis] PMREMGenerator unavailable, PBR reflections disabled');
@@ -137,6 +138,34 @@ function _bakeEnvironment(renderer, scene) {
   }
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
+
+  /* 优先尝试加载真实 HDRI（CC0，Three.js examples CDN） */
+  if (THREE.RGBELoader) {
+    const loader = new THREE.RGBELoader();
+    loader.load(
+      'https://unpkg.com/three@0.160.0/examples/textures/equirectangular/pedestrian_overpass_1k.hdr',
+      function(hdrTexture) {
+        hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+        const envRT = pmrem.fromEquirectangular(hdrTexture);
+        scene.environment = envRT.texture;
+        /* 同时设为背景：天更真（比渐变球真实得多） */
+        scene.background = hdrTexture;
+        pmrem.dispose();
+        console.log('[vis] HDRI environment loaded (pedestrian_overpass_1k)');
+      },
+      undefined,
+      function(err) {
+        console.warn('[vis] HDRI load failed, fallback to fromScene:', err);
+        _bakeFromScene(pmrem, scene);
+      }
+    );
+  } else {
+    _bakeFromScene(pmrem, scene);
+  }
+}
+
+/** 回退：用 scene 内的天空 + 灯光烘 PMREM */
+function _bakeFromScene(pmrem, scene) {
   const envRT = pmrem.fromScene(scene, 0.04);
   scene.environment = envRT.texture;
   pmrem.dispose();

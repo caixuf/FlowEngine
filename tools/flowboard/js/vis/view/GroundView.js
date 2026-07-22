@@ -18,7 +18,7 @@ export function createGroundView(scene) {
       }
       if (size <= 0) return;
       const geo = new THREE.PlaneGeometry(size, size);
-      const mat = new THREE.MeshLambertMaterial({ color: GRASS_COLOR });
+      const mat = new THREE.MeshStandardMaterial({ color: GRASS_COLOR, roughness: 0.95 });
       mesh = new THREE.Mesh(geo, mat);
       mesh.rotation.x = -Math.PI / 2;
       mesh.position.y = -0.05;

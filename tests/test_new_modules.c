@@ -552,7 +552,7 @@ static void test_bag_empty_close(void) {
 
 static void test_freg_register_task(void) {
     TEST("flow_registry register/get task");
-    const char* inputs[] = {"sensor/lidar", "sensor/gps", NULL};
+    const char* inputs[] = {"vehicle/state", "sensor/lidar", NULL};
     const char* outputs[] = {"perception/obstacles", NULL};
     flow_registry_register_task("perception", "Sensor fusion task", "libperception.so",
         inputs, outputs, NULL);

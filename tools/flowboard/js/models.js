@@ -278,7 +278,7 @@ function _upgradeCarPaint(model, color) {
         roughness: oldMat.roughness !== undefined ? oldMat.roughness : 0.25,
         envMapIntensity: 1.1,
         clearcoat: 1.0, clearcoatRoughness: 0.07,
-        sheen: new THREE.Color(0.4, 0.4, 0.4)
+        sheenColor: new THREE.Color(0.4, 0.4, 0.4)
       });
       c.material = newMat;
     } else if (c.material && c.material.color) {

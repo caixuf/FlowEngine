@@ -6,7 +6,7 @@
  *   - 保留 on_vehicle_state 持久回调更新 ego 状态
  *   - DBSCAN 聚类逻辑原样搬入 run()
  *
- * 输入 topics: vehicle/state (IPC 模式下同步仿真状态)
+ * 输入 topics: vehicle/state, sensor/lidar (NOA Phase 2.1: 真实传感器链路)
  * 输出 topics: perception/obstacles
  *
  * 算法:

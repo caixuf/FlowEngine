@@ -1,28 +1,34 @@
 /**
- * Lighting.js — 三光照系统：环境光 + 方向光 + 半球光
- * 营造真实白天光照。夜间模式降低 ambient + direction 强度。
+ * Lighting.js — 电影感光照系统
+ *
+ * r160 迁移：
+ *   - 构造器不再传 intensity 参数（r155 弃用三参数构造）
+ *   - 砍掉纯白 AmbientLight（HDRI 接管环境光）
+ *   - 半球光 0.7 → 0.3（只补底色，不洗白）
+ *   - 太阳强度 1.2 → 3.0（physically correct，r155+ 单位变化）
+ *   - 太阳色暖化（0xfff5e0 → 0xffe4b0）
+ *   - 阴影 2048 → 4096（超锐）
  */
 
 export function createLighting(scene) {
-  // 半球光：天空蓝 → 地面绿的渐变环境光。
-  // 强度 0.55 → 0.7：稍亮一点让地面/树有自然色，不至于死黑。
-  const hemi = new THREE.HemisphereLight(0xb0d0ff, 0x6b7a55, 0.7);
+  // 半球光：天空蓝 → 地面绿，低强度补底色。
+  // HDRI 接管环境光后，半球光只做"地面反弹"的色调暗示。
+  const hemi = new THREE.HemisphereLight(0xb0d0ff, 0x6b7a55);
+  hemi.intensity = 0.3;
   scene.add(hemi);
 
-  // 环境光：基础填充
-  const ambient = new THREE.AmbientLight(0xffffff, 0.35);
-  scene.add(ambient);
-
-  // 方向光：太阳光，斜射而非正顶（参考 scene.html 50,70,30 风格）。
-  // 强度 0.9 → 1.2：金属漆高光更亮，路面反光更强。
-  const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
+  // 方向光：太阳光，暖色斜射，强主光 + 深阴影的电影感。
+  // r155+ physically correct：DirectionalLight 强度 ≈ irradiance，
+  // 3.0 ≈ 明亮正午阳光（旧 1.2 在新单位下偏暗）。
+  const sun = new THREE.DirectionalLight(0xffe4b0);
+  sun.intensity = 3.0;
   sun.position.set(50, 80, 30);
   sun.castShadow = true;
-  /* 阴影相机跟随 ego（见 updateSunShadow），小 frustum 保证贴图锐利。
-   * ±90 范围在 1024 贴图下 = 11.7px/m，足够锐。 */
-  sun.shadow.mapSize.set(2048, 2048);  // 1024 → 2048：阴影更锐，车边缘锯齿少
+  /* 阴影 4096：演示画质优先，车边缘锯齿几乎不可见。
+   * ±90 范围在 4096 贴图下 = 22.8px/m，极锐。 */
+  sun.shadow.mapSize.set(4096, 4096);
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 220;          // sun 高度 80 + 地表 = 80m，加冗余到 220
+  sun.shadow.camera.far = 220;
   sun.shadow.camera.left = -90;
   sun.shadow.camera.right = 90;
   sun.shadow.camera.top = 90;
@@ -32,14 +38,11 @@ export function createLighting(scene) {
   scene.add(sun);
   scene.add(sun.target);
 
-  return { hemi, ambient, sun };
+  return { hemi, sun };
 }
 
-/** 让太阳阴影相机跟随 ego，使小 frustum 始终罩住主车周围。
- *  每帧调用（开销极小）。ego 缺省时不动。
- *  注意：sun.position 是相对 target 的偏移（方向光无位置概念，但
- *  shadow.camera frustum 沿 target→position 方向投影），所以保持
- *  固定偏移 (50,80,30) 平移。 */
+/** 让太阳阴影相机跟随 ego，使小 frustum 始终罩住主车。
+ *  每帧调用（开销极小）。ego 缺省时不动。 */
 export function updateSunShadow(lights, ego) {
   if (!lights || !ego) return;
   const sun = lights.sun;
@@ -53,8 +56,7 @@ export function updateSunShadow(lights, ego) {
 /** 切换白天/夜间光照 */
 export function setNightMode(lights, isNight) {
   if (!lights) return;
-  lights.ambient.intensity = isNight ? 0.15 : 0.35;
-  lights.hemi.intensity = isNight ? 0.2 : 0.55;
-  lights.sun.intensity = isNight ? 0.2 : 0.9;
-  lights.sun.color.setHex(isNight ? 0x8090b0 : 0xfff5e0);
+  lights.hemi.intensity = isNight ? 0.1 : 0.3;
+  lights.sun.intensity = isNight ? 0.3 : 3.0;
+  lights.sun.color.setHex(isNight ? 0x8090b0 : 0xffe4b0);
 }
