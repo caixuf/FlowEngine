@@ -45,7 +45,7 @@ export function createCameraRig(canvas) {
 
   function update(ego, roadGroup, now) {
     let ex = ego ? ego.x : 0;
-    const ez = ego ? ego.y : 0;
+    const ez = ego ? -(ego.y) : 0;
     const eh = ego ? ego.heading || 0 : 0;
     const eg = ego ? ego.z || 0 : 0;
 

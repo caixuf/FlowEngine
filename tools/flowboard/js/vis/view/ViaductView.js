@@ -411,8 +411,8 @@ function _createTrees(parent, laneCount, laneWidth) {
   const geo = _ensureGeos();
   const w = laneCount * laneWidth;
   const elevatedEdge = w / 2 + 8;
-  const nationalOuter = 34 + (w / 2 + 12);
-  const nationalInner = 34 - (w / 2 + 11);
+  const nationalOuter = -34 - (w / 2 + 12);
+  const nationalInner = -34 + (w / 2 + 11);
   const elevatedInner = w / 2 + 8;
 
   const detailTreePositions = [];
@@ -433,10 +433,12 @@ function _createTrees(parent, laneCount, laneWidth) {
 
   const gapZ1 = elevatedInner;
   const gapZ2 = nationalInner;
-  if (gapZ2 > gapZ1 + 4) {
+  const gapStart = Math.min(gapZ1, gapZ2);
+  const gapEnd   = Math.max(gapZ1, gapZ2);
+  if (gapEnd > gapStart + 4) {
     for (let i = 0; i < 50; i++) {
       const x = -95 + Math.random() * 190;
-      const z = gapZ1 + Math.random() * (gapZ2 - gapZ1);
+      const z = gapStart + Math.random() * (gapEnd - gapStart);
       if (Math.random() < 0.7) {
         bushPositions.push({ x, z, scale: 0.15 + Math.random() * 0.2 });
       } else {
@@ -453,11 +455,11 @@ function _createTrees(parent, laneCount, laneWidth) {
     else if (r < 0.6) z = 55 + Math.random() * 130;
     else {
       z = -160 + Math.random() * 320;
-      if (z > -15 && z < 50) {
-        z = (Math.random() < 0.5) ? -15 - Math.random() * 15 : 50 + Math.random() * 15;
+      if (z > -50 && z < 15) {
+        z = (Math.random() < 0.5) ? -50 - Math.random() * 15 : 15 + Math.random() * 15;
       }
     }
-    const distFromCenter = Math.sqrt(x * x + (z - 17) * (z - 17));
+    const distFromCenter = Math.sqrt(x * x + (z + 17) * (z + 17));
     if (distFromCenter < 55) continue;
     simpleTreePositions.push({ x, z, scale: 0.7 + Math.random() * 0.7 });
   }
@@ -550,13 +552,13 @@ function _createBushes(parent, laneCount, laneWidth) {
   const M = _ensureMaterials();
   const w = laneCount * laneWidth;
   const elevatedSafe = w / 2 + 10;
-  const nationalSafe = 34 + (w / 2 + 14);
+  const nationalSafe = -34 - (w / 2 + 14);
 
   const bushPositions = [];
   for (let i = 0; i < 20; i++) {
     const x = -95 + Math.random() * 190;
     const side = Math.random() < 0.5 ? -1 : 1;
-    const z = side < 0 ? -(elevatedSafe + Math.random() * 8) : nationalSafe + Math.random() * 8;
+    const z = side < 0 ? -(elevatedSafe + Math.random() * 8) : nationalSafe - Math.random() * 8;
     bushPositions.push({ x, z, scale: 0.2 + Math.random() * 0.3 });
   }
 
@@ -602,7 +604,7 @@ export function createViaductView(scene) {
     const withEnv = opts.withEnvironment !== false;
 
     _buildElevatedHighway(group, 0, 0, length, width, 7, laneCount);
-    _buildNationalHighway(group, 0, 34, length, width, laneCount);
+    _buildNationalHighway(group, 0, -34, length, width, laneCount);
 
     if (withEnv) {
       _createTrees(group, laneCount, laneWidth);

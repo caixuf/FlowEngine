@@ -15,10 +15,10 @@ function check(name, actual, expected) {
 console.log('--- Coord.headingToRotationY ---');
 // heading=0 → rotation=0（车头朝 +X）
 check('heading=0 → 0', headingToRotationY(0), 0);
-// heading=π/2 → rotation=-π/2（车头朝 -Z，THREE 默认 rotation.y=0 朝 +Z）
-check('heading=π/2 → -π/2', headingToRotationY(Math.PI / 2), -Math.PI / 2);
-// heading=π → rotation=-π（车头朝 -X）
-check('heading=π → -π', headingToRotationY(Math.PI), -Math.PI);
+// heading=π/2 → π/2（ENU 速度 (cosθ,sinθ) → THREE (cosθ,0,-sinθ) = rotation.y=+θ）
+check('heading=π/2 → π/2', headingToRotationY(Math.PI / 2), Math.PI / 2);
+// heading=π → π（车头朝 -X）
+check('heading=π → π', headingToRotationY(Math.PI), Math.PI);
 
 console.log('\n--- RoadView ribbon winding (法线必须朝 +Y) ---');
 // 忠实复刻 RoadView.js 的顶点公式与索引顺序（改这里必须同步改 RoadView）。

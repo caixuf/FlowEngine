@@ -5,7 +5,11 @@
  * worldToThree(...) 而不是内联手写 [x, z || 0, y] 模式。
  *
  * FlowEngine 仿真用 ENU（x=East, y=North, z=Up elevation）。
- * THREE 默认 y=up，所以映射：world(x,y,z) → three(x, z, y)。
+ * THREE 默认 y=up，所以映射：world(x,y,z) → three(x, z, -y)。
+ *
+ * 注意：ENU 和 THREE 都是右手系，[x, z, y] 是反射（det=−1），
+ * 会把整个三维世界左右镜像。修正为 [x, z, -y]（det=+1 旋转），
+ * 确保中国右侧通行（ego.y<0 是右车道）渲染在屏幕右侧。
  *
  * 用法：
  *   import { worldToThree, headingToRotationY } from '../math/Coord.js';
@@ -16,28 +20,27 @@
  * 经过 sampleEdgeNodes 输出的点已经是 THREE 坐标，不要再调 worldToThree。
  */
 
-/** ENU 世界坐标 (x=East, y=North, z=Up) → THREE (x, z, y)
+/** ENU 世界坐标 (x=East, y=North, z=Up) → THREE (x, z, -y)
  *  @param {number} x  ENU East（前向）
- *  @param {number} y  ENU North（侧向）
+ *  @param {number} y  ENU North（侧向，正值=北=左，负值=南=右）
  *  @param {number} [z=0]  ENU Up（高度）
  *  @returns {[number, number, number]}  [three.x, three.y(up), three.z] */
 export function worldToThree(x, y, z = 0) {
-  return [x, z, y];
+  return [x, z, -y];
 }
 
 /** THREE.Vector3 版本（少用，优先 worldToThree + spread） */
 export function toVec3(x, y, z = 0) {
-  return new THREE.Vector3(x, z, y);
+  return new THREE.Vector3(x, z, -y);
 }
 
 /** heading(rad) → THREE rotation.y（绕 Y 轴）。
  *  仿真 heading=0 朝 +X（车头朝 +X），THREE rotation.y=0 朝 +Z。
- *  旋转方向约定：右手系，绕 +Y 顺时针为负。
- *  验证：heading=0 → rotation=0 → 模型车头沿 +X（与 [gen_models.py:340] 一致）。
- *  之前 v1/v2 都用 `rotation.y = -heading`，重构时误加 `-Math.PI/2` 致车横在路中央。
- *  修复：恢复 `-heading` 单项。 */
+ *  推导：ENU 速度 (cosθ, sinθ) 经 [x, z, -y] → THREE (cosθ, 0, -sinθ)
+ *  恰是 rotation.y = +θ（绕 +Y 轴转 θ 弧度）。
+ *  验证：heading=0 → rotation=0 → 模型车头沿 +X（与 [gen_models.py:340] 一致）。 */
 export function headingToRotationY(heading) {
-  return -heading;
+  return heading;
 }
 
 /**

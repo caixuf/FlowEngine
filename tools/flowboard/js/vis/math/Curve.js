@@ -7,7 +7,7 @@
 export function sampleCatmullRom(points, n) {
   if (!points || points.length < 2) return [];
   const curve = new THREE.CatmullRomCurve3(
-    points.map(p => new THREE.Vector3(p[0], p[2] || 0, p[1]))
+    points.map(p => new THREE.Vector3(p[0], p[2] || 0, -p[1]))
   );
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -30,7 +30,7 @@ export function sampleEdgeNodes(nodes, samplesPerEdge = 16) {
       out.push(
         a[0] + (b[0] - a[0]) * t,
         (a[2] || 0) + ((b[2] || 0) - (a[2] || 0)) * t,
-        a[1] + (b[1] - a[1]) * t
+        -(a[1] + (b[1] - a[1]) * t)
       );
     }
     return out;
