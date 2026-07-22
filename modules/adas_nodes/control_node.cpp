@@ -312,39 +312,38 @@ static void on_trajectory(const Message* msg, void* user_data) {
     g.last_planning_us = clock_now_us();
 }
 
-/* ── vehicle/state 订阅 — 解析障碍物位置 ─────────────────────── */
-static void on_vehicle_state(const Message* msg, void* user_data) {
+/* ── perception/obstacles 订阅 — 解析障碍物（车体坐标系→世界坐标） ──── */
+static void on_perception_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
+
+    ObstacleList list;
+    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
+        return;
+
     g.ped_index = -1;
-    if (root) {
-        for (int i = 0; i < MAX_OBS; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "ox%d", i);
-            cJSON* j = cJSON_GetObjectItemCaseSensitive(root, key);
-            if (cJSON_IsNumber(j)) {
-                g.obs_valid[i] = 1;
-                g.obs_x[i] = j->valuedouble;
-            } else { g.obs_valid[i] = 0; continue; }
-            snprintf(key, sizeof(key), "oy%d", i);
-            j = cJSON_GetObjectItemCaseSensitive(root, key);
-            if (cJSON_IsNumber(j)) g.obs_y[i] = j->valuedouble;
-            snprintf(key, sizeof(key), "ov%d", i);
-            j = cJSON_GetObjectItemCaseSensitive(root, key);
-            if (cJSON_IsNumber(j)) g.obs_vx[i] = j->valuedouble;
-            snprintf(key, sizeof(key), "ot%d", i);
-            j = cJSON_GetObjectItemCaseSensitive(root, key);
-            if (cJSON_IsString(j) && j->valuestring) {
-                size_t tlen = strlen(j->valuestring);
-                if (tlen >= sizeof(g.obs_type[i])) tlen = sizeof(g.obs_type[i]) - 1;
-                memcpy(g.obs_type[i], j->valuestring, tlen);
-                g.obs_type[i][tlen] = '\0';
-                if (strcmp(g.obs_type[i], "pedestrian") == 0 && g.ped_index < 0)
-                    g.ped_index = i;
+    double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+    for (int i = 0; i < MAX_OBS; i++) {
+        if (i < (int)list.count) {
+            const Obstacle* o = &list.obstacles[i];
+            /* 车体坐标系 → 世界坐标 */
+            g.obs_x[i] = g.ego_x + o->x * ch - o->y * sh;
+            g.obs_y[i] = g.ego_y + o->x * sh + o->y * ch;
+            g.obs_vx[i] = o->vx * ch - o->vy * sh;
+            g.obs_valid[i] = 1;
+            /* 障碍物类型映射 */
+            switch (o->type) {
+                case OBJ_TYPE_PEDESTRIAN: strncpy(g.obs_type[i], "pedestrian", sizeof(g.obs_type[i])-1); break;
+                case OBJ_TYPE_CYCLIST:    strncpy(g.obs_type[i], "cyclist", sizeof(g.obs_type[i])-1); break;
+                default:                  strncpy(g.obs_type[i], "car", sizeof(g.obs_type[i])-1); break;
             }
+            if (o->type == OBJ_TYPE_PEDESTRIAN && g.ped_index < 0)
+                g.ped_index = i;
+        } else {
+            g.obs_valid[i] = 0;
+            g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = 0.0;
+            g.obs_type[i][0] = '\0';
         }
-        cJSON_Delete(root);
     }
 }
 
@@ -1475,7 +1474,7 @@ static int control_init(MessageBus* bus, Transport* transport,
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
-    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
+    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_ref_path, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
@@ -1485,7 +1484,7 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_VEHICLE_STATE, 0x1C0E5A7Eu,
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, 0x0B5A010Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);

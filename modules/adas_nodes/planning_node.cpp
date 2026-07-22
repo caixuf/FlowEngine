@@ -15,14 +15,14 @@
  * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
  * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
  */
-
 #include "node_plugin.h"
 #include "topic_registry.h"
 #include "state_machine.h"
 #include "scenario_loader.h"
 #include "road_geometry.h"
 #include "traffic_light.h"
-/* adas_msgs_gen.h previously included for Localization_deserialize — removed in cJSON-only cleanup */
+#include "adas_msgs_gen.h"   /* ObstacleList_deserialize */
+
 #include "coroutine_task.h"
 #undef LOG_TRACE
 #undef LOG_DEBUG
@@ -268,30 +268,28 @@ static void on_fusion(const Message* msg, void* user_data) {
     g.last_fusion_us = clock_now_us();
 }
 
-/* ── vehicle/state 订阅 — 解析障碍物位置（世界坐标） ─────────── */
+/* ── perception/obstacles 订阅 — 解析障碍物（车体坐标系→世界坐标） ──── */
 
-static void on_vehicle_state(const Message* msg, void* user_data) {
+static void on_perception_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
-    if (root) {
-        for (int i = 0; i < 4; i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "ox%d", i);
-            cJSON* item = cJSON_GetObjectItem(root, key);
-            if (item) g.obs_x[i] = item->valuedouble;
-            snprintf(key, sizeof(key), "oy%d", i);
-            item = cJSON_GetObjectItem(root, key);
-            if (item) g.obs_y[i] = item->valuedouble;
-            snprintf(key, sizeof(key), "ov%d", i);
-            item = cJSON_GetObjectItem(root, key);
-            if (item) g.obs_vx[i] = item->valuedouble;
-            snprintf(key, sizeof(key), "ovy%d", i);
-            item = cJSON_GetObjectItem(root, key);
-            if (item) g.obs_vy[i] = item->valuedouble;
+
+    ObstacleList list;
+    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
+        return;
+
+    double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+    for (int i = 0; i < 4; i++) {
+        if (i < (int)list.count) {
+            const Obstacle* o = &list.obstacles[i];
+            /* 车体坐标系 → 世界坐标 */
+            g.obs_x[i]  = g.ego_x + o->x * ch - o->y * sh;
+            g.obs_y[i]  = g.ego_y + o->x * sh + o->y * ch;
+            g.obs_vx[i] = o->vx * ch - o->vy * sh;
+            g.obs_vy[i] = o->vx * sh + o->vy * ch;
+        } else {
+            g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0;
         }
-        cJSON_Delete(root);
     }
     g.has_vstate = 1;
 }
@@ -876,7 +874,7 @@ void* planning_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_VEHICLE_STATE, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, nullptr };
 static const char* s_outputs[] = { TOPIC_PLANNING_TRAJECTORY, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -983,7 +981,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 #endif
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
-    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
+    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
@@ -991,7 +989,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_VEHICLE_STATE, 0x1C0E5A7Eu,
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, 0x0B5A010Eu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);

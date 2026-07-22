@@ -14,7 +14,9 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "node_plugin.h"
+#include "topic_registry.h"
 #include "adas_msgs_gen.h"
+#include <cjson/cJSON.h>
 
 #include <algorithm>
 #include <atomic>
@@ -140,49 +142,56 @@ ControlCmd parse_control_cmd(const Message& msg) {
     return cmd;
 }
 
-VehicleState parse_vehicle_state(const Message& msg) {
-    VehicleState state;
-    const char* text = reinterpret_cast<const char*>(msg.data);
-    if (!text) return state;
-    scan_double(text, "\"x\":", &state.x);
-    scan_double(text, "\"y\":", &state.y);
-    scan_double(text, "\"spd\":", &state.speed);
-    scan_double(text, "\"hdg\":", &state.heading);
-    for (int i = 0; i < 4; ++i) {
-        char key[16];
-        std::snprintf(key, sizeof(key), "\"ox%d\":", i);
-        state.obs_valid[i] = scan_double(text, key, &state.obs_x[i]);
-        std::snprintf(key, sizeof(key), "\"oy%d\":", i);
-        scan_double(text, key, &state.obs_y[i]);
-        std::snprintf(key, sizeof(key), "\"ov%d\":", i);
-        scan_double(text, key, &state.obs_v[i]);
-        std::snprintf(key, sizeof(key), "\"ovy%d\":", i);
-        scan_double(text, key, &state.obs_vy[i]);
-        /* parse obstacle type to detect pedestrian dynamically */
-        std::snprintf(key, sizeof(key), "\"ot%d\":\"", i);
-        const char* p = std::strstr(text, key);
-        if (p) {
-            p += std::strlen(key);
-            const char* end = std::strchr(p, '"');
-            if (end) {
-                std::size_t tlen = static_cast<std::size_t>(end - p);
-                if (tlen >= sizeof(state.obs_type[i])) tlen = sizeof(state.obs_type[i]) - 1;
-                std::memcpy(state.obs_type[i], p, tlen);
-                state.obs_type[i][tlen] = '\0';
-                if (state.ped_index < 0 && std::strcmp(state.obs_type[i], "pedestrian") == 0)
-                    state.ped_index = i;
-            }
-        }
-    }
-    return state;
+void on_fusion(const Message* msg, void*) {
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    pthread_mutex_lock(&g.state_mutex);
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "v")) && cJSON_IsNumber(j))
+        g.latest_state.speed = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
+        g.latest_state.x = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
+        g.latest_state.y = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "heading")) && cJSON_IsNumber(j))
+        g.latest_state.heading = j->valuedouble;
+    g.has_state = true;
+    pthread_mutex_unlock(&g.state_mutex);
+    cJSON_Delete(root);
 }
 
-void on_vehicle_state(const Message* msg, void*) {
-    if (!msg) return;
-    VehicleState state = parse_vehicle_state(*msg);
+void on_perception_obstacles(const Message* msg, void*) {
+    if (!msg || !msg->data) return;
+    ObstacleList list;
+    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
+        return;
+
     pthread_mutex_lock(&g.state_mutex);
-    g.latest_state = state;
-    g.has_state = true;
+    VehicleState* state = &g.latest_state;
+    state->ped_index = -1;
+    double ch = cos(state->heading), sh = sin(state->heading);
+    for (int i = 0; i < 4; i++) {
+        if (i < (int)list.count) {
+            const Obstacle* o = &list.obstacles[i];
+            state->obs_x[i] = state->x + o->x * ch - o->y * sh;
+            state->obs_y[i] = state->y + o->x * sh + o->y * ch;
+            state->obs_v[i]  = o->vx * ch - o->vy * sh;
+            state->obs_vy[i] = o->vx * sh + o->vy * ch;
+            state->obs_valid[i] = true;
+            switch (o->type) {
+                case OBJ_TYPE_PEDESTRIAN: strncpy(state->obs_type[i], "pedestrian", sizeof(state->obs_type[i])-1); break;
+                case OBJ_TYPE_CYCLIST:    strncpy(state->obs_type[i], "cyclist", sizeof(state->obs_type[i])-1); break;
+                default:                  strncpy(state->obs_type[i], "car", sizeof(state->obs_type[i])-1); break;
+            }
+            if (o->type == OBJ_TYPE_PEDESTRIAN && state->ped_index < 0)
+                state->ped_index = i;
+        } else {
+            state->obs_valid[i] = false;
+            state->obs_x[i] = state->obs_y[i] = state->obs_v[i] = state->obs_vy[i] = 0.0;
+            state->obs_type[i][0] = '\0';
+        }
+    }
     pthread_mutex_unlock(&g.state_mutex);
 }
 
@@ -550,7 +559,7 @@ void* safety_thread(void*) {
     return nullptr;
 }
 
-const char* s_inputs[] = {"control/raw_cmd", "vehicle/state", nullptr};
+const char* s_inputs[] = {"control/raw_cmd", TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, nullptr};
 const char* s_outputs[] = {"control/cmd", nullptr};
 extern NodePlugin s_plugin;
 
@@ -572,11 +581,13 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
         scan_double(params_json, "\"time_headway\":", &g.params.time_headway);
     }
 
-    transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
+    transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
+    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_advertise(transport, "control/cmd", CONTROL_CMD_TYPE_ID);
 
     discovery_advertise(discovery, "control/raw_cmd", CONTROL_RAW_TYPE_ID, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "vehicle/state", VEHICLE_STATE_TYPE_ID, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, 0x0B5A010Eu, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "control/cmd", CONTROL_CMD_TYPE_ID, CAP_PUBLISHER, 100.0);
 
     g.task = std::make_unique<SafetyControlTask>(bus, transport, g.params);
