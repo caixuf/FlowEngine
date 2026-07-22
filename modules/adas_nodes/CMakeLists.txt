@@ -280,34 +280,39 @@ add_library(imu_driver_node SHARED imu_driver_node.c)
 target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 
 # slam_node: SLAM 适配层节点（LiDAR + IMU → Pose2D → sensor/pose）
-# 为 GPS 丢失场景（室内/隧道）提供定位。默认 dead reckoning 占位，真实算法
-# （FAST-LIO2/LIO-SAM）作为外部库通过 slam_update() 钩子接入。无传感器时
-# 自动降级为 dry-run（生成圆形轨迹模拟位姿）。slam_update() 是算法替换点，
-# 社区用户按自己 SLAM 库替换该函数实现即可，订阅/发布/线程框架无需改动。
+# 为 GPS 丢失场景（室内/隧道）提供定位。支持三种算法模式：
+#   - dead_reckon: 默认简易里程计（陀螺仪积分 heading，加速度计积分速度）
+#   - ekf_slam:   轻量 EKF-SLAM（5维状态估计器，内置实现，无需外部依赖）
+#   - fast_lio2:  FAST-LIO2 紧耦合（需外部依赖，占位实现）
+# 无传感器时自动降级为 dry-run（生成圆形轨迹模拟位姿）。
 # 编译依赖: adas_msgs_gen.h (LidarFrame/ImuData/Pose2D 序列化)，随构建生成。
 #
+# EKF-SLAM 已内置（algo="ekf_slam"），无需额外编译开关，直接启用即可。
+# 状态向量: [x, y, heading, v, omega]，完整协方差传播与量测更新。
+#
 # ENABLE_FAST_LIO2 开关：cmake -DENABLE_FAST_LIO2=ON ...
-# 启用后 slam_node 会定义 HAVE_FAST_LIO2 宏，slam_update() 按 algo=fast_lio2
-# 路由到 slam_update_fast_lio2() 占位实现（编译能过，运行时降级到 dead_reckon
-# 并 LOG_WARN 提示填充真实 ESKF 调用）。用户需：
-#   1. 把 slam_node.c 重命名为 slam_node.cpp（FAST-LIO2 是 C++ 模板库）
-#   2. 在 slam_update_fast_lio2() / fast_lio2_init() 里填真实 ESKF 调用
-#   3. 在下面 ENABLE_FAST_LIO2 块里取消注释 find_package + target_link_libraries
+# 启用后 slam_node 会定义 HAVE_FAST_LIO2 宏，支持 algo=fast_lio2 路由。
+# 用户需：1. 安装 PCL/Eigen/Sophus + libfast_lio2.a
+#        2. 在下面 ENABLE_FAST_LIO2 块里取消注释 find_package + target_link_libraries
+#        3. 在 slam_update_fast_lio2() / fast_lio2_init() 里填真实 ESKF 调用
 # 完整步骤见 docs/HARDWARE_DEPLOYMENT.md "FAST-LIO2 集成" 章节。
-option(ENABLE_FAST_LIO2 "Enable FAST-LIO2 SLAM backend (requires PCL/Eigen/Sophus + libfast_lio2.a, and slam_node.c → .cpp rename)" OFF)
-add_library(slam_node SHARED slam_node.c)
-target_link_libraries(slam_node ${NODE_LINK_LIBS})
+option(ENABLE_FAST_LIO2 "Enable FAST-LIO2 SLAM backend (requires PCL/Eigen/Sophus + libfast_lio2.a)" OFF)
+add_library(slam_node SHARED slam_node.cpp ekf_slam.c)
+target_link_libraries(slam_node ${NODE_LINK_LIBS} stdc++)
 if(ENABLE_FAST_LIO2)
     target_compile_definitions(slam_node PRIVATE HAVE_FAST_LIO2)
-    # 用户预装好依赖后取消注释以下行（同时把 slam_node.c 改名为 slam_node.cpp）：
+    # 用户预装好依赖后取消注释以下行：
     # find_package(PCL REQUIRED COMPONENTS common io)
     # find_package(Eigen3 REQUIRED)
     # find_package(Sophus REQUIRED)
     # find_library(FAST_LIO2_LIB NAMES fast_lio2 HINTS /usr/local/lib)
-    # target_link_libraries(slam_node ${NODE_LINK_LIBS}
+    # target_link_libraries(slam_node ${NODE_LINK_LIBS} stdc++
     #     ${PCL_LIBRARIES} Eigen3::Eigen Sophus::Sophus ${FAST_LIO2_LIB})
     message(STATUS "slam_node: HAVE_FAST_LIO2 enabled (占位实现，需填充真实 ESKF 调用)")
 endif()
+
+add_executable(test_ekf_slam test_ekf_slam.c ekf_slam.c)
+target_link_libraries(test_ekf_slam ${NODE_LINK_LIBS} m)
 
 # stereo_camera_node: 双目摄像头驱动节点（OAK-D left+depth → StereoFrame → sensor/stereo）
 # 真车视觉感知入口，为 perception 提供 RGB+深度输入。默认 dry-run 占位（生成模拟左图

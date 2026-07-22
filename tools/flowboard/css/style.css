@@ -27,13 +27,12 @@ body{background:#090c10;color:#c9d1d9;font:13px 'Inter',system-ui,sans-serif;dis
 .chart-box{flex:1;min-width:280px;height:240px;background:#090c10;border:1px solid#1a1f2b;border-radius:10px;overflow:hidden;position:relative;cursor:crosshair}
 .chart-box canvas{width:100%;height:100%;display:block}
 .chart-tooltip{position:absolute;background:#1c2128cc;backdrop-filter:blur(4px);color:#c9d1d9;padding:3px 8px;border-radius:4px;font:10px 'JetBrains Mono',monospace;pointer-events:none;white-space:nowrap;border:1px solid#30363d;display:none;z-index:20}
-/* 3D 场景卡片：独占主区域剩余高度，不再限制在 380px 小框里。
- * min-height 放在 card-body 而非 card 上：折叠时 body display:none，
- * 卡片自然收缩到 header 高度，不会空占 360px。 */
-#scene3d-card{flex:1;display:flex;flex-direction:column}
-#scene3d-card .card-body{flex:1;min-height:360px;padding:0;display:flex;overflow:hidden}
-#scene3d{flex:1;min-height:360px;background:#090c10;position:relative}
-#scene2d{flex:1;min-height:360px;background:#090c10;position:relative}
+/* 3D 场景卡片：固定最小高度，不参与 flex 伸缩（flex-shrink:0）。
+ * 页面有 overflow-y:auto 滚动，无需挤压 3D 视图去迁就下方图表。 */
+#scene3d-card{flex-shrink:0;display:flex;flex-direction:column;min-height:520px}
+#scene3d-card .card-body{flex:1;min-height:480px;padding:0;display:flex;overflow:hidden}
+#scene3d{flex:1;min-height:480px;background:#090c10;position:relative}
+#scene2d{flex:1;min-height:480px;background:#090c10;position:relative}
 #scene3d canvas,#scene2d canvas{display:block;width:100%;height:100%}
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid#0d1117;font-size:12px}
 .stat-row .label{color:#8b949e;font-size:11px}

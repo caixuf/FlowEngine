@@ -39,3 +39,17 @@ export function toVec3(x, y, z = 0) {
 export function headingToRotationY(heading) {
   return -heading;
 }
+
+/**
+ * debugCoordMapping — 坐标映射调试工具，打印 ENU→THREE 转换结果
+ * 帮助排查高度(z轴)对齐问题。
+ * 
+ * @param {number} x ENU x (前向)
+ * @param {number} y ENU y (侧向)  
+ * @param {number} z ENU z (高度)
+ * @param {string} label 标签，便于区分不同对象
+ */
+export function debugCoordMapping(x, y, z, label = '') {
+  const three = worldToThree(x, y, z);
+  console.log(`[Coord] ${label || 'entity'}: ENU(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) → THREE(${three[0].toFixed(2)}, ${three[1].toFixed(2)}, ${three[2].toFixed(2)})`);
+}

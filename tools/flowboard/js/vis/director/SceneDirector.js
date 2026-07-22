@@ -175,7 +175,7 @@ export function createSceneDirector(scene) {
     if (frame.ego !== undefined && !skipEgo) {
       const e = frame.ego;
       const newX = e.x || 0;
-      const viaductOffset = store.isViaduct ? 7.0 : 0;
+      const viaductOffset = store.isViaduct ? 7.7 : 0;
       const simX = newX;
       /* wrap 周期 = 高架段实际建造长度（store.viaductVisLength），
        * 而非写死的 VIADUCT_VIS_LENGTH=500。两者必须一致，否则：
@@ -214,7 +214,7 @@ export function createSceneDirector(scene) {
     }
 
     if (frame.entities !== undefined && !skipEntities) {
-      const viaductOffset = store.isViaduct ? 7.0 : 0;
+      const viaductOffset = store.isViaduct ? 7.7 : 0;
       store.entities = frame.entities.filter(e => e && e.type !== 'ego').map((e) => {
         /* 校验 8 由本函数上面完成，这里只构建。type 缺失的 entity 仍会被
          * 各 View 静默丢弃（与原行为一致）。 */
@@ -274,10 +274,12 @@ export function createSceneDirector(scene) {
   function tickAnimation(now) {
     tickDeadReckon();
     if (store.ego && _dr.init) {
+      const egoZ = store.ego.z;
       store.ego.x = _dr.smoothX;
       store.ego.y = _dr.smoothZ;
       store.ego.heading = _dr.smoothHeading;
       store.ego.speed = _dr.smoothSpeed;
+      store.ego.z = egoZ;
     }
     /* Layer 树递归 update：agent(vehicle) + infra(trafficLight, etcGate) */
     rootLayer.update(store, now);

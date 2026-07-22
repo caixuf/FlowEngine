@@ -103,12 +103,12 @@
 </div>
 
 <div id="main">
-  <div class="row" style="display:flex;gap:12px">
-    <div style="flex:3;min-width:500px">
+  <div class="row" style="display:flex;gap:12px;flex-shrink:0">
+    <div style="flex:3;min-width:300px">
       <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2><span class="toggle">▼</span></div>
         <div id="topo"><div id="msg">Press Connect or Demo to load</div></div></div>
     </div>
-    <div style="flex:2;min-width:350px;display:flex;flex-direction:column;gap:12px">
+    <div style="flex:2;min-width:250px;display:flex;flex-direction:column;gap:12px">
       <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2><span class="toggle">▼</span></div>
         <div class="card-body" id="topic-stats" style="max-height:200px;overflow-y:auto"><span style="color:#484f58">No data</span></div></div>
       <div class="card" style="flex:1"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2><span class="toggle">▼</span></div>
