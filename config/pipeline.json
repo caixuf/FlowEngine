@@ -156,9 +156,10 @@
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
-        "vehicle/state",
+        "perception/obstacles",
         "road/geometry",
-        "road/traffic_lights"
+        "road/traffic_lights",
+        "scene/frame"
       ],
       "publish": [
         {
@@ -201,8 +202,8 @@
       "library_path": "build/lib/libsafety_control_node.so",
       "auto_start": true,
       "subscribe": [
-        "control/raw_cmd",
-        "vehicle/state"
+        "fusion/localization",
+        "perception/obstacles"
       ],
       "publish": [
         {

@@ -112,7 +112,7 @@
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
-        "vehicle/state"
+        "perception/obstacles"
       ],
       "publish": [
         {
@@ -153,8 +153,8 @@
       "library_path": "build/lib/libsafety_control_node.so",
       "auto_start": true,
       "subscribe": [
-        "control/raw_cmd",
-        "vehicle/state"
+        "fusion/localization",
+        "perception/obstacles"
       ],
       "publish": [
         {
