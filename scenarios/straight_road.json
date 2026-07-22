@@ -1,11 +1,11 @@
 {
   "name": "straight_road",
-  "description": "无 NPC 单 ego 直路：1000m 高架双向 4 车道（Y=7）+ 平行国道（Y=0.4, Z=34）。ego 在高架左车道匀速行驶。",
+  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。高架双向4车道（Y=7）+ 平行国道（Y=0.4, Z=34）。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
     "x": 5.0,
-    "y": -1.0,
+    "y": -1.75,
     "heading": 0.0,
     "init_speed": 10.0,
     "target_speed": 15.0
@@ -25,5 +25,102 @@
       }
     ]
   },
-  "actors": []
+  "actors": [
+    {
+      "id": 1,
+      "type": "car",
+      "x": 120.0,
+      "y": -1.75,
+      "vx": 8.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 2,
+      "type": "car",
+      "x": 300.0,
+      "y": 1.75,
+      "vx": 12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 3,
+      "type": "pedestrian",
+      "x": 450.0,
+      "y": -8.75,
+      "vx": 0.0,
+      "vy": 0.0,
+      "len": 0.6,
+      "wid": 0.6
+    },
+    {
+      "id": 4,
+      "type": "car",
+      "x": 750.0,
+      "y": 5.25,
+      "vx": -12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    }
+  ],
+  "traffic_lights": [
+    {
+      "id": 0,
+      "x": 600.0,
+      "y_lane": -1.75,
+      "red_s": 10.0,
+      "yellow_s": 3.0,
+      "green_s": 12.0,
+      "phase_offset_s": 0.0
+    }
+  ],
+  "stop_lines": [
+    {
+      "id": 0,
+      "x": 595.0,
+      "y": -1.75
+    }
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 120.0,
+    "min_avg_speed_mps": 5.0
+  },
+  "scenarios": [
+    {
+      "name": "npc_cutin",
+      "label": "邻道车辆cutin到ego车道",
+      "trigger": {
+        "type": "ego_x_gte",
+        "value": 260.0
+      },
+      "actor_overrides": [
+        {
+          "id": 2,
+          "ai_state": "cutin",
+          "target_offset": -1.75,
+          "target_vx": 10.0
+        }
+      ]
+    },
+    {
+      "name": "pedestrian_cross",
+      "label": "行人开始横穿道路",
+      "trigger": {
+        "type": "ego_x_gte",
+        "value": 400.0
+      },
+      "actor_overrides": [
+        {
+          "id": 3,
+          "vx": 0.0,
+          "vy": 1.5
+        }
+      ]
+    }
+  ]
 }
