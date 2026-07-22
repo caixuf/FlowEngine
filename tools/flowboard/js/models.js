@@ -43,7 +43,7 @@ const MODEL_NAMES = ['sedan', 'su7', 'truck', 'suv', 'pedestrian'];
  * 因此这里只需按名查找节点并填入 userData，无需 reparent / 重算几何中心 ——
  * 转向 rotation.y 绕轴心自转（不再画弧线），滚动 rotation.z 绕轮轴自转。
  *
- * wheel.userData.rollAxis = 'z' 标记 GLTF 车轮的滚动轴，scene3d.js 据此选
+ * wheel.userData.rollAxis = 'z' 标记 GLTF 车轮的滚动轴，VehicleView.js 据此选
  * rotation.z（GLTF，cylinder axis=Z）或 rotation.x（程序化 _buildSedan，cylinder axis=X）。
  */
 function _buildVehicleFromGltf(name, gltf) {
@@ -75,7 +75,7 @@ function _buildVehicleFromGltf(name, gltf) {
       else if (n === 'wheel_RL') rl = c;
       else if (n === 'wheel_RR') rr = c;
     });
-    // 标记 GLTF 车轮滚动轴 = Z（cylinder axis=Z），scene3d.js 据此用 rotation.z 滚动。
+    // 标记 GLTF 车轮滚动轴 = Z（cylinder axis=Z），VehicleView.js 据此用 rotation.z 滚动。
     // 程序化 _buildSedan 的车轮没有此标记，默认走 rotation.x（cylinder axis=X）。
     [fl, fr, rl, rr].forEach(function(w) {
       if (w) {
@@ -87,8 +87,8 @@ function _buildVehicleFromGltf(name, gltf) {
     // 转向系统已烘进 glTF 节点层级（见 gen_models.py / commit 162e3ea）：
     // axle_front / axle_rear 作为独立 Group 节点导出，无需运行时再用 Box3
     // 算 FL/FR 包围盒中心建 pivot。这里只需把 4 个 wheel 节点 push 进 wheels
-    // 供滚动动画使用，并把 axle_front / axle_rear 直接挂到 userData 给 scene3d.js
-    // 的转向逻辑读取。
+    // 供滚动动画使用，并把 axle_front / axle_rear 直接挂到 userData 给
+    // VehicleView.js 的转向逻辑读取。
     if (fl) wheels.push(fl);
     if (fr) wheels.push(fr);
     if (rl) wheels.push(rl);
@@ -98,7 +98,7 @@ function _buildVehicleFromGltf(name, gltf) {
     if (wheels.length) group.userData.wheels = wheels;
   }
   // 灯节点扫描：brakelight_L/R, turnsignal_FL/FR/RL/RR, headlight_L/R, ads_indicator_L/R。
-  // scene3d.js 通过 material.emissiveIntensity 切换亮灭（接感知/规划链路）。
+  // VehicleView.js 通过 material.emissiveIntensity 切换亮灭（接感知/规划链路）。
   // ads_indicator（自动驾驶小蓝灯）由 _setVehicleLights 设为常亮。
   var brakeLights = [], turnSignals = {}, headlights = [], adsIndicators = [];
   group.traverse(function(c) {
@@ -294,7 +294,7 @@ function _upgradeCarPaint(model, color) {
  *
  * @param {THREE.Group} group   车辆 group（含 userData.brakeLights/turnSignals）
  * @param {object} state        { brake: bool, turnL: bool, turnR: bool, head: bool }
- * @param {number} blinkPhase   闪烁相位 0..1（转向灯 1.5Hz 闪烁，scene3d.js 传入 _animT）
+ * @param {number} blinkPhase   闪烁相位 0..1（转向灯 1.5Hz 闪烁，VehicleView.js 传入 _animT）
  */
 export function _setVehicleLights(group, state, blinkPhase) {
   if (!group || !group.userData) return;

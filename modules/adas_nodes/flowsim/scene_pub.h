@@ -68,7 +68,7 @@ struct ScenePubConfig {
 
     /* ── Task 4：全局光照模式 ──
      * 0=day（默认），1=night（夜间：环境光/平行光下调，emissive 提升），
-     * 2=dusk（黄昏）。每帧发布给前端，scene3d.js 据此调整 AmbientLight 等。
+     * 2=dusk（黄昏）。每帧发布给前端，vis/main.js 据此调整 AmbientLight 等。
      * 来源：scenario_loader 解析 JSON 顶层 "lighting" 字段。 */
     int lighting{0};
 

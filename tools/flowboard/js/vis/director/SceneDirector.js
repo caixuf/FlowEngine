@@ -48,15 +48,6 @@ export function createSceneDirector(scene) {
   /* 实例化所有已注册 View。instantiateAll 内部已有 try/catch，
    * 工厂本身抛错不会炸整个 director。 */
   ViewRegistry.instantiateAll(scene);
-  const roadView         = ViewRegistry.get('road');
-  const groundView       = ViewRegistry.get('ground');
-  const vehicleView      = ViewRegistry.get('vehicle');
-  const connectorView    = ViewRegistry.get('connector');
-  const trafficLightView = ViewRegistry.get('trafficLight');
-  const etcGateView      = ViewRegistry.get('etcGate');
-  const viaductView      = ViewRegistry.get('viaduct');
-  const streetlightView  = ViewRegistry.get('streetlight');
-  const barrierView      = ViewRegistry.get('barrier');
   let lastRoadHash = '';
 
   /* ── Layer 树（Qt 对象树 + 单向依赖）──────────────────────────
@@ -80,15 +71,20 @@ export function createSceneDirector(scene) {
   const roadLayer  = rootLayer.addChild(createLayer('road', scene));
   const agentLayer = rootLayer.addChild(createLayer('agent', scene));
   const infraLayer = rootLayer.addChild(createLayer('infra', scene));
-  if (groundView)      envLayer.addView(groundView);
-  if (viaductView)     envLayer.addView(viaductView);
-  if (roadView)        roadLayer.addView(roadView);
-  if (streetlightView) roadLayer.addView(streetlightView);
-  if (barrierView)     roadLayer.addView(barrierView);
-  if (connectorView)   roadLayer.addView(connectorView);
-  if (vehicleView)      agentLayer.addView(vehicleView);
-  if (trafficLightView) infraLayer.addView(trafficLightView);
-  if (etcGateView)      infraLayer.addView(etcGateView);
+  /* View 实例从 ViewRegistry 取（register 后 instantiateAll 已建好），
+   * 不再保留 9 个顶层 const —— ViewRegistry 是单一事实来源，避免双份引用。 */
+  for (const [layerName, viewNames] of [
+    ['env',   ['ground', 'viaduct']],
+    ['road',  ['road', 'streetlight', 'barrier', 'connector']],
+    ['agent', ['vehicle']],
+    ['infra', ['trafficLight', 'etcGate']],
+  ]) {
+    const layer = rootLayer.findDescendant(layerName);
+    for (const vn of viewNames) {
+      const v = ViewRegistry.get(vn);
+      if (v) layer.addView(v);
+    }
+  }
 
   /* 已 warn 过的字段 key 集合，避免 20Hz × N 字段刷屏。
    * key 形如 'ego.x' / 'entities[3].heading' / 'road_network.edges' */
@@ -275,15 +271,15 @@ export function createSceneDirector(scene) {
   }
 
   function getStore() { return store; }
-  function getRoadView() { return roadView; }
-  function getGroundView() { return groundView; }
-  function getVehicleView() { return vehicleView; }
-  function getConnectorView() { return connectorView; }
-  function getTrafficLightView() { return trafficLightView; }
-  function getETCGateView() { return etcGateView; }
-  function getViaductView() { return viaductView; }
-  function getStreetlightView() { return streetlightView; }
-  function getBarrierView() { return barrierView; }
+  /* getter 代理到 ViewRegistry —— ViewRegistry 是单一事实来源，
+   * 避免顶层 const + getter 两份引用。删掉实际无人调用的
+   * getGroundView/getConnectorView/getTrafficLightView/getETCGateView/
+   * getStreetlightView/getBarrierView（API 表面更诚实）。
+   * 保留 main.js 实际还在调的 4 个：getRoadView/getViaductView/
+   * getVehicleView + getStore。 */
+  const getRoadView    = () => ViewRegistry.get('road');
+  const getViaductView = () => ViewRegistry.get('viaduct');
+  const getVehicleView = () => ViewRegistry.get('vehicle');
 
   /* ── Layer 树访问（调试 + dispose 用）── */
   function getRootLayer() { return rootLayer; }
@@ -298,8 +294,6 @@ export function createSceneDirector(scene) {
   }
 
   return { init, update, tickAnimation, dispose,
-           getStore, getRoadView, getGroundView, getVehicleView,
-           getConnectorView, getTrafficLightView, getETCGateView, getViaductView,
-           getStreetlightView, getBarrierView,
+           getStore, getRoadView, getViaductView, getVehicleView,
            getRootLayer, getLayer, resetWarnings };
 }

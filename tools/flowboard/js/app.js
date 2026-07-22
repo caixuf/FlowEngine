@@ -41,7 +41,7 @@ var COLORS = {1:'#3fb950',2:'#58a6ff',4:'#d29922',8:'#bc8cff',0:'#f85149'};
 // ═══════════════════════════════════════════════════════════════
 //
 // Phase 4.9 cleanup: previously scattered window.* assignments across
-// scene2d.js / scene3d.js / deadreckon.js / utils.js / charts.js.
+// scene2d.js / vis/main.js / vis/core/DeadReckon.js / utils.js / charts.js.
 // Now all global state lives in a single `flowboard` namespace object
 // — this is the ONLY thing attached to window from this app.
 // Internal modules talk to each other via ES module imports.

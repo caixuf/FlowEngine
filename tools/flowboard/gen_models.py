@@ -296,7 +296,7 @@ MATERIALS = {
         },
     },
     # ── 灯光材质（运行时通过 material.emissiveIntensity 切换亮灭）──
-    # 默认 emissiveFactor 较暗（灭灯态），scene3d.js 点亮时拉高 emissiveIntensity
+    # 默认 emissiveFactor 较暗（灭灯态），VehicleView.js 点亮时拉高 emissiveIntensity
     "headlight": {
         "pbrMetallicRoughness": {
             "baseColorFactor": [0.85, 0.85, 0.8, 1.0],
@@ -339,7 +339,7 @@ MODEL_SPECS = [
     # ── sedan 精致版：车身件 + 4 车门 + 充电盖 + 雨刮器 + 后备箱盖 +
     #    前大灯/后刹车灯/4 转向灯 + 圆柱车轮。车头朝 +x（与 _buildSedan 一致）。
     #    灯节点命名约定被 models.js 扫描建立 userData.brakeLights /
-    #    turnSignals / headlights，scene3d.js 通过 emissiveIntensity 切换亮灭。
+    #    turnSignals / headlights，VehicleView.js 通过 emissiveIntensity 切换亮灭。
     {
         "name": "sedan",
         "builder": build_sedan,

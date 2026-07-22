@@ -81,7 +81,7 @@ static struct {
      * etc_gate / stop_line）。vehicle/state 的 obstacles 仅承载前 16 个 NPC
      * 车辆/行人（MAX_OBS_SCENE=16），而 NOA 24-NPC 场景需要前端能渲染全部 24
      * 个 NPC + ego + 红绿灯 + ETC 门架 + 停止线。完整 entities 透传后，前端
-     * (scene3d.js) 优先消费 scn.entities，scn.obstacles 作为旧场景 fallback。 */
+     * (vis/main.js) 优先消费 scn.entities，scn.obstacles 作为旧场景 fallback。 */
     char   scene_road_network_json[4096];
     char   scene_entities_json[16384];  /* 完整 entities（24 NPC + ego + TL/ETC/StopLine） */
     volatile int has_scene_frame;
@@ -294,7 +294,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
     }
 
     /* NOA Phase 2.2: 透传完整 entities 数组（不再过滤类型）。
-     * 前端 scene3d.js 按 type 分发渲染：ego/NPC/pedestrian/tl/etc_gate/stop_line，
+     * 前端 vis/main.js 按 type 分发渲染：ego/NPC/pedestrian/tl/etc_gate/stop_line，
      * scn.obstacles (vehicle/state) 作为旧场景 fallback。 */
     cJSON* entities = cJSON_GetObjectItem(root, "entities");
     if (entities && cJSON_IsArray(entities)) {
@@ -612,7 +612,7 @@ static void export_dashboard_json(void) {
     }
 
     /* NOA Phase 2.2: 完整 entities 从 scene/frame 透传。
-     * 含全部 NPC（最多 24）+ ego + 红绿灯 + ETC 门架 + 停止线。前端 scene3d.js
+     * 含全部 NPC（最多 24）+ ego + 红绿灯 + ETC 门架 + 停止线。前端 vis/main.js
      * 优先消费 scn.entities 渲染障碍物池（扩到 24），scn.obstacles 作为旧场景
      * fallback。 */
     if (g.has_scene_frame && g.scene_entities_json[0] != '\0') {
