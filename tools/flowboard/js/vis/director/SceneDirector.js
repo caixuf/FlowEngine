@@ -20,6 +20,7 @@ import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
 import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
 import * as ViewRegistry from '../core/ViewRegistry.js';
+import { createLayer } from '../core/Layer.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
 // 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
 import { validateFrame } from './FrameValidator.js';
@@ -57,6 +58,26 @@ export function createSceneDirector(scene) {
   const streetlightView  = ViewRegistry.get('streetlight');
   const barrierView      = ViewRegistry.get('barrier');
   let lastRoadHash = '';
+
+  /* ── Layer 树（Qt 对象树 + 单向依赖）──────────────────────────
+   * 4 个语义层，每帧递归 update。view 抛错只 log + 跳过，不传染兄弟。
+   * 静态布局 View（road/ground/connector/streetlight/barrier/viaduct）
+   *   仍走 ViewRegistry.safeCall 的 build 路径，不挂 Layer 树（无需每帧调）。
+   * 动态更新 View（vehicle/trafficLight/etcGate）挂到对应 Layer，每帧
+   *   rootLayer.update(store, now) 递归调用 —— 取代 main.js 单独调
+   *   vehicle.update + SceneDirector 末尾 safeCall trafficLight/etcGate。
+   *
+   * 层级：
+   *   root
+   *   ├── agent    (vehicle)             — 智能体层
+   *   └── infra    (trafficLight, etcGate) — 路侧设施层
+   * 后续 RoadLayer/EnvLayer 可继续挂（Step C）。 */
+  const rootLayer  = createLayer('root', scene);
+  const agentLayer = rootLayer.addChild(createLayer('agent', scene));
+  const infraLayer = rootLayer.addChild(createLayer('infra', scene));
+  if (vehicleView)      agentLayer.addView(vehicleView);
+  if (trafficLightView) infraLayer.addView(trafficLightView);
+  if (etcGateView)      infraLayer.addView(etcGateView);
 
   /* 已 warn 过的字段 key 集合，避免 20Hz × N 字段刷屏。
    * key 形如 'ego.x' / 'entities[3].heading' / 'road_network.edges' */
@@ -202,26 +223,33 @@ export function createSceneDirector(scene) {
       });
     }
 
-    ViewRegistry.safeCall('trafficLight', 'update', store);
-    ViewRegistry.safeCall('etcGate', 'update', store);
+    /* 动态 View 不在 update() 里调，统一由 tickAnimation(now) 每帧走 Layer 树
+     * 递归 update（agent/infra 层）。update() 只负责写 store 数据 + 触发
+     * 静态 View 的 build（roadHash 变了才重建）。 */
   }
 
-  /* ── tickAnimation(now) — 每帧推进死推算 + 把平滑结果写回 store.ego ──
+  /* ── tickAnimation(now) — 每帧推进死推算 + Layer 树递归 update ──
    *
    * Step 2 重构：原 main.js 行 104-112 直接 import deadreckon + 覆盖
-   * store.ego.x/y/heading/speed，违反"数据单向流：Director → Store → View"。
-   * 现在此逻辑下沉到 SceneDirector，main.js 只调 director.tickAnimation(now)。
+   * store.ego.x/y/heading/speed，违反"Director → Store → View 单向流"。
+   * 现在此逻辑下沉到 SceneDirector。
+   *
+   * 架构升级：每帧 view update 走 rootLayer.update(store, now) 递归 ——
+   * 取代 main.js 单独调 _director.getVehicleView().update(store, now) +
+   * SceneDirector 末尾逐个 safeCall trafficLight/etcGate。
+   * 一个 view 抛错只 log + 跳过，不传染兄弟（Layer 错误隔离）。
    *
    * 数据流：
    *   app.js sync2DTarget (SSE tick) → updateDeadReckon(x,z,speed,heading) → _dr
    *   main.js 渲染帧 → director.tickAnimation(now)
    *     → tickDeadReckon() 推进 _dr.smooth*
    *     → 把 smooth* 写入 store.ego（覆盖 x/y/heading/speed，保留 _simX 等原始字段）
+   *     → rootLayer.update(store, now) 递归 update agent/infra 层所有 view
    *
    * 2D（scene2d.js）仍直接调 tickDeadReckon + 读 _dr.smooth*，与 3D 共享同一
    * _dr 全局单例，保证 3D/2D 视图 ego 位置完全同步。
    *
-   * @param {number} now 当前 performance.now() 毫秒（保留参数兼容，实际 tickDeadReckon 内部自取）
+   * @param {number} now 当前 performance.now() 毫秒（传给 view.update 需要 simTime）
    */
   function tickAnimation(now) {
     tickDeadReckon();
@@ -231,6 +259,8 @@ export function createSceneDirector(scene) {
       store.ego.heading = _dr.smoothHeading;
       store.ego.speed = _dr.smoothSpeed;
     }
+    /* Layer 树递归 update：agent(vehicle) + infra(trafficLight, etcGate) */
+    rootLayer.update(store, now);
   }
 
   function getStore() { return store; }

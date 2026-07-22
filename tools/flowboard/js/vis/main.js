@@ -153,12 +153,10 @@ function _startRenderLoop() {
         : _director.getRoadView().getRoadGroup();
 
       // ── 死推算：每帧 advance 平滑位置，弥补 SSE 5Hz 离散数据 ──
-      // Step 2 重构：原直接 import deadreckon + 覆盖 store.ego，违反
-      // Director → Store → View 单向流。现下沉到 director.tickAnimation()。
+      // 架构升级：tickAnimation 内部走 Layer 树递归 update ——
+      // agent 层 (vehicle) + infra 层 (trafficLight, etcGate) 都由它驱动，
+      // 不再单独调 _director.getVehicleView().update(store, now)。
       _director.tickAnimation(now);
-
-      // 更新车辆（含车灯闪烁需要 simTime）
-      _director.getVehicleView().update(store, now);
 
       // 太阳阴影相机跟随 ego（小 frustum 罩住主车周围）
       updateSunShadow(_lights, store.ego);
