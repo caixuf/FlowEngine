@@ -4,7 +4,7 @@
 // All globally-referenced functions are also set on window.* so inline
 // HTML onclick handlers and the monolithic <script> block continue to work.
 // ═════════════════════════════════════════════════════════════════════
-const THREE = window.THREE;
+import * as THREE from 'three';
 
 // ── Diagnostic state ─────────────────────────────────────────────
 const _diag = { msgs: [], seen: {} };

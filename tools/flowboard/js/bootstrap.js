@@ -10,33 +10,34 @@
  */
 
 import * as THREE from 'three';
-window.THREE = THREE;
+// ES module namespace 是只读的，Object.assign 拷贝为普通对象后再挂 addons
+window.THREE = Object.assign({}, THREE);
 
 // GLTFLoader — r16x 不再挂 THREE 全局，ESM 导入后手动挂
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-THREE.GLTFLoader = GLTFLoader;
+window.THREE.GLTFLoader = GLTFLoader;
 
 // RGBELoader — HDRI 环境贴图加载
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
-THREE.RGBELoader = RGBELoader;
+window.THREE.RGBELoader = RGBELoader;
 
 // 后处理管线 addons
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-THREE.EffectComposer = EffectComposer;
+window.THREE.EffectComposer = EffectComposer;
 
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-THREE.RenderPass = RenderPass;
+window.THREE.RenderPass = RenderPass;
 
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
-THREE.GTAOPass = GTAOPass;
+window.THREE.GTAOPass = GTAOPass;
 
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-THREE.UnrealBloomPass = UnrealBloomPass;
+window.THREE.UnrealBloomPass = UnrealBloomPass;
 
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-THREE.OutputPass = OutputPass;
+window.THREE.OutputPass = OutputPass;
 
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
-THREE.SMAAPass = SMAAPass;
+window.THREE.SMAAPass = SMAAPass;
 
 console.log('[bootstrap] Three.js r160 ESM loaded, THREE.GLTFLoader + post-processing ready');

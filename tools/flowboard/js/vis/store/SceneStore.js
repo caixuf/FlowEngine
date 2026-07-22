@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 /**
  * SceneStore.js — 单一数据源
  * 存储所有场景状态，View 只读。Director 写入。

@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 /**
  * VehicleView.js — 车辆渲染（gltf 优先 + 程序化 fallback）
  *

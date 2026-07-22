@@ -9,8 +9,8 @@
  * 远处雾和天空接不上。现在换成渐变球，远景平滑消失到天际。
  */
 
-/* FlowBoard 通过 <script src="/tools/three.min.js"> 注入全局 THREE，
- * 不是 ESM import-map 项目，所以这里不能 import 'three'。 */
+import * as THREE from 'three';
+
 const DAY_TOP    = new THREE.Color(0x1e90ff);  // 顶蓝（道奇蓝）
 const DAY_BOTTOM = new THREE.Color(0xbfe4ff);  // 地平线浅蓝
 const DAY_HORIZON = new THREE.Color(0xfff0d0); // 地平线暖白（大气散射）

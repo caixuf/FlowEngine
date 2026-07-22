@@ -1,3 +1,5 @@
+import * as THREE from 'three';
+
 /**
  * CameraRig.js — 相机控制器
  * 支持 chase / top / driver / front / map / orbit 六种模式
