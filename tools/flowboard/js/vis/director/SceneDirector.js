@@ -19,6 +19,7 @@ import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
 import { tickDeadReckon, _dr } from '../core/DeadReckon.js';
+import * as ViewRegistry from '../core/ViewRegistry.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
 // 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
 import { validateFrame } from './FrameValidator.js';
@@ -26,17 +27,35 @@ import { validateFrame } from './FrameValidator.js';
 // 向后兼容：原调用方从 SceneDirector import validateFrame。
 export { validateFrame };
 
+/* 架构升级：View 插件注册 + 错误隔离（Qt 对象树 + 单向依赖思路）。
+ * 所有 View 工厂在模块加载时注册一次，createSceneDirector 实例化时
+ * 走 ViewRegistry.instantiateAll(scene)，update() 里所有 view 方法调用
+ * 走 ViewRegistry.safeCall —— 单个 View 抛错只 log + 跳过，兄弟继续渲染。
+ * 对应"一个模块坏了整个 3D 就坏了"的痛点。 */
+ViewRegistry.register('road',         createRoadView);
+ViewRegistry.register('ground',       createGroundView);
+ViewRegistry.register('vehicle',      createVehicleView);
+ViewRegistry.register('connector',    createConnectorView);
+ViewRegistry.register('trafficLight', createTrafficLightView);
+ViewRegistry.register('etcGate',      createETCGateView);
+ViewRegistry.register('viaduct',     createViaductView);
+ViewRegistry.register('streetlight',  createStreetlightView);
+ViewRegistry.register('barrier',      createBarrierView);
+
 export function createSceneDirector(scene) {
   const store = createSceneStore();
-  const roadView = createRoadView(scene);
-  const groundView = createGroundView(scene);
-  const vehicleView = createVehicleView(scene);
-  const connectorView = createConnectorView(scene);
-  const trafficLightView = createTrafficLightView(scene);
-  const etcGateView = createETCGateView(scene);
-  const viaductView = createViaductView(scene);
-  const streetlightView = createStreetlightView(scene);
-  const barrierView = createBarrierView(scene);
+  /* 实例化所有已注册 View。instantiateAll 内部已有 try/catch，
+   * 工厂本身抛错不会炸整个 director。 */
+  ViewRegistry.instantiateAll(scene);
+  const roadView         = ViewRegistry.get('road');
+  const groundView       = ViewRegistry.get('ground');
+  const vehicleView      = ViewRegistry.get('vehicle');
+  const connectorView    = ViewRegistry.get('connector');
+  const trafficLightView = ViewRegistry.get('trafficLight');
+  const etcGateView      = ViewRegistry.get('etcGate');
+  const viaductView      = ViewRegistry.get('viaduct');
+  const streetlightView  = ViewRegistry.get('streetlight');
+  const barrierView      = ViewRegistry.get('barrier');
   let lastRoadHash = '';
 
   /* 已 warn 过的字段 key 集合，避免 20Hz × N 字段刷屏。
@@ -54,7 +73,7 @@ export function createSceneDirector(scene) {
   const VIADUCT_VIS_LENGTH = 500;
 
   function init() {
-    groundView.build(20000);
+    ViewRegistry.safeCall('ground', 'build', 20000);
     const defaultRN = {
       edges: [{
         id: 0,
@@ -95,25 +114,25 @@ export function createSceneDirector(scene) {
           const laneCount = edge0.lanes || 4;
           const laneWidth = edge0.lane_width || 3.5;
           const actualLength = edge0.length || edge0.length_m || VIADUCT_VIS_LENGTH;
-          groundView.build(20000);
-          viaductView.build({ laneCount, laneWidth, length: actualLength, withEnvironment: true });
-          roadView.build({ edges: [] });
+          ViewRegistry.safeCall('ground', 'build', 20000);
+          ViewRegistry.safeCall('viaduct', 'build', { laneCount, laneWidth, length: actualLength, withEnvironment: true });
+          ViewRegistry.safeCall('road', 'build', { edges: [] });
           /* Step 4：高架场景路灯/护栏由 ViaductView 内置，StreetlightView /
            * BarrierView 在普通 edge 上不放置（内部跳过 viaduct_highway），
            * 此处显式 clear 一遍保证切换场景时不残留。 */
-          streetlightView.build({ edges: [] });
-          barrierView.build({ edges: [] });
+          ViewRegistry.safeCall('streetlight', 'build', { edges: [] });
+          ViewRegistry.safeCall('barrier', 'build', { edges: [] });
           store.isViaduct = true;
         } else {
-          roadView.build(rn);
-          groundView.build(20000);
+          ViewRegistry.safeCall('road', 'build', rn);
+          ViewRegistry.safeCall('ground', 'build', 20000);
           /* Step 4：普通道路场景，路灯 + 护栏从 roadNetwork 自动布局。 */
-          streetlightView.build(rn);
-          barrierView.build(rn);
+          ViewRegistry.safeCall('streetlight', 'build', rn);
+          ViewRegistry.safeCall('barrier', 'build', rn);
           store.isViaduct = false;
         }
 
-        connectorView.build(rn);
+        ViewRegistry.safeCall('connector', 'build', rn);
         lastRoadHash = hash;
         store.roadNetwork = rn;
         store.roadHash = hash;
@@ -149,7 +168,7 @@ export function createSceneDirector(scene) {
       };
 
       if (store.isViaduct) {
-        viaductView.followEgo(wrapOffset + VIADUCT_VIS_LENGTH / 2);
+        ViewRegistry.safeCall('viaduct', 'followEgo', wrapOffset + VIADUCT_VIS_LENGTH / 2);
       }
     }
 
@@ -183,8 +202,8 @@ export function createSceneDirector(scene) {
       });
     }
 
-    trafficLightView.update(store);
-    etcGateView.update(store);
+    ViewRegistry.safeCall('trafficLight', 'update', store);
+    ViewRegistry.safeCall('etcGate', 'update', store);
   }
 
   /* ── tickAnimation(now) — 每帧推进死推算 + 把平滑结果写回 store.ego ──
