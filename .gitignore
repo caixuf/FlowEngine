@@ -67,6 +67,7 @@ Thumbs.db
 node_modules/
 .npm/
 vendor/
+!tools/flowboard/vendor/
 
 # 测试覆盖率报告
 coverage/
