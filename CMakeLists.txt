@@ -593,6 +593,18 @@ target_link_libraries(test_json_schema flowengine_core)
 add_test(NAME json_schema_tests COMMAND test_json_schema)
 set_tests_properties(json_schema_tests PROPERTIES TIMEOUT 10)
 
+# ── ADAS 节点纯逻辑单元测试（imu / slam / actuator_pwm dry-run 路径）──
+# 真车部署 roadmap 第一步：把"两头"占位实现的纯逻辑钉死，避免后续接入真实
+# 算法/驱动时回归掉已验证过的行为。副本 + 行号标注策略，详见文件头注释。
+add_executable(test_adas_nodes_logic tests/test_adas_nodes_logic.c)
+set_source_files_properties(tests/test_adas_nodes_logic.c PROPERTIES LANGUAGE CXX)
+target_link_libraries(test_adas_nodes_logic flowengine_core)
+add_dependencies(test_adas_nodes_logic msg_codegen)
+target_include_directories(test_adas_nodes_logic PRIVATE ${GEN_DIR})
+
+add_test(NAME adas_nodes_logic_tests COMMAND test_adas_nodes_logic)
+set_tests_properties(adas_nodes_logic_tests PROPERTIES TIMEOUT 10)
+
 add_test(NAME e2e_training_tools
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
