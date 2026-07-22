@@ -10,6 +10,7 @@ export function createSceneStore() {
     roadNetwork: null,        // { edges: [...], hash: string }
     roadHash: '',             // 用于 diff 检测
     isViaduct: false,         // 是否高架模式
+    viaductVisLength: 0,      // 高架段实际建造长度（米），用于 wrap 周期；0 = 未建
 
     // ── ego ──
     ego: null,                // { x, y, heading, speed, steer, brake, throttle, lights, vx, vy, length, width }

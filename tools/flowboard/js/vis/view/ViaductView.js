@@ -615,9 +615,22 @@ export function createViaductView(scene) {
   function getGroup() { return group; }
   function isBuilt() { return built; }
 
-  function followEgo(egoVisualX) {
-    if (!built || egoVisualX == null) return;
-    group.position.x = egoVisualX - 100;
+  /* followEgo(centerX) — 把整段高架组的中心对齐到 centerX。
+   * SceneDirector 在高架模式每帧调用，参数为
+   *   wrapOffset + visLength / 2
+   * 即"当前 wrap 周期的中点"。高架组以 cx=0 为中心建造，
+   * 故 group.position.x = centerX 时高架段恰好覆盖
+   *   [wrapOffset, wrapOffset + visLength]
+   * ego 的 simX 总落在该区间内（视觉位置 = simX % visLength
+   * 落在 [0, visLength)，物理位置仍在 [wrapOffset, wrapOffset+visLength)），
+   * 因此 ego 永远在高架段上，wrap 边界不再出现"驶出高架 100m"的接缝。
+   *
+   * 历史 -100 常数是个谜之偏移，会把高架组往后挪 100m，导致
+   * ego 接近 wrap 周期末尾（simX 接近 wrapOffset+visLength）时
+   * 已驶出高架末段约 100m，每 500m 跳一次可见接缝。 */
+  function followEgo(centerX) {
+    if (!built || centerX == null) return;
+    group.position.x = centerX;
   }
 
   function getBBox() {

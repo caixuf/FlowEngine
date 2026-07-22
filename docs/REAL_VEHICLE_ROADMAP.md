@@ -88,10 +88,15 @@
 > 不影响「可用」，影响「高架长途看起来顺不顺」。esmini 子模块为空时这些
 > 属于 flowsim_node 视图层问题，不阻塞真车链路。
 
-- [ ] **ViaductView.followEgo 的 -100 常数** — 疑似没跟 `VIS_LENGTH=500` 同步，
-      高架段相机/视野跟随偏移可能不一致。
-- [ ] **wrap 周期(500) 与道路 build 长度(1000) 不一致** — 环境物可能每 500m 跳一下
-      （接缝处可见跳变）。需对齐 wrap 周期与 build 长度，或加平滑过渡。
+- [x] **ViaductView.followEgo 的 -100 常数** — 已删除。原本高架组中心对齐到
+      `wrapOffset + 250 - 100`，导致高架段覆盖 `[wrapOffset-100, wrapOffset+400]`，
+      ego 在 wrap 周期末段 ~100m 驶出高架。现直接 `group.position.x = centerX`，
+      高架段覆盖 `[wrapOffset, wrapOffset+visLen]`，ego 永远在内。
+- [x] **wrap 周期(500) 与道路 build 长度(1000) 不一致** — 已对齐。原 SceneDirector
+      写死 `VIADUCT_VIS_LENGTH=500` 做取模，但高架可按 `edge0.length` 建成 1000m 或
+      其它，环境物每 500m 跳一下。现 build 时把 `actualLength` 存到
+      `store.viaductVisLength`，ego 更新块用 `visLen = store.viaductVisLength ||
+      VIADUCT_VIS_LENGTH` 同时做取模和 followEgo，wrap 周期与 build 长度强制一致。
 
 ---
 

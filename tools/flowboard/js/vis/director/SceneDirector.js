@@ -151,6 +151,10 @@ export function createSceneDirector(scene) {
           ViewRegistry.safeCall('streetlight', 'build', { edges: [] });
           ViewRegistry.safeCall('barrier', 'build', { edges: [] });
           store.isViaduct = true;
+          /* 记录高架段实际建造长度，作为 wrap 周期（见下 ego 更新块）。
+           * 历史 bug：wrap 周期写死 500m，但高架可按 edge0.length
+           * 建成 1000m 或其它，导致环境物每 500m 跳一下、接缝可见。 */
+          store.viaductVisLength = actualLength;
         } else {
           ViewRegistry.safeCall('road', 'build', rn);
           ViewRegistry.safeCall('ground', 'build', 20000);
@@ -158,6 +162,7 @@ export function createSceneDirector(scene) {
           ViewRegistry.safeCall('streetlight', 'build', rn);
           ViewRegistry.safeCall('barrier', 'build', rn);
           store.isViaduct = false;
+          store.viaductVisLength = 0;
         }
 
         ViewRegistry.safeCall('connector', 'build', rn);
@@ -172,7 +177,13 @@ export function createSceneDirector(scene) {
       const newX = e.x || 0;
       const viaductOffset = store.isViaduct ? 7.0 : 0;
       const simX = newX;
-      const visualX = simX % VIADUCT_VIS_LENGTH;
+      /* wrap 周期 = 高架段实际建造长度（store.viaductVisLength），
+       * 而非写死的 VIADUCT_VIS_LENGTH=500。两者必须一致，否则：
+       *   - 高架建 1000m，wrap 在 500m，则高架组每 500m 跳一次；
+       *   - 反之高架建 500m、wrap 1000m，则 ego 驶出高架末段后才 wrap。
+       * 首帧（viaductVisLength 还没建出来）回退到 VIADUCT_VIS_LENGTH。 */
+      const visLen = store.viaductVisLength || VIADUCT_VIS_LENGTH;
+      const visualX = simX % visLen;
       const wrapOffset = simX - visualX;
 
       store.ego = {
@@ -196,7 +207,9 @@ export function createSceneDirector(scene) {
       };
 
       if (store.isViaduct) {
-        ViewRegistry.safeCall('viaduct', 'followEgo', wrapOffset + VIADUCT_VIS_LENGTH / 2);
+        /* 高架组中心对齐到当前 wrap 周期的中点，
+         * 高架段恰好覆盖 [wrapOffset, wrapOffset + visLen]，ego 必在内。 */
+        ViewRegistry.safeCall('viaduct', 'followEgo', wrapOffset + visLen / 2);
       }
     }
 
