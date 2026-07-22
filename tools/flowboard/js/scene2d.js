@@ -7,19 +7,19 @@
 //   switchSceneView(view) — Switch between '3d' and '2d' scene modes
 //   _2d              — 2D state object
 //
-// Ego smoothing is owned by deadreckon.js (_dr.smooth*). The 2D renderer
-// reads those values in draw2D() via tickDeadReckon() in the anim loop.
+// Ego smoothing is owned by vis/core/DeadReckon.js (_dr.smooth*). The 2D
+// renderer reads those values in draw2D() via tickDeadReckon() in the anim loop.
 //
 // Phase 4.9 cleanup: no `window.X = X` exports — all entry points are
 // reached via ES module imports.  app.js re-publishes them under the
 // single `window.flowboard` namespace for inline-onclick handlers.
 
 import { safeCall, reportDiag } from './utils.js';
-import { _dr, tickDeadReckon } from './deadreckon.js';
+import { _dr, tickDeadReckon } from './vis/core/DeadReckon.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
 // egoT / gpsHistory were removed: dead-reckoning state (last*/smooth*) is
-// now owned by deadreckon.js and fed by app.js sync2DTarget().
+// now owned by vis/core/DeadReckon.js and fed by app.js sync2DTarget().
 var _2d = {
   canvas: null, ctx: null, active: false, animId: 0, frame: 0, w: 0, h: 0,
   trail: [],                                               // last N positions
@@ -53,7 +53,7 @@ var OBS_LBL = { car: 'CAR', truck: 'TRUCK', pedestrian: 'PED', cyclist: 'CYC', v
 export function init2D() {
   // No monkey-patching of updateAll() — the 2D target (egoT) is now
   // synced by app.js sync2DTarget() inside the normal updateAll()
-  // pipeline, and ego smoothing is owned by deadreckon.js.
+  // pipeline, and ego smoothing is owned by vis/core/DeadReckon.js.
   // If no Three.js at all, go straight to 2D fallback
   if (typeof THREE === 'undefined') {
     init2DFallback(true);
@@ -86,7 +86,7 @@ export function init2DFallback(force) {
 }
 
 // ── Internal: animation loop ──
-// Smoothing is centralised in deadreckon.js — this loop just ticks the
+// Smoothing is centralised in vis/core/DeadReckon.js — this loop just ticks the
 // engine and redraws. 3D and 2D now share identical smoothing behaviour.
 function _2dAnimLoop() {
   if (!_2d.active) return;

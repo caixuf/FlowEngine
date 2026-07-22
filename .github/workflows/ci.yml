@@ -224,6 +224,38 @@ jobs:
           curl -sf http://localhost:8811/api/topology > /tmp/topo.json
           kill $SRV 2>/dev/null || true
 
+  # ── vis/ JS smoke tests (pure Node, no browser) ───────────
+  # Validates the pure-function modules extracted from THREE-coupled code:
+  #   - tests/vis_vehicle_lights.test.mjs  : bitmask constants + deriveLightState
+  #   - tests/vis_director_validation.test.mjs : SceneDirector.validateFrame
+  #   - tests/vis_geometry.test.mjs        : Coord.headingToRotationY + RoadView winding
+  # These guard against silent breakage of ENU→THREE mapping, vehicle light
+  # bitmask semantics, and frame schema validation when refactoring vis/.
+  vis-js-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check all vis/ modules
+        run: |
+          set -e
+          for f in $(find tools/flowboard/js/vis -name '*.js'); do
+            node --check "$f"
+          done
+          for f in $(find tools/flowboard/js -maxdepth 1 -name '*.js'); do
+            node --check "$f"
+          done
+      - name: Run vis smoke tests
+        run: |
+          set -e
+          for t in tests/vis_*.test.mjs; do
+            echo "--- $t ---"
+            node "$t"
+          done
+
   # ── Nightly long-running suite (stability + benchmark) ─────
   # These tests are labeled manual/stability/benchmark and are excluded from
   # per-PR runs to keep pull-request CI fast. They run on the nightly schedule.

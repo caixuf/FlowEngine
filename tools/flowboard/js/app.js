@@ -6,7 +6,7 @@ import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as se
 import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
 import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
 import { safeCall, reportDiag, clearDiag, _auditSceneMaterials } from './utils.js';
-import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './deadreckon.js';
+import { updateDeadReckon, _dr, initDeadReckon, tickDeadReckon } from './vis/core/DeadReckon.js';
 
 function setText(id, val) {
   var el = document.getElementById(id);
