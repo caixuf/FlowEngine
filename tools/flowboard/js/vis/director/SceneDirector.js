@@ -60,21 +60,32 @@ export function createSceneDirector(scene) {
   let lastRoadHash = '';
 
   /* ── Layer 树（Qt 对象树 + 单向依赖）──────────────────────────
-   * 4 个语义层，每帧递归 update。view 抛错只 log + 跳过，不传染兄弟。
-   * 静态布局 View（road/ground/connector/streetlight/barrier/viaduct）
-   *   仍走 ViewRegistry.safeCall 的 build 路径，不挂 Layer 树（无需每帧调）。
-   * 动态更新 View（vehicle/trafficLight/etcGate）挂到对应 Layer，每帧
-   *   rootLayer.update(store, now) 递归调用 —— 取代 main.js 单独调
-   *   vehicle.update + SceneDirector 末尾 safeCall trafficLight/etcGate。
+   * 4 个语义层，构成完整对象树。所有 View（静态 + 动态）都挂到 Layer，
+   * dispose 时递归清理 geometry/material，不再需要手动管理生命周期。
    *
    * 层级：
    *   root
-   *   ├── agent    (vehicle)             — 智能体层
-   *   └── infra    (trafficLight, etcGate) — 路侧设施层
-   * 后续 RoadLayer/EnvLayer 可继续挂（Step C）。 */
+   *   ├── env     (ground, viaduct)              — 环境层
+   *   ├── road     (road, streetlight, barrier, connector)  — 道路层
+   *   ├── agent    (vehicle)                      — 智能体层
+   *   └── infra    (trafficLight, etcGate)        — 路侧设施层
+   *
+   * 静态布局 View（road/ground/...）的 build 仍由 update() 内部条件性调用
+   * （高架 vs 普通道路分支不同），不走 Layer.build（Layer 树只管递归 update
+   * 和 dispose）。
+   * 动态 View（vehicle/trafficLight/etcGate）每帧由 tickAnimation →
+   * rootLayer.update(store, now) 递归调用，单个抛错只 log + 跳过。 */
   const rootLayer  = createLayer('root', scene);
+  const envLayer   = rootLayer.addChild(createLayer('env', scene));
+  const roadLayer  = rootLayer.addChild(createLayer('road', scene));
   const agentLayer = rootLayer.addChild(createLayer('agent', scene));
   const infraLayer = rootLayer.addChild(createLayer('infra', scene));
+  if (groundView)      envLayer.addView(groundView);
+  if (viaductView)     envLayer.addView(viaductView);
+  if (roadView)        roadLayer.addView(roadView);
+  if (streetlightView) roadLayer.addView(streetlightView);
+  if (barrierView)     roadLayer.addView(barrierView);
+  if (connectorView)   roadLayer.addView(connectorView);
   if (vehicleView)      agentLayer.addView(vehicleView);
   if (trafficLightView) infraLayer.addView(trafficLightView);
   if (etcGateView)      infraLayer.addView(etcGateView);
@@ -274,7 +285,21 @@ export function createSceneDirector(scene) {
   function getStreetlightView() { return streetlightView; }
   function getBarrierView() { return barrierView; }
 
-  return { init, update, tickAnimation, getStore, getRoadView, getGroundView, getVehicleView,
+  /* ── Layer 树访问（调试 + dispose 用）── */
+  function getRootLayer() { return rootLayer; }
+  function getLayer(name) { return rootLayer.findDescendant(name); }
+
+  /* ── dispose() — 切场景 / 卸载时调用，递归清理所有 View 资源 ──
+   * 调用后 director 不可再用（store/layer 都已 dispose）。
+   * 当前 main.js 没用到（页面生命周期内不卸载），但留出口便于
+   * 未来动态切场景、HMR、单测隔离用。 */
+  function dispose() {
+    rootLayer.dispose();
+  }
+
+  return { init, update, tickAnimation, dispose,
+           getStore, getRoadView, getGroundView, getVehicleView,
            getConnectorView, getTrafficLightView, getETCGateView, getViaductView,
-           getStreetlightView, getBarrierView, resetWarnings };
+           getStreetlightView, getBarrierView,
+           getRootLayer, getLayer, resetWarnings };
 }
