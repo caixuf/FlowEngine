@@ -6,7 +6,7 @@
  * @brief 跨进程 Topic 桥接 — 显式把一组 topic 在两个独立进程间对拷
  *
  * ── 定位 ──────────────────────────────────────────────────
- * 这是一个 **接口契约（scaffold）**，用于 EVOLUTION_ROADMAP 的
+ * 这是一个 **接口契约（scaffold）**，用于跨进程 topic bridge 的
  * Phase 10「多进程仿真部署验证」（plan 主线 A3）。
  *
  * 与 `transport.h` 的区别：
@@ -34,7 +34,7 @@
  *   - `serializer.h`    —— 出站 message_bus_publish 前序列化 / 入站反序列化。
  *   - `message_bus.h`   —— 本进程收发（PUB 侧订阅本地 topic；SUB 侧向本地发布）。
  * 所有函数当前**未实现**，返回 ERR_OK/句柄即视为契约占位；实现前请勿在生产链路依赖。
- * 详见 docs/IMPLEMENTATION_GUIDE.md（A3 小节）与 skills/ 下 IPC 教程。
+ * 详见 skills/04_ipc_channel.md（IPC 教程）。
  */
 
 #include "message_bus.h"

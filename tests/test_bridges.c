@@ -1,7 +1,7 @@
 /**
  * test_bridges.c — 传输/可视化桥接栈单元测试
  *
- * 覆盖 EVOLUTION_ROADMAP 下一阶段优先级 #1（质量收敛）中点名的三个模块：
+ * 覆盖质量收敛阶段点名的三个模块（跨进程 topic bridge / IPC / 发现）：
  *   - transport.c        统一传输抽象（此处测 LOCAL 策略，进程内闭环）
  *   - stats_bridge.c     跨进程 topic 统计 IPC 桥接
  *   - dashboard_bridge.c 跨进程仪表盘 JSON IPC 桥接（含分块/重组协议）
