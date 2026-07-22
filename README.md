@@ -459,6 +459,7 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [FlowBoard Scene Contract](docs/FLOWBOARD_SCENE_CONTRACT.md) | scene 数据契约 |
 | [FloSim Architecture](docs/FLOWSIM_ARCHITECTURE.md) | flowsim 仿真器架构 |
 | [Hardware Deployment](docs/HARDWARE_DEPLOYMENT.md) | 硬件部署 |
+| [Real Vehicle Roadmap](docs/REAL_VEHICLE_ROADMAP.md) | 真车部署待办（占位/缺位清单）|
 | [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) | 落地实施指南 |
 | [Learning Loop](docs/LEARNING_LOOP.md) | 仿真内学习闭环 |
 | [Vis Rearch (归档)](docs/VIS_REARCH.md) | vis/ 重构方案 spec（历史，已落地）|
