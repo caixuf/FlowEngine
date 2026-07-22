@@ -433,6 +433,9 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [12 — Demo Evaluator](skills/12_demo_evaluator.md) | 回归评估器设计 |
 | [13 — E2E Learning Loop](skills/13_e2e_learning_loop.md) | 车端学习闭环 |
 | [14 — Dead Reckoning](skills/14_dead_reckoning.md) | 前端航位推算 |
+| [15 — SocketCAN Actuator](skills/15_socketcan_actuator.md) | SocketCAN 执行器 |
+| [16 — FlowSim Scenario Design](skills/16_flowsim_scenario_design.md) | 仿真场景设计 |
+| [17 — Vis Module Designer](skills/17_vis_module_designer.md) | vis 模块设计（Layer + ViewRegistry 插件化）|
 
 ---
 
@@ -446,16 +449,22 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [Technical Design](docs/TECHNICAL_DESIGN.md) | 架构设计 |
 | [API Quick Reference](docs/API_QUICK_REFERENCE.md) | C API 参考 |
 | [Simulation Guide](docs/SIMULATION_GUIDE.md) | 仿真测试指南 |
-| [Visualization Architecture](docs/VISUALIZATION_ARCHITECTURE.md) | FlowBoard + flowmond |
+| [Visualization Architecture](docs/VISUALIZATION_ARCHITECTURE.md) | flowmond + vis/ 模块树（Layer + ViewRegistry + Qt 对象树）|
+| [Vis Module Guide](docs/VIS_MODULE_GUIDE.md) | vis/ 模块接口契约 + 设计 AI 提示词模板 |
 | [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
 | [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
 | [Algorithm Stack](docs/ALGORITHM_STACK.md) | 算法总览 |
 | [Algorithm Integration](docs/ALGORITHM_INTEGRATION.md) | 算法集成指南 |
-| [E2E Simulation Design](docs/E2E_SIMULATION_DESIGN.md) | 端到端仿真设计 |
 | [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | 仪表盘数据契约 |
+| [FlowBoard Scene Contract](docs/FLOWBOARD_SCENE_CONTRACT.md) | scene 数据契约 |
+| [FloSim Architecture](docs/FLOWSIM_ARCHITECTURE.md) | flowsim 仿真器架构 |
+| [Hardware Deployment](docs/HARDWARE_DEPLOYMENT.md) | 硬件部署 |
 | [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) | 落地实施指南 |
-| [Flow Registry Plan](docs/FLOW_REGISTRY_PLAN.md) | Flow Registry 设计 |
 | [Learning Loop](docs/LEARNING_LOOP.md) | 仿真内学习闭环 |
+| [Vis Rearch (归档)](docs/VIS_REARCH.md) | vis/ 重构方案 spec（历史，已落地）|
+| [Vis Rebuild Progress (归档)](docs/VIS_REBUILD_PROGRESS.md) | vis/ 重构进度日志（历史，已落地）|
+| [Troubleshooting 3D Dashboard](docs/TROUBLESHOOTING_3D_DASHBOARD.md) | 3D 仪表盘故障排查 |
+| [Fix Plan](docs/FIX_PLAN.md) | 已知问题修复计划 |
 
 ---
 

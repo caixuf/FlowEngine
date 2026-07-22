@@ -1,7 +1,28 @@
 # vis 模块设计 — 让 AI 按规范输出可无缝集成的 View 模块
 
 > 设计并生成 `tools/flowboard/js/vis/view/` 下的新 View 模块（路灯/护栏/行人/标志/ETC 等）。
-> 按本规范输出的模块可以零修改集成进 SceneDirector。
+> 按本规范输出的模块可以零修改集成进 SceneDirector 的 Layer 对象树。
+
+## 架构概览（Qt 对象树 + 插件化）
+
+```
+SceneDirector
+  ├─ ViewRegistry.register('xxx', createXxxView)   # 注册工厂
+  ├─ instantiateAll(scene)                          # 批量实例化
+  └─ Layer 树（Qt 对象树 + 错误隔离）
+      root
+      ├── env     (ground, viaduct)              — 环境层
+      ├── road    (road, streetlight, barrier, connector) — 道路层
+      ├── agent   (vehicle)                       — 智能体层
+      └── infra   (trafficLight, etcGate)         — 路侧设施层
+```
+
+**核心价值**：
+- **错误隔离** — 一个 View 抛错只 log + 跳过，兄弟继续渲染（解药："一个模块坏了整个 3D 就坏了"）
+- **插件化** — 新增 View 只需 `register + addView`，不动 SceneDirector 主体
+- **递归 dispose** — Layer 树自动递归清理所有 View 资源
+
+完整架构见 [docs/VISUALIZATION_ARCHITECTURE.md](../docs/VISUALIZATION_ARCHITECTURE.md)。
 
 ## 何时使用
 
@@ -101,34 +122,37 @@ export function createXxxView(scene) {
 }
 ```
 
-### Step 4：接入 SceneDirector
+### Step 4：接入 SceneDirector（插件式 — 改三处）
 
 编辑 `tools/flowboard/js/vis/director/SceneDirector.js`：
 
-1. **import**（顶部）：
+1. **import + 注册**（顶部，其他 register 旁边）：
    ```javascript
    import { createXxxView } from '../view/XxxView.js';
+   ViewRegistry.register('xxx', createXxxView);
+   ```
+   （`ViewRegistry.instantiateAll(scene)` 会自动建实例，不用手动 `createXxxView(scene)`）
+
+2. **挂到 Layer 树**（`createSceneDirector` 内部的挂载表，表驱动）：
+   ```javascript
+   // 动态 View（每帧 update）→ agent/infra 层
+   ['agent', ['vehicle', 'pedestrian']],    // 加 'xxx'
+   
+   // 静态 View（roadNetwork 变了才 build）→ env/road 层
+   ['road', ['road', 'streetlight', 'barrier', 'connector', 'signpost']],
    ```
 
-2. **创建实例**（`createSceneDirector` 内部，其他 view 旁边）：
+3. **静态 View 还需在 update() 分支调 build**（动态 View 不需要）：
    ```javascript
-   const xxxView = createXxxView(scene);
+   // 普通道路分支
+   ViewRegistry.safeCall('xxx', 'build', rn);
+   // 高架分支（如需跳过）
+   ViewRegistry.safeCall('xxx', 'build', { edges: [] });
    ```
 
-3. **调用 update**（`update()` 末尾，其他 view.update 旁边）：
-   ```javascript
-   xxxView.update(store);
-   ```
-   注：如果模块需要 `simTime`（如闪烁/动画），改在 `vis/main.js` 的 `_startRenderLoop` 里调：
-   ```javascript
-   _director.getXxxView().update(store, now);
-   ```
-
-4. **导出 getter**（return 语句里）：
-   ```javascript
-   function getXxxView() { return xxxView; }
-   return { init, update, getStore, ..., getXxxView };
-   ```
+**错误隔离已内置**：新 View 抛错只 log + 跳过，整个 3D 场景不受影响 ——
+其他 View 继续渲染。这是 Layer 对象树 + ViewRegistry 的核心价值。
+不再需要手动写 `getXxxView()` getter，ViewRegistry.get('xxx') 是单一来源。
 
 ### Step 5：刷新缓存 + 验证
 

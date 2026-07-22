@@ -10,10 +10,17 @@ App Shell (app.js)
     ↓
 Scene Director (vis/director/SceneDirector.js)
     ↓
+Layer 树 (vis/core/Layer.js — Qt 对象树 + 错误隔离)
+  root
+  ├── env     (ground, viaduct)
+  ├── road    (road, streetlight, barrier, connector)
+  ├── agent   (vehicle)
+  └── infra   (trafficLight, etcGate)
+    ↓
 View Modules (vis/view/*.js)         ← 你要写的模块在这里
-    ↓
+  ↓
 Core (vis/core/) + Math (vis/math/)  ← 你只能 import，不能修改
-    ↓
+  ↓
 Scene Store (vis/store/SceneStore.js) ← 单一数据源，View 只读
 ```
 
@@ -21,6 +28,17 @@ Scene Store (vis/store/SceneStore.js) ← 单一数据源，View 只读
 - View 模块**只能 import** `vis/core/`、`vis/math/`、`vis/store/` 的导出
 - View 模块**不能**直接读 `topoData` / `window.*` / DOM
 - View 模块**不能**创建自己的全局变量；状态必须闭包在 factory 函数内
+- View 模块**不能**反向调 SceneDirector 或 Layer 方法（单向依赖，对应 Qt 信号槽默认子→父方向）
+
+**View 注册到 SceneDirector 的方式**（不是直接 import + 实例化）：
+1. 在 SceneDirector.js 顶部调 `ViewRegistry.register('xxx', createXxxView)`
+2. `instantiateAll(scene)` 批量建实例
+3. 挂到对应 Layer（表驱动：`['agent', ['vehicle', 'pedestrian']]`）
+4. 动态 View 由 `tickAnimation → rootLayer.update` 每帧递归调用
+5. 静态 View 由 `update()` 内部走 `ViewRegistry.safeCall('xxx', 'build', rn)`
+
+**错误隔离**：每个 View 的 build/update/clear/dispose 调用都包 try/catch，
+单个 View 抛错只 log + 跳过，不传染兄弟。这是"一个模块坏了整个 3D 就坏了"的解药。
 
 ## 2. View 模块接口契约
 
@@ -28,27 +46,31 @@ Scene Store (vis/store/SceneStore.js) ← 单一数据源，View 只读
 
 ```javascript
 // vis/view/XxxView.js
-import { getBox, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
-import { headingToRotationY } from '../math/Coord.js';
+import { getBox, getCylinder, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
+import { worldToThree, headingToRotationY } from '../math/Coord.js';
 
 /**
  * XxxView — 一句话描述
  * @param {THREE.Scene} scene  场景对象，由 SceneDirector 注入
  * @returns {{
- *   update: (store: SceneStore, simTime?: number) => void,
- *   clear: () => void,
- *   getXxx?: () => any,  // 可选 getter
+ *   build?:  (ctx) => void,            // 静态 View 用：roadNetwork 变了才调
+ *   update?: (store, simTime?) => void, // 动态 View 用：每帧由 Layer 树递归调
+ *   clear:   () => void,                // 必选：清空所有实例（场景重建时调）
+ *   dispose?: () => void,               // 可选：销毁（Layer.dispose 递归调；无则退化为 clear）
  * }}
  */
 export function createXxxView(scene) {
   // 闭包状态：实例池、共享几何体、共享材质
   const pool = new Map();  // id → { group, ... }
 
-  function _createOne(ent) { /* 构建 THREE.Group 并 scene.add */ }
-  function _updateOne(entry, ent, simTime) { /* 位姿 + 状态 */ }
-  function _setLight(entry, state) { /* 灯/动作切换 */ }
+  // 可选：静态布局 build（静态 View 用，如路灯/护栏沿路布置）
+  // roadNetwork hash 变了才被 SceneDirector 调用，不走每帧路径
+  function build(rn) {
+    // 用 InstancedMesh 沿 edge 节点布置，sampleEdgeNodes 内部已做 ENU→THREE 交换
+    // 直接用 p.x/p.z，不要再调 worldToThree（否则双交换）
+  }
 
-  /** 主更新入口：SceneDirector 每帧调用 */
+  // 必选：每帧 update（动态 View 用，由 Layer 树递归调）
   function update(store, simTime) {
     // 1. 从 store 读数据（entities/ego/roadNetwork）
     const all = (store.entities || []).filter(e => e.type === 'xxx');
@@ -65,15 +87,32 @@ export function createXxxView(scene) {
     }
   }
 
-  /** 清空所有实例（场景重建时调） */
+  // 必选：清空所有实例（场景重建 / Layer.clear 时调）
   function clear() {
     for (const [, entry] of pool) scene.remove(entry.group);
     pool.clear();
   }
 
-  return { update, clear };
+  // 可选：销毁（Layer.dispose 递归调；若无此方法，Layer 会退化为调 clear）
+  // 释放 geometry/material 资源（geometry.dispose() / material.dispose()）
+  function dispose() {
+    clear();
+    // 释放共享 geometry/material
+  }
+
+  function _createOne(ent) { /* 构建 THREE.Group 并 scene.add */ }
+  function _updateOne(entry, ent, simTime) { /* 位姿 + 状态 */ }
+  function _setLight(entry, state) { /* 灯/动作切换 */ }
+
+  return { build, update, clear, dispose };  // 按需导出
 }
 ```
+
+**View 分两类**：
+- **静态布局 View**（road/ground/connector/streetlight/barrier/viaduct）— 只 `build`，
+  roadNetwork hash 变了才重建。不挂 Layer 树的 update 路径（无 update 方法被跳过）。
+- **动态更新 View**（vehicle/trafficLight/etcGate）— 每帧 `update`，
+  挂到 Layer 树由 `tickAnimation → rootLayer.update` 递归调用。
 
 ## 3. SceneStore 数据契约（View 只读）
 
@@ -174,29 +213,43 @@ const headMat = createEmissiveMaterial(0xfff4d6, 1.0); // 独立（每帧改 int
 
 ## 7. 集成步骤（写完模块后必须做）
 
+新架构下集成是插件式的 —— 改 SceneDirector.js 三处即可：
+
 1. **创建文件**：`tools/flowboard/js/vis/view/XxxView.js`
-2. **接入 SceneDirector**：编辑 `vis/director/SceneDirector.js`
+
+2. **注册到 ViewRegistry**：编辑 `vis/director/SceneDirector.js` 顶部
    ```javascript
    import { createXxxView } from '../view/XxxView.js';
-
-   // 在 createSceneDirector 内部
-   const xxxView = createXxxView(scene);
-
-   // 在 update() 末尾添加
-   xxxView.update(store);
-
-   // 导出 getter
-   function getXxxView() { return xxxView; }
-
-   // 修改 return 语句
-   return { init, update, getStore, ..., getXxxView };
+   ViewRegistry.register('xxx', createXxxView);
    ```
-3. **（可选）渲染循环**：如果模块需要 `simTime`（如车灯闪烁），在 `vis/main.js` 的 `_startRenderLoop` 里添加：
+   （`instantiateAll(scene)` 会自动实例化）
+
+3. **挂到 Layer 树**：在 `createSceneDirector` 内部的挂载表加一行
    ```javascript
-   _director.getXxxView().update(store, now);
+   // 动态 View（每帧 update）→ agent/infra 层
+   ['agent', ['vehicle', 'pedestrian']],    // 加到对应层
+   
+   // 静态 View（roadNetwork 变了才 build）→ env/road 层
+   ['road', ['road', 'streetlight', 'barrier', 'connector', 'signpost']],
    ```
-4. **缓存刷新**：编辑 `index.html`，把 `app.js?v=XXX` 改一个新版本号
-5. **语法检查**：`node --check tools/flowboard/js/vis/view/XxxView.js`
+
+4. **静态 View 还需在 update() 的分支调 build**：
+   ```javascript
+   // 普通道路分支
+   ViewRegistry.safeCall('xxx', 'build', rn);
+   // 高架分支（如需跳过）
+   ViewRegistry.safeCall('xxx', 'build', { edges: [] });
+   ```
+
+5. **缓存刷新**：编辑 `index.html`，把 `app.js?v=XXX` 改一个新版本号
+
+6. **语法检查**：`node --check tools/flowboard/js/vis/view/XxxView.js`
+
+**动态 View 不需要第 4 步** —— 挂到 Layer 树后，`tickAnimation → rootLayer.update`
+会自动每帧调用，抛错只 log + 跳过，不传染兄弟。
+
+**错误隔离保证**：即使新 View 抛错，整个 3D 场景不受影响 —— 其他 View 继续
+渲染。这是 Layer 对象树 + ViewRegistry 的核心价值。
 
 ## 8. 设计 AI 提示词模板
 
@@ -217,20 +270,34 @@ const headMat = createEmissiveMaterial(0xfff4d6, 1.0); // 独立（每帧改 int
 
 ## 输出格式
 - 单文件 ES Module：`tools/flowboard/js/vis/view/<模块名>.js`
-- 导出 `create<模块名>(scene)` factory，返回 `{ update(store, simTime?), clear() }`
+- 导出 `create<模块名>(scene)` factory，返回 `{ build?, update?, clear, dispose? }`
+  - 静态 View（沿路布置）：返回 `{ build(rn), clear() }`
+  - 动态 View（每帧更新）：返回 `{ update(store, simTime?), clear() }`
 - 闭包内维护 `const pool = new Map()`，按 entity.id diff 管理 mesh 生命周期
 
+## 集成方式（SceneDirector.js 改三处）
+1. 顶部 `import { create<模块名> } from '../view/<模块名>.js';`
+2. `ViewRegistry.register('<name>', create<模块名>);`
+3. Layer 挂载表加一行：`['<layer>', [..., '<name>']]`
+   - 动态 View 挂 agent/infra 层 → 每帧自动 update
+   - 静态 View 挂 env/road 层 + update() 里调 `ViewRegistry.safeCall('<name>', 'build', rn)`
+4. 错误隔离已内置：View 抛错只 log，不传染兄弟
+
 ## 强制约束
-1. 只 import：`../core/AssetFactory.js`、`../math/Coord.js`、`../math/Curve.js`
+1. 只 import：`../core/AssetFactory.js`、`../math/Coord.js`、`../math/Curve.js`、`../math/GeometryMerge.js`
 2. 坐标映射：`group.position.set(ent.x, 0, ent.y)` + `group.rotation.y = headingToRotationY(ent.heading||0)`
+   - 或用 `worldToThree(ent.x, ent.y, ent.z||0)` 解构
+   - sampleEdgeNodes 返回的节点已做 ENU→THREE 交换，不要再调 worldToThree
 3. 材质：`getStdMaterial(color, rough, metal)` 缓存版；发光体用 `createEmissiveMaterial(color, intensity)` 独立版
 4. 几何体：用 `getBox/getCylinder/getPlane` 共享缓存，不要 `new THREE.BoxGeometry` 重复创建
 5. 总面数预算：<N，如 2000>；用低分段数（cylinder 12 段、box 1 段）
 6. 不读 DOM / window / topoData；不创建全局变量
+7. 不反向调 SceneDirector 或 Layer 方法（单向依赖）
 
 ## 参考实现
 见 `tools/flowboard/js/vis/view/TrafficLightView.js`（124 行，标准模板）
 见 `tools/flowboard/js/vis/view/ETCGateView.js`（207 行，复杂组装配式）
+见 `tools/flowboard/js/vis/view/StreetlightView.js`（190 行，InstancedMesh 静态布局）
 ```
 
 ---

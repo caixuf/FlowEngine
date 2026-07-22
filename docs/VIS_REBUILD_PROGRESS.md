@@ -1,11 +1,15 @@
 # VIS 重构进度日志
 
-> **状态**：Step 1–6 全部落地并 push 到 main；Phase 4 清理待启动
+> **状态**：✅ Step 1–6 + Phase 4 清理 + Layer 架构升级全部落地并 push 到 main
 > **范围**：JS 可视化侧（`tools/flowboard/js/vis/`）增量重构
 > **配套文档**：[VIS_REARCH.md](./VIS_REARCH.md)（重构方案 spec，Phase 1–4 总览）
 >
 > **核心原则**：增量、可回滚、commit 即进度记录。
 > AI 会话记忆有限，**重构进度以 git log 为准**，本文档是 git log 的人类可读索引。
+>
+> **⚠️ 归档文档**：6 步重构 + Layer 对象树架构升级已全部完成。
+> **当前架构以 [VISUALIZATION_ARCHITECTURE.md](./VISUALIZATION_ARCHITECTURE.md)
+> 为准**，本文档仅作历史进度记录保留。
 
 ---
 
