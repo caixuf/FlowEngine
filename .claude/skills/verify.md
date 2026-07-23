@@ -61,7 +61,7 @@ All checks passed. The demo pipeline is regression-clean.
 ### FAIL
 - **"vehicle stuck or no progress"** → likely the ROAD_GUARD deadlock:
   car drifts to road edge, speed drops to 0, bicycle model can't move laterally.
-  Check `control_node.c` ROAD_GUARD low-speed recovery condition (should be `>=` not `>`).
+  Check `control_node.cpp` ROAD_GUARD low-speed recovery condition (should be `>=` not `>`).
 - **"road departure"** → lane-change overshoot. Check `lat_kd_heading` is actually
   used in the Stanley heading term (not hardcoded to 0.5).
 - **"collision detected"** → AEB or ACC gap too aggressive. Check safety_control params.
@@ -71,7 +71,7 @@ All checks passed. The demo pipeline is regression-clean.
 
 ### Pattern 1: ROAD_GUARD deadlock (car stops permanently at road edge)
 **Symptom:** `x_delta` near 0, `min_road_margin` near 0, speed=0 in final samples.
-**Root cause:** `control_node.c` line 534 — low-speed recovery uses `>` instead of `>=`,
+**Root cause:** `control_node.cpp` line 534 — low-speed recovery uses `>` instead of `>=`,
 and at exactly `|y| = road_center_limit` the escape throttle never fires.
 **Fix:** Change `>` to `>=` in the ROAD_GUARD condition.
 

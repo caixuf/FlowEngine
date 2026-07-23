@@ -107,7 +107,7 @@ demo 里的一次性示例）：
 - 车速骤降 / 融合数据超时 (`CONDITIONS_LOST`) 会触发降级（`check_mode_downgrade`）。
 - 当前模式通过 `mode=<hier>` 字段附加在 `planning/trajectory` 消息里发布。
 - 进入 NOA 后，场景 `route[]` 里到达 `trigger_x` 的步骤会把目标车道写入
-  `route_lane=<±1>` 字段；`control_node.c` 消费该字段，复用既有的安全变道
+  `route_lane=<±1>` 字段；`control_node.cpp` 消费该字段，复用既有的安全变道
   状态机（`lane_rear_safe`/`lane_has_pedestrian_risk`）主动发起变道
   （日志标记为 `NOA_ROUTE`），从而实现"导航驱动的主动变道"而非仅有的
   "障碍物触发的被动超车"。

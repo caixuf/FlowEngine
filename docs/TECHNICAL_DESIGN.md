@@ -100,7 +100,7 @@ FlowEngine 通过以下三层抽象将 C++20 协程与消息总线融合：
 | 属性 | 值 |
 |------|----|
 | 仓库 | https://github.com/caixuf/flowcoro |
-| 版本 | v4.0.0 |
+| 版本 | main (latest) |
 | 许可 | MIT |
 | 引入方式 | CMake FetchContent |
 | 使用部分 | 纯头文件（`include/flowcoro/`），不链接 `flowcoro_net` |

@@ -25,7 +25,7 @@
 | pipeline.json 默认使用 flowsim | ✅ | `config/pipeline.json` |
 | 14 个旧场景全部通过 `demo_evaluator.py` 回归 | ✅ | `scenarios/*.json` |
 
-### 🔴 待完成（Phase 3–5，见 NOA_SCENARIO_PLAN.md）
+### 🔴 待完成（Phase 3–5）
 
 | 缺口 | 优先级 |
 |------|--------|
@@ -52,7 +52,7 @@
 | `json_to_xodr.py` | 275 |
 | **合计** | **~2600 行** |
 
-> 详细 NOA 场景实施计划见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
+> 详细 NOA 场景实施计划见项目 issue tracker。
 
 ---
 
@@ -762,18 +762,16 @@ flowsim 已通过 pipeline.json 作为默认仿真节点运行，
 | 3.4 特效（阴影/Bloom） | ✅ 已实现 |
 | 3.5 2D 多段道路 | 🟡 待 `scene/frame entities` 消费路径切换 |
 
-### Phase 4 — 场景落地 🔴 待 NOA_SCENARIO_PLAN.md
+### Phase 4 — 场景落地 🔴 待实施
 
 当前场景 `city_to_highway.json` 是简化版（单条直道+弯道）。
-完整 NOA 全链路场景（分叉/汇入/24 NPC）见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
+完整 NOA 全链路场景（分叉/汇入/24 NPC）见项目 issue tracker。
 
 ### Phase 5 — 数据流修复 🔴 待实施
 
 - perception ↔ sensor_model 对接
 - monitor 透传 entities
 - 3D 前端 entities 消费
-
-详见 [`NOA_SCENARIO_PLAN.md`](NOA_SCENARIO_PLAN.md)。
 
 **已完成：约 15 天（Phase 0–2）。剩余：约 10 天（Phase 3–5）。**
 

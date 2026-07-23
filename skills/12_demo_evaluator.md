@@ -59,7 +59,7 @@ python3 tools/demo_evaluator.py --no-run
 ### FAIL（需修复）
 - `vehicle stuck or no progress` → 车永久停止。常见于 ROAD_GUARD 死锁：
   车漂移到路边缘 → 刹车至 0 → 自行车模型无法横向移动。
-  修复：`control_node.c` ROAD_GUARD 低俗恢复条件改为 `>=`
+  修复：`control_node.cpp` ROAD_GUARD 低俗恢复条件改为 `>=`
 - `road departure` → 变道冲出车道。检查 Stanley 控制器 heading 阻尼
 - `collision detected` → AEB/ACC 间距太激进
 - `low-speed stagnation` → 被慢车阻塞且无法变道

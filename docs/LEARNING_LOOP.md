@@ -111,7 +111,7 @@ b2 <1 floats>
 |------|------|------|------|
 | `data_recorder_node` | `modules/adas_nodes/data_recorder_node.c` | 0 | 订阅 topic，按频率落盘 JSONL 训练样本 |
 | `train.py`           | `tools/train_e2e/train.py` | 1 | 读样本训练 tiny-MLP 或 PyTorch 模型，导出 `model.txt` / `model.pt` |
-| `inference_node`     | `modules/adas_nodes/inference_node.c` | 2 | 加载模型，影子模式发布 `inference/trajectory`；订阅 `model_ota/active` 支持 OTA 热重载 |
+| `inference_node`     | `modules/adas_nodes/inference_node.cpp` | 2 | 加载模型，影子模式发布 `inference/trajectory`；订阅 `model_ota/active` 支持 OTA 热重载 |
 | `tiny_mlp.h`         | `modules/adas_nodes/tiny_mlp.h` | 2/3 | 零依赖推理 + SGD 微调内核（`tiny_mlp_forward` / `tiny_mlp_sgd_step` / `tiny_mlp_save`）|
 | `learner_node`       | `modules/adas_nodes/learner_node.c` | 3 | 车端增量 SGD 微调，资源受限调度，发布 `learner/status` |
 | `model_ota_node`     | `modules/adas_nodes/model_ota_node.c` | 4 | 模型版本注册表、热加载、回滚、A-B 对比测试 |
