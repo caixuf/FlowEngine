@@ -336,7 +336,10 @@ protected:
 
         LOG_INFO("safety_control", "safety gate started (synchronous resume)");
         while (!should_stop()) {
-            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "inference/raw_cmd"});
+            auto r = co_await when_any_bus_for(bus(), {"control/raw_cmd", "inference/raw_cmd"}, 50000);
+            if (r.status == AwaitStatus::Timeout) continue;  // 50ms 周期醒来查 should_stop
+            if (!r.ok()) continue;
+            Message msg = r.message;
             if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
                 std::strcmp(msg.topic, "inference/raw_cmd") != 0) continue;
 

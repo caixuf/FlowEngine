@@ -89,7 +89,7 @@ protected:
         }
 
         std::cout << "[LidarTask] 退出，共处理 " << frame << " 帧\n";
-        stop();
+        set_stop();
     }
 
 private:
@@ -145,7 +145,7 @@ protected:
 
         std::cout << "[FusionTask] 退出，共处理 LiDAR=" << lidar_count
                   << " GPS=" << gps_count << " 事件\n";
-        stop();
+        set_stop();
     }
 
 private:
@@ -168,7 +168,8 @@ static int coro_execute(TaskBase* b) {
     try {
         flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
         g_node_exec = &ex;
-        ex.spawn(w->impl->run());
+        CoroutineTask& ct = *w->impl;
+        ex.spawn(ct.run(), "coro_demo");
         while (!w->impl->should_stop()) ex.run();
         ex.shutdown();
         g_node_exec = nullptr;
@@ -196,13 +197,11 @@ int main() {
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    /* ── 打印 flowcoro 线程池信息 ─────────────────────────── */
-    auto& pool = flowcoro_integration::get_thread_pool();
+    /* 打印信息 */
     std::cout << "╔══════════════════════════════════════════╗\n"
               << "║  flowcoro 协程 + 消息总线演示程序        ║\n"
               << "╚══════════════════════════════════════════╝\n"
-              << "[Main] flowcoro 线程池工作线程数: "
-              << pool.active_thread_count() << "\n\n";
+              << "[Main] RtExecutor 确定性调度模式\n\n";
 
     /* ── 创建消息总线 ─────────────────────────────────────── */
     MessageBus* bus = message_bus_create("adas_bus");
@@ -305,9 +304,10 @@ int main() {
     fusion_task->set_stop();
     task_manager_stop_all(mgr);
 
-    /* ── 打印线程池状态 ───────────────────────────────────── */
-    std::cout << "\n[Main] 最终线程池状态:\n";
-    pool.print_status();
+    /* ── 打印最终状态 ───────────────────────────────────── */
+    std::cout << "\n[Main] 最终状态:\n";
+    std::cout << "  lidar_task  stopped: " << lidar_task->should_stop() << "\n";
+    std::cout << "  fusion_task stopped: " << fusion_task->should_stop() << "\n";
 
     /* ── 清理 ────────────────────────────────────────────── */
     task_manager_destroy(mgr);

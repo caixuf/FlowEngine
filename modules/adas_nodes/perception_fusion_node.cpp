@@ -434,7 +434,7 @@ protected:
              * 超时作 watchdog（无数据时定期醒来，与旧 usleep 等价）；
              * 有数据即醒，融合延迟比旧 usleep 更低。自动注入 CancelToken，
              * stop() 可立即唤醒。 */
-            auto res = co_await select_for({g.input_a_topic, g.input_b_topic},
+            auto res = co_await select_for(bus(), {g.input_a_topic, g.input_b_topic},
                                            (uint64_t)period_us);
             (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
             if (should_stop() || !g.enabled) break;
@@ -664,7 +664,7 @@ static int fusion_start(void) {
 
 static void fusion_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
 }
 
 static void fusion_cleanup(void) {

@@ -106,7 +106,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -137,7 +137,8 @@ static void bench_buschannel_throughput() {
         std::thread t([&]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(task.run());
+            CoroutineTask& ct = task;
+            ex.spawn(ct.run(), "bench2");
             while (!task.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;
@@ -189,7 +190,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -221,7 +222,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -264,7 +265,8 @@ static void bench_subscribe_once_vs_channel() {
             std::thread t([&]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(task.run());
+            CoroutineTask& ct = task;
+            ex.spawn(ct.run(), "bench2");
             while (!task.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;
@@ -295,7 +297,8 @@ static void bench_subscribe_once_vs_channel() {
             std::thread t([&]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(task.run());
+            CoroutineTask& ct = task;
+            ex.spawn(ct.run(), "bench2");
             while (!task.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;
@@ -340,7 +343,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -366,7 +369,8 @@ static void bench_when_any_latency() {
         std::thread t([&]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(task.run());
+            CoroutineTask& ct = task;
+            ex.spawn(ct.run(), "bench3");
             while (!task.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;
@@ -424,7 +428,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -464,7 +468,8 @@ static void bench_heavy_callback_throughput() {
             threads.emplace_back([&t = *task]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(t.run());
+            CoroutineTask& ct = t;
+            ex.spawn(ct.run(), "bench4");
             while (!t.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;
@@ -538,7 +543,7 @@ protected:
         }
         done_flag_.store(true, std::memory_order_release);
         { std::unique_lock<std::mutex> lk(mtx_); cv_.notify_all(); }
-        stop();
+        set_stop();
     }
 
 private:
@@ -578,7 +583,8 @@ static void bench_concurrent_tasks() {
                 threads.emplace_back([&t = *task]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
-            ex.spawn(t.run());
+            CoroutineTask& ct = t;
+            ex.spawn(ct.run(), "bench5");
             while (!t.should_stop()) ex.run();
             ex.shutdown();
             g_node_exec = nullptr;

@@ -953,7 +953,7 @@ protected:
         while (!should_stop()) {
             /* 50ms tick：select_for 等待 control/cmd 或超时（20Hz 节拍）。
              * stop() 触发 cancel_token 立即唤醒，无需外发消息。 */
-            auto res = co_await select_for({TOPIC_CONTROL_CMD}, FLOWSIM_DT_US);
+            auto res = co_await select_for(bus(), {TOPIC_CONTROL_CMD}, FLOWSIM_DT_US);
             if (should_stop()) break;
 
             /* 直接从 select_for 返回的消息中解析控制指令，不再依赖
@@ -1341,7 +1341,7 @@ static int flowsim_start(void) {
 
 static void flowsim_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
 }
 
 static void flowsim_cleanup(void) {

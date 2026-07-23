@@ -212,6 +212,14 @@ public:
         : bus_(bus), topic_(topic), timeout_us_(timeout_us),
           ctl_(std::make_shared<AwaitCtl>()) {}
 
+    ~BusAwaitableT() {
+        if (!subscribed_) return;  // await_resume 已退订则跳过
+        message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
+        if (timer_id_) TimerService::instance().cancel(timer_id_);
+    }
+    BusAwaitableT(const BusAwaitableT&) = delete;
+    BusAwaitableT& operator=(const BusAwaitableT&) = delete;
+
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> handle) {
@@ -227,10 +235,12 @@ public:
             });
         }
         message_bus_subscribe(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
+        subscribed_ = true;
     }
 
     auto await_resume() {
         message_bus_unsubscribe_ex(bus_, topic_.c_str(), &BusAwaitableT::on_message, this);
+        subscribed_ = false;
         if (timer_id_) TimerService::instance().cancel(timer_id_);
         if constexpr (WithResult) {
             return AwaitResult{ctl_->status, received_msg_};
@@ -256,6 +266,7 @@ private:
     std::coroutine_handle<>     handle_;
     Message                     received_msg_{};
     flowcoro::rt::RtExecutor*   exec_ = nullptr;
+    bool                        subscribed_ = false;
 };
 
 using BusAwaitable = BusAwaitableT<false>;
@@ -317,6 +328,23 @@ private:
         uint64_t    timer_id{0};
         uint64_t    t_suspend_us{0};
         flowcoro::rt::RtExecutor* exec_ = nullptr;
+
+        RecvAwaitable(BusChannel* c, uint64_t t) : ch(c), timeout_us(t) {}
+
+        ~RecvAwaitable() {
+            // 强拆 park 帧时：清理 channel 里的 waiter 指针，防止 UAF
+            if (timer_id) TimerService::instance().cancel(timer_id);
+            {
+                std::lock_guard<std::mutex> lk(ch->mutex_);
+                if (ch->waiter_ctl_ == ctl) {
+                    ch->waiter_     = nullptr;
+                    ch->waiter_ctl_ = nullptr;
+                    ch->waiter_exec_ = nullptr;
+                }
+            }
+        }
+        RecvAwaitable(const RecvAwaitable&) = delete;
+        RecvAwaitable& operator=(const RecvAwaitable&) = delete;
 
         bool await_ready() {
             std::lock_guard<std::mutex> lk(ch->mutex_);
@@ -394,6 +422,15 @@ public:
         : bus_(bus), topics_(std::move(topics)),
           timeout_us_(timeout_us), ctl_(std::make_shared<AwaitCtl>()) {}
 
+    ~WhenAnyBusAwaitableT() {
+        if (!subscribed_) return;  // await_resume 已退订则跳过
+        for (const auto& t : topics_)
+            message_bus_unsubscribe_ex(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
+        if (timer_id_) TimerService::instance().cancel(timer_id_);
+    }
+    WhenAnyBusAwaitableT(const WhenAnyBusAwaitableT&) = delete;
+    WhenAnyBusAwaitableT& operator=(const WhenAnyBusAwaitableT&) = delete;
+
     bool await_ready() const noexcept { return false; }
 
     void await_suspend(std::coroutine_handle<> h) {
@@ -410,12 +447,14 @@ public:
         for (const auto& t : topics_) {
             message_bus_subscribe(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
         }
+        subscribed_ = true;
     }
 
     auto await_resume() {
         for (const auto& t : topics_) {
             message_bus_unsubscribe_ex(bus_, t.c_str(), &WhenAnyBusAwaitableT::on_message, this);
         }
+        subscribed_ = false;
         if (timer_id_) TimerService::instance().cancel(timer_id_);
         if constexpr (WithResult) {
             return AwaitResult{ctl_->status, received_msg_};
@@ -441,6 +480,7 @@ private:
     std::coroutine_handle<>   handle_{};
     Message                   received_msg_{};
     flowcoro::rt::RtExecutor* exec_ = nullptr;
+    bool                      subscribed_ = false;
 };
 
 using WhenAnyBusAwaitable = WhenAnyBusAwaitableT<false>;
@@ -454,6 +494,14 @@ inline WhenAnyBusAwaitableT<false> when_any_bus(MessageBus* bus,
 inline WhenAnyBusAwaitableT<true> when_any_bus_for(MessageBus* bus,
                                                    std::initializer_list<const char*> topics,
                                                    uint64_t timeout_us) {
+    return WhenAnyBusAwaitableT<true>{
+        bus, std::vector<std::string>(topics.begin(), topics.end()), timeout_us};
+}
+
+// 兼容旧 CoroutineTask::select_for() 的别名（需显式传入 bus）
+inline WhenAnyBusAwaitableT<true> select_for(MessageBus* bus,
+                                             std::initializer_list<const char*> topics,
+                                             uint64_t timeout_us) {
     return WhenAnyBusAwaitableT<true>{
         bus, std::vector<std::string>(topics.begin(), topics.end()), timeout_us};
 }
@@ -492,6 +540,7 @@ private:
 };
 
 inline DelayAwaitable delay_us(uint64_t us) { return DelayAwaitable{us}; }
+inline auto sleep_us(uint64_t us) { return delay_us(us); }  // 旧名兼容
 inline DelayAwaitable delay_ms(uint64_t ms) { return DelayAwaitable{ms * 1000ULL}; }
 
 /* ─────────────────────────────────────────────────────────
@@ -604,7 +653,8 @@ static int prefix##_execute(TaskBase* b) {                                    \
     try {                                                                     \
         flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};    \
         g_node_exec = &ex;                                                    \
-        ex.spawn(w->impl->run());                                             \
+        CoroutineTask& ct = *w->impl;                                          \
+        ex.spawn(ct.run(), #prefix);                                             \
         while (!w->impl->should_stop()) ex.run();                             \
         ex.shutdown();                                                        \
         g_node_exec = nullptr;                                                \

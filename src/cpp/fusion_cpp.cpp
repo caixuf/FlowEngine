@@ -51,8 +51,13 @@ void FusionNodeCpp::Start() {
     if (impl_->c_node) {
         fusion_node_start(impl_->c_node);
     }
-    /* Also start the coroutine execute loop */
-    execute();
+    /* Also start the coroutine on RtExecutor */
+    flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+    g_node_exec = &ex;
+    ex.spawn(run(), "fusion_cpp");
+    while (!should_stop()) ex.run();
+    ex.shutdown();
+    g_node_exec = nullptr;
 }
 
 Task FusionNodeCpp::run() {

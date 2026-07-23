@@ -132,7 +132,7 @@ protected:
             /* 替代 pthread_cond_timedwait(100ms)：100ms 超时作 watchdog，
              * 防止 lidar 停发时协程卡死。select_for 自动注入 cancel_token_，
              * stop() 可立即唤醒。 */
-            auto res = co_await select_for({"sensor/lidar", "sensor/gps", "sensor/pose"}, 100000);
+            auto res = co_await select_for(bus(), {"sensor/lidar", "sensor/gps", "sensor/pose"}, 100000);
             (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
             if (should_stop()) break;
 
@@ -358,7 +358,7 @@ static int fusion_start(void) {
 
 static void fusion_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
 }
 
 static void fusion_cleanup(void) {
