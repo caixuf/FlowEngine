@@ -22,6 +22,7 @@ import * as THREE from 'three';
 
 import { getBox, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
 import { worldToThree, headingToRotationY } from '../math/Coord.js';
+import { roadHeightAt } from '../math/RoadHeight.js';
 import { initModelCache, getModel, _setVehicleLights } from '../../models.js';
 import { _buildContactShadow } from '../../utils.js';
 // Step 5 重构：纯逻辑（LIGHT_* + deriveLightState）抽到 VehicleLights.js，
@@ -103,12 +104,11 @@ export function createVehicleView(scene) {
     return model;
   }
 
-  function _updateGltfVehicle(entry, ent, simTime, dt) {
+  function _updateGltfVehicle(entry, ent, simTime, dt, store) {
     const { group } = entry;
 
-    // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
-    // 不再内联 position.set(ent.x, ent.z||0, ent.y)）
-    group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
+    const z = roadHeightAt(store, ent.x, ent.y);
+    group.position.set(...worldToThree(ent.x, ent.y, z));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
     // ── 车轮自转 + 转向平滑 ──
@@ -250,12 +250,11 @@ export function createVehicleView(scene) {
     return { group, wheels, lights, useGltf: false };
   }
 
-  function _updateProceduralVehicle(entry, ent, simTime, dt) {
+  function _updateProceduralVehicle(entry, ent, simTime, dt, store) {
     const { group, wheels, lights } = entry;
 
-    // 位姿（Step 3 重构：用 Coord.worldToThree 统一 ENU→THREE 映射，
-    // 不再内联 position.set(ent.x, ent.z||0, ent.y)）
-    group.position.set(...worldToThree(ent.x, ent.y, ent.z || 0));
+    const z = roadHeightAt(store, ent.x, ent.y);
+    group.position.set(...worldToThree(ent.x, ent.y, z));
     group.rotation.y = headingToRotationY(ent.heading || 0);
 
     // ── 车轮自转 + 转向平滑 ──
@@ -388,13 +387,12 @@ export function createVehicleView(scene) {
     return entry;
   }
 
-  function _updateVehicle(entry, ent, simTime, dt) {
+  function _updateVehicle(entry, ent, simTime, dt, store) {
     if (entry.useGltf) {
-      _updateGltfVehicle(entry, ent, simTime, dt);
+      _updateGltfVehicle(entry, ent, simTime, dt, store);
     } else {
-      _updateProceduralVehicle(entry, ent, simTime, dt);
+      _updateProceduralVehicle(entry, ent, simTime, dt, store);
     }
-    // shadow 是 group 子节点，position/rotation 自动跟随，无需手动同步
   }
 
   /** 主更新入口：diff 同步 entity 池 */
@@ -449,7 +447,7 @@ export function createVehicleView(scene) {
         entry = _createVehicle(ent);
         pool.set(ent.id, entry);
       }
-      _updateVehicle(entry, ent, simTime, _frameDt);
+      _updateVehicle(entry, ent, simTime, _frameDt, store);
     }
   }
 

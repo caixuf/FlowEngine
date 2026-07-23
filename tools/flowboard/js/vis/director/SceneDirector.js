@@ -102,21 +102,19 @@ export function createSceneDirector(scene) {
   /* 重置 warn 集合（测试 / 切场景时调用，避免漏掉新场景的问题） */
   function resetWarnings() { _warned.clear(); }
 
-  const VIADUCT_VIS_LENGTH = 500;
-
   function init() {
     ViewRegistry.safeCall('ground', 'build', 20000);
     const defaultRN = {
       edges: [{
         id: 0,
-        type: 'viaduct_highway',
+        type: 'highway',
         lanes: 4,
         lane_width: 3.5,
-        length: 500,
-        nodes: [[0, 0, 0], [500, 0, 0]]
+        length: 10000,
+        nodes: [[0, 0, 0], [10000, 0, 0]]
       }]
     };
-    update({ metrics: { scene: { road_network: defaultRN, ego: { x: 50, y: 0, heading: 0, speed: 0, z: 7 }, entities: [] } } });
+    update({ metrics: { scene: { road_network: defaultRN, ego: { x: 50, y: 0, heading: 0, speed: 0, z: 0 }, entities: [] } } });
   }
 
   function update(topoData) {
@@ -141,39 +139,31 @@ export function createSceneDirector(scene) {
           e && (e.name === 'viaduct_highway' || e.type === 'viaduct_highway')
         );
 
+        ViewRegistry.safeCall('road', 'build', rn);
+        ViewRegistry.safeCall('ground', 'build', 20000);
+
         if (isViaduct) {
           const edge0 = edgesArr[0] || {};
           const laneCount = edge0.lanes || 4;
           const laneWidth = edge0.lane_width || 3.5;
           const actualLength = edge0.length || edge0.length_m || VIADUCT_VIS_LENGTH;
-          ViewRegistry.safeCall('ground', 'build', 20000);
           ViewRegistry.safeCall('viaduct', 'build', { laneCount, laneWidth, length: actualLength, withEnvironment: true });
-          ViewRegistry.safeCall('road', 'build', { edges: [] });
-          /* Step 4：高架场景路灯/护栏由 ViaductView 内置，StreetlightView /
-           * BarrierView 在普通 edge 上不放置（内部跳过 viaduct_highway），
-           * 此处显式 clear 一遍保证切换场景时不残留。 */
           ViewRegistry.safeCall('streetlight', 'build', { edges: [] });
           ViewRegistry.safeCall('barrier', 'build', { edges: [] });
           store.isViaduct = true;
-          /* 记录高架段实际建造长度，作为 wrap 周期（见下 ego 更新块）。
-           * 历史 bug：wrap 周期写死 500m，但高架可按 edge0.length
-           * 建成 1000m 或其它，导致环境物每 500m 跳一下、接缝可见。 */
-          store.viaductVisLength = actualLength;
         } else {
-          ViewRegistry.safeCall('road', 'build', rn);
-          ViewRegistry.safeCall('ground', 'build', 20000);
-          /* Step 4：普通道路场景，路灯 + 护栏从 roadNetwork 自动布局。 */
           ViewRegistry.safeCall('streetlight', 'build', rn);
           ViewRegistry.safeCall('barrier', 'build', rn);
+          ViewRegistry.safeCall('viaduct', 'build', { edges: [] });
           store.isViaduct = false;
-          store.viaductVisLength = 0;
         }
+
+        store.viaductVisLength = 0;
 
         ViewRegistry.safeCall('connector', 'build', rn);
         lastRoadHash = hash;
         store.roadNetwork = rn;
         store.roadHash = hash;
-        // 切场景：清空 NPC 平滑状态，避免旧场景 NPC id 复用时位置串味。
         resetEntities();
       }
     }
@@ -181,21 +171,11 @@ export function createSceneDirector(scene) {
     if (frame.ego !== undefined && !skipEgo) {
       const e = frame.ego;
       const newX = e.x || 0;
-      const viaductOffset = store.isViaduct ? 7.7 : 0;
-      const simX = newX;
-      /* wrap 周期 = 高架段实际建造长度（store.viaductVisLength），
-       * 而非写死的 VIADUCT_VIS_LENGTH=500。两者必须一致，否则：
-       *   - 高架建 1000m，wrap 在 500m，则高架组每 500m 跳一次；
-       *   - 反之高架建 500m、wrap 1000m，则 ego 驶出高架末段后才 wrap。
-       * 首帧（viaductVisLength 还没建出来）回退到 VIADUCT_VIS_LENGTH。 */
-      const visLen = store.viaductVisLength || VIADUCT_VIS_LENGTH;
-      const visualX = simX % visLen;
-      const wrapOffset = simX - visualX;
 
       store.ego = {
-        x: simX,
+        x: newX,
         y: e.y || 0,
-        z: viaductOffset,
+        z: e.z || 0,
         heading: e.heading != null ? e.heading : (e.h || 0),
         speed: e.speed != null ? e.speed : (e.spd || 0),
         steer: e.steer || 0,
@@ -208,28 +188,19 @@ export function createSceneDirector(scene) {
         width: e.width != null ? e.width : (e.wid || 2.0),
         ai_state: e.ai_state || e.ai || '',
         _simX: newX,
-        _visualX: visualX,
-        _wrapOffset: wrapOffset,
+        _visualX: newX,
+        _wrapOffset: 0,
       };
-
-      if (store.isViaduct) {
-        /* 高架组中心对齐到当前 wrap 周期的中点，
-         * 高架段恰好覆盖 [wrapOffset, wrapOffset + visLen]，ego 必在内。 */
-        ViewRegistry.safeCall('viaduct', 'followEgo', wrapOffset + visLen / 2);
-      }
     }
 
     if (frame.entities !== undefined && !skipEntities) {
-      const viaductOffset = store.isViaduct ? 7.7 : 0;
       store.entities = frame.entities.filter(e => e && e.type !== 'ego').map((e) => {
-        /* 校验 8 由本函数上面完成，这里只构建。type 缺失的 entity 仍会被
-         * 各 View 静默丢弃（与原行为一致）。 */
         const ent = {
           id: e.id,
           type: e.type,
           x: e.x || 0,
           y: e.y || 0,
-          z: viaductOffset,
+          z: e.z || 0,
           heading: e.heading != null ? e.heading : (e.h || 0),
           speed: e.speed != null ? e.speed : (e.spd || 0),
           steer: e.steer || 0,
