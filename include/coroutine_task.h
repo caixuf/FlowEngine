@@ -1207,16 +1207,11 @@ struct CompletionNotifier {
         }
         std::suspend_always initial_suspend() noexcept { return {}; }
 
-        /* 自定义 final_suspend：帧到达最终挂起点后原子地发出完成信号。
-         * 标准保证 await_suspend 执行时协程帧已处于稳定挂起状态，
-         * 此处 store(release) 与 execute() 线程的 load(acquire) 建立
-         * happens-before，使后续 handle.destroy() 安全。返回 noop_coroutine
-         * 释放 worker 线程回线程池，不再访问 notifier 帧。
-         *
-         * 关键修复：notify_all() 必须在锁内执行，确保 worker 线程的 notify
-         * 完成之前，execute() 线程无法返回并销毁包含 cv 的 CoroutineTask。
-         * waiter 在锁内 wait，被唤醒后需重新获取锁才能返回；
-         * 因此 notify_all() 一定先于 task/cv 析构完成。 */
+        /* 自定义 final_suspend：帧到达最终挂起点后持锁发出完成信号。
+         * store(release) + notify_all() 都在 coro_mutex_ 锁内执行，
+         * execute() 线程在锁内 wait，被唤醒后需重新获取锁才能返回，
+         * 因此 notify_all() 一定先于 execute() 返回及后续析构。
+         * 返回 noop_coroutine 释放 worker 线程回线程池。 */
         struct FinalAwaiter {
             bool await_ready() noexcept { return false; }
             std::coroutine_handle<> await_suspend(
@@ -1248,14 +1243,9 @@ struct CompletionNotifier {
     CompletionNotifier(CompletionNotifier&& o) noexcept
         : handle(o.handle) { o.handle = nullptr; }
 
-    ~CompletionNotifier() {
-        /* execute() 已等待 frame_done_（由 final_suspend::await_suspend 设置），
-         * 此时 notifier 帧处于稳定挂起状态，可直接 destroy，
-         * 无需自旋 handle.done()（避免非原子读 UB）。 */
-        if (handle) {
-            handle.destroy();
-        }
-    }
+    /* 不在析构中 destroy —— handle 生命周期由 FlowCoroTask 延迟管理，
+     * 避免池线程仍在帧中跑 notify_all 时帧被销毁（UAF）。 */
+    ~CompletionNotifier() = default;
 };
 
 /* 工厂函数：创建一个空体协程，挂起于 initial_suspend 等待被续体激活。
@@ -1288,7 +1278,22 @@ public:
         (void)flowcoro_integration::get_thread_pool();
     }
 
+    ~FlowCoroTask() override {
+        /* 销毁最后一轮残留的 notifier 帧。
+         * 此时 execute() 已返回，池线程早已放手。 */
+        if (prev_notifier_handle_) {
+            prev_notifier_handle_.destroy();
+        }
+    }
+
     void execute() override {
+        /* 销毁上一轮的 notifier 帧 —— 此时上一轮的池线程早已跑完
+         * notify_all 并返回 noop_coroutine，帧不再被任何线程访问。 */
+        if (prev_notifier_handle_) {
+            prev_notifier_handle_.destroy();
+            prev_notifier_handle_ = nullptr;
+        }
+
         stop_flag_   = false;
         frame_done_.store(false, std::memory_order_relaxed);
         cancel_token_.reset();
@@ -1299,12 +1304,17 @@ public:
          * 协程完成时 FinalAwaiter 对称转移到 notifier，
          * notifier.final_suspend::await_suspend 在工作线程上持锁设置 frame_done_
          * 并唤醒 cv，确保 notify_all() 完成前 execute() 不会返回并销毁 cv。
-         * 这样 execute() 无需轮询 task_->done()（避免与帧写操作的竞争）。 */
+         *
+         * notifier 的 handle 存入 prev_notifier_handle_，由下一轮 execute()
+         * 或析构函数延迟销毁 —— 此时池线程肯定已跑完 notify_all 并放手帧。 */
         auto notifier = make_completion_notifier(&frame_done_, &coro_cv_);
         notifier.handle.promise().done_flag = &frame_done_;
         notifier.handle.promise().cv        = &coro_cv_;
         notifier.handle.promise().mtx       = &coro_mutex_;
         task_->handle.promise().continuation = notifier.handle;
+        /* 转移所有权到成员，局部 notifier 析构时不会 destroy */
+        prev_notifier_handle_ = notifier.handle;
+        notifier.handle = nullptr;
 
         /* flowcoro::CoroTask 惰性启动（suspend_always）：
          * 将首次 resume 提交到线程池，协程体立即在工作线程上开始执行，
@@ -1351,6 +1361,7 @@ public:
 
 private:
     std::atomic<bool> frame_done_{false};
+    std::coroutine_handle<CompletionNotifier::promise_type> prev_notifier_handle_{nullptr};
 };
 #endif // FLOWCORO_INTEGRATION
 
