@@ -24,6 +24,19 @@ FlowEngine 的学习闭环把 demo pipeline 里的 teacher 行为采成 JSONL，
 | `/tmp/flow_topology.json` | demo runtime 状态，sidecar 从这里读 shadow inference 输入 |
 | `/tmp/flow_torch_inference.json` | PyTorch sidecar 输出 |
 
+## v3 特征体系（默认）
+
+端到端学习已全面升级到 v3，核心变化：
+
+| 维度 | 说明 |
+|------|------|
+| 输入特征 | **59 维/帧**（v1:4, v2:16），包含 ego、感知统计、场景上下文、障碍物全貌 |
+| 时序窗口 | **5 帧滑动窗口**，总输入维度 295 |
+| 模型架构 | **多隐层 MLP**（最多 4 层），前向兼容 v1/v2 单隐层 |
+| 输出 | **5 维**：throttle, brake, steer, lane_change, confidence |
+
+特征定义见 `tools/train_e2e/feature_schema.py` 的 `FEATURE_NAMES_V3`（59 个字段）。
+
 ## Canonical 入口（其他脚本禁止并存）
 
 | 用途 | canonical 路径 | 替代关系 |

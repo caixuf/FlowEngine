@@ -32,53 +32,78 @@
 
 ## 数据契约 (三方一致)
 
-`features` v1 仍由 `data_recorder_node`、`tools/train_e2e/train.py`、`inference_node`
-共享，用于零依赖 tiny-MLP 与 C 侧推理兼容：
+当前**默认使用 v3**（59 维特征、多隐层 MLP、5 维输出）。v1/v2 保持向后兼容。
 
-| 项 | 定义 |
-|----|------|
-| 特征 `features` | `[ego_v, ego_y, ego_heading, ego_yaw_rate]`（4 维，来自 `fusion/localization`）|
-| 标签 `label`    | `planning_target_speed`（1 维，模仿 planning 输出的目标速度）|
+### v3 特征（59 维，每帧）
 
-样本文件 (JSONL，每行一个 JSON)：
+由 `tools/train_e2e/feature_schema.py` 统一构建，包含四个部分：
+
+| 组 | 维度 | 说明 |
+|----|------|------|
+| v2 基础 | 16 | ego_v, ego_y, ego_heading, ego_yaw_rate + 前方 2 个障碍物(x,y,vx,type,confidence) + control(brake,emergency_stop) |
+| 感知统计 | 6 | lidar_point_count, lidar_front_density, lidar_clutter_ratio, perception_obj_count, perception_max_conf, perception_mean_conf |
+| 场景上下文 | 7 | tl_state, tl_distance, road_curvature, road_speed_limit, lane_count, lane_width, ego_lane_offset |
+| 障碍物全貌 | 30 | 类型分布(5)、距离分布(5)、速度分布(5)、前后左右间距(5)、后方来车(5)、左右车道占用(5) |
+
+### v3 输出（5 维）
+
+| 维度 | 含义 |
+|------|------|
+| throttle | 油门 (-1.0 ~ 1.0) |
+| brake | 刹车 (0 ~ 1.0) |
+| steer | 转向 (-1.0 ~ 1.0) |
+| lane_change | 换道意图 (-1=左, 0=直, 1=右) |
+| confidence | 置信度 (0 ~ 1.0) |
+
+### 样本格式 (JSONL)
 
 ```json
-{"t":1783660681184,"features":[5.22,-1.77,-0.0008,0.0],"label":5.2,"ego":{"x":0.47,"y":-1.77}}
+{"t":1783660681184,"features_v3":[5.22,-1.77,-0.0008,0.0,...],"label":[0.5,0,0.1,0,0.9],"ego":{"x":0.47,"y":-1.77}}
 ```
 
-PyTorch 训练路径支持 v2 场景特征。v2 样本保留 `features` v1，同时增加
-`features_v2` 和结构化上下文：
-
-| 项 | 定义 |
-|----|------|
-| `features_v2` | `ego + front obstacles + control`，由 `tools/train_e2e/feature_schema.py` 统一定义 |
-| `planning.target_speed` | teacher 目标速度，同时镜像为 `label` |
-| `obstacles` | recorder 锁存的前向障碍物摘要 |
-| `control` | recorder 锁存的 `control/cmd` 摘要 |
-
-当前 v2 特征名集中定义在 `tools/train_e2e/feature_schema.py`，exporter、PyTorch
-trainer、evaluator、sidecar 都从这里读取，避免同一套拼接逻辑散在多个脚本里。
+特征名集中定义在 `tools/train_e2e/feature_schema.py` 的 `FEATURE_NAMES_V3`，exporter、trainer、evaluator、sidecar 都从这里读取，避免同一套拼接逻辑散在多个脚本里。
 
 ## 模型权重契约 (`tiny_mlp.h` 纯文本格式)
 
-单隐层 MLP，`tanh` 激活，纯文本存储，Python 训练侧与 C 推理侧读写同一格式：
+**v3: 多隐层 MLP**，`tanh` 激活，纯文本存储，Python 训练侧与 C 推理侧读写同一格式：
+
+```
+# flowengine-tinymlp v3
+in 295              # v3: 59 维/帧 × 5 帧时序窗口
+hidden 64 32        # 多隐层: 隐层 0=64, 隐层 1=32
+out 5               # throttle/brake/steer/lane_change/confidence
+norm_mean   <IN floats>     # 输入标准化: xn = (x - mean) / scale
+norm_scale  <IN floats>
+out_mean    <OUT floats>    # 输出反标准化: y = yn * scale + mean
+out_scale   <OUT floats>
+w1 <HID0*IN floats>         # 隐层 0 [hid0][in]
+b1 <HID0 floats>
+w2 <HID1*HID0 floats>       # 隐层 1 [hid1][hid0]
+b2 <HID1 floats>
+w_out <OUT*HID1 floats>     # 输出层 [out][hid1]
+b_out <OUT floats>
+```
+
+**v1/v2 向后兼容**（单隐层，输出层用 w2/b2 标签）：
 
 ```
 # flowengine-tinymlp v1
 in 4
 hidden 8
 out 1
-norm_mean   <IN floats>     # 输入标准化: xn = (x - mean) / scale
+norm_mean   <IN floats>
 norm_scale  <IN floats>
-out_mean    <OUT floats>    # 输出反标准化: y = yn * scale + mean
+out_mean    <OUT floats>
 out_scale   <OUT floats>
-w1 <HID*IN floats>          # 行主序 [HID][IN]
-b1 <HID floats>
-w2 <OUT*HID floats>         # 行主序 [OUT][HID]
-b2 <OUT floats>
+w1 <8*4 floats>
+b1 <8 floats>
+w2 <1*8 floats>    # hidden_count==1 时 w2 读作输出层
+b2 <1 floats>
 ```
 
-前向计算：`y = out_denorm( W2 · tanh(W1 · norm(x) + b1) + b2 )`
+前向计算：`y = out_denorm( W_out · tanh(... tanh(W1 · norm(x) + b1) + b2 ...) + b_out )`
+
+最多支持 4 层隐层（`TINY_MLP_MAX_HID_LAYERS=4`），隐层维度通过 `hidden` 行的多个值表达。
 
 ## 组件
 
@@ -379,10 +404,10 @@ python3 tools/modelctl.py ota status
 |------|------|--------|------|
 | 3 | `learner_node` 车端增量微调 | 持续学习 / on-device SGD / 资源受限调度 | ✅ 已实现 |
 | 4 | 模型 OTA + 版本管理 | Discovery + Transport 灰度发布 / 回滚 / A-B 对比 | ✅ 已实现 |
-| 5 | **端到端 v3** | 感知特征增强 / 多隐层 MLP / 闭环评估 / 渐进灰度 | 🔴 待设计 |
+| 5 | **端到端 v3** | 59 维特征 / 多隐层 MLP / 5 维输出 / 时序窗口 / 感知统计 / 场景上下文 | ✅ 已实现 |
 | — | 推理内核升级 | 把 `tiny_mlp_forward()` 替换为 ONNX Runtime / TensorRT，契约不变 | 待实现 |
 
-> v3 设计文档尚未编写；先把 v1/v2 的「采集→训练→shadow 推理」闭环跑稳后再展开 v3。
+> v3 已全面上线，默认使用 59 维特征、多隐层 MLP、5 维输出（throttle/brake/steer/lane_change/confidence）。
 
 ## 生产化提示
 
