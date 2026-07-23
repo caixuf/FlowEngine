@@ -8,6 +8,7 @@
 
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { mergeGeometries } from '../math/GeometryMerge.js';
+import { LANE_WIDTH, DEFAULT_LANES } from '../core/Constants.js';
 
 const ASPHALT_COLOR = 0x2a2a2a;
 const LINE_WHITE = 0xffffff;
@@ -124,7 +125,7 @@ export function createRoadView(scene) {
 
       const points = sampleEdgeNodes(nodes, 24);
       const lanes = edge.lanes || 2;
-      const laneWidth = edge.lane_width || 3.5;
+      const laneWidth = edge.lane_width || LANE_WIDTH;
       const hw = (lanes * laneWidth) / 2;
 
       // ── 中心线 spine：每个样点的位置 + XZ 平面法线 ──

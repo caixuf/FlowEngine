@@ -28,6 +28,7 @@ import { createLayer } from '../core/Layer.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
 // 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
 import { validateFrame } from './FrameValidator.js';
+import { LANE_WIDTH, EDGE_TYPE } from '../core/Constants.js';
 
 // 向后兼容：原调用方从 SceneDirector import validateFrame。
 export { validateFrame };
@@ -109,7 +110,7 @@ export function createSceneDirector(scene) {
         id: 0,
         type: 'highway',
         lanes: 4,
-        lane_width: 3.5,
+        lane_width: LANE_WIDTH,
         length: 10000,
         nodes: [[0, 0, 0], [10000, 0, 0]]
       }]
@@ -136,7 +137,7 @@ export function createSceneDirector(scene) {
         const urlViaduct = typeof window !== 'undefined' &&
                            new URLSearchParams(window.location.search).get('viaduct') === '1';
         const isViaduct = urlViaduct || edgesArr.some(e =>
-          e && (e.name === 'viaduct_highway' || e.type === 'viaduct_highway')
+          e && (e.name === EDGE_TYPE.VIADUCT_HIGHWAY || e.type === EDGE_TYPE.VIADUCT_HIGHWAY)
         );
 
         ViewRegistry.safeCall('road', 'build', rn);

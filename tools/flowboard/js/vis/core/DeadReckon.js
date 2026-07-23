@@ -221,8 +221,8 @@ function _advanceState(s, dt, now) {
   if (s.lastTime > 0) {
     var elapsed = now - s.lastTime;
     if (elapsed > 2.0) elapsed = 2.0; // cap staleness
-    s.targetX = s.lastX + s.lastSpeed * elapsed;
-    s.targetZ = s.lastZ;
+    s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
+    s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
     s.targetHeading = s.lastHeading;
   }
 

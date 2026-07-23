@@ -20,6 +20,7 @@
 
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
+import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
 
 const POST_SPACING   = 3.0;  // 立柱间距（米）
 const POST_OFFSET    = 0.5;  // 护栏距路缘外距离（米）
@@ -53,11 +54,11 @@ export function createBarrierView(scene) {
     clear();
     if (!roadNetwork || !roadNetwork.edges || roadNetwork.edges.length === 0) return;
 
-    // ── 第一遍：收集所有立柱位置 + 横梁段位置 ──
-    const posts = [];        // [{x, y, z, rotY}]
-    const beamSegs = [];     // [{x1, z1, x2, z2, y}] 横梁段（用 box + 旋转表达）
+    const posts = [];
+    const upperBeamSegs = [];
+    const lowerBeamSegs = [];
     for (const edge of roadNetwork.edges) {
-      if (edge.type === 'viaduct_highway' || edge.name === 'viaduct_highway') continue;
+      if (edge.type === EDGE_TYPE.VIADUCT_HIGHWAY || edge.name === EDGE_TYPE.VIADUCT_HIGHWAY) continue;
 
       let nodes = edge.nodes;
       if (!nodes || nodes.length < 2) continue;
@@ -67,7 +68,7 @@ export function createBarrierView(scene) {
 
       const points = sampleEdgeNodes(nodes, 24);
       const lanes = edge.lanes || 2;
-      const laneWidth = edge.lane_width || 3.5;
+      const laneWidth = edge.lane_width || LANE_WIDTH;
       const halfWidth = (lanes * laneWidth) / 2;
 
       // 中心线 spine + 沿弧长 march
@@ -116,8 +117,8 @@ export function createBarrierView(scene) {
             const len = Math.sqrt(dx * dx + dz * dz);
             if (len > 0.01) {
               const beamRotY = Math.atan2(dx, dz);
-              beamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY, y: BEAM_UPPER_Y });
-              beamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY, y: BEAM_LOWER_Y });
+              upperBeamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY });
+              lowerBeamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY });
             }
           }
           prevPost.x = x;
@@ -128,13 +129,12 @@ export function createBarrierView(scene) {
 
     if (posts.length === 0) return;
 
-    // ── 第二遍：构建 InstancedMesh ──
     const N = posts.length;
     const postGeo = new THREE.BoxGeometry(BEAM_THICKNESS, POST_H, BEAM_THICKNESS);
     const postMat = getStdMaterial(COLOR_POST, 0.6, 0.3);
     postMesh = new THREE.InstancedMesh(postGeo, postMat, N);
 
-    const M = beamSegs.length;
+    const M = upperBeamSegs.length;
     const beamGeo = new THREE.BoxGeometry(SEGMENT_LEN, BEAM_W, BEAM_THICKNESS);
     const beamMat = getStdMaterial(COLOR_BEAM, 0.6, 0.3);
     upperBeamMesh = new THREE.InstancedMesh(beamGeo, beamMat, M);
@@ -150,18 +150,20 @@ export function createBarrierView(scene) {
       postMesh.setMatrixAt(i, dummy.matrix);
     }
     for (let i = 0; i < M; i++) {
-      const b = beamSegs[i];
-      // 按 SEGMENT_LEN 长度切，scale 调整真实长度
+      const b = upperBeamSegs[i];
       const scale = b.len / SEGMENT_LEN;
-      dummy.position.set(b.x, b.y, b.z);
+      dummy.position.set(b.x, BEAM_UPPER_Y, b.z);
       dummy.rotation.set(0, b.rotY, 0);
       dummy.scale.set(scale, 1, 1);
       dummy.updateMatrix();
-      if (b.y > 0.5) {
-        upperBeamMesh.setMatrixAt(i, dummy.matrix);
-      } else {
-        lowerBeamMesh.setMatrixAt(i, dummy.matrix);
-      }
+      upperBeamMesh.setMatrixAt(i, dummy.matrix);
+
+      const lb = lowerBeamSegs[i];
+      dummy.position.set(lb.x, BEAM_LOWER_Y, lb.z);
+      dummy.rotation.set(0, lb.rotY, 0);
+      dummy.scale.set(lb.len / SEGMENT_LEN, 1, 1);
+      dummy.updateMatrix();
+      lowerBeamMesh.setMatrixAt(i, dummy.matrix);
     }
     postMesh.instanceMatrix.needsUpdate = true;
     upperBeamMesh.instanceMatrix.needsUpdate = true;

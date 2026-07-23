@@ -629,6 +629,24 @@ protected:
 
             g.cycle++;
 
+            /* 热重载：每帧从 param_registry 重新读取参数，支持 flowctl param set 运行时修改 */
+            g.kp = param_get_float("control.pid_kp");
+            g.ki = param_get_float("control.pid_ki");
+            g.kd = param_get_float("control.pid_kd");
+            g.cfg_cruise_speed = param_get_float("control.cruise_speed");
+            g.lane_width       = param_get_float("control.lane_width");
+            g.lat_kp           = param_get_float("control.lat_kp");
+            g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
+            g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
+            g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
+            g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
+            g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
+            g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
+            g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
+            g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
+            g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
+            g.yaw_damping                 = param_get_float("control.yaw_damping");
+
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
             uint64_t now_us = clock_now_us();
             if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;

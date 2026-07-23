@@ -13,6 +13,7 @@
  */
 
 import { getBox, getCylinder, getStdMaterial } from '../core/AssetFactory.js';
+import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
 
 const TAPER_COLOR  = 0x2a2a2a;   // 锥形过渡路面（同沥青色）
 const JUNCTION_COLOR = 0x353535; // 路口区域稍浅
@@ -49,8 +50,8 @@ export function createConnectorView(scene) {
       const a = edges[i], b = edges[i + 1];
       // 只处理顺序相连的 edge（id 连续），跳过匝道等跳跃 edge
       if (b.id !== a.id + 1) continue;
-      const widthA = (a.lanes || 2) * (a.lane_width || 3.5);
-      const widthB = (b.lanes || 2) * (b.lane_width || 3.5);
+      const widthA = (a.lanes || DEFAULT_LANES) * (a.lane_width || LANE_WIDTH);
+      const widthB = (b.lanes || DEFAULT_LANES) * (b.lane_width || LANE_WIDTH);
       if (Math.abs(widthA - widthB) < 0.1) continue;
       _buildLaneTaper(a, b, widthA, widthB);
     }
@@ -122,7 +123,7 @@ export function createConnectorView(scene) {
     const end = _getEdgeEnd(edge);
     if (!start || !end) return;
 
-    const width = (edge.lanes || 3) * (edge.lane_width || 3.5) * 1.5;
+    const width = (edge.lanes || DEFAULT_LANES) * (edge.lane_width || LANE_WIDTH) * 1.5;
     const len = edge.length_m || 60;
     const geo = getBox(len, 0.08, width);
     const mat = getStdMaterial(JUNCTION_COLOR, 0.88, 0.0);
@@ -149,7 +150,7 @@ export function createConnectorView(scene) {
 
     // 三角形导流带（连接 ramp 终点和主路边缘）
     const rampWidth = (rampEdge.lanes || 1) * (rampEdge.lane_width || 3.0);
-    const mainWidth = (mainEdge.lanes || 3) * (mainEdge.lane_width || 3.5);
+    const mainWidth = (mainEdge.lanes || DEFAULT_LANES) * (mainEdge.lane_width || LANE_WIDTH);
     const positions = [
       rampEnd.x, 0.11, rampEnd.z + rampWidth/2,
       rampEnd.x, 0.11, rampEnd.z - rampWidth/2,
@@ -218,7 +219,7 @@ export function createConnectorView(scene) {
     const end = _getEdgeEnd(edge);
     if (!start || !end) return;
 
-    const width = (edge.lanes || 2) * (edge.lane_width || 3.5);
+    const width = (edge.lanes || DEFAULT_LANES) * (edge.lane_width || LANE_WIDTH);
     [start, end].forEach(pos => {
       // 红白两段圆柱
       const redGeo = getCylinder(0.3, 0.35, 0.4);
@@ -241,11 +242,10 @@ export function createConnectorView(scene) {
   function _getEdgeStart(edge) {
     if (edge.nodes && edge.nodes.length >= 1) {
       const n = edge.nodes[0];
-      if (Array.isArray(n)) return { x: n[0], y: n[1], z: n[2] || 0 };
-      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: n.z || 0 };
+      if (Array.isArray(n)) return { x: n[0], y: n[1] || 0, z: -(n[2] || 0) };
+      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: -(n.z || 0) };
     }
-    // fallback：用 start_x/start_z（中凯路场景文件没这字段，返回 null）
-    if (edge.start_x != null) return { x: edge.start_x, y: 0, z: edge.start_z || 0 };
+    if (edge.start_x != null) return { x: edge.start_x, y: 0, z: -(edge.start_z || 0) };
     return null;
   }
 
@@ -253,8 +253,8 @@ export function createConnectorView(scene) {
   function _getEdgeEnd(edge) {
     if (edge.nodes && edge.nodes.length >= 2) {
       const n = edge.nodes[edge.nodes.length - 1];
-      if (Array.isArray(n)) return { x: n[0], y: n[1], z: n[2] || 0 };
-      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: n.z || 0 };
+      if (Array.isArray(n)) return { x: n[0], y: n[1] || 0, z: -(n[2] || 0) };
+      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: -(n.z || 0) };
     }
     if (edge.start_x != null) {
       const len = edge.length_m || 100;
@@ -262,7 +262,7 @@ export function createConnectorView(scene) {
       return {
         x: edge.start_x + Math.cos(h) * len,
         y: 0,
-        z: (edge.start_z || 0) + Math.sin(h) * len,
+        z: -((edge.start_z || 0) + Math.sin(h) * len),
       };
     }
     return null;

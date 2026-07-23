@@ -1,3 +1,5 @@
+import { LANE_WIDTH, DEFAULT_LANES } from '../core/Constants.js';
+
 /**
  * RoadHeight.js — 路面高度单一事实源
  * 
@@ -80,7 +82,7 @@ export function roadHeightAt(store, x, y) {
     const nodes = edge.nodes;
     if (!nodes || nodes.length < 2) continue;
     
-    const laneWidth = edge.lane_width || 3.5;
+    const laneWidth = edge.lane_width || LANE_WIDTH;
     const lanes = edge.lanes || 2;
     const halfWidth = (lanes * laneWidth) / 2;
     

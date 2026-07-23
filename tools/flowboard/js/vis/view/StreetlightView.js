@@ -20,6 +20,7 @@
 
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
+import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
 
 const LAMP_SPACING = 40;   // 路灯间距（米）
 const LAMP_OFFSET  = 1.5;  // 路灯距路缘外距离（米）
@@ -59,7 +60,7 @@ export function createStreetlightView(scene) {
     const slots = [];  // [{x, z, nx, nz, side: +1|-1}]
     for (const edge of roadNetwork.edges) {
       // 高架场景路灯由 ViaductView 内置，这里跳过
-      if (edge.type === 'viaduct_highway' || edge.name === 'viaduct_highway') continue;
+      if (edge.type === EDGE_TYPE.VIADUCT_HIGHWAY || edge.name === EDGE_TYPE.VIADUCT_HIGHWAY) continue;
 
       let nodes = edge.nodes;
       if (!nodes || nodes.length < 2) continue;
@@ -69,7 +70,7 @@ export function createStreetlightView(scene) {
 
       const points = sampleEdgeNodes(nodes, 24);
       const lanes = edge.lanes || 2;
-      const laneWidth = edge.lane_width || 3.5;
+      const laneWidth = edge.lane_width || LANE_WIDTH;
       const halfWidth = (lanes * laneWidth) / 2;
 
       // 中心线 spine + 沿弧长 march，每 LAMP_SPACING 米放一盏

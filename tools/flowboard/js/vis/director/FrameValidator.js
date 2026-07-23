@@ -1,3 +1,5 @@
+import { LANE_WIDTH } from '../core/Constants.js';
+
 /**
  * FrameValidator.js — SceneDirector frame schema 校验纯函数
  *
@@ -69,6 +71,30 @@ export function validateFrame(topoData) {
         msg: 'road_network.edges 非数组: ' + _typeOf(rn.edges) + '，跳过道路重建',
       });
       skipRoad = true;
+    } else if (rn.edges && rn.edges.length > 0) {
+      for (let i = 0; i < rn.edges.length; i++) {
+        const edge = rn.edges[i];
+        if (!edge) continue;
+        if (edge.lane_width != null && (edge.lane_width <= 0 || edge.lane_width > 10)) {
+          warnings.push({
+            key: 'road_network.edges[' + i + '].lane_width',
+            msg: 'edge[' + i + '].lane_width=' + edge.lane_width + ' 超出合理范围(0,10]，回退默认 ' + LANE_WIDTH + 'm',
+          });
+        }
+        const len = edge.length || edge.length_m;
+        if (len != null && len <= 0) {
+          warnings.push({
+            key: 'road_network.edges[' + i + '].length',
+            msg: 'edge[' + i + '].length=' + len + ' <= 0，道路长度无效',
+          });
+        }
+        if (!edge.nodes || !Array.isArray(edge.nodes) || edge.nodes.length < 2) {
+          warnings.push({
+            key: 'road_network.edges[' + i + '].nodes',
+            msg: 'edge[' + i + '].nodes 无效（需至少 2 个节点），道路可能无法渲染',
+          });
+        }
+      }
     }
   }
 
@@ -121,6 +147,11 @@ export function validateFrame(topoData) {
             key: 'entities[' + nonEgoIdx + '].type',
             msg: 'entity 缺 type 字段，会被各 View 静默丢弃',
           });
+        } else if (!['car', 'pedestrian', 'traffic_light', 'tl', 'sign', 'ego'].includes(e.type)) {
+          warnings.push({
+            key: 'entities[' + nonEgoIdx + '].type',
+            msg: 'entity 类型 "' + e.type + '" 不在已知集合 {car, pedestrian, traffic_light, sign, ego}，可能被静默兜底为 Car',
+          });
         }
         nonEgoIdx++;
       }
@@ -164,7 +195,7 @@ function _roadHeightAt(edges, px, py) {
   for (const edge of edges) {
     const nodes = edge.nodes;
     if (!nodes || nodes.length < 2) continue;
-    const laneWidth = edge.lane_width || 3.5;
+    const laneWidth = edge.lane_width || LANE_WIDTH;
     const lanes = edge.lanes || 2;
     const halfWidth = (lanes * laneWidth) / 2 + 3;
     for (let i = 0; i < nodes.length - 1; i++) {
