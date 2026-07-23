@@ -498,30 +498,65 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             e.length = (a->len > 0) ? a->len : e.length;
             e.width = (a->wid > 0) ? a->wid : e.width;
         }
-        /* 中央 route 初始化：新格式 actor + esmini + route 就绪时，让 NPC 车辆
-         * 沿车道 Frenet 行驶（过弯/爬匝道自动跟随）。否则 route_dir 保持 0 走旧逻辑。 */
-        if (a->segment_id >= 0 && g.roads_loaded && g.route.ok() && e.is_npc_vehicle()) {
-            e.road_id = a->segment_id;
-            e.s       = a->s;
-            e.offset  = a->l;
-            e.target_offset = a->l;  /* E2: 换道目标 offset 初始 = 当前 offset */
-            flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
+        /* 中央 route 初始化：所有 NPC 车辆（新旧格式）都通过 world_to_frenet
+         * 定位到路网后初始化 route_dir/route_s/offset，保证严格贴道路几何行驶。
+         *
+         * 旧格式（segment_id<0）NPC 以前走世界系直线积分兜底，在弯道/匝道上
+         * 会沿切线飞出路面；对向车（vx<0）更是 route_dir=0 导致 heading 翻转
+         * 缺失，在路网中朝错误方向行驶（逆行到对向车道）。
+         *
+         * 现在统一用 world_to_frenet 定位 → 填 road_id/s/offset → npc_init_route
+         * 设置 route_dir（顺行 +1 / 对向 -1），step_npc_vehicle 自动走正确的
+         * Frenet 车道跟随分支。新格式（segment_id≥0）优先用场景指定值，
+         * world_to_frenet 失败时回退到旧格式兜底。 */
+        if (g.roads_loaded && g.route.ok() && e.is_npc_vehicle()) {
+            if (a->segment_id >= 0) {
+                /* 新格式：用场景指定的 segment_id/s/l 直接初始化 */
+                e.road_id = a->segment_id;
+                e.s       = a->s;
+                e.offset  = a->l;
+                e.target_offset = a->l;
+            } else {
+                /* 旧格式：用 world_to_frenet 反算路网位置 */
+                flowsim::FrenetPos fp;
+                if (g.roads.world_to_frenet(e.x, e.y, fp)) {
+                    e.road_id = fp.road_id;
+                    e.s       = fp.s;
+                    /* offset 取相对参考线的横向偏移（Model A: lane_id=0 + offset_from_ref），
+                     * 而非 world_to_frenet 返回的 lane 内 offset（Model B）。
+                     * 对向车 offset 保持同侧（不取反），因为是在同一参考线下倒退。 */
+                    e.offset  = fp.offset;
+                    e.target_offset = fp.offset;
+                }
+                /* world_to_frenet 失败 → route_dir 保持 0，走旧世界系兜底 */
+            }
+            if (e.road_id > 0 || a->segment_id >= 0) {
+                flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
+            }
         }
 
         /* Phase 2: NPC 持久 road_pos 初始化（与 route 共存）。
-         * 仅对新格式 (segment_id≥0) NPC init：直接用 segment_id/lane_id=0/s/l，
-         * 与现有 NPC frenet_to_world(rid, 0, s, npc.offset) 调用约定一致
-         * （NPC 用 lane_id=0 + offset_from_reference_line 模型，offset 是相对
-         * 参考线的横向位置，非 lane 内 offset）。
-         * 旧格式 (segment_id<0) NPC 不 init road_pos：world_to_frenet 返回的
-         * (lane_id, offset_within_lane) 是 Model B 语义，与 NPC 的 Model A
-         * (lane_id=0 + offset_from_ref) 不一致；且旧格式对向车 route_dir=0
-         * 会导致 step5 航向翻转缺失。让旧格式 NPC 走 world_to_frenet 兜底更安全。
-         * 失败时 road_pos.ok()==false，npc_ai 走旧 route/世界系兜底。 */
-        if (g.roads_loaded && a->segment_id >= 0 && e.is_npc_vehicle()) {
-            if (!e.road_pos.init(g.roads, a->segment_id, 0, a->s, a->l) && a->id <= 2) {
-                LOG_WARN("flowsim", "NPC %d road_pos.init failed — fallback to route/world logic",
-                         a->id);
+         * 新格式 (segment_id≥0) NPC：直接用场景指定的 segment_id/s/l init。
+         * 旧格式 (segment_id<0) NPC：用上一步 world_to_frenet 反算的
+         * (road_id, s, offset) init，让 NPC 也能沿真实 OpenDRIVE 拓扑推进。
+         *
+         * 对向车 (route_dir<0) 虽然 road_pos.advance 不支持 -s 方向（step_npc_vehicle
+         * 会走旧 route 分支），但 road_pos.init 后 set_offset 可正确更新横向位置，
+         * 且 road_pos.frenet() 供 same_lane/find_lead 等用。 */
+        if (g.roads_loaded && e.is_npc_vehicle()) {
+            int rid = e.road_id;
+            double sl = e.s;
+            double ol = e.offset;
+            if (a->segment_id >= 0) {
+                rid = a->segment_id;
+                sl = a->s;
+                ol = a->l;
+            }
+            if (rid > 0) {
+                if (!e.road_pos.init(g.roads, rid, 0, sl, ol) && a->id <= 2) {
+                    LOG_WARN("flowsim", "NPC %d road_pos.init failed — fallback to route/world logic",
+                             a->id);
+                }
             }
         }
     }
@@ -555,47 +590,53 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             if (e.heading == 0.0) {
                 e.heading = compute_road_heading_at(tl->x, tl->y_lane);
             }
-            /* esmini 接管世界坐标：world_to_frenet → 反算真值 */
+            /* esmini 接管世界坐标：world_to_frenet → 反算真值。
+             * 两层语义：
+             *   1) e.x/e.y = 灯杆 3D 位置（路缘外侧 +1.5m 退让，避免杆立在路中间）
+             *   2) e.target_vx 存相位偏移，用 e.width 存 lane_y（车道中心 y），
+             *      供 NPC 红绿灯响应（check_npc_scene_events）判断同侧车流。 */
             if (g.roads_loaded) {
                 flowsim::FrenetPos fp;
                 /* 用 y_lane 作横向偏移（与 x 一起试探路网最近点） */
                 double probe_y = tl->y_lane;
                 if (g.roads.world_to_frenet(tl->x, probe_y, fp)) {
-                    flowsim::WorldPos wp;
-                    if (g.roads.frenet_to_world(fp.road_id, fp.lane_id, fp.s, fp.offset, wp)) {
-                        e.x = wp.x;
-                        /* y 取自 Frenet 反算的车道外侧 +1.5m 路缘退让 */
-                        if (cached_half_width < 0.0 || fp.road_id != e.road_id) {
-                            /* 现算：esmini 给定 road 在 s 处的可行驶车道总宽 */
-                            int n_drivable = g.roads.drivable_lane_count(fp.road_id, fp.s);
-                            /* 半宽 = (n_drivable * lane_width) / 2，lane_width 取场景默认 */
-                            cached_half_width = (n_drivable * g.lane_width) / 2.0;
-                            e.road_id = fp.road_id;
-                        }
-                        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                        e.y = sign * cached_half_width;
-                        /* heading 重新用 Frenet 反算的切线 + π/2（灯杆垂直于道路） */
-                        e.heading = wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2);
-                    } else {
-                        /* 反算失败 fallback 到旧逻辑 */
-                        e.x = tl->x;
-                        double road_half_width = 3.5;
-                        double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                        e.y = sign * road_half_width;
+                    /* 先拿道路中心线世界坐标（offset=0 的 reference line） */
+                    flowsim::WorldPos rc_wp;
+                    bool have_rc = g.roads.frenet_to_world(fp.road_id, 0, fp.s, 0.0, rc_wp);
+                    if (cached_half_width < 0.0 || fp.road_id != e.road_id) {
+                        int n_drivable = g.roads.drivable_lane_count(fp.road_id, fp.s);
+                        cached_half_width = (n_drivable * g.lane_width) / 2.0;
+                        e.road_id = fp.road_id;
+                    }
+                    double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
+                    /* 车道中心 y：从道路中心 + sign * |y_lane|（沿路宽方向） */
+                    double lane_center_y = have_rc ? (rc_wp.y + tl->y_lane) : tl->y_lane;
+                    /* 灯杆 3D 位置：车道侧路缘外 +1.5m 退让 */
+                    double pole_y = have_rc ? (rc_wp.y + sign * (cached_half_width + 1.5)) : (sign * (cached_half_width + 1.5));
+                    e.x = have_rc ? rc_wp.x : tl->x;
+                    e.y = pole_y;
+                    /* e.width 存车道中心 y，供 NPC 红绿灯响应判断同侧车流 */
+                    e.width = lane_center_y;
+                    /* heading：灯杆垂直于道路切线方向 */
+                    e.heading = have_rc ? (rc_wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2)) : 0.0;
+                    if (e.heading == 0.0) {
+                        e.heading = compute_road_heading_at(tl->x, tl->y_lane);
                     }
                 } else {
                     /* world_to_frenet 失败：场景坐标不在路网附近，fallback */
                     e.x = tl->x;
-                    double road_half_width = 3.5;
                     double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                    e.y = sign * road_half_width;
+                    double road_half_width = 3.5;
+                    e.y = sign * (road_half_width + 1.5);
+                    e.width = tl->y_lane;  /* 存原始 lane_y */
                 }
             } else {
                 /* esmini 不可用：旧逻辑 */
                 e.x = tl->x;
-                double road_half_width = 3.5;
                 double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                e.y = sign * road_half_width;
+                double road_half_width = 3.5;
+                e.y = sign * (road_half_width + 1.5);
+                e.width = tl->y_lane;  /* 存原始 lane_y */
             }
         }
     }
@@ -823,7 +864,7 @@ static void publish_traffic_lights() {
         cJSON* light = cJSON_CreateObject();
         cJSON_AddNumberToObject(light, "id", e.id);
         cJSON_AddNumberToObject(light, "x", e.x);
-        cJSON_AddNumberToObject(light, "y_lane", e.y);
+        cJSON_AddNumberToObject(light, "y_lane", e.width);  /* e.width = lane center y, 非 pole y */
         flowsim::TLPhase ph = static_cast<flowsim::TLPhase>(e.phase_state);
         cJSON_AddStringToObject(light, "state", tl_phase_str(ph));
         cJSON_AddNumberToObject(light, "remain_s", e.phase_timer);

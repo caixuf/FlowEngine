@@ -304,6 +304,25 @@ static void on_trajectory(const Message* msg, void* user_data) {
              * 新约定下 -1=无目标，0=第 0 车道（最左）。仅在 lane_count==2 且
              * |v|<=1 时把旧 0 映射为 -1；多车道场景下 0 是合法车道索引，原样保留。 */
             if (g.lane_count == 2 && v >= -1 && v <= 1 && v == 0) v = -1;
+            /* 旧语义→新 N 车道索引转换：
+             * 旧场景（如 straight_road.json）的 route step 使用绝对语义：
+             *   -2=最左车道, -1=次左, +1=次右, +2=最右（以道路中心线为 0 参考）
+             * 新 N 车道模型 lane_center_y 的索引方向与旧语义相反：
+             *   lane 0=最右(y=+half_road-0.5*lw), lane N-1=最左(y=-half_road+0.5*lw)
+             * 转换公式（lane_count=N, half=N/2）：
+             *   旧<0: new = half - 1 - old     (例: N=4, -2→3, -1→2)
+             *   旧>0: new = half - old          (例: N=4, +1→1, +2→0)
+             * 仅当 v 看起来像旧语义（非 0..N-1 范围）时转换。 */
+            if (g.lane_count >= 2 && (v < 0 || v >= g.lane_count)) {
+                int half = g.lane_count / 2;
+                if (v < 0) {
+                    v = half - 1 - v;
+                } else if (v > 0) {
+                    v = half - v;
+                }
+                if (v < 0) v = 0;
+                if (v >= g.lane_count) v = g.lane_count - 1;
+            }
             g.route_lane = v;
         }
     }
@@ -1197,8 +1216,11 @@ protected:
             }
 
             /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
-             * 转向灯：变道中根据目标车道方向打灯，非 steer 反推。
+             * 转向灯：意图先行，在变道开始前就亮灯，通知周围车辆意图。
              *   turn_signal: 0=off, 1=left, 2=right
+             * 优先级：
+             *   1. 变道中/回切中：根据目标 y 相对当前车道中心的方向判断
+             *   2. NOA 路线意图：route_lane 已设置但 lc 尚未开始，提前亮灯
              * 双闪：紧急停车 / 碰撞时点亮。 */
             uint8_t turn_signal = 0;
             bool    hazard      = false;
@@ -1208,6 +1230,19 @@ protected:
                     turn_signal = 1;  /* left */
                 } else if (g.lc_target_y > g.lc_origin_y) {
                     turn_signal = 2;  /* right */
+                }
+            } else if (g.route_lane >= 0 && g.route_lane != g.committed_lane_side &&
+                       g.committed_lane_side >= 0 && g.lc_cooldown <= 0.0) {
+                /* NOA 路线意图先行：route_lane 已设置但尚未触发 lc_state=1，
+                 * 提前亮灯告知周围车辆即将变道。方向：用 lane_center_y 算
+                 * 目标/当前车道中心 y 比较（与变道中逻辑一致），而非 lane idx。
+                 * lane_center_y 约定：idx 越小越靠右(y 正)，idx 越大越靠左(y 负)。 */
+                double route_center_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c, 0.0);
+                double cur_center_y   = lane_center_y(g.committed_lane_side, g.lane_count, g.lane_width, road_c, 0.0);
+                if (route_center_y < cur_center_y) {
+                    turn_signal = 1;  /* 目标 y 更负(左) → 左转灯 */
+                } else if (route_center_y > cur_center_y) {
+                    turn_signal = 2;  /* 目标 y 更正(右) → 右转灯 */
                 }
             }
             /* 紧急制动时开双闪（ROAD_GUARD / collision recovery） */

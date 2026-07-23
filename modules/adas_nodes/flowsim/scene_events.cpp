@@ -125,13 +125,18 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
             double dx = ev.x - npc.x;
             if (dx <= 0 || dx > look_ahead) continue;
 
-            // 同向车流判定：TL.entity.y 已被改为路缘外立柱位置（±5m 左右），
-            // 而 NPC.y 在车道中心（±1.75m）。两者 sign 一致表示同侧路缘 /
-            // 同向车流，才需要响应本侧红绿灯；异号是对向车流的灯，跳过。
+            // 同向车流判定：TL.e.width 存的是车道中心 y（由 flowsim_node 从 y_lane +
+            // road_center_y 计算），NPC.y 是世界坐标车道中心。两者 sign 一致表示
+            // 同侧车流，才需要响应本侧红绿灯；异号是对向车流的灯，跳过。
             // 横向距离阈值放宽到 6.0m 覆盖杆位（5m）与最远同向车道中心（1.75m）
             // 的最大差。原 2.0m 阈值会过滤掉所有 TL（NPC 看不到红灯 → 闯灯撞 ego）。
-            if (ev.y * npc.y < 0.0) continue;
-            if (std::fabs(ev.y - npc.y) > 6.0) continue;
+            //
+            // 修复：用 e.width（车道中心 y）替代 e.y（杆位 y）做同侧判断。
+            // 杆位 y 在路缘外侧 ±(road_half_width+1.5)m，与 NPC.y（车道中心 ±1.75m）
+            // 相距太远，sign 乘积可能因精度/坐标偏移出错，导致 NPC 看不到本侧红灯。
+            double tl_lane_y = ev.width;  /* e.width = 车道中心 y */
+            if (tl_lane_y * npc.y < 0.0) continue;
+            if (std::fabs(ev.y - npc.y) > 10.0) continue;  /* 放宽到 10m，覆盖杆位到车道中心距离 */
 
             // 红灯/黄灯：需要减速
             if (ev.type == EntityType::TrafficLight) {

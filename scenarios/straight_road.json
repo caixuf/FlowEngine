@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。高架双向4车道（Y=7）+ 平行国道（Y=0.4, Z=34）。",
+  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。高架双向4车道（Y=0）+ 平行国道（elevation 7m）。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
@@ -20,7 +20,7 @@
         "lanes": 4,
         "lane_width": 3.5,
         "speed_limit": 22.0,
-        "nodes": [[0, 7, 0], [1000, 7, 0]],
+        "nodes": [[0, 0, 0], [1000, 0, 0]],
         "elevation_profile": [{"s": 0, "h": 7}]
       }
     ]
@@ -40,7 +40,7 @@
       "id": 2,
       "type": "car",
       "x": 300.0,
-      "y": 1.75,
+      "y": -5.25,
       "vx": 12.0,
       "vy": 0.0,
       "len": 4.6,
@@ -90,6 +90,20 @@
     "max_duration_s": 120.0,
     "min_avg_speed_mps": 5.0
   },
+  "route": [
+    {
+      "type": "lane_change",
+      "trigger_x": 70.0,
+      "target_lane": -2,
+      "label": "变道到左侧快车道（lane 0），避开前方慢车NPC1"
+    },
+    {
+      "type": "lane_change",
+      "trigger_x": 280.0,
+      "target_lane": -1,
+      "label": "变回原车道（lane 1），NPC2 cutin 后让出空间"
+    }
+  ],
   "scenarios": [
     {
       "name": "npc_cutin",

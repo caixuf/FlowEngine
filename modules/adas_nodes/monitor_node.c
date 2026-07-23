@@ -84,6 +84,7 @@ static struct {
      * (vis/main.js) 优先消费 scn.entities，scn.obstacles 作为旧场景 fallback。 */
     char   scene_road_network_json[4096];
     char   scene_entities_json[16384];  /* 完整 entities（24 NPC + ego + TL/ETC/StopLine） */
+    char   scene_ego_json[2048];        /* ego 实体 JSON（从 entities 提取，含 lights/brake/vx/vy） */
     volatile int has_scene_frame;
 
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
@@ -306,6 +307,30 @@ static void on_scene_frame(const Message* msg, void* user_data) {
             memcpy(g.scene_entities_json, ent_str, len);
             g.scene_entities_json[len] = '\0';
             free(ent_str);
+        }
+
+        /* 从 entities 中提取 ego 实体（type="ego"），缓存完整 JSON 供
+         * export_dashboard_json 使用。旧架构从 vehicle/state 提取 ego 数据，
+         * 缺少 lights（转向灯/双闪/大灯）、brake、throttle、vx、vy 等字段，
+         * 导致 3D 前端无法渲染 ego 车灯、刹车灯、油门动画。
+         *
+         * 新架构：scene/frame（scene_pub 模块）已包含完整 ego 实体，直接
+         * 缓存后 export 时合并到 scene.ego，补充旧架构缺失字段。 */
+        cJSON* entity;
+        cJSON_ArrayForEach(entity, entities) {
+            cJSON* type = cJSON_GetObjectItem(entity, "type");
+            if (type && cJSON_IsString(type) && strcmp(type->valuestring, "ego") == 0) {
+                char* ego_str = cJSON_PrintUnformatted(entity);
+                if (ego_str) {
+                    size_t len = strlen(ego_str);
+                    if (len >= sizeof(g.scene_ego_json))
+                        len = sizeof(g.scene_ego_json) - 1;
+                    memcpy(g.scene_ego_json, ego_str, len);
+                    g.scene_ego_json[len] = '\0';
+                    free(ego_str);
+                }
+                break;
+            }
         }
     }
 
@@ -586,6 +611,35 @@ static void export_dashboard_json(void) {
     cJSON_AddNumberToObject(ego_o, "heading", hdg);
     cJSON_AddNumberToObject(ego_o, "speed", spd);
     cJSON_AddNumberToObject(ego_o, "steer", steer);
+
+    /* 从 scene/frame 的 ego 实体缓存中补充旧架构缺失字段。
+     * vehicle/state 只提供 x/y/hdg/speed/steer 5 个基础字段，
+     * 缺少 3D 前端渲染需要的 lights（转向灯/双闪/大灯）、brake（刹车灯）、
+     * throttle（油门动画）、vx/vy（速度矢量）、length/width（尺寸）、
+     * ai_state（AI 状态标签）、target_vx（巡航速度）。
+     *
+     * 合并策略：position/heading/speed/steer 以 vehicle/state 为主（物理仿真真值），
+     * 其余字段从 scene/frame 补充。scene/frame 与 vehicle/state 来自同一帧，
+     * 时间戳一致，不会有 stale data 问题。 */
+    if (g.has_scene_frame && g.scene_ego_json[0] != '\0') {
+        cJSON* ego_src = cJSON_Parse(g.scene_ego_json);
+        if (ego_src) {
+            /* 从 scene/frame ego 补充的字段清单（不在 vehicle/state 中） */
+            const char* merge_fields[] = {
+                "lights", "brake", "throttle", "vx", "vy",
+                "target_vx", "length", "width", "ai_state",
+                NULL
+            };
+            for (int i = 0; merge_fields[i]; i++) {
+                cJSON* field = cJSON_GetObjectItem(ego_src, merge_fields[i]);
+                if (field) {
+                    cJSON* dup = cJSON_Duplicate(field, 1);
+                    if (dup) cJSON_AddItemToObject(ego_o, merge_fields[i], dup);
+                }
+            }
+            cJSON_Delete(ego_src);
+        }
+    }
 
     cJSON* lane_o = cJSON_AddObjectToObject(scene, "lane");
     cJSON_AddNumberToObject(lane_o, "width", g.lane_width);
