@@ -138,6 +138,11 @@ Transport* transport_create(MessageBus* bus, DiscoveryManager* discovery,
     t->policy    = policy;
     pthread_mutex_init(&t->mutex, NULL);
 
+    if (!discovery && policy != TRANSPORT_LOCAL) {
+        LOG_WARN("transport", "policy=%d but discovery=NULL, all topics will fall back to LOCAL bus",
+                 (int)policy);
+    }
+
     /* 如果是 REMOTE 或 AUTO 模式，创建 TCP 传输层 */
     if (policy == TRANSPORT_REMOTE || policy == TRANSPORT_AUTO) {
         t->net_transport = net_transport_create("0.0.0.0", 0, bus, discovery);

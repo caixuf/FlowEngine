@@ -11,6 +11,7 @@
 #include "message_bus.h"
 #include "error_codes.h"
 #include "clock_service.h"
+#include "logger.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -292,6 +293,11 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
                     uint64_t age_ms = (clock_now_monotonic_wall_us() - msg->timestamp_us) / 1000ULL;
                     if (age_ms > (uint64_t)q->lifespan_ms) {
                         bus->topic_entries[i].stats.drop_count++;
+                        if (bus->topic_entries[i].stats.drop_count % 100 == 1) {
+                            LOG_WARN("message_bus", "topic '%s' lifespan expired (%lu ms > %d ms), drop_count=%lu",
+                                     msg->topic, (unsigned long)age_ms, q->lifespan_ms,
+                                     (unsigned long)bus->topic_entries[i].stats.drop_count);
+                        }
                         if (bus->topic_entries[i].pending_count > 0)
                             bus->topic_entries[i].pending_count--;
                         pthread_mutex_unlock(&bus->topic_mutex);
@@ -592,6 +598,10 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
                 case QOS_DROP_LATEST:
                     should_drop = true;  /* Drop this new message */
                     s->drop_count++;
+                    if (s->drop_count % 100 == 1) {
+                        LOG_WARN("message_bus", "topic '%s' QOS_DROP_LATEST depth=%u full, drop_count=%lu",
+                                 resolved_topic, depth, (unsigned long)s->drop_count);
+                    }
                     break;
                 case QOS_BLOCK: {
                     /* Block until the topic has drained below depth (bounded).
@@ -608,6 +618,11 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
                     if (bus->topic_entries[ti].pending_count >= depth) {
                         should_drop = true;
                         s->drop_count++;
+                        if (s->drop_count % 100 == 1) {
+                            LOG_WARN("message_bus", "topic '%s' QOS_BLOCK timeout after %d ms, drop_count=%lu",
+                                     resolved_topic, max_waits,
+                                     (unsigned long)s->drop_count);
+                        }
                     }
                     break;
                 }
@@ -628,6 +643,10 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
             if (bus->topic_entries[ti].pending_count > 0)
                 bus->topic_entries[ti].pending_count--;
             bus->topic_entries[ti].stats.drop_count++;
+            if (bus->topic_entries[ti].stats.drop_count % 100 == 1) {
+                LOG_WARN("message_bus", "topic '%s' QOS_DROP_OLDEST evicted oldest, drop_count=%lu",
+                         resolved_topic, (unsigned long)bus->topic_entries[ti].stats.drop_count);
+            }
         }
         pthread_mutex_unlock(&bus->topic_mutex);
         atomic_fetch_add(&bus->stat_dropped, 1);
@@ -638,6 +657,11 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
         atomic_fetch_add(&bus->stat_published, 1);
     } else {
         atomic_fetch_add(&bus->stat_dropped, 1);
+        uint64_t total = atomic_load(&bus->stat_dropped);
+        if (total % 100 == 1) {
+            LOG_WARN("message_bus", "ring buffer full (topic '%s'), total_dropped=%lu",
+                     resolved_topic, (unsigned long)total);
+        }
     }
 
     /* Per-topic tracking */
@@ -668,6 +692,10 @@ int message_bus_publish(MessageBus* bus, const char* topic, const char* sender,
             }
         } else {
             s->drop_count++;
+            if (s->drop_count % 100 == 1) {
+                LOG_WARN("message_bus", "topic '%s' ring buffer push failed, drop_count=%lu",
+                         resolved_topic, (unsigned long)s->drop_count);
+            }
         }
     }
     pthread_mutex_unlock(&bus->topic_mutex);

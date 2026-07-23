@@ -993,13 +993,45 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     drops = sum(int(t.get("drop", 0) or 0) for t in topics.values())
     total_pub = sum(int(t.get("pub", 0) or 0) for t in topics.values())
     drop_rate = drops / total_pub if total_pub > 0 else 0.0
-    # Tolerate transient drops during startup/scheduling jitter.
-    # Visual upgrades do not affect backend transport; threshold raised to avoid
-    # flaky CI failures on heavily-loaded runners.
     if drops > 50 or drop_rate > 0.01:
         failures.append(f"message drops detected: {drops} (rate {drop_rate*100:.2f}%)")
     elif drops > 0:
         warnings.append(f"message drops detected: {drops} (rate {drop_rate*100:.2f}%)")
+
+    # ── min_forward_gap 近距/碰撞 FAIL ──
+    # 前方有车但 gap <= 0 → 追尾/碰撞，直接 FAIL（无论是否触发 COLLISION 正则）
+    min_gap_all = min(m["min_forward_gap"] for m in series if not math.isinf(m["min_forward_gap"]))
+    if min_gap_all <= 0.0:
+        failures.append(f"min_forward_gap <= 0 (min={min_gap_all:.2f}m): rear-end collision risk")
+    elif min_gap_all < 5.0:
+        warnings.append(f"min_forward_gap too small: min={min_gap_all:.2f}m (< 5m safety buffer)")
+
+    # ── 感知降频检测 ──
+    # 场景有 entities 但 obstacles 长期为空 → 感知链路降频/掉线
+    has_entities = bool(scenario.get("actors") or scenario.get("entities"))
+    frames_with_obs = sum(1 for m in series if m["obs_world"])
+    obs_ratio = frames_with_obs / len(series) if series else 0.0
+    if has_entities and obs_ratio < 0.3:
+        failures.append(f"perception dropout: obstacles present in only {obs_ratio*100:.1f}% frames (scene has entities)")
+    elif has_entities and obs_ratio < 0.7:
+        warnings.append(f"perception degradation: obstacles in {obs_ratio*100:.1f}% frames")
+
+    # ── 上游 dead 专项断言 ──
+    # DATA_TIMEOUT / EKF_NOT_CONVERGED 出现频率过高 → 上游定位/感知已死
+    data_timeout_frames = sum(1 for m in series if m["driver_mode"] == "DATA_TIMEOUT")
+    ekf_timeout_frames = sum(1 for m in series if m["driver_mode"] == "EKF_NOT_CONVERGED")
+    total_frames = len(series)
+    if total_frames > 0:
+        dt_ratio = data_timeout_frames / total_frames
+        ekf_ratio = ekf_timeout_frames / total_frames
+        if dt_ratio > 0.1:
+            failures.append(f"upstream DATA_TIMEOUT: {dt_ratio*100:.1f}% frames ({data_timeout_frames}/{total_frames})")
+        elif dt_ratio > 0.02:
+            warnings.append(f"upstream DATA_TIMEOUT: {dt_ratio*100:.1f}% frames")
+        if ekf_ratio > 0.1:
+            failures.append(f"EKF not converged: {ekf_ratio*100:.1f}% frames ({ekf_timeout_frames}/{total_frames})")
+        elif ekf_ratio > 0.02:
+            warnings.append(f"EKF not converged: {ekf_ratio*100:.1f}% frames")
 
     # ── inference/trajectory frequency check (only when topic is present in runtime data) ──
     inference_freq = float(topics.get("inference/trajectory", {}).get("freq", 0.0) or 0.0)

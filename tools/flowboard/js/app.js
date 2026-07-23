@@ -499,7 +499,10 @@ function startSSE() {
   eventSource.onmessage = function(e) {
     if (paused) return;
     try { topoData = JSON.parse(e.data); }
-    catch(err) { return; }
+    catch(err) {
+      console.warn('[SSE] JSON parse failed:', err.message, 'data length:', e.data ? e.data.length : 0, 'first 200 chars:', (e.data || '').slice(0, 200));
+      return;
+    }
     // 收到消息即刷新数据时间戳并重置退避
     _markDataFresh();
     _reconnectDelay = 2000;
