@@ -252,9 +252,11 @@ export function createVehicleView(scene, renderer, modelCache) {
     return group;
   }
 
-  /** 从 glTF 创建车辆 */
+  /** 从 glTF 创建车辆。
+   *  getModel() 返回的已经是 THREE.Group（非 loader 原始 {scene}），
+   *  直接对其 clone，不要走 .scene 否则抛 TypeError 导致永远回退 fallback。 */
   function _createGltfVehicle(gltf, id) {
-    const scene = gltf.scene.clone(true);
+    const scene = gltf.clone(true);
     scene.name = 'gltf_' + id;
     // 应用车漆升级
     _applyCarPaintToScene(scene, _envMap);
