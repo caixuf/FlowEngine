@@ -110,8 +110,14 @@ export function createTrafficLightView(scene) {
         entry = _createTrafficLight();
         pool.set(ent.id, entry);
       }
-      // 位姿：放在路边（entity.y 是横向偏移，加偏移到路肩）
-      entry.group.position.set(...worldToThree(ent.x, ent.y, 0));
+      // 位姿：放在路边（entity.y 是横向偏移，加偏移到路肩）。
+      // 高度：高架场景路面抬高 7m，灯杆必须落在 deck 上，否则被高架板挡住。
+      // 优先用 entity.z（SceneDirector 已按 isViaduct 设 7.7/0），缺失时回退
+      // store.ego.z（同源），最后兜底 0。
+      const elev = (ent.z != null) ? ent.z
+                 : (store.ego && store.ego.z != null) ? store.ego.z
+                 : 0;
+      entry.group.position.set(...worldToThree(ent.x, ent.y, elev));
       _setLight(entry, ent.state);
     }
   }

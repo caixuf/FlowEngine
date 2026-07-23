@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。高架双向4车道（Y=0）+ 平行国道（elevation 7m）。",
+  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。平路双向4车道（Y=0），10km 直路。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
@@ -14,14 +14,13 @@
     "edges": [
       {
         "id": 0,
-        "type": "viaduct_highway",
-        "name": "viaduct_highway",
-        "length_m": 1000,
+        "type": "highway",
+        "name": "straight",
+        "length_m": 10000,
         "lanes": 4,
         "lane_width": 3.5,
         "speed_limit": 22.0,
-        "nodes": [[0, 0, 0], [1000, 0, 0]],
-        "elevation_profile": [{"s": 0, "h": 7}]
+        "nodes": [[0, 0, 0], [10000, 0, 0]]
       }
     ]
   },

@@ -142,7 +142,7 @@ bash scripts/demo.sh --no-browser # 不打开浏览器
 
 ## Pipeline
 
-默认配置（`config/pipeline.json`）启动 **12 个插件节点**，默认场景为高架直路（`scenarios/straight_road.json`，1000m 双向 4 车道高架 + 平行国道）：
+默认配置（`config/pipeline.json`）启动 **12 个插件节点**，默认场景为平路直路（`scenarios/straight_road.json`，10km 双向 4 车道平路，含 NPC/行人/红绿灯）：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
@@ -341,7 +341,7 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 | 场景 | 描述 |
 |------|------|
-| `straight_road.json` | 无 NPC 单 ego 直路：1000m 高架双向 4 车道（Y=7）+ 平行国道（Y=0.4, Z=34），用于验证感知-融合-规划-控制链路与 FlowBoard 3D 渲染 |
+| `straight_road.json` | 直路综合场景：10km 平路双向 4 车道（Y=0），含 NPC 慢车/cutin、行人横穿、红绿灯停车，用于验证感知-融合-规划-控制链路与 FlowBoard 3D 渲染 |
 
 更多典型场景（弯道、超车、行人横穿、cut-in、鬼探头、高速出口、无保护路口等）已列入
 [docs/REAL_VEHICLE_ROADMAP.md](docs/REAL_VEHICLE_ROADMAP.md) 可视化/仿真打磨章节，

@@ -11,6 +11,12 @@
 
 import { mergeGeometries } from '../math/GeometryMerge.js';
 
+/** wrap 前瞻余量（米）：高架 deck 实际建造长度 = wrap 周期 + LOOKAHEAD，
+ *  使 deck 末端始终超出当前 wrap 周期边界，消除 ego 接近周期末尾时
+ *  "路到头"的可见接缝（end wall 永远在相机视野之外）。
+ *  followEgo 把 deck 中心对齐 wrapOffset + visLen/2，故前后各外伸 LOOKAHEAD/2。 */
+const LOOKAHEAD = 200;
+
 let _mats = null;
 let _geos = null;
 
@@ -605,7 +611,9 @@ export function createViaductView(scene) {
     const width = laneCount * laneWidth;
     const withEnv = opts.withEnvironment !== false;
 
-    _buildElevatedHighway(group, 0, 0, length, width, 7, laneCount);
+    // deck 加 LOOKAHEAD 前瞻：wrap 周期仍是 visLen（SceneDirector 按 edge.length），
+    // 但 deck 多建 LOOKAHEAD 米，followEgo 居中后末端外伸 LOOKAHEAD/2，消除"路到头"。
+    _buildElevatedHighway(group, 0, 0, length + LOOKAHEAD, width, 7, laneCount);
     _buildNationalHighway(group, 0, -34, length, width, laneCount);
 
     if (withEnv) {
