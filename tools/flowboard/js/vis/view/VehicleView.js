@@ -181,37 +181,33 @@ export function createVehicleView(scene, renderer, modelCache) {
     return entry.group;
   }
 
-  /** 创建程序化 fallback（保留原 getStdMaterial 但升级为 MeshPhysicalMaterial） */
+  /** 创建程序化 fallback（MeshPhysicalMaterial 车漆 + X-forward 朝向） */
   function _createFallbackVehicle(type, id) {
     const group = new THREE.Group();
-    let bodyMat;
 
-    // 尝试用 MeshPhysicalMaterial 替代 MeshStandardMaterial
-    const stdMat = getStdMaterial(type);
-    if (stdMat && stdMat.color) {
-      bodyMat = new THREE.MeshPhysicalMaterial({
-        color: stdMat.color.getHex(),
-        metalness: PAINT_METALNESS,
-        roughness: PAINT_ROUGHNESS,
-        clearcoat: PAINT_CLEARCOAT,
-        clearcoatRoughness: PAINT_CLEARCOAT_ROUGHNESS,
-        envMap: _envMap || null,
-        envMapIntensity: ENVMAP_INTENSITY,
-        depthWrite: true,
-      });
-    } else {
-      bodyMat = new THREE.MeshPhysicalMaterial({
-        color: 0xcccccc,
-        metalness: PAINT_METALNESS,
-        roughness: PAINT_ROUGHNESS,
-        clearcoat: PAINT_CLEARCOAT,
-        clearcoatRoughness: PAINT_CLEARCOAT_ROUGHNESS,
-        depthWrite: true,
-      });
-    }
+    // 车型 → 车身颜色映射（与 gen_models.py 材质一致）
+    const COLOR_MAP = {
+      su7: 0x1a5288,    // 海湾蓝
+      sedan: 0x2a6fc4,   // 深蓝
+      truck: 0x4a4a4a,   // 深灰
+      suv: 0x2d6b3a,     // 深绿
+      car: 0x2a6fc4,
+    };
+    const bodyColor = COLOR_MAP[type] || 0xcccccc;
 
-    // 简易盒子车身（保留原逻辑，换材质）
-    const bodyGeo = new THREE.BoxGeometry(1.8, 0.6, 4.5);
+    const bodyMat = new THREE.MeshPhysicalMaterial({
+      color: bodyColor,
+      metalness: PAINT_METALNESS,
+      roughness: PAINT_ROUGHNESS,
+      clearcoat: PAINT_CLEARCOAT,
+      clearcoatRoughness: PAINT_CLEARCOAT_ROUGHNESS,
+      envMap: _envMap || null,
+      envMapIntensity: ENVMAP_INTENSITY,
+      depthWrite: true,
+    });
+
+    // 车身：长轴沿 X（forward），宽沿 Z（与 glTF 模型一致）
+    const bodyGeo = new THREE.BoxGeometry(4.5, 0.6, 1.8);
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.castShadow = true;
     body.receiveShadow = true;
@@ -219,7 +215,7 @@ export function createVehicleView(scene, renderer, modelCache) {
     group.add(body);
 
     // 挡风玻璃（半透明）
-    const glassGeo = new THREE.BoxGeometry(1.6, 0.35, 0.1);
+    const glassGeo = new THREE.BoxGeometry(0.1, 0.35, 1.6);
     const glassMat = new THREE.MeshPhysicalMaterial({
       color: 0x88ccff,
       roughness: 0.1,
@@ -229,25 +225,25 @@ export function createVehicleView(scene, renderer, modelCache) {
       depthWrite: false,
     });
     const glass = new THREE.Mesh(glassGeo, glassMat);
-    glass.position.set(0, 0.95, 0.8);
+    glass.position.set(0.8, 0.95, 0);
     group.add(glass);
 
     // 后窗
     const rearGlass = new THREE.Mesh(glassGeo.clone(), glassMat);
-    rearGlass.position.set(0, 0.95, -0.8);
+    rearGlass.position.set(-0.8, 0.95, 0);
     group.add(rearGlass);
 
-    // 轮毂（4个圆柱）
+    // 轮毂（4个圆柱，轴沿 Z 与 glTF 一致）
     const wheelGeo = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 16);
     const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6, metalness: 0.7 });
     const wheelPositions = [
-      [-0.8, 0.3, 1.3], [0.8, 0.3, 1.3],
-      [-0.8, 0.3, -1.3], [0.8, 0.3, -1.3],
+      [1.3, 0.3, -0.8], [1.3, 0.3, 0.8],
+      [-1.3, 0.3, -0.8], [-1.3, 0.3, 0.8],
     ];
     wheelPositions.forEach(([x, y, z]) => {
       const w = new THREE.Mesh(wheelGeo, wheelMat);
       w.position.set(x, y, z);
-      w.rotation.z = Math.PI / 2;
+      w.rotation.x = Math.PI / 2; // 圆柱轴从 Y → Z（横向，与 glTF cylinder axis=Z 一致）
       w.castShadow = true;
       group.add(w);
     });
@@ -308,6 +304,11 @@ export function createVehicleView(scene, renderer, modelCache) {
     // 尝试加载 glTF 模型
     const gltf = getModel(type);
     if (gltf && !entry.modelData) {
+      // 清除旧 fallback group（避免双重模型叠加）
+      if (entry.group) {
+        vehicleGroup.remove(entry.group);
+        entry.group = null;
+      }
       entry.modelData = gltf;
       entry.group = _createGltfVehicle(gltf, id);
       vehicleGroup.add(entry.group);
@@ -408,11 +409,11 @@ export function createVehicleView(scene, renderer, modelCache) {
     // 收集所有需要渲染的实体（ego + 其他车辆/NPC）
     const activeIds = new Set();
 
-    // 1. ego 车辆（type 用于选模型：'ego' → sedan）
+    // 1. ego 车辆（type 用于选模型：'ego' → su7）
     if (store.ego) {
       const egoId = 'ego';
       activeIds.add(egoId);
-      updateVehicle(egoId, store.ego, 'sedan');
+      updateVehicle(egoId, store.ego, 'su7');
     }
 
     // 2. 其他实体（car/truck/suv/pedestrian 等）
