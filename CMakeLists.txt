@@ -119,64 +119,29 @@ if(NOT CJSON_FOUND)
 endif()
 
 # =============================================================================
-# flowcoro — 内置源码（third_party/flowcoro/），无需网络下载
-# 原 FetchContent 从 GitHub 拉取，CI 环境常因 tree 不可达而失败。
-# 现将稳定版本 (8607075) 直接内置为 lib + h。
-# flowcoro main(8607075) 起新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
+# flowcoro — C++20 高性能协程库 (https://github.com/caixuf/flowcoro)
+# 使用 FetchContent 从 GitHub 拉取完整源码
+# =============================================================================
+# 关闭 flowcoro 自身的测试/示例/文档，只编译核心库
+set(FLOWCORO_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_DOCS      OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_ENABLE_DATABASE OFF CACHE BOOL "" FORCE)
+set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    flowcoro
+    GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(flowcoro)
+# flowcoro main 新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
 # 纯 C 节点 / FFI 宿主可直接 #include <flowcoro/c_api.h> 调用
 # flowcoro_pool_create / flowcoro_pool_submit / flowcoro_task_wait /
 # flowcoro_alloc / flowcoro_shutdown。C 接口实现随 flowcoro_net 静态库一起产出，
 # 链接 flowcoro_net 即可拿到 C ABI 符号。
-# =============================================================================
-set(FLOWCORO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/flowcoro)
-
-# 添加 flowcoro 头文件搜索路径（项目级别，确保所有目标都能看到）
-# flowcoro 头文件有两种 include 风格：
-#   #include "flowcoro/core.h"  → 需要 include/
-#   #include "core.h"           → 需要 include/flowcoro/ (net.h 等内部头文件)
-include_directories(
-    ${FLOWCORO_DIR}/include
-    ${FLOWCORO_DIR}/include/flowcoro
-)
-
-# flowcoro — header-only INTERFACE 库
-add_library(flowcoro INTERFACE)
-target_include_directories(flowcoro INTERFACE
-    ${FLOWCORO_DIR}/include
-)
-target_compile_features(flowcoro INTERFACE cxx_std_20)
-target_link_libraries(flowcoro INTERFACE
-    Threads::Threads
-    $<$<PLATFORM_ID:Linux>:atomic>
-)
-
-# flowcoro_net — 静态库（C ABI + 协程池 + 网络实现）
-add_library(flowcoro_net STATIC
-    ${FLOWCORO_DIR}/src/net_impl.cpp
-    ${FLOWCORO_DIR}/src/globals.cpp
-    ${FLOWCORO_DIR}/src/coroutine_pool.cpp
-    ${FLOWCORO_DIR}/src/c_api.cpp
-)
-# flowcoro 头文件有两种 include 风格：
-#   #include "flowcoro/core.h"  → 需要 include/
-#   #include "core.h"           → 需要 include/flowcoro/ (net.h 等内部头文件)
-# 所以两个目录都要加，确保 CI 环境也能正确解析。
-target_include_directories(flowcoro_net PUBLIC
-    ${FLOWCORO_DIR}/include
-    ${FLOWCORO_DIR}/include/flowcoro
-)
-target_compile_features(flowcoro_net PUBLIC cxx_std_20)
-target_link_libraries(flowcoro_net PUBLIC
-    flowcoro
-    Threads::Threads
-    $<$<PLATFORM_ID:Linux>:atomic>
-)
-target_compile_definitions(flowcoro_net PUBLIC
-    "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\""
-)
-target_compile_options(flowcoro_net PUBLIC
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
-)
 
 # ── Eigen3 (header-only linear algebra, for Frenet planner) ──
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
@@ -243,7 +208,7 @@ set(BUILD_TESTING ON CACHE BOOL "" FORCE)
 # =============================================================================
 add_library(flowcoro_headers INTERFACE)
 target_include_directories(flowcoro_headers INTERFACE
-    ${FLOWCORO_DIR}/include
+    ${flowcoro_SOURCE_DIR}/include
 )
 target_compile_features(flowcoro_headers INTERFACE cxx_std_20)
 # GCC 需要显式 -fcoroutines（C++20 模式下通常已隐含，但显式更安全）
@@ -686,7 +651,7 @@ set_tests_properties(flow_launcher_smoke PROPERTIES TIMEOUT 150 LABELS "integrat
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
-message(STATUS "flowcoro source dir: ${FLOWCORO_DIR} (vendored)")
+message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
 add_custom_target(dev DEPENDS launcher flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
