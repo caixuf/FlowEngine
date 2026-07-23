@@ -119,10 +119,10 @@ if(NOT CJSON_FOUND)
 endif()
 
 # =============================================================================
-# flowcoro — 内置版本（third_party/flowcoro/），无需网络下载
-# 原 FetchContent 从 GitHub 拉取，CI 环境常因 tree 不可达而失败。
-# 现将稳定版本 (8607075) 直接内置为 lib + h。
-# flowcoro main(8607075) 起新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
+# flowcoro — 内置预编译静态库（third_party/flowcoro/），无需网络下载或源码编译
+# 原 FetchContent 从 GitHub 拉取，CI 环境常因 tree 不可达 / 编译器差异而失败。
+# 现将稳定版本 (8607075) 预编译为 libflowcoro_net.a 直接内置，头文件 + .a 即可用。
+# flowcoro main(8607075) 起新增 C ABI：include/flowcoro/c_api.h。
 # 纯 C 节点 / FFI 宿主可直接 #include <flowcoro/c_api.h> 调用
 # flowcoro_pool_create / flowcoro_pool_submit / flowcoro_task_wait /
 # flowcoro_alloc / flowcoro_shutdown。C 接口实现随 flowcoro_net 静态库一起产出，
@@ -141,27 +141,15 @@ target_link_libraries(flowcoro INTERFACE
     $<$<PLATFORM_ID:Linux>:atomic>
 )
 
-# flowcoro_net — 静态库（C ABI + 协程池 + 网络实现）
-add_library(flowcoro_net STATIC
-    ${FLOWCORO_DIR}/src/net_impl.cpp
-    ${FLOWCORO_DIR}/src/globals.cpp
-    ${FLOWCORO_DIR}/src/coroutine_pool.cpp
-    ${FLOWCORO_DIR}/src/c_api.cpp
-)
-target_include_directories(flowcoro_net PUBLIC
-    ${FLOWCORO_DIR}/include
-)
-target_compile_features(flowcoro_net PUBLIC cxx_std_20)
-target_link_libraries(flowcoro_net PUBLIC
-    flowcoro
-    Threads::Threads
-    $<$<PLATFORM_ID:Linux>:atomic>
-)
-target_compile_definitions(flowcoro_net PUBLIC
-    "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\""
-)
-target_compile_options(flowcoro_net PUBLIC
-    $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>
+# flowcoro_net — 预编译静态库（IMPORTED），无需源码编译
+add_library(flowcoro_net STATIC IMPORTED)
+set_target_properties(flowcoro_net PROPERTIES
+    IMPORTED_LOCATION "${FLOWCORO_DIR}/lib/libflowcoro_net.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${FLOWCORO_DIR}/include"
+    INTERFACE_COMPILE_FEATURES "cxx_std_20"
+    INTERFACE_COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU>:-fcoroutines>"
+    INTERFACE_COMPILE_DEFINITIONS "PROJECT_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\""
+    INTERFACE_LINK_LIBRARIES "flowcoro;Threads::Threads;$<$<PLATFORM_ID:Linux>:atomic>"
 )
 
 # ── Eigen3 (header-only linear algebra, for Frenet planner) ──
