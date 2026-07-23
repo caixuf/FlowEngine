@@ -208,7 +208,20 @@ ScenarioConfig* scenario_load(const char* path) {
      * （如 viaduct_highway 触发高架场景）。与旧格式 road 字段完全兼容：
      *   - 有 road_network 无 road → 用 road_network 的 type，road 字段全零（直道）
      *   - 有 road 无 road_network → 走旧逻辑，type 为空（向后兼容）
-     *   - 两者都有 → type 取 road_network，curve_* 取 road（保留弯道配置） */
+     *   - 两者都有 → type 取 road_network，curve_* 取 road（保留弯道配置）
+     *
+     * 前端渲染副作用：edge.type 是触发 ViaductView（高架）分支的唯一键，
+     * 非法值可能导致渲染异常。此处做枚举校验，非法值 LOG_WARN 并回退
+     * 到 "highway"（平路，最安全默认值）。 */
+    static const char* VALID_EDGE_TYPES[] = {
+        "highway",        /* 高速公路/城市快速路（平路） */
+        "urban",          /* 城市道路 */
+        "viaduct_highway",/* 高架快速路（触发前端高架渲染分支） */
+        "ramp_curve",     /* 匝道/弯道 */
+        "cross_road",     /* 十字路口 */
+        "",               /* 空 = 向后兼容，不触发任何特殊分支 */
+        NULL
+    };
     cJSON* jrn = cJSON_GetObjectItemCaseSensitive(root, "road_network");
     if (cJSON_IsObject(jrn)) {
         cJSON* jedges = cJSON_GetObjectItemCaseSensitive(jrn, "edges");
@@ -217,7 +230,16 @@ ScenarioConfig* scenario_load(const char* path) {
             if (cJSON_IsObject(jedge0)) {
                 cJSON* jtype = cJSON_GetObjectItemCaseSensitive(jedge0, "type");
                 if (cJSON_IsString(jtype) && jtype->valuestring) {
-                    strncpy(sc->road.type, jtype->valuestring, sizeof(sc->road.type) - 1);
+                    const char* etype = jtype->valuestring;
+                    int valid = 0;
+                    for (int i = 0; VALID_EDGE_TYPES[i]; i++) {
+                        if (strcmp(etype, VALID_EDGE_TYPES[i]) == 0) { valid = 1; break; }
+                    }
+                    if (!valid) {
+                        LOG_WARN("scenario", "edge[0].type='%s' 非法，有效值: highway/urban/viaduct_highway/ramp_curve/cross_road，回退 highway", etype);
+                        etype = "highway";
+                    }
+                    strncpy(sc->road.type, etype, sizeof(sc->road.type) - 1);
                 }
             }
         }

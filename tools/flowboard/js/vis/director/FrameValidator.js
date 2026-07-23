@@ -127,5 +127,65 @@ export function validateFrame(topoData) {
     }
   }
 
+  /* ── 不变量：实体/ego 高度 vs 路网高度偏差 >2m → 悬空/入地告警 ──
+   * 把"红绿灯在路面下 7m"这类问题从静默变成可见 warn。
+   * 只对有路网、有坐标的数据做检查，不因此阻断渲染。 */
+  if (rn && rn.edges && rn.edges.length > 0) {
+    const toCheck = [];
+    if (frame.ego && typeof frame.ego === 'object') {
+      toCheck.push({ label: 'ego', x: frame.ego.x, y: frame.ego.y, z: frame.ego.z });
+    }
+    if (frame.entities && Array.isArray(frame.entities)) {
+      for (let i = 0; i < frame.entities.length; i++) {
+        const e = frame.entities[i];
+        if (!e || e.type === 'ego') continue;
+        toCheck.push({ label: 'entity[' + i + '](type=' + (e.type || '?') + ')', x: e.x, y: e.y, z: e.z });
+      }
+    }
+    for (const item of toCheck) {
+      const rz = _roadHeightAt(rn.edges, item.x, item.y);
+      const dz = Math.abs((item.z || 0) - rz);
+      if (dz > 2.0) {
+        warnings.push({
+          key: 'height.' + item.label,
+          msg: item.label + ' z=' + (item.z || 0) + 'm 与路面高度 ' + rz + 'm 偏差 ' + dz.toFixed(1) + 'm，可能悬空或入地',
+        });
+      }
+    }
+  }
+
   return { ok: true, frame, rn, skipRoad, skipEgo, skipEntities, warnings };
+}
+
+/** 轻量路面高度查询（FrameValidator 零依赖版）
+ *  复用 RoadHeight.js 算法：找最近 edge 投影，线性插值 z。 */
+function _roadHeightAt(edges, px, py) {
+  let minDist = Infinity, resultZ = 0;
+  for (const edge of edges) {
+    const nodes = edge.nodes;
+    if (!nodes || nodes.length < 2) continue;
+    const laneWidth = edge.lane_width || 3.5;
+    const lanes = edge.lanes || 2;
+    const halfWidth = (lanes * laneWidth) / 2 + 3;
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const a = nodes[i], b = nodes[i + 1];
+      const ax = a[0], ay = a[1], bx = b[0], by = b[1];
+      const dx = bx - ax, dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      if (len2 < 1e-6) continue;
+      let t = ((px - ax) * dx + (py - ay) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const projX = ax + dx * t;
+      const projY = ay + dy * t;
+      const dist = Math.hypot(px - projX, py - projY);
+      if (dist < minDist) {
+        minDist = dist;
+        const edgeT = (i + t) / (nodes.length - 1);
+        const az = a[2] || 0, bz = b[2] || 0;
+        resultZ = az + (bz - az) * edgeT;
+      }
+    }
+    if (minDist <= halfWidth) break; // 已在道路范围内，不必继续
+  }
+  return resultZ;
 }

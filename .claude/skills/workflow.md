@@ -50,6 +50,23 @@ bash scripts/demo.sh --scenario scenarios/<target>.json --no-browser <duration>
 cp /tmp/flow_topology.json /tmp/verify_<name>.json
 ```
 
+### 3.1a 视觉验收（前端渲染验证 — 必做，不许甩给用户）
+
+**只抓 JSON 不够。** 以下问题 JSON 正常但画面异常，必须通过浏览器实机确认：
+
+```bash
+# 1. 起 demo（后台运行，不自动开浏览器）
+bash scripts/demo.sh --no-browser 120
+
+# 2. 手动打开浏览器 → http://localhost:8800
+# 3. F12 → Console → 输入 window.__vis 确认 store 数据
+# 4. 目视检查 checklist：
+#    [ ] 所有 NPC 可见且车轮贴路面
+#    [ ] 红绿灯/行人/路侧设施可见（不在路面下/空中）
+#    [ ] 跑满 120s，ego 前方始终有路，无 end-wall 接缝
+# 5. 若 JSON 有但画面无 → 排查前端 isViaduct / RoadHeight / wrap 分支，不要只改生产端
+```
+
 ### 3.2 回归测试
 
 ```bash

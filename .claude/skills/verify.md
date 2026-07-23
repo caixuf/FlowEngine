@@ -124,6 +124,27 @@ nearest road start.
 **Fix:** All `s` values in scenario JSON actors must be ≥ 0. Negative s is semantically invalid
 in OpenDRIVE (no road surface exists before s=0).
 
+## 视觉验收（前端渲染验证 — 必做）
+
+**不能只抓 JSON 数据！** JSON 里有不代表画面里能看到。以下 bug 模式只能通过浏览器实机确认：
+
+| 症状 | 根因 | 验证方法 |
+|------|------|---------|
+| NPC/红绿灯/行人"有数据但看不见" | isViaduct 分叉错误：flat 场景的 edge 被标成 `viaduct_highway`，导致物体被抬高到 z=7.7m（高架 deck），或红绿灯被放到路面下 7m | 浏览器打开 `http://localhost:8800`，按 F12 → Console → 确认 `window.__vis` 存在；目视确认所有 entity 落在路面上 |
+| "路到头了"（开到某处路突然消失） | viaduct 分支的 wrap 逻辑：deck 长度 < visLen，或 wrapOffset 没对齐 | 持续跑 120s，ego 前方始终有路，无 end-wall 接缝 |
+| 车辆悬空/入地 | 高度基准错位：VehicleView 硬编码 z=0，但路面实际 z=7（高架） | 侧面视角观察车轮是否贴地 |
+
+**视觉验收 checklist：**
+1. 起 demo：`bash scripts/demo.sh --no-browser 120`
+2. 浏览器打开 `http://localhost:8800`
+3. 按 F12 → Console 输入 `window.__vis` 确认 store 数据
+4. **目视检查**：
+   - [ ] 所有 NPC 车辆可见且车轮贴路面
+   - [ ] 红绿灯可见（杆+臂+灯壳完整）
+   - [ ] 行人可见（不在路面下）
+   - [ ] 跑满 120s 路不断
+5. **若 JSON 有但画面无** → 直接排查前端渲染分支（isViaduct / RoadHeight / wrap），不要再改生产端
+
 ## Diagnostic commands
 
 ```bash

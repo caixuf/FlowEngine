@@ -27,6 +27,24 @@
 
 ## 路网设计规则
 
+### ⚠️ edge.type 前端渲染副作用（极易踩坑）
+
+**`edge.type` 是前端选择渲染分支的唯一触发键**，写错会导致"数据有但画面无"的静默 bug：
+
+| edge.type | 前端行为 | 使用场景 | 错误后果 |
+|-----------|---------|---------|---------|
+| `highway` | RoadView 平路 ribbon + 车道线 | 普通高速/城市快速路 | — |
+| `urban` | RoadView 平路 + StreetlightView 路灯 + BarrierView 护栏 | 城市道路 | — |
+| `viaduct_highway` | **ViaductView 高架分支**：抬高 deck(z=7)、桥墩、wrap 逻辑 | 真正的高架/立交场景 | **平路场景误标此类型 → NPC/红绿灯被抬高 7m 或藏到路面下，看不见** |
+| `ramp_curve` | RoadView 弯道 ribbon | 匝道/弯道 | — |
+| `cross_road` | RoadView 十字路口 | 交叉口 | — |
+| `''` (空) | RoadView 默认平路 | 向后兼容 | — |
+
+**铁律**：
+- 平路场景（ pedestrians, traffic_lights, stop_lines ）**绝对禁用** `viaduct_highway`
+- 高架场景必须有 `elevation_profile: [{"s":0,"h":7}]` 且 nodes 的 z 对应抬高
+- 不确定时选 `highway`（最安全默认值），不要抄旧模板里的 `viaduct_highway`
+
 ### 主 route 链
 `Route::build()` 会按端点连续性 + 航向连续性把 edges 链成**一条主 route**。
 ego 沿这条 route 行驶；control_node 的 Stanley 控制器从 `sample_ahead()` 消费 ref_path。

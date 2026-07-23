@@ -318,6 +318,8 @@ function build(roadNetwork) {
 - [ ] SceneDirector.js 已 import + 创建实例 + 调 update + 导出 getter
 - [ ] index.html 版本号已刷新
 - [ ] 单模块面数 < 5000
+- [ ] **浏览器目视验收**：实体落在路面上，z 高度由 `roadHeightAt(store, x, y)` 计算，不硬编码
+- [ ] **高架场景测试**：临时把 edge.type 改 `viaduct_highway`，确认物体仍正确坐在 deck 上（不悬空/不入地）
 
 ## 提示词模板（给外部设计 AI）
 

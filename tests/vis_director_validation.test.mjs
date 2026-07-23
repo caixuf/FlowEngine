@@ -153,5 +153,23 @@ check('组合 skipEntities=true', combined.skipEntities, true);
 check('组合 3 条 warnings',
   combined.warnings.length, 3);
 
+console.log('\n--- 高度不变量校验 ---');
+const heightOk = validateFrame({
+  road_network: { edges: [{ id: 0, lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]] }] },
+  ego: { x: 100, y: -1.75, z: 0 },
+  entities: [{ type: 'car', x: 200, y: -1.75, z: 0 }, { type: 'tl', x: 300, y: 0, z: 0 }],
+});
+check('entity 在路面上 → 无 height warning', hasWarningKey(heightOk, 'height.ego'), false);
+check('entity 在路面上 → warnings 数=0', heightOk.warnings.length, 0);
+
+const heightBad = validateFrame({
+  road_network: { edges: [{ id: 0, lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]] }] },
+  ego: { x: 100, y: -1.75, z: 8 },
+  entities: [{ type: 'car', x: 200, y: -1.75, z: -5 }],
+});
+check('ego 悬空 8m → height warning', hasWarningKey(heightBad, 'height.ego'), true);
+check('entity 入地 5m → height warning', hasWarningKey(heightBad, 'height.entity[0](type=car)'), true);
+check('悬空+入地 → 2 条 height warnings', heightBad.warnings.filter(w => w.key.startsWith('height.')).length, 2);
+
 console.log('\n--- summary: ' + pass + ' pass, ' + fail + ' fail ---');
 process.exit(fail > 0 ? 1 : 0);
