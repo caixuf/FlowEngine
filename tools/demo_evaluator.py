@@ -1000,20 +1000,24 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     # ── min_forward_gap 近距/碰撞 FAIL ──
     # 前方有车但 gap <= 0 → 追尾/碰撞，直接 FAIL（无论是否触发 COLLISION 正则）
-    min_gap_all = min(m["min_forward_gap"] for m in series if not math.isinf(m["min_forward_gap"]))
-    if min_gap_all <= 0.0:
-        failures.append(f"min_forward_gap <= 0 (min={min_gap_all:.2f}m): rear-end collision risk")
-    elif min_gap_all < 5.0:
-        warnings.append(f"min_forward_gap too small: min={min_gap_all:.2f}m (< 5m safety buffer)")
+    valid_gaps = [m["min_forward_gap"] for m in series if not math.isinf(m["min_forward_gap"])]
+    if valid_gaps:
+        min_gap_all = min(valid_gaps)
+        if min_gap_all <= 0.0:
+            failures.append(f"min_forward_gap <= 0 (min={min_gap_all:.2f}m): rear-end collision risk")
+        elif min_gap_all < 5.0:
+            warnings.append(f"min_forward_gap too small: min={min_gap_all:.2f}m (< 5m safety buffer)")
 
     # ── 感知降频检测 ──
     # 场景有 entities 但 obstacles 长期为空 → 感知链路降频/掉线
-    has_entities = bool(scenario.get("actors") or scenario.get("entities"))
     frames_with_obs = sum(1 for m in series if m["obs_world"])
     obs_ratio = frames_with_obs / len(series) if series else 0.0
-    if has_entities and obs_ratio < 0.3:
-        failures.append(f"perception dropout: obstacles present in only {obs_ratio*100:.1f}% frames (scene has entities)")
-    elif has_entities and obs_ratio < 0.7:
+    # 只有在 samples 中出现过至少一次障碍物时才做检测
+    # （空场景无 NPC 时不应触发感知告警）
+    has_seen_obs = frames_with_obs > 0
+    if has_seen_obs and obs_ratio < 0.3:
+        failures.append(f"perception dropout: obstacles present in only {obs_ratio*100:.1f}% frames")
+    elif has_seen_obs and obs_ratio < 0.7:
         warnings.append(f"perception degradation: obstacles in {obs_ratio*100:.1f}% frames")
 
     # ── 上游 dead 专项断言 ──
