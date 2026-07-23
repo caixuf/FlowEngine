@@ -11,6 +11,7 @@
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
 import { worldToThree } from '../math/Coord.js';
 import { roadHeightAt } from '../math/RoadHeight.js';
+import { getEdgePointAtS } from '../math/Curve.js';
 
 const RED = 0xff0000, YELLOW = 0xffaa00, GREEN = 0x00ff00;
 const LAMP_Y = [4.6, 4.3, 4.0];  // 红/黄/绿的 Y 坐标
@@ -84,11 +85,13 @@ export function createTrafficLightView(scene) {
         const tls = edge.traffic_lights || [];
         for (let i = 0; i < tls.length; i++) {
           const tl = tls[i];
+          const pt = getEdgePointAtS(edge.nodes, tl.s || 0, edge.length || 1);
           all.push({
             id: `tl_${edge.id}_${i}`,
             type: 'tl',
-            x: (edge.nodes && edge.nodes[0] ? edge.nodes[0][0] : 0) + (tl.s || 0),
+            x: pt ? pt.x : 0,
             y: tl.l || 0,
+            z: pt ? pt.z : 0,
             state: tl.state || 'red',
           });
         }

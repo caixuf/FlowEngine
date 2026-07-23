@@ -938,7 +938,7 @@ int message_bus_publish_zero_copy(MessageBus* bus, const char* topic,
      * callbacks outside the lock — prevents deadlock if a callback tries
      * to subscribe/unsubscribe_zero_copy (same non-recursive mutex). */
     typedef struct { ZeroCopyCallback cb; void* ud; } ZcSnap;
-    ZcSnap snap[MSG_BUS_MAX_ZC_SUBSCRIBERS];
+    ZcSnap snap[MSG_BUS_MAX_SUBSCRIBERS];
     int snap_count = 0;
 
     pthread_mutex_lock(&bus->zc_mutex);
