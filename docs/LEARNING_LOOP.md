@@ -183,10 +183,13 @@ python3 tools/train_e2e/train.py \
   --output models/e2e_tiny_v001
 
 # 离线评估 teacher imitation 误差
-python3 tools/eval_model.py \
-  --model models/e2e_tiny_v001 \
+python3 tools/train_e2e/temporal_train.py \
   --dataset datasets/demo_e2e \
-  --output models/e2e_tiny_v001/metrics.json
+  --output models/e2e_tiny_v001 \
+  --eval
+
+# 查看 artifact 的 manifest / 训练参数 / metrics
+python3 tools/modelctl.py inspect models/e2e_tiny_v001
 
 # 让 inference_node 加载新产物的 model.txt 继续 shadow 运行
 python3 tools/modelctl.py promote models/e2e_tiny_v001
@@ -200,7 +203,7 @@ models/e2e_tiny_v001/
   model.txt              # inference_node 可直接加载
   manifest.json          # 模型格式、输入输出 schema、训练参数、数据集摘要
   dataset_metadata.json  # 数据集元信息快照
-  metrics.json           # eval_model.py 输出（可选）
+  metrics.json           # temporal_train.py --eval 产出（可选）
 ```
 
 这不是完整的端到端自动驾驶训练平台，而是训练框架接入点：后续把
@@ -219,10 +222,8 @@ python3 tools/train_e2e/torch_train.py \
   --dataset datasets/demo_e2e \
   --output models/e2e_torch_v001
 
-python3 tools/eval_model.py \
-  --model models/e2e_torch_v001 \
-  --dataset datasets/demo_e2e \
-  --output models/e2e_torch_v001/metrics.json
+# 用 modelctl 查看 metrics.json
+python3 tools/modelctl.py inspect models/e2e_torch_v001
 ```
 
 `torch_train.py` 是可选入口；未安装 PyTorch 时，零依赖的 `tools/train_e2e/train.py`

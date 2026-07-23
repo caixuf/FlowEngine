@@ -369,7 +369,7 @@ FlowEngine 实现了完整的车端学习闭环：
 ```
 
 - **Stage 0:** `data_recorder_node` — 采集人类/规则驾驶样本（JSONL）
-- **Stage 1:** 离线训练 — `tools/train/train.py`（scikit-learn MLP）或 `tools/train_e2e/`（PyTorch 时序训练）
+- **Stage 1:** 离线训练 — `tools/train_demo_model.py`（顶层入口，调度 `tools/train_e2e/{train,torch_train,temporal_train}.py`）
 - **Stage 2:** `inference_node` — tiny-MLP 影子推理，与规则控制器并行评估
 - **Stage 3:** `learner_node` — 车端增量 SGD 微调（全量/部分更新）
 - **Stage 4:** `model_ota_node` — 模型版本管理 + A-B 效果对比 + 动态切换
