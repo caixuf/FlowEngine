@@ -13,10 +13,67 @@
  * 不动现有的 wheelSpin / window slide / steering 动画逻辑。
  */
 
-import { createVehicleLights } from './VehicleLights.js';
+import { deriveLightState, LIGHT_TURN_LEFT, LIGHT_TURN_RIGHT, LIGHT_HAZARD, LIGHT_HIGH_BEAM, LIGHT_LOW_BEAM } from './VehicleLights.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
 import { initModelCache, getModel } from '../../models.js';
 import { worldToThree, headingToRotationY } from '../math/Coord.js';
+
+// ═══════════════════════════════════════════════════════════
+// createVehicleLights — THREE 灯光网格工厂（原在 VehicleLights.js，
+// 移到此处以保持 VehicleLights.js 零 THREE 依赖，供 Node 单元测试）
+// ═══════════════════════════════════════════════════════════
+
+const LIGHT_OFF = new THREE.Color(0x111111);
+const LIGHT_BRAKE_ON = new THREE.Color(0xff0000);
+const LIGHT_TURN_ON = new THREE.Color(0xff8800);
+const LIGHT_HEAD_ON = new THREE.Color(0xffffcc);
+
+const BRAKE_Y = 0.55;      // 尾灯高度
+const BRAKE_Z = -2.0;      // 车尾
+const BRAKE_X = 0.65;      // 左右间距
+const TURN_X = 0.75;
+const TURN_Z = -1.95;
+const HEAD_Y = 0.45;       // 前灯高度
+const HEAD_Z = 2.05;       // 车头
+const HEAD_X = 0.60;
+
+const GEO_RECT = new THREE.PlaneGeometry(0.18, 0.10);
+
+function _makeRectMesh(color, x, y, z) {
+  const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+  const m = new THREE.Mesh(GEO_RECT, mat);
+  m.position.set(x, y, z);
+  return m;
+}
+
+/** 为车辆模型创建灯光网格组。
+ *  @param {THREE.Group} vehicleGroup 车辆模型根节点
+ *  @returns {{group: THREE.Group, update: (v: object) => void}} */
+function createVehicleLights(vehicleGroup) {
+  const group = new THREE.Group();
+
+  const brakeL = _makeRectMesh(LIGHT_OFF, -BRAKE_X, BRAKE_Y, BRAKE_Z);
+  const brakeR = _makeRectMesh(LIGHT_OFF,  BRAKE_X, BRAKE_Y, BRAKE_Z);
+  const turnL  = _makeRectMesh(LIGHT_OFF, -TURN_X,  BRAKE_Y, TURN_Z);
+  const turnR  = _makeRectMesh(LIGHT_OFF,  TURN_X,  BRAKE_Y, TURN_Z);
+  const headL  = _makeRectMesh(LIGHT_OFF, -HEAD_X,  HEAD_Y,  HEAD_Z);
+  const headR  = _makeRectMesh(LIGHT_OFF,  HEAD_X,  HEAD_Y,  HEAD_Z);
+
+  group.add(brakeL, brakeR, turnL, turnR, headL, headR);
+
+  return {
+    group,
+    update(v) {
+      const s = deriveLightState(v.lights || 0, v.brake || 0);
+      brakeL.material.color.copy(s.brake ? LIGHT_BRAKE_ON : LIGHT_OFF);
+      brakeR.material.color.copy(s.brake ? LIGHT_BRAKE_ON : LIGHT_OFF);
+      turnL.material.color.copy(s.turnL ? LIGHT_TURN_ON : LIGHT_OFF);
+      turnR.material.color.copy(s.turnR ? LIGHT_TURN_ON : LIGHT_OFF);
+      headL.material.color.copy(s.head ? LIGHT_HEAD_ON : LIGHT_OFF);
+      headR.material.color.copy(s.head ? LIGHT_HEAD_ON : LIGHT_OFF);
+    }
+  };
+}
 
 // ═══════════════════════════════════════════════════════════
 // 车漆参数（MeshPhysicalMaterial）
