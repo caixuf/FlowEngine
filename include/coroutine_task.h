@@ -56,7 +56,11 @@
  * 每个 awaitable 在 await_suspend(executor 线程)中读一次存入 exec_。
  * 跨线程回调(bus/timer)使用已捕获的 self->exec_，不读 TLS（那些线程 TLS 是 null）。
  * ───────────────────────────────────────────────────────── */
-namespace { thread_local flowcoro::rt::RtExecutor* g_node_exec = nullptr; }
+/* inline thread_local with external linkage — all .so files share the same TLS key.
+ * Anonymous namespace would give each .so its own copy, causing DelayAwaitable and
+ * other header-defined awaitables to read the wrong (null) g_node_exec when the
+ * dynamic linker resolves the inline function to a different .so's copy. */
+inline thread_local flowcoro::rt::RtExecutor* g_node_exec = nullptr;
 
 /* ─────────────────────────────────────────────────────────
  * 1. Task 别名 — 所有 `Task run() override` 自动跟随

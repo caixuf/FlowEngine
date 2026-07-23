@@ -15,6 +15,8 @@
 
 import { createVehicleLights } from './VehicleLights.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
+import { initModelCache, getModel } from '../../models.js';
+import { worldToThree, headingToRotationY } from '../math/Coord.js';
 
 // ═══════════════════════════════════════════════════════════
 // 车漆参数（MeshPhysicalMaterial）
@@ -96,6 +98,13 @@ function _applyCarPaintToScene(gltfScene, envMap) {
 // ═══════════════════════════════════════════════════════════
 // 主工厂
 // ═══════════════════════════════════════════════════════════
+
+/** 异步预加载 glTF 车辆模型（SU7/sedan/suv/truck）。
+ *  加载完成前用程序化 fallback，完成后新车自动用 glTF。
+ *  main.js 在 init3DScene 中调用，无需 await。 */
+export function initModels() {
+  initModelCache();
+}
 
 export function createVehicleView(scene, renderer, modelCache) {
   const vehicleMap = new Map();  // id → { group, lights, modelData, ... }
@@ -240,7 +249,7 @@ export function createVehicleView(scene, renderer, modelCache) {
     }
 
     // 尝试加载 glTF 模型
-    const gltf = (modelCache && modelCache.getModel) ? modelCache.getModel(type) : null;
+    const gltf = getModel(type);
     if (gltf && !entry.modelData) {
       entry.modelData = gltf;
       entry.group = _createGltfVehicle(gltf, id);
@@ -263,14 +272,15 @@ export function createVehicleView(scene, renderer, modelCache) {
       }
     }
 
-    // 更新位姿
+    // 更新位姿（ENU → THREE 坐标映射）
     if (vehicleData) {
-      entry.group.position.set(
+      const [tx, ty, tz] = worldToThree(
         vehicleData.x || vehicleData.px || 0,
         vehicleData.y || vehicleData.py || 0,
         vehicleData.z || vehicleData.pz || 0
       );
-      entry.group.rotation.set(0, vehicleData.heading || vehicleData.yaw || 0, 0);
+      entry.group.position.set(tx, ty, tz);
+      entry.group.rotation.set(0, headingToRotationY(vehicleData.heading || vehicleData.yaw || 0), 0);
       entry.steerAngle = vehicleData.steer || vehicleData.steerAngle || 0;
     }
 
@@ -334,5 +344,35 @@ export function createVehicleView(scene, renderer, modelCache) {
   function getVehicleGroup() { return vehicleGroup; }
   function getVehicleMap() { return vehicleMap; }
 
-  return { updateVehicle, tick, removeVehicle, dispose, getVehicleGroup, getVehicleMap };
+  /** Layer 树每帧调用：从 store 同步 ego + entities → 创建/更新/删除车辆 */
+  function update(store, now) {
+    if (!store) return;
+
+    // 收集所有需要渲染的实体（ego + 其他车辆/NPC）
+    const activeIds = new Set();
+
+    // 1. ego 车辆（type 用于选模型：'ego' → sedan）
+    if (store.ego) {
+      const egoId = 'ego';
+      activeIds.add(egoId);
+      updateVehicle(egoId, store.ego, 'sedan');
+    }
+
+    // 2. 其他实体（car/truck/suv/pedestrian 等）
+    const entities = store.entities || [];
+    for (const ent of entities) {
+      if (!ent || !ent.id) continue;
+      activeIds.add(ent.id);
+      updateVehicle(ent.id, ent, ent.type || 'car');
+    }
+
+    // 3. 删除消失的车辆
+    for (const id of Array.from(vehicleMap.keys())) {
+      if (!activeIds.has(id)) {
+        removeVehicle(id);
+      }
+    }
+  }
+
+  return { update, updateVehicle, tick, removeVehicle, dispose, getVehicleGroup, getVehicleMap };
 }
