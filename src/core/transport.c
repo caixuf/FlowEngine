@@ -286,29 +286,43 @@ int transport_subscribe(Transport* t, const char* topic,
     /* For REMOTE routes, bridge via TCP */
     if (r->route == ROUTE_REMOTE && t->net_transport) {
         net_transport_bridge_topic(t->net_transport, topic);
+        pthread_mutex_lock(&t->mutex);
         r->remote_bridged = true;
+        pthread_mutex_unlock(&t->mutex);
     }
 
-    /* For IPC policy/routes, set up IPC subscriber */
-    if ((t->policy == TRANSPORT_IPC || r->route == ROUTE_IPC) && !r->ipc_channel) {
+    /* For IPC policy/routes, set up IPC subscriber.
+     * Slow open done outside lock; result written back under lock. */
+    if ((t->policy == TRANSPORT_IPC || r->route == ROUTE_IPC)) {
         char ch_name[256];
         topic_to_ipc_name(topic, ch_name, sizeof(ch_name));
+        IpcChannel* ipc_ch = NULL;
         /* Retry up to 20 times (2s) waiting for publisher to create the channel */
         for (int attempt = 0; attempt < 20; attempt++) {
-            r->ipc_channel = ipc_channel_open(ch_name, IPC_ROLE_SUBSCRIBER, 32);
-            if (r->ipc_channel) break;
+            ipc_ch = ipc_channel_open(ch_name, IPC_ROLE_SUBSCRIBER, 32);
+            if (ipc_ch) break;
             usleep(100000); /* 100ms */
         }
-        if (r->ipc_channel) {
-            /* 使用 relay 而不是用户回调: IPC 消息转御到本地 bus,
-             * 这样 choreo trigger 和所有本地订阅者自动被调用 */
+        if (ipc_ch) {
             IpcRelayCtx* ctx = (IpcRelayCtx*)malloc(sizeof(IpcRelayCtx));
             if (ctx) {
                 ctx->bus = t->bus;
-                ipc_channel_subscribe(r->ipc_channel, ipc_to_bus_relay, ctx);
-                r->ipc_relay_ctx = ctx;  /* tracked for cleanup */
+                ipc_channel_subscribe(ipc_ch, ipc_to_bus_relay, ctx);
+                ipc_channel_start(ipc_ch);
             }
-            ipc_channel_start(r->ipc_channel);
+            pthread_mutex_lock(&t->mutex);
+            if (!r->ipc_channel) {
+                r->ipc_channel = ipc_ch;
+                r->ipc_relay_ctx = ctx;
+            } else {
+                /* Another thread raced us and already set the channel */
+                pthread_mutex_unlock(&t->mutex);
+                ipc_channel_close(ipc_ch);
+                free(ctx);
+                LOG_INFO("transport", "subscribe '%s' (route=%d)", topic, (int)r->route);
+                return 0;
+            }
+            pthread_mutex_unlock(&t->mutex);
         } else {
             LOG_WARN("transport", "IPC channel '%s' not available, falling back to bus",
                      ch_name);
