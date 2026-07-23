@@ -390,19 +390,18 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
 
     /* Handle reply if this is a REPLY message */
     if (msg->type == MSG_TYPE_REPLY) {
-        pthread_mutex_lock(&bus->reply_mutex);
         for (int i = 0; i < MAX_PENDING_REPLIES; i++) {
             ReplySlot* slot = &bus->reply_slots[i];
+            pthread_mutex_lock(&slot->mutex);
             if (slot->req_id == msg->msg_id && !slot->done) {
-                pthread_mutex_lock(&slot->mutex);
                 slot->reply = *msg;
                 slot->done  = true;
                 pthread_cond_signal(&slot->cond);
                 pthread_mutex_unlock(&slot->mutex);
                 break;
             }
+            pthread_mutex_unlock(&slot->mutex);
         }
-        pthread_mutex_unlock(&bus->reply_mutex);
     }
 }
 
@@ -439,19 +438,18 @@ static void* dispatch_thread_fn(void* arg) {
                 pthread_mutex_unlock(&bus->svc_mutex);
 
                 /* Deliver reply to waiting caller */
-                pthread_mutex_lock(&bus->reply_mutex);
                 for (int i = 0; i < MAX_PENDING_REPLIES; i++) {
                     ReplySlot* slot = &bus->reply_slots[i];
+                    pthread_mutex_lock(&slot->mutex);
                     if (slot->req_id == msg.msg_id && !slot->done) {
-                        pthread_mutex_lock(&slot->mutex);
                         slot->reply = reply;
                         slot->done  = true;
                         pthread_cond_signal(&slot->cond);
                         pthread_mutex_unlock(&slot->mutex);
                         break;
                     }
+                    pthread_mutex_unlock(&slot->mutex);
                 }
-                pthread_mutex_unlock(&bus->reply_mutex);
             } else {
                 pthread_mutex_unlock(&bus->svc_mutex);
             }
@@ -793,17 +791,18 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
     uint32_t req_id = atomic_fetch_add(&bus->msg_id_counter, 1);
 
     /* Allocate a reply slot */
-    pthread_mutex_lock(&bus->reply_mutex);
     ReplySlot* slot = NULL;
     for (int i = 0; i < MAX_PENDING_REPLIES; i++) {
-        if (!bus->reply_slots[i].done && bus->reply_slots[i].req_id == 0) {
-            slot = &bus->reply_slots[i];
+        ReplySlot* s = &bus->reply_slots[i];
+        pthread_mutex_lock(&s->mutex);
+        if (!s->done && s->req_id == 0) {
+            slot = s;
             slot->req_id = req_id;
             slot->done   = false;
-            break;
+            break; /* keep slot->mutex locked */
         }
+        pthread_mutex_unlock(&s->mutex);
     }
-    pthread_mutex_unlock(&bus->reply_mutex);
     if (!slot) return ERR_OVERFLOW;
 
     /* Build and enqueue request */
@@ -818,14 +817,12 @@ int message_bus_request(MessageBus* bus, const char* topic, const char* sender,
     if (data && size > 0) memcpy(req.data, data, size);
 
     if (rb_push(&bus->queue, &req) != 0) {
-        pthread_mutex_lock(&bus->reply_mutex);
         slot->req_id = 0;
-        pthread_mutex_unlock(&bus->reply_mutex);
+        pthread_mutex_unlock(&slot->mutex);
         return ERR_OVERFLOW;
     }
 
-    /* Wait for reply */
-    pthread_mutex_lock(&slot->mutex);
+    /* Wait for reply (slot->mutex already held) */
     int ret = 0;
     if (!slot->done) {
         if (timeout_ms == 0) {
@@ -937,16 +934,27 @@ int message_bus_publish_zero_copy(MessageBus* bus, const char* topic,
 
     atomic_fetch_add(&bus->stat_zc_published, 1);
 
+    /* Snapshot matching zero-copy subscribers under lock, then invoke
+     * callbacks outside the lock — prevents deadlock if a callback tries
+     * to subscribe/unsubscribe_zero_copy (same non-recursive mutex). */
+    typedef struct { ZeroCopyCallback cb; void* ud; } ZcSnap;
+    ZcSnap snap[MSG_BUS_MAX_ZC_SUBSCRIBERS];
+    int snap_count = 0;
+
     pthread_mutex_lock(&bus->zc_mutex);
     for (int i = 0; i < bus->zc_sub_count; i++) {
         ZcSubEntry* s = &bus->zc_subs[i];
         if (!s->active) continue;
         if (!topic_match(s->topic, topic)) continue;
-        s->callback(topic, sender ? sender : "", msg_id, ts, data, data_size, s->user_data);
+        snap[snap_count++] = (ZcSnap){ s->callback, s->user_data };
+    }
+    pthread_mutex_unlock(&bus->zc_mutex);
+
+    for (int i = 0; i < snap_count; i++) {
+        snap[i].cb(topic, sender ? sender : "", msg_id, ts, data, data_size, snap[i].ud);
         count++;
         atomic_fetch_add(&bus->stat_zc_delivered, 1);
     }
-    pthread_mutex_unlock(&bus->zc_mutex);
 
     /* Also push a copy-based message for regular subscribers */
     message_bus_publish(bus, topic, sender, data, data_size);

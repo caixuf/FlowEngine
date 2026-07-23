@@ -497,7 +497,7 @@ private:
 
                     bool ped_still_dangerous = (ped_gap_recheck < ped_stop_gap_recheck);
                     bool crossing_still_dangerous = (hold_gap_recheck < 10.0);
-                    bool oncoming_still_dangerous = (oncoming_ttc_recheck < 1.5 || oncoming_dx_recheck < 8.0);
+                    bool oncoming_still_dangerous = (oncoming_ttc_recheck < 4.0 || oncoming_dx_recheck < 8.0);
 
                     if (!ped_still_dangerous && !crossing_still_dangerous && !oncoming_still_dangerous) {
                         double gap = nearest_same_lane_gap(state, params_);

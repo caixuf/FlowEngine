@@ -116,8 +116,11 @@ int discovery_advertise(DiscoveryManager* dm, const char* topic,
 /** 取消广播 topic */
 int discovery_unadvertise(DiscoveryManager* dm, const char* topic);
 
-/** 获取当前拓扑快照 */
+/** 获取当前拓扑快照（无锁，返回内部指针；多线程不安全） */
 const TopologyGraph* discovery_get_topology(DiscoveryManager* dm);
+
+/** 复制当前拓扑到 out（持 topo_mutex，线程安全） */
+int discovery_copy_topology(const DiscoveryManager* dm, TopologyGraph* out);
 
 /** 导出拓扑为 JSON（调用者需 free） */
 char* discovery_export_json(DiscoveryManager* dm);

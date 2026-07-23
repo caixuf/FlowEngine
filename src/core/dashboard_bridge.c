@@ -140,6 +140,12 @@ static void on_raw_chunk(const Message* msg, void* user_data) {
         return;
     }
 
+    /* Validate chunk header BEFORE any allocation. A count of 0, a count
+     * larger than the bitmap width (64), or an idx outside [0,count) would
+     * all be malformed — drop the chunk rather than risk a massive realloc
+     * or size_t overflow. */
+    if (count == 0 || count > 64 || idx >= count) return;
+
     /* Multi-chunk: first chunk of a new sequence — allocate/reset buffer.
      * Also reset if idx==0 of the same seq arrives again (publisher retry). */
     if (idx == 0 || seq != st->current_seq) {
@@ -161,12 +167,6 @@ static void on_raw_chunk(const Message* msg, void* user_data) {
 
     /* Discard if sequence changed (e.g., dropped a chunk) */
     if (seq != st->current_seq) return;
-
-    /* Validate chunk header against the protocol invariant. A count of 0,
-     * a count larger than the bitmap width (64), or an idx outside [0,
-     * count) would all be malformed — drop the chunk rather than risk
-     * writing out of bounds or setting a non-existent bit. */
-    if (count == 0 || count > 64 || idx >= count) return;
 
     /* Record the last chunk's actual payload length so we can compute the
      * true total length on completion regardless of arrival order. */

@@ -95,13 +95,13 @@ static RouteType determine_route(Transport* t, const char* topic) {
     /* AUTO: 查询 discovery 拓扑 */
     if (!t->discovery) return ROUTE_LOCAL;
 
-    const TopologyGraph* g = discovery_get_topology(t->discovery);
-    if (!g) return ROUTE_LOCAL;
+    TopologyGraph g;
+    if (discovery_copy_topology(t->discovery, &g) != 0) return ROUTE_LOCAL;
 
     /* 查找发布此 topic 的其他节点 */
     bool has_remote = false;
-    for (uint32_t i = 0; i < g->node_count; i++) {
-        const NodeInfo* n = &g->nodes[i];
+    for (uint32_t i = 0; i < g.node_count; i++) {
+        const NodeInfo* n = &g.nodes[i];
         if (!n->alive) continue;
         for (uint32_t j = 0; j < n->topic_count; j++) {
             if (strcmp(n->topics[j].topic, topic) == 0 &&

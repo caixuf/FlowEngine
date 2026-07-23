@@ -38,7 +38,19 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+
 #include <time.h>
+
+/** 带 ROBUST 恢复的 process-shared mutex 加锁 */
+static int ipc_mutex_lock(pthread_mutex_t* mtx) {
+    int r = pthread_mutex_lock(mtx);
+    if (r == EOWNERDEAD) {
+        /* 前持有进程崩溃，恢复 mutex 一致性；共享状态由 seq 号自愈 */
+        pthread_mutex_consistent(mtx);
+        return 0;
+    }
+    return r;
+}
 
 /* ── Shared memory header (lives inside the shm region) ─
  * mutex/cond are PTHREAD_PROCESS_SHARED so every process that mmaps this
@@ -189,6 +201,7 @@ IpcChannel* ipc_channel_open(const char* channel_name, IpcRole role,
         pthread_mutexattr_t mattr;
         pthread_mutexattr_init(&mattr);
         pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
+        pthread_mutexattr_setrobust(&mattr, PTHREAD_MUTEX_ROBUST);
         pthread_mutex_init(&hdr->mutex, &mattr);
         pthread_mutexattr_destroy(&mattr);
 
@@ -253,7 +266,7 @@ int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
      * any subscriber that has fallen behind). This avoids publisher stalls that
      * previously occurred when a slow/absent subscriber left the ring full. */
     ShmHeader* hdr = get_header(ch);
-    pthread_mutex_lock(&hdr->mutex);
+    ipc_mutex_lock(&hdr->mutex);
 
     ShmSlot*   arr = get_slot_array(ch);
     uint64_t   idx = hdr->head;
@@ -298,7 +311,7 @@ int ipc_channel_subscribe(IpcChannel* ch, MessageCallback callback, void* user_d
  * Returns 0 and fills *out if a message was available, ERR_IO if caught up. */
 static int try_read_one(IpcChannel* ch, Message* out) {
     ShmHeader* hdr = get_header(ch);
-    pthread_mutex_lock(&hdr->mutex);
+    ipc_mutex_lock(&hdr->mutex);
     ShmSlot*   arr = get_slot_array(ch);
     uint64_t   head  = hdr->head;
     uint32_t   depth = hdr->queue_depth;
@@ -351,7 +364,7 @@ static void compute_wait_deadline(struct timespec* ts) {
  * already there. This replaces the old fixed-interval usleep() spin. */
 static void wait_for_data(IpcChannel* ch) {
     ShmHeader* hdr = get_header(ch);
-    pthread_mutex_lock(&hdr->mutex);
+    ipc_mutex_lock(&hdr->mutex);
 
     /* Apply the same sliding-window clamp as try_read_one() before deciding
      * whether data is already available: a read_cursor that fell behind by
@@ -451,7 +464,7 @@ void ipc_channel_stop(IpcChannel* ch) {
 uint64_t ipc_channel_get_drop_count(IpcChannel* ch) {
     if (!ch || !ch->shm_ptr) return 0;
     ShmHeader* hdr = get_header(ch);
-    pthread_mutex_lock(&hdr->mutex);
+    ipc_mutex_lock(&hdr->mutex);
     uint64_t cnt = ch->drop_count;
     pthread_mutex_unlock(&hdr->mutex);
     return cnt;
@@ -460,7 +473,7 @@ uint64_t ipc_channel_get_drop_count(IpcChannel* ch) {
 void ipc_channel_reset_drop_count(IpcChannel* ch) {
     if (!ch || !ch->shm_ptr) return;
     ShmHeader* hdr = get_header(ch);
-    pthread_mutex_lock(&hdr->mutex);
+    ipc_mutex_lock(&hdr->mutex);
     ch->drop_count = 0;
     pthread_mutex_unlock(&hdr->mutex);
 }

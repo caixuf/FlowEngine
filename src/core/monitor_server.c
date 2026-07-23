@@ -206,7 +206,11 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
         "{\"self\":\"flowmond\",");
 
     /* Nodes + endpoints from discovery topology */
-    const TopologyGraph* g = dm ? discovery_get_topology(dm) : NULL;
+    TopologyGraph topo;
+    const TopologyGraph* g = NULL;
+    if (dm && discovery_copy_topology(dm, &topo) == 0) {
+        g = &topo;
+    }
     if (g && g->node_count > 0) {
         SSE_APPEND("\"nodes\":[");
         for (uint32_t ni = 0; ni < g->node_count; ni++) {

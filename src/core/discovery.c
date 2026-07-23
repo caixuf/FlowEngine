@@ -128,9 +128,14 @@ static int deserialize_beacon(const uint8_t* buf, size_t len,
     memcpy(&node->pid, buf + off, 4); off += 4;
     node->capabilities = buf[off++];
 
+    if (off + 2 > len) return ERR_INVALID_PARAM;
     uint16_t tcount;
     memcpy(&tcount, buf + off, 2); off += 2;
     if (tcount > DISC_MAX_TOPICS_PER_NODE) tcount = DISC_MAX_TOPICS_PER_NODE;
+
+    /* Validate topic data and CRC fit within packet before copying */
+    if (off + tcount * sizeof(TopicAdvert) + 4 > len) return ERR_INVALID_PARAM;
+
     node->topic_count = tcount;
     for (uint16_t i = 0; i < tcount; i++) {
         memcpy(&node->topics[i], buf + off, sizeof(TopicAdvert));
@@ -141,7 +146,6 @@ static int deserialize_beacon(const uint8_t* buf, size_t len,
     memcpy(&node->unicast_port, buf + off, 2); off += 2;
 
     /* Verify CRC32 (covers everything after the 4-byte magic) */
-    if (off + 4 > len) return ERR_INVALID_PARAM;
     uint32_t received_crc;
     memcpy(&received_crc, buf + off, 4);
     uint32_t computed_crc = crc32(buf + 4, off - 4);
@@ -453,6 +457,14 @@ int discovery_unadvertise(DiscoveryManager* dm, const char* topic) {
 
 const TopologyGraph* discovery_get_topology(DiscoveryManager* dm) {
     return dm ? &dm->topology : NULL;
+}
+
+int discovery_copy_topology(const DiscoveryManager* dm, TopologyGraph* out) {
+    if (!dm || !out) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&dm->topo_mutex);
+    memcpy(out, &dm->topology, sizeof(TopologyGraph));
+    pthread_mutex_unlock(&dm->topo_mutex);
+    return 0;
 }
 
 void discovery_set_change_callback(DiscoveryManager* dm,

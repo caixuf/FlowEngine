@@ -139,10 +139,10 @@ static void ekf_update_generic(EkfFusion* ekf,
                 if (a > max_abs) { max_abs = a; piv_row = row; }
             }
             if (max_abs < 1e-10) {
-                /* 主元接近 0，矩阵奇异，跳过该列（类似 m==2 分支的 det 检查） */
+                /* 主元接近 0，矩阵奇异，整体 abort 本次更新（与 m==2 分支一致） */
                 fprintf(stderr, "ekf_fusion: 4x4 S matrix near-singular at col %d "
-                                "(pivot=%.3e), inversion skipped\n", col, max_abs);
-                continue;
+                                "(pivot=%.3e), update aborted\n", col, max_abs);
+                return;
             }
             /* 交换 piv_row 与 col 行（含右侧单位矩阵部分） */
             if (piv_row != col) {
@@ -259,6 +259,7 @@ void ekf_fusion_init(EkfFusion* ekf, double dt, const double x0[EKF_STATE_DIM]) 
     /* y 同上 */
     ekf->Q[1*5 + 1] = dt4 * DEFAULT_Q_ACCEL_VAR;
     ekf->Q[1*5 + 2] = dt3 * DEFAULT_Q_ACCEL_VAR;
+    ekf->Q[2*5 + 1] = dt3 * DEFAULT_Q_ACCEL_VAR;
     /* heading 来自 yaw rate 噪声 */
     ekf->Q[3*5 + 3] = dt2 * DEFAULT_Q_YAWRATE_VAR;
     ekf->Q[3*5 + 4] = dt  * DEFAULT_Q_YAWRATE_VAR;
