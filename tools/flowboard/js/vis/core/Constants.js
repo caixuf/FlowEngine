@@ -24,3 +24,4 @@ export const ENTITY_TYPE = {
 
 export const VIADUCT_HEIGHT = 7.0;
 export const VIADUCT_RIDE_HEIGHT = 7.7;
+export const VIADUCT_VIS_LENGTH = 500;  // 高架可视段长度 (m)，兜底 edge.length 缺失

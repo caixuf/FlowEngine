@@ -28,7 +28,7 @@ import { createLayer } from '../core/Layer.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
 // 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
 import { validateFrame } from './FrameValidator.js';
-import { LANE_WIDTH, EDGE_TYPE } from '../core/Constants.js';
+import { LANE_WIDTH, EDGE_TYPE, VIADUCT_VIS_LENGTH } from '../core/Constants.js';
 
 // 向后兼容：原调用方从 SceneDirector import validateFrame。
 export { validateFrame };
@@ -152,14 +152,14 @@ export function createSceneDirector(scene) {
           ViewRegistry.safeCall('streetlight', 'build', { edges: [] });
           ViewRegistry.safeCall('barrier', 'build', { edges: [] });
           store.isViaduct = true;
+          store.viaductVisLength = actualLength;
         } else {
           ViewRegistry.safeCall('streetlight', 'build', rn);
           ViewRegistry.safeCall('barrier', 'build', rn);
           ViewRegistry.safeCall('viaduct', 'build', { edges: [] });
           store.isViaduct = false;
+          store.viaductVisLength = VIADUCT_VIS_LENGTH;
         }
-
-        store.viaductVisLength = 0;
 
         ViewRegistry.safeCall('connector', 'build', rn);
         lastRoadHash = hash;
@@ -286,6 +286,15 @@ export function createSceneDirector(scene) {
     }
     /* Layer 树递归 update：agent(vehicle) + infra(trafficLight, etcGate) */
     rootLayer.update(store, now);
+
+    // B2 fix: 高架 deck 跟随 ego 移动，消除"钉死在世界原点"的视觉 bug
+    if (store.isViaduct && store.ego) {
+      const viaductView = ViewRegistry.get('viaduct');
+      if (viaductView && viaductView.followEgo) {
+        const visLen = store.viaductVisLength || VIADUCT_VIS_LENGTH;
+        viaductView.followEgo(store.ego.x + visLen / 2);
+      }
+    }
   }
 
   function getStore() { return store; }

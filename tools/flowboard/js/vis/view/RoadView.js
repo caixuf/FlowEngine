@@ -278,19 +278,21 @@ export function createRoadView(scene) {
       })), SHOULDER_W * 0.5, Y_SHOULDER);
       if (shoulderR) shoulderGeos.push(shoulderR);
 
-      // ── 边线（实线白）：路缘内缩 ──
-      const eL = solidLine(spine, hw - EDGE_INSET);
-      const eR = solidLine(spine, -(hw - EDGE_INSET));
-      if (eL) whiteGeos.push(eL);
-      if (eR) whiteGeos.push(eR);
+      // ── 边线（白虚线）：路缘内缩 ──
+      // B4 fix: 自车道边界改白虚线，不再用黄实线
+      for (const g of dashedLine(spine, hw - EDGE_INSET)) whiteGeos.push(g);
+      for (const g of dashedLine(spine, -(hw - EDGE_INSET))) whiteGeos.push(g);
 
       // ── 车道分隔 ──
+      // B4 fix: 黄实线只留真对向分界（4+车道），2车道全程白虚线
       for (let k = 1; k < lanes; k++) {
         const d = -hw + k * laneWidth;
-        if (lanes % 2 === 0 && k === lanes / 2) {
+        if (lanes >= 4 && k === Math.floor(lanes / 2)) {
+          // 4+ 车道：中央对向分界 → 黄实线
           const g = solidLine(spine, d);
           if (g) yellowGeos.push(g);
         } else {
+          // 其他车道分隔 → 白虚线
           for (const g of dashedLine(spine, d)) whiteGeos.push(g);
         }
       }

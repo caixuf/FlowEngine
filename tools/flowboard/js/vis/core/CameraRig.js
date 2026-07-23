@@ -5,8 +5,6 @@ import * as THREE from 'three';
  * 支持 chase / top / driver / front / map / orbit 六种模式
  */
 
-import { getCenter } from '../store/SceneStore.js';
-
 /* 流畅专题：复用单个 Box3，替代每帧 new THREE.Box3().setFromObject()。
  * roadGroup 在 roadHash 变化时才重建，setFromObject 每帧重新算只是为
  * clamp ego 的 x 边界，没必要每帧分配新对象。 */
@@ -105,20 +103,18 @@ export function createCameraRig(canvas) {
         break;
       }
       case 'map': {
-        const c = getCenter(roadGroup);
-        camera.position.set(c.x, eg + 80, c.z);
-        camera.lookAt(c.x, eg, c.z);
+        camera.position.set(ex, eg + 80, ez);
+        camera.lookAt(ex, eg, ez);
         break;
       }
       case 'orbit': {
-        const c = getCenter(roadGroup);
         const cosP = Math.cos(orbitPitch), sinP = Math.sin(orbitPitch);
         camera.position.set(
-          c.x + Math.cos(orbitYaw) * orbitDist * cosP,
+          ex + Math.cos(orbitYaw) * orbitDist * cosP,
           eg + orbitDist * sinP,
-          c.z + Math.sin(orbitYaw) * orbitDist * cosP
+          ez + Math.sin(orbitYaw) * orbitDist * cosP
         );
-        camera.lookAt(c.x, eg, c.z);
+        camera.lookAt(ex, eg, ez);
         break;
       }
     }
@@ -131,14 +127,15 @@ export function createCameraRig(canvas) {
   }
 
   function reset(roadGroup) {
-    const c = getCenter(roadGroup);
     orbitYaw = 0;
     orbitPitch = Math.PI / 4;
     orbitDist = 80;
 
     if (mode === 'chase' || mode === 'top' || mode === 'driver' || mode === 'front' || mode === 'map') {
-      camera.position.set(c.x - 10, 10, c.z);
-      camera.lookAt(c.x, 0, c.z);
+      // B3 fix: 不再用路包围盒中心（10km 路→x=5000，车在 x≈50 时看空路），
+      // 改为对准原点——车初始位置在原点附近，reset 后能看到车。
+      camera.position.set(-10, 10, 0);
+      camera.lookAt(0, 0, 0);
     }
   }
 
