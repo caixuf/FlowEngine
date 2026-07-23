@@ -69,7 +69,7 @@ export function init3DScene(canvas) {
   try {
     _cameraRig = createCameraRig(canvas);
     _lights = createLighting(_scene);
-    _skyEnv = createSkyEnv(_scene);
+    _skyEnv = createSkyEnv(_scene, _lights.sun, _lights.hemi);
     _director = createSceneDirector(_scene);
     _director.init();
     /* 烘焙 PMREM 环境贴图：把当前 scene（天空色 + hemisphere 灯光渐变）

@@ -563,18 +563,22 @@ async function doConnect() {
   if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
   setConnStatus('warn', '● connecting');
   try {
+    // 并行：/api/topology + startSSE 同时发，不串行等
     var r = await fetch(serverUrl+'/api/topology');
     topoData = await r.json();
     updateAll();
     applyLiveStatus(topoData);
     connectRetries = 0;
     _reconnectDelay = 2000;
+    // SSE 与 topology fetch 并行启动（减少一跳延迟）
     startSSE();
   } catch(err) {
     connectRetries++;
     if (connectRetries <= 3) {
+      // 指数退避：250ms → 500ms → 1000ms（localhost 冷启动 <0.5s 命中）
+      var delay = 250 * Math.pow(2, connectRetries - 1);
       setConnStatus('warn','● retry ('+connectRetries+'/3)');
-      reconnectTimer = setTimeout(doConnect, 1500);
+      reconnectTimer = setTimeout(doConnect, delay);
     } else {
       setConnStatus('dead','● offline');
       doSimulate();

@@ -100,6 +100,12 @@ if [ -n "$REPLAY_FILE" ]; then
   sleep 1
   echo "  Dashboard: http://localhost:8800"
   if $OPEN_BROWSER; then
+    # 等服务器就绪再开浏览器（复用 main path 的 health check 写法）
+    for _ in $(seq 1 20); do
+      HEALTH_CODE=$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8800/api/health 2>/dev/null || echo "000")
+      if [ "$HEALTH_CODE" = "200" ]; then break; fi
+      sleep 0.25
+    done
     xdg-open http://localhost:8800 2>/dev/null || open http://localhost:8800 2>/dev/null || true
   fi
   "$BUILD_DIR/bin/flow_bag" --replay "$REPLAY_FILE" 2>&1
@@ -322,6 +328,12 @@ echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 # ── Open browser ────────────────────────────────────────────
 if $OPEN_BROWSER; then
   echo "───[4/5] Opening browser..."
+  # 等服务器就绪再开浏览器，避免冷启动白屏（复用 298-306 的 health check 写法）
+  for _ in $(seq 1 20); do
+    HEALTH_CODE=$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8800/api/health 2>/dev/null || echo "000")
+    if [ "$HEALTH_CODE" = "200" ]; then break; fi
+    sleep 0.25
+  done
   if command -v xdg-open &>/dev/null; then
     xdg-open http://localhost:8800 2>/dev/null || true
   elif command -v open &>/dev/null; then
