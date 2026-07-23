@@ -1199,6 +1199,7 @@ struct CompletionNotifier {
     struct promise_type {
         std::atomic<bool>*       done_flag{nullptr};
         std::condition_variable* cv{nullptr};
+        std::mutex*              mtx{nullptr};
 
         CompletionNotifier get_return_object() noexcept {
             return CompletionNotifier{
@@ -1210,13 +1211,19 @@ struct CompletionNotifier {
          * 标准保证 await_suspend 执行时协程帧已处于稳定挂起状态，
          * 此处 store(release) 与 execute() 线程的 load(acquire) 建立
          * happens-before，使后续 handle.destroy() 安全。返回 noop_coroutine
-         * 释放 worker 线程回线程池，不再访问 notifier 帧。 */
+         * 释放 worker 线程回线程池，不再访问 notifier 帧。
+         *
+         * 关键修复：notify_all() 必须在锁内执行，确保 worker 线程的 notify
+         * 完成之前，execute() 线程无法返回并销毁包含 cv 的 CoroutineTask。
+         * waiter 在锁内 wait，被唤醒后需重新获取锁才能返回；
+         * 因此 notify_all() 一定先于 task/cv 析构完成。 */
         struct FinalAwaiter {
             bool await_ready() noexcept { return false; }
             std::coroutine_handle<> await_suspend(
                 std::coroutine_handle<promise_type> h) noexcept {
                 auto& p = h.promise();
-                if (p.done_flag) {
+                if (p.done_flag && p.cv && p.mtx) {
+                    std::lock_guard<std::mutex> lk(*p.mtx);
                     p.done_flag->store(true, std::memory_order_release);
                     p.cv->notify_all();
                 }
@@ -1290,11 +1297,13 @@ public:
 
         /* 将 CompletionNotifier 设为 task_ 的 continuation。
          * 协程完成时 FinalAwaiter 对称转移到 notifier，
-         * notifier.return_void() 在工作线程上设置 frame_done_ 并唤醒 cv。
+         * notifier.final_suspend::await_suspend 在工作线程上持锁设置 frame_done_
+         * 并唤醒 cv，确保 notify_all() 完成前 execute() 不会返回并销毁 cv。
          * 这样 execute() 无需轮询 task_->done()（避免与帧写操作的竞争）。 */
         auto notifier = make_completion_notifier(&frame_done_, &coro_cv_);
         notifier.handle.promise().done_flag = &frame_done_;
         notifier.handle.promise().cv        = &coro_cv_;
+        notifier.handle.promise().mtx       = &coro_mutex_;
         task_->handle.promise().continuation = notifier.handle;
 
         /* flowcoro::CoroTask 惰性启动（suspend_always）：

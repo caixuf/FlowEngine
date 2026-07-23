@@ -56,6 +56,7 @@ typedef enum {
 
 /** 观测到的目标状态（一帧） */
 typedef struct {
+    uint32_t object_id;    /**< 跨帧唯一目标 ID */
     double x, y;           /**< 世界坐标 (m) */
     double vx, vy;         /**< 速度 (m/s) */
     double ax, ay;         /**< 加速度 (m/s²) */

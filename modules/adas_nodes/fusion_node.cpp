@@ -161,22 +161,23 @@ protected:
              * 真车模式: lidar->x/y 是障碍物点云的某个点（非自车），跳过；
              *   此时优先用 SLAM Pose2D 的位置（cov 收敛时）。
              * 仿真模式: lidar->x/y 是自车真值，照常用。
-             * 简化判定: 若有 Pose2D 且 converged，用 Pose2D 覆盖 LiDAR 位置。 */
+             * 简化判定: 若有 Pose2D 且 converged，用 Pose2D 覆盖 LiDAR 位置。
+             *
+             * A4 修复：不要把状态估计当观测喂回；全维 pose 与 GPS heading
+             * 更新互斥（同周期二选一），避免 heading 被更新两次导致 cov_hh
+             * 塌太快、滤波器过自信。 */
             if (pose && pose->converged) {
-                /* SLAM 全维更新（位置+航向），R 用 cov_xx/cov_yy 动态调权 */
                 double pose_cov = (double)pose->cov_xx + (double)pose->cov_yy;
-                if (pose_cov < 100.0) {  /* 协方差过大视为发散，跳过 */
-                    ekf_fusion_update_gps_full(ekf_,
-                        (double)pose->x, (double)pose->y,
-                        /* v 无观测，用 EKF 当前估计 */ ekf_->x[2],
-                        (double)pose->heading);
+                if (pose_cov < 100.0) {
+                    /* 只用 SLAM 位置；速度/航向交给 GPS（如有）或 predict 传播 */
+                    ekf_fusion_update_lidar(ekf_, (double)pose->x, (double)pose->y, nullptr);
                 }
             } else {
                 /* 仿真路径：LiDAR 位置真值 + GPS 速度/航向 */
                 ekf_fusion_update_lidar(ekf_, (double)lidar->x, (double)lidar->y, nullptr);
             }
 
-            /* ── GPS 速度/航向更新（无论是否有 SLAM，GPS 总是高权速度源） ── */
+            /* ── GPS 速度/航向更新（高权速度源；heading 与 SLAM 互斥） ── */
             if (gps) {
                 double heading_rad = (double)gps->heading_deg * M_PI / 180.0;
                 ekf_fusion_update_gps(ekf_, (double)gps->speed_mps, heading_rad, nullptr);

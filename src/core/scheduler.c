@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <sched.h>
 #include <errno.h>
+#include <stdatomic.h>
 
 /* ══════════════════════════════════════════════════════════ */
 /* RateControl                                                */
@@ -137,6 +138,7 @@ typedef struct {
     RateControl     rate_control;
     ResourceUsage   resource;
     bool            active;
+    atomic_bool     executing;           /**< 执行中 claim（防止同 task 多 worker 并发） */
 
     /* Choreo mode */
     char            trigger_topic[64];   /**< 触发的 topic（空=无） */
@@ -317,6 +319,12 @@ static void* scheduler_worker_fn(void* arg) {
             /* RateControl gating */
             if (!rate_control_acquire(&e->rate_control)) continue;
 
+            /* Claim: 同一 task 不可被多 worker 并发 execute */
+            bool expected = false;
+            if (!atomic_compare_exchange_strong(&e->executing, &expected, true)) {
+                continue;
+            }
+
             /* Grab a reference before unlocking */
             TaskBase* task = e->task;
             LatencyTracker* lt = &e->latency;
@@ -326,10 +334,12 @@ static void* scheduler_worker_fn(void* arg) {
             if (task->vtable && task->vtable->execute) {
                 task->vtable->execute(task);
             }
-            latency_tracker_record(lt, clock_now_us() - t0);
+            uint64_t dt = clock_now_us() - t0;
             any_ran = true;
 
             pthread_mutex_lock(&sched->mutex);
+            latency_tracker_record(lt, dt);
+            atomic_store(&e->executing, false);
         }
         pthread_mutex_unlock(&sched->mutex);
 
@@ -396,6 +406,7 @@ int scheduler_register_task(Scheduler* sched, TaskBase* task, const char* name) 
     e->task = task;
     e->id   = id;
     e->active = true;
+    atomic_init(&e->executing, false);
     if (name) snprintf(e->name, sizeof(e->name), "%s", name);
     rate_control_init(&e->rate_control, task->config.max_frequency_hz);
     pthread_mutex_init(&e->trigger_mutex, NULL);

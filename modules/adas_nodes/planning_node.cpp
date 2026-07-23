@@ -616,9 +616,9 @@ protected:
                     if (dx < -10.0 || dx > 80.0) continue;
                     double dy = g.obs_y[i] - g.ego_y;  /* 相对 ego 的横向偏移 */
 
-                    /* 会车检测: 对向车道 (dy > 2.0m,即 y≈+1.75 方向),
+                    /* 会车检测: 对向车道 (|dy| > 2.0m, 双侧),
                      * 迎面驶来 (vx < -2 m/s), 前方 60m 内 */
-                    if (dy > 2.0 && dx > 0.0 && dx < 60.0 &&
+                    if (std::fabs(dy) > 2.0 && dx > 0.0 && dx < 60.0 &&
                         g.obs_vx[i] < -2.0) {
                         oncoming = 1;
                     }

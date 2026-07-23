@@ -285,8 +285,8 @@ double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = state.obs_y[i] - state.y;
-        /* 对向车道: dy > 2.0m (y≈+1.75 lane), 前方 60m */
-        if (dx < 0.0 || dx > 60.0 || dy < 2.0) continue;
+        /* 对向车道: |dy| > 2.0m (双侧车道), 前方 60m */
+        if (dx < 0.0 || dx > 60.0 || std::fabs(dy) < 2.0) continue;
         /* 迎面驶来: obs_v < -2 m/s */
         if (state.obs_v[i] > -2.0) continue;
 

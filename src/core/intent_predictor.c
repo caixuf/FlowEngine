@@ -165,30 +165,30 @@ static void compute_intent_scores(const IntentFeatures* f,
     scores[INTENT_LANE_KEEP] = lk_score / 4.0;
 
     /* ── Lane Change 得分 ── */
-    /* 左变道: 横向速度为正 (y增加) + 车道偏移为负 (在中心线左侧) */
+    /* 左变道: 横向速度为正 (vy>0, y增加) + 车道偏移为负 (在中心线左侧) */
     double lc_left = 0.0;
-    if (f->lateral_speed > 0.1) {
-        lc_left += clamp(f->lateral_speed / 2.0, 0.0, 1.0);
+    if (f->avg_vy > 0.1) {
+        lc_left += clamp(f->avg_vy / 2.0, 0.0, 1.0);
     }
     /* 靠近左车道边缘 */
     if (f->lane_offset < -half_lane * 0.3) {
         lc_left += clamp(fabs(f->lane_offset) / half_lane, 0.0, 1.0) * 0.5;
     }
-    /* 横向速度方向与车道偏移符号一致 (正在离开当前车道) */
-    if (f->lane_offset_rate * f->lateral_speed > 0) {
+    /* 横向速度方向与车道偏移变化率符号一致 (正在离开当前车道) */
+    if (f->lane_offset_rate * f->avg_vy > 0) {
         lc_left += 0.5;
     }
     scores[INTENT_LANE_CHANGE_L] = lc_left / 3.0;
 
-    /* 右变道: 横向速度为负 + 车道偏移为正 */
+    /* 右变道: 横向速度为负 (vy<0) + 车道偏移为正 */
     double lc_right = 0.0;
-    if (f->lateral_speed > 0.1) {
-        lc_right += clamp(f->lateral_speed / 2.0, 0.0, 1.0);
+    if (f->avg_vy < -0.1) {
+        lc_right += clamp(-f->avg_vy / 2.0, 0.0, 1.0);
     }
     if (f->lane_offset > half_lane * 0.3) {
         lc_right += clamp(fabs(f->lane_offset) / half_lane, 0.0, 1.0) * 0.5;
     }
-    if (f->lane_offset_rate * f->avg_vy < 0) {
+    if (f->lane_offset_rate * f->avg_vy > 0) {
         lc_right += 0.5;
     }
     scores[INTENT_LANE_CHANGE_R] = lc_right / 3.0;
@@ -411,7 +411,7 @@ void intent_predictor_feed(IntentPredictor* pred,
         for (int j = 0; j < pred->history_count; j++) {
             if (pred->histories[j].count > 0) {
                 const IntentObject* h = history_get(&pred->histories[j], 0);
-                if (h && h->x == obj->x && h->y == obj->y) {
+                if (h && h->object_id == obj->object_id) {
                     slot = j;
                     break;
                 }

@@ -688,7 +688,17 @@ protected:
                 }
                 double fb_lat_error = fb_target_y - g.ego_y;
                 double fb_cte_term  = atan2(g.lat_kp * fb_lat_error, fmax(g.current_speed, 3.0));
-                double fb_heading_term = g.lat_kd_heading * (g.ego_heading - fb_road_heading);
+                /* fallback heading_term: 同主循环一样加 wrap + junction 守卫 */
+                double fb_ref_h_eff = fb_road_heading;
+                {
+                    double dh = fb_ref_h_eff - g.ego_heading;
+                    while (dh >  M_PI) dh -= 2.0 * M_PI;
+                    while (dh < -M_PI) dh += 2.0 * M_PI;
+                    if (fabs(dh) > 0.5) {
+                        fb_ref_h_eff = g.ego_heading;
+                    }
+                }
+                double fb_heading_term = g.lat_kd_heading * (g.ego_heading - fb_ref_h_eff);
                 double fb_steer = fb_cte_term - fb_heading_term;
                 double fb_steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
                 if (fb_steer >  fb_steer_limit) fb_steer =  fb_steer_limit;
