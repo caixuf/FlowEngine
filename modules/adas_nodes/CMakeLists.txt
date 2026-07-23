@@ -95,6 +95,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# flowcoro/logger.h（经 rt_executor.h → coroutine_task.h 引入）在默认参数中用
+# PROJECT_SOURCE_DIR "/flowcoro.log" 做字符串拼接，需要该宏是字符串字面量。
+# 主项目通过 flowcoro_headers INTERFACE 目标提供此定义；节点子项目不链接该
+# 目标，故在此显式补充（值用 FlowEngine 根目录，日志文件落在根目录下）。
+add_compile_definitions(PROJECT_SOURCE_DIR="${FLOW_ROOT}")
+
 # 输出目录: 与主项目的 build/lib 保持一致，方便 flow_launcher 查找
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 

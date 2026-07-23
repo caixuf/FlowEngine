@@ -1371,7 +1371,8 @@ void* control_thread(void*) {
     try {
         flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
         g_node_exec = &ex;
-        ex.spawn(g.task->run());
+        CoroutineTask& ct = *g.task;
+        ex.spawn(ct.run(), "control");
         while (!g.should_stop) ex.run();
         ex.shutdown();
         g_node_exec = nullptr;

@@ -10,8 +10,8 @@
  *           同时在两个 topic 上各发一条消息，协程只被唤醒一次（原子 CAS 语义）。
  *
  *   Test 3: CoroutineTask 优雅停止
- *           调用 stop() 后协程仅凭取消令牌即在下一个挂起点被唤醒并
- *           干净退出，无需外发唤醒消息。
+ *           调用 set_stop() 后协程凭借 recv_for(50ms) 周期超时醒来，
+ *           在循环边界查 should_stop() 后干净退出，无需外发唤醒消息。
  *
  *   Test 4: recv_for 超时
  *           无消息到达时 co_await ch.recv_for(timeout) 返回 Timeout。
@@ -245,9 +245,10 @@ static void test_when_any_fires_once() {
  * stop() 调用后，execute() 应在有限时间内正常返回；协程在
  * should_stop() 检查处干净退出（exited_cleanly_ 被设置）。
  *
- * 关键设计：execute() 一旦检测到 stop_flag_ 就退出，但协程此时
- * 可能仍悬挂在 co_await ch.recv()。因此在 execute() 返回后，
- * 需额外发一条消息让协程唤醒并通过 should_stop() 干净退出。
+ * rt 确定性调度模型下取消不再靠"cancel_token 直接唤醒悬挂 recv()"——
+ * 该机制已在 rt 重构中删除。改为协程用 recv_for(50ms) 周期醒来
+ * 在循环边界查 should_stop()，配合 ex.shutdown() 排空 timer 后
+ * 干净 co_return。期间不发送任何"唤醒消息"。
  * done_cv 用于等待协程自身完成（独立于 execute() 线程）。
  * ══════════════════════════════════════════════════════════ */
 
@@ -266,10 +267,11 @@ public:
 
 protected:
     Task run() override {
-        /* 传入 cancel_token()：stop() 可直接唤醒悬挂的 recv()，无需外发消息 */
+        /* rt 模型：recv_for(50ms) 周期醒来查 should_stop，无需 cancel_token */
         BusChannel ch(bus(), "test3/msg", 32);
         while (!should_stop()) {
-            co_await ch.recv();
+            auto r = co_await ch.recv_for(50000);  // 50ms 周期醒来查 stop
+            if (r.timed_out()) continue;            // 无消息：回循环查 should_stop
             if (should_stop()) break;
             ++loop_count_;
         }
@@ -290,7 +292,7 @@ private:
 };
 
 static void test_graceful_stop() {
-    printf("\n[Test 3] CoroutineTask 优雅停止（取消令牌，无需外发消息）\n");
+    printf("\n[Test 3] CoroutineTask 优雅停止（rt 周期醒查 stop，无需外发消息）\n");
 
     std::atomic<int>  loop_count{0};
     std::atomic<bool> exited_cleanly{false};
@@ -320,8 +322,9 @@ static void test_graceful_stop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    /* 请求停止：cancel_token 直接唤醒悬挂在 co_await ch.recv() 的协程，
-     * 无需再发任何"唤醒消息"。 */
+    /* 请求停止：rt 模型下 set_stop() 不直接唤醒悬挂的 recv_for()，
+     * 而是由协程自身的 50ms 周期超时唤醒，在循环边界查 should_stop 后
+     * 干净 co_return。期间不发送任何"唤醒消息"。 */
     task.set_stop();
 
     /* 等 execute() 返回（最长 3 秒）*/
@@ -340,7 +343,7 @@ static void test_graceful_stop() {
     }
 
     CHECK(execute_returned.load(), "stop() 后 execute() 在 3 秒内正常返回");
-    CHECK(exited_cleanly.load(),   "协程仅凭 stop() 取消令牌即干净退出（无需外发唤醒消息）");
+    CHECK(exited_cleanly.load(),   "协程仅凭 set_stop() + 周期超时即干净退出（无需外发唤醒消息）");
     CHECK(loop_count.load() > 0,   "停止前协程已处理至少 1 条消息（正常运行过）");
 
     /* coroutine frame already destroyed by ~RtExecutor, no explicit reset needed */
