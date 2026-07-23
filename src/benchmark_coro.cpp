@@ -8,7 +8,7 @@
  *  Bench 2: subscribe_once vs BusChannel 单次端到端延迟对比
  *  Bench 3: when_any_bus 多 topic 竞争等待延迟
  *  Bench 4: 重回调场景吞吐量（每条消息模拟 200µs 处理，flowcoro 线程池并行）
- *  Bench 5: 多并发 FlowCoroTask 扩展性（1/2/4 任务消费同一 topic）
+ *  Bench 5: 多并发 CoroutineTask 扩展性（1/2/4 任务消费同一 topic）
  *
  * 关键设计：每个任务都有 done_flag + done_cv，协程在退出前发出信号；
  * main 等到 done_flag 后再销毁 MessageBus，避免 use-after-free 崩溃。
@@ -66,12 +66,12 @@ static void print_latency_row(const char* label, Stats s) {
  * 停止 task + 发一条唤醒消息（让协程从 co_await 醒来检查 should_stop()）
  * + 等待协程自身的 done_flag 后再 join 线程并销毁总线。
  * ─────────────────────────────────────────────────────────── */
-static void safe_stop(FlowCoroTask& task, std::thread& t,
+static void safe_stop(CoroutineTask& task, std::thread& t,
                       MessageBus* bus, const char* wakeup_topic,
                       std::atomic<bool>& done_flag,
                       std::mutex& done_mtx, std::condition_variable& done_cv,
                       int timeout_s = 10) {
-    task.stop();
+    task.set_stop();
     if (wakeup_topic)
         message_bus_publish(bus, wakeup_topic, "bench", nullptr, 0);
 
@@ -87,13 +87,13 @@ static void safe_stop(FlowCoroTask& task, std::thread& t,
  * Bench 1: BusChannel 端到端吞吐量（分批有反压）
  * ══════════════════════════════════════════════════════════ */
 
-class Bench1Task : public FlowCoroTask {
+class Bench1Task : public CoroutineTask {
 public:
     Bench1Task(MessageBus* bus, int target,
                std::atomic<int>& cnt,
                std::atomic<bool>& done_flag,
                std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), target_(target), cnt_(cnt),
+        : CoroutineTask(bus), target_(target), cnt_(cnt),
           done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -118,7 +118,7 @@ private:
 };
 
 static void bench_buschannel_throughput() {
-    print_bench_header("Bench 1: BusChannel 端到端吞吐量 (FlowCoroTask + 分批有反压)");
+    print_bench_header("Bench 1: BusChannel 端到端吞吐量 (CoroutineTask + 分批有反压)");
 
     const int BATCH  = 100;
     const int ROUNDS = 50;
@@ -134,7 +134,14 @@ static void bench_buschannel_throughput() {
     uint64_t t0 = 0, t1 = 0;
     {
         Bench1Task task(bus, TOTAL, cnt, done_flag, mtx, cv);
-        std::thread t([&]{ task.execute(); });
+        std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         t0 = now_ns();
@@ -163,14 +170,14 @@ static void bench_buschannel_throughput() {
  * Bench 2: subscribe_once vs BusChannel 单次延迟对比
  * ══════════════════════════════════════════════════════════ */
 
-class Bench2OnceTask : public FlowCoroTask {
+class Bench2OnceTask : public CoroutineTask {
 public:
     Bench2OnceTask(MessageBus* bus, int n,
                    std::vector<uint64_t>& samples,
                    std::atomic<bool>& started,
                    std::atomic<bool>& done_flag,
                    std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), n_(n), samples_(samples),
+        : CoroutineTask(bus), n_(n), samples_(samples),
           started_(started), done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -194,14 +201,14 @@ private:
     std::condition_variable& cv_;
 };
 
-class Bench2ChanTask : public FlowCoroTask {
+class Bench2ChanTask : public CoroutineTask {
 public:
     Bench2ChanTask(MessageBus* bus, int n,
                    std::vector<uint64_t>& samples,
                    std::atomic<bool>& started,
                    std::atomic<bool>& done_flag,
                    std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), n_(n), samples_(samples),
+        : CoroutineTask(bus), n_(n), samples_(samples),
           started_(started), done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -254,7 +261,14 @@ static void bench_subscribe_once_vs_channel() {
         MessageBus* bus = message_bus_create("b2a");
         {
             Bench2OnceTask task(bus, N, samples, started, done_flag, mtx, cv);
-            std::thread t([&]{ task.execute(); });
+            std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
             drive_latency(bus, "b2/once", started, N);
 
@@ -278,7 +292,14 @@ static void bench_subscribe_once_vs_channel() {
         MessageBus* bus = message_bus_create("b2b");
         {
             Bench2ChanTask task(bus, N, samples, started, done_flag, mtx, cv);
-            std::thread t([&]{ task.execute(); });
+            std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
             drive_latency(bus, "b2/chan", started, N);
 
@@ -300,14 +321,14 @@ static void bench_subscribe_once_vs_channel() {
  * Bench 3: when_any_bus 多 topic 竞争等待延迟
  * ══════════════════════════════════════════════════════════ */
 
-class Bench3Task : public FlowCoroTask {
+class Bench3Task : public CoroutineTask {
 public:
     Bench3Task(MessageBus* bus, int n,
                std::vector<uint64_t>& samples,
                std::atomic<bool>& started,
                std::atomic<bool>& done_flag,
                std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), n_(n), samples_(samples),
+        : CoroutineTask(bus), n_(n), samples_(samples),
           started_(started), done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -342,7 +363,14 @@ static void bench_when_any_latency() {
     MessageBus* bus = message_bus_create("b3");
     {
         Bench3Task task(bus, N, samples, started, done_flag, mtx, cv);
-        std::thread t([&]{ task.execute(); });
+        std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
         while (!started.load(std::memory_order_acquire))
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -372,13 +400,13 @@ static void bench_when_any_latency() {
  * Bench 4: 重回调场景吞吐量
  * ══════════════════════════════════════════════════════════ */
 
-class Bench4Task : public FlowCoroTask {
+class Bench4Task : public CoroutineTask {
 public:
     Bench4Task(MessageBus* bus, int target,
                std::atomic<int>& cnt,
                std::atomic<bool>& done_flag,
                std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), target_(target), cnt_(cnt),
+        : CoroutineTask(bus), target_(target), cnt_(cnt),
           done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -433,7 +461,14 @@ static void bench_heavy_callback_throughput() {
                 bus, TOTAL, cnt, done_flags[i], mtx, cv));
         }
         for (auto& task : tasks)
-            threads.emplace_back([&t = *task]{ t.execute(); });
+            threads.emplace_back([&t = *task]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(t.run());
+            while (!t.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -453,7 +488,7 @@ static void bench_heavy_callback_throughput() {
         t1 = now_ns();
 
         for (int i = 0; i < NUM_WORKERS; ++i) {
-            tasks[i]->stop();
+            tasks[i]->set_stop();
             message_bus_publish(bus, "b4/heavy", "bench", nullptr, 0);
         }
         for (int i = 0; i < NUM_WORKERS; ++i) {
@@ -478,16 +513,16 @@ static void bench_heavy_callback_throughput() {
 }
 
 /* ══════════════════════════════════════════════════════════
- * Bench 5: 多并发 FlowCoroTask 扩展性
+ * Bench 5: 多并发 CoroutineTask 扩展性
  * ══════════════════════════════════════════════════════════ */
 
-class Bench5Task : public FlowCoroTask {
+class Bench5Task : public CoroutineTask {
 public:
     Bench5Task(MessageBus* bus, int target,
                std::atomic<int>& cnt,
                std::atomic<bool>& done_flag,
                std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), target_(target), cnt_(cnt),
+        : CoroutineTask(bus), target_(target), cnt_(cnt),
           done_flag_(done_flag), mtx_(mtx), cv_(cv) {}
 
 protected:
@@ -515,7 +550,7 @@ private:
 };
 
 static void bench_concurrent_tasks() {
-    print_bench_header("Bench 5: 多并发 FlowCoroTask 扩展性 (N 任务消费同一 topic)");
+    print_bench_header("Bench 5: 多并发 CoroutineTask 扩展性 (N 任务消费同一 topic)");
 
     const int MSGS_PER_WORKER = 2000;
 
@@ -540,7 +575,14 @@ static void bench_concurrent_tasks() {
                     bus, total, cnt, done_flags[i], mtx, cv));
             }
             for (auto& task : tasks)
-                threads.emplace_back([&t = *task]{ t.execute(); });
+                threads.emplace_back([&t = *task]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(t.run());
+            while (!t.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
             std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
@@ -560,7 +602,7 @@ static void bench_concurrent_tasks() {
             t1 = now_ns();
 
             for (int i = 0; i < num_workers; ++i) {
-                tasks[i]->stop();
+                tasks[i]->set_stop();
                 message_bus_publish(bus, "b5/fanout", "bench", nullptr, 0);
             }
             for (int i = 0; i < num_workers; ++i) {

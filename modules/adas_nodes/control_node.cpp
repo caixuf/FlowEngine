@@ -1369,7 +1369,12 @@ private:
 
 void* control_thread(void*) {
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("control", "FlowCoro task failed");
     }
@@ -1603,7 +1608,7 @@ static int control_start(void) {
 
 static void control_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();
+    if (g.task) g.task->set_stop();
 }
 
 static void control_cleanup(void) {

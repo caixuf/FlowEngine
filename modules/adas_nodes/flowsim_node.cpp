@@ -11,13 +11,13 @@
  *   - IDM 跟车 + 状态机驱动 NPC
  *   - OBB SAT 碰撞检测
  *   - 红绿灯/ETC 场景事件调度
- *   - flowcoro 协程主循环（FlowCoroTask，线程池 resume）
+ *   - flowcoro 协程主循环（CoroutineTask，线程池 resume）
  *
  * 向后兼容（与 sim_world_node.c 的 topic 契约完全一致）：
  *   订阅: control/cmd（二进制 ControlCmd + JSON fallback）
  *   发布: vehicle/state, road/geometry, road/traffic_lights, sim/tick, sim/collision
  *
- * 采用 FlowCoroTask（线程池 resume）：物理积分 + NPC AI + 碰撞 + 事件 + JSON
+ * 采用 CoroutineTask（线程池 resume）：物理积分 + NPC AI + 碰撞 + 事件 + JSON
  * 序列化单次 ~50-200μs，同步 resume 会阻塞消息总线分发线程，故改用线程池 resume。
  */
 
@@ -938,10 +938,10 @@ static void internal_cruise_control(flowsim::Entity& ego) {
 
 /* ── 协程主循环 ───────────────────────────────────────────────── */
 
-class FlowSimTask : public FlowCoroTask {
+class FlowSimTask : public CoroutineTask {
 public:
     FlowSimTask(MessageBus* bus, Transport* transport)
-        : FlowCoroTask(bus), transport_(transport) {}
+        : CoroutineTask(bus), transport_(transport) {}
 
 protected:
     Task run() override {
@@ -1169,7 +1169,12 @@ private:
 void* flowsim_thread(void*) {
     pthread_setname_np(pthread_self(), "flowsim");
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("flowsim", "FlowCoro task failed");
     }
@@ -1336,7 +1341,7 @@ static int flowsim_start(void) {
 
 static void flowsim_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
 }
 
 static void flowsim_cleanup(void) {

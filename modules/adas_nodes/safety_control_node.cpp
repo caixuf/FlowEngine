@@ -336,7 +336,7 @@ protected:
 
         LOG_INFO("safety_control", "safety gate started (synchronous resume)");
         while (!should_stop()) {
-            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "inference/raw_cmd"}, &cancel_token_);
+            Message msg = co_await when_any_bus(bus(), {"control/raw_cmd", "inference/raw_cmd"});
             if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
                 std::strcmp(msg.topic, "inference/raw_cmd") != 0) continue;
 
@@ -564,7 +564,12 @@ private:
 void* safety_thread(void*) {
     pthread_setname_np(pthread_self(), "safety_ctrl");
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("safety_control", "FlowCoro task failed");
     }
@@ -623,7 +628,7 @@ int safety_start() {
 
 void safety_stop() {
     g.should_stop = true;
-    if (g.task) g.task->stop();
+    if (g.task) g.task->set_stop();
 }
 
 void safety_cleanup() {

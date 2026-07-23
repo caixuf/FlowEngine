@@ -2,7 +2,7 @@
  * @file coro_bus_demo.cpp
  * @brief flowcoro 协程 + 消息总线综合演示
  *
- * 演示 FlowCoroTask 与 MessageBus 的完整集成，充分利用两个高级原语：
+ * 演示 CoroutineTask 与 MessageBus 的完整集成，充分利用两个高级原语：
  *
  *   BusChannel   — 持久订阅 + 消息缓冲通道，适合持续消费单一 topic。
  *                  构造时一次订阅，每次 co_await ch.recv() 直接取下一条，
@@ -55,10 +55,10 @@ static void signal_handler(int /*sig*/) { g_stop = true; }
  *     不再有循环订阅/注销的往返开销。
  *   - 消息积压时自动缓冲（默认 32 条），不丢帧。
  */
-class LidarProcessTask : public FlowCoroTask {
+class LidarProcessTask : public CoroutineTask {
 public:
     explicit LidarProcessTask(MessageBus* bus, int max_frames = -1)
-        : FlowCoroTask(bus), max_frames_(max_frames) {}
+        : CoroutineTask(bus), max_frames_(max_frames) {}
 
 protected:
     Task run() override {
@@ -106,10 +106,10 @@ private:
  * 这正是自动驾驶中多传感器融合的真实模式：
  *   各传感器频率不同，融合算法不应被最慢的传感器阻塞。
  */
-class FusionTask : public FlowCoroTask {
+class FusionTask : public CoroutineTask {
 public:
     explicit FusionTask(MessageBus* bus, int max_events = -1)
-        : FlowCoroTask(bus), max_events_(max_events) {}
+        : CoroutineTask(bus), max_events_(max_events) {}
 
 protected:
     Task run() override {
@@ -165,14 +165,21 @@ struct CoroWrapper {
 template <typename CoroTaskT>
 static int coro_execute(TaskBase* b) {
     auto* w = reinterpret_cast<CoroWrapper<CoroTaskT>*>(b);
-    try { w->impl->execute(); return 0; }
-    catch (...) { return -1; }
+    try {
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(w->impl->run());
+        while (!w->impl->should_stop()) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
+        return 0;
+    } catch (...) { return -1; }
 }
 
 template <typename CoroTaskT>
 static void coro_stop(TaskBase* b) {
     auto* w = reinterpret_cast<CoroWrapper<CoroTaskT>*>(b);
-    w->impl->stop();
+    w->impl->set_stop();
 }
 
 template <typename CoroTaskT>
@@ -294,8 +301,8 @@ int main() {
 
     /* ── 优雅停止 ─────────────────────────────────────────── */
     std::cout << "\n[Main] 停止所有任务...\n";
-    lidar_task->stop();
-    fusion_task->stop();
+    lidar_task->set_stop();
+    fusion_task->set_stop();
     task_manager_stop_all(mgr);
 
     /* ── 打印线程池状态 ───────────────────────────────────── */

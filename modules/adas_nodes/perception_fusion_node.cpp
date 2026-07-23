@@ -2,7 +2,7 @@
  * perception_fusion_node.cpp — 感知融合节点 (FlowCoro 协程版)
  *
  * 从 perception_fusion_node.c 迁移而来，参照 fusion_node.cpp 范本：
- *   - FlowCoroTask 替代 pthread_create(fusion_thread) + 手写 usleep 轮询
+ *   - CoroutineTask 替代 pthread_create(fusion_thread) + 手写 usleep 轮询
  *   - MessageBuffer + message_buffer_latest 替代手写 a_list/b_list + mutex + max_age
  *   - co_await select_for({a,b}, period_us) 替代 usleep(period_us) 定时轮询
  *   - cJSON 替代手写 parse_double/parse_int/parse_string（CLAUDE.md 规范唯一合法入口）
@@ -418,11 +418,11 @@ static void associate_and_track(const ObstacleList* detections,
 
 /* ── 协程任务 ────────────────────────────────────────────── */
 
-class PerceptionFusionTask : public FlowCoroTask {
+class PerceptionFusionTask : public CoroutineTask {
 public:
     PerceptionFusionTask(MessageBus* bus, Transport* transport,
                          MessageBuffer* a_buf, MessageBuffer* b_buf)
-        : FlowCoroTask(bus), transport_(transport), a_buf_(a_buf), b_buf_(b_buf) {}
+        : CoroutineTask(bus), transport_(transport), a_buf_(a_buf), b_buf_(b_buf) {}
 
 protected:
     Task run() override {
@@ -515,9 +515,14 @@ private:
 /* ── 协程宿主线程 ─────────────────────────────────────────── */
 
 void* fusion_thread(void*) {
-    pthread_setname_np(pthread_self(), "perc_fuse");
+    pthread_setname_np(pthread_self(), "p_fusion");
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("perception_fusion", "FlowCoro task failed");
     }
@@ -659,7 +664,7 @@ static int fusion_start(void) {
 
 static void fusion_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
 }
 
 static void fusion_cleanup(void) {

@@ -106,7 +106,7 @@ static void simple_cpp_task_cleanup(TaskBase* base_task) {
     auto* wrapper = reinterpret_cast<SimpleCppTaskWrapper*>(base_task);
     
     if (wrapper->task) {
-        wrapper->task->stop();
+        wrapper->task->set_stop();
         wrapper->task.reset();
     }
 }

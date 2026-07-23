@@ -1,7 +1,7 @@
 /**
  * planning_node.cpp — Frenet 轨迹规划节点插件 (FlowCoro 协程版)
  *
- * 从 planning_node.c 迁移而来，采用 FlowCoroTask 协程框架：
+ * 从 planning_node.c 迁移而来，采用 CoroutineTask 协程框架：
  *   - co_await sleep_us(50000) 替代 usleep 20Hz 轮询（可被 stop 取消）
  *   - 保留 on_fusion / on_vehicle_state / on_road_geometry 持久回调
  *   - 驾驶模式状态机 + 路线变道 + Frenet 规划逻辑原样搬入 run()
@@ -10,7 +10,7 @@
  *
  * NodePlugin 接口，编译为 libplanning_node.so。
  *
- * 采用 FlowCoroTask（线程池 resume）：节点做重计算（Frenet 轨迹规划），同步 resume 会阻塞
+ * 采用 CoroutineTask（线程池 resume）：节点做重计算（Frenet 轨迹规划），同步 resume 会阻塞
  * 消息总线分发线程导致 drops，故改用线程池 resume。
  * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
  * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
@@ -414,10 +414,10 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class PlanningTask : public FlowCoroTask {
+class PlanningTask : public CoroutineTask {
 public:
     PlanningTask(MessageBus* bus, Transport* transport)
-        : FlowCoroTask(bus), transport_(transport) {}
+        : CoroutineTask(bus), transport_(transport) {}
 
 protected:
     Task run() override {
@@ -865,7 +865,12 @@ private:
 
 void* planning_thread(void*) {
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("planning", "FlowCoro task failed");
     }
@@ -1030,7 +1035,7 @@ static int planning_start(void) {
 
 static void planning_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();
+    if (g.task) g.task->set_stop();
 }
 
 static void planning_cleanup(void) {

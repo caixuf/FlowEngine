@@ -20,10 +20,10 @@
  *   - 无 GPS 时: SLAM Pose2D 全维更新（位置+航向）→ 接管定位
  *   SLAM 的 cov_xx/cov_yy 用于动态调节 R 矩阵，发散的 SLAM 自动降权
  *
- * 采用 FlowCoroTask（线程池 resume），而非 CoroutineTask（同步 resume）：
+ * 采用 CoroutineTask（线程池 resume），而非 CoroutineTask（同步 resume）：
  * EKF 计算 + 序列化 + transport_publish 单次 ~50-100μs，同步 resume 会在
  * 消息总线分发线程上执行完整协程体，阻塞后续消息分发，累积导致 drops。
- * FlowCoroTask 将 resume 交给 flowcoro 无锁线程池，总线分发线程只触发不阻塞。
+ * CoroutineTask 将 resume 交给 flowcoro 无锁线程池，总线分发线程只触发不阻塞。
  * 与 safety_control_node 不同——后者纯限幅 <10μs，同步 resume 无阻塞风险。
  */
 
@@ -114,13 +114,13 @@ static void on_pose(const Message* msg, void* user_data) {
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class FusionTask : public FlowCoroTask {
+class FusionTask : public CoroutineTask {
 public:
     FusionTask(MessageBus* bus, Transport* transport,
                MessageBuffer* lidar_buf, MessageBuffer* gps_buf,
                MessageBuffer* pose_buf,
                EkfFusion* ekf, LatencyTracker* lat_tracker)
-        : FlowCoroTask(bus), transport_(transport),
+        : CoroutineTask(bus), transport_(transport),
           lidar_buf_(lidar_buf), gps_buf_(gps_buf), pose_buf_(pose_buf),
           ekf_(ekf), lat_tracker_(lat_tracker) {}
 
@@ -274,7 +274,12 @@ private:
 void* fusion_thread(void*) {
     pthread_setname_np(pthread_self(), "fusion");
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("fusion", "FlowCoro task failed");
     }
@@ -353,7 +358,7 @@ static int fusion_start(void) {
 
 static void fusion_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
+    if (g.task) g.task->set_stop();  /* 触发 CancelToken 唤醒挂起的 select_for */
 }
 
 static void fusion_cleanup(void) {

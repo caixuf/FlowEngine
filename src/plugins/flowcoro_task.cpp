@@ -2,8 +2,8 @@
  * @file flowcoro_task.cpp
  * @brief flowcoro 协程任务插件示例
  *
- * 演示如何基于 FlowCoroTask 实现一个消息驱动的协程任务插件：
- *   - 继承 FlowCoroTask，只需实现 run() 协程
+ * 演示如何基于 CoroutineTask 实现一个消息驱动的协程任务插件：
+ *   - 继承 CoroutineTask，只需实现 run() 协程
  *   - 使用 BusChannel 持久订阅消息总线，循环 co_await ch.recv() 消费消息
  *   - 消息到达时，resume 在 flowcoro 线程池工作线程执行，
  *     不阻塞消息总线的分发线程
@@ -39,9 +39,9 @@
  *   - 用 when_any_bus 竞争等待两个通道，哪个先来就先处理
  *   - 支持优雅停止（should_stop()）
  */
-class SensorFusionTask : public FlowCoroTask {
+class SensorFusionTask : public CoroutineTask {
 public:
-    explicit SensorFusionTask(MessageBus* bus) : FlowCoroTask(bus) {}
+    explicit SensorFusionTask(MessageBus* bus) : CoroutineTask(bus) {}
 
 protected:
     Task run() override {

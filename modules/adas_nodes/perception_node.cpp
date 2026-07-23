@@ -1,7 +1,7 @@
 /**
  * perception_node.cpp — 感知节点插件 (FlowCoro 协程版)
  *
- * 从 perception_node.c 迁移而来，采用 FlowCoroTask 协程框架：
+ * 从 perception_node.c 迁移而来，采用 CoroutineTask 协程框架：
  *   - co_await sleep_us(period_us) 替代 usleep 定频轮询（可被 stop 取消）
  *   - 保留 on_vehicle_state 持久回调更新 ego 状态
  *   - DBSCAN 聚类逻辑原样搬入 run()
@@ -14,7 +14,7 @@
  *   - RANSAC 地面移除
  *   - 基于真值的障碍物聚类仿真
  *
- * 采用 FlowCoroTask（线程池 resume）：节点做重计算（DBSCAN 点云聚类），同步 resume 会阻塞
+ * 采用 CoroutineTask（线程池 resume）：节点做重计算（DBSCAN 点云聚类），同步 resume 会阻塞
  * 消息总线分发线程导致 drops，故改用线程池 resume。
  * flowcoro 核心库为 header-only（INTERFACE），子项目已 include 其头文件目录，
  * 故只需 FLOWCORO_INTEGRATION 定义 + -fcoroutines，无需额外链接 flowcoro 库。
@@ -170,10 +170,10 @@ static void on_sensor_lidar(const Message* msg, void* user_data) {
 
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
-class PerceptionTask : public FlowCoroTask {
+class PerceptionTask : public CoroutineTask {
 public:
     PerceptionTask(MessageBus* bus, Transport* transport, int lidar_rate_hz)
-        : FlowCoroTask(bus), transport_(transport),
+        : CoroutineTask(bus), transport_(transport),
           period_us_(1000000L / (lidar_rate_hz > 0 ? lidar_rate_hz : 20)) {}
 
 protected:
@@ -324,7 +324,12 @@ private:
 void* perception_thread(void*) {
     pthread_setname_np(pthread_self(), "perception");
     try {
-        g.task->execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(g.task->run());
+        while (!g.should_stop) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
     } catch (...) {
         LOG_ERROR("perception", "FlowCoro task failed");
     }
@@ -428,7 +433,7 @@ static int perception_start(void) {
 
 static void perception_stop(void) {
     g.should_stop = true;
-    if (g.task) g.task->stop();
+    if (g.task) g.task->set_stop();
 }
 
 static void perception_cleanup(void) {

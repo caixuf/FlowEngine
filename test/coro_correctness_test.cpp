@@ -1,6 +1,6 @@
 /**
  * @file coro_correctness_test.cpp
- * @brief FlowCoroTask 协程集成层正确性测试
+ * @brief CoroutineTask 协程集成层正确性测试
  *
  * 测试项目:
  *   Test 1: BusChannel 消息不丢失
@@ -9,7 +9,7 @@
  *   Test 2: when_any_bus 只唤醒一次
  *           同时在两个 topic 上各发一条消息，协程只被唤醒一次（原子 CAS 语义）。
  *
- *   Test 3: FlowCoroTask 优雅停止
+ *   Test 3: CoroutineTask 优雅停止
  *           调用 stop() 后协程仅凭取消令牌即在下一个挂起点被唤醒并
  *           干净退出，无需外发唤醒消息。
  *
@@ -60,13 +60,13 @@ static int g_fail = 0;
  * 验证最终计数 == N。
  * ══════════════════════════════════════════════════════════ */
 
-class BusChannelNoLossTask : public FlowCoroTask {
+class BusChannelNoLossTask : public CoroutineTask {
 public:
     BusChannelNoLossTask(MessageBus* bus, int n,
                          std::atomic<int>& counter,
                          std::mutex& mtx,
                          std::condition_variable& cv)
-        : FlowCoroTask(bus), n_(n), counter_(counter), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), n_(n), counter_(counter), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
@@ -101,7 +101,14 @@ static void test_buschannel_no_loss() {
 
     MessageBus* bus = message_bus_create("t1");
     BusChannelNoLossTask task(bus, N, counter, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
     /* 等协程到达第一个 co_await（已订阅）*/
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -119,7 +126,7 @@ static void test_buschannel_no_loss() {
         cv.wait_for(lk, std::chrono::seconds(10),
                     [&]{ return counter.load() >= N; });
     }
-    task.stop();
+    task.set_stop();
     t.join();
 
     CHECK(counter.load() == N, "BusChannel 收到全部 100 条消息（无丢帧）");
@@ -143,7 +150,7 @@ static void test_buschannel_no_loss() {
  *   - 全部发完后通过 done_flag + condition_variable 等待协程结束。
  * ══════════════════════════════════════════════════════════ */
 
-class WhenAnyOnceTask : public FlowCoroTask {
+class WhenAnyOnceTask : public CoroutineTask {
 public:
     WhenAnyOnceTask(MessageBus* bus, int rounds,
                     std::atomic<int>& resume_count,
@@ -151,7 +158,7 @@ public:
                     std::atomic<bool>& done_flag,
                     std::mutex& mtx,
                     std::condition_variable& cv)
-        : FlowCoroTask(bus), rounds_(rounds),
+        : CoroutineTask(bus), rounds_(rounds),
           resume_count_(resume_count),
           started_(started), done_flag_(done_flag),
           mtx_(mtx), cv_(cv) {}
@@ -190,7 +197,14 @@ static void test_when_any_fires_once() {
 
     MessageBus* bus = message_bus_create("t2");
     WhenAnyOnceTask task(bus, ROUNDS, resume_count, started, done_flag, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
     /* 等协程线程池工作线程启动并到达第一个 co_await */
     while (!started.load(std::memory_order_acquire))
@@ -213,7 +227,7 @@ static void test_when_any_fires_once() {
         cv.wait_for(lk, std::chrono::seconds(10),
                     [&]{ return done_flag.load(std::memory_order_acquire); });
     }
-    task.stop();
+    task.set_stop();
     t.join();
 
     CHECK(resume_count.load() == ROUNDS,
@@ -224,7 +238,7 @@ static void test_when_any_fires_once() {
 }
 
 /* ══════════════════════════════════════════════════════════
- * Test 3: FlowCoroTask 优雅停止
+ * Test 3: CoroutineTask 优雅停止
  *
  * stop() 调用后，execute() 应在有限时间内正常返回；协程在
  * should_stop() 检查处干净退出（exited_cleanly_ 被设置）。
@@ -235,14 +249,14 @@ static void test_when_any_fires_once() {
  * done_cv 用于等待协程自身完成（独立于 execute() 线程）。
  * ══════════════════════════════════════════════════════════ */
 
-class GracefulStopTask : public FlowCoroTask {
+class GracefulStopTask : public CoroutineTask {
 public:
     GracefulStopTask(MessageBus* bus,
                      std::atomic<int>& loop_count,
                      std::atomic<bool>& exited_cleanly,
                      std::mutex& done_mtx,
                      std::condition_variable& done_cv)
-        : FlowCoroTask(bus),
+        : CoroutineTask(bus),
           loop_count_(loop_count),
           exited_cleanly_(exited_cleanly),
           done_mtx_(done_mtx),
@@ -274,7 +288,7 @@ private:
 };
 
 static void test_graceful_stop() {
-    printf("\n[Test 3] FlowCoroTask 优雅停止（取消令牌，无需外发消息）\n");
+    printf("\n[Test 3] CoroutineTask 优雅停止（取消令牌，无需外发消息）\n");
 
     std::atomic<int>  loop_count{0};
     std::atomic<bool> exited_cleanly{false};
@@ -286,7 +300,12 @@ static void test_graceful_stop() {
     GracefulStopTask task(bus, loop_count, exited_cleanly, done_mtx, done_cv);
 
     std::thread t([&]{
-        task.execute();
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        g_node_exec = &ex;
+        ex.spawn(task.run());
+        while (!task.should_stop()) ex.run();
+        ex.shutdown();
+        g_node_exec = nullptr;
         execute_returned.store(true, std::memory_order_release);
     });
 
@@ -300,7 +319,7 @@ static void test_graceful_stop() {
 
     /* 请求停止：cancel_token 直接唤醒悬挂在 co_await ch.recv() 的协程，
      * 无需再发任何"唤醒消息"。 */
-    task.stop();
+    task.set_stop();
 
     /* 等 execute() 返回（最长 3 秒）*/
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -330,11 +349,11 @@ static void test_graceful_stop() {
  * 无消息到达时，co_await ch.recv_for(timeout) 应在超时后返回 Timeout。
  * ══════════════════════════════════════════════════════════ */
 
-class TimeoutTask : public FlowCoroTask {
+class TimeoutTask : public CoroutineTask {
 public:
     TimeoutTask(MessageBus* bus, std::atomic<bool>& timed_out,
                 std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), timed_out_(timed_out), done_(done), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), timed_out_(timed_out), done_(done), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
@@ -367,14 +386,21 @@ static void test_recv_timeout() {
 
     MessageBus* bus = message_bus_create("t4");
     TimeoutTask task(bus, timed_out, done, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
     {
         std::unique_lock<std::mutex> lk(mtx);
         cv.wait_for(lk, std::chrono::seconds(3),
                     [&]{ return done.load(std::memory_order_acquire); });
     }
-    task.stop();
+    task.set_stop();
     t.join();
 
     CHECK(timed_out.load(), "无消息时 recv_for 在超时后返回 Timeout 状态");
@@ -388,11 +414,11 @@ static void test_recv_timeout() {
  * co_await sleep_ms(N) 应挂起约 N 毫秒后恢复（不占线程）。
  * ══════════════════════════════════════════════════════════ */
 
-class DelayTask : public FlowCoroTask {
+class DelayTask : public CoroutineTask {
 public:
     DelayTask(MessageBus* bus, std::atomic<long>& elapsed_ms,
               std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), elapsed_ms_(elapsed_ms), done_(done), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), elapsed_ms_(elapsed_ms), done_(done), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
@@ -429,14 +455,21 @@ static void test_delay() {
 
     MessageBus* bus = message_bus_create("t5");
     DelayTask task(bus, elapsed_ms, done, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
     {
         std::unique_lock<std::mutex> lk(mtx);
         cv.wait_for(lk, std::chrono::seconds(3),
                     [&]{ return done.load(std::memory_order_acquire); });
     }
-    task.stop();
+    task.set_stop();
     t.join();
 
     long e = elapsed_ms.load();
@@ -456,11 +489,11 @@ static void echo_service(const Message* req, Message* reply, void* /*ud*/) {
     if (req->data_size) memcpy(reply->data, req->data, req->data_size);
 }
 
-class RequestTask : public FlowCoroTask {
+class RequestTask : public CoroutineTask {
 public:
     RequestTask(MessageBus* bus, std::atomic<bool>& ok, std::atomic<int>& value,
                 std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), ok_(ok), value_(value), done_(done), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), ok_(ok), value_(value), done_(done), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
@@ -501,14 +534,21 @@ static void test_request() {
     message_bus_register_service(bus, "service/echo", echo_service, nullptr);
 
     RequestTask task(bus, ok, value, done, mtx, cv);
-    std::thread t([&]{ task.execute(); });
+    std::thread t([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
     {
         std::unique_lock<std::mutex> lk(mtx);
         cv.wait_for(lk, std::chrono::seconds(5),
                     [&]{ return done.load(std::memory_order_acquire); });
     }
-    task.stop();
+    task.set_stop();
     t.join();
 
     CHECK(ok.load(),            "co_await ask() 成功收到回复");
@@ -531,11 +571,11 @@ static void test_request() {
  *   - 主线程在随机时刻 stop()，要求协程迅速取消退出。
  * ══════════════════════════════════════════════════════════ */
 
-class StressTask : public FlowCoroTask {
+class StressTask : public CoroutineTask {
 public:
     StressTask(MessageBus* bus, std::atomic<long>& iters,
                std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
-        : FlowCoroTask(bus), iters_(iters), done_(done), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), iters_(iters), done_(done), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
@@ -578,7 +618,14 @@ static void test_stress_concurrency() {
 
         MessageBus* bus = message_bus_create("t7");
         StressTask task(bus, iters, done, mtx, cv);
-        std::thread runner([&]{ task.execute(); });
+        std::thread runner([&]{
+            flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+            g_node_exec = &ex;
+            ex.spawn(task.run());
+            while (!task.should_stop()) ex.run();
+            ex.shutdown();
+            g_node_exec = nullptr;
+        });
 
         /* 发布线程：高频灌两个 topic */
         std::thread publisher([&]{
@@ -594,7 +641,7 @@ static void test_stress_concurrency() {
         std::this_thread::sleep_for(std::chrono::milliseconds(15 + c * 3));
 
         /* 取消：协程应迅速退出，无需外发特殊消息 */
-        task.stop();
+        task.set_stop();
         {
             std::unique_lock<std::mutex> lk(mtx);
             if (!cv.wait_for(lk, std::chrono::seconds(3),
@@ -623,7 +670,7 @@ static void test_stress_concurrency() {
 
 int main() {
     printf("╔═══════════════════════════════════════════════════════════════════╗\n");
-    printf("║            FlowCoroTask 协程集成层正确性测试                     ║\n");
+    printf("║            CoroutineTask 协程集成层正确性测试                     ║\n");
     printf("╚═══════════════════════════════════════════════════════════════════╝\n");
 
     test_buschannel_no_loss();
