@@ -130,6 +130,15 @@ endif()
 # =============================================================================
 set(FLOWCORO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/flowcoro)
 
+# 添加 flowcoro 头文件搜索路径（项目级别，确保所有目标都能看到）
+# flowcoro 头文件有两种 include 风格：
+#   #include "flowcoro/core.h"  → 需要 include/
+#   #include "core.h"           → 需要 include/flowcoro/ (net.h 等内部头文件)
+include_directories(
+    ${FLOWCORO_DIR}/include
+    ${FLOWCORO_DIR}/include/flowcoro
+)
+
 # flowcoro — header-only INTERFACE 库
 add_library(flowcoro INTERFACE)
 target_include_directories(flowcoro INTERFACE
