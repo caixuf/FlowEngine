@@ -237,7 +237,7 @@ static double mobil_gain(const Entity& npc, double target_offset,
 static bool boundary_permissive(const Entity& npc, double target_offset,
                                 FlowRoadNetwork* roads) {
     // CutIn 状态机：跨实线变道，直接放行
-    if (npc.ai_state == AIState::CutIn) return true;
+    if (npc.state == NpcState::CutIn) return true;
     if (!roads || !roads->loaded()) return true;  // 无路网时保守放行
 
     // 中心线保护：offset=0 是对向分界线，严禁跨越。留 0.5m 余量防越线。
@@ -307,8 +307,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.speed = 0.0;
     npc.vx = 0.0; npc.vy = 0.0;
     npc.throttle = 0.0; npc.brake = 0.0;
-    npc.ai_state = AIState::Cruise;
-    npc.lateral_control = LateralControl::None;
+    npc.state = NpcState::Cruise;
     npc.lead_id = INVALID_ENTITY;
     npc.follow_gap = 1e9;
     npc.crash_cooldown = 0.0;
@@ -365,8 +364,8 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     // ── 横向控制仲裁 ──
     // NPC 横向由以下系统之一控制，优先级从高到低：
     //   Choreo/Script > CutIn > Mobil > None（E2 保持当前车道）
-    // lateral_control 由写入 target_offset 的系统设置，CutIn 完成时清除。
-    // 脚本/编舞 (lateral_control=Script/Choreo) 期间 MOBIL 跳过评估，
+    // 横向控制权由写入 target_offset 的系统隐式持有，CutIn 完成时释放。
+    // 脚本/编舞（状态=CutIn/LaneChange）期间 MOBIL 跳过评估，
     // 防止两套系统互相覆盖。
 
     // ── E2: offset → target_offset 平滑插值（换道不瞬移，1.5s 完成 3.5m 变道）──
@@ -378,7 +377,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     //   offset += clamp(u, ±max_lateral_speed) * dt
     // PID 比 2.3 m/s 固定插值更"激进"且可控（超调后回拉），符合加塞场景；
     // 同时 bypass lane_change_safe（跨实线变道本就要"硬挤"）。
-    if (!in_crash_cooldown && npc.ai_state == AIState::CutIn) {
+    if (!in_crash_cooldown && npc.state == NpcState::CutIn) {
         double err = npc.target_offset - npc.offset;
         npc.cutin_pid_integral += err * dt;
         // 积分项防饱和（误差大时积分不持续累积，避免过冲后回拉过度）
@@ -404,11 +403,10 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         if (npc.route_dir < 0 && npc.offset <  0.3) npc.offset =  0.3;
         npc.cutin_active = true;
         // 到达目标通道 → 完成，回 Cruise（清积分项防残留影响下次）
-        // 释放横向控制权：lateral_control 恢复为 None，后续 MOBIL/IDM 可接管
+        // 释放横向控制权，后续 MOBIL/IDM 可接管
         if (std::fabs(npc.target_offset - npc.offset) < cfg.cutin_completion_threshold) {
             npc.offset = npc.target_offset;
-            npc.ai_state = AIState::Cruise;
-            npc.lateral_control = LateralControl::None;
+            npc.state = NpcState::Cruise;
             npc.cutin_pid_integral = 0.0;
             npc.cutin_pid_prev = 0.0;
             npc.cutin_active = false;
@@ -451,14 +449,13 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     //    候选车道：当前 offset ± lane_width（3.5m），不超过路面半宽。
     //    每个候选评估：boundary_permissive(是否虚线可跨越) + mobil_gain(收益>阈值)
     //    + safety(新跟随者不会被迫急刹)。同时保留避障触发：前车太慢时主动评估。
-    //    仲裁检查：lateral_control 不为 None（脚本/编舞/CutIn 活跃中）时跳过，
+    //    仲裁检查：CutIn/LaneChange（脚本/编舞/CutIn 活跃中）时跳过，
     //    防止 MOBIL 覆盖场景导演的横向指令。
     //    红绿灯/让行期间不评估变道（StopForTL/Yield 状态下保持当前车道）
     if (false) {
         // 仲裁门禁：存在更高优先级的横向控制时跳过
-        if (npc.lateral_control == LateralControl::Script ||
-            npc.lateral_control == LateralControl::Choreo ||
-            npc.ai_state == AIState::CutIn) { goto mobil_done; }
+        if (npc.state == NpcState::CutIn ||
+            npc.state == NpcState::LaneChange) { goto mobil_done; }
         if (npc.lane_change_timer > 0.0) {
             npc.lane_change_timer -= dt;
             if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
@@ -525,7 +522,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
 
             if (chosen > -900) {
                 npc.target_offset = chosen;
-                npc.lateral_control = LateralControl::Mobil;
+                npc.state = NpcState::LaneChange;
                 npc.lane_change_timer = cfg.mobil_lane_change_cooldown;
             }
         }
@@ -536,9 +533,9 @@ mobil_done: ;
     double v = npc.speed;
     double v_desired = 0.0;
     if (!in_crash_cooldown) {
-        if (npc.ai_state == AIState::Stop || npc.ai_state == AIState::StopForTL) {
+        if (npc.state == NpcState::Stopped || npc.state == NpcState::StopForTL) {
             v_desired = 0.0;
-        } else if (npc.ai_state == AIState::CutIn) {
+        } else if (npc.state == NpcState::CutIn) {
             // CutIn 期间：纵向减速 cfg.cutin_longitudinal_decel m/s（避免变道时冲撞侧后车），
             // 仍按 IDM 跟前车（gap 不足时进一步减速），但上限为 target_vx - decel。
             double cap = std::max(0.0, npc.target_vx - cfg.cutin_longitudinal_decel);
@@ -548,12 +545,12 @@ mobil_done: ;
                 v_desired = cap;
             }
             // 保持 ai_state==CutIn（不要被 lead 分支覆盖成 Follow）
-            npc.ai_state = AIState::CutIn;
+            npc.state = NpcState::CutIn;
         } else if (lead != INVALID_ENTITY) {
-            npc.ai_state = AIState::Follow;
+            npc.state = NpcState::Follow;
             v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
         } else {
-            npc.ai_state = AIState::Cruise;
+            npc.state = NpcState::Cruise;
             v_desired = npc.target_vx;
         }
     }
@@ -592,7 +589,7 @@ mobil_done: ;
         // type 映射左/右转。advance 失败（路网边界）→ recycle。
         double dist = npc.speed * dt;
         double junc_angle = M_PI;
-        if (npc.ai_state == AIState::BranchSel) {
+        if (npc.state == NpcState::Cruise) {
             // 路口选支路：暂用直行（后续可从 target_vx 或 route step 决定）
             junc_angle = M_PI;
         }

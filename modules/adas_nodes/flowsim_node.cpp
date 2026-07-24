@@ -274,17 +274,17 @@ static flowsim::EntityType actor_type_to_entity(const char* type) {
  *
  * ai_state 字符串 → AIState 枚举映射（与 scene_pub.cpp::ai_state_str 反向）。
  */
-static flowsim::AIState ai_state_from_str(const char* s) {
-    if (!s || !s[0]) return flowsim::AIState::Cruise;
-    if (strcmp(s, "follow") == 0)       return flowsim::AIState::Follow;
-    if (strcmp(s, "stop") == 0)         return flowsim::AIState::Stop;
-    if (strcmp(s, "stop_for_tl") == 0)  return flowsim::AIState::StopForTL;
-    if (strcmp(s, "etc_approach") == 0) return flowsim::AIState::ETCApproach;
-    if (strcmp(s, "branch_sel") == 0)   return flowsim::AIState::BranchSel;
-    if (strcmp(s, "merge") == 0)        return flowsim::AIState::Merge;
-    if (strcmp(s, "yield") == 0)        return flowsim::AIState::Yield;
-    if (strcmp(s, "cutin") == 0)        return flowsim::AIState::CutIn;
-    return flowsim::AIState::Cruise;
+static flowsim::NpcState ai_state_from_str(const char* s) {
+    if (!s || !s[0]) return flowsim::NpcState::Cruise;
+    if (strcmp(s, "follow") == 0)       return flowsim::NpcState::Follow;
+    if (strcmp(s, "stop") == 0)         return flowsim::NpcState::Stopped;
+    if (strcmp(s, "stop_for_tl") == 0)  return flowsim::NpcState::StopForTL;
+    if (strcmp(s, "etc_approach") == 0) return flowsim::NpcState::Yield;      /* ETC 接近 → 让行减速 */
+    if (strcmp(s, "branch_sel") == 0)   return flowsim::NpcState::Cruise;     /* 路口选路由 road_pos 处理 */
+    if (strcmp(s, "merge") == 0)        return flowsim::NpcState::Cruise;     /* 汇入由 road_pos 处理 */
+    if (strcmp(s, "yield") == 0)        return flowsim::NpcState::Yield;
+    if (strcmp(s, "cutin") == 0)        return flowsim::NpcState::CutIn;
+    return flowsim::NpcState::Cruise;
 }
 
 static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
@@ -297,23 +297,17 @@ static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
 
 static void apply_actor_override(flowsim::Entity& e,
                                  const ScenarioActorOverride* o) {
-    bool took_control = false;  // 是否获取了横向控制权
     if (o->ai_state[0]) {
-        e.ai_state = ai_state_from_str(o->ai_state);
+        e.state = ai_state_from_str(o->ai_state);
         /* 进入 CutIn 时初始化 PID 状态，避免残留旧值影响新变道 */
-        if (e.ai_state == flowsim::AIState::CutIn) {
+        if (e.state == flowsim::NpcState::CutIn) {
             e.cutin_pid_integral = 0.0;
             e.cutin_pid_prev = 0.0;
             e.cutin_active = true;
-            took_control = true;
         }
     }
     if (!isnan(o->target_offset)) {
         e.target_offset = o->target_offset;
-        took_control = true;
-    }
-    if (took_control) {
-        e.lateral_control = flowsim::LateralControl::Script;
     }
     if (!isnan(o->target_vx)) {
         e.target_vx = o->target_vx;
@@ -677,7 +671,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         e.target_vx = eg->approach_speed;   /* ETC 通过目标速度 */
         e.phase_timer = 0.0;                 /* 抬杆进度 [0,1]，初始 closed */
         e.width = eg->open_range_m;          /* open_range_m 存到 width 字段 */
-        e.ai_state = flowsim::AIState::Stop; /* 初始 closed 状态 */
+        e.state = flowsim::NpcState::Stopped; /* 初始 closed 状态 */
         e.heading = eg->heading;
         /* esmini 校正坐标 */
         if (g.roads_loaded) {
@@ -1092,7 +1086,7 @@ protected:
             }
 
             /* ── Step 2: 场景事件预检查（让 NPC 知道前方红绿灯/ETC） ── */
-            flowsim::check_npc_scene_events(g.pool, g.ai_cfg.look_ahead);
+            flowsim::check_npc_scene_events(g.pool, g.ai_cfg.look_ahead, g.ai_cfg);
 
             /* ── Step 2.5: 工况脚本（Task 3）—— 触发器评估 + actor_overrides 应用 ──
              * 必须在 NPC AI 之前：CutIn 触发后 set ai_state+target_offset，

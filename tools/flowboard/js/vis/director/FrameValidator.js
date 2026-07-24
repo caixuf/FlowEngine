@@ -147,10 +147,10 @@ export function validateFrame(topoData) {
             key: 'entities[' + nonEgoIdx + '].type',
             msg: 'entity 缺 type 字段，会被各 View 静默丢弃',
           });
-        } else if (!['car', 'pedestrian', 'traffic_light', 'tl', 'sign', 'ego'].includes(e.type)) {
+        } else if (!['car', 'suv', 'truck', 'pedestrian', 'traffic_light', 'tl', 'etc_gate', 'stop_line', 'sign', 'ego'].includes(e.type)) {
           warnings.push({
             key: 'entities[' + nonEgoIdx + '].type',
-            msg: 'entity 类型 "' + e.type + '" 不在已知集合 {car, pedestrian, traffic_light, sign, ego}，可能被静默兜底为 Car',
+            msg: 'entity 类型 "' + e.type + '" 不在已知集合 {car, suv, truck, pedestrian, traffic_light, etc_gate, stop_line, sign, ego}，可能被静默兜底为 Car',
           });
         }
         nonEgoIdx++;

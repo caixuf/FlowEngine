@@ -13,7 +13,7 @@ using flowsim::EntityType;
 using flowsim::EntityId;
 using flowsim::INVALID_ENTITY;
 using flowsim::MAX_ENTITIES;
-using flowsim::AIState;
+using flowsim::NpcState;
 using flowsim::apply_vehicle_defaults;
 using flowsim::step_bicycle;
 using flowsim::step_pedestrian;
