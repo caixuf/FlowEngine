@@ -171,7 +171,8 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                        double sim_time_s, double dt,
                        const Choreography* choreo,
                        FlowRoadNetwork* roads,
-                       const Route* route) {
+                       const Route* route,
+                       uint32_t cycle) {
     (void)dt;
     if (!choreo || !choreo->enabled || choreo->beat_count <= 0) return;
     if (choreo->loop_period_s <= 0.0) return;
@@ -267,6 +268,10 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
         target->vy = 0.0;
         target->speed = std::fabs(b->vx);
         target->heading = 0.0;  /* 沿 +x 直行 */
+        /* 标记本次显式传送，供 temporal invariant 跳过 Δpos 检查。
+         * choreography beat 是场景循环机制（非 bug），传送后下一帧
+         * invariant 会跳过 pos 检查，避免误报瞬移。 */
+        target->last_teleport_cycle = cycle;
 
         /* ── 同步 Frenet 状态 ──
          * choreography 传送 NPC 到新世界坐标后，必须同步其 Frenet 状态

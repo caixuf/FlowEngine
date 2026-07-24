@@ -101,6 +101,7 @@ struct ActorDigest {
     double rotation_y;          // 实际给 THREE 的 rotation.y
     int    route_dir;           // 行驶方向
     int    ai_state;            // AI 状态
+    uint32_t last_teleport_cycle;  // 最近一次被显式传送的 cycle（choreography/recycle）
 };
 
 struct DynamicDigest {

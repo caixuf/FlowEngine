@@ -272,7 +272,8 @@ static bool boundary_permissive(const Entity& npc, double target_offset,
  * 到新 (road_id, s_local, offset)，使后续 step5 走 road_pos.advance 分支而非旧
  * route_s+frenet_to_world。 */
 static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
-                        const EntityPool& pool, FlowRoadNetwork* roads) {
+                        const EntityPool& pool, FlowRoadNetwork* roads,
+                        uint32_t cycle) {
     const double total = route.total_length();
     // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
     const double back = 50.0 + (double)(npc.id % 5) * 22.0;
@@ -300,6 +301,8 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     if (target < 0.0)   target = 0.0;
     if (target > total) target = total;
     npc.route_s = target;
+    /* 标记本次显式传送，供 temporal invariant 跳过 Δpos 检查 */
+    npc.last_teleport_cycle = cycle;
     // 重置动态状态：之前 recycle 只改 route_s，speed/ai_state/lead_id/crash_cooldown
     // 残留旧值——刚刹停的车回收后 speed=0 顶在新位置不动；刚撞车冻结的车回收后
     // crash_cooldown>0 继续冻结；follow 状态的车回收后还在追一辆已不存在的 lead。
@@ -347,7 +350,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
                       FlowRoadNetwork* roads, const Route* route,
-                      double ego_route_s) {
+                      double ego_route_s, uint32_t cycle) {
     bool in_crash_cooldown = (npc.crash_cooldown > 0.0);
     if (in_crash_cooldown) {
         npc.crash_cooldown -= dt;
@@ -602,7 +605,7 @@ mobil_done: ;
             // 无 route 可 recycle 时（route.build 失败但 roads 加载成功）停车防飞出：
             // advance 失败时 esmini position 停在最后有效点，speed=0 让 NPC 不再尝试推进。
             if (route && route->ok() && npc.route_dir != 0) {
-                recycle_npc(npc, *route, ego_route_s, pool, roads);
+                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
             } else {
                 npc.speed = 0.0;
                 npc.vx = 0.0; npc.vy = 0.0;
@@ -641,7 +644,7 @@ mobil_done: ;
                     // 越界 → recycle
                     if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
                         (npc.route_dir < 0 && npc.route_s < 0.0)) {
-                        recycle_npc(npc, *route, ego_route_s, pool, roads);
+                        recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
                     }
                 }
             }
@@ -664,7 +667,7 @@ mobil_done: ;
         //   2.12m road departure）。对向车是单次事件（迎面驶过后不再相关），
         //   停用比错误回收更安全。
         if (npc.route_dir > 0 && npc.route_s > route->total_length()) {
-            recycle_npc(npc, *route, ego_route_s, pool, roads);
+            recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
         } else if (npc.route_dir < 0 && npc.route_s < 0.0) {
             npc.active = false;
             return;
@@ -698,7 +701,7 @@ mobil_done: ;
                     npc.active = false;
                     return;
                 }
-                recycle_npc(npc, *route, ego_route_s, pool, roads);
+                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
             }
         }
     } else if (roads && roads->loaded()) {

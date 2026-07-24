@@ -1108,7 +1108,8 @@ protected:
                 if (!e.active) continue;
                 if (e.is_npc_vehicle()) {
                     flowsim::step_npc_vehicle(e, g.pool, FLOWSIM_DT_SEC,
-                                              g.ai_cfg, roads_ptr, route_ptr, ego_route_s);
+                                              g.ai_cfg, roads_ptr, route_ptr, ego_route_s,
+                                              g.cycle);
                 } else if (e.type == flowsim::EntityType::Pedestrian) {
                     flowsim::step_npc_pedestrian(e, FLOWSIM_DT_SEC, g.ai_cfg);
                 }
@@ -1139,7 +1140,8 @@ protected:
                 flowsim::tick_choreography(g.pool, ego, sim_time_s, FLOWSIM_DT_SEC,
                                            &g.scenario->choreography,
                                            g.roads_loaded ? &g.roads : nullptr,
-                                           g.route.ok() ? &g.route : nullptr);
+                                           g.route.ok() ? &g.route : nullptr,
+                                           g.cycle);
             }
 
             /* ── Step 5.5: 车灯信号派生 ──

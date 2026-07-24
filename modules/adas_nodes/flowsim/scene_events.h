@@ -98,7 +98,8 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                        double sim_time_s, double dt,
                        const Choreography* choreo,
                        FlowRoadNetwork* roads = nullptr,
-                       const Route* route = nullptr);
+                       const Route* route = nullptr,
+                       uint32_t cycle = 0);
 
 }  // namespace flowsim
 

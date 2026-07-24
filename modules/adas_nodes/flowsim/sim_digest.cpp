@@ -182,6 +182,7 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.rotation_y = e.heading;  // headingToRotationY(h) = h
         ad.route_dir = e.route_dir;
         ad.ai_state = (int)e.state;
+        ad.last_teleport_cycle = e.last_teleport_cycle;
         dd.actors.push_back(ad);
     }
     return dd;
@@ -718,23 +719,41 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
         if (!pa) continue;
 
         // 1. Δpos ≈ vel × dt
-        double dx = ca.pos[0] - pa->pos[0];
-        double dy = ca.pos[1] - pa->pos[1];
+        //    用绝对位置算 Δpos：digest 可能是 ego_centered（pos 相对 ego），
+        //    此时若用相对位置算 Δpos，ego 移动会让静止 actor 也"瞬移"，
+        //    而 expected 用的是绝对 speed，坐标系不一致必误报。
+        //    绝对 pos = ad.pos + dd.origin。
+        double abs_prev_x = pa->pos[0] + prev.origin[0];
+        double abs_prev_y = pa->pos[1] + prev.origin[1];
+        double abs_curr_x = ca.pos[0] + curr.origin[0];
+        double abs_curr_y = ca.pos[1] + curr.origin[1];
+        double dx = abs_curr_x - abs_prev_x;
+        double dy = abs_curr_y - abs_prev_y;
         double dist = std::sqrt(dx * dx + dy * dy);
         double expected = pa->speed * dt;
-        if (dist > expected * 2.0 + 0.5) {
+
+        // 设计内瞬移：choreography beat / recycle_npc 把 actor 显式传送到新位置，
+        // 这是场景循环机制，非 bug。若上次采样帧到本次采样帧之间（含 prev 帧
+        // 本身，因 beat 在 Step5 触发、digest 在 Step6 采样，prev 帧的 pos 已含
+        // 传送）发生过传送，跳过 Δpos 检查 1 和 2（仍检查 heading/accel）。
+        bool teleported = (ca.last_teleport_cycle >= (uint32_t)prev.frame &&
+                           ca.last_teleport_cycle <= (uint32_t)curr.frame &&
+                           ca.last_teleport_cycle > 0);
+        if (teleported) {
+            r.passed++;  // 跳过，计为通过
+        } else if (dist > expected * 2.0 + 0.5) {
             r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),
-                "  FAIL %s: Δpos=%.3f >> expected=%.3f (瞬移/teleport)\n",
-                tag, dist, expected);
+                "  FAIL %s: Δpos=%.3f >> expected=%.3f (瞬移/teleport tp_cycle=%u prev=%d curr=%d)\n",
+                tag, dist, expected, ca.last_teleport_cycle, prev.frame, curr.frame);
             r.details += buf;
         } else {
             r.passed++;
         }
 
         // 2. |Δpos| ≤ v_max × dt
-        if (dist > V_MAX * dt + 0.5) {
+        if (!teleported && dist > V_MAX * dt + 0.5) {
             r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),

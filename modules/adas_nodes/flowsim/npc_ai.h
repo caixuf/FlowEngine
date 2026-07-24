@@ -125,7 +125,8 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
                       FlowRoadNetwork* roads = nullptr,
                       const Route* route = nullptr,
-                      double ego_route_s = 0.0);
+                      double ego_route_s = 0.0,
+                      uint32_t cycle = 0);
 
 /**
  * 初始化 NPC 的 route 跟随状态（spawn 后调用一次）。

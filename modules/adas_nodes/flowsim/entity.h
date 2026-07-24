@@ -121,6 +121,12 @@ struct Entity {
     double cutin_pid_prev{0.0};      /**< CutIn 横向 PID 上次误差（用于微分项） */
     bool   cutin_active{false};      /**< CutIn 是否激活（ai_state==CutIn 时为 true，结束变道后置 false） */
 
+    /* ── 瞬移标记（choreography beat / recycle_npc 传送 actor 时设置）──
+     * 记录最近一次被显式传送到新位置的仿真 cycle。
+     * build_dynamic_digest 把它写入 ActorDigest，check_temporal_invariants
+     * 据此跳过本次采样间隔的 Δpos 检查（设计内瞬移，非 bug）。 */
+    uint32_t last_teleport_cycle{0};
+
     /* ── 行人专用 ── */
     double ped_wait_timer{0};      /**< 行人等待计时器 (s) */
     int    ped_parked{0};          /**< 行人是否停在路边 */
