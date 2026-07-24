@@ -272,7 +272,7 @@ typedef struct {
     char   phase[8];                 /**< 红绿灯相位："red"/"green"/"yellow" */
 } ChoreoBeat;
 
-typedef struct {
+typedef struct Choreography {
     double       loop_period_s;      /**< 循环周期（秒） */
     ChoreoBeat   beats[SCENARIO_MAX_CHOREO_BEATS];
     int          beat_count;
