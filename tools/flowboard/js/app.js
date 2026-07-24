@@ -615,7 +615,7 @@ function updateAll() {
   // Feed dead reckoning FIRST so update3D reads fresh _dr.lastX/Z for
   // obstacle / LiDAR world-anchoring without a one-frame lag.
   safeCall('deadreckon', sync2DTarget);
-  safeCall('scene3d', update3D);
+  safeCall('scene3d', function () { update3D(topoData); });
   safeCall('topology', function() {
     var nn = (topoData.nodes||[]).map(function(n){ return n.name; }).sort().join(',');
     if (nn !== lastNodeNames) { lastNodeNames = nn; updateTopo(topoData); }
