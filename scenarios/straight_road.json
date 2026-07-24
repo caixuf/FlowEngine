@@ -89,20 +89,7 @@
     "max_duration_s": 120.0,
     "min_avg_speed_mps": 5.0
   },
-  "route": [
-    {
-      "type": "lane_change",
-      "trigger_x": 70.0,
-      "target_lane": -2,
-      "label": "变道到左侧快车道（lane 0），避开前方慢车NPC1"
-    },
-    {
-      "type": "lane_change",
-      "trigger_x": 280.0,
-      "target_lane": -1,
-      "label": "变回原车道（lane 1），NPC2 cutin 后让出空间"
-    }
-  ],
+  "route": [],
   "scenarios": [
     {
       "name": "npc_cutin",
