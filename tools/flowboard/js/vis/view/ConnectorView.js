@@ -14,6 +14,7 @@
 
 import { getBox, getCylinder, getStdMaterial } from '../core/AssetFactory.js';
 import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
+import { worldToThree, forwardENU } from '../math/Coord.js';
 
 const TAPER_COLOR  = 0x2a2a2a;   // 锥形过渡路面（同沥青色）
 const JUNCTION_COLOR = 0x353535; // 路口区域稍浅
@@ -238,14 +239,24 @@ export function createConnectorView(scene) {
   }
 
   /** 工具：获取 edge 起点（优先用 nodes[0]，否则用 length_m 累计）
-   *  注意：scene_pub 输出的 nodes 是 [x, y_up, z_north] 数组格式 */
+   *  注意：scene_pub 输出的 nodes 是 [x_ENU, y_up, z_north] 数组格式，
+   *  返回 THREE 坐标 {x, y, z}。 */
   function _getEdgeStart(edge) {
     if (edge.nodes && edge.nodes.length >= 1) {
       const n = edge.nodes[0];
-      if (Array.isArray(n)) return { x: n[0], y: n[1] || 0, z: -(n[2] || 0) };
-      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: -(n.z || 0) };
+      if (Array.isArray(n)) {
+        const [tx, ty, tz] = worldToThree(n[0], n[2] || 0, n[1] || 0);
+        return { x: tx, y: ty, z: tz };
+      }
+      if (typeof n === 'object') {
+        const [tx, ty, tz] = worldToThree(n.x || 0, n.z || 0, n.y || 0);
+        return { x: tx, y: ty, z: tz };
+      }
     }
-    if (edge.start_x != null) return { x: edge.start_x, y: 0, z: -(edge.start_z || 0) };
+    if (edge.start_x != null) {
+      const [tx, ty, tz] = worldToThree(edge.start_x, edge.start_z || 0, 0);
+      return { x: tx, y: ty, z: tz };
+    }
     return null;
   }
 
@@ -253,17 +264,23 @@ export function createConnectorView(scene) {
   function _getEdgeEnd(edge) {
     if (edge.nodes && edge.nodes.length >= 2) {
       const n = edge.nodes[edge.nodes.length - 1];
-      if (Array.isArray(n)) return { x: n[0], y: n[1] || 0, z: -(n[2] || 0) };
-      if (typeof n === 'object') return { x: n.x || 0, y: n.y || 0, z: -(n.z || 0) };
+      if (Array.isArray(n)) {
+        const [tx, ty, tz] = worldToThree(n[0], n[2] || 0, n[1] || 0);
+        return { x: tx, y: ty, z: tz };
+      }
+      if (typeof n === 'object') {
+        const [tx, ty, tz] = worldToThree(n.x || 0, n.z || 0, n.y || 0);
+        return { x: tx, y: ty, z: tz };
+      }
     }
     if (edge.start_x != null) {
       const len = edge.length_m || 100;
       const h = edge.heading || 0;
-      return {
-        x: edge.start_x + Math.cos(h) * len,
-        y: 0,
-        z: -((edge.start_z || 0) + Math.sin(h) * len),
-      };
+      const [fex, fey] = forwardENU(h);
+      const sx = edge.start_x + fex * len;
+      const sy = (edge.start_z || 0) + fey * len;
+      const [tx, ty, tz] = worldToThree(sx, sy, 0);
+      return { x: tx, y: ty, z: tz };
     }
     return null;
   }

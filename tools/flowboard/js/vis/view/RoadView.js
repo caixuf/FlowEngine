@@ -14,6 +14,7 @@
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { mergeGeometries } from '../math/GeometryMerge.js';
 import { LANE_WIDTH, DEFAULT_LANES } from '../core/Constants.js';
+import { tangentToNormal, offsetAlongNormal, forwardENU } from '../math/Coord.js';
 
 const ASPHALT_COLOR = 0x2a2a2a;
 const SHOULDER_COLOR = 0x5a5a55;
@@ -38,6 +39,8 @@ let _asphaltNormal = null;
 
 function _buildAsphaltTextures() {
   if (_asphaltTex) return;
+  // 在 Node.js 无头测试环境中，document 不可用，跳过纹理生成
+  if (typeof document === 'undefined') return;
 
   const SIZE = 512;
   const canvas = document.createElement('canvas');
@@ -167,9 +170,10 @@ export function createRoadView(scene) {
 
   /** 把中心线整体横向偏移 d（沿各点法线方向） */
   function offsetSpine(spine, d) {
-    return spine.map(c => ({
-      px: c.px + c.nx * d, py: c.py, pz: c.pz + c.nz * d, nx: c.nx, nz: c.nz,
-    }));
+    return spine.map(c => {
+      const [opx, , opz] = offsetAlongNormal(c.px, c.pz, c.nx, c.nz, d);
+      return { px: opx, py: c.py, pz: opz, nx: c.nx, nz: c.nz };
+    });
   }
 
   /** 实线：沿偏移中心线铺一条连续窄 ribbon */
@@ -234,7 +238,8 @@ export function createRoadView(scene) {
         const len = edge.length_m || 100;
         const h = edge.heading || 0;
         const sx = edge.start_x || 0, sz = edge.start_z || 0;
-        nodes = [[sx, sz, 0], [sx + Math.cos(h) * len, sz + Math.sin(h) * len, 0]];
+        const [fex, fey] = forwardENU(h);
+        nodes = [[sx, sz, 0], [sx + fex * len, sz + fey * len, 0]];
       } else if (nodes[0] && typeof nodes[0] === 'object' && !Array.isArray(nodes[0])) {
         nodes = nodes.map(n => [n.x || 0, n.y || 0, n.z || 0]);
       }
@@ -251,9 +256,8 @@ export function createRoadView(scene) {
         let tx = 1, tz = 0;
         if (i + 6 < points.length) { tx = points[i + 3] - px; tz = points[i + 5] - pz; }
         else if (i >= 3) { tx = px - points[i - 3]; tz = pz - points[i - 2]; }
-        const l = Math.sqrt(tx * tx + tz * tz) || 1;
-        tx /= l; tz /= l;
-        spine.push({ px, py, pz, nx: -tz, nz: tx });
+        const [nx, nz] = tangentToNormal(tx, tz);
+        spine.push({ px, py, pz, nx, nz });
       }
       if (spine.length < 2) continue;
 

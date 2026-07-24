@@ -35,9 +35,22 @@ const handler = {
     if (prop === 'name' || prop === 'type' || prop === 'uuid') {
       return '';
     }
-    // ── 常见数组属性：返回空数组 ──
+    // ── 常见数组属性：返回 Proxy 数组，索引访问返回新 Proxy ──
     if (prop === 'children') {
-      return [];
+      return new Proxy([], {
+        get(target, p) {
+          if (p === 'length') return 0;
+          if (p === Symbol.iterator) return function* () { /* empty */ };
+          if (p === 'push' || p === 'pop' || p === 'shift' || p === 'unshift' ||
+              p === 'splice' || p === 'slice' || p === 'concat' || p === 'filter' ||
+              p === 'map' || p === 'forEach' || p === 'find' || p === 'findIndex' ||
+              p === 'indexOf' || p === 'includes' || p === 'some' || p === 'every' ||
+              p === 'reduce' || p === 'reduceRight' || p === 'sort' || p === 'reverse') {
+            return () => createProxy();
+          }
+          return createProxy();
+        }
+      });
     }
     // ── 常见布尔属性 ──
     if (prop === 'visible' || prop === 'castShadow' || prop === 'receiveShadow' ||

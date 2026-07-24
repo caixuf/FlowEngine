@@ -209,6 +209,180 @@ C 侧: 改 pipeline 节点 → demo_evaluator.py (45s 真跑) → FAIL 阻断
 3D 侧: 改 flowboard/** → npm run vis:check (~3s) → FAIL 阻断
 ```
 
+### 坐标约定门禁（有牙，可 grep — 2026-07 收敛）
+
+> 所有位置/朝向/高度/尺度转换的**唯一合法入口**是 `js/vis/math/Coord.js` 的纯函数。
+> 禁止在任何 view 里手写裸 -y 翻转、裸 atan2 求朝向、裸 position.set 配魔法数。
+
+#### 唯一合法纯函数
+
+| 函数 | 替代 | 用途 |
+|------|------|------|
+| `worldToThree(x,y,z)` | 手写 `[x, z, -y]` | ENU→THREE 坐标映射 |
+| `headingToRotationY(h)` | 裸赋值 `rotation.y = h` | heading→THREE rotation.y |
+| `directionToRotationY(dx,dz)` | 裸 `Math.atan2(dx,dz)` | 2D 方向→rotation.y |
+| `forwardENU(heading)` | 裸 `Math.cos(h), Math.sin(h)` | heading→ENU 单位前向向量 |
+| `offsetAlongNormal(px,pz,nx,nz,d)` | 裸 `px + nx*d` | 中心线法线偏移 |
+| `tangentToNormal(tx,tz)` | 裸 `l=sqrt(...); -tz/l, tx/l` | 切线→单位法线 |
+| `placeOnRoad(spine,s,lateralOffset)` | 手算插值+法线偏移 | 沿路参数→{pos,rotY,height} |
+
+#### grep 强制违规检测
+
+```
+npm run vis:check:grep
+```
+
+等价于 `node tests/vis_grep_enforce.mjs`，扫描 `js/vis/view/` 目录：
+
+- 裸 `z: -(n[2])` → 应走 `worldToThree`
+- 裸 `Math.atan2(...)` → 应走 `directionToRotationY`
+- 裸 `Math.sin/Math.cos`（坐标计算用）→ 应走 `forwardENU` / `offsetAlongNormal`
+- 裸 `.position.set(...)` 配魔法数 → 应走 `placeOnRoad`
+
+命中即 FAIL（注释豁免：行内含 `Coord.` 或 `// Coord` 注释）。
+
+#### 纯函数 property-test
+
+```
+npm run vis:check:invariant
+```
+
+等价于 `node --import ./tests/support/three-preload.mjs tests/vis_coord_property.test.mjs`，验证：
+
+- `worldToThree`: ENU +y(北) → THREE -z 轴映射 golden 表
+- `headingToRotationY`: heading=0(东/+x)→车头 forward 指 +x
+- `forwardENU`: 单位向量长度=1，方向正确
+- `directionToRotationY` 与 `headingToRotationY` 一致性
+- `tangentToNormal`: 法线与切线正交，单位长度
+- `placeOnRoad`: 任意 s，|height−groundHeightAt(s)|<ε（永不浮空/埋地）；|lateral|≤半路宽⇒点在路面内
+
+#### 全量门禁
+
+```
+npm run vis:check:all
+```
+
+等价于 `vis:check` + `vis:check:invariant` + `vis:check:grep`，三者全绿才可合并。
+
+- ❌ 坐标/朝向/高度/尺度只准走 `Coord.*` / `placeOnRoad` 纯函数；view 里裸 `-y`/`atan2`/`position.set`+魔法数 = 违规
+- ❌ 每个坐标纯函数必须有 property-test
+- ❌ flowboard 改动跑 `npm run vis:check:all` 必须绿；几何变更同 commit 更新 golden + PR 附截图
+- ✅ 残余诚实说："低/丑/材质光照"这种纯观感 invariant 测不了，只能人 diff（puppeteer 无头跑一帧存图，人肉审 golden 图）。但"位置关系"——功能性几何错——100% 可数值化。收敛约定 + invariant，是把"黑屏后人肉手修"变成"提交前红灯拦下"。
+
+### 违反以上规范的代码不会被合并。
+
+## NPC 智能 — IDM + MOBIL + 边界权限门（2026-07）
+
+> NPC 行为从「简单 IDM 跟车 + 基础安全换道」升级为「IDM 纵向 + MOBIL 变道决策 + 边界权限门 + 红绿灯协调」。
+
+### 架构
+
+```
+每帧 NPC tick:
+  1. 找同车道前车 (find_lead) → IDM 期望速度
+  2. MOBIL 变道评估:
+     a. boundary_permissive(): 检查目标车道边界是否虚线（相邻同向车道存在）
+     b. mobil_gain(): 计算变道代价函数 gain = a'_c - a_c + p*(a'_n - a_n + a'_o - a_o)
+     c. 安全约束: a'_n > -b_safe（新跟随者不会被迫急刹）
+     d. 避障兜底: MOBIL 未找到好车道但被前车阻挡时，退回到基础安全换道
+  3. 红绿灯/让行期间不评估变道（StopForTL/Yield 状态保持当前车道）
+  4. 纵向积分 + 位置更新（Frenet 车道跟随 + road_pos 推进）
+```
+
+### MOBIL 参数（NpcAiConfig）
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `mobil_politeness` | 0.5 | 礼貌因子 [0,1]，0=纯利己 |
+| `mobil_safe_brake` | 4.0 | 安全减速度阈值 (m/s²) |
+| `mobil_gain_threshold` | 0.2 | 增益阈值，gain>此值才变道 |
+| `mobil_back_look` | 15.0 | 后向搜索距离 (m) |
+| `mobil_lane_change_cooldown` | 4.0 | 变道冷却时间 (s) |
+
+### 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `modules/adas_nodes/flowsim/npc_ai.h` | NPC AI 配置（NpcAiConfig）+ API |
+| `modules/adas_nodes/flowsim/npc_ai.cpp` | IDM + MOBIL + 边界权限门实现 |
+| `modules/adas_nodes/flowsim/scene_events.cpp` | 红绿灯/ETC 事件调度 + NPC 响应 |
+| `modules/adas_nodes/flowsim/route.cpp` | 中央有序 route（NPC 车道跟随骨架） |
+
+## 仿真基础层 — Digest + Invariant（2026-07）
+
+> 静态/动态 digest 编码空间关系为数值，invariant 断言在提交前红灯拦下功能性几何错。
+
+### 帧契约
+
+```
+frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: true/false
+```
+
+### 静态 digest
+
+几何变更时（road network 加载后）建一次，包含：
+- 车道（id、中线采样点、宽度、边界类型、行驶方向、限速、s 范围）
+- 车道线（虚线段/实线/双黄，位置+段长+间距）
+- 可行驶区（路面多边形/路沿 polyline）
+- 红绿灯（位置、朝向、管辖车道、相位）
+
+### 动态 digest
+
+每帧 dump ego + 每个 NPC：
+- pos [x,y,z]、bbox [L,W,H]、heading、vel [vx,vy]、speed
+- yaw_rate、accel、lane_id、lateral_offset、s、rotationY
+
+### Invariant 检查
+
+| 类型 | 检查项 | 抓的 bug |
+|------|--------|----------|
+| 静态 | 车道宽 ∈ [2.5,4.0]m | 车道宽度配置错 |
+| 静态 | 边界类型自洽（同向分隔=虚线、对向=双黄/实线、外沿=实线） | 边界类型配置错 |
+| 静态 | 虚线段长 ~3m、间距 ~6–9m | 标线参数错 |
+| 静态 | 可行驶区闭合 | 多边形不闭合 |
+| 静态 | 路面高程连续 | 高度阶跃跳变 |
+| 静态 | 红绿灯朝向 · 车道方向 < 0 | 红绿灯背对来车 |
+| 静态 | 没有物体堆在 (0,0,0) | 路网未初始化 |
+| 静态 | 每条 lane 中线落在可行驶多边形内 | 可行驶区与车道不一致 |
+| 空间 | \|z − roadHeight(x,y)\| < ε | 浮空/埋地 |
+| 空间 | \|lateral_offset\| ≤ 半路宽 | 飞出路面 |
+| 空间 | rotationY == headingToRotationY(heading) | ENU→THREE 符号翻错 |
+| 空间 | 0 ≤ speed ≤ 1.5×限速 | 超速/呆滞 |
+| 空间 | bbox ≈ 标准尺寸 | 尺度错 |
+| 空间 | 两 actor bbox 不重叠 | 穿模/重叠 |
+| 运动方向 | dot(forward, vel) > cos(30°) | 车头≠前进方向（横着/倒着开） |
+| 运动方向 | dot(forward, lane_dir) > cos(45°) | 与车道方向不一致 |
+| 时序 | Δpos ≈ vel × dt | 瞬移/teleport |
+| 时序 | \|Δpos\| ≤ v_max × dt | 超速瞬移 |
+| 时序 | \|Δheading\| ≤ yaw_max × dt | 朝向瞬变 |
+| 时序 | accel ∈ [−8, +4] m/s² | 运动学不可行 |
+
+### Golden 快照
+
+- 罐头帧 dump 排序后的 `(name, pos, rotY, scale)` JSON，diff committed golden
+- 任何位置漂移即 FAIL；只有几何合法变更时才需更新 golden（PR 附截图）
+- 函数：`flowsim::golden_snapshot(dd)` + `flowsim::golden_diff(golden, current)`
+
+### ASCII 俯视
+
+```
+┌────────────────────────────────────────────────┐
+│  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  │
+│        E>        C>        C>                  │
+│  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  │
+│                                                │
+└────────────────────────────────────────────────┘
+E=ego C=car *=pedestrian ><^v=朝向 G/Y/R=红绿灯 -=车道线
+```
+
+### 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `modules/adas_nodes/flowsim/sim_digest.h` | Digest 数据结构 + invariant API + golden 快照 |
+| `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 生成 + invariant 检查 + ASCII 俯视 + golden diff |
+| `modules/adas_nodes/flowsim_node.cpp` | 集成点：静态 digest 建一次，动态 digest + invariant 每 20 帧 |
+
 ### 违反以上规范的代码不会被合并。
 
 ## 常见故障模式

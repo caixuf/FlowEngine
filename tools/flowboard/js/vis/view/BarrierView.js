@@ -21,6 +21,7 @@
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
 import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
+import { tangentToNormal, directionToRotationY } from '../math/Coord.js';
 
 const POST_SPACING   = 3.0;  // 立柱间距（米）
 const POST_OFFSET    = 0.5;  // 护栏距路缘外距离（米）
@@ -78,9 +79,8 @@ export function createBarrierView(scene) {
         let tx = 1, tz = 0;
         if (i + 6 < points.length) { tx = points[i + 3] - px; tz = points[i + 5] - pz; }
         else if (i >= 3) { tx = px - points[i - 3]; tz = pz - points[i - 2]; }
-        const l = Math.sqrt(tx * tx + tz * tz) || 1;
-        tx /= l; tz /= l;
-        spine.push({ px, py, pz, nx: -tz, nz: tx, cum: 0 });
+        const [nx, nz] = tangentToNormal(tx, tz);
+        spine.push({ px, py, pz, nx, nz, cum: 0 });
       }
       if (spine.length < 2) continue;
       for (let i = 1; i < spine.length; i++) {
@@ -105,7 +105,8 @@ export function createBarrierView(scene) {
           const x = s.px + s.nx * sideOffset;
           const z = s.pz + s.nz * sideOffset;
           // 立柱旋转：让 box 沿道路切向
-          const rotY = Math.atan2(s.nz, s.nx);  // 切向 = (tz, tx)，法向 = (-tz, tx) = (nz, nx)
+          // 切线 = (tx, tz) = (nz, -nx)（从法线 nx=-tz/l, nz=tx/l 反推）
+          const rotY = directionToRotationY(s.nz, -s.nx);
           posts.push({ x, y: POST_H / 2, z, rotY });
 
           // 横梁段（除第一根外，每根立柱连一段到前一根）
@@ -116,7 +117,7 @@ export function createBarrierView(scene) {
             const dz = z - prevPost.z;
             const len = Math.sqrt(dx * dx + dz * dz);
             if (len > 0.01) {
-              const beamRotY = Math.atan2(dx, dz);
+              const beamRotY = directionToRotationY(dx, dz);
               upperBeamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY });
               lowerBeamSegs.push({ x: midX, z: midZ, len, rotY: beamRotY });
             }

@@ -59,6 +59,23 @@ struct NpcAiConfig {
     double cutin_max_lateral_speed{3.0};/**< CutIn 横向最大速度（m/s），限幅防过冲 */
     double cutin_completion_threshold{0.15}; /**< CutIn 完成判定阈值：|err|<此值 → 回 Cruise */
     double cutin_longitudinal_decel{2.0};    /**< CutIn 时纵向速度减幅（m/s），放缓避免冲撞 */
+
+    /* ── MOBIL 变道决策参数 ──
+     * lane_change_safe 只检查"目标车道有无车"，不判断"变道是否有益"。
+     * MOBIL 代价函数：gain = a'_c - a_c + p * (a'_n - a_n + a'_o - a_o)
+     *   a_c  = 当前车道 IDM 加速度
+     *   a'_c = 目标车道 IDM 加速度
+     *   a_n  = 新跟随者（目标车道后车）当前加速度
+     *   a'_n = 新跟随者变道后加速度
+     *   a_o  = 旧跟随者（当前车道后车）当前加速度
+     *   a'_o = 旧跟随者变道后加速度
+     *   p    = 礼貌因子（0=纯利己，1=考虑他人）
+     * 安全约束：a'_n > -b_safe（新跟随者不会被迫急刹） */
+    double mobil_politeness{0.5};       /**< MOBIL 礼貌因子 [0,1] */
+    double mobil_safe_brake{4.0};       /**< MOBIL 安全减速度阈值 (m/s²)，a'_n 不得低于此值 */
+    double mobil_gain_threshold{0.2};   /**< MOBIL 增益阈值 (m/s²)，gain>此值才变道（防抖动） */
+    double mobil_back_look{15.0};       /**< 后向搜索距离 (m)，找新/旧跟随者 */
+    double mobil_lane_change_cooldown{4.0}; /**< 变道冷却时间 (s) */
 };
 
 /**

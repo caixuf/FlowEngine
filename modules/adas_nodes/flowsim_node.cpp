@@ -42,6 +42,7 @@
 #include "flowsim/scene_pub.h"
 #include "flowsim/actor/VehicleActor.h"   /* 车灯信号派生（Phase 1 重构）*/
 #include "flowsim/route.h"
+#include "flowsim/sim_digest.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -135,6 +136,11 @@ struct FlowSimContext {
     uint32_t          cycle{0};
     uint64_t          sim_start_us{0};
     bool              roads_loaded{false};
+
+    /* 仿真基础层：静态 digest（几何变更时建一次）+ 上一帧动态 digest（时序 invariant） */
+    flowsim::StaticDigest  static_digest;
+    flowsim::DynamicDigest prev_dynamic_digest;
+    bool                   digest_initialized{false};
 
     /* 协程任务 */
     std::unique_ptr<class FlowSimTask> task;
@@ -1154,6 +1160,56 @@ protected:
                          g.cycle, ego.x, ego.y, ego.speed,
                          g.pool.active_count() - 1);
             }
+
+            /* ── 仿真基础层：每帧 digest + invariant 检查 ──
+             * 每 20 帧（~1s）跑一次完整 invariant，避免每帧序列化开销过大。
+             * 时序 invariant 需要连续两帧，从第 2 帧开始。 */
+            if (g.cycle % 20 == 0 && g.digest_initialized) {
+                auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true);
+                // 写入 JSON 文件供调试
+                std::string json = flowsim::digest_to_json(dd);
+                // 空间 invariant
+                auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
+                    g.roads_loaded ? &g.roads : nullptr);
+                if (spatial.failed > 0) {
+                    LOG_WARN("flowsim", "spatial_invariant: %d passed, %d FAILED, %d warned",
+                             spatial.passed, spatial.failed, spatial.warned);
+                    // 失败详情写入 stderr 供 evaluator 捕获
+                    if (!spatial.details.empty()) {
+                        fprintf(stderr, "[flowsim::spatial_invariant] cycle=%u\n%s",
+                                g.cycle, spatial.details.c_str());
+                    }
+                }
+                // 运动方向 invariant
+                auto motion = flowsim::check_motion_direction(dd, g.static_digest,
+                    g.roads_loaded ? &g.roads : nullptr);
+                if (motion.failed > 0) {
+                    LOG_WARN("flowsim", "motion_direction: %d passed, %d FAILED, %d warned",
+                             motion.passed, motion.failed, motion.warned);
+                    if (!motion.details.empty()) {
+                        fprintf(stderr, "[flowsim::motion_direction] cycle=%u\n%s",
+                                g.cycle, motion.details.c_str());
+                    }
+                }
+                // 时序 invariant（需要上一帧）
+                if (g.prev_dynamic_digest.actors.size() > 0) {
+                    auto temporal = flowsim::check_temporal_invariants(
+                        g.prev_dynamic_digest, dd, FLOWSIM_DT_SEC * 20);
+                    if (temporal.failed > 0) {
+                        LOG_WARN("flowsim", "temporal_invariant: %d passed, %d FAILED, %d warned",
+                                 temporal.passed, temporal.failed, temporal.warned);
+                        if (!temporal.details.empty()) {
+                            fprintf(stderr, "[flowsim::temporal_invariant] cycle=%u\n%s",
+                                    g.cycle, temporal.details.c_str());
+                        }
+                    }
+                }
+                g.prev_dynamic_digest = std::move(dd);
+            } else if (!g.digest_initialized && g.cycle == 1) {
+                // 第一帧：初始化 prev_digest 供后续时序检查
+                g.prev_dynamic_digest = flowsim::build_dynamic_digest(g.pool, sim_time_s, 0, true);
+                g.digest_initialized = true;
+            }
         }
 
         LOG_INFO("flowsim", "stopped (%u cycles, sim_time=%.3fs, final speed=%.1f)",
@@ -1266,6 +1322,21 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                              g.route.count(), g.route.total_length());
                 } else {
                     LOG_WARN("flowsim", "route build failed — NPC lane-follow off (straight fallback)");
+                }
+                /* 仿真基础层：几何变更时建一次静态 digest */
+                g.static_digest = flowsim::build_static_digest(g.roads, g.route, g.pool);
+                LOG_INFO("flowsim", "static digest: %zu lanes, %zu markings, %zu traffic_lights",
+                         g.static_digest.lanes.size(),
+                         g.static_digest.markings.size(),
+                         g.static_digest.traffic_lights.size());
+                /* 静态 invariant：车道宽/边界自洽/标线/红绿灯朝向等 */
+                auto static_inv = flowsim::check_static_invariants(g.static_digest);
+                if (static_inv.failed > 0) {
+                    LOG_WARN("flowsim", "static_invariant: %d passed, %d FAILED, %d warned",
+                            static_inv.passed, static_inv.failed, static_inv.warned);
+                    if (!static_inv.details.empty()) {
+                        fprintf(stderr, "[flowsim::static_invariant]\n%s", static_inv.details.c_str());
+                    }
                 }
             } else {
                 LOG_WARN("flowsim", "esmini load failed for %s — NPC AI falls back to lateral distance",

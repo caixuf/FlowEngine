@@ -157,6 +157,7 @@ add_library(flowsim_node SHARED
     flowsim/collision.cpp
     flowsim/scene_events.cpp
     flowsim/scene_pub.cpp
+    flowsim/sim_digest.cpp
     flowsim/actor/VehicleActor.cpp
     flowsim/route.cpp
 )

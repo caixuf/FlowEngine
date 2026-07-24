@@ -87,28 +87,174 @@ static double idm_desired_speed(double v, double gap, double target_v,
     return std::max(0.0, v - brake * dt);
 }
 
-/* ── D3 避障换道：检查目标车道是否前后安全可换道 ──
- * target_offset = 候选车道横向位置（如 ±1.75）
- * 返回 true 表示目标车道前方 30m + 后方 8m 无同向车，可安全换道。
- *
- * 阈值依据：
- *   - 前 30m：换道后需要足够反应距离，前车太快不换
- *   - 后 8m：不能贴着后车换道（后车制动距离 ~v*2s，5m/s 时 10m，但 8m 已够避免追尾）
- */
-static bool lane_change_safe(const Entity& npc, double target_offset,
-                             const EntityPool& pool, const NpcAiConfig& cfg) {
+/* ── MOBIL 辅助：在指定车道找前车（leader） ──
+ * 返回实体索引，未找到返回 INVALID_ENTITY。 */
+static EntityId find_leader_in_lane(const Entity& npc, double lane_offset,
+                                    const EntityPool& pool, const NpcAiConfig& cfg,
+                                    double& out_gap) {
+    EntityId best = INVALID_ENTITY;
+    double best_gap = 1e9;
+    out_gap = 1e9;
     for (int i = 0; i < pool.size(); ++i) {
         const Entity& o = pool[i];
         if (!o.active || &o == &npc) continue;
         if (!o.is_vehicle()) continue;
         if (o.route_dir != npc.route_dir) continue;
-        // 目标车道判定：与 target_offset 横向距离 < same_lane_tol
-        if (std::fabs(o.offset - target_offset) >= cfg.same_lane_tol) continue;
-        // 沿 route 纵向距离
+        if (std::fabs(o.offset - lane_offset) >= cfg.same_lane_tol) continue;
         double ahead = (o.route_s - npc.route_s) * (double)npc.route_dir;
-        if (ahead > 0.0 && ahead < 30.0 + npc.length) return false;  // 前方有车
-        if (ahead < 0.0 && -ahead < 8.0 + npc.length) return false;  // 后方有车
+        if (ahead <= 0) continue;
+        double gap = ahead - (o.length * 0.5 + npc.length * 0.5);
+        if (gap < best_gap && gap < cfg.look_ahead) {
+            best_gap = gap;
+            best = i;
+        }
     }
+    if (best != INVALID_ENTITY) out_gap = best_gap;
+    return best;
+}
+
+/* ── MOBIL 辅助：在指定车道找后车（follower） ──
+ * 返回实体索引，未找到返回 INVALID_ENTITY。 */
+static EntityId find_follower_in_lane(const Entity& npc, double lane_offset,
+                                      const EntityPool& pool, const NpcAiConfig& cfg,
+                                      double& out_gap) {
+    EntityId best = INVALID_ENTITY;
+    double best_gap = 1e9;
+    out_gap = 1e9;
+    for (int i = 0; i < pool.size(); ++i) {
+        const Entity& o = pool[i];
+        if (!o.active || &o == &npc) continue;
+        if (!o.is_vehicle()) continue;
+        if (o.route_dir != npc.route_dir) continue;
+        if (std::fabs(o.offset - lane_offset) >= cfg.same_lane_tol) continue;
+        double behind = (npc.route_s - o.route_s) * (double)npc.route_dir;
+        if (behind <= 0) continue;
+        double gap = behind - (o.length * 0.5 + npc.length * 0.5);
+        if (gap < best_gap && gap < cfg.mobil_back_look) {
+            best_gap = gap;
+            best = i;
+        }
+    }
+    if (best != INVALID_ENTITY) out_gap = best_gap;
+    return best;
+}
+
+/* ── MOBIL 辅助：计算 IDM 加速度（给定前车和间距） ──
+ * 无前车时返回 target_vx 对应的自由巡航加速度。 */
+static double mobil_idm_accel(const Entity& vehicle, double gap, double target_v,
+                              const Entity* lead, const NpcAiConfig& cfg) {
+    double v = vehicle.speed;
+    if (lead) {
+        double safe_gap = cfg.idm_safe_gap_base + v * cfg.idm_safe_gap_time;
+        double gap_err = gap - safe_gap;
+        if (gap_err > 0) {
+            return std::min(cfg.accel_rate, (target_v - v) / 0.5);  // 巡航加速
+        }
+        return -cfg.follow_decel_factor * std::exp(-gap_err / 2.0);
+    }
+    // 自由巡航：向 target_v 加速
+    double dv = target_v - v;
+    if (dv > 0) return std::min(cfg.accel_rate, dv / 0.5);
+    return 0.0;
+}
+
+/* ── MOBIL 变道代价函数 ──
+ * gain = a'_c - a_c + p * (a'_n - a_n + a'_o - a_o)
+ * 返回值 > mobil_gain_threshold 表示变道有益。
+ * 安全约束：a'_n > -mobil_safe_brake（新跟随者不会被迫急刹）。
+ *
+ * @param npc         变道主体
+ * @param target_offset 目标车道横向位置
+ * @param pool        实体池
+ * @param cfg         AI 配置
+ * @param out_safety  [out] 安全约束是否满足
+ * @return MOBIL gain 值 */
+static double mobil_gain(const Entity& npc, double target_offset,
+                         const EntityPool& pool, const NpcAiConfig& cfg,
+                         bool& out_safety) {
+    out_safety = true;
+
+    // ── 当前车道：前车 + 后车 ──
+    double cur_leader_gap, cur_follower_gap;
+    EntityId cur_leader = find_leader_in_lane(npc, npc.offset, pool, cfg, cur_leader_gap);
+    EntityId cur_follower = find_follower_in_lane(npc, npc.offset, pool, cfg, cur_follower_gap);
+
+    const Entity* cur_lead_ptr = (cur_leader != INVALID_ENTITY) ? &pool[cur_leader] : nullptr;
+    double a_c = mobil_idm_accel(npc, cur_leader_gap, npc.target_vx, cur_lead_ptr, cfg);
+
+    // ── 目标车道：前车 + 后车 ──
+    double tgt_leader_gap, tgt_follower_gap;
+    EntityId tgt_leader = find_leader_in_lane(npc, target_offset, pool, cfg, tgt_leader_gap);
+    EntityId tgt_follower = find_follower_in_lane(npc, target_offset, pool, cfg, tgt_follower_gap);
+
+    const Entity* tgt_lead_ptr = (tgt_leader != INVALID_ENTITY) ? &pool[tgt_leader] : nullptr;
+    double a_c_prime = mobil_idm_accel(npc, tgt_leader_gap, npc.target_vx, tgt_lead_ptr, cfg);
+
+    // ── 安全约束：新跟随者（目标车道后车）不会被迫急刹 ──
+    double a_n = 0.0, a_n_prime = 0.0;
+    if (tgt_follower != INVALID_ENTITY) {
+        const Entity& nf = pool[tgt_follower];
+        // 变道前：新跟随者跟它原来的前车
+        double nf_old_gap;
+        EntityId nf_old_leader = find_leader_in_lane(nf, nf.offset, pool, cfg, nf_old_gap);
+        const Entity* nf_old_ptr = (nf_old_leader != INVALID_ENTITY) ? &pool[nf_old_leader] : nullptr;
+        a_n = mobil_idm_accel(nf, nf_old_gap, nf.target_vx, nf_old_ptr, cfg);
+        // 变道后：新跟随者跟 npc（npc 插入到它前面）
+        double new_gap = tgt_follower_gap;
+        a_n_prime = mobil_idm_accel(nf, new_gap, nf.target_vx, &npc, cfg);
+        // 安全约束
+        if (a_n_prime < -cfg.mobil_safe_brake) out_safety = false;
+    }
+
+    // ── 旧跟随者（当前车道后车）──
+    double a_o = 0.0, a_o_prime = 0.0;
+    if (cur_follower != INVALID_ENTITY) {
+        const Entity& of = pool[cur_follower];
+        // 变道前：旧跟随者跟 npc
+        a_o = mobil_idm_accel(of, cur_follower_gap, of.target_vx, &npc, cfg);
+        // 变道后：旧跟随者跟 npc 原来的前车
+        const Entity* of_new_ptr = cur_lead_ptr;  // npc 离开后，of 跟原来的前车
+        double of_new_gap = 1e9;
+        if (cur_lead_ptr) {
+            // 旧跟随者到原前车的间距 = cur_follower_gap + cur_leader_gap + npc.length
+            of_new_gap = cur_follower_gap + cur_leader_gap + npc.length;
+        }
+        a_o_prime = mobil_idm_accel(of, of_new_gap, of.target_vx, of_new_ptr, cfg);
+    }
+
+    double gain = (a_c_prime - a_c)
+                + cfg.mobil_politeness * ((a_n_prime - a_n) + (a_o_prime - a_o));
+    return gain;
+}
+
+/* ── 边界权限门：检查当前车道边界是否允许变道 ──
+ * 判断逻辑：目标方向有相邻同向车道 → 虚线（可跨越）；无相邻车道 → 实线/双黄（不可跨越）。
+ * 使用 FlowRoadNetwork 查询车道数，无需直接解析 road marking 类型。
+ * 同时检查 CutIn 状态机：CutIn 是跨实线变道，bypass 此检查。 */
+static bool boundary_permissive(const Entity& npc, double target_offset,
+                                FlowRoadNetwork* roads) {
+    // CutIn 状态机：跨实线变道，直接放行
+    if (npc.ai_state == AIState::CutIn) return true;
+    if (!roads || !roads->loaded()) return true;  // 无路网时保守放行
+
+    double cur_offset = npc.offset;
+    double step = (target_offset > cur_offset) ? 1.0 : -1.0;
+    // 按 lane_width 步进，检查目标方向是否有 1 步以上的车道路径
+    // 简化：只要目标 offset 与当前 offset 在 ±2 个车道宽度内，且不超过 total
+    // 车道数 × lane_width 的范围，就认为有相邻车道（虚线可跨越）
+    int total_lanes = roads->drivable_lane_count(npc.road_id, npc.s);
+    if (total_lanes <= 0) return true;  // 无法查询 → 保守放行
+
+    double half_width = total_lanes * 3.5 * 0.5;  // 估算半宽
+    // 目标 offset 必须在路面范围内（不能飞到路外）
+    if (std::fabs(target_offset) > half_width + 1.0) return false;
+
+    // 至少有一个相邻车道可去
+    // 检查目标方向是否存在其他同向车道
+    double check_offset = cur_offset + step * 3.5;  // 相邻车道
+    // 如果目标 offset 超出检查范围（跨多车道），也允许（可能是多车道变道）
+    if (std::fabs(target_offset - cur_offset) > 7.0) return false;  // 最多跨 2 车道
+
     return true;
 }
 
@@ -273,37 +419,80 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         }
     }
 
-    // 1.5 E4 避障换道：只在顺行侧 (l ≤ 0) 内换道，不跨参考线到对向 (l>0)
-    //    候选 offset：从当前 offset 向更负方向（右侧顺行车道）移动 -3.5m，
-    //    以及向参考线方向 +3.5m（不超过 0）。lane_change_safe 检查前后无车。
-    //    换道时设 target_offset，由上面 E2 插值平滑移动。
-    //    CutIn 状态机时跳过此块：CutIn 的 target_offset 由场景触发器（scenario_loader）
-    //    一次性给定，E4 自主换道逻辑不应覆盖它。
-    if (!in_crash_cooldown && npc.ai_state != AIState::CutIn) {
+    // 1.5 MOBIL 变道决策：用代价函数评估变道收益 + 边界权限门 + 安全约束
+    //    候选车道：当前 offset ± lane_width（3.5m），不超过路面半宽。
+    //    每个候选评估：boundary_permissive(是否虚线可跨越) + mobil_gain(收益>阈值)
+    //    + safety(新跟随者不会被迫急刹)。同时保留避障触发：前车太慢时主动评估。
+    //    CutIn 状态机时跳过此块：CutIn 的 target_offset 由场景触发器一次性给定。
+    // 红绿灯/让行期间不评估变道（StopForTL/Yield 状态下保持当前车道）
+    bool can_change_lane = !in_crash_cooldown
+                        && npc.ai_state != AIState::CutIn
+                        && npc.ai_state != AIState::StopForTL
+                        && npc.ai_state != AIState::Yield;
+    if (can_change_lane) {
         if (npc.lane_change_timer > 0.0) {
             npc.lane_change_timer -= dt;
             if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
-        } else if (npc.route_dir > 0 && npc.speed > 2.0 &&
-                   lead != INVALID_ENTITY) {
-            const Entity& lead_e = pool[lead];
-            double lead_speed = lead_e.speed;
-            double trigger_gap = 10.0 + npc.speed * 1.5;
-            if (gap < trigger_gap && lead_speed < npc.speed * 0.7) {
-                // 候选：右侧（更负）和左侧（向 0 靠近，但不超过 0）
-                double cand_right = npc.target_offset - 3.5;  // 右移一车道
-                double cand_left  = npc.target_offset + 3.5;  // 左移一车道
-                if (cand_left > 0.0) cand_left = -999;        // 不跨到对向
-                // 先试右移，再试左移
-                double chosen = -999;
-                if (cand_right > -20.0 && lane_change_safe(npc, cand_right, pool, cfg)) {
-                    chosen = cand_right;
-                } else if (cand_left > -900 && lane_change_safe(npc, cand_left, pool, cfg)) {
-                    chosen = cand_left;
+        } else if (npc.route_dir > 0 && npc.speed > 2.0) {
+            // 避障触发条件：前车太慢且间距不足
+            bool blocked = false;
+            if (lead != INVALID_ENTITY) {
+                const Entity& lead_e = pool[lead];
+                double trigger_gap = 10.0 + npc.speed * 1.5;
+                if (gap < trigger_gap && lead_e.speed < npc.speed * 0.7) {
+                    blocked = true;
                 }
-                if (chosen > -900) {
-                    npc.target_offset = chosen;
-                    npc.lane_change_timer = 4.0;  // 4s 冷却
+            }
+            // 候选车道：右移（更负）和左移（向 0 靠近，但不超过 0 = 不跨对向）
+            double cand_right = npc.target_offset - 3.5;
+            double cand_left  = npc.target_offset + 3.5;
+            if (cand_left > 0.0) cand_left = -999;
+
+            double best_gain = -1e9;
+            double chosen = -999;
+            for (double cand : {cand_right, cand_left}) {
+                if (cand < -900) continue;
+                if (std::fabs(cand) > 20.0) continue;  // 不超过路面范围
+
+                // 边界权限门：虚线才可变道
+                if (!boundary_permissive(npc, cand, roads)) continue;
+
+                // MOBIL 代价函数
+                bool safe = false;
+                double gain = mobil_gain(npc, cand, pool, cfg, safe);
+                if (!safe) continue;  // 安全约束不满足（新跟随者会急刹）
+
+                if (gain > best_gain && gain > cfg.mobil_gain_threshold) {
+                    best_gain = gain;
+                    chosen = cand;
                 }
+            }
+
+            // 如果 MOBIL 没找到好车道，但被前车阻挡，仍尝试基础安全换道（不跨对向）
+            if (chosen < -900 && blocked) {
+                for (double cand : {cand_right, cand_left}) {
+                    if (cand < -900) continue;
+                    if (std::fabs(cand) > 20.0) continue;
+                    if (!boundary_permissive(npc, cand, roads)) continue;
+                    // 基础安全：检查目标车道前后 30m/8m 无车
+                    bool base_safe = true;
+                    for (int i = 0; i < pool.size(); ++i) {
+                        const Entity& o = pool[i];
+                        if (!o.active || &o == &npc) continue;
+                        if (!o.is_vehicle()) continue;
+                        if (o.route_dir != npc.route_dir) continue;
+                        if (std::fabs(o.offset - cand) >= cfg.same_lane_tol) continue;
+                        double ahead = (o.route_s - npc.route_s) * (double)npc.route_dir;
+                        if (ahead > 0.0 && ahead < 30.0 + npc.length) { base_safe = false; break; }
+                        if (ahead < 0.0 && -ahead < 8.0 + npc.length)  { base_safe = false; break; }
+                    }
+                    if (base_safe) { chosen = cand; break; }
+                }
+            }
+
+            if (chosen > -900) {
+                npc.target_offset = chosen;
+                npc.lane_change_timer = cfg.mobil_lane_change_cooldown;
             }
         }
     }

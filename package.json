@@ -2,6 +2,9 @@
   "name": "flowengine",
   "private": true,
   "scripts": {
-    "vis:check": "node --import ./tests/support/three-preload.mjs tests/vis_module_load.test.mjs && npx eslint -c tools/flowboard/eslint.config.mjs tools/flowboard/js/vis/ && node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs"
+    "vis:check": "node --import ./tests/support/three-preload.mjs tests/vis_module_load.test.mjs && npx eslint -c tools/flowboard/eslint.config.mjs tools/flowboard/js/vis/ && node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs",
+    "vis:check:invariant": "node --import ./tests/support/three-preload.mjs tests/vis_coord_property.test.mjs",
+    "vis:check:grep": "node tests/vis_grep_enforce.mjs",
+    "vis:check:all": "npm run vis:check && npm run vis:check:invariant && npm run vis:check:grep"
   }
 }

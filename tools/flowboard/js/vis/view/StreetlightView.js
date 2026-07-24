@@ -21,6 +21,7 @@
 import { sampleEdgeNodes } from '../math/Curve.js';
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
 import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
+import { tangentToNormal, directionToRotationY } from '../math/Coord.js';
 
 const LAMP_SPACING = 40;   // 路灯间距（米）
 const LAMP_OFFSET  = 1.5;  // 路灯距路缘外距离（米）
@@ -80,9 +81,8 @@ export function createStreetlightView(scene) {
         let tx = 1, tz = 0;
         if (i + 6 < points.length) { tx = points[i + 3] - px; tz = points[i + 5] - pz; }
         else if (i >= 3) { tx = px - points[i - 3]; tz = pz - points[i - 2]; }
-        const l = Math.sqrt(tx * tx + tz * tz) || 1;
-        tx /= l; tz /= l;
-        spine.push({ px, py, pz, nx: -tz, nz: tx, cum: 0 });
+        const [nx, nz] = tangentToNormal(tx, tz);
+        spine.push({ px, py, pz, nx, nz, cum: 0 });
       }
       if (spine.length < 2) continue;
 
@@ -146,7 +146,7 @@ export function createStreetlightView(scene) {
       // 朝向道路中心 = -法线方向（路灯在路肩外，悬臂伸回路上方）
       const dirX = -s.nx * s.side;
       const dirZ = -s.nz * s.side;
-      const armRotY = Math.atan2(dirX, dirZ);  // 旋转使 BoxGeometry 的 +X 朝向 dir
+      const armRotY = directionToRotationY(dirX, dirZ);  // 旋转使 BoxGeometry 的 +X 朝向 dir
       dummy.position.set(s.x + dirX * ARM_LEN / 2, POLE_H, s.z + dirZ * ARM_LEN / 2);
       dummy.rotation.set(0, armRotY, 0);
       dummy.updateMatrix();
