@@ -16,6 +16,7 @@
 #include "scene_events.h"
 #include "physics.h"
 #include "logger.h"
+#include "scenario_loader.h"
 
 #include <cmath>
 #include <algorithm>
@@ -170,6 +171,114 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead) {
             // 前方无红灯/黄灯 → 恢复巡航（绿灯已亮或已通过路口）
             npc.ai_state = AIState::Cruise;
         }
+    }
+}
+
+/* ── 编舞循环：每 loop_period_s 重置 actor 到 ego 附近 ──
+ *
+ * 复用 scene_events.cpp:44 的 fmod(sim_time+offset, T) 循环范式。
+ * 用 last_triggered_loop[] 跟踪每个 beat 在当前 loop 周期内是否已触发，
+ * 避免每 tick 重复触发同一个 beat。
+ *
+ * 红绿灯 beat：actor="tl" 时直接设置所有红绿灯的 phase_state。
+ */
+void tick_choreography(EntityPool& pool, const Entity& ego,
+                       double sim_time_s, double dt,
+                       const Choreography* choreo) {
+    (void)dt;
+    if (!choreo || !choreo->enabled || choreo->beat_count <= 0) return;
+    if (choreo->loop_period_s <= 0.0) return;
+
+    double T = choreo->loop_period_s;
+    double phase = std::fmod(sim_time_s, T);
+    if (phase < 0.0) phase += T;
+    int current_loop = (int)(sim_time_s / T);
+
+    /* 静态 last_triggered_loop 数组，跟踪每个 beat 上次触发的 loop 编号 */
+    static int last_triggered[SCENARIO_MAX_CHOREO_BEATS];
+    static bool init_done = false;
+    if (!init_done) {
+        for (int i = 0; i < SCENARIO_MAX_CHOREO_BEATS; ++i)
+            last_triggered[i] = -1;
+        init_done = true;
+    }
+
+    for (int i = 0; i < choreo->beat_count; ++i) {
+        if (last_triggered[i] >= current_loop) continue;  /* 本轮已触发 */
+
+        const ChoreoBeat* b = &choreo->beats[i];
+        if (phase < b->t) continue;  /* 还没到节拍时间 */
+
+        last_triggered[i] = current_loop;
+
+        /* ── 红绿灯 beat ── */
+        if (strcmp(b->actor, "tl") == 0) {
+            int new_phase = (int)TLPhase::Green;  /* 默认 */
+            if (b->phase[0]) {
+                if (strcmp(b->phase, "red") == 0)    new_phase = (int)TLPhase::Red;
+                else if (strcmp(b->phase, "yellow") == 0) new_phase = (int)TLPhase::Yellow;
+                else if (strcmp(b->phase, "green") == 0)  new_phase = (int)TLPhase::Green;
+            }
+            for (int j = 0; j < pool.size(); ++j) {
+                Entity& tl = pool[j];
+                if (!tl.active || tl.type != EntityType::TrafficLight) continue;
+                tl.phase_state = new_phase;
+                /* 也重置相位计时器，让 tick_traffic_lights 后续继续推进 */
+                if (new_phase == (int)TLPhase::Red) {
+                    double green_s = tl.throttle;
+                    double yellow_s = tl.brake;
+                    double red_s = tl.steer;
+                    tl.phase_timer = red_s;  /* 红灯剩余时长 */
+                    /* 将 fmod 偏移量设为使 phase 落在红灯段 */
+                    tl.target_vx = -sim_time_s + T * (int)(sim_time_s / T);
+                }
+            }
+            continue;
+        }
+
+        /* ── actor beat：解析 actor id ── */
+        int actor_id = atoi(b->actor);
+        if (actor_id <= 0 && b->actor[0] != '0') continue;
+
+        /* 查找 pool 中 actor_id 匹配的实体 */
+        Entity* target = nullptr;
+        for (int j = 0; j < pool.size(); ++j) {
+            Entity& e = pool[j];
+            if (e.active && e.id == actor_id) { target = &e; break; }
+        }
+        if (!target) continue;
+
+        /* ── 重置到 ego 前方 ── */
+        double new_x = ego.x + b->ds;
+        double new_y = ego.y + b->dl;
+        target->x = new_x;
+        target->y = new_y;
+        target->vx = b->vx;
+        target->vy = 0.0;
+        target->speed = std::fabs(b->vx);
+        target->heading = 0.0;  /* 沿 +x 直行 */
+
+        /* ── 动作 ── */
+        if (b->act[0]) {
+            if (strcmp(b->act, "overtake") == 0) {
+                target->ai_state = AIState::Cruise;
+                target->target_vx = b->vx;
+            } else if (strcmp(b->act, "cutin") == 0) {
+                target->ai_state = AIState::CutIn;
+                target->target_offset = ego.y;  /* cutin 到 ego 车道 */
+                target->target_vx = b->vx;
+                target->cutin_pid_integral = 0.0;
+                target->cutin_pid_prev = 0.0;
+                target->cutin_active = true;
+            }
+        } else {
+            /* 无 act：仅重置位置速度，保持当前 AI 状态 */
+            target->ai_state = AIState::Cruise;
+            target->target_vx = b->vx;
+        }
+
+        LOG_INFO("flowsim", "choreo beat t=%.1f actor=%d pos=(%.1f,%.1f) vx=%.1f act='%s' (loop=%d)",
+                 b->t, actor_id, new_x, new_y, b->vx, b->act, current_loop);
     }
 }
 

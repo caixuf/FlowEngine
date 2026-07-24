@@ -18,6 +18,7 @@ import { createETCGateView } from '../view/ETCGateView.js';
 import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
+import { createTreeView } from '../view/TreeView.js';
 import {
   tickDeadReckon, _dr,
   updateEntityDeadReckon, tickEntityDeadReckon, getEntitySmooth,
@@ -47,6 +48,7 @@ ViewRegistry.register('etcGate',      createETCGateView);
 ViewRegistry.register('viaduct',     createViaductView);
 ViewRegistry.register('streetlight',  createStreetlightView);
 ViewRegistry.register('barrier',      createBarrierView);
+ViewRegistry.register('tree',         createTreeView);
 
 export function createSceneDirector(scene) {
   const store = createSceneStore();
@@ -80,7 +82,7 @@ export function createSceneDirector(scene) {
    * 不再保留 9 个顶层 const —— ViewRegistry 是单一事实来源，避免双份引用。 */
   for (const [layerName, viewNames] of [
     ['env',   ['ground', 'viaduct']],
-    ['road',  ['road', 'streetlight', 'barrier', 'connector']],
+    ['road',  ['road', 'streetlight', 'barrier', 'connector', 'tree']],
     ['agent', ['vehicle']],
     ['infra', ['trafficLight', 'etcGate']],
   ]) {
@@ -151,11 +153,13 @@ export function createSceneDirector(scene) {
           ViewRegistry.safeCall('viaduct', 'build', { laneCount, laneWidth, length: actualLength, withEnvironment: true });
           ViewRegistry.safeCall('streetlight', 'build', { edges: [] });
           ViewRegistry.safeCall('barrier', 'build', { edges: [] });
+          ViewRegistry.safeCall('tree', 'build', { edges: [] });
           store.isViaduct = true;
           store.viaductVisLength = actualLength;
         } else {
           ViewRegistry.safeCall('streetlight', 'build', rn);
           ViewRegistry.safeCall('barrier', 'build', rn);
+          ViewRegistry.safeCall('tree', 'build', rn);
           ViewRegistry.safeCall('viaduct', 'build', { edges: [] });
           store.isViaduct = false;
           store.viaductVisLength = VIADUCT_VIS_LENGTH;

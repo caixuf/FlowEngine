@@ -1129,6 +1129,11 @@ protected:
             double sim_time_s = (double)(clock_now_us() - g.sim_start_us) / 1e6;
             flowsim::tick_traffic_lights(g.pool, sim_time_s);
             flowsim::tick_etc_gates(g.pool, ego, FLOWSIM_DT_SEC);
+            /* 编舞循环：每 loop_period_s 重置 actor 到 ego 附近，实现反复演示 */
+            if (g.scenario) {
+                flowsim::tick_choreography(g.pool, ego, sim_time_s, FLOWSIM_DT_SEC,
+                                           &g.scenario->choreography);
+            }
 
             /* ── Step 5.5: 车灯信号派生 ──
              * 从 ego 的 steer/brake/speed 和 NPC 的 ai_state 派生车灯位掩码，

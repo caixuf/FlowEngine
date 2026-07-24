@@ -81,6 +81,8 @@ extern "C" {
 #define SCENARIO_MAX_SCRIPTS        8   /* 顶层 scenarios[] 工况脚本数组上限 */
 #define SCENARIO_MAX_OVERRIDES      8   /* 单个工况脚本的 actor_overrides 上限 */
 #define SCENARIO_SCRIPT_LABEL_LEN   48
+#define SCENARIO_MAX_CHOREO_BEATS   16  /* choreography beats 上限 */
+#define SCENARIO_CHOREO_ACTOR_LEN   16  /* choreography actor 字段长度 */
 
 /* ── Actor（NPC 车辆 / 行人） ─────────────────────────────── */
 
@@ -252,6 +254,31 @@ typedef struct {
     bool                   fired;                         /**< 运行时：是否已触发过（防重复） */
 } ScenarioScript;
 
+/* ── 编舞循环（FlowSim v2 新增，可反复演示）────────────────── */
+
+/**
+ * 编舞节拍：在 loop_period_s 周期内，在 beat.t 秒时重置 actor 到 ego 附近。
+ * actor 字段可为数字字符串（"1"/"2"）或 "tl"（红绿灯）。
+ * act 字段：空串=仅重置位置速度，"overtake"=设 AI 为 overtake，"cutin"=设 AI 为 CutIn。
+ */
+typedef struct {
+    double t;                        /**< 节拍时间（秒，在 loop 内的相对时间） */
+    char   actor[SCENARIO_CHOREO_ACTOR_LEN]; /**< "1"/"2"/"tl" 等 */
+    char   rel_to[16];               /**< "ego" 或 "world" */
+    double ds;                       /**< ego 前方距离（米） */
+    double dl;                       /**< 横向偏移（米，负=ego所在车道侧） */
+    double vx;                       /**< 重置后纵向速度（m/s） */
+    char   act[16];                  /**< 动作："overtake"/"cutin"/"" */
+    char   phase[8];                 /**< 红绿灯相位："red"/"green"/"yellow" */
+} ChoreoBeat;
+
+typedef struct {
+    double       loop_period_s;      /**< 循环周期（秒） */
+    ChoreoBeat   beats[SCENARIO_MAX_CHOREO_BEATS];
+    int          beat_count;
+    bool         enabled;            /**< 是否有 choreography 块 */
+} Choreography;
+
 /* ── 通过 / 失败判据 ──────────────────────────────────────── */
 
 typedef struct {
@@ -285,6 +312,8 @@ typedef struct {
     ScenarioLighting  lighting;        /**< 全局光照模式（day/night/dusk，默认 day） */
     ScenarioScript    scripts[SCENARIO_MAX_SCRIPTS]; /**< 顶层 scenarios[] 工况脚本数组 */
     int               script_count;
+    /* ── 编舞循环（FlowSim v2 新增）── */
+    Choreography      choreography;   /**< 编舞循环配置（可选，缺省 enabled=false） */
 } ScenarioConfig;
 
 /**

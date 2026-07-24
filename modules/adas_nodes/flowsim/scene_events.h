@@ -15,6 +15,9 @@
 
 #include "entity.h"
 
+/* 前向声明：Choreography 定义在 scenario_loader.h（C 头） */
+struct Choreography;
+
 namespace flowsim {
 
 /** 红绿灯相位（存在 Entity::phase_state） */
@@ -64,6 +67,25 @@ void tick_etc_gates(EntityPool& pool, const Entity& ego, double dt);
  * @param cfg   AI 配置（用 look_ahead）
  */
 void check_npc_scene_events(EntityPool& pool, double look_ahead);
+
+/**
+ * 推进编舞循环：按 loop_period_s 周期重置 actor 到 ego 附近。
+ * 复用 scene_events.cpp:44 的 fmod(sim_time+offset, T) 循环范式。
+ *
+ * 语义：每 loop_period_s 一轮，在 fmod(sim_time, T) ≈ beat.t 时，
+ * 把该 actor 重置到 ego 前方 ds 米、横向偏 dl 米、给定 vx。
+ *
+ * 无 choreography 块时是 no-op（向后兼容）。
+ *
+ * @param pool        实体池
+ * @param ego         ego 实体
+ * @param sim_time_s  仿真时间（秒）
+ * @param dt          时间步长（秒）
+ * @param choreo      编舞配置（来自场景 JSON）
+ */
+void tick_choreography(EntityPool& pool, const Entity& ego,
+                       double sim_time_s, double dt,
+                       const Choreography* choreo);
 
 }  // namespace flowsim
 

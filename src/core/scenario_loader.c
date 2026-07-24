@@ -424,6 +424,53 @@ ScenarioConfig* scenario_load(const char* path) {
         }
     }
 
+    /* choreography（可选，FlowSim v2 新增）：编舞循环配置。
+     * 缺省 enabled=false，与既有场景完全兼容（no-op）。 */
+    cJSON* jchoreo = cJSON_GetObjectItemCaseSensitive(root, "choreography");
+    if (cJSON_IsObject(jchoreo)) {
+        sc->choreography.enabled = true;
+        cJSON* j;
+        j = cJSON_GetObjectItemCaseSensitive(jchoreo, "loop_period_s");
+        if (cJSON_IsNumber(j)) sc->choreography.loop_period_s = j->valuedouble;
+        if (sc->choreography.loop_period_s <= 0.0) sc->choreography.loop_period_s = 45.0;
+
+        cJSON* jbeats = cJSON_GetObjectItemCaseSensitive(jchoreo, "beats");
+        if (cJSON_IsArray(jbeats)) {
+            int nb = cJSON_GetArraySize(jbeats);
+            if (nb > SCENARIO_MAX_CHOREO_BEATS) nb = SCENARIO_MAX_CHOREO_BEATS;
+            sc->choreography.beat_count = nb;
+            for (int i = 0; i < nb; i++) {
+                cJSON* jb = cJSON_GetArrayItem(jbeats, i);
+                if (!cJSON_IsObject(jb)) continue;
+                ChoreoBeat* b = &sc->choreography.beats[i];
+                cJSON* j2;
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "t");
+                if (cJSON_IsNumber(j2)) b->t = j2->valuedouble;
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "actor");
+                if (cJSON_IsNumber(j2)) {
+                    snprintf(b->actor, sizeof(b->actor), "%d", (int)j2->valuedouble);
+                } else if (cJSON_IsString(j2) && j2->valuestring) {
+                    strncpy(b->actor, j2->valuestring, sizeof(b->actor) - 1);
+                }
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "rel_to");
+                if (cJSON_IsString(j2) && j2->valuestring)
+                    strncpy(b->rel_to, j2->valuestring, sizeof(b->rel_to) - 1);
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "ds");
+                if (cJSON_IsNumber(j2)) b->ds = j2->valuedouble;
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "dl");
+                if (cJSON_IsNumber(j2)) b->dl = j2->valuedouble;
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "vx");
+                if (cJSON_IsNumber(j2)) b->vx = j2->valuedouble;
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "act");
+                if (cJSON_IsString(j2) && j2->valuestring)
+                    strncpy(b->act, j2->valuestring, sizeof(b->act) - 1);
+                j2 = cJSON_GetObjectItemCaseSensitive(jb, "phase");
+                if (cJSON_IsString(j2) && j2->valuestring)
+                    strncpy(b->phase, j2->valuestring, sizeof(b->phase) - 1);
+            }
+        }
+    }
+
     cJSON_Delete(root);
     LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, lighting=%d, %d scripts, seed=%u)",
              sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count,

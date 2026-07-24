@@ -11,6 +11,12 @@
  */
 
 export function createLighting(scene) {
+  // 环境光：兜底亮度，保证阴影面不发灰。离线环境 PMREM fromScene 偏暗，
+  // 没有 HDRI 时车身底面/侧面会发黑。补底光后任何角度都有基础可见度。
+  const ambient = new THREE.AmbientLight(0x8899bb);
+  ambient.intensity = 0.35;
+  scene.add(ambient);
+
   // 半球光：天空蓝 → 地面绿，低强度补底色。
   // HDRI 接管环境光后，半球光只做"地面反弹"的色调暗示。
   const hemi = new THREE.HemisphereLight(0xb0d0ff, 0x6b7a55);

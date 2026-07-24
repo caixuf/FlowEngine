@@ -45,6 +45,7 @@ const MODULES = [
   ['view/ViaductView',      '../tools/flowboard/js/vis/view/ViaductView.js'],
   ['view/StreetlightView',  '../tools/flowboard/js/vis/view/StreetlightView.js'],
   ['view/BarrierView',      '../tools/flowboard/js/vis/view/BarrierView.js'],
+  ['view/TreeView',         '../tools/flowboard/js/vis/view/TreeView.js'],
 
   // ── director/ (依赖所有 view) ──
   ['director/FrameValidator', '../tools/flowboard/js/vis/director/FrameValidator.js'],

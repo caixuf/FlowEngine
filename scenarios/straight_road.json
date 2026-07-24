@@ -135,5 +135,14 @@
         }
       ]
     }
-  ]
+  ],
+  "choreography": {
+    "loop_period_s": 45,
+    "beats": [
+      {"t": 3,  "actor": 1, "rel_to": "ego", "ds": 60,  "dl": 0.0,   "vx": 8.0,  "act": "overtake"},
+      {"t": 12, "actor": 2, "rel_to": "ego", "ds": 45,  "dl": 3.5,   "vx": 12.0, "act": "cutin"},
+      {"t": 22, "actor": 3, "rel_to": "ego", "ds": 55,  "dl": -7.0,  "vx": 0.0},
+      {"t": 30, "actor": "tl", "phase": "red"}
+    ]
+  }
 }
