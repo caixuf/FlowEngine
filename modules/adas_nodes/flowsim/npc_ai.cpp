@@ -774,4 +774,87 @@ void step_npc_pedestrian(Entity& ped, double dt, const NpcAiConfig& cfg) {
     }
 }
 
+/* ── 统一状态转移入口 ──
+ * 唯一合法修改 npc.state 的函数。
+ * 按 NpcEvent 映射到 NpcState，并重置状态相关字段。 */
+bool npc_request_state(Entity& npc, const NpcTransitionRequest& req,
+                       const NpcAiConfig& cfg) {
+    (void)cfg;
+    NpcState old = npc.state;
+    NpcState target = old;
+
+    switch (req.event) {
+        case NpcEvent::LeadFound:       target = NpcState::Follow;     break;
+        case NpcEvent::LeadLost:        target = NpcState::Cruise;     break;
+        case NpcEvent::TL_Red:          target = NpcState::StopForTL;  break;
+        case NpcEvent::TL_Green:        target = NpcState::Cruise;     break;
+        case NpcEvent::MobilChange:     target = NpcState::LaneChange; break;
+        case NpcEvent::ChoreoCutIn:     target = NpcState::CutIn;      break;
+        case NpcEvent::ChoreoOvertake:  target = NpcState::Cruise;     break;
+        case NpcEvent::ScriptOverride:  target = NpcState::CutIn;     break;
+        case NpcEvent::Collision:       target = NpcState::Stopped;    break;
+        case NpcEvent::Recycle:         target = NpcState::Cruise;     break;
+        case NpcEvent::None:            return false;
+    }
+
+    /* 状态切换时重置状态相关字段 */
+    if (target != old) {
+        npc.state = target;
+        /* 离开 CutIn → 释放横向控制权 */
+        if (old == NpcState::CutIn && target != NpcState::CutIn) {
+            npc.cutin_active = false;
+            npc.cutin_pid_integral = 0.0;
+            npc.cutin_pid_prev = 0.0;
+        }
+        /* 进入 CutIn → 初始化 PID 状态 */
+        if (target == NpcState::CutIn) {
+            npc.cutin_active = true;
+            npc.cutin_pid_integral = 0.0;
+            npc.cutin_pid_prev = 0.0;
+        }
+        /* 进入 LaneChange → 设冷却 */
+        if (target == NpcState::LaneChange) {
+            npc.lane_change_timer = cfg.mobil_lane_change_cooldown;
+        }
+        /* 进入 StopForTL/Stopped → 立即减速 */
+        if (target == NpcState::StopForTL || target == NpcState::Stopped) {
+            npc.brake = 1.0;
+            npc.throttle = 0.0;
+        }
+        /* Recycle → 全量重置 */
+        if (req.event == NpcEvent::Recycle) {
+            npc.lead_id = INVALID_ENTITY;
+            npc.follow_gap = 1e9;
+            npc.lane_change_timer = 0.0;
+            npc.crash_cooldown = 0.0;
+        }
+    }
+
+    /* 应用请求覆盖字段（无论是否发生状态切换） */
+    if (req.target_offset != NPC_REQ_UNSET) {
+        npc.target_offset = req.target_offset;
+    }
+    if (req.target_vx != NPC_REQ_UNSET) {
+        npc.target_vx = req.target_vx;
+    }
+    if (req.vx != NPC_REQ_UNSET) {
+        npc.vx = req.vx;
+        npc.speed = std::fabs(req.vx);
+    }
+    if (req.vy != NPC_REQ_UNSET) {
+        npc.vy = req.vy;
+    }
+    if (req.x != NPC_REQ_UNSET) {
+        npc.x = req.x;
+    }
+    if (req.y != NPC_REQ_UNSET) {
+        npc.y = req.y;
+    }
+    if (req.heading != NPC_REQ_UNSET) {
+        npc.heading = req.heading;
+    }
+
+    return true;
+}
+
 }  // namespace flowsim
