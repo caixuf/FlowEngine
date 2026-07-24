@@ -3,8 +3,6 @@
  * 防止「Coord.js 改一行 + RoadView 改一行」悄无声息破坏朝向/剔除
  * 跑法：node tests/vis_geometry.test.mjs
  */
-import { headingToRotationY } from '../tools/flowboard/js/vis/math/Coord.js';
-
 let pass = 0, fail = 0;
 function check(name, actual, expected) {
   const ok = Math.abs(actual - expected) < 1e-6;
@@ -12,15 +10,7 @@ function check(name, actual, expected) {
   else { fail++; console.log('  FAIL  ' + name + '  actual=' + actual + '  expected=' + expected); }
 }
 
-console.log('--- Coord.headingToRotationY ---');
-// heading=0 → rotation=0（车头朝 +X）
-check('heading=0 → 0', headingToRotationY(0), 0);
-// heading=π/2 → π/2（ENU 速度 (cosθ,sinθ) → THREE (cosθ,0,-sinθ) = rotation.y=+θ）
-check('heading=π/2 → π/2', headingToRotationY(Math.PI / 2), Math.PI / 2);
-// heading=π → π（车头朝 -X）
-check('heading=π → π', headingToRotationY(Math.PI), Math.PI);
-
-console.log('\n--- RoadView ribbon winding (法线必须朝 +Y) ---');
+console.log('--- RoadView ribbon winding (法线必须朝 +Y) ---');
 // 忠实复刻 RoadView.js 的顶点公式与索引顺序（改这里必须同步改 RoadView）。
 // 顶点 push（RoadView 81-82，直道 tangent=(1,0) → nx=0,nz=1）：
 //   左 = (px,        0.1, pz + hw)

@@ -260,14 +260,9 @@ jobs:
         run: |
           set -e
           node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs
-      # ── 原有纯函数测试（保持兼容） ──
-      - name: Run vis smoke tests
-        run: |
-          set -e
-          for t in tests/vis_*.test.mjs; do
-            echo "--- $t ---"
-            node "$t"
-          done
+      # ── 全量 JS 门禁（与 npm run vis:check:all 一致，作者本地同命令） ──
+      - name: Run vis smoke tests (vis:check:all)
+        run: npm run vis:check:all
 
   # ── Nightly long-running suite (stability + benchmark) ─────
   # These tests are labeled manual/stability/benchmark and are excluded from
