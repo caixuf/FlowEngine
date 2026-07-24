@@ -168,6 +168,49 @@ return ERR_INVALID_PARAM;  // 替代 return -1
 
 ### 违反以上规范的代码不会被合并。
 
+## 3D 渲染门禁（与 C 侧对称 — 2026-07 重建）
+
+> C 链路有 `demo_evaluator.py` 运行时门禁（碰撞/频率/拓扑回归），3D 渲染
+> 此前零等价物。以下门禁补上这条缺口，防止"undefined ref / 漏括号 / 漏调用"
+> 类回归反复复发。
+
+### 可执行门禁：`npm run vis:check`
+
+```
+npm run vis:check
+```
+
+等价于顺序执行：
+
+1. **全量模块加载** `node --import ./tests/support/three-preload.mjs tests/vis_module_load.test.mjs`
+   — 逐一 import 每个 `js/vis/**` 模块，抓语法错、顶层 ReferenceError、import 路径错误
+2. **ESLint no-undef** `npx eslint -c tools/flowboard/eslint.config.mjs tools/flowboard/js/vis/`
+   — no-undef 为 error（不通过阻断合并），no-unused-vars 为 warn（标出"定义了但未调用的函数"）
+3. **单帧 tick 冒烟** `node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs`
+   — 用 THREE shim 构 SceneDirector，喂 3 帧（平路/高架/多车道），各调一次 tickAnimation()，任何抛错即 FAIL
+
+- ❌ 任何 `tools/flowboard/**` 改动，`npm run vis:check` 红了**不合并**
+- ❌ 禁止在无渲染门禁覆盖时对 flowboard 做结构性重构（拆层/换架构）；结构重构与覆盖它的 gate 必须**同 commit**
+- ✅ 故障模式表里的 3D 条目，凡能转成 tick 冒烟用例的**必须转成测试**，禁止让文档替代测试
+
+### 门禁覆盖范围
+
+| 门禁 | 覆盖率 | 抓什么 |
+|------|--------|--------|
+| `vis_module_load.test.mjs` | 26/27 模块 (main.js 除外) | 语法错、顶层 ReferenceError、import 路径 |
+| `eslint no-undef` | 全部 27 模块 | 未定义变量引用（如 `VIADUCT_VIS_LENGTH` 未导入） |
+| `eslint no-unused-vars` | 全部 27 模块 | 定义了但未调用的函数（如 `followEgo` 漏调） |
+| `vis_render_tick.test.mjs` | director + 9 view | tickAnimation 运行时抛错、store 数据完整性 |
+
+### 与 C 侧门禁的对称性
+
+```
+C 侧: 改 pipeline 节点 → demo_evaluator.py (45s 真跑) → FAIL 阻断
+3D 侧: 改 flowboard/** → npm run vis:check (~3s) → FAIL 阻断
+```
+
+### 违反以上规范的代码不会被合并。
+
 ## 常见故障模式
 
 | 现象 | 根因 | 位置 |

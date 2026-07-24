@@ -225,12 +225,9 @@ jobs:
           kill $SRV 2>/dev/null || true
 
   # ── vis/ JS smoke tests (pure Node, no browser) ───────────
-  # Validates the pure-function modules extracted from THREE-coupled code:
-  #   - tests/vis_vehicle_lights.test.mjs  : bitmask constants + deriveLightState
-  #   - tests/vis_director_validation.test.mjs : SceneDirector.validateFrame
-  #   - tests/vis_geometry.test.mjs        : Coord.headingToRotationY + RoadView winding
-  # These guard against silent breakage of ENU→THREE mapping, vehicle light
-  # bitmask semantics, and frame schema validation when refactoring vis/.
+  # 2026-07 重建：新增 THREE shim + 全量模块加载 + tick 冒烟 + ESLint 门禁。
+  # 与 C 侧 demo_evaluator.py 对称 —— 任何 tools/flowboard/** 改动
+  # 必须通过此 job，否则不合并。
   vis-js-tests:
     runs-on: ubuntu-24.04
     steps:
@@ -248,6 +245,22 @@ jobs:
           for f in $(find tools/flowboard/js -maxdepth 1 -name '*.js'); do
             node --check "$f"
           done
+      # ── 门禁 1: 全量模块加载（抓语法错/顶层 ReferenceError/import 路径）──
+      - name: Module load smoke (26 vis/ modules)
+        run: |
+          set -e
+          node --import ./tests/support/three-preload.mjs tests/vis_module_load.test.mjs
+      # ── 门禁 2: ESLint no-undef (error) + no-unused-vars (warn) ──
+      - name: ESLint no-undef + no-unused-vars
+        run: |
+          set -e
+          npx eslint -c tools/flowboard/eslint.config.mjs tools/flowboard/js/vis/
+      # ── 门禁 3: 单帧 tick 冒烟（3 场景 × tickAnimation） ──
+      - name: Render tick smoke (3 scenarios)
+        run: |
+          set -e
+          node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs
+      # ── 原有纯函数测试（保持兼容） ──
       - name: Run vis smoke tests
         run: |
           set -e

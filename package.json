@@ -1,0 +1,7 @@
+{
+  "name": "flowengine",
+  "private": true,
+  "scripts": {
+    "vis:check": "node --import ./tests/support/three-preload.mjs tests/vis_module_load.test.mjs && npx eslint -c tools/flowboard/eslint.config.mjs tools/flowboard/js/vis/ && node --import ./tests/support/three-preload.mjs tests/vis_render_tick.test.mjs"
+  }
+}
