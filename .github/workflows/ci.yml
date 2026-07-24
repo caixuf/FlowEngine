@@ -17,6 +17,35 @@ permissions:
   contents: read
 
 jobs:
+  # ── scenario_file existence gate ──────────────────────────
+  # Every scenario_file referenced in config/*.json must exist on
+  # disk. Deleting a scenario file without updating its references
+  # causes actors=0 + core dump at runtime (zhongkai_road_full.json
+  # regression, 8eca3c7). This gate prevents that class of bug.
+  # Symmetric with clock-service-gate.
+  scenario-file-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject missing scenario_file references in config/
+        run: |
+          set -e
+          missing=0
+          for f in config/*.json; do
+            refs=$(grep -oP '"scenario_file"\s*:\s*"\K[^"]+' "$f" 2>/dev/null || true)
+            for ref in $refs; do
+              if [ ! -f "$ref" ]; then
+                echo "::error::Missing scenario file: $ref (referenced in $f)"
+                missing=1
+              fi
+            done
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::One or more scenario_file references point to missing files. Update the references or restore the file."
+            exit 1
+          fi
+          echo "✓ All scenario_file references exist on disk"
+
   # ── clock_service enforcement gate ─────────────────────────
   # clock_service.h must be the only time source for nodes. Raw
   # clock_gettime(CLOCK_MONOTONIC) in modules/ bypasses sim-time injection
