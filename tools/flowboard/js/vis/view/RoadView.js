@@ -333,12 +333,10 @@ export function createRoadView(scene) {
       roadGroup.add(mesh);
     }
 
-    // 白色车道线：轻微 emissive 反光
+    // 白色车道线
     if (whiteGeos.length) {
       const mat = new THREE.MeshStandardMaterial({
         color: LINE_WHITE,
-        emissive: LINE_WHITE,
-        emissiveIntensity: 0.15,
         roughness: 0.5,
         metalness: 0.05,
         side: THREE.DoubleSide,
@@ -347,12 +345,10 @@ export function createRoadView(scene) {
       roadGroup.add(new THREE.Mesh(mergeGeometries(whiteGeos), mat));
     }
 
-    // 黄色中心线：轻微 emissive 反光
+    // 黄色中心线
     if (yellowGeos.length) {
       const mat = new THREE.MeshStandardMaterial({
         color: LINE_YELLOW,
-        emissive: LINE_YELLOW,
-        emissiveIntensity: 0.12,
         roughness: 0.5,
         metalness: 0.05,
         side: THREE.DoubleSide,

@@ -74,11 +74,9 @@ export function init3DScene(canvas) {
     _director.init();
     /* 烘焙 PMREM 环境贴图：把当前 scene（天空色 + hemisphere 灯光渐变）
      * 烘成预滤波 mipmap 环境贴图，赋给 scene.environment。
-     * 这是 PBR 金属漆"活过来"的关键 —— 没有 envMap，metalness=0.9 +
-     * clearcoat=1.0 的 SU7 海湾蓝看起来就是深蓝塑料；有了 envMap，
-     * 车身反射天空渐变高光，立刻像真车漆。
-     * 用 fromScene 而非 HDR 文件：无需外部资产，纯色天空+hemi 渐变
-     * 足够提供反射；路/车是动态加的，不该烘进去。 */
+     * 低金属度车漆（metalness=0.15）+ clearcoat 清漆层依赖 envMap
+     * 产生高光反射；有了 envMap，车身反射天空渐变高光，才有真车漆质感。
+     * 用 fromScene 而非 HDR 文件：离线自洽，无需外部资产。 */
     _bakeEnvironment(_renderer, _scene);
   } catch (err) {
     console.error('[vis] Scene init failed:', err);
@@ -124,13 +122,8 @@ export function init3DScene(canvas) {
 }
 
 /** 烘焙环境贴图并赋给 scene.environment。
- *  Phase 1 HDRI：优先加载真实 HDRI（CC0 Poly Haven），失败则回退到
- *  PMREMGenerator.fromScene（纯色天空 + 半球光渐变烘成环境贴图）。
- *
- *  真实 HDRI 优势：
- *  - 金属漆反射真实天空（云、建筑、树影），不是纯色渐变
- *  - 玻璃/车窗通透感更好（有真实环境可折射）
- *  - 立体感更强（GTAO + HDRI = 接近真实渲染） */
+ *  用 PMREMGenerator.fromScene 从场景天空 + 半球光渐变烘成环境贴图。
+ *  离线自洽，不依赖外网 HDRI。 */
 function _bakeEnvironment(renderer, scene) {
   if (!THREE.PMREMGenerator) {
     console.warn('[vis] PMREMGenerator unavailable, PBR reflections disabled');
@@ -138,30 +131,7 @@ function _bakeEnvironment(renderer, scene) {
   }
   const pmrem = new THREE.PMREMGenerator(renderer);
   pmrem.compileEquirectangularShader();
-
-  /* 优先尝试加载真实 HDRI（CC0，Three.js examples CDN） */
-  if (THREE.RGBELoader) {
-    const loader = new THREE.RGBELoader();
-    loader.load(
-      'https://unpkg.com/three@0.160.0/examples/textures/equirectangular/pedestrian_overpass_1k.hdr',
-      function(hdrTexture) {
-        hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
-        const envRT = pmrem.fromEquirectangular(hdrTexture);
-        scene.environment = envRT.texture;
-        /* 同时设为背景：天更真（比渐变球真实得多） */
-        scene.background = hdrTexture;
-        pmrem.dispose();
-        console.log('[vis] HDRI environment loaded (pedestrian_overpass_1k)');
-      },
-      undefined,
-      function(err) {
-        console.warn('[vis] HDRI load failed, fallback to fromScene:', err);
-        _bakeFromScene(pmrem, scene);
-      }
-    );
-  } else {
-    _bakeFromScene(pmrem, scene);
-  }
+  _bakeFromScene(pmrem, scene);
 }
 
 /** 回退：用 scene 内的天空 + 灯光烘 PMREM */

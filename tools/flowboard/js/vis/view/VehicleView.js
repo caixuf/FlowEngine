@@ -82,7 +82,7 @@ function createVehicleLights(vehicleGroup) {
 const PAINT_CLEARCOAT = 0.9;
 const PAINT_CLEARCOAT_ROUGHNESS = 0.15;
 const PAINT_ROUGHNESS = 0.35;
-const PAINT_METALNESS = 0.85;
+const PAINT_METALNESS = 0.15;
 const ENVMAP_INTENSITY = 0.9;
 
 const BODY_KEYWORDS = ['body', 'car', 'paint', 'chassis', 'body_', 'Body', 'Chassis', 'CAR', 'Paint', 'Car', 'mesh_'];

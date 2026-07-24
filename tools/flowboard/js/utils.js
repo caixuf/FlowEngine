@@ -278,7 +278,7 @@ function _buildWheel(T) {
   hub.rotation.z = Math.PI / 2;
   wg.add(hub);
   // 5 辐条星形轮毂
-  var spokeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.6, roughness: 0.3 });
+  var spokeMat = new T.MeshStandardMaterial({ color: 0xbbbbbb, metalness: 0.6, roughness: 0.3 }); // exempt: wheel spoke
   for (var si = 0; si < 5; si++) {
     var spoke = new T.Mesh(new T.BoxGeometry(0.28, 0.035, 0.025), spokeMat);
     spoke.rotation.z = Math.PI / 2;
@@ -310,7 +310,7 @@ export function _buildSedan(color, secondaryColor, addSpots) {
   // 真实车漆：MeshPhysicalMaterial + clearcoat（清漆层）+ sheen（绒光），
   // 配合 scene.environment 的 PMREM 环境贴图产生高光反射。
   var bodyMat = new T.MeshPhysicalMaterial({
-    color: color, metalness: 0.55, roughness: 0.22, envMapIntensity: 1.1,
+    color: color, metalness: 0.15, roughness: 0.22, envMapIntensity: 1.1,
     clearcoat: 1.0, clearcoatRoughness: 0.06, sheen: new T.Color(0.4, 0.4, 0.4)
   });
   var cabinMat = new T.MeshPhysicalMaterial({
@@ -318,7 +318,7 @@ export function _buildSedan(color, secondaryColor, addSpots) {
     clearcoat: 0.6, clearcoatRoughness: 0.12
   });
   var glassMat = new T.MeshPhysicalMaterial({
-    color: 0x223344, metalness: 0.9, roughness: 0.04, envMapIntensity: 1.3,
+    color: 0x223344, metalness: 0.9, roughness: 0.04, envMapIntensity: 1.3, // exempt: glass
     clearcoat: 1.0, clearcoatRoughness: 0.02
   });
   var blackMat = new T.MeshStandardMaterial({ color: 0x111111, roughness: 0.7 });
@@ -653,11 +653,11 @@ export function _buildObstacle(type, color) {
 
   var isTruck = true;
   var bodyMat = new T.MeshPhysicalMaterial({
-    color: color, metalness: 0.5, roughness: 0.24, envMapIntensity: 1.0,
+    color: color, metalness: 0.15, roughness: 0.24, envMapIntensity: 1.0,
     clearcoat: 0.9, clearcoatRoughness: 0.08, sheen: new T.Color(0.3, 0.3, 0.3)
   });
   var glassMat = new T.MeshPhysicalMaterial({
-    color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1,
+    color: 0x223344, metalness: 0.85, roughness: 0.06, envMapIntensity: 1.1, // exempt: glass
     clearcoat: 1.0, clearcoatRoughness: 0.03
   });
   var blackMat = new T.MeshStandardMaterial({ color: 0x151515, roughness: 0.8 });
@@ -858,7 +858,7 @@ export function _buildTrafficLight() {
   // Pole: 5m tall cylinder at roadside
   var pole = new T.Mesh(
     new T.CylinderGeometry(0.12, 0.15, 5.0, 12),
-    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 })
+    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 }) // exempt: pole/arm
   );
   pole.position.y = 2.5;
   pole.castShadow = true;
@@ -867,7 +867,7 @@ export function _buildTrafficLight() {
   // Arm: horizontal box extending over road (length 4m, at height 4.8m)
   var arm = new T.Mesh(
     new T.BoxGeometry(0.12, 0.12, 4.0),
-    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 })
+    new T.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.4 }) // exempt: pole/arm
   );
   arm.position.set(0, 4.8, 2.0);
   g.add(arm);

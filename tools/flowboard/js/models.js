@@ -274,7 +274,7 @@ function _upgradeCarPaint(model, color) {
       var oldMat = c.material;
       var newMat = new THREE.MeshPhysicalMaterial({
         color: color || (oldMat.color ? oldMat.color.getHex() : 0x4488dd),
-        metalness: oldMat.metalness !== undefined ? oldMat.metalness : 0.5,
+        metalness: oldMat.metalness !== undefined ? oldMat.metalness : 0.15,
         roughness: oldMat.roughness !== undefined ? oldMat.roughness : 0.25,
         envMapIntensity: 1.1,
         clearcoat: 1.0, clearcoatRoughness: 0.07,
