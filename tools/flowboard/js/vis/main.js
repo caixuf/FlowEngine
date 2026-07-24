@@ -70,6 +70,7 @@ export function init3DScene(canvas) {
     _cameraRig = createCameraRig(canvas);
     _lights = createLighting(_scene);
     _skyEnv = createSkyEnv(_scene, _lights.sun, _lights.hemi);
+    _skyEnv.setCamera(_cameraRig.camera);
     _director = createSceneDirector(_scene);
     _director.init();
     /* 烘焙 PMREM 环境贴图：把当前 scene（天空色 + hemisphere 灯光渐变）
@@ -188,6 +189,9 @@ function _startRenderLoop() {
       updateSunShadow(_lights, store.ego);
 
       _cameraRig.update(store.ego, roadGroup, now);
+
+      // 天空穹顶跟随相机 + 雨粒子动画
+      _skyEnv.tick(1 / 60);
 
       renderFrame(_renderer, _composer, _scene, _cameraRig.camera);
       _frameCount++;

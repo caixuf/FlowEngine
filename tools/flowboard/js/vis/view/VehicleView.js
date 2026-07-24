@@ -59,18 +59,29 @@ function createVehicleLights(vehicleGroup) {
   const headL  = _makeRectMesh(LIGHT_OFF, -HEAD_X,  HEAD_Y,  HEAD_Z);
   const headR  = _makeRectMesh(LIGHT_OFF,  HEAD_X,  HEAD_Y,  HEAD_Z);
 
+  // 熄灯时隐藏，避免暗色灯片显示为车身边缘的黑方块
+  brakeL.visible = brakeR.visible = false;
+  turnL.visible = turnR.visible = false;
+  headL.visible = headR.visible = false;
+
   group.add(brakeL, brakeR, turnL, turnR, headL, headR);
 
   return {
     group,
     update(v) {
       const s = deriveLightState(v.lights || 0, v.brake || 0);
-      brakeL.material.color.copy(s.brake ? LIGHT_BRAKE_ON : LIGHT_OFF);
-      brakeR.material.color.copy(s.brake ? LIGHT_BRAKE_ON : LIGHT_OFF);
-      turnL.material.color.copy(s.turnL ? LIGHT_TURN_ON : LIGHT_OFF);
-      turnR.material.color.copy(s.turnR ? LIGHT_TURN_ON : LIGHT_OFF);
-      headL.material.color.copy(s.head ? LIGHT_HEAD_ON : LIGHT_OFF);
-      headR.material.color.copy(s.head ? LIGHT_HEAD_ON : LIGHT_OFF);
+      brakeL.visible = s.brake;
+      brakeR.visible = s.brake;
+      brakeL.material.color.copy(LIGHT_BRAKE_ON);
+      brakeR.material.color.copy(LIGHT_BRAKE_ON);
+      turnL.visible = s.turnL;
+      turnR.visible = s.turnR;
+      turnL.material.color.copy(LIGHT_TURN_ON);
+      turnR.material.color.copy(LIGHT_TURN_ON);
+      headL.visible = s.head;
+      headR.visible = s.head;
+      headL.material.color.copy(LIGHT_HEAD_ON);
+      headR.material.color.copy(LIGHT_HEAD_ON);
     }
   };
 }
@@ -124,12 +135,13 @@ function _upgradeToCarPaint(mesh, envMap) {
 
   // 保留原色
   const oldColor = mesh.material.color ? mesh.material.color.getHex() : 0xcccccc;
-  const oldMetalness = mesh.material.metalness !== undefined ? mesh.material.metalness : PAINT_METALNESS;
+  // 不信 gltf 烘焙的 metalness（gen_models.py 里偏高，导致金属漆缺环境反射时发黑）。
+  // 强制 clamp 到 PAINT_METALNESS，保证有漫反射基色，不纯靠反射成像。
   const oldRoughness = mesh.material.roughness !== undefined ? mesh.material.roughness : PAINT_ROUGHNESS;
 
   const mat = new THREE.MeshPhysicalMaterial({
     color: oldColor,
-    metalness: oldMetalness,
+    metalness: PAINT_METALNESS,
     roughness: Math.min(oldRoughness, PAINT_ROUGHNESS),
     clearcoat: PAINT_CLEARCOAT,
     clearcoatRoughness: PAINT_CLEARCOAT_ROUGHNESS,

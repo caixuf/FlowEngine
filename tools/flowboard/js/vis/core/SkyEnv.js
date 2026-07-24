@@ -81,6 +81,10 @@ export function createSkyEnv(scene, sunLight, hemiLight) {
   sky.name = 'skyDome';
   scene.add(sky);
 
+  // ── scene.background 兜底：即使穹顶被裁掉，背景也是天空色而非黑色 ──
+  // 用 Color 对象，_applyTimeSlot 时同步更新。
+  scene.background = new THREE.Color(0x87ceeb);
+
   // ── 雾 ──
   scene.fog = new THREE.FogExp2(0x87ceeb, 0.0015);
 
@@ -139,6 +143,7 @@ export function createSkyEnv(scene, sunLight, hemiLight) {
   let _timeOfDay = 'noon';
   let _weather = 'clear';
   let _dayMode = true;  // 兼容旧 API
+  let _camera = null;   // 相机引用，每帧让穹顶跟随相机
 
   // ── 更新函数 ──
 
@@ -181,6 +186,11 @@ export function createSkyEnv(scene, sunLight, hemiLight) {
     scene.fog.density = fogDensity;
     scene.fog.color.copy(skyBot);
 
+    // scene.background 同步为天空底色，保证穹顶被裁掉时背景不黑
+    if (scene.background && scene.background.isColor) {
+      scene.background.copy(skyBot);
+    }
+
     // 雨
     const rainRate = w.rainRate;
     if (rainRate !== rainCount) {
@@ -209,8 +219,17 @@ export function createSkyEnv(scene, sunLight, hemiLight) {
   function getWeather() { return _weather; }
   function isDay() { return _dayMode; }
 
+  /** 设置相机引用，穹顶每帧跟随相机位置（半径500的球罩住相机视野） */
+  function setCamera(cam) { _camera = cam; }
+
   // ── 每帧 tick ──
   function tick(dt) {
+    // 穹顶跟随相机：半径500的球必须以相机为中心，否则 ego 开远后穹顶
+    // 被视锥裁掉，露出 renderer 默认黑 clear color。
+    if (_camera) {
+      sky.position.copy(_camera.position);
+    }
+
     // 雨粒子动画
     if (rainMesh && rainCount > 0) {
       const pos = rainMesh.geometry.attributes.position;
@@ -254,7 +273,7 @@ export function createSkyEnv(scene, sunLight, hemiLight) {
   return {
     setTimeOfDay, setWeather,
     getTimeOfDay, getWeather, isDay,
-    tick, dispose,
+    setCamera, tick, dispose,
     getSun, getAmbient,
   };
 }
