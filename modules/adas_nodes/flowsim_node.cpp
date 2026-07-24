@@ -297,6 +297,7 @@ static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
 
 static void apply_actor_override(flowsim::Entity& e,
                                  const ScenarioActorOverride* o) {
+    bool took_control = false;  // 是否获取了横向控制权
     if (o->ai_state[0]) {
         e.ai_state = ai_state_from_str(o->ai_state);
         /* 进入 CutIn 时初始化 PID 状态，避免残留旧值影响新变道 */
@@ -304,10 +305,15 @@ static void apply_actor_override(flowsim::Entity& e,
             e.cutin_pid_integral = 0.0;
             e.cutin_pid_prev = 0.0;
             e.cutin_active = true;
+            took_control = true;
         }
     }
     if (!isnan(o->target_offset)) {
         e.target_offset = o->target_offset;
+        took_control = true;
+    }
+    if (took_control) {
+        e.lateral_control = flowsim::LateralControl::Script;
     }
     if (!isnan(o->target_vx)) {
         e.target_vx = o->target_vx;
@@ -1049,23 +1055,23 @@ protected:
             flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
                                   ego.throttle, ego.brake, ego.steer);
 
-            /* Phase 2: ego 有 road_pos 时用 RoadPosition 推进 + 覆盖世界坐标。
-             * step_bicycle 已更新 ego.speed（throttle/brake 驱动）和 ego.x/y/heading
-             * （世界系自行车模型积分）。若 road_pos.ok()，用 road_pos.advance 沿真实
-             * OpenDRIVE 拓扑推进 ego.speed*dt，再用 road_pos.world() 把 ego.x/y/heading
-             * 覆盖为路网对齐坐标——保证 ego 严格贴路面、过 fork/路口不飞出路网。
-             * junction_angle 暂用 M_PI（直行），后续可从 route step type 映射。
-             * road_pos 不 ok 时保留 step_bicycle 结果（旧逻辑）。 */
+            /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
+             * step_bicycle 已更新 ego.speed/heading/x/y。road_pos.advance 沿道路
+             * 拓扑推进纵向 s，road_pos.world() 取路网对齐 x/y 并 reset heading
+             * 为道路切线（稳定性）。横向位移 delta_lat = vy * dt 叠加到 offset。 */
             if (ego.road_pos.ok()) {
+                double delta_lat = ego.vy * FLOWSIM_DT_SEC;
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 if (dist > 0.0) {
                     if (!ego.road_pos.advance(dist, M_PI)) {
-                        /* 推进失败（路网边界）— 不立即销毁 handle，下一 tick 仍可重试。
-                         * 此处不强制 recycle ego（ego 不回收），只 log 限速。 */
                         if (g.cycle % 100 == 0) {
                             LOG_WARN("flowsim", "ego road_pos.advance failed (dist=%.2f)", dist);
                         }
                     } else {
+                        flowsim::FrenetPos fp_cur;
+                        if (ego.road_pos.frenet(fp_cur)) {
+                            ego.road_pos.set_offset(fp_cur.offset + delta_lat);
+                        }
                         flowsim::WorldPos wp;
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
@@ -1074,7 +1080,6 @@ protected:
                             ego.vx = ego.speed * std::cos(wp.h);
                             ego.vy = ego.speed * std::sin(wp.h);
                         }
-                        /* 同步 Frenet 字段（部分下游逻辑 / 调试日志读 ego.road_id 等） */
                         flowsim::FrenetPos fp;
                         if (ego.road_pos.frenet(fp)) {
                             ego.road_id = fp.road_id;
@@ -1138,7 +1143,9 @@ protected:
             /* 编舞循环：每 loop_period_s 重置 actor 到 ego 附近，实现反复演示 */
             if (g.scenario) {
                 flowsim::tick_choreography(g.pool, ego, sim_time_s, FLOWSIM_DT_SEC,
-                                           &g.scenario->choreography);
+                                           &g.scenario->choreography,
+                                           g.roads_loaded ? &g.roads : nullptr,
+                                           g.route.ok() ? &g.route : nullptr);
             }
 
             /* ── Step 5.5: 车灯信号派生 ──

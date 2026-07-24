@@ -42,12 +42,10 @@ void VehicleActor::update_npc_lights(Entity& npc) {
      * 刹车灯同样由 VehicleView 读 npc.brake 字段直接驱动，不占 lights 位。 */
     npc.lights.clear();
 
-    switch (npc.ai_state) {
-        case AIState::CutIn:
-            /* CutIn：根据 target_offset 方向打转向灯。
-             * target_offset > offset → 向左变道（目标在左）→ 左转灯
-             * target_offset < offset → 向右变道 → 右转灯
-             * offset 增大 = 向左（THREE z 正向），减小 = 向右 */
+    switch (npc.state) {
+        case NpcState::CutIn:
+        case NpcState::LaneChange:
+            /* 变道：根据 target_offset 方向打转向灯 */
             if (npc.target_offset > npc.offset + 0.1) {
                 npc.lights.set_turn_left(true);
             } else if (npc.target_offset < npc.offset - 0.1) {
@@ -55,34 +53,26 @@ void VehicleActor::update_npc_lights(Entity& npc) {
             }
             break;
 
-        case AIState::Merge:
-            /* Merge 汇入主路：打左转向灯（汇入通常从右侧汇入主路左侧）。
-             * 简化：固定打左转向灯。 */
-            npc.lights.set_turn_left(true);
-            break;
-
-        case AIState::Yield:
-            /* Yield 让行：开双闪警示后车 */
+        case NpcState::Yield:
+            /* 让行：开双闪 */
             npc.lights.set_hazard(true);
             break;
 
-        case AIState::Stop:
-            /* Stop 且近乎静止：开双闪（紧急停车） */
+        case NpcState::Stopped:
+            /* 停止且近乎静止：开双闪 */
             if (npc.speed < SPEED_REVERSE_THRESHOLD) {
                 npc.lights.set_hazard(true);
             }
             break;
 
-        case AIState::StopForTL:
-            /* 红灯停车：不开双闪（正常等灯），刹车灯由 brake 字段驱动 */
+        case NpcState::StopForTL:
+            /* 红灯停车：不开双闪 */
             break;
 
-        case AIState::Cruise:
-        case AIState::Follow:
-        case AIState::ETCApproach:
-        case AIState::BranchSel:
+        case NpcState::Cruise:
+        case NpcState::Follow:
         default:
-            /* 巡航/跟车/ETC/选路：根据 steer 实时打转向灯（变道时） */
+            /* 巡航/跟车：根据 steer 打转向灯 */
             if (npc.steer > STEER_TURN_THRESHOLD) {
                 npc.lights.set_turn_right(true);
             } else if (npc.steer < -STEER_TURN_THRESHOLD) {

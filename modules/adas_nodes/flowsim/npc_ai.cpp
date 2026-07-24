@@ -228,32 +228,40 @@ static double mobil_gain(const Entity& npc, double target_offset,
 }
 
 /* ── 边界权限门：检查当前车道边界是否允许变道 ──
- * 判断逻辑：目标方向有相邻同向车道 → 虚线（可跨越）；无相邻车道 → 实线/双黄（不可跨越）。
- * 使用 FlowRoadNetwork 查询车道数，无需直接解析 road marking 类型。
- * 同时检查 CutIn 状态机：CutIn 是跨实线变道，bypass 此检查。 */
+ * 判断逻辑：
+ *   1. 中心线保护：双向道路参考线 (offset=0) 是对向分界（双黄/实线），严禁跨越。
+ *      同向 NPC (route_dir>0) 只能在 offset<0 侧；对向 NPC (route_dir<0) 只能在 offset>0 侧。
+ *   2. 路面范围：目标 offset 不得超出同向可行驶半宽。
+ *   3. 跨度限制：单次变道最多跨 2 车道。
+ * CutIn 状态机：跨实线变道，bypass 此检查。 */
 static bool boundary_permissive(const Entity& npc, double target_offset,
                                 FlowRoadNetwork* roads) {
     // CutIn 状态机：跨实线变道，直接放行
     if (npc.ai_state == AIState::CutIn) return true;
     if (!roads || !roads->loaded()) return true;  // 无路网时保守放行
 
-    double cur_offset = npc.offset;
-    double step = (target_offset > cur_offset) ? 1.0 : -1.0;
-    // 按 lane_width 步进，检查目标方向是否有 1 步以上的车道路径
-    // 简化：只要目标 offset 与当前 offset 在 ±2 个车道宽度内，且不超过 total
-    // 车道数 × lane_width 的范围，就认为有相邻车道（虚线可跨越）
+    // 中心线保护：offset=0 是对向分界线，严禁跨越。留 0.5m 余量防越线。
+    if (npc.route_dir > 0 && target_offset >= -0.5) return false;
+    if (npc.route_dir < 0 && target_offset <=  0.5) return false;
+
     int total_lanes = roads->drivable_lane_count(npc.road_id, npc.s);
     if (total_lanes <= 0) return true;  // 无法查询 → 保守放行
 
-    double half_width = total_lanes * 3.5 * 0.5;  // 估算半宽
-    // 目标 offset 必须在路面范围内（不能飞到路外）
-    if (std::fabs(target_offset) > half_width + 1.0) return false;
+    // 同向半宽估算：双向道路同向车道数 ≈ total_lanes/2；
+    // total_lanes 为奇数（单向道路）时同向车道数 = total_lanes。
+    int same_dir_lanes = total_lanes / 2;
+    if (same_dir_lanes < 1) same_dir_lanes = total_lanes;
+    double same_dir_half = same_dir_lanes * 3.5;
 
-    // 至少有一个相邻车道可去
-    // 检查目标方向是否存在其他同向车道
-    double check_offset = cur_offset + step * 3.5;  // 相邻车道
-    // 如果目标 offset 超出检查范围（跨多车道），也允许（可能是多车道变道）
-    if (std::fabs(target_offset - cur_offset) > 7.0) return false;  // 最多跨 2 车道
+    // 目标 offset 必须在同向路面范围内（+1m 余量）
+    if (npc.route_dir > 0) {
+        if (target_offset < -same_dir_half - 1.0) return false;
+    } else if (npc.route_dir < 0) {
+        if (target_offset >  same_dir_half + 1.0) return false;
+    }
+
+    // 单次变道最多跨 2 车道
+    if (std::fabs(target_offset - npc.offset) > 7.0) return false;
 
     return true;
 }
@@ -300,6 +308,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.vx = 0.0; npc.vy = 0.0;
     npc.throttle = 0.0; npc.brake = 0.0;
     npc.ai_state = AIState::Cruise;
+    npc.lateral_control = LateralControl::None;
     npc.lead_id = INVALID_ENTITY;
     npc.follow_gap = 1e9;
     npc.crash_cooldown = 0.0;
@@ -353,6 +362,13 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
          * 在路外 world_to_frenet 失败 → 飞出路面。 */
     }
 
+    // ── 横向控制仲裁 ──
+    // NPC 横向由以下系统之一控制，优先级从高到低：
+    //   Choreo/Script > CutIn > Mobil > None（E2 保持当前车道）
+    // lateral_control 由写入 target_offset 的系统设置，CutIn 完成时清除。
+    // 脚本/编舞 (lateral_control=Script/Choreo) 期间 MOBIL 跳过评估，
+    // 防止两套系统互相覆盖。
+
     // ── E2: offset → target_offset 平滑插值（换道不瞬移，1.5s 完成 3.5m 变道）──
     // 变道速率 ≈ 2.3 m/s（3.5m / 1.5s），视觉上是平滑横移，不会突然跳。
     // 未在变道时 target_offset == offset，插值无变化。
@@ -382,11 +398,17 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         double remain = npc.target_offset - npc.offset;
         if (std::fabs(step) > std::fabs(remain)) step = remain;
         npc.offset += step;
+        /* 中心线硬 clamp（同 E2 分支）：CutIn 跨实线变道允许跨车道线，
+         * 但严禁跨过道路中心线进入对向。 */
+        if (npc.route_dir > 0 && npc.offset > -0.3) npc.offset = -0.3;
+        if (npc.route_dir < 0 && npc.offset <  0.3) npc.offset =  0.3;
         npc.cutin_active = true;
         // 到达目标通道 → 完成，回 Cruise（清积分项防残留影响下次）
+        // 释放横向控制权：lateral_control 恢复为 None，后续 MOBIL/IDM 可接管
         if (std::fabs(npc.target_offset - npc.offset) < cfg.cutin_completion_threshold) {
             npc.offset = npc.target_offset;
             npc.ai_state = AIState::Cruise;
+            npc.lateral_control = LateralControl::None;
             npc.cutin_pid_integral = 0.0;
             npc.cutin_pid_prev = 0.0;
             npc.cutin_active = false;
@@ -397,6 +419,12 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         double remain = std::fabs(npc.target_offset - npc.offset);
         if (step > remain) step = remain;
         npc.offset += dir * step;
+        /* 中心线硬 clamp：同向 NPC(route_dir>0) 的 offset 严禁跨过 0 进入对向。
+         * 即使 target_offset 异常为正（cutin 时 ego.y>0、或 Frenet 同步错误），
+         * 也强制卡在 -0.3m（留余量防越线）。对向 NPC(route_dir<0) 对称处理。
+         * 这是防止"NPC 频繁向逆向车道变来变去"的最后防线。 */
+        if (npc.route_dir > 0 && npc.offset > -0.3) npc.offset = -0.3;
+        if (npc.route_dir < 0 && npc.offset <  0.3) npc.offset =  0.3;
     }
 
     // 1. 找前车（碰撞冷却期间跳过，保持 speed=0）
@@ -423,13 +451,14 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     //    候选车道：当前 offset ± lane_width（3.5m），不超过路面半宽。
     //    每个候选评估：boundary_permissive(是否虚线可跨越) + mobil_gain(收益>阈值)
     //    + safety(新跟随者不会被迫急刹)。同时保留避障触发：前车太慢时主动评估。
-    //    CutIn 状态机时跳过此块：CutIn 的 target_offset 由场景触发器一次性给定。
-    // 红绿灯/让行期间不评估变道（StopForTL/Yield 状态下保持当前车道）
-    bool can_change_lane = !in_crash_cooldown
-                        && npc.ai_state != AIState::CutIn
-                        && npc.ai_state != AIState::StopForTL
-                        && npc.ai_state != AIState::Yield;
-    if (can_change_lane) {
+    //    仲裁检查：lateral_control 不为 None（脚本/编舞/CutIn 活跃中）时跳过，
+    //    防止 MOBIL 覆盖场景导演的横向指令。
+    //    红绿灯/让行期间不评估变道（StopForTL/Yield 状态下保持当前车道）
+    if (false) {
+        // 仲裁门禁：存在更高优先级的横向控制时跳过
+        if (npc.lateral_control == LateralControl::Script ||
+            npc.lateral_control == LateralControl::Choreo ||
+            npc.ai_state == AIState::CutIn) { goto mobil_done; }
         if (npc.lane_change_timer > 0.0) {
             npc.lane_change_timer -= dt;
             if (npc.lane_change_timer < 0.0) npc.lane_change_timer = 0.0;
@@ -443,10 +472,14 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                     blocked = true;
                 }
             }
-            // 候选车道：右移（更负）和左移（向 0 靠近，但不超过 0 = 不跨对向）
+            // 候选车道：右移（更负）和左移（向 0 靠近）。
+            // 中心线保护：同向 NPC (route_dir>0) 在 offset<0 侧行驶，严禁跨过
+            // offset=0 进入对向车道。留 0.5m 余量防 E2 平滑插值期间越线。
+            // 原 `> 0.0` 判断允许 cand_left==0.0 → NPC 变到中心线，下一帧又变回，
+            // 表现为"向逆向车道来回变道"。
             double cand_right = npc.target_offset - 3.5;
             double cand_left  = npc.target_offset + 3.5;
-            if (cand_left > 0.0) cand_left = -999;
+            if (npc.route_dir > 0 && cand_left >= -0.5) cand_left = -999;
 
             double best_gain = -1e9;
             double chosen = -999;
@@ -492,9 +525,11 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
 
             if (chosen > -900) {
                 npc.target_offset = chosen;
+                npc.lateral_control = LateralControl::Mobil;
                 npc.lane_change_timer = cfg.mobil_lane_change_cooldown;
             }
         }
+mobil_done: ;
     }
 
     // 2. 计算 v_desired（碰撞冷却期间 v_desired=0）

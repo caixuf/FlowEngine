@@ -41,16 +41,32 @@ enum class EntityType : uint8_t {
     StopLine,
 };
 
-enum class AIState : uint8_t {
-    Cruise,      // 巡航（按 target_vx 匀速）
-    Follow,      // 跟车（IDM 调速）
-    Stop,        // 停止（target_vx=0 且已停）
-    StopForTL,   // 红灯停车
-    ETCApproach, // ETC 减速通过
-    BranchSel,   // 选路（路口分支选择）
-    Merge,       // 汇入主路
-    Yield,       // 让行
-    CutIn,       // 加塞：横向 PID 跨实线变道（收费站排队场景，target_offset 给目标通道）
+/**
+ * NPC 统一状态机 — 每个状态完整定义纵向+横向行为。
+ *
+ * 状态语义：
+ *   Cruise     — 自由巡航到 target_vx，车道保持（E2 平滑 offset→target_offset）
+ *   Follow     — IDM 跟车，车道保持
+ *   StopForTL  — 红绿灯前减速/停车，车道保持
+ *   LaneChange — MOBIL 自主变道，E2 平滑横移
+ *   CutIn      — 编舞/脚本触发的加塞变道（PID 横向+纵向压制）
+ *   Stopped    — 碰撞冷却/完全停止，speed=0 brake=1
+ *   Yield      — 让行减速（NPC 汇入；红绿灯黄灯；ETC 抬杆中）
+ *
+ * 非 NPC 实体复用约定：
+ *   TrafficLight: Cruise=绿灯, Yield=黄灯, Stopped=红灯
+ *   ETCGate:      Stopped=关闭, Yield=抬杆中, Cruise=全开
+ *
+ * 状态转移统一由 npc_request_state() 仲裁，外部不得直接写 state 字段。
+ */
+enum class NpcState : uint8_t {
+    Cruise     = 0,
+    Follow     = 1,
+    StopForTL  = 2,
+    LaneChange = 3,
+    CutIn      = 4,
+    Stopped    = 5,
+    Yield      = 6,
 };
 
 /**
@@ -79,8 +95,8 @@ struct Entity {
     double max_accel{2.0};         /**< m/s² */
     double max_brake{4.0};         /**< m/s² */
 
-    /* ── AI 状态（NPC 车辆）── */
-    AIState    ai_state{AIState::Cruise};
+    /* ── AI 状态（NPC 车辆 / 场景事件触发器复用）── */
+    NpcState   state{NpcState::Cruise};  /**< 统一状态机：NPC 纵向+横向行为；TL/ETC 复用 */
     EntityId   lead_id{INVALID_ENTITY};  /**< 跟车目标 */
     double     follow_gap{1e9};          /**< 当前前车间距 (m) */
     double     crash_cooldown{0.0};      /**< 碰撞冷却计时器(s)：>0 期间速度归零不参与 AI；=0 后释放 */

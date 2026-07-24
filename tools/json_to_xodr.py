@@ -502,22 +502,27 @@ def road_to_xml(road: Road) -> ET.Element:
                  road.lane_count == 1 or
                  getattr(road, "oneway", False))
     # 车道：center(参考线 width=0) + right N 条顺向 + left N 条对向(双向道路)
+    # 场景 JSON 的 "lanes" 是**双向合计**车道数（如 4 = 2 顺行 + 2 对向）。
+    # 单向道路（ramp/oneway）时 lanes 全部在 right 侧。
+    # 旧实现误把 lanes 当"每侧车道数"，导致 4 车道场景生成 8 条 drivable lane，
+    # control_node 的 lane_count=8 使 lane_center_y 映射全错、oncoming 检查误判。
+    n_per_side = road.lane_count if is_oneway else max(1, road.lane_count // 2)
     lanes = ET.SubElement(r, "lanes")
     ls = ET.SubElement(lanes, "laneSection", {"s": "0.0"})
     center = ET.SubElement(ls, "center")
     cl = ET.SubElement(center, "lane", {"id": "0", "type": "none"})
     ET.SubElement(cl, "width", {"a": "0", "b": "0", "c": "0", "d": "0"})
-    # right 侧：顺向车道（id=-1,-2,...,-N）
+    # right 侧：顺向车道（id=-1,-2,...,-n_per_side）
     right = ET.SubElement(ls, "right")
-    for li in range(1, road.lane_count + 1):
+    for li in range(1, n_per_side + 1):
         ln = ET.SubElement(right, "lane", {"id": f"-{li}", "type": "driving"})
         ET.SubElement(ln, "width", {
             "a": f"{road.lane_width:.4f}", "b": "0", "c": "0", "d": "0"
         })
-    # left 侧：对向车道（id=+1,+2,...,+N），双向道路才生成
+    # left 侧：对向车道（id=+1,+2,...,+n_per_side），双向道路才生成
     if not is_oneway:
         left = ET.SubElement(ls, "left")
-        for li in range(1, road.lane_count + 1):
+        for li in range(1, n_per_side + 1):
             ln = ET.SubElement(left, "lane", {"id": f"{li}", "type": "driving"})
             ET.SubElement(ln, "width", {
                 "a": f"{road.lane_width:.4f}", "b": "0", "c": "0", "d": "0"

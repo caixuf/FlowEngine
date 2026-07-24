@@ -181,7 +181,7 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.s = e.s;
         ad.rotation_y = e.heading;  // headingToRotationY(h) = h
         ad.route_dir = e.route_dir;
-        ad.ai_state = (int)e.ai_state;
+        ad.ai_state = (int)e.state;
         dd.actors.push_back(ad);
     }
     return dd;

@@ -17,6 +17,9 @@
 
 /* 前向声明：Choreography 定义在 scenario_loader.h（C 头） */
 struct Choreography;
+struct FlowRoadNetwork;
+struct NpcAiConfig;
+class  Route;
 
 namespace flowsim {
 
@@ -61,12 +64,14 @@ void tick_etc_gates(EntityPool& pool, const Entity& ego, double dt);
 
 /**
  * 检查 NPC 是否需要为前方红绿灯/ETC 减速。
- * 在 step_npc_vehicle 之前调用，会修改 npc.target_vx 和 npc.ai_state。
+ * 在 step_npc_vehicle 之前调用，通过 npc_request_state() 请求状态转移。
  *
  * @param pool  实体池
- * @param cfg   AI 配置（用 look_ahead）
+ * @param look_ahead  前向搜索距离 (m)
+ * @param cfg   AI 配置
  */
-void check_npc_scene_events(EntityPool& pool, double look_ahead);
+void check_npc_scene_events(EntityPool& pool, double look_ahead,
+                             const NpcAiConfig& cfg);
 
 /**
  * 推进编舞循环：按 loop_period_s 周期重置 actor 到 ego 附近。
@@ -82,10 +87,18 @@ void check_npc_scene_events(EntityPool& pool, double look_ahead);
  * @param sim_time_s  仿真时间（秒）
  * @param dt          时间步长（秒）
  * @param choreo      编舞配置（来自场景 JSON）
+ * @param roads       路网（可选，用于同步 NPC Frenet 状态）
+ * @param route       中央 route（可选，用于同步 NPC route_s）
+ *
+ * 当 roads/route 可用时，choreography 传送 NPC 后会用 world_to_frenet
+ * 重新计算 NPC 的 (road_id, s, offset) 并 reinit road_pos，保证下一帧
+ * step_npc_vehicle 不会用旧 Frenet 状态把 NPC 拉回原位。
  */
 void tick_choreography(EntityPool& pool, const Entity& ego,
                        double sim_time_s, double dt,
-                       const Choreography* choreo);
+                       const Choreography* choreo,
+                       FlowRoadNetwork* roads = nullptr,
+                       const Route* route = nullptr);
 
 }  // namespace flowsim
 

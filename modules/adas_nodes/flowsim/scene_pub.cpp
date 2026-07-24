@@ -47,17 +47,15 @@ const char* entity_type_str(EntityType t) {
     }
 }
 
-const char* ai_state_str(AIState s) {
+const char* npc_state_str(NpcState s) {
     switch (s) {
-        case AIState::Cruise:      return "cruise";
-        case AIState::Follow:      return "follow";
-        case AIState::Stop:        return "stop";
-        case AIState::StopForTL:   return "stop_for_tl";
-        case AIState::ETCApproach: return "etc_approach";
-        case AIState::BranchSel:   return "branch_sel";
-        case AIState::Merge:       return "merge";
-        case AIState::Yield:       return "yield";
-        case AIState::CutIn:       return "cutin";
+        case NpcState::Cruise:     return "cruise";
+        case NpcState::Follow:     return "follow";
+        case NpcState::StopForTL:  return "stop_for_tl";
+        case NpcState::LaneChange: return "lane_change";
+        case NpcState::CutIn:      return "cutin";
+        case NpcState::Stopped:    return "stopped";
+        case NpcState::Yield:      return "yield";
         default:                   return "cruise";
     }
 }
@@ -72,16 +70,13 @@ const char* tl_phase_str(int phase_state) {
     }
 }
 
-const char* etc_gate_state_str(AIState s) {
-    /* ETC 抬杆状态（scene_events.cpp 约定）：
-     *   Stop    = closed   (远距/已通过)
-     *   Yield   = opening  (10-50m，正在抬杆)
-     *   Cruise  = open     (<10m，全开) */
-    switch (s) {
-        case AIState::Stop:    return "closed";
-        case AIState::Yield:   return "opening";
-        case AIState::Cruise:  return "open";
-        default:               return "closed";
+const char* etc_gate_state_by_phase(int ps) {
+    /* ETC 抬杆状态：0=closed 1=opening 2=open */
+    switch (ps) {
+        case 0:  return "closed";
+        case 1:  return "opening";
+        case 2:  return "open";
+        default: return "closed";
     }
 }
 
@@ -176,7 +171,10 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
             }
             cJSON_AddItemToObject(edge, "nodes", nodes);
 
-            cJSON_AddNumberToObject(edge, "lanes", (double)(info.drivable_lanes / 2));
+            /* lanes = 双向总计车道数。前端 RoadView 用 lanes*lane_width/2 算半宽，
+             * 已包含双向全部车道。info.drivable_lanes 来自 esmini/OpenDRIVE 真实
+             * 车道数，不再除 2（旧 json_to_xodr.py 曾生成双倍车道，现已修正）。 */
+            cJSON_AddNumberToObject(edge, "lanes", (double)info.drivable_lanes);
             /* 从 esmini 查询该 road 第一条行驶车道的实际宽度；
              * 查询失败或为 0 时退回 cfg.lane_width（默认 3.5m）。 */
             {
@@ -254,7 +252,7 @@ cJSON* build_ego_json(const Entity& e) {
      * bit3=远光 bit4=近光 bit6=倒车 bit7=雾灯。刹车灯由 brake 字段驱动。 */
     cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
     /* AI 状态字符串（ego 通常为空，兜底给空串） */
-    cJSON_AddStringToObject(j, "ai_state", ai_state_str(e.ai_state));
+    cJSON_AddStringToObject(j, "ai_state", npc_state_str(e.state));
     return j;
 }
 
@@ -268,7 +266,7 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "speed", e.speed);
     cJSON_AddNumberToObject(j, "length", e.length);
     cJSON_AddNumberToObject(j, "width", e.width);
-    cJSON_AddStringToObject(j, "ai_state", ai_state_str(e.ai_state));
+    cJSON_AddStringToObject(j, "ai_state", npc_state_str(e.state));
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
     cJSON_AddNumberToObject(j, "steer", e.steer);
@@ -312,7 +310,7 @@ cJSON* build_etc_gate_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
     cJSON_AddNumberToObject(j, "heading", e.heading);
-    cJSON_AddStringToObject(j, "state", etc_gate_state_str(e.ai_state));
+    cJSON_AddStringToObject(j, "state", etc_gate_state_by_phase(e.phase_state));
     /* phase_timer ∈ [0,1] 表示抬杆进度（scene_events.cpp 约定） */
     cJSON_AddNumberToObject(j, "progress", e.phase_timer);
     return j;

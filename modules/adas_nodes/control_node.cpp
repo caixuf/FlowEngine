@@ -747,15 +747,23 @@ protected:
              * A4 ego route-following: 优先用 ref_path（flowsim 每帧采样 ego 前方
              * 100m 路网中心线）替代 curve_* 单段直线参考。ref_path 不可用时回退
              * curve_*，保证旧场景/旧 flowsim 兼容。
-             * road_heading / ref_kappa 缓存给下方 Stanley 块复用，避免重复查询。 */
+             * road_heading / ref_kappa 缓存给下方 Stanley 块复用，避免重复查询。
+             *
+             * 注意：ref_path 的 y 是 ego 车道中心（publish_ref_path 用 ego.road_pos
+             * 沿 ego 所在车道采样），不是道路中心。把 ref_path y 当 road_c 会导致
+             * lane_center_y/lane_idx_from_y 映射全错（ego 被误判到错误车道 idx）。
+             * road_c 始终用道路中心（curve_offset_m），ref_path 只取 heading/kappa。 */
             double road_c = 0.0;
             double ref_road_heading = 0.0;
             double ref_kappa = 0.0;
+            double ref_y_unused = 0.0;  /* ref_path 的 y（ego 车道中心），此处不用 */
             bool   ref_path_ok = query_ref_at(g.ego_x, g.ego_y,
-                                              road_c, ref_road_heading, ref_kappa);
+                                              ref_y_unused, ref_road_heading, ref_kappa);
+            /* road_c = 道路中心线 y（直道时 curve_offset_m=0 → road_c=0）。
+             * 不用 ref_path y，避免车道 idx 映射偏移。 */
+            road_c = road_center_y(g.ego_x, g.curve_start_x,
+                                   g.curve_length_m, g.curve_offset_m);
             if (!ref_path_ok) {
-                road_c = road_center_y(g.ego_x, g.curve_start_x,
-                                       g.curve_length_m, g.curve_offset_m);
                 ref_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
                                                        g.curve_length_m, g.curve_offset_m);
                 ref_kappa = road_center_curvature(g.ego_x, g.curve_start_x,
@@ -969,35 +977,33 @@ protected:
                     /* NOA 路线触发时用 route_target_y；被动超车用 adjacent_lane_y */
                     double lc_target_y_candidate = route_triggered ? route_target_y : adjacent_lane_y;
                     /* 防止逆行：多车道（lane_count>2，即顺行侧≥2 条）场景下，
-                     * 禁止 ego 跨过道路中心线 road_c 进入对向车道。
+                     * 禁止 ego 跨过道路中心线进入对向车道。
                      *
-                     * 背景：flowsim_node 发布的 lane_count 是 esmini 的"双向合计"
-                     * 车道数（如 4 车道 = 2 顺行 + 2 对向），而 lane_center_y 用
-                     * 中心对称模型把 N 个 idx 对称布置在 road_c 两侧——idx ≥ N/2
-                     * 的车道实际上是对向车道（y>road_c）。control_node 此前没有
-                     * "不可跨越中心线"约束，导致 ego 被动超车或 NOA 路线变道时
-                     * 可能选到 idx 2/3（y>road_c，对向最内/最外），看起来像逆行。
+                     * lane_center_y 约定：lane 0=最右(y=+half_road-0.5*lw),
+                     * lane N-1=最左(y=-half_road+0.5*lw)。双向道路同向 idx ∈ [N/2, N-1],
+                     * 对向 idx ∈ [0, N/2-1]。用 lane idx 判断同向/对向比用 y 坐标对比
+                     * road_c 更可靠——road_c 来自 ref_path 的 ego 车道中心（非道路中心），
+                     * 会导致同向变道被误判为跨中心线。
                      *
                      * 2 车道场景（lane_count==2，1 顺 + 1 对）保留旧行为：ego 可以
-                     * 借对向车道超车（前方安全时），因为顺行侧只有 1 条车道，不借
-                     * 对向就无法超车。多车道场景下顺行侧已有 ≥2 条车道，应只在顺行
-                     * 侧内变道，不跨中心线。
+                     * 借对向车道超车（前方安全时），因为顺行侧只有 1 条车道。
                      *
-                     * 检查：lane_count>2 且候选 y 在 road_c 对侧（与 ego 不同侧）
-                     * 时拒绝变道，进入冷却避免反复尝试。 */
-                    int ego_on_negative_side = (g.ego_y < road_c);
-                    int candidate_on_opposite_side =
-                        (ego_on_negative_side && lc_target_y_candidate > road_c + 0.1) ||
-                        (!ego_on_negative_side && lc_target_y_candidate < road_c - 0.1);
-                    if (g.lane_count > 2 && candidate_on_opposite_side) {
+                     * 检查：lane_count>2 且候选 idx 与 ego idx 在中心线不同侧时拒绝。 */
+                    int half = g.lane_count / 2;
+                    int ego_idx = g.committed_lane_side;
+                    int cand_idx = route_triggered ? g.route_lane : adj_idx;
+                    int ego_same_dir  = (ego_idx  >= half);
+                    int cand_same_dir = (cand_idx >= half);
+                    if (g.lane_count > 2 && ego_idx >= 0 && cand_idx >= 0 &&
+                        ego_same_dir != cand_same_dir) {
                         /* 拒绝变道但不清除 blocked：ego 必须继续跟车减速（ACC），
                          * 而非以全速撞向前方障碍物。早期版本错误地清除 blocked=0，
                          * 导致 ego 拒绝变道后既不换道也不减速，直接追尾前车
                          * (CI evaluator collision detected 的根因)。 */
                         LOG_WARN("control",
-                                 ">>> LANE CHANGE REJECTED (oncoming): target_y=%.2f crosses road_c=%.2f "
-                                 "into opposite side (lane_count=%d, ego_y=%.2f) — staying in lane, ACC braking",
-                                 lc_target_y_candidate, road_c, g.lane_count, g.ego_y);
+                                 ">>> LANE CHANGE REJECTED (oncoming): ego_idx=%d cand_idx=%d "
+                                 "cross center (lane_count=%d half=%d) — staying in lane, ACC braking",
+                                 ego_idx, cand_idx, g.lane_count, half);
                         g.lc_timer = g.blocked_timeout_s;  /* 冷却，避免反复尝试 */
                         route_triggered = 0;
                         overtake_worthwhile = 0;
@@ -1186,13 +1192,13 @@ protected:
                                 (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
                 if (lc_active) {
                     if (g.current_speed > 12.0) {
-                        lc_lat_kd = g.lat_kd_heading * 0.9;   /* 基于配置缩放, 可调 */
-                        lc_lat_accel_max = 2.2;               /* 减少横向冲击 */
+                        lc_lat_kd = g.lat_kd_heading * 0.9;   /* 阻尼适中，防止横向振荡 */
+                        lc_lat_accel_max = 2.2;               /* 横向加速度限幅，减少冲击 */
                     } else {
-                        lc_lat_kd = g.lat_kd_heading * 1.2;   /* 低速可稍强 */
+                        lc_lat_kd = g.lat_kd_heading * 1.2;   /* 低速稍强阻尼保持稳定 */
                         lc_lat_accel_max = 2.8;
                     }
-                    filter_new = 0.5;                          /* 更激进滤波 */
+                    filter_new = 0.5;                          /* 变道中激进滤波 */
                 }
                 /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
                  * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */

@@ -148,13 +148,13 @@ static void test_etc_gate() {
     // ego 远距：闸门关
     ego.x = 0;
     tick_etc_gates(pool, ego, 0.05);
-    CHECK(gate.ai_state == AIState::Stop, "far: gate closed");
+    CHECK(gate.phase_state == 0, "far: gate closed");
     CHECK(gate.phase_timer == 0.0, "far: bar down");
 
     // ego 中距（40m）：抬杆中
     ego.x = 60;
     tick_etc_gates(pool, ego, 0.05);
-    CHECK(gate.ai_state == AIState::Yield, "mid: gate opening");
+    CHECK(gate.phase_state == 1, "mid: gate opening");
     CHECK(gate.phase_timer > 0.0, "mid: bar rising");
 
     // 多 tick 后抬满
@@ -164,12 +164,12 @@ static void test_etc_gate() {
     // ego 近距（5m）：全开
     ego.x = 95;
     tick_etc_gates(pool, ego, 0.05);
-    CHECK(gate.ai_state == AIState::Cruise, "near: gate open");
+    CHECK(gate.phase_state == 2, "near: gate open");
 
     // ego 已通过：开始放下
     ego.x = 105;
     tick_etc_gates(pool, ego, 0.05);
-    CHECK(gate.ai_state == AIState::Stop, "passed: gate closing");
+    CHECK(gate.phase_state == 0, "passed: gate closing");
 }
 
 int main() {

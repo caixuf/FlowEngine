@@ -32,9 +32,9 @@ static void test_cruise() {
     for (int i = 0; i < 100; ++i) {
         step_npc_vehicle(npc, pool, dt, cfg);
     }
-    std::printf("  after 5s: speed=%.2f state=%d\n", npc.speed, (int)npc.ai_state);
+    std::printf("  after 5s: speed=%.2f state=%d\n", npc.speed, (int)npc.state);
     CHECK(npc.speed > 10.0, "cruise accelerated to >10 m/s");
-    CHECK(npc.ai_state == AIState::Cruise, "state == Cruise");
+    CHECK(npc.state == NpcState::Cruise, "state == Cruise");
     CHECK(npc.lead_id == INVALID_ENTITY, "no lead");
 }
 
@@ -66,10 +66,10 @@ static void test_follow() {
         step_npc_vehicle(npc, pool, dt, cfg);
     }
     std::printf("  after 10s: npc.speed=%.2f lead.x=%.1f npc.x=%.1f gap=%.1f state=%d\n",
-                npc.speed, lead.x, npc.x, lead.x - npc.x, (int)npc.ai_state);
+                npc.speed, lead.x, npc.x, lead.x - npc.x, (int)npc.state);
     CHECK(npc.speed < 12.0, "NPC decelerated below 12 m/s");
     CHECK(npc.lead_id == lead_id, "found lead");
-    CHECK(npc.ai_state == AIState::Follow, "state == Follow");
+    CHECK(npc.state == NpcState::Follow, "state == Follow");
     // 应保持安全间距（不追尾）
     CHECK(lead.x - npc.x > 5.0, "kept safe gap > 5m");
 }
@@ -127,7 +127,7 @@ static void test_different_lane() {
         step_npc_vehicle(npc, pool, dt, cfg);
     }
     CHECK(npc.lead_id == INVALID_ENTITY, "no lead (different lane)");
-    CHECK(npc.ai_state == AIState::Cruise, "state == Cruise (no follow)");
+    CHECK(npc.state == NpcState::Cruise, "state == Cruise (no follow)");
 }
 
 static void test_pedestrian() {
@@ -186,7 +186,7 @@ static void test_cutin() {
     npc.heading = 0; npc.speed = 6.0;
     npc.target_vx = 8.0;
     npc.route_dir = 1; npc.route_s = 0;
-    npc.ai_state = AIState::CutIn;
+    npc.state = NpcState::CutIn;
     npc.target_offset = -5.25;  // 跨两个车道（实线）
 
     double dt = 0.05;
@@ -200,23 +200,23 @@ static void test_cutin() {
         step_npc_vehicle(npc, pool, dt, cfg);
 
         // 采样 CutIn 期间的速度（应被压制到 ≤ target_vx - decel + 1）
-        if (npc.ai_state == AIState::CutIn && i < 20) {
+        if (npc.state == NpcState::CutIn && i < 20) {
             t0_speed_drop = npc.speed;
             if (npc.speed <= npc.target_vx - cfg.cutin_longitudinal_decel + 1.0) {
                 observed_speed_drop = true;
             }
         }
-        if (npc.ai_state != AIState::CutIn) break;  // 已完成
+        if (npc.state != NpcState::CutIn) break;  // 已完成
     }
     std::printf("  start_offset=%.2f final_offset=%.2f target=%.2f state=%d speed=%.2f\n",
                 start_offset, npc.offset, npc.target_offset,
-                (int)npc.ai_state, npc.speed);
+                (int)npc.state, npc.speed);
     CHECK(npc.offset < start_offset - 1.0, "offset moved toward target (cross solid line)");
     CHECK(std::fabs(npc.offset - npc.target_offset) < 0.5,
           "reached target offset within 0.5m");
     // CutIn 完成后状态机切回 Cruise 或 Follow（若目标车道有前车则自然转 Follow，
     // 这是正确的级联：CutIn 完成 → Cruise → 立即识别到前车 → Follow）。
-    CHECK(npc.ai_state != AIState::CutIn, "CutIn state exited after reaching target");
+    CHECK(npc.state != NpcState::CutIn, "CutIn state exited after reaching target");
     CHECK(npc.cutin_active == false, "cutin_active cleared after completion");
     CHECK(observed_speed_drop || t0_speed_drop <= npc.target_vx,
           "longitudinal speed capped during cutin");

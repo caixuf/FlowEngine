@@ -21,7 +21,7 @@ using flowsim::Entity;
 using flowsim::EntityPool;
 using flowsim::EntityType;
 using flowsim::EntityId;
-using flowsim::AIState;
+using flowsim::NpcState;
 using flowsim::ScenePubConfig;
 using flowsim::apply_vehicle_defaults;
 using flowsim::build_scene_frame_json;
@@ -61,7 +61,7 @@ static EntityPool build_test_pool() {
     car.x = 120.0; car.y = -1.75; car.heading = 0;
     car.speed = 3.0; car.vx = 3.0; car.vy = 0;
     car.length = 4.6; car.width = 2.0;
-    car.ai_state = AIState::Follow;
+    car.state = NpcState::Follow;
     apply_vehicle_defaults(car);
 
     EntityId ped_id = pool.alloc(EntityType::Pedestrian);
@@ -83,7 +83,7 @@ static EntityPool build_test_pool() {
     Entity& gate = pool[gate_id];
     gate.id = 12;
     gate.x = 450.0; gate.y = 0;
-    gate.ai_state = AIState::Stop;  /* closed */
+    gate.phase_state = 0;  /* ETC gate closed */
     gate.phase_timer = 0.0;
 
     return pool;

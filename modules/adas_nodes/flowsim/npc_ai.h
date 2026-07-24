@@ -72,26 +72,54 @@ struct NpcAiConfig {
      *   p    = 礼貌因子（0=纯利己，1=考虑他人）
      * 安全约束：a'_n > -b_safe（新跟随者不会被迫急刹） */
     double mobil_politeness{0.5};       /**< MOBIL 礼貌因子 [0,1] */
-    double mobil_safe_brake{4.0};       /**< MOBIL 安全减速度阈值 (m/s²)，a'_n 不得低于此值 */
-    double mobil_gain_threshold{0.2};   /**< MOBIL 增益阈值 (m/s²)，gain>此值才变道（防抖动） */
-    double mobil_back_look{15.0};       /**< 后向搜索距离 (m)，找新/旧跟随者 */
-    double mobil_lane_change_cooldown{4.0}; /**< 变道冷却时间 (s) */
+    double mobil_safe_brake{4.5};       /**< MOBIL 安全减速度阈值 (m/s²)，a'_n 不得低于此值 */
+    double mobil_gain_threshold{0.5};   /**< MOBIL 增益阈值 (m/s²)，gain>此值才变道（原 0.2 太频繁） */
+    double mobil_back_look{20.0};       /**< 后向搜索距离 (m)，加大让更多后车参与评估 */
+    double mobil_lane_change_cooldown{8.0}; /**< 变道冷却时间 (s)，原 4s 太短导致频繁变道 */
+};
+
+/* ── 统一状态机：转移请求事件 ──
+ * 外部系统通过 npc_request_state() 请求状态转移，不得直接写 npc.state。
+ * 转移函数验证合法性后原子更新 state + 相关字段（PID 状态、计时器等）。 */
+enum class NpcEvent : uint8_t {
+    None,
+    LeadFound,        /**< 同车道前方有车 → Follow */
+    LeadLost,         /**< 前车消失 → Cruise */
+    TL_Red,           /**< 前方红灯/黄灯 → StopForTL */
+    TL_Green,         /**< 绿灯/通过路口 → Cruise */
+    MobilChange,      /**< MOBIL 评估通过 → LaneChange */
+    ChoreoCutIn,      /**< 编舞触发加塞 → CutIn */
+    ChoreoOvertake,   /**< 编舞触发超车 → Cruise（保持传送后位置） */
+    ScriptOverride,   /**< 场景脚本 override → CutIn/Cruise */
+    Collision,        /**< 碰撞 → Stopped */
+    Recycle,          /**< 路网末端回收 → Cruise（重置全部状态） */
+};
+
+/* 未设置的字段用此哨兵值（不要用 NAN，其依赖 <cmath> 头文件） */
+static constexpr double NPC_REQ_UNSET = -1e30;
+
+struct NpcTransitionRequest {
+    NpcEvent event{NpcEvent::None};
+    double target_offset{NPC_REQ_UNSET};  /**< 目标横向偏移 (LaneChange/CutIn) */
+    double target_vx{NPC_REQ_UNSET};      /**< 目标速度 (choreo/script) */
+    double vx{NPC_REQ_UNSET}, vy{NPC_REQ_UNSET};  /**< 速度覆盖 */
+    double x{NPC_REQ_UNSET}, y{NPC_REQ_UNSET};    /**< 位置覆盖 */
+    double heading{NPC_REQ_UNSET};        /**< 航向覆盖 */
 };
 
 /**
- * 单步 NPC 车辆 AI。
- * @param npc          NPC 实体（必须 is_npc_vehicle()）
- * @param pool         实体池（用于找前车）
- * @param dt           时间步长 (s)
- * @param cfg          AI 参数
- * @param roads        可选，路网（Frenet↔World；nullptr 跳过）
- * @param route        可选，中央 route。提供且 npc.route_dir!=0 时走「沿车道
- *                     Frenet 推进」路径：NPC 严格贴道路几何行驶、过弯/爬匝道
- *                     自动跟随、到 route 末尾回收到 ego 附近。为空则退回旧的
- *                     世界系直线积分（steer=0），保证 esmini 缺失时不退化。
- * @param ego_route_s  ego 在 route 上的累计 s（回收 NPC 时用来放到 ego 附近）
+ * 统一状态转移入口（唯一合法修改 npc.state 的函数）。
+ * @return true 转移被接受，false 被拒绝（调用者应 LOG_WARN）。
+ */
+bool npc_request_state(Entity& npc, const NpcTransitionRequest& req,
+                       const NpcAiConfig& cfg);
+
+/**
+ * 单步 NPC 车辆 AI（每帧 tick）。
+ * 内部按 npc.state 分发纵向+横向行为；状态内自行调用 npc_request_state
+ * 完成自动转移（如找到前车 → Follow，CutIn 完成 → Cruise 等）。
  *
- * 更新 npc.throttle/brake/ai_state/lead_id/follow_gap/位置。
+ * 更新 npc.throttle/brake/state/lead_id/follow_gap/位置。
  */
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
