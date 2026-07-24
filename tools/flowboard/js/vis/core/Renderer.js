@@ -19,8 +19,8 @@ export function createRenderer(canvas) {
   /* r152+：outputColorSpace 替代 outputEncoding */
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  /* exposure 1.1 → 1.25：HDRI + Bloom 后画面更通透 */
-  renderer.toneMappingExposure = 1.25;
+  /* exposure 1.0：配合 ACES tonemap，避免纯白车道线过曝辉光 */
+  renderer.toneMappingExposure = 1.0;
 
   return renderer;
 }
@@ -57,7 +57,7 @@ export function createComposer(renderer, scene, camera) {
       new THREE.Vector2(window.innerWidth, window.innerHeight),
       0.6,   // strength：适中，不让非灯体发糊
       0.4,   // radius：柔和扩散
-      0.8    // threshold：只让 emissive > 0.8 发光
+      1.0    // threshold：只让 emissive > 1.0 发光（真车灯），普通表面不过阈
     );
     composer.addPass(bloom);
   }

@@ -660,12 +660,14 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
                     double ldx_n = ldx / lnorm;
                     double ldy_n = ldy / lnorm;
                     double dot_lane = fwd_x * ldx_n + fwd_y * ldy_n;
-                    if (std::fabs(dot_lane) < std::cos(M_PI / 4.0)) {  // cos(45°)
-                        r.warned++;
+                    /* dot_lane 应为正（与车道方向一致）。旧代码用 fabs
+                     * 导致对向来车（dot≈-1）也通过，掩盖方向 bug。 */
+                    if (dot_lane < std::cos(M_PI / 4.0)) {  // < cos(45°) = 方向不一致
+                        r.failed++;
                         char buf[256];
                         snprintf(buf, sizeof(buf),
-                            "  WARN %s: dot(forward,lane)=%.3f < cos(45)=%.3f (与车道方向不一致)\n",
-                            tag, std::fabs(dot_lane), std::cos(M_PI / 4.0));
+                            "  FAIL %s: dot(forward,lane)=%.3f < cos(45)=%.3f (与车道方向不一致)\n",
+                            tag, dot_lane, std::cos(M_PI / 4.0));
                         r.details += buf;
                     } else {
                         r.passed++;

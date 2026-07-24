@@ -19,7 +19,7 @@ const TAU = Math.PI * 2;
 const TIME_SLOTS = {
   dawn:    { angle: 0.15,  label: 'dawn',    skyTop: 0xf4a460, skyBot: 0xff6b35, sunColor: 0xffaa33, sunIntensity: 1.2,  fogDensity: 0.0035, ambIntensity: 0.5 },
   morning: { angle: 0.35,  label: 'morning',  skyTop: 0x87ceeb, skyBot: 0xb0c4de, sunColor: 0xfff8dc, sunIntensity: 2.0,  fogDensity: 0.0015, ambIntensity: 0.7 },
-  noon:    { angle: 0.50,  label: 'noon',     skyTop: 0x4682b4, skyBot: 0x87ceeb, sunColor: 0xffffff, sunIntensity: 2.5,  fogDensity: 0.0008, ambIntensity: 0.8 },
+  noon:    { angle: 0.50,  label: 'noon',     skyTop: 0x4682b4, skyBot: 0x87ceeb, sunColor: 0xffffff, sunIntensity: 1.8,  fogDensity: 0.0008, ambIntensity: 0.6 },
   afternoon:{ angle: 0.65, label: 'afternoon',skyTop: 0x5b9bd5, skyBot: 0xc8dff5, sunColor: 0xfff5e0, sunIntensity: 2.0,  fogDensity: 0.0020, ambIntensity: 0.7 },
   dusk:    { angle: 0.80,  label: 'dusk',     skyTop: 0x6a5acd, skyBot: 0xff6347, sunColor: 0xff6600, sunIntensity: 1.0,  fogDensity: 0.0040, ambIntensity: 0.4 },
   night:   { angle: 0.95,  label: 'night',    skyTop: 0x0a0a2e, skyBot: 0x191970, sunColor: 0x334466, sunIntensity: 0.2,  fogDensity: 0.0060, ambIntensity: 0.2 },

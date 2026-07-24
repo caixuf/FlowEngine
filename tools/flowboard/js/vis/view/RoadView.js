@@ -18,7 +18,7 @@ import { tangentToNormal, offsetAlongNormal, forwardENU } from '../math/Coord.js
 
 const ASPHALT_COLOR = 0x2a2a2a;
 const SHOULDER_COLOR = 0x5a5a55;
-const LINE_WHITE = 0xffffff;
+const LINE_WHITE = 0xcccccc;
 const LINE_YELLOW = 0xffd700;
 
 const LINE_W = 0.15;      // 车道线宽度 (m)
@@ -337,7 +337,7 @@ export function createRoadView(scene) {
     if (whiteGeos.length) {
       const mat = new THREE.MeshStandardMaterial({
         color: LINE_WHITE,
-        roughness: 0.5,
+        roughness: 0.6,
         metalness: 0.05,
         side: THREE.DoubleSide,
         polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
@@ -349,7 +349,7 @@ export function createRoadView(scene) {
     if (yellowGeos.length) {
       const mat = new THREE.MeshStandardMaterial({
         color: LINE_YELLOW,
-        roughness: 0.5,
+        roughness: 0.6,
         metalness: 0.05,
         side: THREE.DoubleSide,
         polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,

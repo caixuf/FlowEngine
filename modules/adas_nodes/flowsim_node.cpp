@@ -528,11 +528,17 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                 if (g.roads.world_to_frenet(e.x, e.y, fp)) {
                     e.road_id = fp.road_id;
                     e.s       = fp.s;
-                    /* offset 取相对参考线的横向偏移（Model A: lane_id=0 + offset_from_ref），
-                     * 而非 world_to_frenet 返回的 lane 内 offset（Model B）。
-                     * 对向车 offset 保持同侧（不取反），因为是在同一参考线下倒退。 */
-                    e.offset  = fp.offset;
-                    e.target_offset = fp.offset;
+                    /* fp.offset 是车道内偏移（车在车道中心时≈0），
+                     * 需换算成相对参考线的横向偏移：
+                     *   lane_center = sign(lane_id) * (|lane_id| - 0.5) * lane_width
+                     *   ref_offset  = lane_center + fp.offset
+                     * 这与 ego 路径一致（ego 走 fp.lane_id，road_pos 内部算车道中心）。 */
+                    double lw = g.roads.lane_width(fp.road_id, fp.lane_id, fp.s);
+                    if (lw <= 0.0) lw = 3.5;
+                    double lane_center_t = (fp.lane_id > 0 ? 1.0 : -1.0)
+                                         * (std::abs(fp.lane_id) - 0.5) * lw;
+                    e.offset        = lane_center_t + fp.offset;
+                    e.target_offset = e.offset;
                 }
                 /* world_to_frenet 失败 → route_dir 保持 0，走旧世界系兜底 */
             }
