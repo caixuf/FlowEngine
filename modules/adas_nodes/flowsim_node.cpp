@@ -1070,9 +1070,16 @@ protected:
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
                             ego.y = wp.y;
-                            ego.heading = wp.h;
-                            ego.vx = ego.speed * std::cos(wp.h);
-                            ego.vy = ego.speed * std::sin(wp.h);
+                            /* heading 保留 step_bicycle 值（含 steer 偏转），不覆盖为道路切线 wp.h。
+                             * 原 ego.heading = wp.h 每帧把 heading 重置为道路切线，导致 step_bicycle
+                             * 按 steer 积分出的 heading 偏转无法累积，ego.vy = speed*sin(heading) 始终
+                             * 极小（heading 每帧从 0 重新偏转 -0.013 rad 即被重置），delta_lat≈0，
+                             * 变道横向位移几乎为 0（实测 15s 仅移动 1.1m，变道无法完成）。
+                             * 保留 heading 后，steer 产生的偏转逐帧累积，vy 增大，横向位移正常。
+                             * 弯道跟随由 control 的 ff_term（曲率前馈）+ ref_h 参考保证，
+                             * 不需 road_pos 强制对齐 heading。 */
+                            ego.vx = ego.speed * std::cos(ego.heading);
+                            ego.vy = ego.speed * std::sin(ego.heading);
                         }
                         flowsim::FrenetPos fp;
                         if (ego.road_pos.frenet(fp)) {

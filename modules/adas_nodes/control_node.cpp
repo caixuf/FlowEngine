@@ -1185,20 +1185,28 @@ protected:
                  *   2) lateral accel 限幅从 2.8 → 2.2 (m/s²) 减少横向冲击
                  *   3) 低通滤波权重从 0.8/0.2 → 0.5/0.5 更激进平滑 */
                 double lc_lat_kd = g.lat_kd_heading;
+                double lc_lat_kp = g.lat_kp;                    /* 变道时增大横向误差增益 */
                 double lc_lat_accel_max = 1.4;
                 double filter_new = STEER_FILTER_NEW;
                 /* 变道中或变道后稳定期内使用变道增益 */
                 int lc_active = (g.lc_state == 1) ||
                                 (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
                 if (lc_active) {
+                    /* 变道调参：原 0.9/1.2 的 heading 阻尼过强，ego 微偏后 heading_term
+                     * 反向抵消 cte_term，steer 反转拉回，导致 ego 横向几乎不动
+                     * （实测 15s 仅移动 1.1m，变道无法完成）。
+                     * 修复：大幅降低 heading 阻尼（0.35/0.5），同时增大横向误差增益
+                     * (×2.0)，让 cte_term 主导 steer，维持向目标的横向加速度。 */
                     if (g.current_speed > 12.0) {
-                        lc_lat_kd = g.lat_kd_heading * 0.9;   /* 阻尼适中，防止横向振荡 */
-                        lc_lat_accel_max = 2.2;               /* 横向加速度限幅，减少冲击 */
+                        lc_lat_kd = g.lat_kd_heading * 0.35;  /* 原 0.9: 过强反向拉回 */
+                        lc_lat_kp = g.lat_kp * 2.0;           /* 增大横向误差响应 */
+                        lc_lat_accel_max = 2.2;
                     } else {
-                        lc_lat_kd = g.lat_kd_heading * 1.2;   /* 低速稍强阻尼保持稳定 */
+                        lc_lat_kd = g.lat_kd_heading * 0.5;   /* 原 1.2 */
+                        lc_lat_kp = g.lat_kp * 2.0;
                         lc_lat_accel_max = 2.8;
                     }
-                    filter_new = 0.5;                          /* 变道中激进滤波 */
+                    filter_new = 0.5;
                 }
                 /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
                  * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */
@@ -1219,7 +1227,7 @@ protected:
                         ref_h_eff = g.ego_heading;  /* ref_h 与 ego 航向差 > 29°, 视为无效 */
                     }
                 }
-                double cte_term     = atan2(g.lat_kp * lat_error, fmax(g.current_speed, 3.0));
+                double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
                 double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
                 /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
                  * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
@@ -1247,6 +1255,18 @@ protected:
                 /* 一阶低通滤波（高速变道时更激进） */
                 steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
                 g.prev_steer = steer;
+                /* 调试：变道时打印 steer 各分量，定位横向不动根因 */
+                if (lc_active) {
+                    static int lc_dbg_cnt = 0;
+                    if (++lc_dbg_cnt % 5 == 0) {
+                        LOG_INFO("control",
+                                 "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f lat_err=%.2f "
+                                 "ego_h=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
+                                 steer, cte_term, heading_term, yaw_damp_term, lat_error,
+                                 g.ego_heading, ref_h_eff, g.current_speed, lc_lat_kp, lc_lat_kd,
+                                 steer_limit_for_speed(g.current_speed, lc_lat_accel_max));
+                    }
+                }
             }
 
             /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
