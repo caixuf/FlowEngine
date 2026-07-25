@@ -424,7 +424,7 @@ static int perception_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Fixed seed for reproducibility — sim_world drives deterministic time */
+    /* Fixed seed for reproducibility — flowsim_node drives deterministic time */
     srand(42u);
     dbscan_init(&g.dbscan, (float)g.dbscan_eps, g.dbscan_min_pts);
     dbscan_set_ransac(&g.dbscan, 100, 0.2f, 0.3f);

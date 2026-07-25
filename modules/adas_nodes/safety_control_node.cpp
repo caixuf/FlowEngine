@@ -2,7 +2,7 @@
  * safety_control_node.cpp — FlowCoro safety gate for control commands
  *
  * Subscribes raw controller output and vehicle state, applies a small safety
- * envelope, then publishes the final control/cmd consumed by sim_world.
+ * envelope, then publishes the final control/cmd consumed by flowsim_node.
  */
 
 #include "coroutine_task.h"

@@ -6,7 +6,7 @@
  * （后者依赖 vehicle/state 真值生成"理想"障碍物，无法上真车）：
  *
  *   真车链路: [lidar_driver_node] → perception/obstacles → fusion_node → planning_node
- *   仿真链路: sim_world_node → vehicle/state → perception_node → perception/obstacles
+ *   仿真链路: flowsim_node → vehicle/state → perception_node → perception/obstacles
  *
  * 本节点绕过 perception_node 的真值依赖：直接读点云 → DBSCAN → 发 ObstacleList，
  * 让 fusion/planning 在真车上也能拿到感知结果。常见 LiDAR 硬件：

@@ -468,7 +468,7 @@ static double lane_lead_speed(double lane_y, double same_lane_tol) {
 }
 
 /* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
-/* 从 sim_world 发布的 road/geometry topic 获取弯道参数 + 车道宽度，
+/* 从 flowsim_node 发布的 road/geometry topic 获取弯道参数 + 车道宽度，
  * 替代此前各自 scenario_load() 的冗余方式。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
@@ -1592,7 +1592,7 @@ static int control_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Phase 2: 道路几何从 road/geometry topic 获取（sim_world 发布），
+    /* Phase 2: 道路几何从 road/geometry topic 获取（flowsim_node 发布），
      * 不再独立 scenario_load。 */
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);

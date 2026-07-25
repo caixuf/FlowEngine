@@ -5,7 +5,7 @@
  * Real version (HAVE_CV): would do Canny edge detection + Hough transform
  * on camera image to detect lane markings.
  *
- * Input topics:  road/geometry      — JSON road curve + lane params (from sim_world)
+ * Input topics:  road/geometry      — JSON road curve + lane params (from flowsim_node)
  *                sensor/camera      — reserved for real vision (no-op in sandbox)
  * Output topics: perception/lanes   — JSON array of LaneBoundary objects
  *

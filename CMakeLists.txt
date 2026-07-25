@@ -224,7 +224,6 @@ target_link_libraries(flowcoro_headers INTERFACE Threads::Threads)
 set(CORE_SOURCES
     src/core/config_manager.c
     src/core/logger.c
-    src/core/process_manager.c
     src/core/task_interface.c
     src/core/task_manager.c
     src/core/message_bus.c
@@ -324,10 +323,6 @@ target_link_libraries(flowmond flowengine_core)
 add_executable(flowctl src/flowctl.c)
 target_link_libraries(flowctl flowengine_core scheduler_cpp)
 add_dependencies(flowctl msg_codegen)
-
-# 创建主启动器可执行文件
-add_executable(launcher src/launcher.c)
-target_link_libraries(launcher flowengine_core)
 
 # 性能基准测试程序
 add_executable(benchmark src/benchmark.c)
@@ -475,7 +470,7 @@ set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
 add_executable(flow_nuscenes_demo src/nuscenes_demo.c)
 target_link_libraries(flow_nuscenes_demo flowengine_core m)
 # 安装规则
-install(TARGETS launcher flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
+install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 
@@ -525,13 +520,9 @@ add_custom_target(config
     COMMENT "Creating configuration files"
 )
 
-# 自定义目标：运行启动器
-add_custom_target(run_launcher
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/launcher config/example.json
-    DEPENDS launcher config
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    COMMENT "Running launcher with example config"
-)
+# 自定义目标：运行启动器（已退役，flow_launcher 替代）
+# add_custom_target(run_launcher ...) 已删除 — 文档入口请用：
+#   ./build/bin/flow_launcher config/pipeline.json --duration 30
 
 # 测试支持
 enable_testing()
@@ -654,7 +645,7 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名
-add_custom_target(dev DEPENDS launcher flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+add_custom_target(dev DEPENDS flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

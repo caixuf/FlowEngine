@@ -312,7 +312,7 @@ static int sensor_model_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Fixed seed for reproducibility — sim_world drives deterministic time */
+    /* Fixed seed for reproducibility — flowsim_node drives deterministic time */
     srand(42u);
 
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);

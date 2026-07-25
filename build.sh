@@ -142,19 +142,6 @@ run_demo() {
     cd ..
 }
 
-# 运行启动器
-run_launcher() {
-    if [ ! -d "$BUILD_DIR" ]; then
-        print_error "构建目录不存在，请先构建项目"
-        exit 1
-    fi
-    
-    print_info "运行启动器..."
-    cd $BUILD_DIR
-    make run_launcher
-    cd ..
-}
-
 # 显示帮助信息
 show_help() {
     echo "FlowEngine CMake构建脚本"
@@ -169,7 +156,6 @@ show_help() {
     echo "  test       - 运行测试"
     echo "  bench      - 运行性能基准测试"
   echo "  demo       - 运行任务演示"
-    echo "  launcher   - 运行启动器"
     echo "  help       - 显示此帮助信息"
     echo ""
     echo "示例:"
@@ -246,9 +232,6 @@ main() {
             ;;
         demo)
             run_demo
-            ;;
-        launcher)
-            run_launcher
             ;;
         help|--help|-h)
             show_help

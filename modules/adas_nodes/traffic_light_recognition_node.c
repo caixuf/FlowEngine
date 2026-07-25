@@ -1,13 +1,13 @@
 /**
  * traffic_light_recognition_node.c — Traffic light recognition node plugin (sandbox)
  *
- * Sandbox: forwards sim_world's traffic light state from road/traffic_lights
+ * Sandbox: forwards flowsim_node's traffic light state from road/traffic_lights
  * into the perception pipeline as perception/traffic_lights, adding
  * source="simulation" and confidence=1.0 per light.
  * Real version (HAVE_CV): would do camera-based traffic light detection
  * using color blob analysis / deep learning.
  *
- * Input topics:  road/traffic_lights   — JSON (from sim_world)
+ * Input topics:  road/traffic_lights   — JSON (from flowsim_node)
  *                sensor/camera         — reserved for real vision (no-op in sandbox)
  * Output topics: perception/traffic_lights — JSON with added perception metadata
  *
@@ -187,7 +187,7 @@ static int tl_recognition_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Subscribe to road/traffic_lights (sim_world source) and camera (reserved) */
+    /* Subscribe to road/traffic_lights (flowsim_node source) and camera (reserved) */
     transport_subscribe(transport, "road/traffic_lights", on_road_traffic_lights, NULL);
     transport_subscribe(transport, "sensor/camera", on_camera, NULL);
 

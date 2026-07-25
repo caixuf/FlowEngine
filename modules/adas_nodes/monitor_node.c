@@ -66,7 +66,7 @@ static struct {
     int  ego_road_id;                 /* ego 所在道路段 id（flowsim_node 发布） */
     volatile int has_planning;
 
-    /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，sim_world 发布） */
+    /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，flowsim_node 发布） */
     double road_curve_start_x;
     double road_curve_length_m;
     double road_curve_offset_m;
@@ -248,7 +248,7 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
     g.has_planning = 1;
 }
 
-/* Phase 2: road/geometry 订阅 — 从 sim_world 获取弯道参数，
+/* Phase 2: road/geometry 订阅 — 从 flowsim_node 获取弯道参数，
  * 替代此前从 vehicle/state 间接读取 road_curve_sx/len/off 的方式。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;

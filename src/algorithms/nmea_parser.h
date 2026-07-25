@@ -28,13 +28,10 @@
 #ifndef NMEA_PARSER_H
 #define NMEA_PARSER_H
 
-/* GpsData 可能来自手写头 (adas_msgs.h) 或代码生成头 (adas_msgs_gen.h)。
- * 两者定义相同但不可同时包含，故此处优先复用已包含的生成头，否则回退手写头。 */
-#if defined(ADAS_MSGS_GEN_H)
-/* GpsData already provided by generated message header */
-#else
-#include "adas_msgs.h"
-#endif
+/* GpsData 来自代码生成头 adas_msgs_gen.h（单一真实来源，由 msg/adas_msgs.msg 生成）。
+ * 调用方必须先 #include "adas_msgs_gen.h"（或具体到 GpsData.h），
+ * 此头文件本身不重复定义 GpsData 以避免与生成头漂移。 */
+#include "adas_msgs_gen.h"
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -140,7 +140,7 @@ struct PlanningContext {
     double curve_length_m{0};
     double curve_offset_m{0};
 
-    /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，sim_world 发布）。
+    /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，flowsim_node 发布）。
      * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
      * 红灯/黄灯时注入一面跨车道宽度的静止"墙"，绿灯时不注入——
      * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
@@ -298,7 +298,7 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
 }
 
 /* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
-/* 从 sim_world 发布的 road/geometry topic 获取弯道参数，
+/* 从 flowsim_node 发布的 road/geometry topic 获取弯道参数，
  * 替代此前从 scenario_load() 读取弯道的冗余方式。
  * NOA route steps 仍从场景文件读取（planning 独有需求）。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
@@ -373,7 +373,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
 }
 
 /* ── road/traffic_lights 订阅回调（Phase 2 红绿灯） ────────── */
-/* 从 sim_world 发布的 road/traffic_lights topic 获取红绿灯状态。
+/* 从 flowsim_node 发布的 road/traffic_lights topic 获取红绿灯状态。
  * JSON 格式: {"lights":[{"id":0,"x":100.0,"y_lane":-1.75,
  *                         "state":"red","remain_s":12.3},...]}
  * 解析每个灯的 x(停止线位置)、y_lane(车道)、state(green/yellow/red)。
@@ -965,7 +965,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.route_target_speed = -1.0;  /* -1=未设置 */
 
     /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
-     * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（sim_world 发布）。
+     * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（flowsim_node 发布）。
      * 此处仅加载 NOA route steps。 */
     if (g.scenario_file[0] != '\0') {
         ScenarioConfig* sc = scenario_load(g.scenario_file);
