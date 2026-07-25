@@ -35,6 +35,11 @@ constexpr uint32_t CONTROL_RAW_TYPE_ID = 0x871712d1u;  /* CONTROLRAW_TYPE_ID (ad
 constexpr uint32_t CONTROL_CMD_TYPE_ID = 0x2D95C6D2u;  /* CONTROLCMD_TYPE_ID (adas_msgs_gen.h) */
 constexpr uint32_t VEHICLE_STATE_TYPE_ID = 0x1C0E5A7Eu;
 
+/* 上游 perception 发布的 ObstacleList 容量。从已包含的 adas_msgs_gen.h →
+ * ObstacleList.h 中实际结构体推导，避免与 adas_msgs.h 的 ADAS_MAX_OBSTACLES
+ * 冲突（后者会与生成的 ObstacleList 重复定义）。当协议扩容时此常量自动跟随。 */
+constexpr int kMaxObs = (int)(sizeof(::ObstacleList::obstacles) / sizeof(::Obstacle));
+
 struct ControlCmd {
     double throttle{0.0};
     double brake{0.0};
@@ -52,13 +57,13 @@ struct VehicleState {
     double y{0.0};
     double speed{0.0};
     double heading{0.0};
-    double obs_x[4]{0.0, 0.0, 0.0, 0.0};
-    double obs_y[4]{0.0, 0.0, 0.0, 0.0};
-    double obs_v[4]{0.0, 0.0, 0.0, 0.0};
-    double obs_vy[4]{0.0, 0.0, 0.0, 0.0};
-    bool obs_valid[4]{false, false, false, false};
-    char obs_type[4][16]{};   /* "car", "pedestrian", ... */
-    int  ped_index{-1};       /* index of first pedestrian obs, -1 if none */
+    double obs_x[kMaxObs]{};
+    double obs_y[kMaxObs]{};
+    double obs_v[kMaxObs]{};
+    double obs_vy[kMaxObs]{};
+    bool obs_valid[kMaxObs]{};
+    char obs_type[kMaxObs][16]{};   /* "car", "pedestrian", ... */
+    int  ped_index{-1};             /* index of first pedestrian obs, -1 if none */
 };
 
 struct SafetyParams {
@@ -181,7 +186,7 @@ void on_perception_obstacles(const Message* msg, void*) {
     VehicleState* state = &g.latest_state;
     state->ped_index = -1;
     double ch = cos(state->heading), sh = sin(state->heading);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < kMaxObs; i++) {
         if (i < (int)list.count) {
             const Obstacle* o = &list.obstacles[i];
             state->obs_x[i] = state->x + o->x * ch - o->y * sh;
@@ -207,7 +212,7 @@ void on_perception_obstacles(const Message* msg, void*) {
 
 double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& params) {
     double best_gap = 1e9;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
         if (std::fabs(state.obs_y[i] - state.y) > params.same_lane_tol) continue;
         double dx = state.obs_x[i] - state.x;
@@ -253,7 +258,7 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
     double best_ttc = 1e9;
     double best_dx = 0.0;
     double best_dy = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = std::fabs(state.obs_y[i] - state.y);
@@ -281,7 +286,7 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
 double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
     double best_ttc = 1e9;
     double best_dx = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = state.obs_y[i] - state.y;
@@ -306,7 +311,7 @@ double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out
     double best = 1e9;
     double best_dx = 0.0;
     double best_dy_signed = 0.0;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy_signed = state.obs_y[i] - state.y;
