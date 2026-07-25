@@ -121,7 +121,10 @@ struct PlanningContext {
     volatile int has_fusion{0};
 
     /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
-    double obs_x[4]{}, obs_y[4]{}, obs_vx[4]{}, obs_vy[4]{};  /* Phase 3: +vy */
+    /* 容量与 perception 发布的 ObstacleList.obstacles[8] 对齐（adas_msgs_gen.h
+     * 生成的 ObstacleList.h 中 obstacles[8]）。直接用编译期常量避免运行时切片越界。 */
+    static constexpr int kMaxObs = 8;
+    double obs_x[kMaxObs]{}, obs_y[kMaxObs]{}, obs_vx[kMaxObs]{}, obs_vy[kMaxObs]{};  /* Phase 3: +vy */
     volatile int has_vstate{0};
 
     /* 配置参数 */
@@ -279,7 +282,7 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
         return;
 
     double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < g.kMaxObs; i++) {
         if (i < (int)list.count) {
             const Obstacle* o = &list.obstacles[i];
             /* 车体坐标系 → 世界坐标 */
@@ -611,7 +614,7 @@ protected:
                 double min_clearance_left  = 1e9;  /* 左侧最近障碍横向距离 */
                 double min_clearance_right = 1e9;  /* 右侧最近障碍横向距离 */
 
-                for (int i = 0; i < 4; i++) {
+                for (int i = 0; i < g.kMaxObs; i++) {
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < -10.0 || dx > 80.0) continue;
                     double dy = g.obs_y[i] - g.ego_y;  /* 相对 ego 的横向偏移 */
@@ -660,7 +663,7 @@ protected:
                  * Phase 3: 添加 vx/vy 数组，传给 Frenet 做位置外推。 */
                 double ox[8], oy[8], ow[8], ol[8], ovx[8], ovy[8];
                 int n_obs = 0;
-                for (int i = 0; i < 4 && n_obs < 8; i++) {
+                for (int i = 0; i < g.kMaxObs && n_obs < 8; i++) {
                     /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
@@ -911,7 +914,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     g.plan_count  = 0;
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;
-    for (int i = 0; i < 4; i++) { g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0; }
+    for (int i = 0; i < g.kMaxObs; i++) { g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0; }
 
     g.curve_start_x   = 0.0;
     g.curve_length_m  = 0.0;

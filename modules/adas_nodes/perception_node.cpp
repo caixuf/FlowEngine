@@ -65,7 +65,10 @@ struct PerceptionContext {
     double  ego_x{0}, ego_y{0}, ego_heading{0};
     double  ego_speed{0};
     int     n_obs{0};
-    double  obs_x[16]{}, obs_y[16]{}, obs_vx[16]{};
+    /* 障碍物世界系位置/速度，从 flowsim vehicle/state 的 ox/oy/ov/ovy 字段接收。
+     * 下游 planning/control/safety 经 ego_heading 旋回车体系做几何判断；
+     * 速度方向直接用世界系（对向迎面 obs_vx<0 即可识别）。 */
+    double  obs_x[16]{}, obs_y[16]{}, obs_vx[16]{}, obs_vy[16]{};
 
     /* 发布帧计数 */
     uint32_t frame_id{0};
@@ -148,6 +151,9 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         snprintf(key, sizeof(key), "ov%d", i);
         if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
             g.obs_vx[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "ovy%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_vy[i] = j->valuedouble;
     }
     cJSON_Delete(root);
 }
@@ -284,6 +290,14 @@ protected:
                 ObstacleList obs_list;
                 memset(&obs_list, 0, sizeof(obs_list));
                 obs_list.frame_id = g.frame_id;
+
+                /* 聚类中心 cb->cx/cy 是车体系（DBSCAN 输入即车体系点云）。
+                 * 把它旋转回世界系，再和 flowsim 发的 vehicle/state 障碍物
+                 * 做最近邻匹配，取该真值障碍物的世界系速度 (vx, vy) 填入
+                 * Obstacle.vx/vy。下游 safety_control 的 min_oncoming_ttc
+                 * (obs_v < -2) 与 planning 的 Frenet 位置外推都依赖速度，
+                 * 缺失速度 → 对向来车 TTC 永不触发、Frenet 用零速度外推。 */
+                double ch_w = cos(g.ego_heading), sh_w = sin(g.ego_heading);
                 for (int ci = 0; ci < n_clusters && obs_list.count < 8; ci++) {
                     const ClusterBounds* cb = dbscan_get_cluster(&g.dbscan, ci);
                     if (!cb || cb->point_count < 3) continue;
@@ -296,6 +310,21 @@ protected:
                         case CLS_VEHICLE:    ob->type = OBJ_TYPE_VEHICLE;    break;
                         case CLS_PEDESTRIAN: ob->type = OBJ_TYPE_PEDESTRIAN; break;
                         default:             ob->type = OBJ_TYPE_UNKNOWN;    break;
+                    }
+                    /* 速度匹配：聚类中心(车体系)→世界系 → 与 g.obs_x/y 最近邻 */
+                    double wx = g.ego_x + cb->cx * ch_w - cb->cy * sh_w;
+                    double wy = g.ego_y + cb->cx * sh_w + cb->cy * ch_w;
+                    int best_k = -1;
+                    double best_d2 = 9.0;  /* 阈值 3m 内才匹配（避免误关联） */
+                    for (int k = 0; k < g.n_obs; k++) {
+                        double ddx = wx - g.obs_x[k];
+                        double ddy = wy - g.obs_y[k];
+                        double d2 = ddx*ddx + ddy*ddy;
+                        if (d2 < best_d2) { best_d2 = d2; best_k = k; }
+                    }
+                    if (best_k >= 0) {
+                        ob->vx = (float)g.obs_vx[best_k];
+                        ob->vy = (float)g.obs_vy[best_k];
                     }
                 }
                 g.last_obs_list = obs_list;
