@@ -17,9 +17,14 @@
 
 #include "physics.h"
 
+#include "logger.h"
+
 #include <cmath>
 
 namespace flowsim {
+
+/* 动力学模型桩：单次日志计数，避免每帧刷屏 */
+static bool s_dynamic_warned = false;
 
 void step_bicycle(Entity& e, double dt, double throttle, double brake, double steer) {
     // 纵向力
@@ -54,8 +59,17 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
 void step_pedestrian(Entity& e, double dt) {
     e.x += e.vx * dt;
     e.y += e.vy * dt;
-    // speed = √(vx²+vy²)，供外部判断是否移动
     e.speed = std::sqrt(e.vx * e.vx + e.vy * e.vy);
+}
+
+void step_bicycle_dynamic(Entity& e, double dt, double throttle, double brake, double steer) {
+    if (!s_dynamic_warned) {
+        s_dynamic_warned = true;
+        LOG_WARN("flowsim", "physics_model=dynamic is not yet implemented "
+                 "(tire slip / relaxation / Pacejka stub). "
+                 "Falling back to kinematic step_bicycle.");
+    }
+    step_bicycle(e, dt, throttle, brake, steer);
 }
 
 void apply_vehicle_defaults(Entity& e) {

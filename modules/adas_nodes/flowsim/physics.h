@@ -22,7 +22,7 @@
 namespace flowsim {
 
 /**
- * 单步自行车模型积分。
+ * 运动学自行车模型积分（当前默认）。
  * @param e      实体（必须 is_vehicle()，会更新 x/y/heading/speed/vx/vy）
  * @param dt     时间步长 (s)
  * @param throttle 油门 [0,1]
@@ -33,6 +33,23 @@ namespace flowsim {
  * 本函数只做物理积分，不做决策。
  */
 void step_bicycle(Entity& e, double dt, double throttle, double brake, double steer);
+
+/**
+ * 动力学自行车模型积分（预留接口，默认未实现）。
+ *
+ * 与运动学模型的区别：
+ *   - 保留 step_bicycle 的纵向力计算（drive/brake/drag）
+ *   - 横向用轮胎侧偏力 + 转动惯量积分 heading，不做 heading 重置
+ *   - 侧偏角 = steer - atan2(v_y_body + a*yaw_rate, v_x_body)
+ *   - 需要 tire_stiffness_f/r、yaw_inertia 等字段已初始化
+ *
+ * 当前实现：降级到 step_bicycle + LOG_WARN 一次。
+ * 启用方式：pipeline.json 中 flowsim 节点的 params 加 "physics_model":"dynamic"
+ *          并设置 tire_stiffness_f/r、yaw_inertia 等参数。
+ *
+ * 详见 docs/CALIBRATION_GUIDE.md。
+ */
+void step_bicycle_dynamic(Entity& e, double dt, double throttle, double brake, double steer);
 
 /**
  * 简易行人运动学：按 vx/vy 匀速移动，到达边界后反弹/停止。

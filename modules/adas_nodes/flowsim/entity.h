@@ -96,6 +96,19 @@ struct Entity {
      * 读取者。max_brake 仍保留（scene_events.cpp:147 用于刹车距离估算）。 */
     double max_brake{4.0};         /**< m/s² */
 
+    /* ── 动力学模型预留字段（physics_model=dynamic 时启用）──
+     * 运动学模式下这些字段为 0，不影响现有逻辑。
+     * 动力学模式实现时需填充：轮胎侧偏力 → 车身侧偏角 → heading 积分。
+     * 参考：Pacejka 魔术公式 / 简化刷子模型，见 docs/CALIBRATION_GUIDE.md。 */
+    double v_x_body{0};            /**< 车体系纵向速度 (m/s) */
+    double v_y_body{0};            /**< 车体系横向速度 (m/s) */
+    double yaw_rate{0};            /**< 偏航角速度 (rad/s) */
+    double F_yf{0};                /**< 前轴侧向力 (N) */
+    double F_yr{0};                /**< 后轴侧向力 (N) */
+    double tire_stiffness_f{0};    /**< 前轮侧偏刚度 (N/rad)，默认 0 = 未初始化 */
+    double tire_stiffness_r{0};    /**< 后轮侧偏刚度 (N/rad)，默认 0 = 未初始化 */
+    double yaw_inertia{0};         /**< 绕 Z 轴转动惯量 (kg·m²)，默认 0 = 未初始化 */
+
     /* ── AI 状态（NPC 车辆 / 场景事件触发器复用）── */
     NpcState   state{NpcState::Cruise};  /**< 统一状态机：NPC 纵向+横向行为；TL/ETC 复用 */
     EntityId   lead_id{INVALID_ENTITY};  /**< 跟车目标 */

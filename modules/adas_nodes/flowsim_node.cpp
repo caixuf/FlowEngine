@@ -121,6 +121,9 @@ struct FlowSimContext {
     double            curve_length_m{0};
     double            curve_offset_m{0};
 
+    /* 物理模型选择："kinematic"（默认）| "dynamic"（预留，未实现） */
+    char              physics_model[32]{"kinematic"};
+
     /* control/cmd 状态 */
     std::atomic<int>  has_control_input{0};
     std::atomic<uint64_t> last_control_cmd_us{0};
@@ -1111,21 +1114,30 @@ protected:
                 else if (ts == 2) ego.lights.set_turn_right(true);
                 if (hz)           ego.lights.set_hazard(true);
             }
-            flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
-                                  ego.throttle, ego.brake, ego.steer);
+            if (strcmp(g.physics_model, "dynamic") == 0) {
+                flowsim::step_bicycle_dynamic(ego, FLOWSIM_DT_SEC,
+                                              ego.throttle, ego.brake, ego.steer);
+            } else {
+                flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
+                                      ego.throttle, ego.brake, ego.steer);
+            }
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
              *
-             * heading 每帧被 road_pos.world() 重置为道路切线方向，vl_at_damp
-             * 因 ego_heading ≈ ref_road_heading 而无效，但运动学模型下控制回路
+             * 运动学模式（physics_model=kinematic）：heading 每帧被
+             * road_pos.world() 重置为道路切线方向。运动学模型下控制回路
              * 靠 cte_term + heading_term + 低通滤波 + dead zone 已足够稳定。
              * 强行保留 bicycle model heading 会导致自由积分漂移 → 斜行。
+             *
+             * 动力学模式（physics_model=dynamic）：跳过 heading 重置，
+             * 由 step_bicycle_dynamic 的轮胎侧偏力积分自主演化 heading。
              *
              * 横向位移由 delta_lat 独立控制（与 heading 解耦）：
              *   delta_lat = speed * dt * tan(steer) * gain
              *   gain=1.0：tan(0.05) * 12 * 0.05 = 0.030 m/帧
              *   直路巡航时 steer≈0.02 → delta_lat≈0.012 m/帧 → 过冲可控
              *   变道 steer≈0.10 → delta_lat≈0.060 m/帧 → ~3.5s 完成车道变换 */
+            bool is_dynamic = (strcmp(g.physics_model, "dynamic") == 0);
             if (ego.road_pos.ok()) {
                 double delta_lat = ego.speed * FLOWSIM_DT_SEC
                                  * std::tan(ego.steer) * 1.0;
@@ -1144,9 +1156,13 @@ protected:
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
                             ego.y = wp.y;
-                            ego.heading = wp.h;
-                            ego.vx = ego.speed * std::cos(wp.h);
-                            ego.vy = ego.speed * std::sin(wp.h);
+                            if (!is_dynamic) {
+                                ego.heading = wp.h;
+                                ego.vx = ego.speed * std::cos(wp.h);
+                                ego.vy = ego.speed * std::sin(wp.h);
+                            }
+                            /* 动力学模式：heading/vx/vy 由 step_bicycle_dynamic 自主演化，
+                             * 此处仅更新 x/y 位置，不覆盖 heading。 */
                         }
                         flowsim::FrenetPos fp;
                         if (ego.road_pos.frenet(fp)) {
@@ -1376,6 +1392,13 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                 g.random_seed = (uint32_t)j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "scenario_file")) && cJSON_IsString(j))
                 strncpy(g.scenario_file, j->valuestring, sizeof(g.scenario_file) - 1);
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "physics_model")) && cJSON_IsString(j)) {
+                strncpy(g.physics_model, j->valuestring, sizeof(g.physics_model) - 1);
+                if (strcmp(g.physics_model, "dynamic") == 0) {
+                    LOG_INFO("flowsim", "physics_model=dynamic selected "
+                             "(not yet implemented, falling back to kinematic)");
+                }
+            }
             cJSON_Delete(p);
         }
     }
