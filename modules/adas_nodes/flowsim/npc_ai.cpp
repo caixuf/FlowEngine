@@ -686,7 +686,37 @@ mobil_done: ;
         } else {
             // sync 横向 offset 到 road_pos（E2/CutIn 平滑插值后的 npc.offset）
             // 然后用 road_pos.world() 取路网对齐世界坐标
-            npc.road_pos.set_offset(npc.offset);
+            //
+            // ── Bug 修复（"NPC 骑线行驶" / "车晃来晃去"）──
+            // npc.offset 语义是「相对道路参考线（lane_id=0）的横向偏移」，
+            // 与 init 时 (flowsim_node.cpp:554) `e.offset = lane_center_t + fp.offset`
+            // 一致。但 RoadPosition::set_offset 内部调用
+            //   RM_SetLanePosition(handle, roadId, laneId, offset, s, false)
+            // 当 laneId != 0 时 offset 语义为「相对车道中心的偏移」(lane-internal)。
+            //
+            // 旧格式 NPC init road_pos 时用真实 lane_id (flowsim_node.cpp:602，
+            // 如 -1/-2/+1)，直接传 npc.offset(road ref) 会让车被推到车道边界
+            // （实测 NPC1 在 y=-3.50 骑线行驶、motion_direction invariant 失败）。
+            // 新格式 NPC 用 lane_id=0 init，offset 语义匹配，不报此 bug。
+            //
+            // 修复：先取 road_pos 刚 advance 后的 lane_id（可能与上一帧 npc.lane_id
+            // 不同，过路口时 esmini 可能切车道），把 npc.offset 转换为
+            //   lane_internal = npc.offset - lane_center_t
+            // 其中 lane_center_t = sign(lane_id) * (|lane_id| - 0.5) * lane_width
+            // （与 flowsim_node.cpp:552-553 / 本文件 line 834-835 公式一致）。
+            // lane_id == 0 时 offset 即 road ref，无需转换。
+            double lane_internal = npc.offset;
+            int rp_lane = npc.road_pos.lane_id();
+            if (rp_lane != 0 && roads && roads->loaded()) {
+                int    rp_road = npc.road_pos.road_id();
+                double rp_s    = npc.road_pos.s();
+                double lw = roads->lane_width(rp_road, rp_lane, rp_s);
+                if (lw <= 0.0) lw = 3.5;
+                double lane_center_t = (rp_lane > 0 ? 1.0 : -1.0)
+                                     * (std::abs(rp_lane) - 0.5) * lw;
+                lane_internal = npc.offset - lane_center_t;
+            }
+            npc.road_pos.set_offset(lane_internal);
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
                 /* DEBUG: trace esmini heading */
