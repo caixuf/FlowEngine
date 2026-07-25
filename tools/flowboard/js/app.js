@@ -429,7 +429,25 @@ function updateTopo(data) {
 // Demo data
 // ═══════════════════════════════════════════════════════════════
 function doSimulate() {
+  /* P1 demo fallback 修复：原 topoData 未设 source='demo'，导致：
+   *   1. applyLiveStatus(d) 第 126 行 `!d || typeof d !== 'object'` 不命中
+   *      (d 是有效对象但 source 缺失) → fall through 到第 128 行
+   *      `if (wm) wm.style.display='none'` —— 反而隐藏了 doSimulate 刚显示的水印。
+   *   2. 后台仿真循环（line 1202-1212）每秒改 demo 数据但也没标 source，
+   *      下次 applyLiveStatus 误判为 live。
+   *   3. 用户连上真服务器后，若服务器返回的 source 也是 undefined（很多场景
+   *      没有 demo/live 区分），applyLiveStatus 也走 hide 水印分支——这是对的；
+   *      但反过来若服务器返回 source='live' 而本地还是 demo 残留的 source='demo'，
+   *      就会出现"已连上 live 还显示 demo 水印"的污染。
+   *
+   * 修复：
+   *   - doSimulate 显式标 source:'demo'，让 applyLiveStatus 第 127 行命中
+   *   - 后台仿真循环也标 source:'demo'（它只在 !eventSource 时跑，等价 demo 模式）
+   *   - doConnect 成功拿到真数据时 applyLiveStatus 会按真 source 处理，
+   *     自然覆盖 demo 标记
+   */
   topoData = {
+    source: 'demo',
     nodes: [
       {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",freq:20},{topic:"sensor/camera",freq:20},{topic:"sensor/gps",freq:10}]},
       {name:"fusion",pid:1002,alive:true,caps:9,topics:[{topic:"sensor/lidar",freq:0},{topic:"sensor/gps",freq:0},{topic:"fusion/localization",freq:20}]},
@@ -1199,8 +1217,14 @@ function initAll() {
   }, 100);
 
   // 7. Background data simulation when not connected
+  // P1 demo fallback：此循环仅在 !eventSource（未连接）时运行，等价 demo 模式。
+  // 显式标 source='demo' 让 applyLiveStatus 一致显示水印；若 topoData 来源
+  // 已是 live（服务器返回但随后断流，eventSource 为 null），保留原 source 不覆盖。
   setInterval(function() {
     if (!eventSource && !paused) {
+      if (topoData && typeof topoData === 'object') {
+        if (topoData.source !== 'live') topoData.source = 'demo';
+      }
       var m = topoData.metrics||{}, b = m.bus||{}, l = m.latency||{};
       b.published = (b.published||1000) + Math.floor(Math.random()*50 - 25);
       b.delivered = (b.delivered||2000) + Math.floor(Math.random()*100 - 50);
@@ -1208,6 +1232,8 @@ function initAll() {
       l.avg_us = Math.max(80, (l.avg_us||150) + Math.floor(Math.random()*20 - 10));
       l.p99_us = Math.max(200, (l.p99_us||400) + Math.floor(Math.random()*60 - 30));
       updateAll();
+      // 显式同步水印/状态（之前漏调，导致 demo 数据下 watermark 状态不稳定）
+      applyLiveStatus(topoData);
     }
   }, 1000);
 }

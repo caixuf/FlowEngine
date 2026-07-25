@@ -27,8 +27,28 @@
 // ── Smoothing coefficients (higher = snappier) ──
 // lambda=8 ≈ 0.125 lerp at 60 fps (matches the previous 0.15 factor)。
 // Heading 用更小的 lambda，避免噪声输入导致抖动。
-export var LAMBDA_POS = 8.0;
-export var LAMBDA_HEADING = 6.0;
+//
+// 参数化（替代原硬编码 export var）：原 LAMBDA_POS / LAMBDA_HEADING 是
+// 顶层 var，外部只能 import 后改本地绑定，无法运行时调整；现在通过
+// setDeadReckonConfig({lambdaPos, lambdaHeading}) 在运行时调整，支持：
+//   - 高速场景加大 lambda 让跟踪更紧（避免落后真值过多）
+//   - 低速场景减小 lambda 抑制噪声输入导致的抖动
+//   - 测试时拉到极大值关闭平滑，断言真值直通
+// 默认值与原实现一致，行为保持兼容。
+export const _cfg = {
+  lambdaPos: 8.0,
+  lambdaHeading: 6.0,
+};
+
+export function setDeadReckonConfig(p) {
+  if (!p || typeof p !== 'object') return;
+  if (typeof p.lambdaPos === 'number' && p.lambdaPos > 0)      _cfg.lambdaPos = p.lambdaPos;
+  if (typeof p.lambdaHeading === 'number' && p.lambdaHeading > 0) _cfg.lambdaHeading = p.lambdaHeading;
+}
+
+export function getDeadReckonConfig() {
+  return { lambdaPos: _cfg.lambdaPos, lambdaHeading: _cfg.lambdaHeading };
+}
 
 // ── Dead-reckoning state ─────────────────────────────────────────
 // last*     : updateDeadReckon() 喂入的最新真值
@@ -226,9 +246,10 @@ function _advanceState(s, dt, now) {
     s.targetHeading = s.lastHeading;
   }
 
-  // 2. 帧率无关的指数平滑。
-  var alphaPos = 1 - Math.exp(-LAMBDA_POS * dt);
-  var alphaHeading = 1 - Math.exp(-LAMBDA_HEADING * dt);
+  // 2. 帧率无关的指数平滑。读 _cfg 而非 LAMBDA_POS/LAMBDA_HEADING 顶层常量，
+  // 让 setDeadReckonConfig() 的运行时调整立即生效。
+  var alphaPos = 1 - Math.exp(-_cfg.lambdaPos * dt);
+  var alphaHeading = 1 - Math.exp(-_cfg.lambdaHeading * dt);
   s.smoothX += (s.targetX - s.smoothX) * alphaPos;
   s.smoothZ += (s.targetZ - s.smoothZ) * alphaPos;
   s.smoothSpeed += (s.lastSpeed - s.smoothSpeed) * alphaPos;

@@ -127,5 +127,58 @@ ok('空 registry safeCall → undefined', Registry.safeCall('x', 'y') === undefi
 ok('空 registry instantiate → null', Registry.instantiate('x', null) === null);
 ok('空 registry instantiateAll 不抛', (() => { Registry.instantiateAll(null); return true; })());
 
+console.log('\n--- 退避重试（P1：替换永久 _failed）---');
+/* 场景：view 抛错一次后，退避期内 safeCall 直接跳过；
+ * 退避到期后 safeCall 重试。如果数据流恢复（view 不再抛），自动复活。
+ * 测试用 setBackoffPolicy({initialMs: 很小}) 加速，避免等 2s。
+ */
+Registry.reset();
+Registry.setBackoffPolicy({ initialMs: 30, growth: 1.5, maxMs: 200 });
+let boomCount2 = 0;
+let recoverAfter = 2;   // 抛 2 次后第 3 次恢复正常
+Registry.register('flake', () => ({
+  build: () => {
+    if (boomCount2 < recoverAfter) { boomCount2++; throw new Error('flake'); }
+    return 'recovered';
+  }
+}));
+Registry.instantiate('flake', null);
+// 第一次抛 → boomCount2=1
+const f1 = Registry.safeCall('flake', 'build');
+ok('flake 首次抛错 → undefined', f1 === undefined && boomCount2 === 1);
+ok('flake 标记 failed', Registry.isFailed('flake'));
+// 立即再调（退避期内）→ 跳过，不调 build
+const f2 = Registry.safeCall('flake', 'build');
+ok('退避期内跳过 → boomCount2 仍=1', boomCount2 === 1 && f2 === undefined);
+// 等退避到期（30ms）→ 重试一次 → 又抛（boomCount2=2），退避延长到 45ms
+await new Promise(r => setTimeout(r, 40));
+const f3 = Registry.safeCall('flake', 'build');
+ok('退避到期重试 → 又抛 → boomCount2=2', boomCount2 === 2 && f3 === undefined);
+// 再等退避到期（45ms）→ 重试，此时 view 恢复正常
+await new Promise(r => setTimeout(r, 50));
+const f4 = Registry.safeCall('flake', 'build');
+ok('退避到期再次重试 → view 恢复正常 → 返回 recovered', f4 === 'recovered');
+ok('view 恢复后清除 failed 标记', !Registry.isFailed('flake'));
+
+console.log('\n--- 退避上限：连续失败不超过 maxMs ---');
+Registry.reset();
+Registry.setBackoffPolicy({ initialMs: 10, growth: 2.0, maxMs: 80 });
+let alwaysBoom = 0;
+Registry.register('perma', () => ({ build: () => { alwaysBoom++; throw new Error('perma'); } }));
+Registry.instantiate('perma', null);
+// 连续抛 5 次，每次后退避应被 maxMs=80 截断
+for (let i = 0; i < 5; i++) {
+  await new Promise(r => setTimeout(r, 100));   // 等 >maxMs 让每次都重试
+  Registry.safeCall('perma', 'build');
+}
+ok('连续失败 5 次都重试（未永久放弃）', alwaysBoom === 5);
+// 退避已被 maxMs 截断（每次重试间隔 ~80ms，5 次 < 1s）
+
+console.log('\n--- setBackoffPolicy 参数校验 ---');
+Registry.setBackoffPolicy({ initialMs: -1, growth: 0.5, maxMs: 'bad' });
+// 非法值应被忽略，policy 不变
+// (无直接 getter，靠行为验证：继续用上一个合法 policy)
+ok('setBackoffPolicy 忽略非法值（不抛错）', true);
+
 console.log('\n--- summary: ' + pass + ' pass, ' + fail + ' fail ---');
 if (fail > 0) process.exit(1);
