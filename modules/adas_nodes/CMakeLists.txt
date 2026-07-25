@@ -42,8 +42,30 @@ find_library(FLOWENGINE_CORE
 )
 message(STATUS "libflowengine_core: ${FLOWENGINE_CORE}")
 
+# scheduler_cpp: 提供 net_transport_start / net_transport_bridge_topic /
+# net_transport_unbridge_topic 等 C++ transport 符号。所有节点 .so 在 init
+# 阶段调用 transport API，dlopen RTLD_NOW 模式会立即解析这些符号，未链接 →
+# "undefined symbol: net_transport_*" → Loaded 0/N plugins。主项目编译产物
+# 落在 ${FLOWENGINE_BUILD}/lib/libscheduler_cpp.a（静态库，需 OBJECT 模式整体
+# 链接进 .so）。find_library 缺失时降级为空字符串占位，节点链接会失败但
+# cmake 仍可配置（错误在 link 阶段更明显）。
+find_library(SCHEDULER_CPP
+    NAMES scheduler_cpp
+    HINTS ${FLOWENGINE_BUILD}/lib
+)
+if(SCHEDULER_CPP)
+    message(STATUS "libscheduler_cpp: ${SCHEDULER_CPP}")
+else()
+    message(WARNING "libscheduler_cpp NOT found — node plugins will fail at dlopen "
+                    "(undefined symbol: net_transport_*)")
+endif()
+
 # Threads — 节点直接指定 -lpthread，不走 FindThreads（避免 c89-gcc 检测失败）
-set(NODE_LINK_LIBS ${FLOWENGINE_CORE} m pthread)
+# stdc++ + atomic: launcher 是纯 C 程序，主进程符号表不含 C++ ABI（__cxxabiv1::*）
+# 与 __atomic_store；C++ 节点 .so 与用 atomic 的节点在 dlopen RTLD_NOW 时会失败。
+# 让每个节点 .so 自带这两个库依赖（--as-needed 会自动过滤未实际引用的库，
+# 故 C 节点 .so 不会引入额外运行时依赖）。
+set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread stdc++ atomic)
 
 # ── cJSON ─────────────────────────────────────────────────────
 # libflowengine_core.a 是静态库，包含 scenario_loader.o，其中引用了 cJSON 符号。
