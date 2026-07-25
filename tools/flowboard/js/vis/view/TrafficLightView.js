@@ -116,6 +116,9 @@ export function createTrafficLightView(scene) {
       }
       const z = roadHeightAt(store, ent.x, ent.y);
       entry.group.position.set(...worldToThree(ent.x, ent.y, z));
+      // 灯臂沿 local +z，需要旋转使臂指向道路中心。
+      // ENU heading + π/2 映射为 THREE rotation.y（与车辆 headingToRotationY 不同）。
+      entry.group.rotation.y = (ent.heading || 0) + Math.PI / 2;
       _setLight(entry, ent.state);
     }
   }

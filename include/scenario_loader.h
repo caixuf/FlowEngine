@@ -75,9 +75,9 @@ extern "C" {
 #define SCENARIO_DESC_LEN       128
 #define SCENARIO_MAX_ROUTE_STEPS  8
 #define SCENARIO_ROUTE_LABEL_LEN 32
-#define SCENARIO_MAX_TRAFFIC_LIGHTS 4
+#define SCENARIO_MAX_TRAFFIC_LIGHTS 16   /* 10km 直路 1km 间距 */
 #define SCENARIO_MAX_ETC_GATES      4
-#define SCENARIO_MAX_STOP_LINES     4
+#define SCENARIO_MAX_STOP_LINES     16   /* 与红绿灯对应 */
 #define SCENARIO_MAX_SCRIPTS        8   /* 顶层 scenarios[] 工况脚本数组上限 */
 #define SCENARIO_MAX_OVERRIDES      8   /* 单个工况脚本的 actor_overrides 上限 */
 #define SCENARIO_SCRIPT_LABEL_LEN   48

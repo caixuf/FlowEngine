@@ -499,10 +499,12 @@ export function createVehicleView(scene, renderer, modelCache) {
       updateVehicle(egoId, store.ego, 'su7');
     }
 
-    // 2. 其他实体（car/truck/suv/pedestrian 等）
+    // 2. 其他实体（car/truck/suv/pedestrian — 排除红绿灯/ETC/停止线等非车辆）
+    const VEHICLE_TYPES = new Set(['car', 'suv', 'truck', 'pedestrian']);
     const entities = store.entities || [];
     for (const ent of entities) {
       if (!ent || !ent.id) continue;
+      if (!VEHICLE_TYPES.has(ent.type)) continue;
       activeIds.add(ent.id);
       updateVehicle(ent.id, ent, ent.type || 'car');
     }
