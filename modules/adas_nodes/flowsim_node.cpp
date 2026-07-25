@@ -1105,11 +1105,23 @@ protected:
                                   ego.throttle, ego.brake, ego.steer);
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
-             * step_bicycle 已更新 ego.speed/heading/x/y。road_pos.advance 沿道路
-             * 拓扑推进纵向 s，road_pos.world() 取路网对齐 x/y 并 reset heading
-             * 为道路切线（稳定性）。横向位移 delta_lat = vy * dt 叠加到 offset。 */
+             *
+             * 摇动根因 trace ───────────────────────────────────────────
+             * vy*dt 方案：
+             *   heading 保留 → accum 后永不被 road_pos 重置 → 变道完成有 residual
+             *   heading → v_lat_damp 持续反向修正 → 1.6Hz 极限环震荡
+             *
+             * world() reset heading 方案（此前）：
+             *   heading 每帧被道路切线覆盖 → vy ≈ 0 → delta_lat ≈ 0 → 变道需 17s
+             *
+             * 修复：heading 重置为道路切线（稳定），横向位移直接用 steer 算。
+             *   delta_lat = speed * dt * tan(steer) * gain
+             *   gain=1.3：tan(0.05) * 12 * 0.05 * 1.3 = 0.039 m/帧
+             *   3s 变道 ~ 3.5m，steer 收敛后自然停止，不依赖 heading 累积。
+             * ──────────────────────────────────────────────────────────*/
             if (ego.road_pos.ok()) {
-                double delta_lat = ego.vy * FLOWSIM_DT_SEC;
+                double delta_lat = ego.speed * FLOWSIM_DT_SEC
+                                 * std::tan(ego.steer) * 1.3;
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 if (dist > 0.0) {
                     if (!ego.road_pos.advance(dist, M_PI)) {
@@ -1125,16 +1137,9 @@ protected:
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
                             ego.y = wp.y;
-                            /* heading 保留 step_bicycle 值（含 steer 偏转），不覆盖为道路切线 wp.h。
-                             * 原 ego.heading = wp.h 每帧把 heading 重置为道路切线，导致 step_bicycle
-                             * 按 steer 积分出的 heading 偏转无法累积，ego.vy = speed*sin(heading) 始终
-                             * 极小（heading 每帧从 0 重新偏转 -0.013 rad 即被重置），delta_lat≈0，
-                             * 变道横向位移几乎为 0（实测 15s 仅移动 1.1m，变道无法完成）。
-                             * 保留 heading 后，steer 产生的偏转逐帧累积，vy 增大，横向位移正常。
-                             * 弯道跟随由 control 的 ff_term（曲率前馈）+ ref_h 参考保证，
-                             * 不需 road_pos 强制对齐 heading。 */
-                            ego.vx = ego.speed * std::cos(ego.heading);
-                            ego.vy = ego.speed * std::sin(ego.heading);
+                            ego.heading = wp.h;
+                            ego.vx = ego.speed * std::cos(wp.h);
+                            ego.vy = ego.speed * std::sin(wp.h);
                         }
                         flowsim::FrenetPos fp;
                         if (ego.road_pos.frenet(fp)) {
