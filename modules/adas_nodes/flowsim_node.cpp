@@ -1278,6 +1278,15 @@ protected:
                         }
                     }
                 }
+                // ASCII 俯视图：3D 运行时自动生成，写到 /tmp/flow_ascii_overhead.txt
+                // 供 dashboard / 终端 cat 查看（与 flow_topology.json 文件桥接模式一致）。
+                // 频率 = digest 块频率（每 20 帧 ≈ 1s），覆盖式写。
+                std::string ascii = flowsim::render_ascii_overhead(g.static_digest, dd, 80, 40);
+                FILE* fp = fopen("/tmp/flow_ascii_overhead.txt", "w");
+                if (fp) {
+                    fputs(ascii.c_str(), fp);
+                    fclose(fp);
+                }
                 g.prev_dynamic_digest = std::move(dd);
             } else if (!g.digest_initialized && g.cycle == 1) {
                 // 第一帧：初始化 prev_digest 供后续时序检查
