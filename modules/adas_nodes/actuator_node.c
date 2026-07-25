@@ -123,6 +123,13 @@ static struct {
     uint32_t last_seq;             /* 最近一次指令 seq */
 
     int      heartbeat_hz;         /* 心跳频率，默认 10Hz */
+
+    /* 看门狗：与 actuator_pwm_node 对称的安全契约。
+     * 超过 watchdog_timeout_s 未收到 control/cmd → 强制 ESC 中位（油门0/刹车0/转向0），
+     * 防止 control_node 崩溃或 TCP/共享内存丢消息时真车 ESC 维持最后一帧油门狂奔。
+     * 与 actuator_pwm_node.c:340-362 模式一致。 */
+    time_t   last_cmd_time;        /* 0 = 从未收到 cmd */
+    int      watchdog_timeout_s;   /* 默认 3s（与 actuator_pwm_node 一致） */
 } g;
 
 /* ── SocketCAN 工具函数 ──────────────────────────────────── */
@@ -250,6 +257,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
 
     g.cmds_received++;
     g.last_seq = cmd.seq;
+    g.last_cmd_time = time(NULL);  /* 看门狗喂狗：标记最近收到 cmd 的时间 */
 
     /* 紧急停车：ControlCmd 自带 emergency_stop 标志（safety_control 设置） */
     int e_stop = cmd.emergency_stop ? 1 : 0;
@@ -272,11 +280,16 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     }
 }
 
-/* ── 心跳主循环（托管模式）：定期发 status 帧让 ESC 知道控制器在线 ─── */
+/* ── 心跳主循环（托管模式）：定期发 status 帧让 ESC 知道控制器在线 ───
+ *
+ * 兼带看门狗：超过 watchdog_timeout_s 未收到 control/cmd → 强制 ESC 中位，
+ * 防止 control_node / safety_control_node 崩溃时真车 ESC 维持最后一帧油门狂奔。
+ * 与 actuator_pwm_node.c:340-362 的看门狗模式对称（两个执行器节点安全契约一致）。 */
 
 static int actuator_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "act_hb");
     long period_us = 1000000L / (g.heartbeat_hz > 0 ? g.heartbeat_hz : 10);
+    time_t last_wd_warn = 0;  /* 看门狗告警去抖：每 timeout 周期最多打一次 */
     while (!task->should_stop) {
         usleep((unsigned long)period_us);
         if (task->should_stop || !g.enabled) break;
@@ -285,6 +298,28 @@ static int actuator_execute(TaskBase* task) {
         memcpy(buf,     &g.frames_sent,    4);
         memcpy(buf + 4, &g.cmds_received,  4);
         can_send(g.can_status_id, buf, 8);
+
+        /* ── 看门狗：超时无 cmd → 强制 ESC 中位 ── */
+        if (g.last_cmd_time > 0 && g.watchdog_timeout_s > 0) {
+            time_t now = time(NULL);
+            if ((now - g.last_cmd_time) > g.watchdog_timeout_s) {
+                /* 编码中位帧：throttle=0, brake=0, gear=0, e_stop=0, steering=0 */
+                uint8_t tbuf[8] = {0};
+                uint8_t sbuf[4] = {0};
+                encode_throttle_frame(0.0f, 0.0f, 0, 0, tbuf);
+                encode_steering_frame(0.0f, 0, sbuf);
+                can_send(g.can_throttle_id, tbuf, 8);
+                can_send(g.can_steering_id, sbuf, 4);
+                /* 告警去抖：每 timeout 周期最多打一次，避免 10Hz 刷屏 */
+                if (now - last_wd_warn >= g.watchdog_timeout_s) {
+                    LOG_WARN("actuator", "WATCHDOG: %ds 无 control/cmd，强制 ESC 中位 "
+                             "(thr=0/brk=0/steer=0)，检查 control_node/safety_control_node",
+                             g.watchdog_timeout_s);
+                    last_wd_warn = now;
+                }
+                g.last_cmd_time = now;  /* 避免每帧重复触发，下一周期才再检查 */
+            }
+        }
     }
     return 0;
 }
@@ -342,6 +377,7 @@ static int actuator_init(MessageBus* bus, Transport* transport,
     g.enabled          = 1;
     g.dry_run          = 0;
     g.heartbeat_hz     = 10;
+    g.watchdog_timeout_s = 3;   /* 与 actuator_pwm_node 一致：3s 无 cmd → 中位 */
 
     /* CAN 帧 ID 支持 "0x100" 十六进制字符串形式，保留 parse_hex_int */
     g.can_throttle_id = parse_hex_int(params_json, "can_throttle_id", 0x100);

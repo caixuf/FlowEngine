@@ -297,23 +297,29 @@ static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
 
 static void apply_actor_override(flowsim::Entity& e,
                                  const ScenarioActorOverride* o) {
-    if (o->ai_state[0]) {
-        e.state = ai_state_from_str(o->ai_state);
-        /* 进入 CutIn 时初始化 PID 状态，避免残留旧值影响新变道 */
-        if (e.state == flowsim::NpcState::CutIn) {
-            e.cutin_pid_integral = 0.0;
-            e.cutin_pid_prev = 0.0;
-            e.cutin_active = true;
-        }
-    }
-    if (!isnan(o->target_offset)) {
-        e.target_offset = o->target_offset;
-    }
-    if (!isnan(o->target_vx)) {
-        e.target_vx = o->target_vx;
-    }
-    if (!isnan(o->vx)) e.vx = o->vx;
-    if (!isnan(o->vy)) e.vy = o->vy;
+    /* P1.3 修复：状态转移改走统一入口 npc_request_state。
+     *
+     * 原实现直接 `e.state = ai_state_from_str(o->ai_state)` 绕过状态机，
+     * 并手动初始化 cutin_pid_integral / cutin_pid_prev / cutin_active，
+     * 与 npc_request_state 内部清理逻辑重复——任何后续在 npc_request_state
+     * 新增的状态相关字段重置（LaneChange 冷却、Stopped 立即刹车等）都不会
+     * 被脚本 override 路径覆盖到，导致脚本触发的 CutIn/Stop 与状态机自动
+     * 触发的同类状态行为不一致。
+     *
+     * 修复：用 NpcEvent::ScriptSet + req.target_state 把脚本请求的目标状态
+     * 喂回统一入口；target_offset / target_vx / vx / vy 也通过 req 字段下发，
+     * 由 npc_request_state 末尾"应用请求覆盖字段"段统一写入。
+     * ScenarioActorOverride 用 NaN 标记未设置，NpcTransitionRequest 用
+     * NPC_REQ_UNSET，这里做转换。无 ai_state 时用当前 state 作占位，
+     * target==old → 状态不变，仅应用覆盖字段。 */
+    flowsim::NpcTransitionRequest req;
+    req.event        = flowsim::NpcEvent::ScriptSet;
+    req.target_state = o->ai_state[0] ? ai_state_from_str(o->ai_state) : e.state;
+    if (!isnan(o->target_offset)) req.target_offset = o->target_offset;
+    if (!isnan(o->target_vx))      req.target_vx     = o->target_vx;
+    if (!isnan(o->vx))             req.vx            = o->vx;
+    if (!isnan(o->vy))             req.vy            = o->vy;
+    flowsim::npc_request_state(e, req, g.ai_cfg);
 }
 
 /* Compute ego's cumulative s along the central route.

@@ -165,14 +165,16 @@ static void on_imu(const Message* msg, void* user_data) {
     uint64_t now = clock_now_us();
 
     pthread_mutex_lock(&g.lock);
-    if (g.have_imu) {
-        float dt = (float)((double)(now - g.last_imu_us) / 1000000.0);
-        if (dt > 0.0f && dt < 1.0f) {
-            g.pose_heading += imu.gyro_z * dt;
-            while (g.pose_heading >  (float)M_PI) g.pose_heading -= 2.0f * (float)M_PI;
-            while (g.pose_heading < -(float)M_PI) g.pose_heading += 2.0f * (float)M_PI;
-        }
-    }
+    /* Bug 修复：原 on_imu 在回调里直接 `g.pose_heading += imu.gyro_z * dt`
+     * 做 dead reckoning，绕过 EKF。导致：
+     *   1. 双状态维护——EKF 内部维护 heading，slam_node 也维护 g.pose_heading
+     *   2. 循环自证——slam_update_ekf_slam 用 g.pose_heading（dead-reckoned）
+     *      作为 obs_heading 喂回 ekf_slam_update，"用自己算出来的状态观测自己"
+     *      EKF 量测更新完全失效
+     *
+     * 修复：on_imu 只缓存 IMU 数据，不写 g.pose_heading。状态真值唯一由
+     * EKF 拥有，slam_update_ekf_slam 内 ekf_slam_predict/ekf_slam_get_pose
+     * 负责更新 g.pose_heading。 */
     g.last_imu    = imu;
     g.last_imu_us = now;
     g.have_imu    = 1;
@@ -234,6 +236,22 @@ static void slam_update_ekf_slam(Pose2D* pose) {
     }
 
     if (g.have_lidar) {
+        /* obs_heading 来源说明（与 on_imu 修复配套）：
+         *
+         * 当前实现用 g.pose_heading 作为 obs_heading 喂回 EKF。由于 on_imu
+         * 已不再做 dead reckoning（不再绕过 EKF 写 g.pose_heading），g.pose_heading
+         * 的值来自上一次 ekf_slam_get_pose 的输出，即 EKF 自己的 heading 估计。
+         *
+         * 这导致 heading 残差 y[2] = obs_heading - ekf->x.heading ≈ 0，
+         * 等价于"无航向观测"——EKF 的 heading 完全由 predict 步的 IMU 积分驱动，
+         * 没有 update 步的航向校正。位置 (x,y) 仍由 lidar.x/y 观测正常更新。
+         *
+         * TODO: 当接入真实航向观测源（双天线 GPS heading / LiDAR scan-matching
+         * 相对航向 / FAST-LIO2 ESKF）时，把这里的 obs_heading 替换为独立观测值，
+         * EKF 才能真正收敛 heading 误差。
+         *
+         * 现状等价于"位置 EKF + 航向 dead reckoning"的混合模式，比纯 dead reckoning
+         * 好（位置会被 lidar 观测校正），但仍非完整 EKF-SLAM。 */
         ekf_slam_update(&g.ekf_slam_state,
                         g.last_lidar.x, g.last_lidar.y, g.pose_heading);
     }

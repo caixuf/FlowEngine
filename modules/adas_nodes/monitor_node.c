@@ -82,9 +82,12 @@ static struct {
      * 车辆/行人（MAX_OBS_SCENE=16），而 NOA 24-NPC 场景需要前端能渲染全部 24
      * 个 NPC + ego + 红绿灯 + ETC 门架 + 停止线。完整 entities 透传后，前端
      * (vis/main.js) 优先消费 scn.entities，scn.obstacles 作为旧场景 fallback。 */
-    char   scene_road_network_json[4096];
-    char   scene_entities_json[16384];  /* 完整 entities（24 NPC + ego + TL/ETC/StopLine） */
-    char   scene_ego_json[2048];        /* ego 实体 JSON（从 entities 提取，含 lights/brake/vx/vy） */
+    char   scene_road_network_json[8192];   /* road_network（edges 数组，每段含 nodes[[x,y,z],...]）*/
+    char   scene_entities_json[65536];  /* 完整 entities（NOA 24 NPC + ego + TL/ETC/StopLine）
+                                          * 原 16384 在 24-NPC 场景下会被截断 → cJSON_Parse 返回 NULL
+                                          * → export_dashboard_json 静默丢弃 scene.entities，
+                                          *   前端 3D 场景只剩 ego。扩到 64KB 足够 30+ 实体。 */
+    char   scene_ego_json[4096];        /* ego 实体 JSON（含 lights/brake/vx/vy，~1.5KB 实测） */
     volatile int has_scene_frame;
 
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
@@ -286,8 +289,15 @@ static void on_scene_frame(const Message* msg, void* user_data) {
         char* rn_str = cJSON_PrintUnformatted(rn);
         if (rn_str) {
             size_t len = strlen(rn_str);
-            if (len >= sizeof(g.scene_road_network_json))
+            if (len >= sizeof(g.scene_road_network_json)) {
+                static int rn_truncate_warn = 0;
+                if (rn_truncate_warn < 3) {
+                    LOG_WARN("monitor", "scene_road_network_json truncated: %zu > %zu",
+                             len, sizeof(g.scene_road_network_json) - 1);
+                    rn_truncate_warn++;
+                }
                 len = sizeof(g.scene_road_network_json) - 1;
+            }
             memcpy(g.scene_road_network_json, rn_str, len);
             g.scene_road_network_json[len] = '\0';
             free(rn_str);
@@ -302,8 +312,18 @@ static void on_scene_frame(const Message* msg, void* user_data) {
         char* ent_str = cJSON_PrintUnformatted(entities);
         if (ent_str) {
             size_t len = strlen(ent_str);
-            if (len >= sizeof(g.scene_entities_json))
+            if (len >= sizeof(g.scene_entities_json)) {
+                /* 截断告警：原静默截断会让 export_dashboard_json 内 cJSON_Parse
+                 * 返回 NULL，前端 scene.entities 字段全部丢失。这里加 WARN
+                 * 让运维可见，便于及时扩容缓冲区或减少 NPC 数量。 */
+                static int truncate_warn_count = 0;
+                if (truncate_warn_count < 3) {
+                    LOG_WARN("monitor", "scene_entities_json truncated: %zu > %zu (entities will be dropped)",
+                             len, sizeof(g.scene_entities_json) - 1);
+                    truncate_warn_count++;
+                }
                 len = sizeof(g.scene_entities_json) - 1;
+            }
             memcpy(g.scene_entities_json, ent_str, len);
             g.scene_entities_json[len] = '\0';
             free(ent_str);
@@ -323,8 +343,15 @@ static void on_scene_frame(const Message* msg, void* user_data) {
                 char* ego_str = cJSON_PrintUnformatted(entity);
                 if (ego_str) {
                     size_t len = strlen(ego_str);
-                    if (len >= sizeof(g.scene_ego_json))
+                    if (len >= sizeof(g.scene_ego_json)) {
+                        static int ego_truncate_warn = 0;
+                        if (ego_truncate_warn < 3) {
+                            LOG_WARN("monitor", "scene_ego_json truncated: %zu > %zu",
+                                     len, sizeof(g.scene_ego_json) - 1);
+                            ego_truncate_warn++;
+                        }
                         len = sizeof(g.scene_ego_json) - 1;
+                    }
                     memcpy(g.scene_ego_json, ego_str, len);
                     g.scene_ego_json[len] = '\0';
                     free(ego_str);
@@ -662,6 +689,15 @@ static void export_dashboard_json(void) {
         cJSON* rn = cJSON_Parse(g.scene_road_network_json);
         if (rn) {
             cJSON_AddItemToObject(scene, "road_network", rn);
+        } else {
+            /* Parse 失败诊断：原静默跳过会让前端 3D 道路网消失，无法排查
+             * 是 scene 未发布还是 buffer 截断导致 JSON 非法。 */
+            static int rn_parse_warn = 0;
+            if (rn_parse_warn < 3) {
+                LOG_WARN("monitor", "scene_road_network_json cJSON_Parse failed (len=%zu, first 80 chars: %.80s)",
+                         strlen(g.scene_road_network_json), g.scene_road_network_json);
+                rn_parse_warn++;
+            }
         }
     }
 
@@ -673,6 +709,15 @@ static void export_dashboard_json(void) {
         cJSON* ents = cJSON_Parse(g.scene_entities_json);
         if (ents) {
             cJSON_AddItemToObject(scene, "entities", ents);
+        } else {
+            /* Parse 失败诊断：原静默跳过会让前端 24-NPC 场景下 NPC 全部消失，
+             * 仅剩 ego。前端无任何告警，运维难以定位是 scene 未发布还是 buffer 截断。 */
+            static int ent_parse_warn = 0;
+            if (ent_parse_warn < 3) {
+                LOG_WARN("monitor", "scene_entities_json cJSON_Parse failed (len=%zu, first 80 chars: %.80s)",
+                         strlen(g.scene_entities_json), g.scene_entities_json);
+                ent_parse_warn++;
+            }
         }
     }
 

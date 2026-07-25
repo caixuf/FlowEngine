@@ -571,6 +571,24 @@ protected:
              * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
             double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
 
+            /* 安全夹紧：scenario JSON 的 target_speed 是"信任来源"，但安全上限不变量
+             * 应在规划层就守住——任何来源的目标速度都不能超过 cfg_max_speed。
+             *
+             * 原 failsafe 分支（line 800）有此夹紧，主分支漏了。若 scenario 误写
+             * target_speed: 50.0，规划层会原样下发，依赖 safety_control 的 TTC 限幅
+             * 兜底——但 safety_control 假定上游 speed 已合理，不做绝对速度上限夹紧。
+             * 这是安全分层架构里职责错位（上限夹紧应在最靠近数据源的层做）。 */
+            if (command_speed > g.cfg_max_speed) {
+                static int speed_clamp_warn = 0;
+                if (speed_clamp_warn < 3) {
+                    LOG_WARN("planning", "command_speed clamped %.2f → cfg_max_speed %.2f "
+                             "(scenario target_speed/route_target_speed exceeds safety envelope)",
+                             command_speed, g.cfg_max_speed);
+                    speed_clamp_warn++;
+                }
+                command_speed = g.cfg_max_speed;
+            }
+
             /* ── NOA Phase 6 merge 闭环：基于 scene/frame 主线来车 gap 决策并入 ──
              * merge_state==1（等 gap）：用 on_scene_frame 缓存的前后 gap 判断
              *   - 前 gap ≥ min_gap 且 后 gap ≥ min_gap*0.6 → state=2，恢复 route_target_lane 下发并入

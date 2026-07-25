@@ -26,11 +26,13 @@ typedef struct {
 typedef struct {
     EkfState x;          
     EkfCovariance P;     
-    float accel_bias;    
-    float gyro_bias;     
+    /* bias 字段已删除（原 accel_bias/gyro_bias 永不估计，是误导死代码）。
+     * 若未来要在线估计 IMU bias，需把状态向量扩到 7 维
+     * [x,y,heading,v,omega,b_a,b_g] 并补 Jacobian / 噪声项。
+     * 详见 ekf_slam.c 文件头注释。 */
     uint64_t last_time_us;
-    bool initialized;    
-    float process_noise[5]; 
+    bool initialized;
+    float process_noise[5];
     float measurement_noise;
 } EkfSlam;
 

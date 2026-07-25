@@ -409,10 +409,20 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         // 释放横向控制权，后续 MOBIL/IDM 可接管
         if (std::fabs(npc.target_offset - npc.offset) < cfg.cutin_completion_threshold) {
             npc.offset = npc.target_offset;
-            npc.state = NpcState::Cruise;
-            npc.cutin_pid_integral = 0.0;
-            npc.cutin_pid_prev = 0.0;
-            npc.cutin_active = false;
+            /* ── P1.1 修复：状态转移改走统一入口 npc_request_state ──
+             *
+             * 原 4 行手动副作用（state=Cruise + 清 PID 积分 + 清 cutin_active）
+             * 已在 npc_request_state 内部统一处理（line 882-886）。
+             *
+             * 用 LeadLost 事件而非新增 CutInCompleted 的原因：CutIn 完成后下一帧
+             * step_npc_vehicle 会自动评估 lead（line 600-604）：有前车 → Follow，
+             * 无前车 → Cruise。所以 CutIn 完成等价于"释放横向控制权，让状态机
+             * 重新评估纵向行为"——LeadLost 语义最贴近。
+             *
+             * 这同时把"CutIn 退出时清理 PID 状态"集中到 npc_request_state，
+             * 避免 apply_actor_override / recycle_npc 等其他写 state 的地方
+             * 重复实现清理逻辑（之前就有遗漏 case，见 P1.3）。 */
+            npc_request_state(npc, {NpcEvent::LeadLost}, cfg);
         }
     } else if (!in_crash_cooldown && npc.state == NpcState::LaneChange &&
                std::fabs(npc.offset - npc.target_offset) > 0.01) {
@@ -664,14 +674,37 @@ mobil_done: ;
             npc.road_pos.set_offset(npc.offset);
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
-                npc.x = wp.x;
-                npc.y = wp.y;
-                double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
-                while (h >  M_PI) h -= 2.0 * M_PI;
-                while (h < -M_PI) h += 2.0 * M_PI;
-                npc.heading = h;
-                npc.vx = npc.speed * std::cos(h);
-                npc.vy = npc.speed * std::sin(h);
+                /* ── P1.2 修复：crash_cooldown 期间不覆写 npc.x/y ──
+                 *
+                 * 原实现无条件 `npc.x = wp.x; npc.y = wp.y;` —— 但 crash_cooldown
+                 * 期间 collision.cpp::apply_collision_response 已把车纵向分离
+                 * （route_dir!=0 改 route_s；route_dir==0 改 npc.x/y）。road_pos
+                 * 内部 s 未同步 → world() 取回碰撞前位置 → 覆盖 collision 写入
+                 * 的分离位置 → 两车再次重叠 → cooldown 重置 → 永久卡死。
+                 *
+                 * 修复：crash_cooldown 期间保留 collision 写入的 npc.x/y/heading，
+                 * 仅同步 Frenet 字段（road_id/lane_id/s/route_s）。同时用
+                 * world_to_frenet 反向 sync road_pos 到分离后位置，让 cooldown
+                 * 结束后第一帧 advance 用正确 s，不会跳回碰撞前位置。 */
+                if (!in_crash_cooldown) {
+                    npc.x = wp.x;
+                    npc.y = wp.y;
+                    double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
+                    while (h >  M_PI) h -= 2.0 * M_PI;
+                    while (h < -M_PI) h += 2.0 * M_PI;
+                    npc.heading = h;
+                    npc.vx = npc.speed * std::cos(h);
+                    npc.vy = npc.speed * std::sin(h);
+                } else {
+                    /* crash_cooldown：用 npc 当前 (x,y) 反向 sync road_pos
+                     * 让 road_pos 内部 s 与 collision 分离后位置一致。
+                     * 注意 speed=0，vx/vy 已被 collision response 清零，无需重算。 */
+                    FrenetPos fp_sep;
+                    if (roads->world_to_frenet(npc.x, npc.y, fp_sep)) {
+                        npc.road_pos.init(*roads, fp_sep.road_id, 0,
+                                          fp_sep.s, npc.offset);
+                    }
+                }
             }
             // 同步 Frenet 字段（same_lane/lane_change_safe 等用 npc.offset 比较，
             // 但 npc.road_id/lane_id/s 也需更新供下游逻辑/调试使用）
@@ -870,6 +903,7 @@ bool npc_request_state(Entity& npc, const NpcTransitionRequest& req,
         case NpcEvent::ChoreoCutIn:     target = NpcState::CutIn;      break;
         case NpcEvent::ChoreoOvertake:  target = NpcState::Cruise;     break;
         case NpcEvent::ScriptOverride:  target = NpcState::CutIn;     break;
+        case NpcEvent::ScriptSet:        target = req.target_state;    break;
         case NpcEvent::Collision:       target = NpcState::Stopped;    break;
         case NpcEvent::Recycle:         target = NpcState::Cruise;     break;
         case NpcEvent::None:            return false;

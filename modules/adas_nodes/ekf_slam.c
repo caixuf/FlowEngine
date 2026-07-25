@@ -46,22 +46,20 @@ void ekf_slam_init(EkfSlam* ekf, float initial_x, float initial_y, float initial
     ekf->x.heading = initial_heading;
     ekf->x.v = 0.0f;
     ekf->x.omega = 0.0f;
-    ekf->accel_bias = 0.0f;
-    ekf->gyro_bias = 0.0f;
-    
+
     cov_mat_zero(&ekf->P);
-    ekf->P.data[0] = 0.1f;   
-    ekf->P.data[6] = 0.1f;   
+    ekf->P.data[0] = 0.1f;
+    ekf->P.data[6] = 0.1f;
     ekf->P.data[12] = 0.001f;
-    ekf->P.data[18] = 0.1f;  
-    ekf->P.data[24] = 0.1f;  
-    
-    ekf->process_noise[0] = 0.001f; 
-    ekf->process_noise[1] = 0.001f; 
-    ekf->process_noise[2] = 0.001f; 
-    ekf->process_noise[3] = 0.005f; 
-    ekf->process_noise[4] = 0.005f; 
-    
+    ekf->P.data[18] = 0.1f;
+    ekf->P.data[24] = 0.1f;
+
+    ekf->process_noise[0] = 0.001f;
+    ekf->process_noise[1] = 0.001f;
+    ekf->process_noise[2] = 0.001f;
+    ekf->process_noise[3] = 0.005f;
+    ekf->process_noise[4] = 0.005f;
+
     ekf->measurement_noise = 0.5f;
     ekf->initialized = true;
     ekf->last_time_us = 0;
@@ -69,52 +67,77 @@ void ekf_slam_init(EkfSlam* ekf, float initial_x, float initial_y, float initial
 
 void ekf_slam_predict(EkfSlam* ekf, float accel_x, float gyro_z, uint64_t current_time_us) {
     if (!ekf->initialized) return;
-    
+
     if (ekf->last_time_us == 0) {
         ekf->last_time_us = current_time_us;
         return;
     }
-    
+
     float dt = (float)((double)(current_time_us - ekf->last_time_us) / 1000000.0);
     ekf->last_time_us = current_time_us;
-    
+
     if (dt <= 0.0f || dt > 1.0f) return;
-    
+
     float cos_h = cosf(ekf->x.heading);
     float sin_h = sinf(ekf->x.heading);
-    
+
+    /* 状态预测（运动学积分）。
+     * 注意：原代码这里 `accel_x - ekf->accel_bias` / `gyro_z - ekf->gyro_bias`
+     * 引用了永不估计的 bias 字段（始终为 0），等价于无 bias 补偿。
+     * 该字段已删除——若未来需要 bias 估计，请扩状态向量到 7 维。 */
     ekf->x.x += ekf->x.v * cos_h * dt;
     ekf->x.y += ekf->x.v * sin_h * dt;
     ekf->x.heading += ekf->x.omega * dt;
-    ekf->x.v += (accel_x - ekf->accel_bias) * dt;
-    ekf->x.omega = gyro_z - ekf->gyro_bias;
-    
+    ekf->x.v += accel_x * dt;
+    ekf->x.omega = gyro_z;
+
     while (ekf->x.heading > (float)M_PI) ekf->x.heading -= 2.0f * (float)M_PI;
     while (ekf->x.heading < -(float)M_PI) ekf->x.heading += 2.0f * (float)M_PI;
-    
+
+    /* ── 雅可比 F 修复（5×5，行优先） ──
+     *
+     * 状态: x=[px, py, h, v, omega]
+     * 运动学:
+     *   px' = px + v·cos(h)·dt
+     *   py' = py + v·sin(h)·dt
+     *   h'  = h + omega·dt
+     *   v'  = v + a·dt
+     *   omega' = gyro_z  (直通传感器，与历史 omega 无关)
+     *
+     * ∂f/∂x:
+     *   [1,  0,  -v·sin(h)·dt,  cos(h)·dt,  0      ]
+     *   [0,  1,   v·cos(h)·dt,  sin(h)·dt,  0      ]
+     *   [0,  0,   1,             0,          dt     ]
+     *   [0,  0,   0,             1,          0      ]
+     *   [0,  0,   0,             0,          0      ]  ← omega' 与 omega 无关
+     *
+     * 原 F 把 F[2]=F[7]=0（丢失航向对位置的耦合）且 F[24]=1（错误假设
+     * omega 状态有惯性）——这让 P' = F·P·Fᵀ + Q 在数学上不成立，
+     * 位置协方差不会随航向不确定性增长，卡尔曼增益对位置修正过度自信。
+     * 这是 EKF 算法契约被破坏，必须修。 */
     float F[EKF_COV_DIM] = {0};
-    F[0] = 1.0f; F[1] = 0.0f; F[2] = 0.0f; F[3] = cos_h * dt; F[4] = 0.0f;
-    F[5] = 0.0f; F[6] = 1.0f; F[7] = 0.0f; F[8] = sin_h * dt; F[9] = 0.0f;
-    F[10] = 0.0f; F[11] = 0.0f; F[12] = 1.0f; F[13] = 0.0f; F[14] = dt;
-    F[15] = 0.0f; F[16] = 0.0f; F[17] = 0.0f; F[18] = 1.0f; F[19] = 0.0f;
-    F[20] = 0.0f; F[21] = 0.0f; F[22] = 0.0f; F[23] = 0.0f; F[24] = 1.0f;
-    
+    F[0] = 1.0f; F[1] = 0.0f; F[2] = -ekf->x.v * sin_h * dt; F[3] = cos_h * dt;  F[4] = 0.0f;
+    F[5] = 0.0f; F[6] = 1.0f; F[7] =  ekf->x.v * cos_h * dt; F[8] = sin_h * dt;  F[9] = 0.0f;
+    F[10]= 0.0f; F[11]= 0.0f; F[12]= 1.0f;                    F[13]= 0.0f;       F[14]= dt;
+    F[15]= 0.0f; F[16]= 0.0f; F[17]= 0.0f;                    F[18]= 1.0f;       F[19]= 0.0f;
+    F[20]= 0.0f; F[21]= 0.0f; F[22]= 0.0f;                    F[23]= 0.0f;       F[24]= 0.0f;
+
     float F_trans[EKF_COV_DIM];
     mat_transpose(F_trans, F, EKF_STATE_DIM, EKF_STATE_DIM);
-    
+
     float FP[EKF_COV_DIM];
     mat_mul(FP, F, ekf->P.data, EKF_STATE_DIM, EKF_STATE_DIM, EKF_STATE_DIM);
-    
+
     float FPF[EKF_COV_DIM];
     mat_mul(FPF, FP, F_trans, EKF_STATE_DIM, EKF_STATE_DIM, EKF_STATE_DIM);
-    
+
     float Q[EKF_COV_DIM] = {0};
     Q[0] = ekf->process_noise[0] * ekf->process_noise[0] * dt;
     Q[6] = ekf->process_noise[1] * ekf->process_noise[1] * dt;
     Q[12] = ekf->process_noise[2] * ekf->process_noise[2] * dt;
     Q[18] = ekf->process_noise[3] * ekf->process_noise[3] * dt;
     Q[24] = ekf->process_noise[4] * ekf->process_noise[4] * dt;
-    
+
     mat_add(ekf->P.data, FPF, Q, EKF_STATE_DIM, EKF_STATE_DIM);
 }
 

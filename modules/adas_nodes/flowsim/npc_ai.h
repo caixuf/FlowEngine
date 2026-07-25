@@ -91,6 +91,7 @@ enum class NpcEvent : uint8_t {
     ChoreoCutIn,      /**< 编舞触发加塞 → CutIn */
     ChoreoOvertake,   /**< 编舞触发超车 → Cruise（保持传送后位置） */
     ScriptOverride,   /**< 场景脚本 override → CutIn/Cruise */
+    ScriptSet,        /**< 场景脚本直接指定目标状态（用 req.target_state） */
     Collision,        /**< 碰撞 → Stopped */
     Recycle,          /**< 路网末端回收 → Cruise（重置全部状态） */
 };
@@ -100,6 +101,8 @@ static constexpr double NPC_REQ_UNSET = -1e30;
 
 struct NpcTransitionRequest {
     NpcEvent event{NpcEvent::None};
+    NpcState target_state{NpcState::Cruise};  /**< 仅 event==ScriptSet 时生效，
+                                               *   由脚本经 ai_state_from_str 解析得到 */
     double target_offset{NPC_REQ_UNSET};  /**< 目标横向偏移 (LaneChange/CutIn) */
     double target_vx{NPC_REQ_UNSET};      /**< 目标速度 (choreo/script) */
     double vx{NPC_REQ_UNSET}, vy{NPC_REQ_UNSET};  /**< 速度覆盖 */
