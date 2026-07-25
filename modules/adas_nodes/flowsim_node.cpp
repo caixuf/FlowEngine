@@ -542,7 +542,23 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                 }
                 /* world_to_frenet 失败 → route_dir 保持 0，走旧世界系兜底 */
             }
-            if (e.road_id > 0 || a->segment_id >= 0) {
+            /* ── Bug 修复：原条件 `e.road_id > 0` 漏掉了 road_id == 0 的合法道路。
+             *
+             * straight_road.json 等场景的 road_network.edges[0].id = 0，
+             * world_to_frenet 正确返回 fp.road_id = 0，但原 `> 0` 判断让
+             * npc_init_route 永远不被调用 → route_dir 保持 0 → step_npc_vehicle
+             * 走 world_to_frenet 兜底分支（line ~762）。
+             *
+             * 兜底分支用 `npc.offset = f.offset` 覆写 offset（raw lane offset，
+             * 不是 lane_center + offset），与 init 时 `e.offset = lane_center_t + fp.offset`
+             * 不一致 → 第一帧 npc.offset 从 -1.75 跳到 0（车道边线/中心线），
+             * 之后 world_to_frenet 在车道边界抖动把 NPC 反复 snap 到不同 lane_id，
+             * npc.y 在 -1.75 / 0.0 / +1.75 之间"变来变去"。
+             *
+             * 改为 `>= 0`：road_id=0 是合法道路，npc_init_route 内部会用
+             * route.index_of(road_id) 判断是否在主 route 上，不在则置 route_dir=0
+             * 自动走兜底，所以这里无条件调用是安全的。 */
+            if (e.road_id >= 0 || a->segment_id >= 0) {
                 flowsim::npc_init_route(e, g.route, (a->vx < 0.0) ? -1 : 1);
             }
         }
@@ -564,7 +580,21 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                 sl = a->s;
                 ol = a->l;
             }
-            if (rid > 0) {
+            /* ── Bug 修复：原条件 `rid > 0` 漏掉了 road_id == 0 的合法道路。
+             *
+             * 这与 line 561 的 `e.road_id >= 0` 修复是同一个 bug 模式：
+             * straight_road.json 的 road_network.edges[0].id = 0，NPC 通过
+             * world_to_frenet 反算得到 road_id=0，但此处 `> 0` 让 road_pos
+             * 永远不被 init → step_npc_vehicle 中 `npc.road_pos.ok()` 为 false
+             * → 跳过 line 637 的 RoadPosition 推进分支，落到 line 701 的
+             * route 兜底分支。
+             *
+             * route 分支虽然也能工作（用 npc.offset 直接调 frenet_to_world），
+             * 但失去了 road_pos 的精确车道对齐 + junction 选支路能力，且
+             * recycle_npc 内部也依赖 road_pos.init 把 NPC 重新定位到新位置。
+             * 改为 `>= 0` 与 line 561 一致，让 road_id=0 的 NPC 也走 road_pos
+             * 主路径。esmini 内部 RM_CreatePosition 对 road_id=0 是合法的。 */
+            if (rid >= 0) {
                 if (!e.road_pos.init(g.roads, rid, 0, sl, ol) && a->id <= 2) {
                     LOG_WARN("flowsim", "NPC %d road_pos.init failed — fallback to route/world logic",
                              a->id);

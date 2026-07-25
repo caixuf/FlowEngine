@@ -234,6 +234,22 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
         }
         if (!target) continue;
 
+        /* ── NPC 变道防御性禁用 ──
+         *
+         * 用户需求：演示场景中 NPC 各守其道不变道，仅 ego 变道超车。
+         * 即使场景文件写了 dl!=0 的 beat（如 dl=-3.5 横向瞬移到隔壁车道），
+         * 也强制 dl=0，让 NPC 只在纵向被传送（重置到 ego 前方），不跨车道。
+         *
+         * 这从根上杜绝"choreography beat 让 NPC 变道"的行为，
+         * 配合 MOBIL #if 0 禁用，NPC 横向控制权完全归零，仅按初始 offset 直行。
+         *
+         * 若未来需要恢复 NPC 编导变道（如 cutin 测试场景），
+         * 在场景文件加 "allow_npc_lane_change": true 开关，并在下方条件判断。 */
+        double effective_dl = b->dl;
+        if (target->is_vehicle() && target->type != EntityType::Ego) {
+            effective_dl = 0.0;
+        }
+
         /* ── 重置到 ego 前方 ──
          * dl 语义：相对 ego.y 的横向偏移。负值 = 向右（同向更外侧车道），
          * 正值 = 向左（靠近中心线/对向）。cutin 场景 NPC 应从右车道（dl<0）
@@ -243,7 +259,7 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
          * dl=-3.5 会把 NPC 放到 -8.75（路外）。clamp 到同向路面范围
          * [-same_dir_half, -0.3] 防止 NPC 被传送到路外或对向。 */
         double new_x = ego.x + b->ds;
-        double new_y = ego.y + b->dl;
+        double new_y = ego.y + effective_dl;
         if (roads && roads->loaded()) {
             FrenetPos fp_ego;
             if (roads->world_to_frenet(ego.x, ego.y, fp_ego)) {

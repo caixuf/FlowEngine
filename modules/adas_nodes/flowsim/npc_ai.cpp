@@ -414,7 +414,25 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.cutin_pid_prev = 0.0;
             npc.cutin_active = false;
         }
-    } else if (!in_crash_cooldown && std::fabs(npc.offset - npc.target_offset) > 0.01) {
+    } else if (!in_crash_cooldown && npc.state == NpcState::LaneChange &&
+               std::fabs(npc.offset - npc.target_offset) > 0.01) {
+        /* ── E2: 平滑横移到 target_offset ──
+         *
+         * 用户需求：演示场景中 NPC 各守其道不变道，仅 ego 变道超车。
+         * 此分支原为 MOBIL 自主变道服务——MOBIL 把 state 置为 LaneChange 后，
+         * E2 在 1.5s 内把 offset 平滑插值到 target_offset。
+         *
+         * 现在 MOBIL 已 #if 0 禁用，state==LaneChange 永远不会被设置，
+         * 此分支事实上是死代码。但保留它（带 state 门禁）有两个好处：
+         *   1. 未来重新启用 MOBIL 时无需改这里，把 #if 0 改回 #if 1 即可联动恢复。
+         *   2. 防御性：即使有 bug 让 target_offset != offset（如 Frenet 投影漂移、
+         *      外部代码误写），Cruise/Follow/StopForTL 状态下也不会触发横移，
+         *      NPC 严格按当前 offset 直行。
+         *
+         * 关键改动：原条件 `std::fabs(offset - target_offset) > 0.01` 不带 state 门禁，
+         * 任何状态下只要 target_offset != offset 就横移——这是"NPC 禁用后仍变来变去"
+         * 的根因（target_offset 可能被 recycle/外部代码/choreography 残留值污染，
+         * 与 offset 不同步）。加 state==LaneChange 门禁后，仅 MOBIL 显式变道时触发。 */
         double dir = (npc.target_offset > npc.offset) ? 1.0 : -1.0;
         double step = 2.3 * dt;  // ≈2.3 m/s 横移速率
         double remain = std::fabs(npc.target_offset - npc.offset);
@@ -426,6 +444,20 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
          * 这是防止"NPC 频繁向逆向车道变来变去"的最后防线。 */
         if (npc.route_dir > 0 && npc.offset > -0.3) npc.offset = -0.3;
         if (npc.route_dir < 0 && npc.offset <  0.3) npc.offset =  0.3;
+    }
+
+    /* ── NPC 横向控制权归零：非变道状态下强制 target_offset = offset ──
+     *
+     * 用户需求：演示场景中 NPC 各守其道不变道。MOBIL 已 #if 0 禁用，
+     * LaneChange 状态永不被设置；CutIn 完成后状态切回 Cruise/Follow。
+     * 此时若 target_offset != offset（残留值/Frenet 投影漂移/外部代码误写），
+     * 会让下一帧的 E2 分支（虽已加 state 门禁）或 CutIn PID 误动作。
+     *
+     * 此处兜底：非 CutIn 且非 LaneChange 状态下，强制 target_offset = offset，
+     * 彻底断绝"target_offset 残留导致 NPC 漂移"的可能。
+     * 不影响 CutIn PID（PID 分支在上面已执行完毕）和 LaneChange E2（上面已执行）。 */
+    if (npc.state != NpcState::CutIn && npc.state != NpcState::LaneChange) {
+        npc.target_offset = npc.offset;
     }
 
     // 1. 找前车（碰撞冷却期间跳过，保持 speed=0）
@@ -455,7 +487,22 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
     //    仲裁检查：CutIn/LaneChange（脚本/编舞/CutIn 活跃中）时跳过，
     //    防止 MOBIL 覆盖场景导演的横向指令。
     //    红绿灯/让行期间不评估变道（StopForTL/Yield 状态下保持当前车道）
-    if (false) {
+    /* ──────────────────────────────────────────────────────────────
+     * MOBIL 自主变道已被有意禁用。
+     *
+     * 用户需求：演示场景中 NPC 各守其道不变道，仅 ego 变道超车。
+     * 启用 MOBIL 后 NPC 会自主换道避堵/超车，与"NPC 不变道"需求冲突。
+     * 场景编导（choreography）才是横向指令的唯一来源。
+     *
+     * 保留完整 MOBIL 实现作为参考，便于未来重新启用（如 NOA 高密度
+     * 车流场景）。重新启用步骤：
+     *   1. 把下方 #if 0 改回 #if 1
+     *   2. 修复 mobil_idm_accel 的简化 bug（std::min 在 target_v<v 时
+     *      返回负加速度，应改用标准 IDM (1-(v/v0)^4) 项）
+     *   3. 验证 lane_change_timer 冷却期间 target_offset 平滑插值无抖动
+     * ────────────────────────────────────────────────────────────── */
+#if 0
+    {
         // 仲裁门禁：存在更高优先级的横向控制时跳过
         if (npc.state == NpcState::CutIn ||
             npc.state == NpcState::LaneChange) { goto mobil_done; }
@@ -531,6 +578,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         }
 mobil_done: ;
     }
+#endif  /* MOBIL 自主变道禁用 */
 
     // 2. 计算 v_desired（碰撞冷却期间 v_desired=0）
     double v = npc.speed;
@@ -711,12 +759,39 @@ mobil_done: ;
             npc.road_id = f.road_id;
             npc.lane_id = f.lane_id;
             npc.s = f.s;
-            npc.offset = f.offset;
+            /* ── Bug 修复：原 `npc.offset = f.offset` 把「车道内偏移」当成
+             * 「相对参考线偏移」直接覆盖，是"NPC 在车道间变来变去"的根因。
+             *
+             * f.offset 是 esmini 报告的 lane 内偏移（车相对 lane 中心的横向偏移），
+             * 范围约 [-lw/2, +lw/2]，对在车道中心的 NPC ≈ 0。而 npc.offset 语义是
+             * 「相对道路参考线（lane_id=0）的横向偏移」，与 init 时
+             * (flowsim_node.cpp:540) `e.offset = lane_center_t + fp.offset` 一致：
+             *   lane_center_t = sign(lane_id) * (|lane_id| - 0.5) * lane_width
+             *
+             * 原代码用 f.offset（≈0）覆盖 npc.offset（如 -1.75）→ 下一帧
+             * frenet_to_world(f.road_id, 0, f.s, npc.offset=0, wp) 把 NPC 投到
+             * 参考线（y=0）而非原车道（y=-1.75）→ world_to_frenet 在车道边界
+             * 抖动把 NPC 反复 snap 到不同 lane_id → npc.y 在 -1.75 / 0 / +1.75
+             * 间"变来变去"。
+             *
+             * 修复：与 init 一致，把 f.offset 转换为 lane_center + f.offset 后
+             * 再写入 npc.offset，保持横向位置语义一致。 */
+            double lw = roads->lane_width(f.road_id, f.lane_id, f.s);
+            if (lw <= 0.0) lw = 3.5;
+            double lane_center_t = (f.lane_id > 0 ? 1.0 : -1.0)
+                                 * (std::abs(f.lane_id) - 0.5) * lw;
+            npc.offset = lane_center_t + f.offset;
+            /* NPC 横向控制权归零：兜底 NPC 通常 route_dir=0（不在主 route 上），
+             * 不参与变道，强制 target_offset = offset 让它沿当前车道直行。
+             * 注意此处 offset 已是正确的 lane_center + f.offset。 */
+            npc.target_offset = npc.offset;
             // B2: world→frenet→world 回投闭环。原实现只用 world_to_frenet
             //     更新 Frenet 字段，npc.x/y 仍是 step_bicycle 世界系直线积分结果
             //     —— 弯道/匝道上车会沿切线飞出。frenet_to_world 把 NPC 投回路面。
+            //     注意第四个参数用 npc.offset（lane_center + f.offset）而非 f.offset，
+            //     与上面的转换保持一致，否则 wp.y 仍会落到参考线而非车道中心。
             WorldPos wp;
-            if (roads->frenet_to_world(f.road_id, 0, f.s, f.offset, wp)) {
+            if (roads->frenet_to_world(f.road_id, 0, f.s, npc.offset, wp)) {
                 npc.x = wp.x;
                 npc.y = wp.y;
                 npc.heading = wp.h;
