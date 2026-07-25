@@ -198,6 +198,49 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
                                            const DynamicDigest& curr,
                                            double dt);
 
+// ═══════════════════════════════════════════════════════════
+// ASCII 俯视渲染（调试可视化）
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * 渲染 ASCII 俯视图（终端调试用，无需 GUI）。
+ * ═ 实线  : 虚线  ‖ 双黄  C 车(→↑←↓↗ 表朝向)  ● 行人  🚦 灯
+ *
+ * @param sd   静态 digest（车道线/红绿灯位置）
+ * @param dd   动态 digest（车辆/行人位置+朝向）
+ * @param width_chars  输出宽度（字符数），默认 80
+ * @param height_chars 输出高度（字符数），默认 40
+ * @return ASCII 俯视图字符串
+ */
+std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& dd,
+                                   int width_chars = 80, int height_chars = 40);
+
+// ═══════════════════════════════════════════════════════════
+// Golden 快照（transform 记账 + diff）
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * 生成 golden 快照 JSON：排序后的 (name, pos, rotY, scale) 列表。
+ * 可 commit 到仓库作为 golden 参考，任何位置漂移 = diff FAIL。
+ * 只有几何合法变更时才需更新 golden（PR 附截图）。
+ *
+ * @param dd  当前帧动态 digest
+ * @return     排序后的 JSON 字符串
+ */
+std::string golden_snapshot(const DynamicDigest& dd);
+
+/**
+ * 比较两帧 golden 快照，检测位置漂移。
+ * 任何 actor 的 pos/rotY/scale 偏差超过 tolerance 即 FAIL。
+ *
+ * @param golden  基准 golden JSON
+ * @param current 当前帧 golden JSON
+ * @param tolerance 位置容差 (m)，默认 0.01
+ * @return 差异报告（空字符串 = 通过）
+ */
+std::string golden_diff(const std::string& golden, const std::string& current,
+                         double tolerance = 0.01);
+
 }  // namespace flowsim
 
 #endif  // FLOWSIM_SIM_DIGEST_H

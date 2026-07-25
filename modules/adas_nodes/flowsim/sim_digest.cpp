@@ -658,4 +658,176 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
     return r;
 }
 
+// ═══════════════════════════════════════════════════════════
+// ASCII 俯视渲染（调试可视化，终端无 GUI 时使用）
+// ═══════════════════════════════════════════════════════════
+
+std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& dd,
+                                   int width_chars, int height_chars) {
+    if (sd.lanes.empty()) return "(no lanes)";
+
+    // 确定渲染范围（沿车道中心线扫描极值）
+    double min_x = 1e9, max_x = -1e9, min_y = 1e9, max_y = -1e9;
+    for (const auto& l : sd.lanes) {
+        for (size_t i = 0; i < l.centerline_x.size(); ++i) {
+            double cx = l.centerline_x[i];
+            double cy = l.centerline_y[i];
+            if (cx < min_x) min_x = cx;
+            if (cx > max_x) max_x = cx;
+            if (cy < min_y) min_y = cy;
+            if (cy > max_y) max_y = cy;
+        }
+    }
+    // 扩展边界留白
+    double margin = 20;
+    min_x -= margin; max_x += margin;
+    min_y -= margin; max_y += margin;
+    double range_x = max_x - min_x;
+    double range_y = max_y - min_y;
+    if (range_x < 1) range_x = 1;
+    if (range_y < 1) range_y = 1;
+
+    // 等比缩放，保持纵横比
+    double scale_x = (double)(width_chars - 2) / range_x;
+    double scale_y = (double)(height_chars - 2) / range_y;
+    double scale = std::min(scale_x, scale_y);
+
+    auto to_grid = [&](double wx, double wy, int& gx, int& gy) {
+        gx = 1 + (int)((wx - min_x) * scale);
+        gy = 1 + (int)((wy - min_y) * scale);
+        if (gx < 0) gx = 0; if (gx >= width_chars) gx = width_chars - 1;
+        if (gy < 0) gy = 0; if (gy >= height_chars) gy = height_chars - 1;
+    };
+
+    std::vector<std::vector<char>> grid(height_chars, std::vector<char>(width_chars, ' '));
+
+    // 绘制车道中心线（按左边界类型区分：双黄 #，其余 -）
+    for (const auto& l : sd.lanes) {
+        for (size_t i = 0; i < l.centerline_x.size(); ++i) {
+            int gx, gy;
+            to_grid(l.centerline_x[i], l.centerline_y[i], gx, gy);
+            if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
+                grid[gy][gx] = (l.left_boundary_type == 2) ? '#' : '-';
+            }
+        }
+    }
+
+    // 绘制演员（ego=位置 0，行人=*, 车辆=朝向箭头）
+    for (const auto& a : dd.actors) {
+        int gx, gy;
+        double wx = a.pos[0] + dd.origin[0];
+        double wy = a.pos[1] + dd.origin[1];
+        to_grid(wx, wy, gx, gy);
+        if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
+            double h = a.heading;
+            char dir = 'C';
+            if (std::fabs(std::cos(h)) > 0.7)      dir = (std::cos(h) > 0) ? '>' : '<';
+            else if (std::fabs(std::sin(h)) > 0.7) dir = (std::sin(h) > 0) ? '^' : 'v';
+            else if (std::cos(h) > 0 && std::sin(h) > 0)  dir = '7';
+            else if (std::cos(h) > 0 && std::sin(h) < 0)  dir = 'L';
+            else if (std::cos(h) < 0 && std::sin(h) > 0)  dir = 'J';
+            else                                          dir = '\\';
+            grid[gy][gx] = (a.type == 0) ? 'E' :      // ego
+                           (a.type == 4) ? '*' : dir;  // pedestrian or vehicle
+        }
+    }
+
+    // 组装输出（Unicode 边框 + 图例）
+    std::string out;
+    out += "┌";
+    for (int i = 0; i < width_chars - 2; ++i) out += "─";
+    out += "┐\n";
+    for (int y = 0; y < height_chars; ++y) {
+        out += "│";
+        for (int x = 0; x < width_chars; ++x) out += grid[y][x];
+        out += "│\n";
+    }
+    out += "└";
+    for (int i = 0; i < width_chars - 2; ++i) out += "─";
+    out += "┘\n";
+    out += "E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄\n";
+    out += "frame:" + std::to_string(dd.frame) + " time:" + std::to_string(dd.sim_time) + "\n";
+    return out;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Golden 快照（transform 记账 + diff，用于回归检测位置漂移）
+// ═══════════════════════════════════════════════════════════
+
+std::string golden_snapshot(const DynamicDigest& dd) {
+    // 按 id 排序后生成 (name, pos, rotY, scale) 列表
+    std::vector<ActorDigest> sorted = dd.actors;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const ActorDigest& a, const ActorDigest& b) { return a.id < b.id; });
+
+    std::string s = "{\n  \"frame\":" + std::to_string(dd.frame) + ",\n";
+    s += "  \"sim_time\":" + std::to_string(dd.sim_time) + ",\n";
+    s += "  \"actors\":[\n";
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        const auto& a = sorted[i];
+        char buf[512];
+        char name[32];
+        snprintf(name, sizeof(name), "actor_%d", a.id);
+        snprintf(buf, sizeof(buf),
+          "    {\"name\":\"%s\",\"pos\":[%.4f,%.4f,%.4f],\"rotY\":%.4f,\"scale\":[%.2f,%.2f,%.2f]}%s\n",
+          name,
+          a.pos[0], a.pos[1], a.pos[2],
+          a.rotation_y,
+          a.bbox[0], a.bbox[1], a.bbox[2],
+          (i < sorted.size() - 1) ? "," : "");
+        s += buf;
+    }
+    s += "  ]\n}";
+    return s;
+}
+
+std::string golden_diff(const std::string& golden, const std::string& current,
+                         double tolerance) {
+    if (golden == current) return "";  // 完全一致
+
+    // 简易逐行 diff（不引入完整 JSON 解析器，仅做数值容差比较）
+    std::string diff;
+    std::istringstream gs(golden), cs(current);
+    std::string gl, cl;
+    int line = 0;
+    while (std::getline(gs, gl) && std::getline(cs, cl)) {
+        line++;
+        if (gl != cl) {
+            // 提取行内所有数值，按容差比较
+            auto extract_nums = [](const std::string& ln) -> std::vector<double> {
+                std::vector<double> nums;
+                const char* p = ln.c_str();
+                while (*p) {
+                    if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
+                        char* end;
+                        double v = strtod(p, &end);
+                        if (end > p) {
+                            nums.push_back(v);
+                            p = end;
+                            continue;
+                        }
+                    }
+                    p++;
+                }
+                return nums;
+            };
+            auto gn = extract_nums(gl);
+            auto cn = extract_nums(cl);
+            bool numeric_diff = false;
+            if (gn.size() == cn.size() && gn.size() > 0) {
+                for (size_t i = 0; i < gn.size(); ++i) {
+                    if (std::fabs(gn[i] - cn[i]) > tolerance) {
+                        numeric_diff = true;
+                        break;
+                    }
+                }
+                if (!numeric_diff) continue;  // 数值差异在容差内，跳过
+            }
+            diff += "  L" + std::to_string(line) + " golden: " + gl.substr(0, 80) + "\n";
+            diff += "  L" + std::to_string(line) + " current: " + cl.substr(0, 80) + "\n";
+        }
+    }
+    return diff;
+}
+
 }  // namespace flowsim
