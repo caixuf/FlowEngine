@@ -92,7 +92,8 @@ struct Entity {
     double wheelbase{2.7};
     double mass{1500.0};           /**< kg */
     double drag_coeff{0.4};        /**< 空气阻力系数 */
-    double max_accel{2.0};         /**< m/s² */
+    /* P2 清理：移除 max_accel —— 仅在 apply_vehicle_defaults 写入，无任何
+     * 读取者。max_brake 仍保留（scene_events.cpp:147 用于刹车距离估算）。 */
     double max_brake{4.0};         /**< m/s² */
 
     /* ── AI 状态（NPC 车辆 / 场景事件触发器复用）── */

@@ -24,7 +24,6 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
     if (!roads.loaded()) return sd;
 
     int rc = roads.road_count();
-    int total_lanes = 0;
     double max_half_width = 0;
 
     for (int i = 0; i < rc; ++i) {
@@ -33,7 +32,6 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
 
         // 采样道路中线
         int n_lanes = roads.drivable_lane_count((int)ri.id, 0);
-        total_lanes += n_lanes;
         double half_w = n_lanes * 3.5 * 0.5;
         if (half_w > max_half_width) max_half_width = half_w;
 
@@ -49,7 +47,6 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
             ld.road_id = (int)ri.id;
             ld.lane_id = lane_id;
             ld.width = 3.5;
-            ld.speed_limit = roads.speed_limit((int)ri.id, lane_id, 0, 13.89);
 
             // 采样中心线（沿 s 每 10m 采样）
             for (double s = 0; s < ri.length; s += 10.0) {
@@ -68,22 +65,16 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
                 }
             }
 
-            ld.s_start = 0;
-            ld.s_end = ri.length;
             ld.direction = 1;
 
             // 边界类型推断：同向分隔=虚线，外沿=实线，对向=双黄
             ld.left_boundary_type = (li > 0) ? 0 : 1;   // 内边界虚线，外边界实线
-            ld.right_boundary_type = (li < n_lanes - 1) ? 0 : 1;
             sd.lanes.push_back(ld);
         }
 
         // Road marking digest
         for (int li = 0; li < n_lanes - 1; ++li) {
             RoadMarkingDigest rm;
-            rm.road_id = (int)ri.id;
-            rm.s_start = 0;
-            rm.s_end = ri.length;
             rm.type = 0;  // 虚线（同向分隔）
             rm.dash_length = 3.0;
             rm.gap_length = 6.0;
@@ -113,16 +104,13 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
         if (!e.active || e.type != EntityType::TrafficLight) continue;
         TrafficLightDigest tl;
         tl.id = e.id;
-        tl.x = e.x; tl.y = e.y; tl.z = 0;
         tl.heading = e.heading;
         tl.controlled_road_id = e.road_id;
         tl.controlled_lane_id = e.lane_id;
-        tl.phase = e.phase_state;
         sd.traffic_lights.push_back(tl);
     }
 
     sd.road_half_width = max_half_width;
-    sd.total_lanes = total_lanes;
     return sd;
 }
 
@@ -173,15 +161,12 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.vel[0] = e.vx;
         ad.vel[1] = e.vy;
         ad.speed = e.speed;
-        ad.yaw_rate = 0;  // Entity 无 yaw_rate 字段
-        ad.accel = 0;     // 由时序计算
         ad.road_id = e.road_id;
         ad.lane_id = e.lane_id;
         ad.lateral_offset = e.offset;
         ad.s = e.s;
         ad.rotation_y = e.heading;  // headingToRotationY(h) = h
         ad.route_dir = e.route_dir;
-        ad.ai_state = (int)e.state;
         ad.last_teleport_cycle = e.last_teleport_cycle;
         dd.actors.push_back(ad);
     }
@@ -276,24 +261,10 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
         }
     }
 
-    // 5. 路面高程连续检查
-    if (sd.height_samples_z.size() >= 2) {
-        for (size_t i = 1; i < sd.height_samples_z.size(); ++i) {
-            double dz = std::fabs(sd.height_samples_z[i] - sd.height_samples_z[i - 1]);
-            if (dz > 2.0) {  // >2m 高度跳变
-                r.warned++;
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                    "  WARN height_sample[%zu→%zu]: Δz=%.2fm (阶跃跳变)\n",
-                    i - 1, i, dz);
-                r.details += buf;
-                break;  // 只报告第一处
-            }
-        }
-        if (r.warned == 0) r.passed++;
-    }
-
-    // 6. 红绿灯朝向检查：朝向 · 车道行驶方向 < 0（面向来车）
+    // 5. 红绿灯朝向检查：朝向 · 车道行驶方向 < 0（面向来车）
+    /* P2 清理：原检查项 5（路面高程连续检查）已删除——其依赖的
+     * StaticDigest::height_samples_z 从未被 build_static_digest 填充，
+     * size 永远 0，if 块恒不执行，属死分支。原检查项 6 重编号为 5。 */
     for (size_t i = 0; i < sd.traffic_lights.size(); ++i) {
         const auto& tl = sd.traffic_lights[i];
         // 找管辖车道方向
@@ -327,7 +298,7 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
         }
     }
 
-    // 7. 没有物体堆在 (0,0,0)
+    // 6. 没有物体堆在 (0,0,0)
     {
         int at_origin = 0;
         for (const auto& l : sd.lanes) {
@@ -344,7 +315,7 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
         }
     }
 
-    // 8. 每条 lane 中线落在可行驶多边形内
+    // 7. 每条 lane 中线落在可行驶多边形内
     if (sd.drivable_poly_x.size() >= 3) {
         for (const auto& l : sd.lanes) {
             for (size_t k = 0; k < l.centerline_x.size(); ++k) {
@@ -685,203 +656,6 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
     }
 
     return r;
-}
-
-// ═══════════════════════════════════════════════════════════
-// ASCII 俯视渲染
-// ═══════════════════════════════════════════════════════════
-
-std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& dd,
-                                   int width_chars, int height_chars) {
-    if (sd.lanes.empty()) return "(no lanes)";
-
-    // 确定渲染范围
-    double min_x = 1e9, max_x = -1e9, min_y = 1e9, max_y = -1e9;
-    for (const auto& l : sd.lanes) {
-        for (size_t i = 0; i < l.centerline_x.size(); ++i) {
-            double cx = l.centerline_x[i];
-            double cy = l.centerline_y[i];
-            if (cx < min_x) min_x = cx;
-            if (cx > max_x) max_x = cx;
-            if (cy < min_y) min_y = cy;
-            if (cy > max_y) max_y = cy;
-        }
-    }
-    // 扩展边界
-    double margin = 20;
-    min_x -= margin; max_x += margin;
-    min_y -= margin; max_y += margin;
-    double range_x = max_x - min_x;
-    double range_y = max_y - min_y;
-    if (range_x < 1) range_x = 1;
-    if (range_y < 1) range_y = 1;
-
-    // 缩放因子
-    double scale_x = (double)(width_chars - 2) / range_x;
-    double scale_y = (double)(height_chars - 2) / range_y;
-    double scale = std::min(scale_x, scale_y);
-
-    auto to_grid = [&](double wx, double wy, int& gx, int& gy) {
-        gx = 1 + (int)((wx - min_x) * scale);
-        gy = 1 + (int)((wy - min_y) * scale);
-        if (gx < 0) gx = 0; if (gx >= width_chars) gx = width_chars - 1;
-        if (gy < 0) gy = 0; if (gy >= height_chars) gy = height_chars - 1;
-    };
-
-    // 初始化网格
-    std::vector<std::vector<char>> grid(height_chars, std::vector<char>(width_chars, ' '));
-
-    // 绘制车道线
-    for (const auto& l : sd.lanes) {
-        for (size_t i = 0; i < l.centerline_x.size(); ++i) {
-            int gx, gy;
-            to_grid(l.centerline_x[i], l.centerline_y[i], gx, gy);
-            if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
-                grid[gy][gx] = (l.left_boundary_type == 2) ? '#' : '-';
-            }
-        }
-    }
-
-    // 绘制红绿灯
-    for (const auto& tl : sd.traffic_lights) {
-        int gx, gy;
-        to_grid(tl.x, tl.y, gx, gy);
-        if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
-            grid[gy][gx] = (tl.phase == 0) ? 'G' : ((tl.phase == 1) ? 'Y' : 'R');
-        }
-    }
-
-    // 绘制车辆
-    for (const auto& a : dd.actors) {
-        int gx, gy;
-        double wx = a.pos[0] + dd.origin[0];
-        double wy = a.pos[1] + dd.origin[1];
-        to_grid(wx, wy, gx, gy);
-        if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
-            // 朝向箭头
-            double h = a.heading;
-            char dir = 'C';
-            if (std::fabs(std::cos(h)) > 0.7) dir = (std::cos(h) > 0) ? '>' : '<';
-            else if (std::fabs(std::sin(h)) > 0.7) dir = (std::sin(h) > 0) ? '^' : 'v';
-            else if (std::cos(h) > 0 && std::sin(h) > 0) dir = '7';
-            else if (std::cos(h) > 0 && std::sin(h) < 0) dir = 'L';
-            else if (std::cos(h) < 0 && std::sin(h) > 0) dir = 'J';
-            else dir = '\\';
-            grid[gy][gx] = (a.type == 0) ? 'E' :  // ego
-                           (a.type == 4) ? '*' : dir;  // pedestrian or vehicle
-        }
-    }
-
-    // 组装输出
-    std::string out;
-    out += "┌";
-    for (int i = 0; i < width_chars - 2; ++i) out += "─";
-    out += "┐\n";
-
-    for (int y = 0; y < height_chars; ++y) {
-        out += "│";
-        for (int x = 0; x < width_chars; ++x) {
-            out += grid[y][x];
-        }
-        out += "│\n";
-    }
-
-    out += "└";
-    for (int i = 0; i < width_chars - 2; ++i) out += "─";
-    out += "┘\n";
-
-    // 图例
-    out += "E=ego C=car *=pedestrian ><^v=朝向 G/Y/R=红绿灯 -=车道线\n";
-    out += "frame:" + std::to_string(dd.frame) + " time:" + std::to_string(dd.sim_time) + "\n";
-
-  return out;
-}
-
-// ═══════════════════════════════════════════════════════════
-// Golden 快照
-// ═══════════════════════════════════════════════════════════
-
-std::string golden_snapshot(const DynamicDigest& dd) {
-  // 按 id 排序后生成 (name, pos, rotY, scale) 列表
-  std::vector<ActorDigest> sorted = dd.actors;
-  std::sort(sorted.begin(), sorted.end(),
-            [](const ActorDigest& a, const ActorDigest& b) { return a.id < b.id; });
-
-  std::string s = "{\n  \"frame\":" + std::to_string(dd.frame) + ",\n";
-  s += "  \"sim_time\":" + std::to_string(dd.sim_time) + ",\n";
-  s += "  \"actors\":[\n";
-
-  for (size_t i = 0; i < sorted.size(); ++i) {
-    const auto& a = sorted[i];
-    char buf[512];
-    char name[32];
-    snprintf(name, sizeof(name), "actor_%d", a.id);
-    snprintf(buf, sizeof(buf),
-      "    {\"name\":\"%s\",\"pos\":[%.4f,%.4f,%.4f],\"rotY\":%.4f,\"scale\":[%.2f,%.2f,%.2f]}%s\n",
-      name,
-      a.pos[0], a.pos[1], a.pos[2],
-      a.rotation_y,
-      a.bbox[0], a.bbox[1], a.bbox[2],
-      (i < sorted.size() - 1) ? "," : "");
-    s += buf;
-  }
-
-  s += "  ]\n}";
-  return s;
-}
-
-std::string golden_diff(const std::string& golden, const std::string& current,
-                         double tolerance) {
-  if (golden == current) return "";  // 完全一致
-
-  // 简易 JSON 逐行 diff（不引入完整 JSON 解析器）
-  std::string diff;
-  std::istringstream gs(golden), cs(current);
-  std::string gl, cl;
-  int line = 0;
-
-  while (std::getline(gs, gl) && std::getline(cs, cl)) {
-    line++;
-    if (gl != cl) {
-      // 检查是否是数值差异（尝试提取数字比较）
-      auto extract_nums = [](const std::string& ln) -> std::vector<double> {
-        std::vector<double> nums;
-        const char* p = ln.c_str();
-        while (*p) {
-          if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
-            char* end;
-            double v = strtod(p, &end);
-            if (end > p) {
-              nums.push_back(v);
-              p = end;
-              continue;
-            }
-          }
-          p++;
-        }
-        return nums;
-      };
-
-      auto gn = extract_nums(gl);
-      auto cn = extract_nums(cl);
-
-      bool numeric_diff = false;
-      if (gn.size() == cn.size() && gn.size() > 0) {
-        for (size_t i = 0; i < gn.size(); ++i) {
-          if (std::fabs(gn[i] - cn[i]) > tolerance) {
-            numeric_diff = true;
-            break;
-          }
-        }
-        if (!numeric_diff) continue;  // 数值差异在容差内，跳过
-      }
-
-      diff += "  L" + std::to_string(line) + " golden: " + gl.substr(0, 80) + "\n";
-      diff += "  L" + std::to_string(line) + " current: " + cl.substr(0, 80) + "\n";
-    }
-  }
-
-  return diff;
 }
 
 }  // namespace flowsim

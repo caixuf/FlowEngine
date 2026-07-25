@@ -23,7 +23,6 @@ double heading_gap(double a, double b) {
 
 bool Route::build(FlowRoadNetwork& roads, double tol) {
     segs_.clear();
-    all_lengths_.clear();
     total_ = 0.0;
 
     const int n = roads.road_count();
@@ -46,7 +45,6 @@ bool Route::build(FlowRoadNetwork& roads, double tol) {
         if (!roads.frenet_to_world((int)info.id, 0, 0.0, 0.0, a)) continue;
         if (!roads.frenet_to_world((int)info.id, 0, info.length, 0.0, b)) continue;
         rs.push_back({(int)info.id, info.length, a.x, a.y, a.h, b.x, b.y, b.h, false});
-        all_lengths_.push_back({(int)info.id, info.length});
     }
     if (rs.empty()) return false;
 
@@ -95,13 +93,6 @@ int Route::index_of(int road_id) const {
         if (segs_[i].road_id == road_id) return (int)i;
     }
     return -1;
-}
-
-double Route::road_length(int road_id) const {
-    for (const auto& p : all_lengths_) {
-        if (p.first == road_id) return p.second;
-    }
-    return 0.0;
 }
 
 void Route::locate(double route_s, int& road_id, double& s_local, int& route_idx) const {

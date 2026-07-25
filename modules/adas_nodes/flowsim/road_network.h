@@ -74,9 +74,6 @@ public:
     /** 从 xodr 文件加载路网。返回 false 表示加载失败（RM_Init 返回 -1）。 */
     bool load(const std::string& xodr_path);
 
-    /** 从 OpenDRIVE XML 字符串加载路网。 */
-    bool load_string(const std::string& xml);
-
     /** 释放路网（析构会自动调用，也可显式释放）。 */
     void close();
 

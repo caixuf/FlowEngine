@@ -533,6 +533,14 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                 flowsim::FrenetPos fp;
                 if (g.roads.world_to_frenet(e.x, e.y, fp)) {
                     e.road_id = fp.road_id;
+                    e.lane_id = fp.lane_id;   /* P1 修复：保存 lane_id，
+                                              * 供 road_pos.init 用真实车道而非 lane_id=0
+                                              * 中心线。原代码丢掉 fp.lane_id 让下游
+                                              * road_pos.init 硬编码 lane_id=0，
+                                              * RM_SetLanePosition 对 type="none" 的中心
+                                              * 线车道 align=true 时返回 h=PI（对向），
+                                              * 导致同向 NPC vx = speed*cos(PI) = -speed
+                                              * 倒着开（npc1 从 x=120 倒退到 x=99）。 */
                     e.s       = fp.s;
                     /* fp.offset 是车道内偏移（车在车道中心时≈0），
                      * 需换算成相对参考线的横向偏移：
@@ -572,19 +580,30 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         /* Phase 2: NPC 持久 road_pos 初始化（与 route 共存）。
          * 新格式 (segment_id≥0) NPC：直接用场景指定的 segment_id/s/l init。
          * 旧格式 (segment_id<0) NPC：用上一步 world_to_frenet 反算的
-         * (road_id, s, offset) init，让 NPC 也能沿真实 OpenDRIVE 拓扑推进。
+         * (road_id, lane_id, s, offset) init，让 NPC 也能沿真实 OpenDRIVE 拓扑推进。
          *
          * 对向车 (route_dir<0) 虽然 road_pos.advance 不支持 -s 方向（step_npc_vehicle
          * 会走旧 route 分支），但 road_pos.init 后 set_offset 可正确更新横向位置，
          * 且 road_pos.frenet() 供 same_lane/find_lead 等用。 */
         if (g.roads_loaded && e.is_npc_vehicle()) {
             int rid = e.road_id;
+            int lid = 0;          /* 默认中心线（新格式旧分支） */
             double sl = e.s;
             double ol = e.offset;
             if (a->segment_id >= 0) {
                 rid = a->segment_id;
                 sl = a->s;
                 ol = a->l;
+            } else {
+                /* P1 修复：旧格式 NPC 用 world_to_frenet 反算的真实 lane_id。
+                 * 原代码硬编码 lane_id=0（中心线 type="none"），RM_SetLanePosition
+                 * 对该车道 align=true 返回 h=PI（对向），导致同向 NPC
+                 * vx = speed*cos(PI) = -speed 倒着开（npc1 从 x=120 倒退到 x=99）。 */
+                lid = e.lane_id;
+                /* road_pos.init 的 offset 是 lane 内偏移（车道中心时≈0）。
+                 * e.offset 是道路参考线偏移（lane_center + fp.offset），不能直接传；
+                 * 车在车道中心时 fp.offset≈0，多数场景满足，用 0 即可。 */
+                ol = 0.0;
             }
             /* ── Bug 修复：原条件 `rid > 0` 漏掉了 road_id == 0 的合法道路。
              *
@@ -601,7 +620,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
              * 改为 `>= 0` 与 line 561 一致，让 road_id=0 的 NPC 也走 road_pos
              * 主路径。esmini 内部 RM_CreatePosition 对 road_id=0 是合法的。 */
             if (rid >= 0) {
-                if (!e.road_pos.init(g.roads, rid, 0, sl, ol) && a->id <= 2) {
+                if (!e.road_pos.init(g.roads, rid, lid, sl, ol) && a->id <= 2) {
                     LOG_WARN("flowsim", "NPC %d road_pos.init failed — fallback to route/world logic",
                              a->id);
                 }

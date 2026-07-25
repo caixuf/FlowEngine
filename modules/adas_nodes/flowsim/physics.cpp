@@ -65,7 +65,6 @@ void apply_vehicle_defaults(Entity& e) {
             e.wheelbase = 5.0;
             e.mass = 8000.0;
             e.drag_coeff = 0.6;
-            e.max_accel = 1.5;
             e.max_brake = 3.0;
             break;
         case EntityType::SUV:
@@ -73,7 +72,6 @@ void apply_vehicle_defaults(Entity& e) {
             e.wheelbase = 2.85;
             e.mass = 1800.0;
             e.drag_coeff = 0.45;
-            e.max_accel = 2.0;
             e.max_brake = 4.0;
             break;
         case EntityType::Car:
@@ -83,7 +81,6 @@ void apply_vehicle_defaults(Entity& e) {
             e.wheelbase = 2.7;
             e.mass = 1500.0;
             e.drag_coeff = 0.4;
-            e.max_accel = 2.0;
             e.max_brake = 4.0;
             break;
     }

@@ -200,7 +200,7 @@ function _createSteeringWheel() {
   // 方向盘圆环（TorusGeometry：XY 平面，法线沿 Z）
   const torusGeo = new THREE.TorusGeometry(0.16, 0.018, 8, 24);
   const torusMat = new THREE.MeshStandardMaterial({
-    color: 0x111111, roughness: 0.45, metalness: 0.7,
+    color: 0x111111, roughness: 0.45, metalness: 0.7,  // exempt: steering wheel rim (non-body metal)
   });
   const torus = new THREE.Mesh(torusGeo, torusMat);
   torus.name = 'steering_wheel';  // 让 _updateGltfVehicle 的 traverse 选中
@@ -209,7 +209,7 @@ function _createSteeringWheel() {
   // 中心 hub（child of torus，跟随旋转）
   const hubGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.05, 16);
   const hubMat = new THREE.MeshStandardMaterial({
-    color: 0x222222, roughness: 0.4, metalness: 0.8,
+    color: 0x222222, roughness: 0.4, metalness: 0.8,  // exempt: steering wheel hub (non-body metal)
   });
   const hub = new THREE.Mesh(hubGeo, hubMat);
   hub.rotation.x = Math.PI / 2;  // 圆柱轴 Y → Z (沿 column)
@@ -218,7 +218,7 @@ function _createSteeringWheel() {
   // 3 条辐条（child of torus，跟随旋转；各 120° 间隔）
   const spokeGeo = new THREE.BoxGeometry(0.022, 0.30, 0.010);
   const spokeMat = new THREE.MeshStandardMaterial({
-    color: 0x333333, roughness: 0.5, metalness: 0.6,
+    color: 0x333333, roughness: 0.5, metalness: 0.6,  // exempt: steering wheel spokes (non-body metal)
   });
   for (let i = 0; i < 3; i++) {
     const spoke = new THREE.Mesh(spokeGeo, spokeMat);

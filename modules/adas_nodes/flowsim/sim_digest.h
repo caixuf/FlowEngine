@@ -7,7 +7,6 @@
  * 用法：
  *   - 几何变更时调用 dump_static_digest() 输出 JSON
  *   - 每帧调用 dump_dynamic_digest() + check_invariants() 输出 JSON + 断言
- *   - ASCII 俯视：render_ascii_overhead() 输出文本
  *
  * 设计要点：
  *   - invariant 断言编码"眼睛会检查的位置关系"为数值，错一个符号 = FAIL
@@ -41,27 +40,27 @@ struct LaneDigest {
     std::vector<double> centerline_y;
     double width;
     int    left_boundary_type;   // 0=虚线 1=实线 2=双黄
-    int    right_boundary_type;
     int    direction;            // +1=正向 -1=反向
-    double speed_limit;
-    double s_start, s_end;
+    /* P2 清理：移除 right_boundary_type / speed_limit / s_start / s_end ——
+     * 仅 build_static_digest 写入，无任何读取者。left_boundary_type 保留
+     * （check_static_invariants:231 用）。 */
 };
 
 struct RoadMarkingDigest {
-    int    road_id;
-    double s_start, s_end;
     int    type;                 // 0=虚线 1=实线 2=双黄
     double dash_length;         // 虚线段长 (m)
     double gap_length;          // 虚线间距 (m)
+    /* P2 清理：移除 road_id / s_start / s_end —— 仅写入无读取。 */
 };
 
 struct TrafficLightDigest {
     int    id;
-    double x, y, z;
     double heading;
     int    controlled_road_id;
     int    controlled_lane_id;
-    int    phase;               // 0=绿 1=黄 2=红
+    /* P2 清理：移除 x / y / z / phase —— 仅写入无读取。
+     * phase 在 Entity::phase_state 上仍 alive（scene_pub.cpp:301,313 读），
+     * 但 digest 里的副本从未被消费；位置由 entity 直接发布。 */
 };
 
 struct StaticDigest {
@@ -71,13 +70,13 @@ struct StaticDigest {
     // 可行驶区多边形
     std::vector<double> drivable_poly_x;
     std::vector<double> drivable_poly_y;
-    // 路面高程采样
-    std::vector<double> height_samples_x;
-    std::vector<double> height_samples_y;
-    std::vector<double> height_samples_z;
     // 全局
     double road_half_width{0};
-    int    total_lanes{0};
+    /* P2 清理：移除 height_samples_x/y/z + total_lanes ——
+     *   - height_samples_* 从未被 build_static_digest 填充，但 check_static_invariants
+     *     仍读 height_samples_z 触发"高程连续检查"。因 size 永远 0，该 if 块恒不执行，
+     *     属死分支。一并删除该检查块（见 sim_digest.cpp）。
+     *   - total_lanes 仅 build_static_digest 写，无读取者。 */
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -92,16 +91,19 @@ struct ActorDigest {
     double heading;             // 朝向 (rad)
     double vel[2];              // 速度矢量 [vx,vy]
     double speed;
-    double yaw_rate;
-    double accel;
     int    road_id;
     int    lane_id;
     double lateral_offset;
     double s;                   // 沿路里程
     double rotation_y;          // 实际给 THREE 的 rotation.y
     int    route_dir;           // 行驶方向
-    int    ai_state;            // AI 状态
     uint32_t last_teleport_cycle;  // 最近一次被显式传送的 cycle（choreography/recycle）
+    /* P2 清理：移除 yaw_rate / accel / ai_state ——
+     *   - yaw_rate / accel 仅 build_dynamic_digest 写入（恒为 0），
+     *     check_temporal_invariants 用 (ca.heading - pa->heading) / dt
+     *     和 (ca.speed - pa->speed) / dt 本地计算，不读 digest 字段。
+     *   - ai_state 仅 build_dynamic_digest 写入；前端显示的 ai_state 来自
+     *     scene_pub.cpp:255 的 npc_state_str(e.state)，与 digest 无关。 */
 };
 
 struct DynamicDigest {
@@ -129,10 +131,12 @@ struct InvariantResult {
  *   2. 边界类型自洽：同向分隔=虚线、对向=双黄/实线、外沿=实线
  *   3. 虚线段长 ~3m、间距 ~6–9m；实线连续无断
  *   4. 可行驶区闭合、不自交
- *   5. 路面高程连续、无阶跃跳变
- *   6. 红绿灯朝向 · 车道行驶方向 < 0（面向来车，不背对）
- *   7. 没有物体堆在 (0,0,0)（除非本该在）
- *   8. 每条 lane 的中线都落在可行驶多边形内
+ *   5. 红绿灯朝向 · 车道行驶方向 < 0（面向来车，不背对）
+ *   6. 没有物体堆在 (0,0,0)（除非本该在）
+ *   7. 每条 lane 的中线都落在可行驶多边形内
+ *
+ * P2 清理：原检查 5（路面高程连续）已删除——其依赖的
+ * StaticDigest::height_samples_z 从未被填充，恒不执行。
  */
 InvariantResult check_static_invariants(const StaticDigest& sd);
 
@@ -193,49 +197,6 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
 InvariantResult check_temporal_invariants(const DynamicDigest& prev,
                                            const DynamicDigest& curr,
                                            double dt);
-
-// ═══════════════════════════════════════════════════════════
-// ASCII 俯视渲染
-// ═══════════════════════════════════════════════════════════
-
-/**
- * 渲染 ASCII 俯视图（盲 agent 可读）。
- * ═ 实线  : 虚线  ‖ 双黄  C 车(→↑←↓↗ 表朝向)  ● 行人  🚦 灯
- *
- * @param sd   静态 digest（车道线/红绿灯位置）
- * @param dd   动态 digest（车辆/行人位置+朝向）
- * @param width_chars  输出宽度（字符数），默认 80
- * @param height_chars 输出高度（字符数），默认 40
- * @return ASCII 俯视图字符串
- */
-std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& dd,
-                                   int width_chars = 80, int height_chars = 40);
-
-// ═══════════════════════════════════════════════════════════
-// Golden 快照（transform 记账 + diff）
-// ═══════════════════════════════════════════════════════════
-
-/**
- * 生成 golden 快照 JSON：排序后的 (name, pos, rotY, scale) 列表。
- * 可 commit 到仓库作为 golden 参考，任何位置漂移 = diff FAIL。
- * 只有几何合法变更时才需更新 golden（PR 附截图）。
- *
- * @param dd  当前帧动态 digest
- * @return     排序后的 JSON 字符串
- */
-std::string golden_snapshot(const DynamicDigest& dd);
-
-/**
- * 比较两帧 golden 快照，检测位置漂移。
- * 任何 actor 的 pos/rotY/scale 偏差超过 tolerance 即 FAIL。
- *
- * @param golden  基准 golden JSON
- * @param current 当前帧 golden JSON
- * @param tolerance 位置容差 (m)，默认 0.01
- * @return 差异报告（空字符串 = 通过）
- */
-std::string golden_diff(const std::string& golden, const std::string& current,
-                         double tolerance = 0.01);
 
 }  // namespace flowsim
 

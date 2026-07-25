@@ -66,23 +66,6 @@ bool FlowRoadNetwork::load(const std::string& xodr_path) {
     return true;
 }
 
-bool FlowRoadNetwork::load_string(const std::string& xml) {
-    close();
-    if (RM_InitWithString(xml.c_str()) != 0) {
-        std::fprintf(stderr, "FlowRoadNetwork::load_string failed (xml %zu bytes)\n", xml.size());
-        return false;
-    }
-    loaded_ = true;
-    pos_handle_ = RM_CreatePosition();
-    if (pos_handle_ < 0) {
-        std::fprintf(stderr, "FlowRoadNetwork::load_string: RM_CreatePosition failed\n");
-        RM_Close();
-        loaded_ = false;
-        return false;
-    }
-    return true;
-}
-
 void FlowRoadNetwork::close() {
     if (pos_handle_ >= 0) {
         RM_DeletePosition(pos_handle_);

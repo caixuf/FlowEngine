@@ -689,6 +689,11 @@ mobil_done: ;
             npc.road_pos.set_offset(npc.offset);
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
+                /* DEBUG: trace esmini heading */
+                if (npc.id == 1 && (cycle % 50) == 1) {
+                    fprintf(stderr, "[DBG npc1] road_pos.world wp=(%.2f,%.2f,%.2f) h=%.3f route_dir=%d\n",
+                            wp.x, wp.y, wp.z, wp.h, npc.route_dir);
+                }
                 /* ── P1.2 修复：crash_cooldown 期间不覆写 npc.x/y ──
                  *
                  * 原实现无条件 `npc.x = wp.x; npc.y = wp.y;` —— 但 crash_cooldown

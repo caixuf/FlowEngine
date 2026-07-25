@@ -66,9 +66,6 @@ public:
     /** road_id → route 段号；不在 route 上返回 -1。 */
     int index_of(int road_id) const;
 
-    /** 任意 road 的长度（含不在 route 上的），查不到返回 0。 */
-    double road_length(int road_id) const;
-
     /** route 累计 s → (road_id, 段内 s_local, 段号)。route_s 夹到 [0,total]。 */
     void locate(double route_s, int& road_id, double& s_local, int& route_idx) const;
 
@@ -95,7 +92,6 @@ public:
 private:
     std::vector<RouteSeg>                segs_;
     double                              total_{0.0};
-    std::vector<std::pair<int, double>> all_lengths_;  /**< road_id → length（全部 road） */
 };
 
 }  // namespace flowsim

@@ -356,30 +356,12 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 时序 | \|Δheading\| ≤ yaw_max × dt | 朝向瞬变 |
 | 时序 | accel ∈ [−8, +4] m/s² | 运动学不可行 |
 
-### Golden 快照
-
-- 罐头帧 dump 排序后的 `(name, pos, rotY, scale)` JSON，diff committed golden
-- 任何位置漂移即 FAIL；只有几何合法变更时才需更新 golden（PR 附截图）
-- 函数：`flowsim::golden_snapshot(dd)` + `flowsim::golden_diff(golden, current)`
-
-### ASCII 俯视
-
-```
-┌────────────────────────────────────────────────┐
-│  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  │
-│        E>        C>        C>                  │
-│  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  │
-│                                                │
-└────────────────────────────────────────────────┘
-E=ego C=car *=pedestrian ><^v=朝向 G/Y/R=红绿灯 -=车道线
-```
-
 ### 关键文件
 
 | 文件 | 作用 |
 |------|------|
-| `modules/adas_nodes/flowsim/sim_digest.h` | Digest 数据结构 + invariant API + golden 快照 |
-| `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 生成 + invariant 检查 + ASCII 俯视 + golden diff |
+| `modules/adas_nodes/flowsim/sim_digest.h` | Digest 数据结构 + invariant API |
+| `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 生成 + invariant 检查 |
 | `modules/adas_nodes/flowsim_node.cpp` | 集成点：静态 digest 建一次，动态 digest + invariant 每 20 帧 |
 
 ### 违反以上规范的代码不会被合并。
