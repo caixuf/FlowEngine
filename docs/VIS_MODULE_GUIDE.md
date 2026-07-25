@@ -183,6 +183,16 @@ group.rotation.y = headingToRotationY(ent.heading || 0);
 - 发光物体（车灯/信号灯/屏幕）用 `createEmissiveMaterial(color, intensity)`
 - **不要**用 `MeshBasicMaterial`（不参与光照，违和）
 
+**Metalness 约定（CI ESLint 强约束）**：
+- 车身金属感控制在 `metalness ≤ 0.5`（避免高金属反光失真）
+- 非车身金属件（方向盘 rim/hub/spokes、排气管、轮毂等）允许 `0.5 < metalness ≤ 0.9`，
+  但**必须**在该行末加 `// exempt: <部位说明>` 注释，否则 `npm run vis:check:all` 失败
+- 例：
+  ```javascript
+  color: 0x222222, roughness: 0.4, metalness: 0.8,  // exempt: steering wheel hub (non-body metal)
+  ```
+- exempt 注释里必须明确写出部件用途，便于 reviewer 判断是否真该 exempt
+
 **几何体工厂**（`vis/core/AssetFactory.js`）：
 ```javascript
 import { getBox, getCylinder, getPlane, getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
@@ -307,17 +317,21 @@ const headMat = createEmissiveMaterial(0xfff4d6, 1.0); // 独立（每帧改 int
 | 模块 | 路径 | 复杂度 | 学习点 |
 |------|------|-------|-------|
 | GroundView | `vis/view/GroundView.js` | 简单 | 单 mesh，无 pool |
+| RoadView | `vis/view/RoadView.js` | 中等 | 车道面 + 标线 instance 绘制 |
 | TrafficLightView | `vis/view/TrafficLightView.js` | 中等 | 标准 pool + emissive 状态切换 |
+| StreetlightView | `vis/view/StreetlightView.js` | 中等 | InstancedMesh 静态布局（沿路段两侧路灯） |
+| BarrierView | `vis/view/BarrierView.js` | 中等 | 高速护栏 + 防眩板（InstancedMesh） |
+| TreeView | `vis/view/TreeView.js` | 简单 | InstancedMesh 行道树 |
+| ViaductView | `vis/view/ViaductView.js` | 中等 | 高架桥结构（桥面 + 桥墩） |
 | VehicleView | `vis/view/VehicleView.js` | 复杂 | gltf 优先 + 程序化 fallback + 车灯位掩码 |
 | ConnectorView | `vis/view/ConnectorView.js` | 复杂 | 自动派生（无 entity，扫 edge 元数据） |
 | ETCGateView | `vis/view/ETCGateView.js` | 复杂 | 多部件组装 + 动态 boom 抬起 |
+| VehicleLights | `vis/view/VehicleLights.js` | 简单 | 车灯位掩码解析工具模块（非 View，被 VehicleView 调用） |
 
 ## 10. 待设计模块清单（候选）
 
 | 模块 | 数据源 | 功能 |
 |------|-------|------|
-| StreetlightView | edge.type='urban' | 沿城市路段两侧布置路灯（5m 杆 + 臂 + 灯泡） |
-| BarrierView | edge.type='highway' | 高速护栏 + 防眩板 |
 | PedestrianView | entity.type='pedestrian' | 行人模型（gltf 或程序化胶囊） |
 | SignView | edge.signs[] | 交通标志牌（限速/匝道预警/ETC 预告） |
 | JunctionView | rn.junctions[] | 路口区域（斑马线 + 停止线 + 导流线） |

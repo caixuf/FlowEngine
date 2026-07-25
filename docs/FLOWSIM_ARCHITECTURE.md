@@ -1,6 +1,8 @@
-# FlowSim Engine v2 — sim_world 重构设计方案
+# FlowSim Engine v2 — 架构设计
 
-> 目标：让 sim_world 从"一个 1100 行的 C 文件"变成**真正可用的仿真引擎**。
+> 历史背景：本模块由早期 `sim_world` (单一 1100 行 C 文件) 重构而来，现已拆分为
+> `modules/adas_nodes/flowsim/` 下的模块化 C++ 实现，并在 `flowsim_node.cpp` 中
+> 作为 flowcoro 协程节点接入 pipeline。旧名 `sim_world_node` 已淘汰。
 > 对标：不是 3A 大作，但至少不能比 GTA Vice City（2002）的道路和车辆效果差。
 > 约束：C++20 + flowcoro，link esmini RoadManager 处理道路网络，Three.js 做 3D 渲染。
 > 原则：**能用开源轮子就不自己写**，架构钱花在刀刃上（NPC AI + 场景驱动 + 确定性）。
@@ -23,7 +25,7 @@
 | JSON→xodr 转换器（旧格式 + curvature_profile） | ✅ | `tools/json_to_xodr.py` |
 | flowcoro 协程主循环（20Hz） | ✅ | `flowsim_node.cpp` |
 | pipeline.json 默认使用 flowsim | ✅ | `config/pipeline.json` |
-| 14 个旧场景全部通过 `demo_evaluator.py` 回归 | ✅ | `scenarios/*.json` |
+| `straight_road.json` 通过 `demo_evaluator.py` 回归 | ✅ | `scenarios/straight_road.json` |
 
 ### 🔴 待完成（Phase 3–5）
 
@@ -41,16 +43,18 @@
 
 | 模块 | 行数 |
 |------|------|
-| `flowsim_node.cpp` | 850 |
-| `flowsim/entity.h` | 170 |
-| `flowsim/physics.cpp` | 90 |
-| `flowsim/npc_ai.cpp` | 330 |
-| `flowsim/collision.cpp` | 200 |
-| `flowsim/scene_events.cpp` | 180 |
-| `flowsim/scene_pub.cpp` | 350 |
-| `flowsim/road_network.cpp` | 150 |
-| `json_to_xodr.py` | 275 |
-| **合计** | **~2600 行** |
+| `flowsim_node.cpp` | 1541 |
+| `flowsim/entity.h` | 244 |
+| `flowsim/physics.cpp` | 89 |
+| `flowsim/npc_ai.cpp` | 998 |
+| `flowsim/collision.cpp` | 170 |
+| `flowsim/scene_events.cpp` | 357 |
+| `flowsim/scene_pub.cpp` | 412 |
+| `flowsim/road_network.cpp` | 154 |
+| `flowsim/sim_digest.cpp` | 832 |
+| `flowsim/vehicle_lights.h` | 75 |
+| `tools/json_to_xodr.py` | 600 |
+| **合计** | **~5472 行** |
 
 > 详细 NOA 场景实施计划见项目 issue tracker。
 
@@ -135,7 +139,7 @@
 │  flowboard_server.py + Browser (Three.js)                           │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐  │
-│  │  3D 场景 (scene3d.js, 重写)                                  │  │
+│  │  3D 场景 (vis/ 模块树：main.js + director/ + view/)           │  │
 │  │  - 道路: CatmullRomCurve3 + TubeGeometry (借开源 OpenDRIVE   │  │
 │  │          viewer 的渲染代码)                                   │  │
 │  │  - 车辆: glTF 模型 (Blender 导出 Sedan/Truck/SUV, GLTFLoader)│  │
@@ -301,37 +305,54 @@ enum class EntityType : uint8_t {
     StopLine,     // 虚拟停止线
 };
 
+// NPC 统一状态机（替代旧 AIState 枚举）—— 状态转移由 npc_request_state() 仲裁
+// 非 NPC 实体复用：TrafficLight: Cruise=绿灯/Yield=黄灯/Stopped=红灯；
+//                  ETCGate: Stopped=关闭/Yield=抬杆中/Cruise=全开
+enum class NpcState : uint8_t {
+    Cruise     = 0,   // 自由巡航到 target_vx，车道保持
+    Follow     = 1,    // IDM 跟车，车道保持
+    StopForTL  = 2,    // 红绿灯前减速/停车
+    LaneChange = 3,    // MOBIL 自主变道
+    CutIn      = 4,    // 编舞/脚本触发的加塞变道（PID 横向）
+    Stopped    = 5,    // 碰撞冷却/完全停止
+    Yield      = 6,    // 让行减速
+};
+
 struct Entity {
-    bool     active = false;
-    EntityType type = EntityType::None;
+    bool       active{false};
+    EntityType type{EntityType::None};
+    int        id{0};              // 场景里的 actor id（来自 JSON）
 
     // Transform
-    double x = 0, y = 0, heading = 0;
-    double vx = 0, vy = 0;       // 当前速度
-    double target_vx = 0;        // AI 目标速度
+    double x{0}, y{0}, heading{0};
+    double vx{0}, vy{0};
+    double speed{0};               // 标量速度 = √(vx²+vy²)
+    double target_vx{0};           // AI 目标纵向速度
+    double steer{0};               // 方向盘转角 (rad)
+    double throttle{0}, brake{0};  // [0,1]
+    VehicleLights lights;          // 车灯位掩码
 
-    // Vehicle (car/truck/suv only)
-    double length = 4.6, width = 2.0;
-    double wheelbase = 2.7;      // 自行车模型
-    double max_accel = 2.0;      // m/s²
-    double max_brake = 4.0;      // m/s²
+    // Vehicle 参数（Car/SUV/Truck）
+    double length{4.6}, width{2.0};
+    double wheelbase{2.7};
+    double mass{1500.0};           // kg
+    double drag_coeff{0.4};
+    // P2 清理：max_accel 已移除（仅写入无读取者）。max_brake 仍保留用于刹车距离估算
+    double max_brake{4.0};         // m/s²
 
-    // AI state (NPC only, Ego doesn't use this)
-    enum class AIState {
-        Cruise,     // 巡航
-        Follow,     // 跟车
-        Stop,       // 停止
-        StopForTL,  // 红灯停车
-        ETCApproach,// ETC 减速
-        BranchSel,  // 选路
-        Merge,      // 汇入
-        Yield,      // 让行
-    };
-    AIState ai_state = AIState::Cruise;
-    EntityId lead_id = -1;       // 跟车目标
-    int edge_id = -1;            // 所在道路 edge
-    double s = 0, l = 0;        // Frenet 坐标
-    int lane_id = 0;             // 车道 ID
+    // AI 状态（NPC / 场景事件触发器复用）
+    NpcState   state{NpcState::Cruise};
+    EntityId   lead_id{INVALID_ENTITY};
+    double     follow_gap{1e9};    // 当前前车间距 (m)
+    double     crash_cooldown{0};  // 碰撞冷却 (s)
+
+    // 道路坐标（Frenet）
+    int    road_id{0};
+    int    lane_id{0};
+    double s{0};                   // 沿当前 road 的纵向距离
+    double offset{0};              // 相对参考线横向偏移（替代旧名 l）
+    // ...（其余字段：route_s/route_dir/lane_change_timer/cutin_*/ped_*/phase_*/road_pos
+    //      见 entity.h 完整定义）
 };
 ```
 
@@ -401,7 +422,7 @@ class FlowSimNode : public flowcoro::Task {
 
 ```
 每个 NPC tick:
-  1. 更新 Frenet 坐标 (s, l) 从世界坐标反算
+  1. 更新 Frenet 坐标 (s, offset) 从世界坐标反算
   2. 找同车道最近的前车
   3. 检测前方是否为红灯/ETC/分叉/汇入点
   4. 计算 v_desired = min(各限制)
@@ -433,11 +454,11 @@ void check_traffic_light(Entity* npc) {
     for (int i = 0; i < m_entity_count; i++) {
         auto* tl = &m_entities[i];
         if (tl->type != EntityType::TrafficLight) continue;
-        if (tl->edge_id != npc->edge_id) continue;
+        if (tl->road_id != npc->road_id) continue;
         if (tl->s <= npc->s || tl->s > npc->s + 80.0) continue;
-        if (std::abs(tl->l - npc->l) > 2.0) continue;  // 同车道
+        if (std::abs(tl->offset - npc->offset) > 2.0) continue;  // 同车道
 
-        if (tl->ai_state == AIState::Stop) {
+        if (tl->state == NpcState::Stopped) {  // 红灯相位
             // 红灯：目标速度设为 0
             double dist_to_stop = tl->s - npc->s;
             // 减速到刚好在停止线前停住
@@ -486,11 +507,11 @@ void tick_traffic_lights() {
         double T = e.green_s + e.yellow_s + e.red_s;
         double tp = std::fmod(t + e.phase_offset, T);
         if (tp < e.green_s) {
-            e.ai_state = AIState::Cruise;  // 绿灯
+            e.state = NpcState::Cruise;   // 绿灯（TL 复用 Cruise）
         } else if (tp < e.green_s + e.yellow_s) {
-            e.ai_state = AIState::Yield;    // 黄灯
+            e.state = NpcState::Yield;    // 黄灯（TL 复用 Yield）
         } else {
-            e.ai_state = AIState::Stop;     // 红灯
+            e.state = NpcState::Stopped;  // 红灯（TL 复用 Stopped）
         }
     }
 }
@@ -505,13 +526,13 @@ void tick_etc_gates() {
         if (gate.type != EntityType::ETCGate) continue;
         double dist = gate.s - ego->s;
         if (dist < 50.0 && dist > 10.0) {
-            gate.ai_state = AIState::Stop;  // gate closed
+            gate.state = NpcState::Stopped;  // gate closed（ETC 复用 Stopped）
             // ego 的 target_speed 会被 planning_node 限制
         } else if (dist <= 10.0 && dist > 0) {
-            gate.ai_state = AIState::Yield; // opening...
+            gate.state = NpcState::Yield;   // opening...（ETC 复用 Yield）
             gate.vy += 1.0 * 0.05;          // 抬杆动画进度
         } else if (dist <= 0) {
-            gate.ai_state = AIState::Cruise;// passed
+            gate.state = NpcState::Cruise;  // passed（ETC 复用 Cruise）
         }
     }
 }
@@ -688,14 +709,14 @@ tools/
 ├── flowboard/
 │   ├── index.html
 │   ├── app.js                    # 主逻辑
-│   ├── scene3d.js                # 3D 场景（重写）
+│   ├── js/vis/                   # 3D 模块树（main.js + director/ + view/，见 VIS_MODULE_GUIDE.md）
 │   ├── scene2d.js                # 2D 俯视图（升级）
-│   ├── three/                    # Three.js 库 + GLTFLoader
+│   ├── three/                    # Three.js 库 + GLTFLoader（npm 安装，不在仓库）
 │   └── models/                   # glTF 车辆模型
 │
 scripts/
-├── json_to_xodr.py               # 场景 JSON → OpenDRIVE xodr
-├── demo_flowsim.sh               # 启动脚本
+├── json_to_xodr.py               # 场景 JSON → OpenDRIVE xodr（注：实际位于 tools/，非 scripts/）
+├── demo.sh                       # 启动脚本
 │
 third_party/
 └── esmini/                       # git submodule
@@ -714,7 +735,7 @@ third_party/
   "library_path": "libflowsim_node.so",
   "name": "flowsim",
   "params": {
-    "scenario_file": "scenarios/city_to_highway.json",
+    "scenario_file": "scenarios/straight_road.json",
     "enable_3d": true
   }
 }
@@ -729,7 +750,7 @@ third_party/
 | `vehicle/state` topic | 不变，兼容 monitor/flowboard |
 | `road/traffic_lights` topic | 不变 |
 | 场景 JSON 格式 | 扩展 `road_network` 字段，旧 `road` 字段自动转换 |
-| `scene3d.js` | 重写，保持 select 切换 2D/3D 不变 |
+| `scene3d.js`（旧 God Object） | 重构为 `vis/` 模块树（main.js + director/SceneDirector + view/*.js） |
 | `foxglove_bridge.py` | 不变，继续从 vehicle/state 读数据 |
 
 **旧场景兼容：** 不含 `road_network` 字段的场景自动构建为单条直道，NPC 按 `(x, y)` 方式读取，`obey_traffic=0` 退化为原样运动。
@@ -764,7 +785,7 @@ flowsim 已通过 pipeline.json 作为默认仿真节点运行，
 
 ### Phase 4 — 场景落地 🔴 待实施
 
-当前场景 `city_to_highway.json` 是简化版（单条直道+弯道）。
+当前内置场景 `scenarios/straight_road.json` 是简化版（4 车道直路 + 红绿灯）。
 完整 NOA 全链路场景（分叉/汇入/24 NPC）见项目 issue tracker。
 
 ### Phase 5 — 数据流修复 🔴 待实施
@@ -795,7 +816,8 @@ flowsim 已通过 pipeline.json 作为默认仿真节点运行，
 
 ## 十二、已知陷阱与场景设计约束（2026-07 实战总结）
 
-> 本节是 `city_to_highway_full.json` 多 edge + fork junction 场景调试过程中踩过的坑。
+> 本节是多 edge + fork junction 场景调试过程中踩过的坑（早期 `city_to_highway_full.json`
+> 场景已不在仓库中，但经验仍适用于未来的多 road 场景）。
 > 新场景设计者和 pipeline 调参者必读。
 
 ### 12.1 EKF 收敛期与 control_node 初始化的竞态
@@ -860,10 +882,10 @@ road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
 
 **注意：** 场景 JSON 的 `road_network.edges[].lanes` 和 `lane_width` 是 per-edge 的道路几何参数，
 **不影响 evaluator 的路沿判定**。evaluator 只看顶层 `lane` 对象。若场景没有顶层 `lane` 对象
-（如 `city_to_highway_full.json`），则 margin = `3.5 * 2 * 0.5 - |y| - 1.0 = 2.5 - |y|`，
+（如历史 `city_to_highway_full.json`），则 margin = `3.5 * 2 * 0.5 - |y| - 1.0 = 2.5 - |y|`，
 即 |y| > 2.5 时判定路沿偏离。
 
-### 12.6 NPC 17 / NPC 19 修复案例（city_to_highway_full.json）
+### 12.6 NPC 17 / NPC 19 修复案例（历史 city_to_highway_full.json）
 
 | NPC | 原配置 | 问题 | 修复后 |
 |-----|--------|------|--------|

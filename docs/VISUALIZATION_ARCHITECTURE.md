@@ -267,7 +267,7 @@ GET /api/health    → 探活: {status, source, age_sec}
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | type | string | "car"/"truck"/"suv"/"pedestrian"/"traffic_light"/"etc_gate"/"stop_line" |
-| ai_state | string | NPC AI 状态："Cruise"/"Follow"/"CutIn"/"Yield"/"Stop"/"Overtake"/"Parked" |
+| ai_state | string | NPC AI 状态（小写）："cruise"/"follow"/"stop_for_tl"/"lane_change"/"cutin"/"stopped"/"yield"（来源：`scene_pub.cpp::npc_state_str()` 映射 `NpcState` 枚举） |
 | lights | int32 | 车灯位掩码（同 ego） |
 | x, y, heading, speed | float64 | 世界坐标 + 朝向 + 速度 |
 | vx, vy | float64 | 速度分量 |
@@ -398,7 +398,7 @@ function tickAnimation(now) {
 3. **递归 dispose** — 父 dispose 自动递归子层（深度优先，孙先销毁），
    view 若有 `dispose()` 则调，否则退化为 `clear()`。幂等。
 
-SceneDirector 构造时建 4-Layer 树，所有 9 个 View 都挂到对应层：
+SceneDirector 构造时建 4-Layer 树，所有 10 个 View 都挂到对应层：
 
 ```
 root
@@ -671,7 +671,7 @@ HTML inline `onclick` 全部改走 `window.flowboard.X()`，集中式重命名�
 **架构升级 — Layer 对象树 + ViewRegistry 插件化**：
 - 引入 `Layer.js`（Qt 对象树 + 递归 dispose + 错误隔离）
 - SceneDirector 改用 4-Layer 树驱动每帧 update
-- 所有 9 个 View 挂到完整 Layer 树，`dispose()` 递归清理
+- 所有 10 个 View 挂到完整 Layer 树，`dispose()` 递归清理
 - ViewRegistry 管插件注册，新增 View 只需 `register + addView`
 
 **测试覆盖**（6 个测试文件，188 case，CI vis-js-tests job 守护）：

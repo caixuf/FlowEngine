@@ -1,6 +1,9 @@
 # FlowBoard 3D Scene 数据契约
 
-> 本文件是 `metrics.scene`（由 `monitor_node.c` 拼装，供 `tools/flowboard/js/scene3d.js` 消费）的**唯一事实来源**。任何修改 scene schema 的行为都应同步更新本文件，并提升版本号。
+> 本文件是 `metrics.scene`（由 `monitor_node.c` 拼装，供 `tools/flowboard/js/vis/` 模块树消费）的**唯一事实来源**。任何修改 scene schema 的行为都应同步更新本文件，并提升版本号。
+>
+> **历史说明**：旧版引用的 `tools/flowboard/js/scene3d.js` 已被 vis/ 模块树重构取代，
+> 当前 3D 渲染入口是 `vis/main.js`，由 `vis/director/SceneDirector.js` 协调各 View。
 
 ## 1. 版本
 
@@ -9,27 +12,27 @@
 - **变更**:
   - v1.1.0 新增 `entities` 中 `tl`/`etc_gate`/`stop_line` 的 `h`（heading）字段
   - v1.2.0 `trajectory_path` 每点新增可选第 4 元素 `edge_id`；前端实现跨 edge 链式投影，解决弯道投影不准
-  - v2.0.0 **破坏性变更**：移除 `scene.traffic_lights`（ego-relative fallback）字段，红绿灯统一由 `scene.entities` 中的 `tl`（world 坐标）提供。monitor 不再订阅 `road/traffic_lights` 透传到 scene（该 topic 仍由 sim_world 发布，供 planning/inference/recognition 消费）
-- **维护者**: sim-world / perception / flowboard 三端共同维护
+  - v2.0.0 **破坏性变更**：移除 `scene.traffic_lights`（ego-relative fallback）字段，红绿灯统一由 `scene.entities` 中的 `tl`（world 坐标）提供。monitor 不再订阅 `road/traffic_lights` 透传到 scene（该 topic 仍由 flowsim 发布，供 planning/inference/recognition 消费）
+- **维护者**: flowsim / perception / flowboard 三端共同维护
 
 ## 2. 数据链路
 
 ```text
-flowsim_node (sim-world)
+flowsim_node
   └── topic: scene/frame ────────┐
                                  │
 planning_node                    │
-  └── topic: planning/trajectory ┼──► monitor_node ──► /tmp/flow_topology.json ──► flowboard/scene3d.js
+  └── topic: planning/trajectory ┼──► monitor_node ──► /tmp/flow_topology.json ──► flowboard/vis/ 模块树
                                  │      (融合 + 归一化)
-sim_world_node                   │
+flowsim_node                     │
   └── topic: road/geometry ──────┘
 ```
 
-- **sim-world 侧（flowsim_node）**：发布 `scene/frame`，包含 `road_network` + `entities`（红绿灯以 `tl` 实体提供，world 坐标）
+- **flowsim 侧**：发布 `scene/frame`，包含 `road_network` + `entities`（红绿灯以 `tl` 实体提供，world 坐标）
 - **感知/规划侧**：发布 `vehicle/state`、`planning/trajectory` 等
 - **monitor_node**：将多个 topic 融合为 `metrics.scene`，写入状态文件
-- **flowboard/scene3d.js**：仅消费 `metrics.scene`，不反向影响上游
-- **注**：`road/traffic_lights` topic 仍由 sim_world 发布，供 planning/inference/recognition 消费，但不再流入 `metrics.scene`（v2.0.0 移除）
+- **flowboard/vis/**：仅消费 `metrics.scene`，不反向影响上游
+- **注**：`road/traffic_lights` topic 仍由 flowsim 发布，供 planning/inference/recognition 消费，但不再流入 `metrics.scene`（v2.0.0 移除）
 
 ## 3. 坐标系约定
 
@@ -255,11 +258,11 @@ Frenet 坐标数组：`[[s, d, spd], ...]` 或 `[[s, d, spd, edge_id], ...]`（v
 - **向后兼容**：生产者可以增加字段（`additionalProperties: true`），消费者必须忽略未知字段
 - **破坏性变更**：删除字段、修改坐标系、修改字段语义 = 必须提升主版本号（如 1.x → 2.0）
 - **非破坏性变更**：新增字段 = 提升次版本号（如 1.0 → 1.1）
-- **纯渲染改动**：仅修改 `scene3d.js` 的颜色、材质、相机、模型，不触碰 schema = 不提升版本号
+- **纯渲染改动**：仅修改 `vis/view/*.js` 的颜色、材质、相机、模型，不触碰 schema = 不提升版本号
 
 ## 7. 当前已知的待改进项
 
-以下改进需要修改 schema，因此需要 sim-world / planning 配合：
+以下改进需要修改 schema，因此需要 flowsim / planning 配合：
 
 1. **轨迹参考线**：~~`trajectory_path` 未附带所属 `edge_id` 或参考线，弯道处前端投影可能不准~~ v1.2.0 已修复：前端实现跨 edge 链式投影；planning 输出 `edge_id` 待后续重构参考线后启用
 2. **红绿灯来源冗余**：~~`scene.traffic_lights`（ego-relative）与 `scene.entities` 中的 `tl`（world）并存，建议统一为 world 坐标并移除 `scene.traffic_lights`~~ v2.0.0 已修复：移除 `scene.traffic_lights`，红绿灯统一由 `scene.entities` 中的 `tl` 提供
@@ -270,8 +273,8 @@ Frenet 坐标数组：`[[s, d, spd], ...]` 或 `[[s, d, spd, edge_id], ...]`（v
 
 | 改动类型 | 需要修改的模块 | 是否需要更新本契约 |
 |----------|---------------|-------------------|
-| 改颜色/材质/相机/模型 | `scene3d.js` | 否 |
-| 改字段解释方式（不改 schema） | `scene3d.js` | 否 |
-| 新增可选字段 | flowsim / planning / monitor + `scene3d.js` | 是（次版本号） |
-| 修改已有字段语义 | flowsim / planning / monitor + `scene3d.js` | 是（主版本号） |
-| 删除字段 | flowsim / planning / monitor + `scene3d.js` | 是（主版本号） |
+| 改颜色/材质/相机/模型 | `vis/view/*.js` | 否 |
+| 改字段解释方式（不改 schema） | `vis/view/*.js` | 否 |
+| 新增可选字段 | flowsim / planning / monitor + `vis/view/*.js` | 是（次版本号） |
+| 修改已有字段语义 | flowsim / planning / monitor + `vis/view/*.js` | 是（主版本号） |
+| 删除字段 | flowsim / planning / monitor + `vis/view/*.js` | 是（主版本号） |

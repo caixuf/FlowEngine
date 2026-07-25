@@ -40,7 +40,7 @@ bash scripts/demo.sh
 ./build/bin/flow_launcher config/pipeline.json
 ```
 
-内置场景定义见 `scenarios/pedestrian_crossing.json` 和 `scenarios/highway_overtake.json`。
+内置场景定义见 `scenarios/straight_road.json`（4 车道直路：同向慢车 + 对向来车 + 行人 + 红绿灯）。
 
 ## 场景库
 
@@ -114,7 +114,8 @@ open http://localhost:8800
 
 把「场景库 × 评估指标」做成一条命令的批量回归，用于替代实车路测的"验证"职能。
 
-场景清单与回归阈值集中在 `scenarios/suite.json`（加场景只需改这个 JSON，无需改代码）。
+当前只有一个内置场景 `scenarios/straight_road.json`。批量回归套件 `scenarios/suite.json`
+与 `tools/scenario_regression.py` 是规划中的设计，尚未实现。
 
 ```bash
 # 列出套件里将运行的全部场景（不启动 demo）
