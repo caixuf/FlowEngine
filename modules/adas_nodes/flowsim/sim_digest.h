@@ -148,10 +148,6 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
 DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
                                     int frame, bool ego_centered);
 
-/** 将 digest 序列化为 JSON 字符串 */
-std::string digest_to_json(const StaticDigest& d);
-std::string digest_to_json(const DynamicDigest& d);
-
 // ═══════════════════════════════════════════════════════════
 // 单帧 invariant 检查
 // ═══════════════════════════════════════════════════════════

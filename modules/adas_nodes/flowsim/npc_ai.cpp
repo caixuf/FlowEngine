@@ -33,8 +33,12 @@ static bool same_lane(const Entity& a, const Entity& b, const NpcAiConfig& cfg) 
         return a.route_dir == b.route_dir &&
                std::fabs(a.offset - b.offset) < cfg.same_lane_tol;
     }
-    // 旧格式：road_id/lane_id 严格匹配
-    if (a.road_id > 0 && b.road_id > 0 && a.lane_id != 0 && b.lane_id != 0) {
+    // 旧格式：road_id/lane_id 严格匹配。
+    // P2 修复：原 `road_id > 0` 漏掉 road_id == 0 的合法道路（OpenDRIVE 允许
+    // road id 从 0 起，straight_road.json 的 edges[0].id 即为 0；road_network.cpp
+    // 的 world_to_frenet 也以 road_id >= 0 判定合法）。改为 `>= 0` 与
+    // flowsim_node.cpp::spawn_npc / road_network.cpp::world_to_frenet 一致。
+    if (a.road_id >= 0 && b.road_id >= 0 && a.lane_id != 0 && b.lane_id != 0) {
         return a.road_id == b.road_id && a.lane_id == b.lane_id;
     }
     // 更旧：横向距离 < 容差
@@ -273,7 +277,7 @@ static bool boundary_permissive(const Entity& npc, double target_offset,
  * route_s+frenet_to_world。 */
 static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
                         const EntityPool& pool, FlowRoadNetwork* roads,
-                        uint32_t cycle) {
+                        uint32_t cycle, const NpcAiConfig& cfg) {
     const double total = route.total_length();
     // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
     const double back = 50.0 + (double)(npc.id % 5) * 22.0;
@@ -310,12 +314,23 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.speed = 0.0;
     npc.vx = 0.0; npc.vy = 0.0;
     npc.throttle = 0.0; npc.brake = 0.0;
-    npc.state = NpcState::Cruise;
-    npc.lead_id = INVALID_ENTITY;
-    npc.follow_gap = 1e9;
-    npc.crash_cooldown = 0.0;
+    /* P2 修复：状态转移改走统一入口 npc_request_state（与 apply_actor_override
+     * P1.3 修复同模式）。
+     *
+     * 原实现直接 `npc.state = NpcState::Cruise` 绕过状态机，导致 cutin_active
+     * 孤儿——若回收前 NPC 处于 CutIn 状态，cutin_active 保持 true 不被清除
+     * （state==CutIn 时 boundary_permissive 直接放行跨实线变道、MOBIL 跳过
+     * 评估），后续帧逻辑误判。改用 NpcEvent::Recycle 走统一入口：
+     *   - CutIn→Cruise：npc_request_state 内部"离开 CutIn"块清 cutin_active
+     *     + cutin_pid_integral/prev；
+     *   - 任意→Cruise：Recycle 块无条件清 lead_id/follow_gap/lane_change_timer
+     *     /crash_cooldown。
+     * speed/vx/vy/throttle/brake/route_fail_count/target_offset 不在状态机内
+     * 管理，仍手动清零。 */
+    NpcTransitionRequest req;
+    req.event = NpcEvent::Recycle;
+    npc_request_state(npc, req, cfg);
     npc.route_fail_count = 0;
-    npc.lane_change_timer = 0.0;
     npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
 
     /* Phase 2: road_pos 重新 init 到回收点。
@@ -663,7 +678,7 @@ mobil_done: ;
             // 无 route 可 recycle 时（route.build 失败但 roads 加载成功）停车防飞出：
             // advance 失败时 esmini position 停在最后有效点，speed=0 让 NPC 不再尝试推进。
             if (route && route->ok() && npc.route_dir != 0) {
-                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
+                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
             } else {
                 npc.speed = 0.0;
                 npc.vx = 0.0; npc.vy = 0.0;
@@ -725,7 +740,7 @@ mobil_done: ;
                     // 越界 → recycle
                     if ((npc.route_dir > 0 && npc.route_s > route->total_length()) ||
                         (npc.route_dir < 0 && npc.route_s < 0.0)) {
-                        recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
+                        recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
                     }
                 }
             }
@@ -748,7 +763,7 @@ mobil_done: ;
         //   2.12m road departure）。对向车是单次事件（迎面驶过后不再相关），
         //   停用比错误回收更安全。
         if (npc.route_dir > 0 && npc.route_s > route->total_length()) {
-            recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
+            recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
         } else if (npc.route_dir < 0 && npc.route_s < 0.0) {
             npc.active = false;
             return;
@@ -782,7 +797,7 @@ mobil_done: ;
                     npc.active = false;
                     return;
                 }
-                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle);
+                recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
             }
         }
     } else if (roads && roads->loaded()) {
@@ -933,13 +948,19 @@ bool npc_request_state(Entity& npc, const NpcTransitionRequest& req,
             npc.brake = 1.0;
             npc.throttle = 0.0;
         }
-        /* Recycle → 全量重置 */
-        if (req.event == NpcEvent::Recycle) {
-            npc.lead_id = INVALID_ENTITY;
-            npc.follow_gap = 1e9;
-            npc.lane_change_timer = 0.0;
-            npc.crash_cooldown = 0.0;
-        }
+    }
+    /* Recycle → 全量重置（无论状态是否变化）。
+     * P2 修复：原本在 `if (target != old)` 内，导致已处于 Cruise 的 NPC
+     * 回收时 lead_id/follow_gap/lane_change_timer/crash_cooldown 不被清零
+     * （Cruise→Cruise 时 target==old 跳过整块），残留旧值（如已不存在的
+     * lead_id）。移出到状态切换块外，使 Recycle 事件无条件重置这些字段。
+     * cutin_active 不在此清——它只可能在 state==CutIn 时为 true，而
+     * CutIn→Cruise 必有 target!=old，上面的"离开 CutIn"块已覆盖。 */
+    if (req.event == NpcEvent::Recycle) {
+        npc.lead_id = INVALID_ENTITY;
+        npc.follow_gap = 1e9;
+        npc.lane_change_timer = 0.0;
+        npc.crash_cooldown = 0.0;
     }
 
     /* 应用请求覆盖字段（无论是否发生状态切换） */

@@ -1223,8 +1223,6 @@ protected:
              * 时序 invariant 需要连续两帧，从第 2 帧开始。 */
             if (g.cycle % 20 == 0 && g.digest_initialized) {
                 auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true);
-                // 写入 JSON 文件供调试
-                std::string json = flowsim::digest_to_json(dd);
                 // 空间 invariant
                 auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);
