@@ -34,17 +34,33 @@ struct LaneDigest {
 ```cpp
 struct TrafficLightDigest {
     int    id;
-    double heading;
+    double x, y;          // 灯杆世界坐标（ENU）— ASCII 渲染定位
+    double heading;       // 灯杆朝向（rad）— ASCII + invariant 检查
     int    controlled_road_id, controlled_lane_id;
 };
 ```
 
-> **P2 清理**：移除了 `right_boundary_type / speed_limit / s_start / s_end`、
-> `RoadMarkingDigest::road_id / s_start / s_end`、`TrafficLightDigest::x / y / z / phase`、
-> `StaticDigest::height_samples_x/y/z + total_lanes` — 这些字段仅 `build_static_digest`
-> 写入但无任何读取者（包括 invariant 检查、scene_pub、前端）。
+> **P2 清理 + 闭环调试恢复**：`x / y / heading` 曾在 P2 清理时被移除（认为"无
+> 读取者"），但 ASCII 俯视渲染需要位置才能在网格上画灯，导致闭环调试"灯杆落在
+> 路面外/不与车辆重叠"问题无从下手。现已恢复 `x / y / heading`（位置静态，
+> build_static_digest 一次性填）；动态相位走 `DynamicDigest::traffic_light_states`
+> 每帧刷新。仍移除 `z`（灯杆高度，对俯视渲染无意义）和把 `phase` 改名
+> `phase_state` 放到 `TrafficLightStateDigest`，避免静态/动态字段混在一个 struct。
 
-### 1.2 动态演员 digest — `DynamicDigest`
+### 1.2 红绿灯动态相位 — `TrafficLightStateDigest`
+
+每帧由 `build_dynamic_digest` 从 `Entity::phase_state` 提取，与
+`StaticDigest::traffic_lights` 按 id 关联供 `render_ascii_overhead` 画 G/Y/R 字符。
+
+```cpp
+struct TrafficLightStateDigest {
+    int    id;
+    int    phase_state;   // 0=绿 1=黄 2=红（与 Entity::phase_state 一致）
+    double phase_timer;   // 当前相位剩余时间 (s)
+};
+```
+
+### 1.3 动态演员 digest — `DynamicDigest`
 
 每帧构建（digest 块内，每 20 帧 ≈ 1s）。
 
@@ -70,6 +86,7 @@ struct DynamicDigest {
     bool   ego_centered;
     double origin[2];
     std::vector<ActorDigest> actors;
+    std::vector<TrafficLightStateDigest> traffic_light_states;  // 红绿灯相位（每帧）
 };
 ```
 
@@ -139,13 +156,18 @@ struct DynamicDigest {
 每秒覆盖写入 `/tmp/flow_ascii_overhead.txt`。
 
 **渲染规则**：
-- 等比缩放保持纵横比，沿车道中心线扫描极值 + 20m 留白
+- 等比缩放保持纵横比，沿车道中心线 + 红绿灯位置扫描极值 + 20m 留白
+  （灯杆落在路面外侧 7m+，不纳入扫描会被裁出画面）
 - 车道线：`-` 普通车道，`#` 双黄线
+- 红绿灯：`G` 绿 `Y` 黄 `R` 红（位置取 `sd.traffic_lights[i].(x,y)`，
+  相位取 `dd.traffic_light_states` 按 id 关联）
 - 演员标记：
   - `E` = ego
   - `*` = pedestrian
   - `> < ^ v` = 车辆朝向（cos/sin > 0.7 主方向）
   - `7 L J \` = 对角朝向
+- 绘制顺序：车道线 → 红绿灯 → 演员（车辆字符会覆盖同格灯字符，看到 `E`/`C`
+  覆盖 `G/Y/R` 即说明灯杆落在路面内与车重叠，是闭环调试要抓的 bug）
 - Unicode 边框 `┌─┐│└─┘` + 图例 + frame/time 信息
 
 **示例输出**（`straight_road.json` frame 80, time 3.95s）：
@@ -155,12 +177,14 @@ struct DynamicDigest {
 │                                                                                │
 │ ...                                                                             │
 └──────────────────────────────────────────────────────────────────────────────┘
-E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄
+E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄 G/Y/R=灯(绿黄红)
 frame:80 time:3.950000
 ```
 
-> 历史说明：原实现还画了红绿灯 RYG 标记，但 P2 清理移除了 `TrafficLightDigest::x/y/phase`
-> 字段，红绿灯绘制块相应删除。主用途（看车辆/车道布局）不受影响。
+> **闭环调试恢复**：原 P2 清理移除了红绿灯 RYG 标记（连带 `TrafficLightDigest::x/y/phase`
+> 字段），导致"灯杆落在路面内与车重叠"问题在 ASCII 视图里看不到。现已恢复
+> （`x/y/heading` 回到 `TrafficLightDigest`，相位走 `TrafficLightStateDigest`），
+> 可直接 `cat /tmp/flow_ascii_overhead.txt` 看灯杆与车辆相对位置。
 
 ### 3.2 查看方式
 

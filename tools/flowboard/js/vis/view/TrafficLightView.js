@@ -85,13 +85,40 @@ export function createTrafficLightView(scene) {
         const tls = edge.traffic_lights || [];
         for (let i = 0; i < tls.length; i++) {
           const tl = tls[i];
-          const pt = getEdgePointAtS(edge.nodes, tl.s || 0, edge.length || 1);
+          /* getEdgePointAtS 返回 THREE 坐标 (x=ENU_x, y=elevation, z=-ENU_y)，
+           * 但 entity 需要的是 ENU 坐标。直接从 nodes 算 ENU 位置 + 切线方向，
+           * 再把 tl.l 作为横向偏移沿法线方向叠加，并推算垂直于道路的 heading。
+           * 之前把 tl.l 当 ENU y、pt.z 当 elevation 是双重错位，导致灯杆
+           * 落到错误世界坐标 + roadHeightAt 查询错位置返回 0 高度。 */
+          const nodes = edge.nodes;
+          const s = tl.s || 0;
+          const edgeLen = edge.length || 1;
+          const t = Math.max(0, Math.min(1, s / edgeLen));
+          let enuX = 0, enuY = 0, tangentH = 0;
+          if (nodes && nodes.length >= 2) {
+            const a = nodes[0], b = nodes[nodes.length - 1];
+            enuX = a[0] + (b[0] - a[0]) * t;
+            enuY = a[1] + (b[1] - a[1]) * t;
+            tangentH = Math.atan2(b[1] - a[1], b[0] - a[0]);
+          }
+          /* tl.l 是横向偏移：正值=法线左侧（北侧），负值=右侧（南侧）。
+           * 法线方向 = 切线左侧 90° = (cos(h+π/2), sin(h+π/2)) = (-sin h, cos h)。 */
+          const lateral = tl.l || 0;
+          const nx = -Math.sin(tangentH);
+          const ny = Math.cos(tangentH);
+          const px = enuX + nx * lateral;
+          const py = enuY + ny * lateral;
+          /* 灯杆臂应指向道路中心 = 横向偏移的反方向。
+           * 北侧杆 (lateral>0)：臂朝南 = tangentH - π/2
+           * 南侧杆 (lateral<0)：臂朝北 = tangentH + π/2 */
+          const sign = (lateral >= 0) ? 1.0 : -1.0;
+          const armHeading = tangentH + (sign > 0 ? -Math.PI / 2 : Math.PI / 2);
           all.push({
             id: `tl_${edge.id}_${i}`,
             type: 'tl',
-            x: pt ? pt.x : 0,
-            y: tl.l || 0,
-            z: pt ? pt.z : 0,
+            x: px,
+            y: py,
+            heading: armHeading,
             state: tl.state || 'red',
           });
         }

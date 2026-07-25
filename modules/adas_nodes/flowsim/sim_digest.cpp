@@ -104,6 +104,8 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
         if (!e.active || e.type != EntityType::TrafficLight) continue;
         TrafficLightDigest tl;
         tl.id = e.id;
+        tl.x = e.x;                  /* 灯杆世界坐标（ENU）— ASCII 渲染定位 */
+        tl.y = e.y;
         tl.heading = e.heading;
         tl.controlled_road_id = e.road_id;
         tl.controlled_lane_id = e.lane_id;
@@ -169,6 +171,19 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.route_dir = e.route_dir;
         ad.last_teleport_cycle = e.last_teleport_cycle;
         dd.actors.push_back(ad);
+    }
+
+    /* 红绿灯相位（每帧）：与 StaticDigest::traffic_lights 按 id 关联。
+     * render_ascii_overhead 用此画 G/Y/R 字符。entity_type_to_digest 把
+     * TrafficLight 映射为 -1（不进 actors 列表），故相位走单独通道。 */
+    for (int i = 0; i < pool.size(); ++i) {
+        const Entity& e = pool[i];
+        if (!e.active || e.type != EntityType::TrafficLight) continue;
+        TrafficLightStateDigest s;
+        s.id = e.id;
+        s.phase_state = e.phase_state;
+        s.phase_timer = e.phase_timer;
+        dd.traffic_light_states.push_back(s);
     }
     return dd;
 }
@@ -678,6 +693,15 @@ std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& d
             if (cy > max_y) max_y = cy;
         }
     }
+    /* 红绿灯位置也纳入极值扫描——否则 4 车道场景灯杆落在 road_half_width 外侧
+     * （7m 半宽 × 2 = 14m，再加臂 4m ≈ 18m 外），靠车道中线极值会被裁出画面，
+     * 闭环调试看不到灯杆和车辆的相对位置关系。 */
+    for (const auto& tl : sd.traffic_lights) {
+        if (tl.x < min_x) min_x = tl.x;
+        if (tl.x > max_x) max_x = tl.x;
+        if (tl.y < min_y) min_y = tl.y;
+        if (tl.y > max_y) max_y = tl.y;
+    }
     // 扩展边界留白
     double margin = 20;
     min_x -= margin; max_x += margin;
@@ -709,6 +733,23 @@ std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& d
             if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
                 grid[gy][gx] = (l.left_boundary_type == 2) ? '#' : '-';
             }
+        }
+    }
+
+    // 绘制红绿灯（位置取自 sd.traffic_lights，相位取自 dd.traffic_light_states 按 id 关联）
+    /* 顺序：先画灯（再画车辆），车辆若与灯同格会被车辆字符覆盖——这正是闭环
+     * 调试要抓的 bug：灯杆落在路面内 = 与车重叠。看到车辆字符覆盖灯字符即报警。 */
+    for (const auto& tl : sd.traffic_lights) {
+        int gx, gy;
+        to_grid(tl.x, tl.y, gx, gy);
+        if (gx >= 0 && gx < width_chars && gy >= 0 && gy < height_chars) {
+            // 查 id 对应的当前相位
+            int phase = 0;  // 默认绿（找不到状态记录时）
+            for (const auto& s : dd.traffic_light_states) {
+                if (s.id == tl.id) { phase = s.phase_state; break; }
+            }
+            char c = (phase == 2) ? 'R' : (phase == 1) ? 'Y' : 'G';
+            grid[gy][gx] = c;
         }
     }
 
@@ -745,7 +786,7 @@ std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& d
     out += "└";
     for (int i = 0; i < width_chars - 2; ++i) out += "─";
     out += "┘\n";
-    out += "E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄\n";
+    out += "E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄 G/Y/R=灯(绿黄红)\n";
     out += "frame:" + std::to_string(dd.frame) + " time:" + std::to_string(dd.sim_time) + "\n";
     return out;
 }

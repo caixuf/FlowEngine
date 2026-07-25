@@ -241,6 +241,13 @@ ScenarioConfig* scenario_load(const char* path) {
                     }
                     strncpy(sc->road.type, etype, sizeof(sc->road.type) - 1);
                 }
+                /* 提取 lanes / lane_width 供 flowsim 非 esmini 路径算 road_half_width，
+                 * 避免 road_half_width 硬编码 3.5 导致 4 车道场景灯杆落在路面内
+                 * （与车辆位置重叠）。未配置时保持 0，消费方 fallback 到 2 车道 / 3.5m。 */
+                cJSON* jlanes = cJSON_GetObjectItemCaseSensitive(jedge0, "lanes");
+                if (cJSON_IsNumber(jlanes)) sc->road.lanes = (int)jlanes->valuedouble;
+                cJSON* jlwid = cJSON_GetObjectItemCaseSensitive(jedge0, "lane_width");
+                if (cJSON_IsNumber(jlwid)) sc->road.lane_width = jlwid->valuedouble;
             }
         }
     }
@@ -555,6 +562,10 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
     cJSON_AddNumberToObject(jroad, "curve_start_x",  scenario->road.curve_start_x);
     cJSON_AddNumberToObject(jroad, "curve_length_m", scenario->road.curve_length_m);
     cJSON_AddNumberToObject(jroad, "curve_offset_m", scenario->road.curve_offset_m);
+    if (scenario->road.lanes > 0)
+        cJSON_AddNumberToObject(jroad, "lanes", scenario->road.lanes);
+    if (scenario->road.lane_width > 0.0)
+        cJSON_AddNumberToObject(jroad, "lane_width", scenario->road.lane_width);
     cJSON_AddItemToObject(root, "road", jroad);
 
     /* traffic_lights */
