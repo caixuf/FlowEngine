@@ -10,22 +10,10 @@
  *   - SyncedFrame：多传感器时间对齐后的同步帧
  *   - FusionPolicy：融合策略（最新值/时间对齐/加权平均/卡尔曼槽位）
  *   - FusionNode：C API 融合节点
- *   - FusionNodeCpp：C++ 协程基类（继承 CoroutineTask）
  *
- * 典型用法（C++）：
- *   class MyFusion : public FusionNodeCpp {
- *       MyFusion(MessageBus* bus) : FusionNodeCpp(bus) {
- *           AddSensorInput("sensor/lidar", LIDARFRAME_TYPE_ID, 32);
- *           AddSensorInput("sensor/gps", GPSDATA_TYPE_ID, 16);
- *           SetOutputTopic("fusion/localization", FUSEDLOC_TYPE_ID);
- *       }
- *       Message Fuse(const SyncedFrame& f) override {
- *           auto* lidar = msg_cast<LidarFrame>(&f.inputs[0]);
- *           auto* gps   = msg_cast<GpsData>(&f.inputs[1]);
- *           // ... fuse ...
- *           return fused_msg;
- *       }
- *   };
+ * 新代码请使用 FlowCoroTask 协程范式（见 modules/adas_nodes/fusion_node.cpp），
+ * 直接订阅 sensor/ 系列话题并调用 message_buffer_ / ekf_fusion_ 系列函数即可，
+ * 无需继承 FusionNodeCpp 基类（已移除）。
  */
 
 #include "message_bus.h"
@@ -164,55 +152,5 @@ void fusion_node_destroy(FusionNode* fn);
 #ifdef __cplusplus
 }
 #endif
-
-/* ══════════════════════════════════════════════════════════ */
-/* FusionNodeCpp — C++ 协程基类                               */
-/* ══════════════════════════════════════════════════════════ */
-
-#ifdef __cplusplus
-
-#include "coroutine_task.h"
-#include <memory>
-#include <vector>
-#include <string>
-
-/**
- * FusionNodeCpp — 基于协程的融合节点基类。
- *
- * 继承 CoroutineTask，可通过 EXPORT_COROUTINE_TASK 导出为 .so 插件。
- * 用户只需继承并实现 Fuse() 方法。
- */
-class FusionNodeCpp : public CoroutineTask {
-public:
-    FusionNodeCpp(MessageBus* bus,
-                  const FusionPolicy& policy = FUSION_POLICY_TIME_ALIGNED);
-    virtual ~FusionNodeCpp();
-
-    /** 注册传感器输入 */
-    void AddSensorInput(const std::string& topic, uint32_t type_id,
-                        uint32_t buffer_capacity = 64);
-
-    /** 设置融合结果输出 topic */
-    void SetOutputTopic(const std::string& topic, uint32_t type_id);
-
-    /**
-     * 融合逻辑 — 子类重写。
-     * @param frame 时间对齐后的同步帧
-     * @return 融合后的 Message（通过 bus publish 到 output topic）
-     */
-    virtual Message Fuse(const SyncedFrame& frame) = 0;
-
-    /** 协程入口：等待对齐帧 -> Fuse() -> publish */
-    Task run() override;
-
-    /** 启动融合（内部调用 execute） */
-    void Start();
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
-#endif /* __cplusplus */
 
 #endif /* FUSION_H */

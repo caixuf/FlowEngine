@@ -126,7 +126,7 @@ class MyFusion : public FlowCoroTask {
 static void on_lidar(const Message* m, void*) { message_buffer_push(g.lidar_buf, m); }
 ```
 
-> 注：core/fusion.c 的 FusionNode C API / FusionNodeCpp 为历史 API，新代码请用上述 FlowCoroTask 范式。
+> 注：core/fusion.c 的 FusionNode C API 为历史 API，新代码请用上述 FlowCoroTask 范式（FusionNodeCpp C++ 基类已移除）。
 
 ## Logger
 

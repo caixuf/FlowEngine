@@ -403,7 +403,7 @@ endif() # FLOWENGINE_HAVE_EIGEN
 # =============================================================================
 
 # ── Phase 2: C++ 调度器 (M:N coroutine scheduling) ────────
-add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/fusion_cpp.cpp src/cpp/network_transport.cpp)
+add_library(scheduler_cpp STATIC src/cpp/scheduler_cpp.cpp src/cpp/network_transport.cpp)
 target_link_libraries(scheduler_cpp flowengine_core flowcoro_headers)
 target_include_directories(scheduler_cpp PUBLIC ${GEN_DIR})
 target_compile_options(scheduler_cpp PRIVATE

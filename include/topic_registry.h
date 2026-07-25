@@ -86,54 +86,57 @@
  *
  * 每个 topic 记录其 producer(s) 和 consumer(s)。
  * 这里的注释作为文档，CI 可以自动解析验证。
+ * 默认拓扑以 config/pipeline.json 为准（仿真闭环），其它驱动/感知
+ * 子节点（如 lidar_driver_node、stereo_vision_node、scene_assembler_node）
+ * 仅在对应 config/pipeline_*.json 中启用。
  *
  * TOPIC_SENSOR_LIDAR:
- *   PRODUCERS: sensor_model_node, lidar_driver_node
- *   CONSUMERS: slam_node, perception_node, fusion_node
+ *   PRODUCERS: sensor_model_node [pipeline], lidar_driver_node [drivers]
+ *   CONSUMERS: perception_node, fusion_node [pipeline]; slam_node [drivers]
  *
  * TOPIC_SENSOR_IMU:
- *   PRODUCERS: imu_driver_node
- *   CONSUMERS: slam_node
+ *   PRODUCERS: imu_driver_node [drivers]
+ *   CONSUMERS: slam_node [drivers]
  *
  * TOPIC_SENSOR_POSE:
- *   PRODUCERS: slam_node
- *   CONSUMERS: fusion_node, planning_node
+ *   PRODUCERS: slam_node [drivers]
+ *   CONSUMERS: fusion_node [drivers]
  *
  * TOPIC_SENSOR_GPS:
- *   PRODUCERS: sensor_model_node, gps_driver_node
+ *   PRODUCERS: sensor_model_node [pipeline], gps_driver_node [drivers]
  *   CONSUMERS: fusion_node
  *
  * TOPIC_SENSOR_CAMERA:
- *   PRODUCERS: sensor_model_node
- *   CONSUMERS: (none yet)
+ *   PRODUCERS: sensor_model_node [pipeline]
+ *   CONSUMERS: (none in default pipeline — consumed by perception_fusion_node in pipeline_scene.json)
  *
  * TOPIC_SENSOR_STEREO:
  *   PRODUCERS: stereo_camera_node
  *   CONSUMERS: stereo_vision_node
  *
  * TOPIC_PERCEPTION_OBSTACLES:
- *   PRODUCERS: perception_fusion_node, stereo_vision_node, lidar_driver_node
- *   CONSUMERS: monitor_node, object_tracker_node
+ *   PRODUCERS: perception_node [pipeline]; perception_fusion_node, stereo_vision_node [alt pipelines]
+ *   CONSUMERS: planning_node, safety_control_node, inference_node, data_recorder_node, learner_node, monitor_node [pipeline]; object_tracker_node [alt]
  *
  * TOPIC_PERCEPTION_TRACKED_OBJECTS:
- *   PRODUCERS: object_tracker_node
- *   CONSUMERS: scene_assembler_node
+ *   PRODUCERS: object_tracker_node [alt]
+ *   CONSUMERS: scene_assembler_node [alt]
  *
  * TOPIC_PERCEPTION_LANES:
- *   PRODUCERS: lane_detection_node
- *   CONSUMERS: scene_assembler_node
+ *   PRODUCERS: lane_detection_node [alt]
+ *   CONSUMERS: scene_assembler_node [alt]
  *
  * TOPIC_PERCEPTION_TRAFFIC_LIGHTS:
- *   PRODUCERS: traffic_light_recognition_node
- *   CONSUMERS: scene_assembler_node
+ *   PRODUCERS: traffic_light_recognition_node [alt]
+ *   CONSUMERS: scene_assembler_node [alt]
  *
  * TOPIC_PERCEPTION_TRAVERSABILITY:
- *   PRODUCERS: traversability_node
- *   CONSUMERS: scene_assembler_node
+ *   PRODUCERS: traversability_node [alt]
+ *   CONSUMERS: scene_assembler_node [alt]
  *
  * TOPIC_FUSION_LOCALIZATION:
  *   PRODUCERS: fusion_node
- *   CONSUMERS: control_node, scene_assembler_node
+ *   CONSUMERS: planning_node, control_node, safety_control_node, inference_node, data_recorder_node, learner_node, model_ota_node [pipeline]
  *
  * TOPIC_FUSION_LATENCY:
  *   PRODUCERS: fusion_node
@@ -141,27 +144,27 @@
  *
  * TOPIC_PLANNING_TRAJECTORY:
  *   PRODUCERS: planning_node
- *   CONSUMERS: control_node, monitor_node
+ *   CONSUMERS: control_node, inference_node, data_recorder_node, learner_node, monitor_node
  *
  * TOPIC_CONTROL_CMD:
- *   PRODUCERS: planning_node
- *   CONSUMERS: actuator_node, flowsim_node
+ *   PRODUCERS: safety_control_node [pipeline] (闭环最终输出，限幅后)
+ *   CONSUMERS: flowsim_node, inference_node, data_recorder_node, learner_node [pipeline]; actuator_node [real vehicle]
  *
  * TOPIC_CONTROL_RAW_CMD:
  *   PRODUCERS: control_node
- *   CONSUMERS: (none yet — via IPC bridge)
+ *   CONSUMERS: safety_control_node [pipeline] (订阅关系在代码内建立，未在 pipeline.json 显式声明)
  *
  * TOPIC_VEHICLE_STATE:
  *   PRODUCERS: flowsim_node
- *   CONSUMERS: control_node, sensor_model_node, monitor_node
+ *   CONSUMERS: sensor_model_node, perception_node, control_node, monitor_node
  *
  * TOPIC_PREDICTION_TRACKS:
- *   PRODUCERS: prediction_node
- *   CONSUMERS: scene_assembler_node
+ *   PRODUCERS: prediction_node [alt]
+ *   CONSUMERS: scene_assembler_node [alt]
  *
  * TOPIC_ROAD_GEOMETRY:
  *   PRODUCERS: flowsim_node
- *   CONSUMERS: control_node, monitor_node, scene_assembler_node
+ *   CONSUMERS: planning_node, control_node, monitor_node
  *
  * TOPIC_ROAD_REF_PATH:
  *   PRODUCERS: flowsim_node
@@ -169,7 +172,7 @@
  *
  * TOPIC_ROAD_TRAFFIC_LIGHTS:
  *   PRODUCERS: flowsim_node
- *   CONSUMERS: planning_node, traffic_light_recognition_node
+ *   CONSUMERS: planning_node
  *
  * TOPIC_SIM_TICK:
  *   PRODUCERS: flowsim_node
@@ -177,11 +180,11 @@
  *
  * TOPIC_SIM_COLLISION:
  *   PRODUCERS: flowsim_node
- *   CONSUMERS: (none — internal)
+ *   CONSUMERS: (none — internal; monitor 通过日志正则读取)
  *
  * TOPIC_SCENE_FRAME:
  *   PRODUCERS: flowsim_node
- *   CONSUMERS: control_node
+ *   CONSUMERS: planning_node, control_node, monitor_node
  *
  * TOPIC_FLOWENGINE_NODE_INFO:
  *   PRODUCERS: all nodes (via node_announce_self)

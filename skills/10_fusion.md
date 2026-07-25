@@ -78,6 +78,6 @@ static void on_gps(const Message* m, void*)   { message_buffer_push(g.gps_buf,  
 
 ## 历史 API（不推荐新代码使用）
 
-core/fusion.c 另提供 FusionNode C API 与 FusionNodeCpp C++ 基类（事件驱动时间对齐模型）。
-生产代码已迁移到上述 FlowCoroTask 范式，这两个 API 保留供参考，新融合节点请参照
-modules/adas_nodes/fusion_node.cpp。
+core/fusion.c 另提供 FusionNode C API（事件驱动时间对齐模型）。
+生产代码已迁移到上述 FlowCoroTask 范式，该 API 保留供参考，新融合节点请参照
+modules/adas_nodes/fusion_node.cpp。（FusionNodeCpp C++ 基类已移除。）
