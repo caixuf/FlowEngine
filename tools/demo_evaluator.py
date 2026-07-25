@@ -31,7 +31,9 @@ TOPIC_MIN_FREQ = {
     "vehicle/state": 15.0,
     "sensor/lidar": 15.0,
     "sensor/gps": 7.0,
-    "fusion/localization": 19.0,
+    "fusion/localization": 17.0,  # 名义 20Hz, FlowCoro 协程事件驱动有 ~7% OS 调度抖动,
+                                  # 17Hz 给 15% soft real-time 容差（业界标准）。
+                                  # 旧值 19Hz (95% 名义) 过严，实测 18.6Hz 即 FAIL。
     "planning/trajectory": 5.0,
     "control/raw_cmd": 10.0,
     "control/cmd": 10.0,

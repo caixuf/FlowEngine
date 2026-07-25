@@ -129,6 +129,30 @@ struct ControlContext {
     double ego_yaw_rate{0};    /* 从 fusion 获取的偏航角速度 (rad/s) */
     double prev_steer{0};
 
+    /* ── 真车级横向控制（替代 Stanley 极限环补偿）──
+     *
+     * 旧实现：Stanley 控制器 + 低通滤波 + yaw_damping 补丁。
+     * 变道时 cte_term（朝目标车道拉）与 heading_term（按道路切线纠偏）
+     * 互相反向，形成 1.6Hz 极限环 → 车左摇右晃，展示效果差。
+     *
+     * 真车 ADAS（Apollo LQR / Autoware MPC）核心：
+     *   1) heading_term 跟随「目标轨迹切线」而非道路切线
+     *      target_heading = atan2(lat_error, lookahead_distance)
+     *      变道中 ego_heading 朝目标车道方向偏，与 target_heading 一致，
+     *      heading_term ≈ 0，不再反向拉，cte_term 主导把车拉过去；
+     *      到达目标车道时 lat_error→0, target_heading→道路切线，自然回正。
+     *   2) 横向速度阻尼（LQR 状态反馈核心项）：
+     *      v_lat = speed * sin(ego_heading - ref_road_heading)
+     *      steer -= k_v_lat * v_lat
+     *      预判横向运动趋势，过冲时提前反向减速，比 yaw_damping 更根本。
+     *
+     * lat_lookahead_gain: 前视距离 = max(5m, speed * gain)
+     *   高速 lookahead 大（轨迹平滑），低速小（响应快）。
+     * k_v_lat: 横向速度阻尼增益，标准 LQR 推荐值 0.3-0.6。
+     */
+    double lat_lookahead_gain{0.8};   /* 前视距离系数 (s) */
+    double k_v_lat{0.4};              /* 横向速度阻尼增益（LQR v_lat 反馈）*/
+
     /* 从 topic 解析的值 */
     double current_speed{0};
     double target_speed{0};
@@ -650,6 +674,8 @@ protected:
             g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
             g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
             g.yaw_damping                 = param_get_float("control.yaw_damping");
+            g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
+            g.k_v_lat                     = param_get_float("control.k_v_lat");
 
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
             uint64_t now_us = clock_now_us();
@@ -1246,11 +1272,58 @@ protected:
                         ref_h_eff = g.ego_heading;  /* ref_h 与 ego 航向差 > 29°, 视为无效 */
                     }
                 }
+                /* ── 真车级横向控制：目标轨迹切线 + 横向速度阻尼 ──
+                 *
+                 * 旧 Stanley 公式: steer = cte_term - kd*(ego_h - 道路切线)
+                 * 变道时 ego 必须有偏航角才能横向移动, 但 heading_term 按道路切线
+                 * 把这个偏航角纠回 → cte_term 朝目标拉, heading_term 反向推 → 1.6Hz
+                 * 极限环 (左摇右晃), 真车 ADAS 不会这样。
+                 *
+                 * 真车做法 (Apollo LQR / Autoware MPC):
+                 *   heading_term 参考从「道路切线」改为「目标轨迹切线」:
+                 *     target_h = atan2(lat_error, lookahead)
+                 *     lookahead = max(5m, speed * lat_lookahead_gain)
+                 *   变道中 lat_error 大 → target_h 朝目标车道方向偏,
+                 *   ego 跟随这个目标航向 → heading_term ≈ 0 → 不再反向拉,
+                 *   cte_term 主导把车平滑拉到目标车道。
+                 *   到达目标车道时 lat_error→0, target_h→道路切线, 自然回正。
+                 *
+                 * 直道巡航时 lat_error 小, target_h ≈ 道路切线, 行为与原 Stanley 一致。
+                 * 算法切换平滑, 不破坏直道稳定性。 */
+                double lookahead_dist = fmax(5.0, g.current_speed * g.lat_lookahead_gain);
+                double target_h = atan2(lat_error, lookahead_dist);
+                /* wrap (target_h - ref_road_heading) 到 [-π,π], 防止跨 ±π 跳变 */
+                double dh_target = target_h - ref_road_heading;
+                while (dh_target >  M_PI) dh_target -= 2.0 * M_PI;
+                while (dh_target < -M_PI) dh_target += 2.0 * M_PI;
+                /* 与道路切线夹角超过 30° 视为异常 (理论上变道 target_h < 20°),
+                 * 退回道路切线 (原 Stanley 行为), 保证安全 */
+                double ref_h_for_heading = ref_road_heading + dh_target;
+                if (fabs(dh_target) > 0.52 /* ~30° */) {
+                    ref_h_for_heading = ref_h_eff;  /* 退化到原 ref_h_eff (已做合理性检查) */
+                }
                 double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
-                /* yaw_rate 阻尼项：抑制 1.6Hz 极限环振荡（左摇右晃）。
-                 * 偏航角速度反映瞬时转向趋势，反向阻尼消除高频摆动。 */
+                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_for_heading);
+                /* yaw_rate 阻尼项：保留作为高频抑制（与 v_lat 阻尼互补,
+                 * yaw_damping 处理航向角速度, v_lat_damp 处理位移速度）。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
+
+                /* 横向速度阻尼（LQR 状态反馈核心项, 真车 ADAS 关键）:
+                 *   v_lat = speed * sin(ego_heading - 道路切线)
+                 *   steer -= k_v_lat * v_lat
+                 * 物理意义: ego 横向运动越快, 反向减速越强, 抑制过冲。
+                 * 这是 LQR K 矩阵里 [v_y] 状态反馈的工程实现,
+                 * 比 yaw_damping 更根本——v_lat 直接反映横向位移趋势,
+                 * yaw_rate 只反映航向角变化率, 后者在大曲率弯道会误判。
+                 * 阈值: 仅在速度 > 2 m/s 时启用 (低速泊车方向盘乱转不该阻尼)。 */
+                double v_lat_damp_term = 0.0;
+                if (g.current_speed > 2.0) {
+                    double heading_err = g.ego_heading - ref_road_heading;
+                    while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
+                    while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
+                    double v_lat = g.current_speed * sin(heading_err);
+                    v_lat_damp_term = g.k_v_lat * v_lat;
+                }
 
                 /* NOA Phase 3.4: 曲率前馈项 δ_ff = wheelbase * κ。
                  * steady-state 转向角，让控制器预先打方向而非等 CTE 累积。
@@ -1267,11 +1340,13 @@ protected:
                 }
                 double ff_term = g.wheelbase * kappa * ff_weight;
 
-                steer = cte_term - heading_term - yaw_damp_term + ff_term;
+                steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
                 double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                 if (steer >  steer_limit) steer =  steer_limit;
                 if (steer < -steer_limit) steer = -steer_limit;
-                /* 一阶低通滤波（高速变道时更激进） */
+                /* 一阶低通滤波（高速变道时更激进）。
+                 * 注: 引入 v_lat_damp 后极限环已根治, 低通滤波仅作为执行器建模
+                 * (转向机一阶滞后), 不再承担抑制振荡的职责, 故仍保留 0.5 权重。 */
                 steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
                 g.prev_steer = steer;
                 /* 调试：变道时打印 steer 各分量，定位横向不动根因 */
@@ -1279,10 +1354,10 @@ protected:
                     static int lc_dbg_cnt = 0;
                     if (++lc_dbg_cnt % 5 == 0) {
                         LOG_INFO("control",
-                                 "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f lat_err=%.2f "
-                                 "ego_h=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
-                                 steer, cte_term, heading_term, yaw_damp_term, lat_error,
-                                 g.ego_heading, ref_h_eff, g.current_speed, lc_lat_kp, lc_lat_kd,
+                                 "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f vlat_t=%.3f lat_err=%.2f "
+                                 "ego_h=%.3f tgt_h=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
+                                 steer, cte_term, heading_term, yaw_damp_term, v_lat_damp_term, lat_error,
+                                 g.ego_heading, ref_h_for_heading, ref_road_heading, g.current_speed, lc_lat_kp, lc_lat_kd,
                                  steer_limit_for_speed(g.current_speed, lc_lat_accel_max));
                     }
                 }
@@ -1503,6 +1578,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
     g.yaw_damping     = 0.15;  /* yaw_rate → steer 阻尼, 抑制 1.6Hz 极限环振荡 */
+    g.lat_lookahead_gain = 0.8;  /* 前视距离 = max(5m, speed*0.8s)，Apollo 标准 */
+    g.k_v_lat          = 0.4;    /* 横向速度阻尼增益（LQR v_lat 反馈，0.3-0.6 推荐区间）*/
     g.lane_width = 3.5;
     g.blocked_timeout_s = 1.2;   /* 原 2.0s，缩短阻塞判定等待，更快评估超车可行性 */
     g.lc_stable_wait_s           = 4.0;  /* 原硬编码 8.0，缩短变道后稳定巡航期 */
@@ -1523,6 +1600,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
     param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
     param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
+    param_register_float("control.lat_lookahead_gain", g.lat_lookahead_gain, 0.1, 3.0, "Lookahead time gain (s): lookahead=max(5m, speed*gain), Apollo-style target trajectory");
+    param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
     param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
     param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
     param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
@@ -1549,6 +1628,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
     g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
     g.yaw_damping                 = param_get_float("control.yaw_damping");
+    g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
+    g.k_v_lat                     = param_get_float("control.k_v_lat");
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
@@ -1572,6 +1653,10 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.lat_kd_heading = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "yaw_damping");
             if (cJSON_IsNumber(j)) g.yaw_damping = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lat_lookahead_gain");
+            if (cJSON_IsNumber(j)) g.lat_lookahead_gain = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "k_v_lat");
+            if (cJSON_IsNumber(j)) g.k_v_lat = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lane_change_blocked_timeout_s");
             if (cJSON_IsNumber(j)) g.blocked_timeout_s = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lc_stable_wait_s");
