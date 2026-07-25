@@ -165,6 +165,74 @@ function _applyCarPaintToScene(gltfScene, envMap) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// 方向盘程序化注入
+// ═══════════════════════════════════════════════════════════
+
+/* glTF 模型（sedan/suv/truck/su7）均无 "steering"/"steer"/"handle" 命名节点，
+ * 原 _updateGltfVehicle 第 297-300 行的方向盘旋转分支是死代码，
+ * 用户因此看不到方向盘转动。这里程序化注入一个名为 "steering_wheel" 的
+ * torus mesh，挂载到车辆根 group 上，配合下方的乘子修复让方向盘可见转动。
+ *
+ * 几何：TorusGeometry 默认在 XY 平面、法线沿 Z。我们用嵌套 Group 把 column
+ * 从默认 +Z 转到 (-X, +Y, 0)（驾驶员胸口方向，向后上方 ~25°）。
+ *   pos Group：定位到驾驶位（x=0.5 副车前, y=1.0 胸高, z=0.4 左侧 LHD）
+ *   yaw Group：rotation.y = -π/2 让 column 从 +Z 转到 -X
+ *   tilt Group：rotation.x = +0.45 让 column 顶部向后上方抬起 ~25°
+ *   torus mesh（name="steering_wheel"）：local Z = column 轴
+ *
+ * 旋转方向约定：control_node 发布的 steer > 0 = 向右转（车辆右转），
+ * 方向盘视觉上应顺时针旋转（从驾驶员视角）。THREE.js rotation.z 正向
+ * 是逆时针，所以取 steer * -10 让正 steer → 顺时针，符合直觉。
+ *
+ * 乘子 10：典型 steer ≈ 0.1 rad → 方向盘转 1.0 rad ≈ 57°；max 0.25 → 143°。
+ * 旧值 0.02 让 max 0.25 → 0.005 rad ≈ 0.29°，肉眼完全不可见。
+ */
+function _createSteeringWheel() {
+  const pos = new THREE.Group();
+  pos.position.set(0.5, 1.0, 0.4);
+
+  const yaw = new THREE.Group();
+  yaw.rotation.y = -Math.PI / 2;  // column: +Z → -X
+
+  const tilt = new THREE.Group();
+  tilt.rotation.x = 0.45;  // column 顶部向后上方 25°
+
+  // 方向盘圆环（TorusGeometry：XY 平面，法线沿 Z）
+  const torusGeo = new THREE.TorusGeometry(0.16, 0.018, 8, 24);
+  const torusMat = new THREE.MeshStandardMaterial({
+    color: 0x111111, roughness: 0.45, metalness: 0.7,
+  });
+  const torus = new THREE.Mesh(torusGeo, torusMat);
+  torus.name = 'steering_wheel';  // 让 _updateGltfVehicle 的 traverse 选中
+  torus.castShadow = false;       // 方向盘不投影，避免车内饰阴影噪音
+
+  // 中心 hub（child of torus，跟随旋转）
+  const hubGeo = new THREE.CylinderGeometry(0.04, 0.04, 0.05, 16);
+  const hubMat = new THREE.MeshStandardMaterial({
+    color: 0x222222, roughness: 0.4, metalness: 0.8,
+  });
+  const hub = new THREE.Mesh(hubGeo, hubMat);
+  hub.rotation.x = Math.PI / 2;  // 圆柱轴 Y → Z (沿 column)
+  torus.add(hub);
+
+  // 3 条辐条（child of torus，跟随旋转；各 120° 间隔）
+  const spokeGeo = new THREE.BoxGeometry(0.022, 0.30, 0.010);
+  const spokeMat = new THREE.MeshStandardMaterial({
+    color: 0x333333, roughness: 0.5, metalness: 0.6,
+  });
+  for (let i = 0; i < 3; i++) {
+    const spoke = new THREE.Mesh(spokeGeo, spokeMat);
+    spoke.rotation.z = (i * 120) * Math.PI / 180;
+    torus.add(spoke);
+  }
+
+  tilt.add(torus);
+  yaw.add(tilt);
+  pos.add(yaw);
+  return pos;
+}
+
+// ═══════════════════════════════════════════════════════════
 // 主工厂
 // ═══════════════════════════════════════════════════════════
 
@@ -260,6 +328,9 @@ export function createVehicleView(scene, renderer, modelCache) {
       group.add(w);
     });
 
+    // 注入方向盘（fallback 车辆同样需要可见的转向反馈）
+    group.add(_createSteeringWheel());
+
     group.name = 'fallback_' + type + '_' + id;
     return group;
   }
@@ -272,6 +343,8 @@ export function createVehicleView(scene, renderer, modelCache) {
     scene.name = 'gltf_' + id;
     // 应用车漆升级
     _applyCarPaintToScene(scene, _envMap);
+    // 注入方向盘（glTF 模型未自带 steering_wheel mesh）
+    scene.add(_createSteeringWheel());
     return scene;
   }
 
@@ -281,8 +354,21 @@ export function createVehicleView(scene, renderer, modelCache) {
     if (!vis) return;
 
     vis.traverse((child) => {
-      if (!child.isMesh) return;
       const name = (child.name || '').toLowerCase();
+
+      // 方向盘优先处理（允许非 Mesh 的 Group，但 _createSteeringWheel 里的 torus
+      // 是 Mesh 且 name 含 'steering'，所以 isMesh 早退仍能命中）。
+      // 乘子 10（不是原 0.02）：让 0.1 rad 的 steer 视觉上转 ~57°，max 0.25 → ~143°，
+      // 肉眼可见。负号：THREE.js rotation.z 正向是逆时针，驾驶员视角下右转（steer>0）
+      // 应顺时针，所以取反符合直觉。
+      if ((name.includes('steering') || name.includes('steer') || name.includes('handle')) &&
+          entry.steerAngle !== undefined) {
+        child.rotation.z = entry.steerAngle * -10;
+        // 命中方向盘后不再处理车轮逻辑（避免方向盘被误判为 wheel）
+        return;
+      }
+
+      if (!child.isMesh) return;
 
       // 车轮旋转（沿 X 轴）
       if (name.includes('wheel') || name.includes('tire') || name.includes('tyre')) {
@@ -290,13 +376,6 @@ export function createVehicleView(scene, renderer, modelCache) {
           // 假设半径 0.35m
           const angularSpeed = speed_mps / 0.35;
           child.rotation.x += angularSpeed * 0.016;
-        }
-      }
-
-      // 方向盘（Z 轴缓慢回旋）
-      if (name.includes('steering') || name.includes('steer') || name.includes('handle')) {
-        if (entry.steerAngle !== undefined) {
-          child.rotation.z = entry.steerAngle * 0.02;
         }
       }
     });

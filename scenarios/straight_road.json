@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "直路综合场景：同向慢车触发变道超车、邻道车辆cutin、行人横穿、红绿灯停车。平路双向4车道（Y=0），10km 直路。",
+  "description": "直路综合场景：同向慢车触发变道超车、对向来车、红绿灯停车。平路双向4车道（Y=0），10km 直路。NPC 各守其道不变道，行人位于路外不横穿。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
@@ -49,11 +49,12 @@
       "id": 3,
       "type": "pedestrian",
       "x": 450.0,
-      "y": -8.75,
+      "y": -12.0,
       "vx": 0.0,
       "vy": 0.0,
       "len": 0.6,
-      "wid": 0.6
+      "wid": 0.6,
+      "parked": true
     },
     {
       "id": 4,
@@ -90,45 +91,12 @@
     "min_avg_speed_mps": 5.0
   },
   "route": [],
-  "scenarios": [
-    {
-      "name": "npc_cutin",
-      "label": "邻道车辆cutin到ego车道",
-      "trigger": {
-        "type": "ego_x_gte",
-        "value": 260.0
-      },
-      "actor_overrides": [
-        {
-          "id": 2,
-          "ai_state": "cutin",
-          "target_offset": -1.75,
-          "target_vx": 10.0
-        }
-      ]
-    },
-    {
-      "name": "pedestrian_cross",
-      "label": "行人开始横穿道路",
-      "trigger": {
-        "type": "ego_x_gte",
-        "value": 400.0
-      },
-      "actor_overrides": [
-        {
-          "id": 3,
-          "vx": 0.0,
-          "vy": 1.5
-        }
-      ]
-    }
-  ],
+  "scenarios": [],
   "choreography": {
     "loop_period_s": 45,
     "beats": [
       {"t": 3,  "actor": 1, "rel_to": "ego", "ds": 60,  "dl": 0.0,   "vx": 8.0,  "act": "overtake"},
-      {"t": 12, "actor": 2, "rel_to": "ego", "ds": 45,  "dl": -3.5,  "vx": 12.0, "act": "cutin"},
-      {"t": 22, "actor": 3, "rel_to": "ego", "ds": 55,  "dl": -7.0,  "vx": 0.0},
+      {"t": 12, "actor": 2, "rel_to": "ego", "ds": 45,  "dl": -3.5,  "vx": 12.0, "act": "overtake"},
       {"t": 30, "actor": "tl", "phase": "red"}
     ]
   }

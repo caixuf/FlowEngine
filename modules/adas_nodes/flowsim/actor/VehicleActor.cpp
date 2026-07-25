@@ -33,6 +33,29 @@ void VehicleActor::update_ego_lights(Entity& ego, double sim_time_s) {
         ego.lights.set_low_beam(true);
     }
 
+    /* 转向灯兜底：当 ControlCmd 未下发任何转向意图（无 left/right/hazard 任一位）
+     * 且 ego 处于巡航空档（不是停止/倒车）时，按 steer 自动打转向灯。
+     *
+     * 触发场景：
+     *   - control_node 在 Cruise/Follow 状态下不发 turn_signal（默认 0），但
+     *     Stanley 横向控制仍会输出非零 steer（变道/弯道跟随）。
+     *   - 旧实现下 ego.lights 任何转向灯都不亮，前端看不到「车在转弯」的视觉反馈。
+     *
+     * 设计原则（意图优先级）：
+     *   1. ControlCmd 显式下发 turn_signal/hazard → 直接采用，本兜底完全跳过；
+     *   2. ControlCmd 未下发（any_turn==false）→ 按 steer 方向补转向灯；
+     *   3. 兜底仅填充空缺位，不覆盖任何已设定位（用 set_xxx(true)，没有 set_xxx(false)）。
+     *
+     * 阈值 STEER_TURN_THRESHOLD 与 NPC 一致（0.1 rad ≈ 5.7°），低于此视为直线行驶。
+     * 静止或倒车状态不触发，避免低速泊车时方向盘乱转导致灯乱闪。 */
+    if (!ego.lights.any_turn() && ego.speed > SPEED_REVERSE_THRESHOLD) {
+        if (ego.steer > STEER_TURN_THRESHOLD) {
+            ego.lights.set_turn_right(true);   /* steer > 0 = 右转 */
+        } else if (ego.steer < -STEER_TURN_THRESHOLD) {
+            ego.lights.set_turn_left(true);    /* steer < 0 = 左转 */
+        }
+    }
+
     /* 倒车灯：暂不启用（需要挡位 R 信号），保留接口。
      * 刹车灯不占 lights 位：VehicleView 直接读 ego.brake > 0.1 判断。 */
 }

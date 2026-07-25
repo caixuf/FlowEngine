@@ -58,8 +58,12 @@ namespace {
 
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
-#define STEER_FILTER_NEW   0.8     /* 低通滤波新值权重 (0.8: -3dB@2.8Hz, 减少相位滞后防蛇行) */
-#define STEER_FILTER_PREV  0.2     /* 低通滤波旧值权重 */
+/* 低通滤波新值权重：0.5 = -3dB@1.2Hz (20Hz 采样)。
+ * 旧值 0.8 (-3dB@2.8Hz) 高频抑制不足, Stanley 控制器在 cte_term 与 heading_term
+ * 互相反向时产生 ~1.6Hz 极限环振荡（左摇右晃）。降到 0.5 增加阻尼, 让 steer
+ * 平滑过渡, 牺牲少量相位裕度换取稳定性。yaw_damping 配合抑制高频。 */
+#define STEER_FILTER_NEW   0.5     /* 低通滤波新值权重 */
+#define STEER_FILTER_PREV  0.5     /* 低通滤波旧值权重 */
 #define LC_STABILIZE_S     1.0     /* 变道完成后保持变道增益的稳定期 (s) */
 #define LC_COMPLETE_THRESH 0.15    /* 变道完成横向偏差阈值 (m) — 收紧防振荡 */
 /* 轴距 (m)：真车默认 2.7，RC 小车在 pipeline_car.json 里通过 params.wheelbase
@@ -1202,16 +1206,26 @@ protected:
                      * （实测 15s 仅移动 1.1m，变道无法完成）。
                      * 修复：大幅降低 heading 阻尼（0.35/0.5），同时增大横向误差增益
                      * (×2.0)，让 cte_term 主导 steer，维持向目标的横向加速度。 */
-                    if (g.current_speed > 12.0) {
-                        lc_lat_kd = g.lat_kd_heading * 0.35;  /* 原 0.9: 过强反向拉回 */
-                        lc_lat_kp = g.lat_kp * 2.0;           /* 增大横向误差响应 */
-                        lc_lat_accel_max = 2.2;
-                    } else {
-                        lc_lat_kd = g.lat_kd_heading * 0.5;   /* 原 1.2 */
-                        lc_lat_kp = g.lat_kp * 2.0;
-                        lc_lat_accel_max = 2.8;
-                    }
-                    filter_new = 0.5;
+                    /* 变道调参：原 0.9/1.2 的 heading 阻尼过强，ego 微偏后 heading_term
+                 * 反向抵消 cte_term，steer 反转拉回，导致 ego 横向几乎不动
+                 * （实测 15s 仅移动 1.1m，变道无法完成）。
+                 * 修复：大幅降低 heading 阻尼（0.35/0.5），同时增大横向误差增益
+                 * 让 cte_term 主导 steer，维持向目标的横向加速度。
+                 *
+                 * Anti-sway 调优 (2024): 原 lat_kp × 2.0 在变道中导致 cte_term 在
+                 * 高速下饱和到 steer_limit，反向回拉时产生 ~1.6Hz 极限环振荡
+                 * （左摇右晃）。降到 × 1.3 让控制器有更多线性工作区，配合
+                 * STEER_FILTER_NEW=0.5 的低通滤波 + yaw_damping 抑制高频摆动。 */
+                if (g.current_speed > 12.0) {
+                    lc_lat_kd = g.lat_kd_heading * 0.55;  /* 原 0.9: 过强反向拉回 */
+                    lc_lat_kp = g.lat_kp * 1.3;           /* 原 ×2.0: 高速饱和致振荡 */
+                    lc_lat_accel_max = 2.0;
+                } else {
+                    lc_lat_kd = g.lat_kd_heading * 0.7;   /* 原 1.2 */
+                    lc_lat_kp = g.lat_kp * 1.3;
+                    lc_lat_accel_max = 2.4;
+                }
+                filter_new = 0.5;
                 }
                 /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
                  * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */
