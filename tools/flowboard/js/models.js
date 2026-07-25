@@ -203,7 +203,7 @@ export function getModel(type) {
  *  clone 已保留完整层级（axle_front / axle_rear 含 wheel_* 子节点），
  *  仅需按名查找并重建 userData 引用，无需重建 Group。
  *  同时为新克隆的 wheel_* 节点重新打 rollAxis='z' 标记（GLTF cylinder axis=Z）。 */
-function _relinkWheelUserData(clone) {
+export function _relinkWheelUserData(clone) {
   var fwGroup = null, rwGroup = null;
   var fl = null, fr = null, rl = null, rr = null;
   clone.traverse(function(c) {
@@ -300,18 +300,19 @@ export function _setVehicleLights(group, state, blinkPhase) {
   if (!group || !group.userData) return;
   var ud = group.userData;
   var blinkOn = (blinkPhase !== undefined) ? (Math.sin(blinkPhase * Math.PI * 2 * 1.5) > 0) : true;
-  // 刹车灯：on=2.0, off=0.15
+  // 刹车灯：on=3.0, off=0.15（glTF 基础 emissiveFactor 仅 0.12，乘 2.0 只有 0.24 太暗）
   if (ud.brakeLights) {
-    var bi = state.brake ? 2.0 : 0.15;
+    var bi = state.brake ? 3.0 : 0.15;
     for (var i = 0; i < ud.brakeLights.length; i++) {
       if (ud.brakeLights[i].material) ud.brakeLights[i].material.emissiveIntensity = bi;
     }
   }
-  // 转向灯：on 时按 blinkPhase 闪烁，off=0.1
+  // 转向灯：on 时按 blinkPhase 闪烁，off=0.1。glTF turnsignal emissiveFactor 仅 0.35，
+  // 乘 2.2 = 0.77 偏暗，提到 3.5 让闪烁更明显
   if (ud.turnSignals) {
     var ts = ud.turnSignals;
     var setSide = function(on, keys) {
-      var intensity = on ? (blinkOn ? 2.2 : 0.1) : 0.1;
+      var intensity = on ? (blinkOn ? 3.5 : 0.1) : 0.1;
       for (var k = 0; k < keys.length; k++) {
         if (ts[keys[k]] && ts[keys[k]].material) {
           ts[keys[k]].material.emissiveIntensity = intensity;
@@ -321,9 +322,9 @@ export function _setVehicleLights(group, state, blinkPhase) {
     setSide(state.turnL, ['FL', 'RL']);
     setSide(state.turnR, ['FR', 'RR']);
   }
-  // 大灯：常亮（白天低亮，可扩展为夜间高亮）
+  // 大灯：glTF emissiveFactor [0.5,0.5,0.45]，乘 1.5=0.75 偏暗，提到 2.5 更醒目
   if (ud.headlights && state.head !== undefined) {
-    var hi = state.head ? 1.5 : 0.4;
+    var hi = state.head ? 2.5 : 0.4;
     for (var h = 0; h < ud.headlights.length; h++) {
       if (ud.headlights[h].material) ud.headlights[h].material.emissiveIntensity = hi;
     }
@@ -338,48 +339,4 @@ export function _setVehicleLights(group, state, blinkPhase) {
   }
 }
 
-/**
- * Build a vehicle group for use as ego car.
- *
- * Task 6：ego 默认使用小米 SU7 模型（gen_models.py 生成的 su7.gltf，
- * 低趴溜背造型 + 贯穿式尾灯 + 车顶 LiDAR 凸起，海湾蓝金属漆）。
- * SU7 不可用时回退到 sedan，再不行回退到程序化 _buildSedan。
- *
- * 调用方传入的 color 仅用于 sedan fallback 着色；SU7 走 su7_paint 材质
- * （海湾蓝），_upgradeCarPaint 会识别 SU7 body 件名（body/hood/cabin/
- * trunklid/spoiler/splitter/lidar_bump/side_skirt_*）并应用清漆车漆升级。
- */
-export function buildEgoCar(color) {
-  var model = getModel('su7');
-  if (model) {
-    _upgradeCarPaint(model, 0x1A528C);  // 海湾蓝（与 su7_paint baseColorFactor 对齐）
-    model.add(_buildContactShadow(5.0, 2.0));  // SU7 尺寸 4.95×1.92
-    return model;
-  }
-  // SU7 不可用 → 回退到 sedan
-  model = getModel('sedan');
-  if (model) {
-    _upgradeCarPaint(model, color || 0x4488dd);
-    model.add(_buildContactShadow(4.6, 2.0));
-    return model;
-  }
-  return _buildSedan(color || 0x4488dd, 0x3377bb);
-}
 
-/**
- * Build an obstacle group for NPC vehicles/pedestrians.
- * 优先使用 glTF，GLTFLoader 未就绪时回退到程序化 _buildObstacle。
- */
-export function buildObstacleGroup(type, color) {
-  var model = getModel(type);
-  if (model) {
-    var c = color || 0xff9944;
-    _upgradeCarPaint(model, c);
-    if (type !== 'pedestrian') {
-      model.add(_buildContactShadow(4.6, 2.0));
-    }
-    model.userData.realScale = true;
-    return model;
-  }
-  return _buildObstacle(type || 'car', color || 0xff9944);
-}

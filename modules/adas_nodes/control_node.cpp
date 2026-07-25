@@ -1245,11 +1245,11 @@ protected:
                 if (g.current_speed > 12.0) {
                     lc_lat_kd = g.lat_kd_heading * 0.55;  /* 原 0.9: 过强反向拉回 */
                     lc_lat_kp = g.lat_kp * 1.3;           /* 原 ×2.0: 高速饱和致振荡 */
-                    lc_lat_accel_max = 2.0;
+                    lc_lat_accel_max = 2.2;                /* 运动学校调值 */
                 } else {
                     lc_lat_kd = g.lat_kd_heading * 0.7;   /* 原 1.2 */
                     lc_lat_kp = g.lat_kp * 1.3;
-                    lc_lat_accel_max = 2.4;
+                    lc_lat_accel_max = 2.8;                /* 运动学校调值 */
                 }
                 filter_new = 0.5;
                 }
@@ -1348,6 +1348,14 @@ protected:
                  * 注: 引入 v_lat_damp 后极限环已根治, 低通滤波仅作为执行器建模
                  * (转向机一阶滞后), 不再承担抑制振荡的职责, 故仍保留 0.5 权重。 */
                 steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
+                /* 直线巡航死区：|steer| < 0.003 rad 钳零。真车 EPS 转向机有物理间隙
+                 * + 摩擦阻尼，< 0.5° 的指令会被机械特性自然滤除，方向盘不转动。
+                 * 仿真中无此物理特性，LQR 的 v_lat_damp 和 flowsim 的 tan(steer)*gain
+                 * 形成闭环后 0.005-0.025 rad 级微小修正会持续反复，不会自行收敛。
+                 * 此前为 0.005，配合 flowsim 新增的 steer_smooth EPS 惯性滤波后，
+                 * 转向指令已通过一阶低通平滑，极限环能量被机械惯性吸收，可降为 0.003。
+                 * 变道中 (lc_active) 跳过死区，避免打断正常变道 steer。 */
+                if (!lc_active && fabs(steer) < 0.003) steer = 0.0;
                 g.prev_steer = steer;
                 /* 调试：变道时打印 steer 各分量，定位横向不动根因 */
                 if (lc_active) {

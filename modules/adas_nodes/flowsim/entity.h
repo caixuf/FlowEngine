@@ -135,6 +135,7 @@ struct Entity {
     /* ── 场景事件触发器专用 ── */
     int    phase_state{0};         /**< 红绿灯当前相位：0=绿 1=黄 2=红 */
     double phase_timer{0};         /**< 当前相位剩余时间 (s) */
+    int    phase_override_frames{0}; /**< 相位锁定帧数（>0 时 tick_traffic_lights 跳过重算，由 choreography 设置用于覆盖锁定） */
 
     /* ── RoadPosition（Task: 地图路由重构）──
      * 每车持久的 esmini position handle，替代 route_s/route_dir 的单链路由。

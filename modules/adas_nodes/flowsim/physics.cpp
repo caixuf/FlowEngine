@@ -1,5 +1,5 @@
 /**
- * physics.cpp — 自行车模型积分实现
+ * physics.cpp — 自行车运动学模型积分实现
  *
  * 数值方法：前向欧拉积分，dt=0.05s（20Hz）足够稳定。
  * 力模型与 sim_world_node.c vehicle_tick() 一致，保证迁移后行为不退化：

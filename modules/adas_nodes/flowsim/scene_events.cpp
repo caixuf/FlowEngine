@@ -24,12 +24,25 @@
 #include <cmath>
 #include <algorithm>
 
+/* 仿真步长 20Hz → 0.05s，与 flowsim_node.cpp 保持一致 */
+#define FLOWSIM_DT_SEC  0.05
+
 namespace flowsim {
 
 void tick_traffic_lights(EntityPool& pool, double sim_time_s) {
     for (int i = 0; i < pool.size(); ++i) {
         Entity& tl = pool[i];
         if (!tl.active || tl.type != EntityType::TrafficLight) continue;
+
+        /* choreography beat 相位覆盖锁定：phase_override_frames > 0 时不重算，
+         * 仅递减 phase_timer 和计数器。让编舞 beat 设定的红/黄/绿灯持续一段时间
+         * 而非 1 帧后被 fmod 时序重算覆盖。 */
+        if (tl.phase_override_frames > 0) {
+            tl.phase_override_frames--;
+            tl.phase_timer -= FLOWSIM_DT_SEC;
+            if (tl.phase_timer < 0.0) tl.phase_timer = 0.0;
+            continue;
+        }
 
         // 相位时长复用 throttle/brake/steer 字段
         double green_s  = tl.throttle;
@@ -202,22 +215,26 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
         /* ── 红绿灯 beat ── */
         if (strcmp(b->actor, "tl") == 0) {
             int new_phase = (int)TLPhase::Green;  /* 默认 */
+            double override_duration = 0.0;
             if (b->phase[0]) {
-                if (strcmp(b->phase, "red") == 0)    new_phase = (int)TLPhase::Red;
-                else if (strcmp(b->phase, "yellow") == 0) new_phase = (int)TLPhase::Yellow;
-                else if (strcmp(b->phase, "green") == 0)  new_phase = (int)TLPhase::Green;
+                if (strcmp(b->phase, "red") == 0) {
+                    new_phase = (int)TLPhase::Red;
+                    override_duration = 10.0;  /* 锁定 10s */
+                } else if (strcmp(b->phase, "yellow") == 0) {
+                    new_phase = (int)TLPhase::Yellow;
+                    override_duration = 3.0;
+                } else if (strcmp(b->phase, "green") == 0) {
+                    new_phase = (int)TLPhase::Green;
+                    override_duration = 10.0;
+                }
             }
             for (int j = 0; j < pool.size(); ++j) {
                 Entity& tl = pool[j];
                 if (!tl.active || tl.type != EntityType::TrafficLight) continue;
                 tl.phase_state = new_phase;
-                /* 也重置相位计时器，让 tick_traffic_lights 后续继续推进 */
-                if (new_phase == (int)TLPhase::Red) {
-                    double red_s = tl.steer;
-                    tl.phase_timer = red_s;  /* 红灯剩余时长 */
-                    /* 将 fmod 偏移量设为使 phase 落在红灯段 */
-                    tl.target_vx = -sim_time_s + T * (int)(sim_time_s / T);
-                }
+                tl.phase_timer = override_duration;
+                /* 锁定帧数 = duration / dt，让 tick_traffic_lights 跳过重算 */
+                tl.phase_override_frames = (int)(override_duration / FLOWSIM_DT_SEC + 0.5);
             }
             continue;
         }

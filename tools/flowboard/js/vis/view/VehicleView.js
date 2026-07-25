@@ -10,12 +10,13 @@
  *   1. glTF 模型（models/*.gltf）—— 优先，加载失败回退到 2
  *   2. 程序化 fallback（utils._buildSedan 等）—— 兼容 /api/topology 无 model 字段
  *
- * 不动现有的 wheelSpin / window slide / steering 动画逻辑。
+ * Layer 树驱动：rootLayer.update(store, now) → 创建/更新车辆 + 每帧动画
+ * （车轮转向/滚动、方向盘、刹车灯/转向灯/大灯 emissive 控制）
  */
 
 import { deriveLightState, LIGHT_TURN_LEFT, LIGHT_TURN_RIGHT, LIGHT_HAZARD, LIGHT_HIGH_BEAM, LIGHT_LOW_BEAM } from './VehicleLights.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
-import { initModelCache, getModel } from '../../models.js';
+import { initModelCache, getModel, _setVehicleLights, _relinkWheelUserData } from '../../models.js';
 import { worldToThree, headingToRotationY } from '../math/Coord.js';
 
 // ═══════════════════════════════════════════════════════════
@@ -169,24 +170,8 @@ function _applyCarPaintToScene(gltfScene, envMap) {
 // ═══════════════════════════════════════════════════════════
 
 /* glTF 模型（sedan/suv/truck/su7）均无 "steering"/"steer"/"handle" 命名节点，
- * 原 _updateGltfVehicle 第 297-300 行的方向盘旋转分支是死代码，
- * 用户因此看不到方向盘转动。这里程序化注入一个名为 "steering_wheel" 的
- * torus mesh，挂载到车辆根 group 上，配合下方的乘子修复让方向盘可见转动。
- *
- * 几何：TorusGeometry 默认在 XY 平面、法线沿 Z。我们用嵌套 Group 把 column
- * 从默认 +Z 转到 (-X, +Y, 0)（驾驶员胸口方向，向后上方 ~25°）。
- *   pos Group：定位到驾驶位（x=0.5 副车前, y=1.0 胸高, z=0.4 左侧 LHD）
- *   yaw Group：rotation.y = -π/2 让 column 从 +Z 转到 -X
- *   tilt Group：rotation.x = +0.45 让 column 顶部向后上方抬起 ~25°
- *   torus mesh（name="steering_wheel"）：local Z = column 轴
- *
- * 旋转方向约定：control_node 发布的 steer > 0 = 向右转（车辆右转），
- * 方向盘视觉上应顺时针旋转（从驾驶员视角）。THREE.js rotation.z 正向
- * 是逆时针，所以取 steer * -10 让正 steer → 顺时针，符合直觉。
- *
- * 乘子 10：典型 steer ≈ 0.1 rad → 方向盘转 1.0 rad ≈ 57°；max 0.25 → 143°。
- * 旧值 0.02 让 max 0.25 → 0.005 rad ≈ 0.29°，肉眼完全不可见。
- */
+ * 因此程序化注入一个名为 "steering_wheel" 的 torus mesh。
+ * 旋转方向：steer > 0 = 右转，THREE rotation.z 正向逆时针，故取 -10 倍。 */
 function _createSteeringWheel() {
   const pos = new THREE.Group();
   pos.position.set(0.5, 1.0, 0.4);
@@ -341,6 +326,8 @@ export function createVehicleView(scene, renderer, modelCache) {
   function _createGltfVehicle(gltf, id) {
     const scene = gltf.clone(true);
     scene.name = 'gltf_' + id;
+    // clone() 不深拷贝 userData 引用，重建 wheel/light 引用
+    _relinkWheelUserData(scene);
     // 应用车漆升级
     _applyCarPaintToScene(scene, _envMap);
     // 注入方向盘（glTF 模型未自带 steering_wheel mesh）
@@ -348,10 +335,23 @@ export function createVehicleView(scene, renderer, modelCache) {
     return scene;
   }
 
-  /** 每帧更新 glTF 车辆：车轮旋转 + 方向盘 */
-  function _updateGltfVehicle(entry, speed_mps) {
+  /** 每帧更新 glTF 车辆：前轴转向 + 车轮旋转 + 灯光 */
+  function _updateGltfVehicle(entry, v, dt) {
     const vis = _getVisGroup(entry);
     if (!vis) return;
+    const speed_mps = v ? v.speed_mps : 0;
+
+    // 前轴转向：glTF 模型 axle_front（含 wheel_FL/wheel_FR）整体绕 Y 旋转。
+    // steer > 0 = 右转，THREE rotation.y 正向 = 逆时针，故取负。
+    // 乘子 0.6：steer=0.1 rad → 前轮转 0.06 rad ≈ 3.4°（真实车辆前轮最大转角 ~30°，
+    // steer=0.25 时 map 到 0.15 rad ≈ 8.6°，方向盘转 143° → 前轮转 8.6° 是合理
+    // 传动比 16.6:1）。
+    // 死区滤波：|steer| < 0.005 时视为 0，避免直路巡航时方向盘和车轮微动。
+    const rawSteer = (entry && entry.steerAngle) || 0;
+    const steerFiltered = (Math.abs(rawSteer) < 0.005) ? 0 : rawSteer;
+    if (vis.userData && vis.userData.frontAxle) {
+      vis.userData.frontAxle.rotation.y = -steerFiltered * 0.6;
+    }
 
     vis.traverse((child) => {
       const name = (child.name || '').toLowerCase();
@@ -362,8 +362,8 @@ export function createVehicleView(scene, renderer, modelCache) {
       // 肉眼可见。负号：THREE.js rotation.z 正向是逆时针，驾驶员视角下右转（steer>0）
       // 应顺时针，所以取反符合直觉。
       if ((name.includes('steering') || name.includes('steer') || name.includes('handle')) &&
-          entry.steerAngle !== undefined) {
-        child.rotation.z = entry.steerAngle * -10;
+          steerFiltered !== undefined) {
+        child.rotation.z = steerFiltered * -10;
         // 命中方向盘后不再处理车轮逻辑（避免方向盘被误判为 wheel）
         return;
       }
@@ -406,11 +406,9 @@ export function createVehicleView(scene, renderer, modelCache) {
       entry.group = _createGltfVehicle(gltf, id);
       vehicleGroup.add(entry.group);
 
-      // 灯光
-      entry.lights = createVehicleLights(entry.group);
-      if (entry.lights && entry.lights.group) {
-        entry.group.add(entry.lights.group);
-      }
+      // glTF 模型自带灯节点（turnsignal_/brakelight_/headlight_），
+      // 由 _setVehicleLights 控制 emissive，不需要 PlaneGeometry 方块。
+      entry.lights = null;
     }
 
     // 如果没有 group（glTF 加载失败或未就绪），创建 fallback
@@ -438,24 +436,12 @@ export function createVehicleView(scene, renderer, modelCache) {
     return entry;
   }
 
-  /** 每帧 tick */
-  function tick(vehicles, dt) {
-    if (!vehicles) return;
-    for (const v of vehicles) {
-      const entry = vehicleMap.get(v.id);
-      if (!entry) continue;
+  /* ── tick() 已删除 ──
+   *
+   * MVC 重构后 Layer 树只调 view.update()，不调 view.tick()。
+   * 车轮转向/滚动 + 灯光控制等每帧动画已全部合并到 update() 中。
+   * 若需单独驱动动画，直接调 update(store, now) 即可。 */
 
-      // 车轮动画
-      if (entry.modelData) {
-        _updateGltfVehicle(entry, v.speed_mps);
-      }
-
-      // 灯光
-      if (entry.lights) {
-        entry.lights.update(v);
-      }
-    }
-  }
 
   /** 移除车辆 */
   function removeVehicle(id) {
@@ -495,9 +481,10 @@ export function createVehicleView(scene, renderer, modelCache) {
   function getVehicleGroup() { return vehicleGroup; }
   function getVehicleMap() { return vehicleMap; }
 
-  /** Layer 树每帧调用：从 store 同步 ego + entities → 创建/更新/删除车辆 */
+  /** Layer 树每帧调用：从 store 同步 ego + entities → 创建/更新/删除车辆 + 动画 */
   function update(store, now) {
     if (!store) return;
+    const dt = 1 / 60;  // 默认帧间隔
 
     // 收集所有需要渲染的实体（ego + 其他车辆/NPC）
     const activeIds = new Set();
@@ -523,7 +510,48 @@ export function createVehicleView(scene, renderer, modelCache) {
         removeVehicle(id);
       }
     }
+
+    // 4. 每帧动画：前轴转向 + 车轮旋转 + 灯光
+    const animateVehicle = (id) => {
+      const entry = vehicleMap.get(id);
+      if (!entry) return;
+      const v = (id === 'ego') ? store.ego
+               : entities.find(e => e && e.id === id);
+      if (!v) return;
+
+      // glTF 车辆动画（前轴转向 + 车轮旋转 + 方向盘）
+      if (entry.modelData) {
+        _updateGltfVehicle(entry, v, dt);
+      } else {
+        // 程序化 fallback 前轴转向（加死区滤波，避免直路巡航时微动）
+        const vis = _getVisGroup(entry);
+        if (vis && vis.userData && vis.userData.frontAxle) {
+          const raw = (entry && entry.steerAngle) || 0;
+          const sf = (Math.abs(raw) < 0.005) ? 0 : raw;
+          vis.userData.frontAxle.rotation.y = -sf * 0.6;
+        }
+      }
+
+      // 灯光：glTF 模型用 emissive 材质自带灯节点，不叠加 PlaneGeometry 方块
+      // 只有程序化 fallback 车辆（无 modelData）才需要 PlaneGeometry 灯光
+      if (!entry.modelData && entry.lights) {
+        entry.lights.update(v);
+      }
+
+      // glTF 模型 emissive 灯光
+      const vis = _getVisGroup(entry);
+      if (vis && vis.userData &&
+          (vis.userData.brakeLights || vis.userData.turnSignals || vis.userData.headlights)) {
+        const ls = deriveLightState(v.lights || 0, v.brake || 0);
+        _setVehicleLights(vis, ls, now !== undefined ? now / 1000 : undefined);
+      }
+    };
+
+    animateVehicle('ego');
+    for (const ent of entities) {
+      if (ent && ent.id) animateVehicle(ent.id);
+    }
   }
 
-  return { update, updateVehicle, tick, removeVehicle, dispose, getVehicleGroup, getVehicleMap };
+  return { update, updateVehicle, removeVehicle, dispose, getVehicleGroup, getVehicleMap };
 }

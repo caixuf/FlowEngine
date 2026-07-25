@@ -44,7 +44,8 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `src/core/flow_registry.c` | 统一元信息注册中心（Task/Topic/Type/Plugin/Schema） |
 | `src/core/param_registry.c` | 参数系统（int/float/bool/string，范围校验，hot-reload） |
 | `src/core/scenario_loader.c` | 场景 JSON 加载器（actor 定义 + ego 配置） |
-| `tools/bag_check.c` | Bag 文件完整性检查器 |
+| `modules/adas_nodes/flowsim/physics.cpp` | 动态双轮自行车模型（轮胎侧偏+松弛长度+摩擦圆），v<0.5m/s 退化到运动学 |
+| `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 轮胎动力学状态） |
 | `scenarios/straight_road.json` | 直道场景（默认，唯一） |
 | `modules/adas_nodes/data_recorder_node.c` | 训练样本采集（Learning Loop Stage 0） |
 | `modules/adas_nodes/inference_node.cpp` | tiny-MLP 影子推理（Learning Loop Stage 2） |
@@ -378,6 +379,9 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | NPC 瞬移 | 障碍物回收逻辑放入 100m 外（设计如此，非 bug） | `sim_world_node.c:204` |
 | NPC/车飞出路面、不在车道上、坐标飞到几千米外 | flowsim NPC 用 `step_bicycle(steer=0)` 世界系直线积分、不跟道路几何，路一拐弯就直线冲出路网。已改为中央 `Route`（把 esmini 各 road 连成有序主路）+ Frenet 沿车道推进 + 到头回收 | `npc_ai.cpp` step_npc_vehicle / `flowsim/route.cpp` |
 | 感知降频 | DBSCAN 点云过多时聚类耗时超过 deadline | `perception_node.c` |
+| 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 覆盖 ego.heading 为道路切线，导致 control_node 的 `v_lat_damp` 失效（heading_err≈0），LQR 阻尼不掉，退化为纯 P 控制。修复：保留 bicycle model heading，不用 wp.h 覆盖 | `flowsim_node.cpp:1178-1182` |
+| steer 打到 0.25 硬限幅导致抖动 | 动态自行车模型下轮胎侧偏力有松弛滞后，同样 steer 的 ay 低于运动学模型。`steer_limit_for_speed` 限幅过紧，控制器累积误差后撞 physics clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
+| 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，动态模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
 
 ## 最新 tag
 

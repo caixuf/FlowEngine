@@ -16,6 +16,7 @@
 
 import { safeCall, reportDiag } from './utils.js';
 import { _dr, tickDeadReckon } from './vis/core/DeadReckon.js';
+import { init3DScene, resize3D } from './vis/main.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
 // egoT / gpsHistory were removed: dead-reckoning state (last*/smooth*) is
@@ -532,12 +533,8 @@ export function switchSceneView(mode) {
     if (c3d) c3d.style.display = '';
     if (_2d.animId) cancelAnimationFrame(_2d.animId);
     _2d.active = false;
-    if (typeof sceneReady !== 'undefined' && !sceneReady && typeof THREE !== 'undefined') {
-      try {
-        if (typeof init3DScene !== 'undefined') { init3DScene(); sceneReady = true; }
-      } catch (e) {}
-    }
-    if (typeof resize3D !== 'undefined') setTimeout(resize3D, 100);
+    init3DScene();
+    setTimeout(resize3D, 100);
   }
 }
 

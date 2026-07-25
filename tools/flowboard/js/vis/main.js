@@ -35,6 +35,9 @@ export let scene3d = null;
 
 /** 初始化 3D 场景 */
 export function init3DScene(canvas) {
+  // 幂等：已初始化则跳过（app.js 可能同时调 init3DScene + switchSceneView → 各 init 一次）
+  if (_scene && _renderer) return _scene;
+
   // app.js 调 init3DScene() 不传参数，自己找/建 canvas
   if (!canvas) {
     canvas = document.getElementById('scene3d-canvas');

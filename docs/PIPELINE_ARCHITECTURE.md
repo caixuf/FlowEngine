@@ -111,10 +111,17 @@ control (PID) → control/raw_cmd → safety_control → control/cmd → flowsim
 | flowsim | `target_speed` | 15.0 | 目标巡航速度 m/s |
 | flowsim | `scenario_file` | `scenarios/straight_road.json` | 场景文件路径 |
 | control | `pid_kp/ki/kd` | 800/50/100 | PID 纵向控制器 |
-| control | `lat_kp` | 0.32 | 横向误差增益 (rad/m) |
+| control | `lat_kp` | 0.5 | 横向误差增益 (rad/m) |
 | control | `lat_kd_heading` | 1.35 | 航向阻尼增益 |
-| control | `lane_change_blocked_timeout_s` | 2.0 | 变道阻塞超时 (s) |
-| safety_control | `max_throttle` | 0.85 | 最大油门 |
+| control | `yaw_damping` | 0.15 | 横摆角速度阻尼增益 |
+| control | `steer_min_clamp` | 0.030 | 高速最小转向钳位 (rad)，动态模型需比运动学模型更高 |
+| control | `lc_lat_accel_max` | 3.5 (高速) / 4.5 (低速) | 变道最大侧向加速度 (m/s²)，动态模型下轮胎松弛导致有效 ay 偏低 |
+| control | `lane_change_blocked_timeout_s` | 0.6 | 变道阻塞超时 (s) |
+| control | `lc_stable_wait_s` | 4.0 | 变道后稳定巡航时间 |
+| control | `lc_cooldown_after_stable_s` | 1.5 | 稳定后冷却 |
+| control | `lc_cooldown_after_return_s` | 2.0 | 返回原车道后冷却 |
+| control | `min_overtake_gap_base` | 14.0 | 触发超车最小间距基准 (m) |
+| safety_control | `max_throttle` | 1.0 | 最大油门 |
 | safety_control | `max_steer` | 0.22 | 最大转向角 (rad) |
 | safety_control | `time_headway` | 1.8 | 安全时距 (s) |
 

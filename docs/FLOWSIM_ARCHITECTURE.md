@@ -45,7 +45,7 @@
 |------|------|
 | `flowsim_node.cpp` | 1541 |
 | `flowsim/entity.h` | 244 |
-| `flowsim/physics.cpp` | 89 |
+| `flowsim/physics.cpp` | 180 |
 | `flowsim/npc_ai.cpp` | 998 |
 | `flowsim/collision.cpp` | 170 |
 | `flowsim/scene_events.cpp` | 357 |
@@ -416,9 +416,77 @@ class FlowSimNode : public flowcoro::Task {
 
 ---
 
-## 四、NPC AI 状态机
+## 四、车辆动力学（`physics.cpp` — 动态双轮自行车模型）
 
-### 4.1 状态定义
+### 4.1 模型概述
+
+从 v0.1.1 起，`step_bicycle()` 从纯运动学模型升级为**动力学双轮（单轨）自行车模型**，
+带轮胎侧偏 + 松弛长度 + 摩擦圆约束。低速（v < 0.5 m/s）自动退化到运动学模型。
+
+```
+运动学模型（低速，v < 0.5 m/s）：
+  heading += speed / wheelbase * tan(steer) * dt
+  x += speed * cos(heading) * dt
+  y += speed * sin(heading) * dt
+
+动力学模型（高速，v ≥ 0.5 m/s）：
+  轮胎侧偏角：α_f = steer - (vy + l_f·r) / vx
+              α_r = -(vy - l_r·r) / vx
+  稳态侧向力：F_yf_ss = C_f · α_f
+              F_yr_ss = C_r · α_r
+  松弛效应：  τ · dF_y/dt + F_y = F_y_ss    (τ = relaxation_length / vx)
+  摩擦圆：    |F_y| ≤ μ · F_z               (μ = 0.9 干燥沥青)
+  车身动力学：vx_dot = (F_x - F_yf·sinδ)/m + vy·r
+              vy_dot = (F_yr + F_yf·cosδ)/m - vx·r
+              r_dot  = (l_f·F_yf·cosδ - l_r·F_yr) / I_zz
+  位置积分：  x_dot = vx·cosψ - vy·sinψ
+              y_dot = vx·sinψ + vy·cosψ
+              ψ_dot = r
+```
+
+### 4.2 参数（`apply_vehicle_defaults` 设置）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `cornering_stiffness_front/rear` | 80,000 N/rad | 前后轴侧偏刚度 |
+| `relaxation_length_tire` | 0.3 m | 轮胎松弛长度 |
+| `mu` | 0.9 | 路面附着系数（干燥沥青） |
+| `inertia_yaw` | m·l_f·l_r (≈2700) | 横摆转动惯量 |
+| `cg_to_front / cg_to_rear` | 0.45·wb / 0.55·wb | 质心到前后轴 |
+
+### 4.3 EPS 转向执行器惯性
+
+flowsim 在 `delta_lat` 计算中加入了 steer_smooth 一阶低通滤波（α=0.25, τ≈0.15s），
+模拟真车 EPS 转向机的机械惯性和摩擦阻尼。防止 control_node 的微小 steer 修正
+在仿真中产生无阻尼振荡（真车 EPS 的物理间隙和摩擦会自然吸收）。
+
+### 4.4 日志诊断（1Hz，仅 ego）
+
+运行时在 `flowsim_node.cpp` 中每 20 帧（1Hz）输出 DYN 日志到 stderr：
+
+```
+DYN v=10.2 vx_b=10.23 vy_b=-0.08 r=-0.045 ay=-0.67
+    af=-0.0097 ar=0.0015 Fyf=-1364 Fyr=364 steer=-0.0230 hdg=-0.005
+```
+
+字段含义：`v`=标量速度, `vx_b/vy_b`=车身坐标系速度, `r`=横摆角速度,
+`ay`=侧向加速度, `af/ar`=前后轮侧偏角, `Fyf/Fyr`=前后轴侧向力,
+`steer`=转向角, `hdg`=航向。
+
+### 4.5 与运动学模型的差异
+
+| 场景 | 运动学 | 动力学 | 影响 |
+|------|--------|--------|------|
+| 直路巡航 steer=0 | 完全一致 | 完全一致 | 无差异 |
+| 变道 steer=0.05 | ay≈2.0 m/s² 瞬时 | ay≈1.8 m/s² 滞后~0.1s | 相同 steer 产生稍小 ay，需更大 steer |
+| 急弯 steer=0.15 | ay≈8.0 m/s² | 受摩擦圆约束 ay≤μ·g≈8.8 | 高速急弯轮胎饱和，ay 受限 |
+| 松油门转向 | 速度不变 | vy·r 项消耗纵向动能 | 过弯速度自然降低，更真实 |
+
+---
+
+## 五、NPC AI 状态机
+
+### 5.1 状态定义
 
 ```
 每个 NPC tick:
@@ -430,7 +498,7 @@ class FlowSimNode : public flowcoro::Task {
   6. 更新世界坐标
 ```
 
-### 4.2 IDM 跟车（复用 FLOWSIM v1 设计）
+### 5.2 IDM 跟车（复用 FLOWSIM v1 设计）
 
 ```cpp
 double idm_desired_speed(double v, double gap, double target_v) {
@@ -445,7 +513,7 @@ double idm_desired_speed(double v, double gap, double target_v) {
 }
 ```
 
-### 4.3 红灯感知
+### 5.3 红灯感知
 
 ```cpp
 void check_traffic_light(Entity* npc) {
