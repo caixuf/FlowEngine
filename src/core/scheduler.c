@@ -158,8 +158,10 @@ struct Scheduler {
     uint32_t         worker_count;
     pthread_t        monitor_thread;   /**< 监控线程 ID，用于安全 join */
     bool             monitor_active;   /**< 监控线程是否活跃 */
+    pthread_mutex_t  monitor_mutex;   /**< monitor 线程可取消等待的互斥锁 */
+    pthread_cond_t   monitor_cv;      /**< monitor 线程可取消等待的条件变量 */
 
-    /* Choreo: topic → task_id mapping for trigger routing */
+    /* Choreo: topic → task mapping for trigger routing */
     MessageBus*      choreo_bus;         /**< 用于注册触发回调的总线 */
 };
 
@@ -179,6 +181,8 @@ Scheduler* scheduler_create(const SchedulerConfig* config) {
     }
 
     pthread_mutex_init(&s->mutex, NULL);
+    pthread_mutex_init(&s->monitor_mutex, NULL);
+    pthread_cond_init(&s->monitor_cv, NULL);
     s->running = false;
     return s;
 }
@@ -188,6 +192,8 @@ void scheduler_destroy(Scheduler* sched) {
     if (sched->running) scheduler_stop(sched);
     free(sched->workers);
     pthread_mutex_destroy(&sched->mutex);
+    pthread_mutex_destroy(&sched->monitor_mutex);
+    pthread_cond_destroy(&sched->monitor_cv);
     free(sched);
 }
 
@@ -206,8 +212,20 @@ static void* scheduler_monitor_fn(void* arg) {
 
     pthread_setname_np(pthread_self(), "sched-mon");
 
+    /* 用条件变量定时等待而非 usleep：scheduler_stop 发信号后能立即退出，
+     * 避免在 usleep(5s) 中间被 join 卡住最多 5 秒（CI 超时失败的根因之一）。 */
+    struct timespec ts;
     while (sched->running) {
-        usleep((unsigned int)period_us);
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = (uint64_t)ts.tv_nsec + (uint64_t)period_us * 1000ULL;
+        ts.tv_sec  += (time_t)(ns / 1000000000ULL);
+        ts.tv_nsec  = (long)(ns % 1000000000ULL);
+
+        pthread_mutex_lock(&sched->monitor_mutex);
+        int rc = 0;
+        while (sched->running && rc != ETIMEDOUT)
+            rc = pthread_cond_timedwait(&sched->monitor_cv, &sched->monitor_mutex, &ts);
+        pthread_mutex_unlock(&sched->monitor_mutex);
         if (!sched->running) break;
 
         pthread_mutex_lock(&sched->mutex);
@@ -252,6 +270,12 @@ void scheduler_set_choreo_bus(Scheduler* sched, MessageBus* bus) {
 void scheduler_stop(Scheduler* sched) {
     if (!sched || !sched->running) return;
     sched->running = false;
+
+    /* 唤醒 monitor 线程：它可能在 pthread_cond_timedwait 中等待最长 5s，
+     * 不发信号的话 scheduler_stop 会被 pthread_join 卡住直到超时。 */
+    pthread_mutex_lock(&sched->monitor_mutex);
+    pthread_cond_signal(&sched->monitor_cv);
+    pthread_mutex_unlock(&sched->monitor_mutex);
 
     /* Wake all choreo waiters so they can exit */
     pthread_mutex_lock(&sched->mutex);

@@ -40,6 +40,8 @@ typedef struct TaskManager {
     pthread_mutex_t mutex;                     // 保护链表的互斥锁
     pthread_t monitor_thread;                  // 监控线程
     bool is_running;                           // 管理器运行状态
+    pthread_mutex_t monitor_mutex;             // monitor 线程可取消等待的互斥锁
+    pthread_cond_t  monitor_cv;                // monitor 线程可取消等待的条件变量
     uint32_t task_count;                       // 任务计数
     uint32_t running_task_count;               // 运行中任务计数
     TaskEventCallback event_callback;          // 任务状态变更回调

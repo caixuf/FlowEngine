@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <time.h>
+#include <errno.h>
 
 /* Forward declaration to avoid including flow_registry.h */
 int flow_registry_register_task(const char* name, const char* description,
@@ -32,8 +34,20 @@ static void notify_event(TaskManager* mgr, const char* name,
 static void* monitor_thread_fn(void* arg) {
     TaskManager* mgr = (TaskManager*)arg;
 
+    /* 用条件变量定时等待而非 sleep(5)：task_manager_stop_monitor 发信号后能立即退出，
+     * 避免在 sleep(5s) 中间被 pthread_join 卡住最多 5 秒（CI 超时失败的根因之一）。 */
     while (mgr->is_running) {
-        sleep(5);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = (uint64_t)ts.tv_nsec + 5000000000ULL; /* 5s 周期 */
+        ts.tv_sec  += (time_t)(ns / 1000000000ULL);
+        ts.tv_nsec  = (long)(ns % 1000000000ULL);
+
+        pthread_mutex_lock(&mgr->monitor_mutex);
+        int rc = 0;
+        while (mgr->is_running && rc != ETIMEDOUT)
+            rc = pthread_cond_timedwait(&mgr->monitor_cv, &mgr->monitor_mutex, &ts);
+        pthread_mutex_unlock(&mgr->monitor_mutex);
         if (!mgr->is_running) break;
 
         pthread_mutex_lock(&mgr->mutex);
@@ -57,10 +71,10 @@ static void* monitor_thread_fn(void* arg) {
             if (cur == TASK_STATE_RUNNING && task->config.heartbeat_interval > 0) {
                 uint64_t hb = task->stats.last_heartbeat;
                 if (hb > 0) {
-                    struct timespec ts;
-                    clock_gettime(CLOCK_MONOTONIC, &ts);
-                    uint64_t now = (uint64_t)ts.tv_sec * 1000000ULL
-                                 + (uint64_t)ts.tv_nsec / 1000ULL;
+                    struct timespec ts2;
+                    clock_gettime(CLOCK_MONOTONIC, &ts2);
+                    uint64_t now = (uint64_t)ts2.tv_sec * 1000000ULL
+                                 + (uint64_t)ts2.tv_nsec / 1000ULL;
                     uint64_t interval_us = (uint64_t)task->config.heartbeat_interval * 1000000ULL;
                     if (now - hb > interval_us * 3) {
                         fprintf(stderr, "[TaskManager] Task '%s' heartbeat timeout\n", node->name);
@@ -81,6 +95,8 @@ TaskManager* task_manager_create(void) {
 
     TAILQ_INIT(&mgr->task_list);
     pthread_mutex_init(&mgr->mutex, NULL);
+    pthread_mutex_init(&mgr->monitor_mutex, NULL);
+    pthread_cond_init(&mgr->monitor_cv, NULL);
     mgr->is_running = false;
     return mgr;
 }
@@ -106,6 +122,8 @@ void task_manager_destroy(TaskManager* mgr) {
     }
     pthread_mutex_unlock(&mgr->mutex);
     pthread_mutex_destroy(&mgr->mutex);
+    pthread_mutex_destroy(&mgr->monitor_mutex);
+    pthread_cond_destroy(&mgr->monitor_cv);
     free(mgr);
 }
 
@@ -394,6 +412,13 @@ int task_manager_start_monitor(TaskManager* mgr) {
 void task_manager_stop_monitor(TaskManager* mgr) {
     if (!mgr || !mgr->is_running) return;
     mgr->is_running = false;
+
+    /* 唤醒 monitor 线程：它可能在 pthread_cond_timedwait 中等待最长 5s，
+     * 不发信号的话 stop_monitor 会被 pthread_join 卡住直到超时。 */
+    pthread_mutex_lock(&mgr->monitor_mutex);
+    pthread_cond_signal(&mgr->monitor_cv);
+    pthread_mutex_unlock(&mgr->monitor_mutex);
+
     pthread_join(mgr->monitor_thread, NULL);
 }
 

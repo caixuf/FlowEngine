@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <errno.h>
 
 /* ── 协议常量 ─────────────────────────────────────────────── */
 
@@ -58,6 +59,8 @@ struct DiscoveryManager {
     int      sock_fd;
     struct sockaddr_in mcast_addr;
     bool     running;
+    pthread_mutex_t stop_mutex;   /**< 配合 stop_cv 实现可取消等待 */
+    pthread_cond_t  stop_cv;     /**< beacon 线程可取消等待的条件变量 */
 
     /* 线程 */
     pthread_t beacon_thread;
@@ -248,8 +251,22 @@ static void* beacon_thread_fn(void* arg) {
         sendto(dm->sock_fd, buf, (size_t)len, 0,
                (const struct sockaddr*)&dm->mcast_addr, sizeof(dm->mcast_addr));
 
+    /* 用条件变量定时等待而非 usleep：discovery_stop 发信号后能立即退出，
+     * 避免在 usleep(2s) 中间被 pthread_join 卡住最多 2 秒（CI 超时失败的根因之一）。 */
     while (dm->running) {
-        usleep(DISC_HEARTBEAT_MS * 1000);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t ns = (uint64_t)ts.tv_nsec
+                    + (uint64_t)DISC_HEARTBEAT_MS * 1000000ULL;
+        ts.tv_sec  += (time_t)(ns / 1000000000ULL);
+        ts.tv_nsec  = (long)(ns % 1000000000ULL);
+
+        pthread_mutex_lock(&dm->stop_mutex);
+        int rc = 0;
+        while (dm->running && rc != ETIMEDOUT)
+            rc = pthread_cond_timedwait(&dm->stop_cv, &dm->stop_mutex, &ts);
+        pthread_mutex_unlock(&dm->stop_mutex);
+        if (!dm->running) break;
 
         /* Send HEARTBEAT */
         len = serialize_beacon(buf, sizeof(buf), DISC_MSG_HEARTBEAT, dm);
@@ -346,6 +363,8 @@ DiscoveryManager* discovery_create(const char* node_name, uint8_t capabilities) 
     dm->my_capabilities = capabilities;
 
     pthread_mutex_init(&dm->topo_mutex, NULL);
+    pthread_mutex_init(&dm->stop_mutex, NULL);
+    pthread_cond_init(&dm->stop_cv, NULL);
 
     /* Setup UDP multicast socket */
     dm->sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -395,6 +414,8 @@ void discovery_destroy(DiscoveryManager* dm) {
 
     if (dm->sock_fd >= 0) close(dm->sock_fd);
     pthread_mutex_destroy(&dm->topo_mutex);
+    pthread_mutex_destroy(&dm->stop_mutex);
+    pthread_cond_destroy(&dm->stop_cv);
     free(dm);
 }
 
@@ -414,6 +435,14 @@ int discovery_start(DiscoveryManager* dm) {
 void discovery_stop(DiscoveryManager* dm) {
     if (!dm || !dm->running) return;
     dm->running = false;
+
+    /* 唤醒 beacon 线程：它可能在 pthread_cond_timedwait 中等待最长 2s，
+     * 不发信号的话 stop 会被 pthread_join 卡住直到超时。
+     * recv 线程用非阻塞 recvfrom + 100ms 轮询，最坏 100ms 退出，可接受。 */
+    pthread_mutex_lock(&dm->stop_mutex);
+    pthread_cond_signal(&dm->stop_cv);
+    pthread_mutex_unlock(&dm->stop_mutex);
+
     pthread_join(dm->beacon_thread, NULL);
     pthread_join(dm->recv_thread, NULL);
     printf("[discovery:%s] stopped\n", dm->my_name);

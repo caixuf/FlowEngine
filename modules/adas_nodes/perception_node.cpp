@@ -323,8 +323,18 @@ protected:
                         if (d2 < best_d2) { best_d2 = d2; best_k = k; }
                     }
                     if (best_k >= 0) {
-                        ob->vx = (float)g.obs_vx[best_k];
-                        ob->vy = (float)g.obs_vy[best_k];
+                        /* g.obs_vx/vy 是世界系真值速度（来自 flowsim）。下游
+                         * planning/control/safety 都按"Obstacle.vx/vy 是车体系"
+                         * 做旋转还原世界系（见各自 on_perception_obstacles）。
+                         * 若直接写世界系速度，下游会对已世界系的速度再旋转一次，
+                         * ego_heading≠0（弯道/变道）时对向来车检测 (obs_vx<-2)
+                         * 和 min_oncoming_ttc 的符号会被破坏 → 静默误判。
+                         * 因此这里先把世界系速度旋转到车体系，与 ob->x/y 保持
+                         * 一致的车体坐标系，下游旋转后即可正确还原世界系速度。 */
+                        double wvx = g.obs_vx[best_k];
+                        double wvy = g.obs_vy[best_k];
+                        ob->vx = (float)( wvx * ch_w + wvy * sh_w);
+                        ob->vy = (float)(-wvx * sh_w + wvy * ch_w);
                     }
                 }
                 g.last_obs_list = obs_list;
@@ -435,9 +445,9 @@ static int perception_init(MessageBus* bus, Transport* transport,
 
     discovery_advertise(discovery, "vehicle/state",         0x1C0E5A7Eu, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, "sensor/lidar",          LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, "perception/obstacles",  0x0B5A010Eu, CAP_PUBLISHER, 20.0);
+    discovery_advertise(discovery, "perception/obstacles",  OBSTACLELIST_TYPE_ID, CAP_PUBLISHER, 20.0);
 
-    transport_advertise(transport, "perception/obstacles", 0x0B5A010Eu);
+    transport_advertise(transport, "perception/obstacles", OBSTACLELIST_TYPE_ID);
 
     g.task = std::make_unique<PerceptionTask>(bus, transport, g.lidar_rate_hz);
 

@@ -1004,7 +1004,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, 0x0B5A010Eu,
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, OBSTACLELIST_TYPE_ID,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
                         CAP_SUBSCRIBER, 0);
