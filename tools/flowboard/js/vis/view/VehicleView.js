@@ -39,10 +39,13 @@ const HEAD_Z = 2.05;       // 车头
 const HEAD_X = 0.60;
 
 const GEO_RECT = new THREE.PlaneGeometry(0.18, 0.10);
+const GEO_BRAKE = new THREE.PlaneGeometry(0.10, 0.06);  // 刹车灯：窄条不占视觉
+const GEO_TURN  = new THREE.PlaneGeometry(0.22, 0.12);  // 转向灯：更大更醒目
+const GEO_HEAD  = new THREE.PlaneGeometry(0.26, 0.14);  // 近光灯：宽大明显
 
-function _makeRectMesh(color, x, y, z) {
+function _makeRectMesh(geo, color, x, y, z) {
   const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
-  const m = new THREE.Mesh(GEO_RECT, mat);
+  const m = new THREE.Mesh(geo, mat);
   m.position.set(x, y, z);
   return m;
 }
@@ -53,12 +56,12 @@ function _makeRectMesh(color, x, y, z) {
 function createVehicleLights(vehicleGroup) {
   const group = new THREE.Group();
 
-  const brakeL = _makeRectMesh(LIGHT_OFF, -BRAKE_X, BRAKE_Y, BRAKE_Z);
-  const brakeR = _makeRectMesh(LIGHT_OFF,  BRAKE_X, BRAKE_Y, BRAKE_Z);
-  const turnL  = _makeRectMesh(LIGHT_OFF, -TURN_X,  BRAKE_Y, TURN_Z);
-  const turnR  = _makeRectMesh(LIGHT_OFF,  TURN_X,  BRAKE_Y, TURN_Z);
-  const headL  = _makeRectMesh(LIGHT_OFF, -HEAD_X,  HEAD_Y,  HEAD_Z);
-  const headR  = _makeRectMesh(LIGHT_OFF,  HEAD_X,  HEAD_Y,  HEAD_Z);
+  const brakeL = _makeRectMesh(GEO_BRAKE, LIGHT_OFF, -BRAKE_X, BRAKE_Y, BRAKE_Z);
+  const brakeR = _makeRectMesh(GEO_BRAKE, LIGHT_OFF,  BRAKE_X, BRAKE_Y, BRAKE_Z);
+  const turnL  = _makeRectMesh(GEO_TURN, LIGHT_OFF, -TURN_X,  BRAKE_Y, TURN_Z);
+  const turnR  = _makeRectMesh(GEO_TURN, LIGHT_OFF,  TURN_X,  BRAKE_Y, TURN_Z);
+  const headL  = _makeRectMesh(GEO_HEAD, LIGHT_OFF, -HEAD_X,  HEAD_Y,  HEAD_Z);
+  const headR  = _makeRectMesh(GEO_HEAD, LIGHT_OFF,  HEAD_X,  HEAD_Y,  HEAD_Z);
 
   // 熄灯时隐藏，避免暗色灯片显示为车身边缘的黑方块
   brakeL.visible = brakeR.visible = false;

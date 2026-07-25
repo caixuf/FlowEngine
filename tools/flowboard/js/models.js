@@ -300,19 +300,18 @@ export function _setVehicleLights(group, state, blinkPhase) {
   if (!group || !group.userData) return;
   var ud = group.userData;
   var blinkOn = (blinkPhase !== undefined) ? (Math.sin(blinkPhase * Math.PI * 2 * 1.5) > 0) : true;
-  // 刹车灯：on=3.0, off=0.15（glTF 基础 emissiveFactor 仅 0.12，乘 2.0 只有 0.24 太暗）
+  // 刹车灯：on=1.5（降低视觉占比），off=0.15（微弱暗红）
   if (ud.brakeLights) {
-    var bi = state.brake ? 3.0 : 0.15;
+    var bi = state.brake ? 1.5 : 0.15;
     for (var i = 0; i < ud.brakeLights.length; i++) {
       if (ud.brakeLights[i].material) ud.brakeLights[i].material.emissiveIntensity = bi;
     }
   }
-  // 转向灯：on 时按 blinkPhase 闪烁，off=0.1。glTF turnsignal emissiveFactor 仅 0.35，
-  // 乘 2.2 = 0.77 偏暗，提到 3.5 让闪烁更明显
+  // 转向灯：亮闪 4.5（更醒目），灭 0.1
   if (ud.turnSignals) {
     var ts = ud.turnSignals;
     var setSide = function(on, keys) {
-      var intensity = on ? (blinkOn ? 3.5 : 0.1) : 0.1;
+      var intensity = on ? (blinkOn ? 4.5 : 0.1) : 0.1;
       for (var k = 0; k < keys.length; k++) {
         if (ts[keys[k]] && ts[keys[k]].material) {
           ts[keys[k]].material.emissiveIntensity = intensity;
@@ -322,9 +321,9 @@ export function _setVehicleLights(group, state, blinkPhase) {
     setSide(state.turnL, ['FL', 'RL']);
     setSide(state.turnR, ['FR', 'RR']);
   }
-  // 大灯：glTF emissiveFactor [0.5,0.5,0.45]，乘 1.5=0.75 偏暗，提到 2.5 更醒目
+  // 大灯：亮 3.0（补足视觉占比），灭 0.4
   if (ud.headlights && state.head !== undefined) {
-    var hi = state.head ? 2.5 : 0.4;
+    var hi = state.head ? 3.0 : 0.4;
     for (var h = 0; h < ud.headlights.length; h++) {
       if (ud.headlights[h].material) ud.headlights[h].material.emissiveIntensity = hi;
     }

@@ -176,8 +176,8 @@ export function initCarMesh() {
   _carGeom.wheel = new T.CylinderGeometry(0.33, 0.33, 0.26, 24);
   _carGeom.tread = new T.TorusGeometry(0.33, 0.018, 6, 24);
   _carGeom.hubcap = new T.CylinderGeometry(0.18, 0.18, 0.27, 16);
-  // 车灯：椭圆透镜造型
-  _carGeom.headlight = new T.BoxGeometry(0.08, 0.16, 0.42, 1, 1, 3);
+  // 车灯：椭圆透镜造型（前灯加大更醒目，尾灯维持窄条不占视觉）
+  _carGeom.headlight = new T.BoxGeometry(0.10, 0.20, 0.50, 1, 1, 3);
   _carGeom.taillight = new T.BoxGeometry(0.06, 0.16, 0.42, 1, 1, 3);
   _carGeom.mirror = new T.BoxGeometry(0.14, 0.2, 0.1, 1, 1, 2);
   _carGeom.doorHandle = new T.BoxGeometry(0.12, 0.04, 0.05);
@@ -433,7 +433,7 @@ export function _buildSedan(color, secondaryColor, addSpots) {
 
   // Turn signals（琥珀色，四角，name turnsignal_ 供 _setVehicleLights 查找）
   var turnMat = new T.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2.0, roughness: 0.10 });
-  var turnGeo = new T.BoxGeometry(0.08, 0.15, 0.30, 1, 1, 2);
+  var turnGeo = new T.BoxGeometry(0.10, 0.18, 0.36, 1, 1, 2);
   var turnSignals = {};
   function addTurnSignal(x, z, key) {
     var m = new T.Mesh(turnGeo, turnMat);
@@ -695,7 +695,7 @@ export function _buildObstacle(type, color) {
   // 命名 + userData 引用与 _buildSedan 一致，_setVehicleLights 才能切换刹车/转向/大灯。
   var headMat = new T.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffee, emissiveIntensity: 1.2, roughness: 0.2 });
   var tailMat = new T.MeshStandardMaterial({ color: 0xff2222, emissive: 0xff1111, emissiveIntensity: 1.2, roughness: 0.2 });
-  var hlGeo = new T.BoxGeometry(0.08, 0.16, 0.42, 1, 1, 2);
+  var hlGeo = new T.BoxGeometry(0.10, 0.20, 0.50, 1, 1, 2);
   var tlGeo = new T.BoxGeometry(0.06, 0.16, 0.42, 1, 1, 2);
   var lightX = BL / 2 - 0.04;
   var headlightMeshes = [], brakeLightMeshes = [];
@@ -711,7 +711,7 @@ export function _buildObstacle(type, color) {
 
   // 转向灯（琥珀色，四角，name turnsignal_ 供 _setVehicleLights 查找）
   var turnMat = new T.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2.0, roughness: 0.10 });
-  var turnGeo = new T.BoxGeometry(0.08, 0.15, 0.30, 1, 1, 2);
+  var turnGeo = new T.BoxGeometry(0.10, 0.18, 0.36, 1, 1, 2);
   var turnSignals = {};
   function addTruckTurn(x, z, key) {
     var m = new T.Mesh(turnGeo, turnMat);
