@@ -541,10 +541,10 @@ export function createVehicleView(scene, renderer, modelCache) {
         entry.lights.update(v);
       }
 
-      // glTF 模型 emissive 灯光
+      // glTF 模型 emissive 灯光（含 ads_indicator 小蓝灯）
       const vis = _getVisGroup(entry);
       if (vis && vis.userData &&
-          (vis.userData.brakeLights || vis.userData.turnSignals || vis.userData.headlights)) {
+          (vis.userData.brakeLights || vis.userData.turnSignals || vis.userData.headlights || vis.userData.adsIndicators)) {
         const ls = deriveLightState(v.lights || 0, v.brake || 0);
         _setVehicleLights(vis, ls, now !== undefined ? now / 1000 : undefined);
       }

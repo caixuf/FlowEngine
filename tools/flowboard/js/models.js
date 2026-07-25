@@ -109,7 +109,7 @@ function _buildVehicleFromGltf(name, gltf) {
       turnSignals[n.substring('turnsignal_'.length)] = c;  // FL/FR/RL/RR
     }
     else if (n.indexOf('headlight_') === 0) headlights.push(c);
-    else if (n.indexOf('ads_indicator_') === 0) adsIndicators.push(c);
+    else if (n.indexOf('ads_indicator') === 0) adsIndicators.push(c);
   });
   if (brakeLights.length) group.userData.brakeLights = brakeLights;
   if (Object.keys(turnSignals).length) group.userData.turnSignals = turnSignals;
@@ -235,7 +235,7 @@ export function _relinkWheelUserData(clone) {
     if (n.indexOf('brakelight_') === 0) brakeLights.push(c);
     else if (n.indexOf('turnsignal_') === 0) turnSignals[n.substring('turnsignal_'.length)] = c;
     else if (n.indexOf('headlight_') === 0) headlights.push(c);
-    else if (n.indexOf('ads_indicator_') === 0) adsIndicators.push(c);
+    else if (n.indexOf('ads_indicator') === 0) adsIndicators.push(c);
   });
   if (brakeLights.length) clone.userData.brakeLights = brakeLights;
   if (Object.keys(turnSignals).length) clone.userData.turnSignals = turnSignals;
@@ -328,12 +328,15 @@ export function _setVehicleLights(group, state, blinkPhase) {
       if (ud.headlights[h].material) ud.headlights[h].material.emissiveIntensity = hi;
     }
   }
-  // 自动驾驶小蓝灯（ads_indicator）：车尾左右各一，量产 ADS 标志，始终亮。
-  // 不受 brake/turn 状态影响，每次 _setVehicleLights 调用时强制拉到 1.4，
-  // 防止 ego/NPC 因状态切换时材质被重置而熄灭。
+  // 自动驾驶小蓝灯（ads_indicator）：车尾左右各一，量产 ADS 标志。
+  // 常亮 + 高 emissive（穿透性蓝光），不受 brake/turn 状态影响。
+  // 每次 _setVehicleLights 调用时强制覆盖，防止材质被重置而熄灭。
   if (ud.adsIndicators) {
     for (var ai = 0; ai < ud.adsIndicators.length; ai++) {
-      if (ud.adsIndicators[ai].material) ud.adsIndicators[ai].material.emissiveIntensity = 1.4;
+      if (ud.adsIndicators[ai].material) {
+        ud.adsIndicators[ai].material.emissive.setHex(0x4488ff);
+        ud.adsIndicators[ai].material.emissiveIntensity = 3.0;
+      }
     }
   }
 }

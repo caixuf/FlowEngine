@@ -347,16 +347,16 @@ export function _buildSedan(color, secondaryColor, addSpots) {
   var ant = new T.Mesh(_carGeom.antenna, chromeMat);
   ant.position.set(-0.9, 1.4, 0.55); g.add(ant);
 
-  // 自动驾驶小蓝灯 ×2（车尾左右，量产 ADS 指示灯，比车顶款更显眼）
-  var adsLightGeo = new T.CylinderGeometry(0.07, 0.08, 0.08, 12);
-  var adsLightMat = new T.MeshStandardMaterial({ color: 0x3388ff, emissive: 0x2277ee, emissiveIntensity: 2.2, roughness: 0.10, metalness: 0.2 });
-  function addAdsLight(z) {
+  // 自动驾驶小蓝灯 ×2（车尾左右，量产 ADS 指示灯，加大提高穿透性）
+  var adsLightGeo = new T.CylinderGeometry(0.10, 0.12, 0.12, 12);
+  var adsLightMat = new T.MeshStandardMaterial({ color: 0x3388ff, emissive: 0x2277ee, emissiveIntensity: 2.5, roughness: 0.10, metalness: 0.2 });
+  function addAdsLight(z, side) {
     var m = new T.Mesh(adsLightGeo, adsLightMat);
-    m.name = 'ads_indicator';
+    m.name = 'ads_indicator_' + side;
     m.position.set(-1.75, 0.88, z);
     g.add(m);
   }
-  addAdsLight(0.48); addAdsLight(-0.48);
+  addAdsLight(0.48, 'L'); addAdsLight(-0.48, 'R');
 
   // Wheels (4) — 前后轴分别建 Group，前轴支持转向动画。
   // 轴 Group pivot 在轴中心，车轮相对轴定位，rotation.y 转向时车轮绕轴心自转而非绕车身公转。
