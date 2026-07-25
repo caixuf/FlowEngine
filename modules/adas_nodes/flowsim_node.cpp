@@ -638,12 +638,27 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
      * 之前 world_half_width 硬编码为 3.5m（2 车道 × 3.5），但中凯路 road 3 是 3 车道
      * （半宽 5.25m）→ 杆位 y=5.0 实际在中央车道分隔线上。修复：esmini 加载时
      * 用 RM_GetRoadNumberOfDrivableLanes + RM_GetLaneIdByIndex 反查车道数+宽度
-     * 算 road_half_width；非 finite/esmini 不可用时再 fallback 硬编码。
+     * 算 road_half_width；非 esmini 路径从 sc->road.lanes/lane_width
+     * （scenario_loader 从 road_network.edges[0] 提取）算 road_half_width，
+     * 避免 4 车道场景灯杆落在路面内与车辆位置重叠。
      * 此外场景 traffic_lights[*].x 可能是手填的「近似世界坐标」（中凯路 x=770
      * 实际应在路口中心 x=560）——esmini 加载时用 world_to_frenet 校正 x/y，
      * 找到最近的 (road_id, s, lane_id, offset) 再 frenet_to_world 反算真值。
-     * 这样无论场景 JSON 用相对值还是手填世界坐标，灯杆永远落在正确车道。 */
+     * 这样无论场景 JSON 用相对值还是手填世界坐标，灯杆永远落在正确车道。
+     *
+     * heading 修正：灯杆臂应垂直于道路切线方向（指向道路中心）。
+     *   - 北侧杆 (sign=+1)：heading = road_tangent - π/2（臂朝南）
+     *   - 南侧杆 (sign=-1)：heading = road_tangent + π/2（臂朝北）
+     * 之前 `if (e.heading == 0.0)` 检查会在垂直计算恰好得 0 时误覆盖
+     * （如道路朝北 + 北侧杆 → π/2 - π/2 = 0），且非 esmini 路径从未设垂直朝向。 */
     {
+        /* 非 esmini 路径的 road_half_width：从场景配置算一次，循环外缓存。
+         * sc->road.lanes/lane_width 由 scenario_loader 从 road_network.edges[0]
+         * 提取；未配置（旧场景）时 fallback 2 车道 × 3.5m = 7m 宽，半宽 3.5m。 */
+        int    fallback_lanes = (sc->road.lanes > 0) ? sc->road.lanes : 2;
+        double fallback_lw    = (sc->road.lane_width > 0.0) ? sc->road.lane_width : 3.5;
+        double fallback_half_width = (fallback_lanes * fallback_lw) / 2.0;
+
         /* 缓存：每个 (road_id, s) 位置处的 road_half_width，避免重复 esmini 调用 */
         double cached_half_width = -1.0;
         for (int i = 0; i < sc->traffic_light_count && i < SCENARIO_MAX_TRAFFIC_LIGHTS; i++) {
@@ -657,9 +672,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             e.steer    = tl->red_s;
             e.target_vx = tl->phase_offset_s;
             e.heading = tl->heading;
-            if (e.heading == 0.0) {
-                e.heading = compute_road_heading_at(tl->x, tl->y_lane);
-            }
+            double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
             /* esmini 接管世界坐标：world_to_frenet → 反算真值。
              * 两层语义：
              *   1) e.x/e.y = 灯杆 3D 位置（路缘外侧 +1.5m 退让，避免杆立在路中间）
@@ -678,7 +691,6 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                         cached_half_width = (n_drivable * g.lane_width) / 2.0;
                         e.road_id = fp.road_id;
                     }
-                    double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
                     /* 车道中心 y：从道路中心 + sign * |y_lane|（沿路宽方向） */
                     double lane_center_y = have_rc ? (rc_wp.y + tl->y_lane) : tl->y_lane;
                     /* 灯杆 3D 位置：车道侧路缘外 +1.5m 退让 */
@@ -687,26 +699,35 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                     e.y = pole_y;
                     /* e.width 存车道中心 y，供 NPC 红绿灯响应判断同侧车流 */
                     e.width = lane_center_y;
-                    /* heading：灯杆垂直于道路切线方向 */
-                    e.heading = have_rc ? (rc_wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2)) : 0.0;
-                    if (e.heading == 0.0) {
-                        e.heading = compute_road_heading_at(tl->x, tl->y_lane);
+                    /* heading：灯杆臂垂直于道路切线方向（指向道路中心）。
+                     * 场景显式配置 tl->heading 时优先用配置值；否则从道路切线推算。
+                     * 用 have_rc 标志判断是否成功取到道路切线，不再用
+                     * `e.heading == 0.0` 检查（会在垂直计算恰好得 0 时误覆盖）。 */
+                    if (tl->heading != 0.0) {
+                        e.heading = tl->heading;
+                    } else if (have_rc) {
+                        e.heading = rc_wp.h + (sign > 0.0 ? -M_PI_2 : M_PI_2);
+                    } else {
+                        double tan_h = compute_road_heading_at(tl->x, tl->y_lane);
+                        e.heading = tan_h + (sign > 0.0 ? -M_PI_2 : M_PI_2);
                     }
                 } else {
                     /* world_to_frenet 失败：场景坐标不在路网附近，fallback */
                     e.x = tl->x;
-                    double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                    double road_half_width = 3.5;
-                    e.y = sign * (road_half_width + 1.5);
+                    e.y = sign * (fallback_half_width + 1.5);
                     e.width = tl->y_lane;  /* 存原始 lane_y */
+                    double tan_h = compute_road_heading_at(tl->x, tl->y_lane);
+                    e.heading = (tl->heading != 0.0) ? tl->heading
+                                : (tan_h + (sign > 0.0 ? -M_PI_2 : M_PI_2));
                 }
             } else {
-                /* esmini 不可用：旧逻辑 */
+                /* esmini 不可用：从场景配置算 road_half_width + 垂直朝向 */
                 e.x = tl->x;
-                double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
-                double road_half_width = 3.5;
-                e.y = sign * (road_half_width + 1.5);
+                e.y = sign * (fallback_half_width + 1.5);
                 e.width = tl->y_lane;  /* 存原始 lane_y */
+                double tan_h = compute_road_heading_at(tl->x, tl->y_lane);
+                e.heading = (tl->heading != 0.0) ? tl->heading
+                            : (tan_h + (sign > 0.0 ? -M_PI_2 : M_PI_2));
             }
         }
     }
@@ -1441,21 +1462,6 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                 } else {
                     LOG_WARN("flowsim", "route build failed — NPC lane-follow off (straight fallback)");
                 }
-                /* 仿真基础层：几何变更时建一次静态 digest */
-                g.static_digest = flowsim::build_static_digest(g.roads, g.route, g.pool);
-                LOG_INFO("flowsim", "static digest: %zu lanes, %zu markings, %zu traffic_lights",
-                         g.static_digest.lanes.size(),
-                         g.static_digest.markings.size(),
-                         g.static_digest.traffic_lights.size());
-                /* 静态 invariant：车道宽/边界自洽/标线/红绿灯朝向等 */
-                auto static_inv = flowsim::check_static_invariants(g.static_digest);
-                if (static_inv.failed > 0) {
-                    LOG_WARN("flowsim", "static_invariant: %d passed, %d FAILED, %d warned",
-                            static_inv.passed, static_inv.failed, static_inv.warned);
-                    if (!static_inv.details.empty()) {
-                        fprintf(stderr, "[flowsim::static_invariant]\n%s", static_inv.details.c_str());
-                    }
-                }
             } else {
                 LOG_WARN("flowsim", "esmini load failed for %s — NPC AI falls back to lateral distance",
                          xodr.c_str());
@@ -1463,8 +1469,33 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* 填充 EntityPool */
+    /* 填充 EntityPool（ego + actors + 红绿灯 + ETC 门架）。
+     * 必须在 build_static_digest 之前——digest 的 traffic_lights 字段从 pool
+     * 提取（位置/朝向/受控车道），早于 populate 会导致 sd.traffic_lights 为空，
+     * ASCII 渲染看不到灯杆，闭环调试失效。 */
     populate_entities_from_scenario(g.scenario);
+
+    /* 仿真基础层：几何变更时建一次静态 digest。
+     * 放在 populate_entities_from_scenario 之后，使 traffic_light 实体的
+     * 位置/朝向能被 build_static_digest 提取到 TrafficLightDigest.x/y/heading，
+     * 供 ASCII 俯视渲染（render_ascii_overhead）画 G/Y/R 字符 + 静态 invariant
+     * 检查（check_static_invariants）校验灯杆朝向。 */
+    if (g.roads_loaded) {
+        g.static_digest = flowsim::build_static_digest(g.roads, g.route, g.pool);
+        LOG_INFO("flowsim", "static digest: %zu lanes, %zu markings, %zu traffic_lights",
+                 g.static_digest.lanes.size(),
+                 g.static_digest.markings.size(),
+                 g.static_digest.traffic_lights.size());
+        /* 静态 invariant：车道宽/边界自洽/标线/红绿灯朝向等 */
+        auto static_inv = flowsim::check_static_invariants(g.static_digest);
+        if (static_inv.failed > 0) {
+            LOG_WARN("flowsim", "static_invariant: %d passed, %d FAILED, %d warned",
+                    static_inv.passed, static_inv.failed, static_inv.warned);
+            if (!static_inv.details.empty()) {
+                fprintf(stderr, "[flowsim::static_invariant]\n%s", static_inv.details.c_str());
+            }
+        }
+    }
 
     /* 仿真时钟：逻辑时间从 0 开始步进 */
     clock_set_sim_mode(true);

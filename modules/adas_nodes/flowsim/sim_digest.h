@@ -55,12 +55,22 @@ struct RoadMarkingDigest {
 
 struct TrafficLightDigest {
     int    id;
-    double heading;
+    double x;                  /**< 灯杆世界坐标 x（m，ENU）— ASCII 渲染用 */
+    double y;                  /**< 灯杆世界坐标 y（m，ENU）— ASCII 渲染用 */
+    double heading;            /**< 灯杆朝向（rad）— ASCII 渲染臂方向 + invariant 检查 */
     int    controlled_road_id;
     int    controlled_lane_id;
-    /* P2 清理：移除 x / y / z / phase —— 仅写入无读取。
-     * phase 在 Entity::phase_state 上仍 alive（scene_pub.cpp:301,313 读），
-     * 但 digest 里的副本从未被消费；位置由 entity 直接发布。 */
+    /* 闭环调试恢复：x / y / heading 重新加入（之前 P2 清理时误删，认为"无读取"，
+     * 但 ASCII 俯视渲染需要位置才能在网格上画灯）。phase 是动态字段，放
+     * DynamicDigest::traffic_light_states（每帧刷新）。 */
+};
+
+/** 红绿灯动态状态（每帧）— 配套 TrafficLightDigest 的静态位置，渲染 ASCII 时
+ * 按 id 关联拿当前相位。phase_state 与 Entity::phase_state 一致：0=绿 1=黄 2=红。 */
+struct TrafficLightStateDigest {
+    int    id;
+    int    phase_state;
+    double phase_timer;        /**< 当前相位剩余时间 (s) — 调试用 */
 };
 
 struct StaticDigest {
@@ -112,6 +122,10 @@ struct DynamicDigest {
     bool   ego_centered;
     double origin[2];
     std::vector<ActorDigest> actors;
+    /* 红绿灯相位（每帧）：与 StaticDigest::traffic_lights 按 id 关联，
+     * render_ascii_overhead 据此画 G/Y/R 字符。build_dynamic_digest 从
+     * Entity::phase_state 提取。 */
+    std::vector<TrafficLightStateDigest> traffic_light_states;
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -204,10 +218,15 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
 
 /**
  * 渲染 ASCII 俯视图（终端调试用，无需 GUI）。
- * ═ 实线  : 虚线  ‖ 双黄  C 车(→↑←↓↗ 表朝向)  ● 行人  🚦 灯
+ * ═ 实线  : 虚线  ‖ 双黄  C 车(→↑←↓↗ 表朝向)  ● 行人  G/Y/R 灯(相位色)
+ *
+ * 红绿灯位置取自 sd.traffic_lights[i].(x,y)，相位取自 dd.traffic_light_states
+ * 按 id 关联（绿=G 黄=Y 红=R），便于闭环调试"灯杆落在路面外 + 不与车辆重叠 +
+ * 相位切换正确"三类问题。flowsim_node 每 20 帧调用一次，覆盖写入
+ * /tmp/flow_ascii_overhead.txt。
  *
  * @param sd   静态 digest（车道线/红绿灯位置）
- * @param dd   动态 digest（车辆/行人位置+朝向）
+ * @param dd   动态 digest（车辆/行人位置+朝向 + 红绿灯相位）
  * @param width_chars  输出宽度（字符数），默认 80
  * @param height_chars 输出高度（字符数），默认 40
  * @return ASCII 俯视图字符串

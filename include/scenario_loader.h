@@ -150,6 +150,8 @@ typedef struct {
     double curve_length_m;  /**< 弯道长度（m），<=0 = 禁用（直道） */
     double curve_offset_m;  /**< 弯道终点横向偏移（m），默认 0 */
     char   type[32];        /**< 道路类型（road_network 新格式：viaduct_highway/urban/ramp_curve 等） */
+    int    lanes;           /**< 车道数（road_network.edges[0].lanes，默认 0=未配置→fallback 2） */
+    double lane_width;      /**< 车道宽度 m（road_network.edges[0].lane_width，默认 0=未配置→fallback 3.5） */
 } ScenarioRoad;
 
 /* ── 红绿灯（可选, 见 traffic_light.h） ────────────────────── */
