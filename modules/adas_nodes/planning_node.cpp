@@ -680,7 +680,13 @@ protected:
                 /* 红绿灯虚拟停止线墙注入：
                  * 遍历缓存的灯，找前方最近的红/黄灯。若 ego 与停止线距离在
                  * 刹停可行范围内，注入一面跨车道宽度的静止"墙"——
-                 * safety_control 现有 TTC/brake 逻辑直接对虚拟墙生效，免费复用。
+                 * Frenet 规划器在轨迹优化时会绕开/减速至墙前停车。
+                 *
+                 * 注意：虚拟墙仅存在于 Frenet 内部障碍物数组，不发布到
+                 * perception/obstacles topic，故 safety_control 看不到虚拟墙。
+                 * 红绿灯停车的执行链路是 planning(target_speed=0) → control(PID 跟踪)
+                 * → safety(透传)。safety_control 作为最后闸门不直接感知红绿灯，
+                 * 依赖 control 正确跟踪 planning 下发的 target_speed。
                  *
                  * 刹停距离估算: d_brake = v² / (2*a) + 余量，a≈4 m/s²。
                  * 黄灯判据: 仅当能安全刹停时注入（dx > min_stop_dist）；

@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -227,8 +226,11 @@ double pedestrian_collision_gap(const VehicleState& state) {
     if (pi < 0 || !state.obs_valid[pi]) return 1e9;
     double dx = state.obs_x[pi] - state.x;
     double dy = std::fabs(state.obs_y[pi] - state.y);
-    if (std::fabs(dx) > 70.0 || dy > 4.5) return 1e9;
-    return std::fabs(dx) - 2.8;
+    /* 行人位于 ego 后方（dx <= 0）时无前向碰撞风险：ego 不会倒车。
+     * 此前用 fabs(dx) 会让后方行人也触发刹车，导致 ego 已驶过行人后仍误刹。
+     * dx > 0（行人在前方）时返回 dx - 2.8 作为碰撞间隙。 */
+    if (dx <= 0.0 || dx > 70.0 || dy > 4.5) return 1e9;
+    return dx - 2.8;
 }
 
 double pedestrian_crossing_hold_gap(const VehicleState& state) {
@@ -476,48 +478,15 @@ private:
                 }
             }
 
-            /* Low-speed deadlock recovery: if ego has been stuck for too long
-             * and the road ahead is clear, ease the brake and allow a small
-             * throttle so the planner can creep forward (e.g. stopped at a
-             * red light or blocked during a low-speed lane change).
+            /* 死锁恢复职责归属 control 节点（SPEED_ZERO_RECOVERY / STUCK_RECOVER）。
              *
-             * 安全复查：恢复前必须确认触发刹停的原因已消失。nearest_same_lane_gap
-             * 只看同车道车辆（横向容差 2.0m），不复查行人/TTC/横穿风险——若 ego
-             * 因行人而正确刹停，行人多等 5 秒（现实常见）就触发恢复，会把车命令
-             * 朝着行人冲过去。故恢复前必须复查行人碰撞、斑马线等待、对向来车 TTC。 */
-            static auto last_move_time = std::chrono::steady_clock::now();
-            if (state.speed >= 0.5) {
-                last_move_time = std::chrono::steady_clock::now();
-            } else {
-                double elapsed_ms = static_cast<double>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - last_move_time)
-                        .count());
-                if (elapsed_ms > 5000.0) {
-                    /* 复查行人碰撞风险：行人仍在危险范围内不恢复 */
-                    double ped_gap_recheck = pedestrian_collision_gap(state);
-                    double ped_stop_gap_recheck = std::max(24.0, state.speed * 5.0);
-                    /* 复查斑马线等待：斑马线区域仍有行人不恢复 */
-                    double hold_gap_recheck = pedestrian_crossing_hold_gap(state);
-                    /* 复查对向来车 TTC：参考 413-423 行 oncoming 紧急刹车逻辑 */
-                    double oncoming_dx_recheck = 0.0;
-                    double oncoming_ttc_recheck = min_oncoming_ttc(state, &oncoming_dx_recheck);
-
-                    bool ped_still_dangerous = (ped_gap_recheck < ped_stop_gap_recheck);
-                    bool crossing_still_dangerous = (hold_gap_recheck < 10.0);
-                    bool oncoming_still_dangerous = (oncoming_ttc_recheck < 4.0 || oncoming_dx_recheck < 8.0);
-
-                    if (!ped_still_dangerous && !crossing_still_dangerous && !oncoming_still_dangerous) {
-                        double gap = nearest_same_lane_gap(state, params_);
-                        if (gap > 10.0) {
-                            fprintf(stderr, "[safety] low-speed recovery: spd=%.2f gap=%.2f -> brake=%.2f throttle=%.2f\n",
-                                    state.speed, gap, cmd.brake, cmd.throttle);
-                            set_changed(cmd.brake, std::min(cmd.brake, 0.30));
-                            set_changed(cmd.throttle, std::max(cmd.throttle, 0.20));
-                        }
-                    }
-                }
-            }
+             * safety_control 此前有独立的 5s low-speed deadlock recovery，与 control
+             * 的 SPEED_ZERO_RECOVERY 同时触发后互相矛盾：control 设 throttle=0.15/brake=0，
+             * safety 又覆写为 throttle=0.20/brake=0.30 → ego 既前进又刹车，无法移动。
+             * 更严重的是 safety 不订阅红绿灯 topic，红灯停车 5s 后会强制蠕行闯红灯。
+             *
+             * 职责边界：safety 是纯安全闸门（clamp + 碰撞制动覆写），不发起恢复。
+             * control 负责所有死锁恢复（已含 target_speed 检查，红灯时不触发）。 */
         }
         if (changed && cmd.mode.find("SAFE") == std::string::npos) {
             cmd.mode += "+SAFE";

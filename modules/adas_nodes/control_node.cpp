@@ -1141,9 +1141,14 @@ protected:
                 mode = "SPEED_LIMIT";
             }
 
-            /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。 */
+            /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。
+             *
+             * target_speed 守卫：planning 因红灯/停车标志下发 target_speed≈0 时禁止恢复，
+             * 否则 5s 后会强制蠕行闯红灯。仅在 planning 要求前进（target_speed>1.0）
+             * 但 ego 因横向死锁/控制抖动而静止时才触发恢复。 */
             if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-                fabs(g.ego_y - road_c) <= road_center_limit - 0.4) {
+                fabs(g.ego_y - road_c) <= road_center_limit - 0.4 &&
+                g.target_speed > 1.0) {
                 throttle = 0.15;
                 brake    = 0.0;
                 mode     = "SPEED_ZERO_RECOVERY";
@@ -1151,8 +1156,8 @@ protected:
                 g.lc_attempted = 0;
                 g.lc_cooldown  = 0.0;
                 g.speed_zero_timer = 0.0;
-                LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f))",
-                         g.ego_y, g.ego_x, g.ego_y);
+                LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f)) tgt=%.1f",
+                         g.ego_y, g.ego_x, g.ego_y, g.target_speed);
             }
 
             /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
