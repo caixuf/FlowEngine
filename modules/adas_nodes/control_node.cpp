@@ -156,6 +156,7 @@ struct ControlContext {
     /* 从 topic 解析的值 */
     double current_speed{0};
     double target_speed{0};
+    int    has_target_speed{0};  /* trajectory 回调是否已设置 target_speed */
     double ego_x{0}, ego_y{0};
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
@@ -295,7 +296,10 @@ static void on_trajectory(const Message* msg, void* user_data) {
     cJSON* root = cJSON_Parse(d);
     if (root) {
         cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
-        if (cJSON_IsNumber(j)) g.target_speed = j->valuedouble;
+        if (cJSON_IsNumber(j)) {
+            g.target_speed = j->valuedouble;
+            g.has_target_speed = 1;
+        }
         j = cJSON_GetObjectItemCaseSensitive(root, "lane_keep_d");
         if (cJSON_IsNumber(j)) g.lane_d = j->valuedouble;
         /* 解析路径数组 first element: [s,d,spd] */
@@ -903,8 +907,16 @@ protected:
             double adjacent_gap = lane_lead_gap(adjacent_lane_y, same_lane_tol);
             double lead_speed = lane_lead_speed(cruise_lane_y, same_lane_tol);
             double safe_gap = min_gap + g.current_speed * time_headway;
-            double boost_target = fmax(g.target_speed, g.cfg_cruise_speed);
+            double boost_target = (g.has_target_speed) ? g.target_speed : fmax(g.target_speed, g.cfg_cruise_speed);
             double acc_target = boost_target;
+            /* 局部拷贝 target_speed 防回调线程覆盖（race condition） */
+            double tl_ts = g.target_speed;
+            int    tl_ht = g.has_target_speed;
+            /* 红灯停车时清 PID 积分：trajectory 显式 target_speed≈0 时清除积分
+             * 抗 windup，避免巡航阶段累积的正向积分导致减速响应延迟数秒。 */
+            if (tl_ht && tl_ts < 0.01 && g.integral > 0) {
+                g.integral = 0;
+            }
             int blocked = 0;
             int overtake_worthwhile = 0;
             int overtake_need_accel = 0;
@@ -1131,6 +1143,14 @@ protected:
                 g.lc_cooldown = g.lc_cooldown_after_return_s;
                 g.lc_timer = 0.0;
                 LOG_INFO("control", ">>> returned to original lane");
+            }
+
+            /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，
+             * 无条件置 acc_target=0，覆盖所有 ACC/变道逻辑对 acc_target 的改写。
+             * 同时清积分抗 windup，保证 PID 立即输出刹车。 */
+            if (tl_ht && tl_ts < 0.1) {
+                acc_target = 0.0;
+                g.integral = 0;
             }
 
             /* ── 纵向 PID 计算 (目标为 ACC 限速后的值) ── */

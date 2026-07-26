@@ -1,17 +1,19 @@
 /**
  * TrafficLightView.js — 交通信号灯
  *
- * 从 utils.js _buildTrafficLight 搬迁：灯杆 5m + 臂架 4m + 灯壳 + 3 灯泡（红黄绿）。
- * update(store) 扫描 entities 里 type='tl' 的实体，根据 state 切换灯亮：
- *   state='red'/'yellow'/'green'（或 0/1/2）→ 对应灯 emissiveIntensity 拉高
+ * 渲染逻辑唯一来源：scene/frame 的 entities 数组里 type='tl' 的实体。
+ * 不再从 road_network.edges[*].traffic_lights 二次构造，避免"同个红绿灯
+ * 多处实现"导致重复或错位渲染。
  *
- * 灯位置：路口 edge 的 traffic_lights 字段（s, l 横向偏移）。
+ * 坐标/朝向约定：
+ *   - 后端 heading 表示灯杆臂的指向（垂直于道路切线，指向道路中心）。
+ *   - 前端本地模型：臂默认沿 -z，灯壳/灯泡默认朝 +x（向来车方向）。
+ *   - 组旋转：rotation.y = PI/2 - heading，使臂与后端 heading 对齐。
  */
 
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
 import { worldToThree } from '../math/Coord.js';
 import { roadHeightAt } from '../math/RoadHeight.js';
-import { getEdgePointAtS } from '../math/Curve.js';
 
 const RED = 0xff0000, YELLOW = 0xffaa00, GREEN = 0x00ff00;
 const LAMP_Y = [4.6, 4.3, 4.0];  // 红/黄/绿的 Y 坐标
@@ -23,28 +25,31 @@ export function createTrafficLightView(scene) {
   function _createTrafficLight() {
     const g = new THREE.Group();
 
-    // 灯杆（5m 圆柱）
     const poleMat = getStdMaterial(0x555555, 0.4, 0.6);
+
+    // 灯杆（5m 圆柱）
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 5.0, 12), poleMat);
     pole.position.y = 2.5;
     pole.castShadow = true;
     g.add(pole);
 
-    // 臂架（4m 横向 Box，高度 4.8m）
+    // 臂架：4m 横向 Box，默认沿 -z（从杆顶向道路中心延伸）
     const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 4.0), poleMat);
-    arm.position.set(0, 4.8, 2.0);
+    arm.position.set(0, 4.8, -2.0);
     g.add(arm);
 
-    // 灯壳
+    // 灯壳：在臂架末端，默认朝 +x（向来车方向）
+    const housingMat = getStdMaterial(0x222222, 0.7, 0.3);
     const housing = new THREE.Mesh(
-      new THREE.BoxGeometry(0.35, 0.9, 0.3),
-      getStdMaterial(0x222222, 0.7, 0.3)
+      new THREE.BoxGeometry(0.3, 0.9, 0.35),
+      housingMat
     );
-    housing.position.set(0, 4.3, 4.0);
+    housing.position.set(0, 4.3, -4.0);
+    // 默认 BoxGeometry 的 +x 面作为正面；无需额外旋转即可朝 +x
     housing.castShadow = true;
     g.add(housing);
 
-    // 3 灯泡（红/黄/绿，默认暗）
+    // 3 灯泡（红/黄/绿，默认暗），装在灯壳 +x 面外侧
     const lamps = [];
     const colors = [RED, YELLOW, GREEN];
     for (let i = 0; i < 3; i++) {
@@ -52,7 +57,8 @@ export function createTrafficLightView(scene) {
         new THREE.SphereGeometry(0.11, 16, 12),
         createEmissiveMaterial(colors[i], 0.05)
       );
-      lamp.position.set(0, LAMP_Y[i], 4.16);
+      // 灯泡排成一列，x 略微突出（-x 侧）以便面向来车
+      lamp.position.set(-0.16, LAMP_Y[i], -4.0);
       g.add(lamp);
       lamps.push(lamp);
     }
@@ -75,55 +81,9 @@ export function createTrafficLightView(scene) {
     });
   }
 
-  /** 主更新入口：扫描 entities 找 type='tl' */
+  /** 主更新入口：只认 scene/frame entities 里的 type='tl' */
   function update(store) {
-    const all = (store.entities || []).filter(e => e.type === 'tl');
-    // 也支持 frame.traffic_lights 数组（场景文件格式）
-    const rn = store.roadNetwork;
-    if (rn && rn.edges) {
-      for (const edge of rn.edges) {
-        const tls = edge.traffic_lights || [];
-        for (let i = 0; i < tls.length; i++) {
-          const tl = tls[i];
-          /* getEdgePointAtS 返回 THREE 坐标 (x=ENU_x, y=elevation, z=-ENU_y)，
-           * 但 entity 需要的是 ENU 坐标。直接从 nodes 算 ENU 位置 + 切线方向，
-           * 再把 tl.l 作为横向偏移沿法线方向叠加，并推算垂直于道路的 heading。
-           * 之前把 tl.l 当 ENU y、pt.z 当 elevation 是双重错位，导致灯杆
-           * 落到错误世界坐标 + roadHeightAt 查询错位置返回 0 高度。 */
-          const nodes = edge.nodes;
-          const s = tl.s || 0;
-          const edgeLen = edge.length || 1;
-          const t = Math.max(0, Math.min(1, s / edgeLen));
-          let enuX = 0, enuY = 0, tangentH = 0;
-          if (nodes && nodes.length >= 2) {
-            const a = nodes[0], b = nodes[nodes.length - 1];
-            enuX = a[0] + (b[0] - a[0]) * t;
-            enuY = a[1] + (b[1] - a[1]) * t;
-            tangentH = Math.atan2(b[1] - a[1], b[0] - a[0]);
-          }
-          /* tl.l 是横向偏移：正值=法线左侧（北侧），负值=右侧（南侧）。
-           * 法线方向 = 切线左侧 90° = (cos(h+π/2), sin(h+π/2)) = (-sin h, cos h)。 */
-          const lateral = tl.l || 0;
-          const nx = -Math.sin(tangentH);
-          const ny = Math.cos(tangentH);
-          const px = enuX + nx * lateral;
-          const py = enuY + ny * lateral;
-          /* 灯杆臂应指向道路中心 = 横向偏移的反方向。
-           * 北侧杆 (lateral>0)：臂朝南 = tangentH - π/2
-           * 南侧杆 (lateral<0)：臂朝北 = tangentH + π/2 */
-          const sign = (lateral >= 0) ? 1.0 : -1.0;
-          const armHeading = tangentH + (sign > 0 ? -Math.PI / 2 : Math.PI / 2);
-          all.push({
-            id: `tl_${edge.id}_${i}`,
-            type: 'tl',
-            x: px,
-            y: py,
-            heading: armHeading,
-            state: tl.state || 'red',
-          });
-        }
-      }
-    }
+    const all = (store.entities || []).filter(e => e && e.type === 'tl');
 
     // 删除消失的
     const aliveIds = new Set(all.map(e => e.id));
@@ -143,9 +103,8 @@ export function createTrafficLightView(scene) {
       }
       const z = roadHeightAt(store, ent.x, ent.y);
       entry.group.position.set(...worldToThree(ent.x, ent.y, z));
-      // 灯臂沿 local +z，需要旋转使臂指向道路中心。
-      // ENU heading + π/2 映射为 THREE rotation.y（与车辆 headingToRotationY 不同）。
-      entry.group.rotation.y = (ent.heading || 0) + Math.PI / 2;
+      // 后端 heading 是臂指向；本地臂默认沿 -z，用 PI/2 - heading 对齐
+      entry.group.rotation.y = Math.PI / 2 - (ent.heading || 0);
       _setLight(entry, ent.state);
     }
   }

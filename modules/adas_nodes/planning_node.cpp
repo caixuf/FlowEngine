@@ -725,8 +725,9 @@ protected:
                         if (dx_tl > 60.0) continue;  /* 太远，不注入 */
 
                         if (g.tl_state[ti] == 2) {
-                            /* 红灯：在刹停距离内注入墙 */
-                            if (dx_tl > brake_dist + 5.0) continue;  /* 还很远，不急 */
+                            /* 红灯：在刹停距离内注入墙
+                             * 加大余量到 brake_dist + 20m 补 fusion 滞后。 */
+                            if (dx_tl > brake_dist + 20.0) continue;  /* 还很远，不急 */
                         } else {
                             /* 黄灯：仅当能安全刹停时注入（太近则通过） */
                             if (dx_tl < min_yellow_stop) continue;
@@ -784,6 +785,29 @@ protected:
             char traj[1024];
             if (n_wp > 0) {
                 command_speed = spd_out[0];
+
+                /* ── 红绿灯速度强制 override ──
+                 * Frenet 轨迹的第一个点速度 spd_out[0] ≈ 当前车速，control 节点
+                 * 只读 target_speed 做速度 PID，不读 path 内的减速曲线。因此必须
+                 * 在此显式置 0，否则 control 一直追当前车速，直接闯红灯。 */
+                if (g.has_traffic_lights) {
+                    double v = g.ego_v;
+                    if (v < 0.0) v = 0.0;
+                    double brake_dist = v * v / 8.0 + 3.0;
+                    if (brake_dist < 5.0) brake_dist = 5.0;
+                    for (int ti = 0; ti < g.tl_count; ti++) {
+                        if (g.tl_state[ti] == 0) continue;  /* 绿灯 */
+                        double dx_tl = g.tl_x[ti] - g.ego_x;
+                        if (dx_tl <= 0.0 || dx_tl > 60.0) continue;
+                        if (dx_tl > brake_dist + 20.0) continue;  /* 还很远（fusion 滞后补 20m 余量） */
+                        /* 刹停范围内 → 强制停车
+                         * 用 brake_dist + 20m 大余量补 fusion 定位滞后，
+                         * 见 control_node.cpp boost_target 注释。 */
+                        command_speed = 0.0;
+                        break;
+                    }
+                }
+
                 /* Debuggability: report the ACTUAL planner mode instead of always
                  * claiming "frenet". When built without Eigen (HAVE_FRENET undefined),
                  * this path is the simple lane-keep fallback (d=0.0 always, no lane
