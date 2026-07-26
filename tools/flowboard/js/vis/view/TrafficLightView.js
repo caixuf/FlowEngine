@@ -8,11 +8,11 @@
  * 坐标/朝向约定：
  *   - 后端 heading 表示灯杆臂的指向（垂直于道路切线，指向道路中心）。
  *   - 前端本地模型：臂默认沿 -z，灯壳/灯泡默认朝 +x（向来车方向）。
- *   - 组旋转：rotation.y = PI/2 - heading，使臂与后端 heading 对齐。
+ *   - 组旋转：headingToRotationY(heading - PI/2)，使臂与后端 heading 对齐。
  */
 
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, headingToRotationY } from '../math/Coord.js';
 import { roadHeightAt } from '../math/RoadHeight.js';
 
 const RED = 0xff0000, YELLOW = 0xffaa00, GREEN = 0x00ff00;
@@ -103,8 +103,9 @@ export function createTrafficLightView(scene) {
       }
       const z = roadHeightAt(store, ent.x, ent.y);
       entry.group.position.set(...worldToThree(ent.x, ent.y, z));
-      // 后端 heading 是臂指向；本地臂默认沿 -z，用 PI/2 - heading 对齐
-      entry.group.rotation.y = Math.PI / 2 - (ent.heading || 0);
+      // 后端 heading 是臂指向；本地臂默认沿 -z。
+      // 用 headingToRotationY(h - PI/2) = PI/2 - h 对齐。
+      entry.group.rotation.y = headingToRotationY((ent.heading || 0) - Math.PI / 2);
       _setLight(entry, ent.state);
     }
   }

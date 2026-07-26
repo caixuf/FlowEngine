@@ -548,6 +548,11 @@ static int wp_init(MessageBus* bus, Transport* transport,
 
     pthread_mutex_init(&g.lock, NULL);
 
+    /* ⚠️ 本节点与 planning_node 共用 planning/trajectory topic，
+     * pipeline 中二者只能选一，同时加载会导致 control 收到两个来源的轨迹。 */
+    LOG_WARN("waypoint_follower", "DEPRECATED: publishes planning/trajectory — "
+             "do NOT load planning_node in the same pipeline");
+
     /* 默认参数 */
     snprintf(g.waypoints_file, sizeof(g.waypoints_file), "/tmp/waypoints.json");
     g.loop = 1;

@@ -15,7 +15,8 @@
  */
 
 import { getStdMaterial, createEmissiveMaterial } from '../core/AssetFactory.js';
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, headingToRotationY } from '../math/Coord.js';
+import { roadHeightAt } from '../math/RoadHeight.js';
 
 const N_BOOTHS = 4;
 const LANE_W = 3.5;
@@ -194,7 +195,9 @@ export function createETCGateView(scene) {
         entry = _createETCGate();
         pool.set(ent.id, entry);
       }
-      entry.group.position.set(...worldToThree(ent.x || 0, ent.y || 0, 0));
+      const z = roadHeightAt(store, ent.x, ent.y);
+      entry.group.position.set(...worldToThree(ent.x || 0, ent.y || 0, z));
+      entry.group.rotation.y = headingToRotationY(ent.heading || 0);
       _setBoomState(entry, ent.state);
     }
   }

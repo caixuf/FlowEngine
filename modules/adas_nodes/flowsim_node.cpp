@@ -783,6 +783,19 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     flowsim::Entity& ego = g.pool[0];
 
     cJSON* vstate = cJSON_CreateObject();
+    /* vehicle/state 字段约定（缩写 → 全称映射）：
+     *   x, y    → ENU 世界坐标
+     *   spd     → speed
+     *   hdg     → heading
+     *   thr     → throttle
+     *   brk     → brake
+     *   tgt     → target_vx
+     *   st      → steer
+     *   t_us    → time (micros)
+     *   road_id, lane_id → Frenet 路网定位
+     *   oxN, oyN, ovN, ovyN, otN, olN, owN → 障碍物（N=索引）
+     *   n_obs   → 障碍物计数
+     * scene/frame 用全称，本 topic 用缩写是为了保持向后兼容。 */
     cJSON_AddNumberToObject(vstate, "x", ego.x);
     cJSON_AddNumberToObject(vstate, "y", ego.y);
     cJSON_AddNumberToObject(vstate, "spd", ego.speed);
@@ -955,7 +968,10 @@ static void publish_traffic_lights() {
         cJSON* light = cJSON_CreateObject();
         cJSON_AddNumberToObject(light, "id", e.id);
         cJSON_AddNumberToObject(light, "x", e.x);
-        cJSON_AddNumberToObject(light, "y_lane", e.width);  /* e.width = lane center y, 非 pole y */
+        /* y_lane = 车道中心 y（停止线判定用），非灯杆 3D 位置。
+         * 灯杆的 3D y 在 scene/frame entities 中以 "y" 字段发布。
+         * 这里复用 e.width 存储初始化时写入的 lane_center_y（见 line 701）。 */
+        cJSON_AddNumberToObject(light, "y_lane", e.width);
         flowsim::TLPhase ph = static_cast<flowsim::TLPhase>(e.phase_state);
         cJSON_AddStringToObject(light, "state", tl_phase_str(ph));
         cJSON_AddNumberToObject(light, "remain_s", e.phase_timer);
