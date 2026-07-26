@@ -907,7 +907,12 @@ protected:
             double adjacent_gap = lane_lead_gap(adjacent_lane_y, same_lane_tol);
             double lead_speed = lane_lead_speed(cruise_lane_y, same_lane_tol);
             double safe_gap = min_gap + g.current_speed * time_headway;
-            double boost_target = (g.has_target_speed) ? g.target_speed : fmax(g.target_speed, g.cfg_cruise_speed);
+            double boost_target;
+            if (g.has_target_speed && g.target_speed < 0.1) {
+                boost_target = 0.0;  /* 红灯停车：不提升到巡航速度 */
+            } else {
+                boost_target = fmax(g.target_speed, g.cfg_cruise_speed);  /* 正常巡航 */
+            }
             double acc_target = boost_target;
             /* 局部拷贝 target_speed 防回调线程覆盖（race condition） */
             double tl_ts = g.target_speed;
@@ -1012,7 +1017,7 @@ protected:
             if (effective_target_y > road_c + half_road) effective_target_y = road_c + half_road;
             if (effective_target_y < road_c - half_road) effective_target_y = road_c - half_road;
 
-            if (blocked && g.lc_state == 0) {
+            if (blocked && g.lc_state == 0 && !(tl_ht && tl_ts < 0.1)) {
                 g.lc_timer += CONTROL_DT_S;
                 if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
                     int need_accel = 0;
@@ -1069,7 +1074,7 @@ protected:
                                  g.driving_mode[0] ? g.driving_mode : "?");
                     } else {
                         LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
-                        g.lc_timer = g.blocked_timeout_s;
+                        g.lc_timer = g.blocked_timeout_s + 1.0;  /* +1s backoff 防每帧重试 */
                     }
                     }  /* end else (not oncoming) */
                 }
