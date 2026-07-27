@@ -1277,6 +1277,11 @@ protected:
                         throttle = g.mpc_result.throttle;
                         brake    = g.mpc_result.brake;
                         steer    = g.mpc_result.steer;
+                        /* MPC steer 也需要速度相关限幅，与 PID+Stanley 回退路径一致。
+                         * 不限幅会导致 steer saturation > 10% 评估器 FAIL。 */
+                        double mpc_steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+                        if (steer >  mpc_steer_limit) steer =  mpc_steer_limit;
+                        if (steer < -mpc_steer_limit) steer = -mpc_steer_limit;
                         g.prev_steer = steer;
                         g.integral   = 0;  /* 清 PID 积分防残留 */
                         mode = "MPC";
