@@ -712,6 +712,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     series = [sample_metrics(s, road) for s in samples]
     speeds = [m["speed"] for m in series]
     xs = [m["x"] for m in series]
+    ys = [m["y"] for m in series]
     lane_errors = [m["lane_error"] for m in series]
     road_margins = [m["road_edge_margin"] for m in series]
     steer_values = [m["steer"] for m in series]
@@ -741,6 +742,17 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         entity_ids_str = ", ".join(f"entity{eid}" for eid in collision_entity_ids[:5]) if collision_entity_ids else "n/a"
         failures.append(f"collision detected: topic_pub={collision_pub}, log_count={collision_log_count}"
                         f", entities=[{entity_ids_str}]")
+
+    # P2-7: flowsim invariant 失败升级为 FAIL。
+    # flowsim_node.cpp:1604 在 cleanup 时打印 [INVARIANT_FAILED] total=N marker。
+    # 旧行为只 LOG_WARN，evaluator 看不到 → P0-2 类 id 撞车污染（pool 真值干净、
+    # 但前端 Map 污染）漏检。invariant 是后端真值校验，能拦下 pool 层面的异常。
+    invariant_match = re.search(r"\[INVARIANT_FAILED\]\s*total=(\d+)", log_text)
+    if invariant_match and int(invariant_match.group(1)) > 0:
+        failures.append(
+            f"flowsim invariant failed: total={invariant_match.group(1)} "
+            f"(spatial+motion+temporal checks, see stderr for details)"
+        )
 
     max_lane_index = max(range(len(series)), key=lambda i: lane_errors[i])
     max_lane_error = lane_errors[max_lane_index]
@@ -934,14 +946,56 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 f"while light was green (possible over-conservative planning)"
             )
 
-    steer_saturation_ratio = sum(1 for s in steer_values if s > 0.219) / max(1, len(steer_values))
+    # P2-7: steer 饱和阈值从 0.219 降到 0.17。
+    # 旧值 0.219 按 max_steer=0.22 定，但实际生效限幅是 low_speed_steer=0.18
+    # （pipeline.json:220 → safety_control_node.cpp:383，速度<3.0 分支）。
+    # 差 0.039 完美漏检 0.18 饱和——98% 帧死贴 0.18 时旧门禁看不到。
+    steer_saturation_ratio = sum(1 for s in steer_values if s > 0.17) / max(1, len(steer_values))
     if steer_saturation_ratio > 0.45:
         warnings.append(f"steer saturated often: {steer_saturation_ratio * 100:.0f}% samples")
+    elif steer_saturation_ratio > 0.10:
+        # P2-7: 10% 以上饱和即告警，>45% 升级为 warning（上方分支）。
+        # 验收标准要求饱和帧占比 < 10%（P0-1 修复前 98%）。
+        failures.append(f"steer saturation too high: {steer_saturation_ratio * 100:.0f}% samples > 10% threshold")
+
+    # P2-7: heading 健全性断言 —— garbage-in 防御。
+    # flowsim_node.cpp:1196 在 kinematic 模式下把 ego.heading 钉死为 wp.h（直道=0），
+    # 旧门禁读 ego.heading 算 yaw_rate_rms / heading_flip_rate，恒为 0 → 永不触发。
+    # 这类"字段恒定"应视为门禁自身失效。判据：heading 方差≈0 且 steer 非 0
+    # → 必然 garbage-in（车在动方向却不变，物理不可能）。
+    if len(headings) >= 10:
+        heading_mean = statistics.fmean(headings)
+        heading_var = statistics.fmean([(h - heading_mean) ** 2 for h in headings])
+        steer_nonzero = sum(1 for s in steer_values if abs(s) > 0.01)
+        if heading_var < 1e-12 and steer_nonzero > len(steer_values) * 0.1:
+            failures.append(
+                f"heading invariant garbage-in: heading variance={heading_var:.2e} ≈ 0 "
+                f"while {steer_nonzero}/{len(steer_values)} frames have non-zero steer "
+                f"(field pinned constant, gate invalid)"
+            )
+
+    # P2-7: 横向偏离真实幅度检查 —— 旧 max_lane_error 取最近车道中心距离，
+    # 4m 蛇形跨车道时车总"接近某条车道中心"，该值反而不大，度量选择错误。
+    # 补充直接检查 y 坐标的峰峰值，>2m 即横向大幅扫动（一条车道宽 3.5m，
+    # 正常巡航 y 抖动应 <0.3m）。
+    if len(ys) >= 10:
+        y_range = max(ys) - min(ys)
+        if y_range > 4.0:
+            failures.append(
+                f"lateral excursion too large: y range={y_range:.2f} m > 4.0 m "
+                f"(snaking across lanes, y_min={min(ys):.2f} y_max={max(ys):.2f})"
+            )
+        elif y_range > 2.0:
+            warnings.append(f"lateral wobble: y range={y_range:.2f} m > 2.0 m")
 
     yaw_rates: list[float] = []
     steer_rates: list[float] = []
     npc_speed_spikes: list[float] = []
     npc_lateral_spikes: list[float] = []
+    # P2-7: 记录超大位移（千米级瞬移），不再静音。
+    # 旧逻辑 `if disp > 30.0: continue` 把最严重的瞬移直接跳过，
+    # 1000m 级瞬移连样本都不进 → P0-2 漏检。
+    npc_teleport_displacements: list[tuple[int, float]] = []
     for i in range(1, len(series)):
         dt = timestamps[i] - timestamps[i - 1]
         if dt <= 1e-3 or dt > 2.0:
@@ -956,13 +1010,16 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 continue
             dx = obs["x"] - prev["x"]
             dy = obs["y"] - prev["y"]
-            # NPC respawn 时位置跳变（recycle 距离 50-138m）会反算出 25-500+ m/s
-            # 的"假速度"。原先用 speed > 50.0 过滤会漏掉 25-50 m/s 区间的中等跳变
-            # （50m recycle / 2s 采样 ≈ 25 m/s），这些跳变会触发 >45.0 的 respawn
-            # jump 告警，导致 CI 误报。改为用位移阈值：连续两帧间位移 > 30m 几乎
-            # 不可能是真实运动（即使 30 m/s × 1s 采样也只有 30m），视为 teleport。
             disp = math.hypot(dx, dy)
             if disp > 30.0:
+                # 30-200m: 可能是 recycle/respawn（设计内瞬移），记录但不 FAIL。
+                # >200m: 几乎必然是 P0-2 类 id 撞车污染，直接 FAIL。
+                npc_teleport_displacements.append((obs.get("id", -1), disp))
+                if disp > 200.0:
+                    failures.append(
+                        f"npc teleport: id={obs.get('id', -1)} displaced {disp:.1f} m "
+                        f"in one frame (>200m threshold, likely id-collision pollution)"
+                    )
                 continue
             speed = disp / dt
             npc_speed_spikes.append(speed)

@@ -34,6 +34,14 @@ import { LANE_WIDTH, EDGE_TYPE, VIADUCT_VIS_LENGTH } from '../core/Constants.js'
 // 向后兼容：原调用方从 SceneDirector import validateFrame。
 export { validateFrame };
 
+/* P0-2 前端防御：dead-reckon Map key 用 (type, id) 复合键。
+ * 后端已保证 e.id（pool 索引）全局唯一，这里再做一道独立命名空间防御，
+ * 即便未来后端 id 空间再次重叠（如 actor 与 tl 同 id），也不会在 _entities
+ * Map 里互相覆盖导致车被拉向红绿灯位置。所有 dead-reckon 调用必须走此函数。 */
+function entityDrKey(ent) {
+  return ent.type + ':' + ent.id;
+}
+
 /* 架构升级：View 插件注册 + 错误隔离（Qt 对象树 + 单向依赖思路）。
  * 所有 View 工厂在模块加载时注册一次，createSceneDirector 实例化时
  * 走 ViewRegistry.instantiateAll(scene)，update() 里所有 view 方法调用
@@ -199,6 +207,32 @@ export function createSceneDirector(scene) {
     }
 
     if (frame.entities !== undefined && !skipEntities) {
+      /* P2-7 前端 invariant：scene.entities 的 (type, id) 必须全局唯一。
+       *
+       * 防御 P0-2 类 id 撞车污染：后端 entity pool 用业务 id 覆盖 pool 索引
+       * 时，actors(id=1..10) / tls(id=0..9) / ego(id=0) 三类 id 空间重合，
+       * 发布到前端时若被 dead-reckon Map 以纯 id 作 key 合并，TL 会覆盖
+       * 同 id 的车，导致车 x 被拉向 TL 的 x（千米级瞬移）。
+       *
+       * 这里在 map 前做一次唯一性扫描，发现 (type, id) 重复即打
+       * [ENTITY_ID_COLLISION] marker 到 console.error，供 CI 截图/日志
+       * 扫描；同时保留所有实体（不丢数据），由 entityDrKey 复合键天然
+       * 隔离 dead-reckon 写入。
+       *
+       * 只警告不抛错 —— 抛错会让整个 SceneDirector 崩溃，更糟。 */
+      const _seenKeys = new Set();
+      const _collisions = [];
+      for (const e of frame.entities) {
+        if (!e || e.type === 'ego') continue;
+        const k = (e.type || '?') + ':' + (e.id != null ? e.id : '?');
+        if (_seenKeys.has(k)) _collisions.push(k);
+        else _seenKeys.add(k);
+      }
+      if (_collisions.length > 0) {
+        console.error('[ENTITY_ID_COLLISION] duplicates in frame.entities:',
+          _collisions.slice(0, 5).join(', '),
+          _collisions.length > 5 ? `(+${_collisions.length - 5} more)` : '');
+      }
       store.entities = frame.entities.filter(e => e && e.type !== 'ego').map((e) => {
         const ent = {
           id: e.id,
@@ -225,11 +259,11 @@ export function createSceneDirector(scene) {
         /* 流畅专题：把真值喂进多实体 dead reckon Map。tickAnimation 每帧
          * 会用平滑后的 x/y/heading/speed 覆盖上面的真值，让 NPC 在 SSE
          * 5Hz 离散帧之间平滑插值，不再每帧 snap 跳变。 */
-        updateEntityDeadReckon(ent.id, ent.x, ent.y, ent.speed, ent.heading);
+        updateEntityDeadReckon(entityDrKey(ent), ent.x, ent.y, ent.speed, ent.heading);
         return ent;
       });
       /* 清理消失的 NPC，防止 Map 无限增长。 */
-      pruneEntities(new Set(store.entities.map(e => e.id)));
+      pruneEntities(new Set(store.entities.map(e => entityDrKey(e))));
     }
 
     /* 动态 View 不在 update() 里调，统一由 tickAnimation(now) 每帧走 Layer 树
@@ -279,7 +313,7 @@ export function createSceneDirector(scene) {
       tickEntityDeadReckon(now / 1000);
       for (let i = 0; i < store.entities.length; i++) {
         const ent = store.entities[i];
-        const sm = getEntitySmooth(ent.id);
+        const sm = getEntitySmooth(entityDrKey(ent));
         if (sm) {
           ent.x = sm.x;
           ent.y = sm.y;

@@ -243,11 +243,11 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
         int actor_id = atoi(b->actor);
         if (actor_id <= 0 && b->actor[0] != '0') continue;
 
-        /* 查找 pool 中 actor_id 匹配的实体 */
+        /* 查找 pool 中 actor_id 匹配的实体（按场景业务 id 匹配，e.id 是 pool 索引） */
         Entity* target = nullptr;
         for (int j = 0; j < pool.size(); ++j) {
             Entity& e = pool[j];
-            if (e.active && e.id == actor_id) { target = &e; break; }
+            if (e.active && e.scenario_id == actor_id) { target = &e; break; }
         }
         if (!target) continue;
 

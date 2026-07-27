@@ -719,8 +719,8 @@ mobil_done: ;
             npc.road_pos.set_offset(lane_internal);
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
-                /* DEBUG: trace esmini heading */
-                if (npc.id == 1 && (cycle % 50) == 1) {
+                /* DEBUG: trace esmini heading（按场景业务 id=1 的 NPC） */
+                if (npc.scenario_id == 1 && (cycle % 50) == 1) {
                     fprintf(stderr, "[DBG npc1] road_pos.world wp=(%.2f,%.2f,%.2f) h=%.3f route_dir=%d\n",
                             wp.x, wp.y, wp.z, wp.h, npc.route_dir);
                 }

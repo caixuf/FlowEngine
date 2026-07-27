@@ -1297,38 +1297,20 @@ protected:
                         ref_h_eff = g.ego_heading;  /* ref_h 与 ego 航向差 > 29°, 视为无效 */
                     }
                 }
-                /* ── 真车级横向控制：目标轨迹切线 + 横向速度阻尼 ──
+                /* ── 横向控制：CTE 比例 + 航向阻尼（负反馈）+ 横向速度阻尼 ──
                  *
-                 * 旧 Stanley 公式: steer = cte_term - kd*(ego_h - 道路切线)
-                 * 变道时 ego 必须有偏航角才能横向移动, 但 heading_term 按道路切线
-                 * 把这个偏航角纠回 → cte_term 朝目标拉, heading_term 反向推 → 1.6Hz
-                 * 极限环 (左摇右晃), 真车 ADAS 不会这样。
+                 * heading_term 必须以「道路切线 ref_h_eff」为参考做负反馈阻尼：
+                 *   heading_term = kd * (ego_heading - 道路切线)
+                 *   steer -= heading_term  →  ego 偏航越大反向修正越强, 抑制过冲。
                  *
-                 * 真车做法 (Apollo LQR / Autoware MPC):
-                 *   heading_term 参考从「道路切线」改为「目标轨迹切线」:
-                 *     target_h = atan2(lat_error, lookahead)
-                 *     lookahead = max(5m, speed * lat_lookahead_gain)
-                 *   变道中 lat_error 大 → target_h 朝目标车道方向偏,
-                 *   ego 跟随这个目标航向 → heading_term ≈ 0 → 不再反向拉,
-                 *   cte_term 主导把车平滑拉到目标车道。
-                 *   到达目标车道时 lat_error→0, target_h→道路切线, 自然回正。
-                 *
-                 * 直道巡航时 lat_error 小, target_h ≈ 道路切线, 行为与原 Stanley 一致。
-                 * 算法切换平滑, 不破坏直道稳定性。 */
-                double lookahead_dist = fmax(5.0, g.current_speed * g.lat_lookahead_gain);
-                double target_h = atan2(lat_error, lookahead_dist);
-                /* wrap (target_h - ref_road_heading) 到 [-π,π], 防止跨 ±π 跳变 */
-                double dh_target = target_h - ref_road_heading;
-                while (dh_target >  M_PI) dh_target -= 2.0 * M_PI;
-                while (dh_target < -M_PI) dh_target += 2.0 * M_PI;
-                /* 与道路切线夹角超过 30° 视为异常 (理论上变道 target_h < 20°),
-                 * 退回道路切线 (原 Stanley 行为), 保证安全 */
-                double ref_h_for_heading = ref_road_heading + dh_target;
-                if (fabs(dh_target) > 0.52 /* ~30° */) {
-                    ref_h_for_heading = ref_h_eff;  /* 退化到原 ref_h_eff (已做合理性检查) */
-                }
+                 * 历史教训（已修）：曾把参考改成「前视目标角」target_h=atan2(lat_error,L)。
+                 * 直道 ego_h=0 时 heading_term = kd*(0-target_h) = -kd*atan2(lat_error,L),
+                 * 与 cte_term 同号；合成式 steer = cte_term - heading_term 变成 +kd*atan2(...)
+                 * → 阻尼项符号翻转成额外比例项, P 增益翻倍；叠加 yaw/v_lat 阻尼项被
+                 * ego_h≡0 清零 → 纯比例控制器发散, steer 死贴饱和、y 4m 扫动（蛇形）。
+                 * 故 heading_term 参考必须用道路切线；前视思想只允许喂 cte_term, 不得混入阻尼项。 */
                 double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_for_heading);
+                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
                 /* yaw_rate 阻尼项：保留作为高频抑制（与 v_lat 阻尼互补,
                  * yaw_damping 处理航向角速度, v_lat_damp 处理位移速度）。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
@@ -1388,9 +1370,9 @@ protected:
                     if (++lc_dbg_cnt % 5 == 0) {
                         LOG_INFO("control",
                                  "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f vlat_t=%.3f lat_err=%.2f "
-                                 "ego_h=%.3f tgt_h=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
+                                 "ego_h=%.3f ref_heff=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
                                  steer, cte_term, heading_term, yaw_damp_term, v_lat_damp_term, lat_error,
-                                 g.ego_heading, ref_h_for_heading, ref_road_heading, g.current_speed, lc_lat_kp, lc_lat_kd,
+                                 g.ego_heading, ref_h_eff, ref_road_heading, g.current_speed, lc_lat_kp, lc_lat_kd,
                                  steer_limit_for_speed(g.current_speed, lc_lat_accel_max));
                     }
                 }

@@ -38,6 +38,9 @@
 #include "auto_tuner.h"
 #include "clock_service.h"
 #include <cjson/cJSON.h>
+#ifdef FLOWENGINE_USE_ZLIB
+#include <zlib.h>
+#endif
 
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     65536
@@ -366,6 +369,109 @@ static void send_response(int fd, const char* status, const char* content_type,
     }
 }
 
+/* ── P1-4: gzip + keep-alive + 路径分级缓存 ──────────────────
+ *
+ * 旧 send_response 每个静态资源都 Connection: close，60+ ES module 各自
+ * TCP 握手；Cache-Control: no-cache 让 vendor/three/* 永变资源每次重下；
+ * 全文件无 gzip，three.module.js 1243KB 裸传。本扩展解决三件事：
+ *
+ * 1) keep_alive=true → Connection: keep-alive，调用者负责在同一 socket
+ *    上循环读下一请求（见 handle_client 的 keep-alive 循环）。
+ * 2) cache_control 显式传入：vendor/models → immutable；index.html/js → no-cache。
+ * 3) allow_gzip=true 且客户端 Accept-Encoding 含 gzip → 压缩 body。
+ *    仅当压缩后更小（至少省 32B）才用 gzip，避免对小文件反效果。
+ *
+ * SSE 路径绝对不走此函数 —— 压缩会缓冲实时数据，重现 "Waiting for data"。
+ */
+static char* gzip_compress(const char* body, int body_len, int* out_len) {
+#ifdef FLOWENGINE_USE_ZLIB
+    if (!body || body_len <= 0) return NULL;
+    uLong bound = compressBound((uLong)body_len);
+    char* buf = (char*)malloc(bound);
+    if (!buf) return NULL;
+    uLongf actual = bound;
+    int rc = compress2((Bytef*)buf, &actual, (const Bytef*)body,
+                       (uLong)body_len, Z_DEFAULT_COMPRESSION);
+    if (rc != Z_OK) {
+        free(buf);
+        return NULL;
+    }
+    *out_len = (int)actual;
+    return buf;
+#else
+    (void)body; (void)body_len; (void)out_len;
+    return NULL;
+#endif
+}
+
+/* 路径分级缓存策略：
+ *   /tools/flowboard/vendor/*    → 三方库永不变 → immutable
+ *   /tools/flowboard/models/*    → glTF 模型永不变 → immutable
+ *   /tools/d3.v7.min.js          → 永不变 → immutable
+ *   /index.html, /js/*, /css/*   → 开发热更新 → no-cache
+ *   /api/*                       → 实时数据 → no-cache
+ */
+static const char* cache_control_for_path(const char* path) {
+    if (!path) return "no-cache";
+    if (strstr(path, "/vendor/") ||
+        strstr(path, "/models/") ||
+        strstr(path, "d3.v7.min.js") ||
+        strstr(path, "three.min.js")) {
+        return "public, max-age=31536000, immutable";
+    }
+    return "no-cache";
+}
+
+/* 扩展响应：keep-alive + 自定义 Cache-Control + 可选 gzip。
+ * SSE 不走此函数。body 以 NUL 结尾（按 strlen 算长度）。 */
+static void send_response_full(int fd, const char* status, const char* content_type,
+                                const char* body, bool keep_alive,
+                                const char* cache_control,
+                                bool allow_gzip, const char* accept_encoding) {
+    int body_len = body ? (int)strlen(body) : 0;
+    char* gz_body = NULL;
+    int gz_len = 0;
+    const char* enc_header = "";
+    const char* actual_body = body;
+    int actual_body_len = body_len;
+
+    if (allow_gzip && body_len > 256 &&
+        accept_encoding && strcasestr(accept_encoding, "gzip")) {
+        gz_body = gzip_compress(body, body_len, &gz_len);
+        if (gz_body && gz_len < body_len - 32) {
+            actual_body = gz_body;
+            actual_body_len = gz_len;
+            enc_header = "Content-Encoding: gzip\r\n";
+        } else if (gz_body) {
+            free(gz_body);
+            gz_body = NULL;
+        }
+    }
+
+    char header[768];
+    int hl = snprintf(header, sizeof(header),
+        "HTTP/1.1 %s\r\n"
+        "Content-Type: %s\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: %s\r\n"
+        "%s"
+        "Content-Length: %d\r\n"
+        "Connection: %s\r\n"
+        "\r\n",
+        status, content_type,
+        cache_control ? cache_control : "no-cache",
+        enc_header,
+        actual_body_len,
+        keep_alive ? "keep-alive" : "close");
+    ssize_t w = write(fd, header, (size_t)hl);
+    (void)w;
+    if (actual_body && actual_body_len > 0) {
+        w = write(fd, actual_body, (size_t)actual_body_len);
+        (void)w;
+    }
+    if (gz_body) free(gz_body);
+}
+
 /* ── SSE 流 ──────────────────────────────────────────────── */
 
 /**
@@ -597,12 +703,17 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
 
 /* ── 处理单个连接 ────────────────────────────────────────── */
 
-static void handle_client(int fd, MonitorServer* ms) {
-    char req[4096];
-    ssize_t n = read(fd, req, sizeof(req) - 1);
-    if (n <= 0) { close(fd); return; }
-    req[n] = '\0';
-
+/* dispatch_request: 处理单个 HTTP 请求。
+ * 返回 true 表示连接可继续（keep-alive），false 表示已关闭。
+ * - POST / error / SSE 路径返回 false（连接关闭）。
+ * - 静态资源 + JSON API 在 client_keep_alive=true 时返回 true。
+ * - 静态资源用 send_response_full（keep-alive + 路径分级缓存 + gzip）。
+ * - SSE 路径绝对不走 gzip —— 压缩会缓冲实时数据，重现 "Waiting for data"。 */
+static bool dispatch_request(int fd, MonitorServer* ms,
+                              char* req, ssize_t req_len,
+                              const char* accept_encoding,
+                              bool client_keep_alive) {
+    (void)req_len;  /* req 已 NUL 结尾，长度按 strlen 算；参数保留为后续扩展 */
     /* Parse the HTTP request line (first line) into method + path so routing
      * matches on the real request target rather than a substring that could
      * appear anywhere in the headers/body (e.g. a Referer header). */
@@ -631,7 +742,7 @@ static void handle_client(int fd, MonitorServer* ms) {
     if (method[0] == '\0' || path[0] == '\0') {
         send_response(fd, "400 Bad Request", "text/plain", "bad request");
         close(fd);
-        return;
+        return false;
     }
 
     /* CORS preflight */
@@ -641,14 +752,14 @@ static void handle_client(int fd, MonitorServer* ms) {
         ssize_t w = write(fd, cors, strlen(cors));
         (void)w;
         close(fd);
-        return;
+        return false;
     }
 
     /* Support GET and POST; reject everything else */
     if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
         send_response(fd, "405 Method Not Allowed", "text/plain", "method not allowed");
         close(fd);
-        return;
+        return false;
     }
 
     /* POST: /api/training/start|promote → fork+exec modelctl.py */
@@ -666,60 +777,61 @@ static void handle_client(int fd, MonitorServer* ms) {
                               "{\"ok\":false,\"error\":\"failed to read body\"}");
                 close(fd);
             }
-            return;
+            return false;
         }
         send_response(fd, "404 Not Found", "text/plain", "not found");
         close(fd);
-        return;
+        return false;
     }
 
     /* GET: /api/health → liveness check for dashboard/script polling */
     if (strcmp(path, "/api/health") == 0) {
-        send_response(fd, "200 OK", "application/json",
-                      "{\"status\":\"ok\"}");
-        close(fd);
-        return;
+        send_response_full(fd, "200 OK", "application/json",
+                           "{\"status\":\"ok\"}",
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
+        return client_keep_alive;
     }
 
     /* GET: /api/training/status → modelctl.py train-status (无 JSON body) */
     if (strcmp(path, "/api/training/status") == 0) {
         exec_modelctl(fd, "train-status", "{}", ms);
-        return;
+        return false;
     }
 
-    /* Route: /api/stream → SSE */
+    /* Route: /api/stream → SSE
+     * SSE 不走 gzip / keep-alive 复用 —— 它有自己的长连接循环，
+     * 且压缩会缓冲实时数据，重现 "Waiting for data" 故障。 */
     if (strcmp(path, "/api/stream") == 0) {
         handle_sse(fd, ms);
         close(fd);
-        return;
+        return false;
     }
 
     /* Route: /api/topology → JSON (prefer cached dashboard JSON) */
     if (strcmp(path, "/api/topology") == 0) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
-        if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf);
-        } else {
+        if (cached_len <= 0) {
             build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf);
         }
-        close(fd);
-        return;
+        send_response_full(fd, "200 OK", "application/json", buf,
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
+        return client_keep_alive;
     }
 
     /* Route: /api/topics → per-topic stats (local + remote) */
     if (strcmp(path, "/api/topics") == 0) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         int cached_len = build_cached_dashboard_json(ms, buf, sizeof(buf));
-        if (cached_len > 0) {
-            send_response(fd, "200 OK", "application/json", buf);
-        } else {
+        if (cached_len <= 0) {
             build_sse_json(ms, buf, sizeof(buf));
-            send_response(fd, "200 OK", "application/json", buf);
         }
-        close(fd);
-        return;
+        send_response_full(fd, "200 OK", "application/json", buf,
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
+        return client_keep_alive;
     }
 
     /* ── Debug API ─────────────────────────────────────── */
@@ -750,11 +862,12 @@ static void handle_client(int fd, MonitorServer* ms) {
         cJSON_AddBoolToObject(root, "all_ok", health_is_all_ok());
 
         char* json = cJSON_PrintUnformatted(root);
-        send_response(fd, "200 OK", "application/json", json);
+        send_response_full(fd, "200 OK", "application/json", json,
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
         cJSON_free(json);
         cJSON_Delete(root);
-        close(fd);
-        return;
+        return client_keep_alive;
     }
 
     /* GET /api/debug/autotune → 自动调优器状态 */
@@ -779,20 +892,22 @@ static void handle_client(int fd, MonitorServer* ms) {
         cJSON_AddItemToObject(root, "tuners", arr);
 
         char* json = cJSON_PrintUnformatted(root);
-        send_response(fd, "200 OK", "application/json", json);
+        send_response_full(fd, "200 OK", "application/json", json,
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
         cJSON_free(json);
         cJSON_Delete(root);
-        close(fd);
-        return;
+        return client_keep_alive;
     }
 
     /* GET /api/debug/params → 所有注册参数及当前值 */
     if (strcmp(path, "/api/debug/params") == 0) {
         char buf[MONITOR_HTTP_BUF_SIZE];
         build_sse_json(ms, buf, sizeof(buf));
-        send_response(fd, "200 OK", "application/json", buf);
-        close(fd);
-        return;
+        send_response_full(fd, "200 OK", "application/json", buf,
+                           client_keep_alive, "no-cache",
+                           true, accept_encoding);
+        return client_keep_alive;
     }
 
     /* Route: / → flowboard/index.html (from --html-path) */
@@ -802,7 +917,10 @@ static void handle_client(int fd, MonitorServer* ms) {
             html = read_file(ms->html_path, NULL);
         }
         if (html) {
-            send_response(fd, "200 OK", "text/html; charset=utf-8", html);
+            /* index.html 走 no-cache：开发期需热更新；gzip 受益有限但允许。 */
+            send_response_full(fd, "200 OK", "text/html; charset=utf-8", html,
+                               client_keep_alive, "no-cache",
+                               true, accept_encoding);
             free(html);
         } else {
             /* Fallback: minimal embedded dashboard */
@@ -815,11 +933,11 @@ static void handle_client(int fd, MonitorServer* ms) {
                 "<p><a href='/api/topology'>/api/topology</a> — JSON data</p>"
                 "<p><a href='/api/stream'>/api/stream</a> — SSE live feed</p>"
                 "</body></html>";
-            send_response(fd, "200 OK", "text/html; charset=utf-8",
-                          fallback);
+            send_response_full(fd, "200 OK", "text/html; charset=utf-8",
+                               fallback, client_keep_alive, "no-cache",
+                               true, accept_encoding);
         }
-        close(fd);
-        return;
+        return client_keep_alive;
     }
 
     /* Route: /js/<file> or /css/<file> → modular frontend from flowboard/ subdir.
@@ -830,7 +948,7 @@ static void handle_client(int fd, MonitorServer* ms) {
         if (strstr(reqpath, "..") || strchr(reqpath, '\\')) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
             send_response(fd, "403 Forbidden", "application/json", forbidden);
-            close(fd); return;
+            close(fd); return false;
         }
         /* Derive parent dir from html_path, then go up once more to reach
          * tools/ (since html_path is tools/flowboard/index.html, we strip
@@ -851,20 +969,34 @@ static void handle_client(int fd, MonitorServer* ms) {
         if (fbuf) {
             const char* ctype = "application/octet-stream";
             const char* dot = strrchr(filepath, '.');
+            bool allow_gzip = false;
             if (dot) {
-                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
-                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
-                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
-                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
+                if (strcmp(dot, ".js") == 0) {
+                    ctype = "application/javascript; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".css") == 0) {
+                    ctype = "text/css; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".html") == 0) {
+                    ctype = "text/html; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".json") == 0) {
+                    ctype = "application/json";
+                    allow_gzip = true;
+                }
             }
-            send_response(fd, "200 OK", ctype, fbuf);
+            /* /js/ + /css/ 走 no-cache：开发期需热更新；js/css/html/json 允许 gzip。 */
+            send_response_full(fd, "200 OK", ctype, fbuf,
+                               client_keep_alive, "no-cache",
+                               allow_gzip, accept_encoding);
             free(fbuf);
         } else {
             const char* notfound = "{\"error\":\"not found\"}";
             send_response(fd, "404 Not Found", "application/json", notfound);
+            close(fd);
+            return false;
         }
-        close(fd);
-        return;
+        return client_keep_alive;
     }
 
     /* Route: /tools/<file> → static asset served from the directory that
@@ -883,7 +1015,7 @@ static void handle_client(int fd, MonitorServer* ms) {
             const char* forbidden = "{\"error\":\"forbidden\"}";
             send_response(fd, "403 Forbidden", "application/json", forbidden);
             close(fd);
-            return;
+            return false;
         }
 
         /* Path relative to tools/ dir: skip the "/tools/" prefix (7 chars).
@@ -913,29 +1045,104 @@ static void handle_client(int fd, MonitorServer* ms) {
             /* Content type by extension. */
             const char* ctype = "application/octet-stream";
             const char* dot = strrchr(reqpath, '.');
+            bool allow_gzip = false;
             if (dot) {
-                if (strcmp(dot, ".js") == 0)        ctype = "application/javascript; charset=utf-8";
-                else if (strcmp(dot, ".css") == 0)  ctype = "text/css; charset=utf-8";
-                else if (strcmp(dot, ".html") == 0) ctype = "text/html; charset=utf-8";
-                else if (strcmp(dot, ".json") == 0) ctype = "application/json";
-                else if (strcmp(dot, ".svg") == 0)  ctype = "image/svg+xml";
-                else if (strcmp(dot, ".wasm") == 0) ctype = "application/wasm";
-                else if (strcmp(dot, ".png") == 0)  ctype = "image/png";
+                if (strcmp(dot, ".js") == 0) {
+                    ctype = "application/javascript; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".css") == 0) {
+                    ctype = "text/css; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".html") == 0) {
+                    ctype = "text/html; charset=utf-8";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".json") == 0) {
+                    ctype = "application/json";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".svg") == 0) {
+                    ctype = "image/svg+xml";
+                    allow_gzip = true;
+                } else if (strcmp(dot, ".wasm") == 0) {
+                    ctype = "application/wasm";
+                } else if (strcmp(dot, ".png") == 0) {
+                    ctype = "image/png";
+                } else if (strcmp(dot, ".gltf") == 0) {
+                    ctype = "model/gltf+json";
+                    allow_gzip = true;
+                }
             }
-            send_response(fd, "200 OK", ctype, fbuf);
+            /* 路径分级缓存：vendor/ + models/ → immutable；其余 no-cache。
+             * 缓存 + keep-alive + gzip 让 three.module.js 1243KB 二次打开近 0 字节传输。 */
+            const char* cache = cache_control_for_path(reqpath);
+            send_response_full(fd, "200 OK", ctype, fbuf,
+                               client_keep_alive, cache,
+                               allow_gzip, accept_encoding);
             free(fbuf);
         } else {
             const char* notfound = "{\"error\":\"not found\"}";
             send_response(fd, "404 Not Found", "application/json", notfound);
+            close(fd);
+            return false;
         }
-        close(fd);
-        return;
+        return client_keep_alive;
     }
 
     /* 404 */
     const char* notfound = "{\"error\":\"not found\"}";
     send_response(fd, "404 Not Found", "application/json", notfound);
     close(fd);
+    return false;
+}
+
+/* handle_client: 每连接一个线程，支持 HTTP/1.1 keep-alive 循环。
+ * P1-4 优化前每请求都 Connection: close，60+ ES module 各自 TCP 握手；
+ * 现在静态资源 + JSON API 在 client_keep_alive 时复用连接，握手开销归零。
+ *
+ * Accept-Encoding / Connection 头每个请求都重新解析（keep-alive 连接上
+ * 不同请求可能携带不同头）。POST / SSE / error 仍走 close（dispatch_request
+ * 返回 false），不参与复用 —— 避免 POST body 读取跨请求的字节污染问题。 */
+static void handle_client(int fd, MonitorServer* ms) {
+    while (true) {
+        char req[4096];
+        ssize_t n = read(fd, req, sizeof(req) - 1);
+        if (n <= 0) { close(fd); return; }
+        req[n] = '\0';
+
+        /* 解析 Accept-Encoding（gzip 协商） */
+        char accept_encoding[64] = {0};
+        const char* ae = strcasestr(req, "Accept-Encoding:");
+        if (ae) {
+            const char* eol = strstr(ae, "\r\n");
+            if (eol) {
+                size_t aelen = (size_t)(eol - (ae + 16));
+                if (aelen >= sizeof(accept_encoding))
+                    aelen = sizeof(accept_encoding) - 1;
+                memcpy(accept_encoding, ae + 16, aelen);
+                accept_encoding[aelen] = '\0';
+            }
+        }
+
+        /* 解析 Connection 头：HTTP/1.1 默认 keep-alive，HTTP/1.0 默认 close */
+        char connection_hdr[32] = {0};
+        const char* conn = strcasestr(req, "Connection:");
+        if (conn) {
+            const char* eol = strstr(conn, "\r\n");
+            if (eol) {
+                size_t connlen = (size_t)(eol - (conn + 11));
+                if (connlen >= sizeof(connection_hdr))
+                    connlen = sizeof(connection_hdr) - 1;
+                memcpy(connection_hdr, conn + 11, connlen);
+                connection_hdr[connlen] = '\0';
+            }
+        }
+        bool client_keep_alive = (strstr(req, "HTTP/1.1") != NULL);
+        if (strcasestr(connection_hdr, "close")) client_keep_alive = false;
+        if (strcasestr(connection_hdr, "keep-alive")) client_keep_alive = true;
+
+        bool stay_open = dispatch_request(fd, ms, req, n,
+                                          accept_encoding, client_keep_alive);
+        if (!stay_open) return;  /* dispatch_request 已 close(fd) */
+    }
 }
 
 /* ── Server thread ───────────────────────────────────────── */
