@@ -1323,15 +1323,16 @@ protected:
                     int lc_active = (g.lc_state == 1) ||
                                     (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
                     if (lc_active) {
-                        if (g.current_speed > 12.0) {
-                            lc_lat_kd = g.lat_kd_heading * 0.55;
-                            lc_lat_kp = g.lat_kp * 1.3;
-                            lc_lat_accel_max = 2.2;
-                        } else {
-                            lc_lat_kd = g.lat_kd_heading * 0.7;
-                            lc_lat_kp = g.lat_kp * 1.3;
-                            lc_lat_accel_max = 2.8;
-                        }
+                        /* A8 变道横向控制调优：旧参数 heading_term 太强
+                         * (lat_kd=1.4@10m/s) 与 cte_term 互相抵消，steer≈0。
+                         * 修复：
+                         *   - lat_kd 降到 0.2x 避免 heading_term 抵消 cte_term
+                         *   - lat_kp 提到 2.5x 加大横向纠偏
+                         *   - lat_accel 提到 4.5m/s² 提高 steer_limit
+                         *   - filter_new=0.5 保持滤波稳定 */
+                        lc_lat_kd = g.lat_kd_heading * 0.2;
+                        lc_lat_kp = g.lat_kp * 2.5;
+                        lc_lat_accel_max = 4.5;
                         filter_new = 0.5;
                     }
                     double ref_h_eff = ref_road_heading;
@@ -1345,7 +1346,7 @@ protected:
                     double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
                     double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
                     double v_lat_damp_term = 0.0;
-                    if (g.current_speed > 2.0) {
+                    if (g.current_speed > 2.0 && !lc_active) {
                         double heading_err = g.ego_heading - ref_road_heading;
                         while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
                         while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
@@ -1629,11 +1630,11 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lat_lookahead_gain = 0.8;  /* 前视距离 = max(5m, speed*0.8s)，Apollo 标准 */
     g.k_v_lat          = 0.4;    /* 横向速度阻尼增益（LQR v_lat 反馈，0.3-0.6 推荐区间）*/
     g.lane_width = 3.5;
-    g.blocked_timeout_s = 1.2;   /* 原 2.0s，缩短阻塞判定等待，更快评估超车可行性 */
-    g.lc_stable_wait_s           = 4.0;  /* 原硬编码 8.0，缩短变道后稳定巡航期 */
-    g.lc_cooldown_after_stable_s = 1.5;  /* 原硬编码 3.0 */
-    g.lc_cooldown_after_return_s = 2.0;  /* 原硬编码 4.0 */
-    g.min_overtake_gap_base      = 14.0; /* 原硬编码 18.0 */
+    g.blocked_timeout_s = 0.8;   /* 原 2.0s→1.2s，再缩短到 0.8s，更快响应超车机会 */
+    g.lc_stable_wait_s           = 2.0;  /* 原 8.0→4.0，再缩短到 2.0s，减少变道后无谓等待 */
+    g.lc_cooldown_after_stable_s = 0.5;  /* 原 3.0→1.5，再缩短到 0.5s */
+    g.lc_cooldown_after_return_s = 1.0;  /* 原 4.0→2.0，再缩短到 1.0s */
+    g.min_overtake_gap_base      = 10.0; /* 原 18.0→14.0，再缩短到 10.0m，更早触发超车评估 */
     g.min_overtake_gap_cap       = 90.0; /* 原 min_overtake_gap 计算中硬编码的上限 60.0（与 best_gap<90.0 的独立筛选阈值无关），
                                            * 提高上限避免高速场景 min_overtake_gap 被过度收窄导致无法触发超车 */
     g.min_overtake_gap_speed_mult = 0.7; /* 原硬编码 current_speed * 2.0（绝对速度），改为相对速度乘数，避免高速下 gap 永远无法满足 */

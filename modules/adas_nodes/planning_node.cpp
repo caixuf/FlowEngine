@@ -144,7 +144,7 @@ struct PlanningContext {
      * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
      * 红灯/黄灯时注入一面跨车道宽度的静止"墙"，绿灯时不注入——
      * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
-#define TL_CACHE_MAX 4
+#define TL_CACHE_MAX 16
     double tl_x[TL_CACHE_MAX];         /* 停止线 x（世界坐标） */
     double tl_y_lane[TL_CACHE_MAX];    /* 灯所在车道 y */
     int    tl_state[TL_CACHE_MAX];     /* 0=green 1=yellow 2=red */
