@@ -1162,6 +1162,18 @@ protected:
                 else if (ts == 2) ego.lights.set_turn_right(true);
                 if (hz)           ego.lights.set_hazard(true);
             }
+            /* EPS 转向执行器低通滤波：模拟电动助力转向惯性，
+             * 滤掉 20Hz 控制环中 Stanley 控制器的小幅振荡。
+             * 时间常数 ~0.1s（alpha=0.33 @ 20Hz 对应 -3dB@~3Hz）。
+             * 变道 steer 较大时滤波影响小（alpha 较高让大 steer 快速通过），
+             * 巡航小幅修正时滤波效果显著。 */
+            {
+                static double prev_steer = 0.0;
+                const double eps_alpha = 0.4;  /* 滤波系数：0-1，越小滤波越强 */
+                double raw = ego.steer;
+                ego.steer = eps_alpha * raw + (1.0 - eps_alpha) * prev_steer;
+                prev_steer = ego.steer;
+            }
             if (strcmp(g.physics_model, "dynamic") == 0) {
                 flowsim::step_bicycle_dynamic(ego, FLOWSIM_DT_SEC,
                                               ego.throttle, ego.brake, ego.steer);

@@ -1262,7 +1262,11 @@ protected:
             const char* mode = "NONE";
             bool mpc_used = false;
 
-            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+            /* MPC 预留（当前未启用）。iLQR 求解器在含变道的场景中会产生
+             * 大幅转向振荡（steer 在 ±0.25 间每帧翻转），导致车道偏离和蛇行。
+             * 稳态巡航已由 A9 feedforward-only 解决极限环问题，且无振荡风险。
+             * 保留 param_register 和 create 逻辑，后续可注释此条件启用调试。 */
+            if (0 && g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
@@ -1359,12 +1363,29 @@ protected:
                         if (R <= g.curve_ff_boost_radius_m) ff_weight = g.curve_ff_boost_factor;
                     }
                     double ff_term = g.wheelbase * kappa * ff_weight;
-                    steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
+
+                    /* A9 稳态巡航前馈-only：彻底切断反馈回路消除极限环。
+                     *
+                     * 当车辆在车道中心附近（|lat_error|<0.3m, |heading_err|<0.04rad）
+                     * 且非变道状态时，只使用 curvature 前馈 + 小阻尼维持车道。
+                     * cte_term / heading_term / v_lat_damp_term 全部跳过，
+                     * 车不晃（反馈回路不会以 1.6Hz 自激振荡）。
+                     *
+                     * 偏离阈值后 Stanley 全反馈立即介入纠偏。阈值 0.3m/0.04rad
+                     * 确保只在"已经稳定"时才切断反馈——纠偏时反馈必须全开。 */
+                    bool steady_cruise = !lc_active
+                        && fabs(lat_error) < 0.3
+                        && fabs(g.ego_heading - ref_road_heading) < 0.04;
+                    if (steady_cruise) {
+                        steer = ff_term - yaw_damp_term * 0.1;
+                    } else {
+                        steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
+                    }
                     double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
                     steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
-                    if (!lc_active && fabs(steer) < 0.003) steer = 0.0;
+                    if (!lc_active && fabs(steer) < 0.005) steer = 0.0;
                     g.prev_steer = steer;
                 }
             }
@@ -1724,6 +1745,19 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
     param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
     param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
+
+    /* MPC 参数注册。从 mpc_default_config() 取默认值，确保 param_get_float
+     * 返回合理值而非 0（之前未注册导致 MPC 初始化后 horizon=0 永不被使用）。
+     * 支持通过 pipeline.json params 或 flowctl param set 覆盖运行时调优。 */
+    param_register_float("control.mpc_horizon",  10.0f,         1,    50,    "MPC prediction horizon steps");
+    param_register_float("control.mpc_dt",       0.05f,         0.01, 0.5,   "MPC discrete time step (s)");
+    param_register_float("control.mpc_q_x",      1.0f,          0.0,  100.0, "MPC cost weight x (longitudinal)");
+    param_register_float("control.mpc_q_y",      8.0f,          0.0,  100.0, "MPC cost weight y (lateral)");
+    param_register_float("control.mpc_q_theta",  3.0f,          0.0,  100.0, "MPC cost weight heading");
+    param_register_float("control.mpc_q_v",      2.0f,          0.0,  100.0, "MPC cost weight speed");
+    param_register_float("control.mpc_r_a",      0.1f,          0.0,  10.0,  "MPC cost weight acceleration");
+    param_register_float("control.mpc_r_delta",  2.0f,          0.0,  20.0,  "MPC cost weight steering angle");
+    param_register_float("control.mpc_r_ddelta", 5.0f,          0.0,  20.0,  "MPC cost weight steering rate (higher = less oscillation)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
      * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；
