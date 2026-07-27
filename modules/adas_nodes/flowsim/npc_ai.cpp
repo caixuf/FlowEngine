@@ -625,6 +625,13 @@ mobil_done: ;
             npc.state = NpcState::CutIn;
         } else if (lead != INVALID_ENTITY) {
             npc.state = NpcState::Follow;
+            /* E4: 碰撞死锁恢复 — 碰撞分离后两车间距过小（gap < 2m），
+             * IDM 计算 gap_error 极负 → v_desired=0 → 两车都停住不动。
+             * 临时给一个较大的 gap 值让 NPC 起步加速，拉开足够间距后
+             * 下一帧重新评估 lead 并恢复正常跟车。 */
+            if (gap < 2.0 && npc.speed < 0.5) {
+                gap = 10.0;
+            }
             v_desired = idm_desired_speed(v, gap, npc.target_vx, cfg, dt);
         } else {
             npc.state = NpcState::Cruise;
@@ -743,13 +750,23 @@ mobil_done: ;
                     npc.vx = npc.speed * std::cos(h);
                     npc.vy = npc.speed * std::sin(h);
                 } else {
-                    /* crash_cooldown：用 npc 当前 (x,y) 反向 sync road_pos
-                     * 让 road_pos 内部 s 与 collision 分离后位置一致。
-                     * 注意 speed=0，vx/vy 已被 collision response 清零，无需重算。 */
-                    FrenetPos fp_sep;
-                    if (roads->world_to_frenet(npc.x, npc.y, fp_sep)) {
-                        npc.road_pos.init(*roads, fp_sep.road_id, 0,
-                                          fp_sep.s, npc.offset);
+                    /* crash_cooldown: 用 collision-separated route_s 重建 road_pos，
+                     * 而非用 (x,y) 反向 sync — 后者会回到碰撞前位置，使分离失效。
+                     * 同时同步世界坐标，让 crash_cooldown 结束后第一帧位置正确。 */
+                    if (route && route->ok() && npc.route_dir != 0) {
+                        int rid = 0, ridx = -1;
+                        double s_local = 0.0;
+                        route->locate(npc.route_s, rid, s_local, ridx);
+                        npc.road_pos.init(*roads, rid, 0, s_local, npc.offset);
+                        WorldPos wp_sep;
+                        if (npc.road_pos.world(wp_sep)) {
+                            npc.x = wp_sep.x;
+                            npc.y = wp_sep.y;
+                            double h = wp_sep.h + (npc.route_dir < 0 ? M_PI : 0.0);
+                            while (h >  M_PI) h -= 2.0 * M_PI;
+                            while (h < -M_PI) h += 2.0 * M_PI;
+                            npc.heading = h;
+                        }
                     }
                 }
             }
@@ -765,7 +782,9 @@ mobil_done: ;
             }
             // route_s 同步：用 route.index_of + to_route_s 把 road_pos 的 (road,s)
             // 映射回 route 累计 s，让 recycle_npc / find_lead 的 route_s 比较仍有效
-            if (route && route->ok() && npc.route_dir != 0) {
+            // crash_cooldown 期间跳过此同步，保留 collision 分离后的 route_s，
+            // 避免碰撞分离 2m 后被 road_pos 的碰撞前位置覆盖→分离失效→永久卡死。
+            if (route && route->ok() && npc.route_dir != 0 && !in_crash_cooldown) {
                 int ei = route->index_of(npc.road_id);
                 if (ei >= 0) {
                     npc.route_s = route->to_route_s(ei, npc.s);

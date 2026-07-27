@@ -120,7 +120,7 @@ public:
      * 查询指定道路/车道在 s 处的车道宽度 (m)。
      * 失败返回 0。
      */
-    double lane_width(int road_id, int lane_id, double s);
+    double lane_width(int road_id, int lane_id, double s) const;
 
     /**
      * 查询指定道路在 s 处的可行驶车道数（双向合计）。

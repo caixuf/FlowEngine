@@ -28,6 +28,7 @@
 #include "coroutine_task.h"
 #include "logger.h"
 #include "clock_service.h"
+#include "mpc_controller.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -246,6 +247,15 @@ struct ControlContext {
 
     /* 协程任务 */
     std::unique_ptr<class ControlTask> task;
+
+    /* MPC 控制器 */
+    MpcController* mpc{nullptr};
+    MpcResult mpc_result;
+    MpcConfig mpc_config;
+    int mpc_initialized{0};
+
+    /* MPC 参考轨迹缓存（避免每帧重新分配） */
+    MpcRefPoint mpc_ref_buf[MPC_MAX_HORIZON];
 };
 
 ControlContext g;
@@ -601,6 +611,87 @@ static bool query_ref_at(double ego_x, double ego_y,
     out_kappa = best->kappa;
     pthread_mutex_unlock(&g.ref_path_mtx);
     return true;
+}
+
+/**
+ * build_mpc_reference — 从 ref_path 构建 MPC 参考轨迹。
+ *
+ * 找到 ref_path 上离 ego 最近的点，以该点为起点沿路径采样 horizon 个参考点，
+ * 参考点间距 = speed * dt，速度 = acc_target。
+ *
+ * @param ref         输出缓冲区（至少 MPC_MAX_HORIZON 大小）
+ * @param acc_target  目标速度 (m/s)
+ * @return 实际参考点数，0 表示 ref_path 不可用
+ */
+static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
+    if (g.ref_path.empty()) return 0;
+
+    pthread_mutex_lock(&g.ref_path_mtx);
+    if (g.ref_path.empty()) {
+        pthread_mutex_unlock(&g.ref_path_mtx);
+        return 0;
+    }
+
+    /* 找到离 ego 最近的 ref_path 点 */
+    double best_d2 = 1e18;
+    int best_idx = 0;
+    for (int i = 0; i < (int)g.ref_path.size(); i++) {
+        double dx = g.ref_path[i].x - g.ego_x;
+        double dy = g.ref_path[i].y - g.ego_y;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) { best_d2 = d2; best_idx = i; }
+    }
+    if (best_d2 > 25.0) {  /* >5m, ego 偏离参考 */
+        pthread_mutex_unlock(&g.ref_path_mtx);
+        return 0;
+    }
+
+    int horizon = g.mpc_config.horizon;
+    if (horizon > MPC_MAX_HORIZON) horizon = MPC_MAX_HORIZON;
+    int n = 0;
+
+    /* 用 ref_path 的 rs（累计弧长）做 arc-length 参数化采样 */
+    double start_rs = g.ref_path[best_idx].rs;
+    double speed = fmax(g.current_speed, 2.0);  /* 防止低速时 dt*speed 过小 */
+
+    for (int k = 0; k < horizon; k++) {
+        double target_rs = start_rs + (double)(k + 1) * speed * g.mpc_config.dt;
+
+        /* 线性插值找到 target_rs 对应的点 */
+        if (target_rs <= g.ref_path[0].rs) {
+            ref[n] = { g.ref_path[0].x, g.ref_path[0].y,
+                       g.ref_path[0].h, acc_target, g.ref_path[0].kappa };
+        } else if (target_rs >= g.ref_path.back().rs) {
+            ref[n] = { g.ref_path.back().x, g.ref_path.back().y,
+                       g.ref_path.back().h, acc_target, g.ref_path.back().kappa };
+        } else {
+            int j = 0;
+            for (j = 0; j < (int)g.ref_path.size() - 1; j++) {
+                if (g.ref_path[j].rs <= target_rs && g.ref_path[j+1].rs >= target_rs) break;
+            }
+            if (j >= (int)g.ref_path.size() - 1) {
+                ref[n] = { g.ref_path.back().x, g.ref_path.back().y,
+                           g.ref_path.back().h, acc_target, g.ref_path.back().kappa };
+            } else {
+                double seg = g.ref_path[j+1].rs - g.ref_path[j].rs;
+                double frac = (seg > 1e-6) ? (target_rs - g.ref_path[j].rs) / seg : 0.0;
+                double dh = g.ref_path[j+1].h - g.ref_path[j].h;
+                while (dh >  M_PI) dh -= 2.0 * M_PI;
+                while (dh < -M_PI) dh += 2.0 * M_PI;
+                ref[n] = {
+                    g.ref_path[j].x + frac * (g.ref_path[j+1].x - g.ref_path[j].x),
+                    g.ref_path[j].y + frac * (g.ref_path[j+1].y - g.ref_path[j].y),
+                    g.ref_path[j].h + frac * dh,
+                    acc_target,
+                    g.ref_path[j].kappa + frac * (g.ref_path[j+1].kappa - g.ref_path[j].kappa)
+                };
+            }
+        }
+        n++;
+    }
+
+    pthread_mutex_unlock(&g.ref_path_mtx);
+    return n;
 }
 
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
@@ -1158,35 +1249,128 @@ protected:
                 g.integral = 0;
             }
 
-            /* ── 纵向 PID 计算 (目标为 ACC 限速后的值) ── */
+            /* ── MPC 控制（替代 PID 纵向 + Stanley 横向） ──
+             *
+             * 优先使用 MPC 控制器。若 MPC 不可用（未初始化、无参考轨迹、求解失败）
+             * 则回退到 PID 纵向 + Stanley 横向。
+             *
+             * MPC 同时优化纵向和横向，输出 throttle/brake/steer。
+             * 回退保留原有 PID+Stanley 行为，确保退化安全。 */
             double error = acc_target - g.current_speed;
-            g.integral += error * 0.05;
-            if (g.integral > 500)  g.integral = 500;
-            if (g.integral < -200) g.integral = -200;
+            double lat_error = effective_target_y - g.ego_y;
+            double throttle = 0, brake = 0, steer = 0;
+            const char* mode = "NONE";
+            bool mpc_used = false;
 
-            double derivative = (error - g.prev_error) / 0.05;
-            double output = g.kp * error + g.ki * g.integral + g.kd * derivative;
-
-            double throttle = 0, brake = 0;
-            const char* mode;
-            if (output > 0) {
-                throttle = output / 5000.0;
-                if (throttle > 1.0) throttle = 1.0;
-                brake = 0;
-                mode = (error < 1.0) ? "HOLD" : "ACCEL";
-            } else {
-                throttle = 0;
-                brake = (-output) / 8000.0;
-                if (brake > 1.0) brake = 1.0;
-                mode = "BRAKE";
+            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+                /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
+                int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
+                if (n_ref > 0) {
+                    mpc_set_reference(g.mpc, g.mpc_ref_buf, n_ref);
+                    mpc_set_state(g.mpc, g.ego_x, g.ego_y, g.ego_heading, g.current_speed);
+                    mpc_set_prev_steer(g.mpc, g.prev_steer);
+                    if (mpc_solve(g.mpc, &g.mpc_result) == 0) {
+                        throttle = g.mpc_result.throttle;
+                        brake    = g.mpc_result.brake;
+                        steer    = g.mpc_result.steer;
+                        g.prev_steer = steer;
+                        g.integral   = 0;  /* 清 PID 积分防残留 */
+                        mode = "MPC";
+                        mpc_used = true;
+                        if (g.cycle % 20 == 1) {
+                            LOG_INFO("control", "#%d MPC ok: thr=%.2f brk=%.2f st=%.4f accel=%.2f iter=%d cost=%.2e",
+                                     g.cycle, throttle, brake, steer, g.mpc_result.accel_cmd,
+                                     g.mpc_result.iterations, g.mpc_result.cost);
+                        }
+                    }
+                }
             }
 
-            /* Anti-windup: don't accumulate integral when output is saturated */
-            if (g.integral > 0 && throttle >= 1.0 && error > 0)
-                g.integral -= error * 0.05;  /* unwind positive accumulation */
-            if (g.integral < 0 && brake >= 1.0 && error < 0)
-                g.integral -= error * 0.05;  /* unwind negative accumulation */
+            if (!mpc_used) {
+                /* ── 回退：PID 纵向 (目标为 ACC 限速后的值) ── */
+                g.integral += error * 0.05;
+                if (g.integral > 500)  g.integral = 500;
+                if (g.integral < -200) g.integral = -200;
 
+                double derivative = (error - g.prev_error) / 0.05;
+                double output = g.kp * error + g.ki * g.integral + g.kd * derivative;
+
+                if (output > 0) {
+                    throttle = output / 5000.0;
+                    if (throttle > 1.0) throttle = 1.0;
+                    brake = 0;
+                    mode = (error < 1.0) ? "HOLD" : "ACCEL";
+                } else {
+                    throttle = 0;
+                    brake = (-output) / 8000.0;
+                    if (brake > 1.0) brake = 1.0;
+                    mode = "BRAKE";
+                }
+
+                /* Anti-windup */
+                if (g.integral > 0 && throttle >= 1.0 && error > 0)
+                    g.integral -= error * 0.05;
+                if (g.integral < 0 && brake >= 1.0 && error < 0)
+                    g.integral -= error * 0.05;
+
+                /* ── 回退：Stanley 横向 ── */
+                steer = 0.0;
+                if (fabs(g.ego_y - road_c) <= road_center_limit - 0.4) {
+                    double lc_lat_kd = g.lat_kd_heading;
+                    double lc_lat_kp = g.lat_kp;
+                    double lc_lat_accel_max = 1.4;
+                    double filter_new = STEER_FILTER_NEW;
+                    int lc_active = (g.lc_state == 1) ||
+                                    (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
+                    if (lc_active) {
+                        if (g.current_speed > 12.0) {
+                            lc_lat_kd = g.lat_kd_heading * 0.55;
+                            lc_lat_kp = g.lat_kp * 1.3;
+                            lc_lat_accel_max = 2.2;
+                        } else {
+                            lc_lat_kd = g.lat_kd_heading * 0.7;
+                            lc_lat_kp = g.lat_kp * 1.3;
+                            lc_lat_accel_max = 2.8;
+                        }
+                        filter_new = 0.5;
+                    }
+                    double ref_h_eff = ref_road_heading;
+                    {
+                        double dh = ref_h_eff - g.ego_heading;
+                        while (dh >  M_PI) dh -= 2.0 * M_PI;
+                        while (dh < -M_PI) dh += 2.0 * M_PI;
+                        if (fabs(dh) > 0.5) ref_h_eff = g.ego_heading;
+                    }
+                    double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
+                    double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
+                    double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
+                    double v_lat_damp_term = 0.0;
+                    if (g.current_speed > 2.0) {
+                        double heading_err = g.ego_heading - ref_road_heading;
+                        while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
+                        while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
+                        v_lat_damp_term = g.k_v_lat * g.current_speed * sin(heading_err);
+                    }
+                    double kappa = ref_kappa;
+                    double ff_weight = 1.0;
+                    if (fabs(kappa) > 1e-9) {
+                        double R = 1.0 / fabs(kappa);
+                        if (R <= g.curve_ff_boost_radius_m) ff_weight = g.curve_ff_boost_factor;
+                    }
+                    double ff_term = g.wheelbase * kappa * ff_weight;
+                    steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
+                    double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
+                    if (steer >  steer_limit) steer =  steer_limit;
+                    if (steer < -steer_limit) steer = -steer_limit;
+                    steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
+                    if (!lc_active && fabs(steer) < 0.003) steer = 0.0;
+                    g.prev_steer = steer;
+                }
+            }
+
+            /* ── Safety overrides（对 MPC 和 PID 回退都生效） ── */
+
+            /* 超速限幅 */
             if (g.current_speed > g.cfg_cruise_speed + 1.0) {
                 throttle = 0.0;
                 double overspeed_brake = (g.current_speed - g.cfg_cruise_speed - 1.0) / 5.0;
@@ -1196,11 +1380,7 @@ protected:
                 mode = "SPEED_LIMIT";
             }
 
-            /* 仅在盲区 (不在 ROAD_GUARD 区域) 激活; ROAD_GUARD 会在后续覆写 throttle/brake。
-             *
-             * target_speed 守卫：planning 因红灯/停车标志下发 target_speed≈0 时禁止恢复，
-             * 否则 5s 后会强制蠕行闯红灯。仅在 planning 要求前进（target_speed>1.0）
-             * 但 ego 因横向死锁/控制抖动而静止时才触发恢复。 */
+            /* 全域速度死锁恢复 */
             if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
                 fabs(g.ego_y - road_c) <= road_center_limit - 0.4 &&
                 g.target_speed > 1.0) {
@@ -1215,167 +1395,20 @@ protected:
                          g.ego_y, g.ego_x, g.ego_y, g.target_speed);
             }
 
-            /* ── 横向级联 PD：lat_error → psi_des → steer（阻尼消振） ── */
-            double steer = 0.0;
-            double lat_error = effective_target_y - g.ego_y;
+            /* ROAD_GUARD：车辆偏离道路中心过远时强制回正 */
             if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
                 double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
                 steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
-                /* 低速时给少许油门使自行车模型能横向移动回车道中心，
-                 * 避免 speed=0 时永久卡在路边缘的死锁。 */
                 if (g.current_speed < 2.5) {
                     throttle = 0.18;
                     brake = 0.0;
-                    g.speed_zero_timer = 0.0;  /* ROAD_GUARD 自己处理低速, 重置全域计时器 */
+                    g.speed_zero_timer = 0.0;
                 } else {
                     throttle = 0.0;
                     if (brake < 0.65) brake = 0.65;
                 }
                 g.prev_steer = steer;
                 mode = "ROAD_GUARD";
-            } else {
-                /* ── Stanley 式横向控制（高速自适应阻尼） ──
-                 * cross-track 项: atan2(k*e, v) 随速度自然衰减 → 高速小幅打方向;
-                 * heading 项: lat_kd_heading 阻尼抑制航向偏差, 避免极限环振荡。
-                 * 弯道时以道路中心线切线航向为参考 (road_center_heading)。
-                 *
-                 * 高速变道时 (>12m/s) 动态调节：
-                 *   1) heading 阻尼增益基于配置 lat_kd_heading 缩放 (×0.9), 避免过阻尼
-                 *      但仍保持足够阻尼防止蛇行 (之前的硬编码 1.2 低于配置值 1.35, 阻尼不足)
-                 *   2) lateral accel 限幅从 2.8 → 2.2 (m/s²) 减少横向冲击
-                 *   3) 低通滤波权重从 0.8/0.2 → 0.5/0.5 更激进平滑 */
-                double lc_lat_kd = g.lat_kd_heading;
-                double lc_lat_kp = g.lat_kp;                    /* 变道时增大横向误差增益 */
-                double lc_lat_accel_max = 1.4;
-                double filter_new = STEER_FILTER_NEW;
-                /* 变道中或变道后稳定期内使用变道增益 */
-                int lc_active = (g.lc_state == 1) ||
-                                (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
-                if (lc_active) {
-                    /* 变道调参：原 0.9/1.2 的 heading 阻尼过强，ego 微偏后 heading_term
-                     * 反向抵消 cte_term，steer 反转拉回，导致 ego 横向几乎不动
-                     * （实测 15s 仅移动 1.1m，变道无法完成）。
-                     * 修复：大幅降低 heading 阻尼（0.35/0.5），同时增大横向误差增益
-                     * (×2.0)，让 cte_term 主导 steer，维持向目标的横向加速度。 */
-                    /* 变道调参：原 0.9/1.2 的 heading 阻尼过强，ego 微偏后 heading_term
-                 * 反向抵消 cte_term，steer 反转拉回，导致 ego 横向几乎不动
-                 * （实测 15s 仅移动 1.1m，变道无法完成）。
-                 * 修复：大幅降低 heading 阻尼（0.35/0.5），同时增大横向误差增益
-                 * 让 cte_term 主导 steer，维持向目标的横向加速度。
-                 *
-                 * Anti-sway 调优 (2024): 原 lat_kp × 2.0 在变道中导致 cte_term 在
-                 * 高速下饱和到 steer_limit，反向回拉时产生 ~1.6Hz 极限环振荡
-                 * （左摇右晃）。降到 × 1.3 让控制器有更多线性工作区，配合
-                 * STEER_FILTER_NEW=0.5 的低通滤波 + yaw_damping 抑制高频摆动。 */
-                if (g.current_speed > 12.0) {
-                    lc_lat_kd = g.lat_kd_heading * 0.55;  /* 原 0.9: 过强反向拉回 */
-                    lc_lat_kp = g.lat_kp * 1.3;           /* 原 ×2.0: 高速饱和致振荡 */
-                    lc_lat_accel_max = 2.2;                /* 运动学校调值 */
-                } else {
-                    lc_lat_kd = g.lat_kd_heading * 0.7;   /* 原 1.2 */
-                    lc_lat_kp = g.lat_kp * 1.3;
-                    lc_lat_accel_max = 2.8;                /* 运动学校调值 */
-                }
-                filter_new = 0.5;
-                }
-                /* A4: 用上方 query_ref_at 已缓存的 ref_road_heading / ref_kappa
-                 * （ref_path 不可用时已是 curve_* 回退值），不再重复算。 */
-                /* ref_path heading 合理性检查: esmini 在 junction/fork 处可能返回
-                 * 与 ego 当前航向偏差极大的切线方向（如匝道 h≈5 rad 而 ego h≈0）。
-                 * 这种 ref_h 会让 heading_term 爆炸, 反向打满 steer 把 ego 拉向岔路。
-                 * 检测: 将 (ref_h - ego_heading) 归一化到 [-π,π], 若绝对值 > 0.5 rad
-                 * (≈29°) 则视为无效参考, 用 ego_heading 替代 (heading_term=0)。
-                 * 阈值比 π/2 更严: esmini 在路口前 100m 采样的 fork 切线常差 60°+,
-                 * 但直道/缓弯 ref_h 与 ego 航向差 < 15°, 0.5 rad 能区分两者。
-                 * 真正的急弯跟随由下方 ff_term (曲率前馈) 处理, 不依赖 heading_term。 */
-                double ref_h_eff = ref_road_heading;
-                {
-                    double dh = ref_h_eff - g.ego_heading;
-                    while (dh >  M_PI) dh -= 2.0 * M_PI;
-                    while (dh < -M_PI) dh += 2.0 * M_PI;
-                    if (fabs(dh) > 0.5) {
-                        ref_h_eff = g.ego_heading;  /* ref_h 与 ego 航向差 > 29°, 视为无效 */
-                    }
-                }
-                /* ── 横向控制：CTE 比例 + 航向阻尼（负反馈）+ 横向速度阻尼 ──
-                 *
-                 * heading_term 必须以「道路切线 ref_h_eff」为参考做负反馈阻尼：
-                 *   heading_term = kd * (ego_heading - 道路切线)
-                 *   steer -= heading_term  →  ego 偏航越大反向修正越强, 抑制过冲。
-                 *
-                 * 历史教训（已修）：曾把参考改成「前视目标角」target_h=atan2(lat_error,L)。
-                 * 直道 ego_h=0 时 heading_term = kd*(0-target_h) = -kd*atan2(lat_error,L),
-                 * 与 cte_term 同号；合成式 steer = cte_term - heading_term 变成 +kd*atan2(...)
-                 * → 阻尼项符号翻转成额外比例项, P 增益翻倍；叠加 yaw/v_lat 阻尼项被
-                 * ego_h≡0 清零 → 纯比例控制器发散, steer 死贴饱和、y 4m 扫动（蛇形）。
-                 * 故 heading_term 参考必须用道路切线；前视思想只允许喂 cte_term, 不得混入阻尼项。 */
-                double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
-                /* yaw_rate 阻尼项：保留作为高频抑制（与 v_lat 阻尼互补,
-                 * yaw_damping 处理航向角速度, v_lat_damp 处理位移速度）。 */
-                double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
-
-                /* 横向速度阻尼（LQR 状态反馈核心项, 真车 ADAS 关键）:
-                 *   v_lat = speed * sin(ego_heading - 道路切线)
-                 *   steer -= k_v_lat * v_lat
-                 * 物理意义: ego 横向运动越快, 反向减速越强, 抑制过冲。
-                 * 这是 LQR K 矩阵里 [v_y] 状态反馈的工程实现,
-                 * 比 yaw_damping 更根本——v_lat 直接反映横向位移趋势,
-                 * yaw_rate 只反映航向角变化率, 后者在大曲率弯道会误判。
-                 * 阈值: 仅在速度 > 2 m/s 时启用 (低速泊车方向盘乱转不该阻尼)。 */
-                double v_lat_damp_term = 0.0;
-                if (g.current_speed > 2.0) {
-                    double heading_err = g.ego_heading - ref_road_heading;
-                    while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
-                    while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
-                    double v_lat = g.current_speed * sin(heading_err);
-                    v_lat_damp_term = g.k_v_lat * v_lat;
-                }
-
-                /* NOA Phase 3.4: 曲率前馈项 δ_ff = wheelbase * κ。
-                 * steady-state 转向角，让控制器预先打方向而非等 CTE 累积。
-                 * 急弯（R ≤ curve_ff_boost_radius_m）时权重 ×curve_ff_boost_factor，
-                 * 匝道 R=45m 回头弯尤其需要——纯反馈在急弯入口总是滞后。
-                 * 直道 / 弯道端点外 κ=0，前馈为 0，与原行为完全一致。 */
-                double kappa = ref_kappa;
-                double ff_weight = 1.0;
-                if (fabs(kappa) > 1e-9) {
-                    double R = 1.0 / fabs(kappa);  /* 曲率半径 (m) */
-                    if (R <= g.curve_ff_boost_radius_m) {
-                        ff_weight = g.curve_ff_boost_factor;
-                    }
-                }
-                double ff_term = g.wheelbase * kappa * ff_weight;
-
-                steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
-                double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
-                if (steer >  steer_limit) steer =  steer_limit;
-                if (steer < -steer_limit) steer = -steer_limit;
-                /* 一阶低通滤波（高速变道时更激进）。
-                 * 注: 引入 v_lat_damp 后极限环已根治, 低通滤波仅作为执行器建模
-                 * (转向机一阶滞后), 不再承担抑制振荡的职责, 故仍保留 0.5 权重。 */
-                steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
-                /* 直线巡航死区：|steer| < 0.003 rad 钳零。真车 EPS 转向机有物理间隙
-                 * + 摩擦阻尼，< 0.5° 的指令会被机械特性自然滤除，方向盘不转动。
-                 * 仿真中无此物理特性，LQR 的 v_lat_damp 和 flowsim 的 tan(steer)*gain
-                 * 形成闭环后 0.005-0.025 rad 级微小修正会持续反复，不会自行收敛。
-                 * 此前为 0.005，配合 flowsim 新增的 steer_smooth EPS 惯性滤波后，
-                 * 转向指令已通过一阶低通平滑，极限环能量被机械惯性吸收，可降为 0.003。
-                 * 变道中 (lc_active) 跳过死区，避免打断正常变道 steer。 */
-                if (!lc_active && fabs(steer) < 0.003) steer = 0.0;
-                g.prev_steer = steer;
-                /* 调试：变道时打印 steer 各分量，定位横向不动根因 */
-                if (lc_active) {
-                    static int lc_dbg_cnt = 0;
-                    if (++lc_dbg_cnt % 5 == 0) {
-                        LOG_INFO("control",
-                                 "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f vlat_t=%.3f lat_err=%.2f "
-                                 "ego_h=%.3f ref_heff=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
-                                 steer, cte_term, heading_term, yaw_damp_term, v_lat_damp_term, lat_error,
-                                 g.ego_heading, ref_h_eff, ref_road_heading, g.current_speed, lc_lat_kp, lc_lat_kd,
-                                 steer_limit_for_speed(g.current_speed, lc_lat_accel_max));
-                    }
-                }
             }
 
             /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
@@ -1712,6 +1745,32 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.yaw_damping                 = param_get_float("control.yaw_damping");
     g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
     g.k_v_lat                     = param_get_float("control.k_v_lat");
+
+    /* ── MPC 控制器初始化 ── */
+    g.mpc_config = mpc_default_config();
+    g.mpc_config.wheelbase = g.wheelbase;  /* 与 control 节点轴距一致 */
+    /* 从 param_registry 读取 MPC 参数（支持 flowctl param set 热重载，
+     * 但 MPC 重建需要 mpc_destroy + mpc_create，此处仅初始化时读取一次；
+     * 运行时热重载需要重启节点）。 */
+    g.mpc_config.horizon  = (int)param_get_float("control.mpc_horizon");
+    g.mpc_config.dt       = param_get_float("control.mpc_dt");
+    g.mpc_config.q_x      = param_get_float("control.mpc_q_x");
+    g.mpc_config.q_y      = param_get_float("control.mpc_q_y");
+    g.mpc_config.q_theta  = param_get_float("control.mpc_q_theta");
+    g.mpc_config.q_v      = param_get_float("control.mpc_q_v");
+    g.mpc_config.r_a      = param_get_float("control.mpc_r_a");
+    g.mpc_config.r_delta  = param_get_float("control.mpc_r_delta");
+    g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
+    g.mpc = mpc_create(&g.mpc_config);
+    if (g.mpc) {
+        g.mpc_initialized = 1;
+        LOG_INFO("control", "MPC initialized (horizon=%d dt=%.3f q_y=%.1f r_a=%.3f)",
+                 g.mpc_config.horizon, g.mpc_config.dt,
+                 g.mpc_config.q_y, g.mpc_config.r_a);
+    } else {
+        g.mpc_initialized = 0;
+        LOG_WARN("control", "MPC creation failed — falling back to PID+Stanley");
+    }
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");

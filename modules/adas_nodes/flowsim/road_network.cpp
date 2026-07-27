@@ -134,7 +134,7 @@ double FlowRoadNetwork::speed_limit(int road_id, int lane_id, double s,
     return (v > 0.0) ? v : default_value;
 }
 
-double FlowRoadNetwork::lane_width(int road_id, int lane_id, double s) {
+double FlowRoadNetwork::lane_width(int road_id, int lane_id, double s) const {
     if (!loaded_) return 0.0;
     double w = 0.0;
     if (RM_GetLaneWidthByRoadId((id_t)road_id, lane_id, s, &w) < 0) return 0.0;
