@@ -659,7 +659,16 @@ static int prefix##_execute(TaskBase* b) {                                    \
         g_node_exec = &ex;                                                    \
         CoroutineTask& ct = *w->impl;                                          \
         ex.spawn(ct.run(), #prefix);                                             \
-        while (!w->impl->should_stop()) ex.run();                             \
+        /* run() 是非阻塞 tick（不 sleep / 不 notify / 不 syscall），节奏控制是宿主责任。
+         * idle_sleep_us 仅 run_blocking() 读取，对 run() 无效 —— 裸 run() 循环会 100% 忙等自旋。
+         * 这里补 200µs sleep：定频轮询节点（control/planning 20Hz 等）的定时器精度损失
+         * 仅 0.4%；消息驱动节点（fusion/safety_control）跨线程事件延迟 +0~200µs，
+         * 远小于 lidar 50ms / 对齐窗口 50ms 周期。硬约束：sleep 必须 ≪ 最小对齐窗口。
+         * should_stop() 响应性最坏迟 200µs。若实测睡过头致 20Hz→18Hz，降到 50µs 或 sched_yield。 */ \
+        while (!w->impl->should_stop()) {                                     \
+            ex.run();                                                         \
+            std::this_thread::sleep_for(std::chrono::microseconds(200));      \
+        }                                                                     \
         ex.shutdown();                                                        \
         g_node_exec = nullptr;                                                \
         return 0;                                                             \

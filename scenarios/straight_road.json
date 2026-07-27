@@ -58,7 +58,10 @@
   "choreography": {
     "loop_period_s": 120,
     "beats": [
-      {"t": 10, "actor": "tl", "phase": "red"}
+      {"t": 10, "actor": "tl", "phase": "red"},
+      {"t": 20, "actor": "1", "rel_to": "ego", "ds": 45, "dl": 0, "vx": 6.0, "act": "overtake"},
+      {"t": 50, "actor": "1", "rel_to": "ego", "ds": 45, "dl": 0, "vx": 6.0, "act": "overtake"},
+      {"t": 80, "actor": "1", "rel_to": "ego", "ds": 45, "dl": 0, "vx": 6.0, "act": "overtake"}
     ]
   }
 }

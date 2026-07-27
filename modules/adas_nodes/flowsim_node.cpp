@@ -145,6 +145,11 @@ struct FlowSimContext {
     flowsim::DynamicDigest prev_dynamic_digest;
     bool                   digest_initialized{false};
 
+    /* P2-7: invariant 失败计数。cleanup 时打印汇总 marker，
+     * demo_evaluator.py 扫描此 marker 把 invariant 失败升级为 FAIL。
+     * 旧行为只 LOG_WARN，不影响退出码也不被 evaluator 捕获 → 同类回归漏检。 */
+    std::atomic<uint32_t>  invariant_fail_count{0};
+
     /* 协程任务 */
     std::unique_ptr<class FlowSimTask> task;
 };
@@ -293,7 +298,7 @@ static flowsim::NpcState ai_state_from_str(const char* s) {
 static flowsim::Entity* find_entity_by_actor_id(int actor_id) {
     for (int i = 0; i < g.pool.size(); ++i) {
         flowsim::Entity& e = g.pool[i];
-        if (e.active && e.id == actor_id) return &e;
+        if (e.active && e.scenario_id == actor_id) return &e;
     }
     return nullptr;
 }
@@ -401,7 +406,10 @@ static void apply_scenario_scripts(double sim_time_s) {
 static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     g.pool.clear();
 
-    /* Ego 固定 index 0 */
+    /* Ego 固定 index 0。
+     * ScenarioEgo 结构体无 id 字段（ego 无场景业务 id），scenario_id 保留
+     * 默认 0 —— 与 pool 索引一致，且 actors(id=1..N)/tls/etc_gates 不会
+     * 用 0 与 ego 冲突（前端 (type, id) 复合键已隔离，type='ego' 唯一）。 */
     flowsim::EntityId ego_id = g.pool.alloc(flowsim::EntityType::Ego);
     flowsim::Entity& ego = g.pool[ego_id];
     ego.x = sc->ego.x;
@@ -452,7 +460,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         flowsim::EntityId id = g.pool.alloc(et);
         if (id == flowsim::INVALID_ENTITY) break;
         flowsim::Entity& e = g.pool[id];
-        e.id = a->id;
+        e.scenario_id = a->id;  /* 业务 id 存独立字段；e.id 保持 pool 索引，全局唯一 */
 
         /* 新格式：segment_id ≥ 0 → 用 esmini Frenet→World 转换
          *
@@ -666,7 +674,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::TrafficLight);
             if (id == flowsim::INVALID_ENTITY) break;
             flowsim::Entity& e = g.pool[id];
-            e.id = tl->id;
+            e.scenario_id = tl->id;  /* 业务 id 存独立字段；e.id 保持 pool 索引，全局唯一 */
             e.throttle = tl->green_s;
             e.brake    = tl->yellow_s;
             e.steer    = tl->red_s;
@@ -746,7 +754,7 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
         flowsim::EntityId id = g.pool.alloc(flowsim::EntityType::ETCGate);
         if (id == flowsim::INVALID_ENTITY) break;
         flowsim::Entity& e = g.pool[id];
-        e.id = eg->id;
+        e.scenario_id = eg->id;  /* 业务 id 存独立字段；e.id 保持 pool 索引，全局唯一 */
         e.target_vx = eg->approach_speed;   /* ETC 通过目标速度 */
         e.phase_timer = 0.0;                 /* 抬杆进度 [0,1]，初始 closed */
         e.width = eg->open_range_m;          /* open_range_m 存到 width 字段 */
@@ -1313,6 +1321,7 @@ protected:
                 if (spatial.failed > 0) {
                     LOG_WARN("flowsim", "spatial_invariant: %d passed, %d FAILED, %d warned",
                              spatial.passed, spatial.failed, spatial.warned);
+                    g.invariant_fail_count.fetch_add(spatial.failed, std::memory_order_relaxed);
                     // 失败详情写入 stderr 供 evaluator 捕获
                     if (!spatial.details.empty()) {
                         fprintf(stderr, "[flowsim::spatial_invariant] cycle=%u\n%s",
@@ -1325,6 +1334,7 @@ protected:
                 if (motion.failed > 0) {
                     LOG_WARN("flowsim", "motion_direction: %d passed, %d FAILED, %d warned",
                              motion.passed, motion.failed, motion.warned);
+                    g.invariant_fail_count.fetch_add(motion.failed, std::memory_order_relaxed);
                     if (!motion.details.empty()) {
                         fprintf(stderr, "[flowsim::motion_direction] cycle=%u\n%s",
                                 g.cycle, motion.details.c_str());
@@ -1337,6 +1347,7 @@ protected:
                     if (temporal.failed > 0) {
                         LOG_WARN("flowsim", "temporal_invariant: %d passed, %d FAILED, %d warned",
                                  temporal.passed, temporal.failed, temporal.warned);
+                        g.invariant_fail_count.fetch_add(temporal.failed, std::memory_order_relaxed);
                         if (!temporal.details.empty()) {
                             fprintf(stderr, "[flowsim::temporal_invariant] cycle=%u\n%s",
                                     g.cycle, temporal.details.c_str());
@@ -1586,6 +1597,15 @@ static void flowsim_cleanup(void) {
     if (g.running) {
         pthread_join(g.thread, nullptr);
         g.running = false;
+    }
+    /* P2-7: invariant 失败汇总 marker。demo_evaluator.py 扫描此 marker
+     * 把 invariant 失败升级为 FAIL（旧逻辑只 LOG_WARN，evaluator 看不到）。
+     * marker 格式固定：[INVARIANT_FAILED] total=N
+     * 仅当 N>0 时打印，避免污染正常退出日志。 */
+    uint32_t inv_fails = g.invariant_fail_count.load(std::memory_order_relaxed);
+    if (inv_fails > 0) {
+        fprintf(stderr, "[INVARIANT_FAILED] total=%u (spatial+motion+temporal)\n", inv_fails);
+        fflush(stderr);
     }
     g.task.reset();
     g.roads.close();

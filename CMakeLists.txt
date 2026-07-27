@@ -274,11 +274,17 @@ set(ALGORITHM_SOURCES
 find_package(ProtobufC QUIET)
 if(ProtobufC_FOUND)
     message(STATUS "Protobuf-C found: enabling FLOWENGINE_USE_PROTOBUF")
-    target_compile_definitions(flowengine_core PUBLIC FLOWENGINE_USE_PROTOBUF)
-    target_link_libraries(flowengine_core PUBLIC ${ProtobufC_LIBRARIES})
-    target_include_directories(flowengine_core PUBLIC ${ProtobufC_INCLUDE_DIRS})
 else()
     message(STATUS "Protobuf-C not found — protobuf support disabled (install libprotobuf-c-dev)")
+endif()
+
+# ── zlib: monitor_server 静态资源 gzip 压缩（P1-4 加载速度优化） ──
+# 系统级 zlib（libz.so）几乎必然存在；找不到则降级为不压缩。
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+    message(STATUS "zlib found: enabling monitor_server gzip")
+else()
+    message(STATUS "zlib not found — monitor_server gzip disabled (install zlib1g-dev)")
 endif()
 
 set(PLUGIN_SOURCES
@@ -303,6 +309,17 @@ target_include_directories(flowengine_core PUBLIC
     ${GEN_DIR}              # 代码生成的头文件
 )
 target_compile_options(flowengine_core PUBLIC ${CJSON_CFLAGS_OTHER})
+
+# ── 在 flowengine_core 创建后才能 target_link_libraries ──
+if(ProtobufC_FOUND)
+    target_compile_definitions(flowengine_core PUBLIC FLOWENGINE_USE_PROTOBUF)
+    target_link_libraries(flowengine_core ${ProtobufC_LIBRARIES})
+    target_include_directories(flowengine_core PUBLIC ${ProtobufC_INCLUDE_DIRS})
+endif()
+if(ZLIB_FOUND)
+    target_compile_definitions(flowengine_core PUBLIC FLOWENGINE_USE_ZLIB)
+    target_link_libraries(flowengine_core ZLIB::ZLIB)
+endif()
 
 # 创建插件动态库
 add_library(example_process SHARED src/plugins/example_process.c)

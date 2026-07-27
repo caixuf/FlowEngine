@@ -76,7 +76,8 @@ enum class NpcState : uint8_t {
 struct Entity {
     bool       active{false};
     EntityType type{EntityType::None};
-    int        id{0};              /**< 场景里的 actor id（来自 JSON） */
+    int        id{0};              /**< pool 索引（alloc 写入，全局唯一），序列化/前端 Map key 用此字段 */
+    int        scenario_id{0};     /**< 场景业务 id（JSON 里的 actor/tl/egc/ego id），choreography/override 查找用此字段 */
 
     /* ── Transform ── */
     double x{0}, y{0}, heading{0}; /**< 世界坐标 + 航向 (rad) */
