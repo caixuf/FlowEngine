@@ -386,17 +386,30 @@ static void send_response(int fd, const char* status, const char* content_type,
 static char* gzip_compress(const char* body, int body_len, int* out_len) {
 #ifdef FLOWENGINE_USE_ZLIB
     if (!body || body_len <= 0) return NULL;
-    uLong bound = compressBound((uLong)body_len);
+    uLong bound = compressBound((uLong)body_len) + 18;
     char* buf = (char*)malloc(bound);
     if (!buf) return NULL;
-    uLongf actual = bound;
-    int rc = compress2((Bytef*)buf, &actual, (const Bytef*)body,
-                       (uLong)body_len, Z_DEFAULT_COMPRESSION);
-    if (rc != Z_OK) {
+
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    /* MAX_WBITS + 16 = gzip format output */
+    int rc = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                          MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY);
+    if (rc != Z_OK) { free(buf); return NULL; }
+
+    strm.next_in = (Bytef*)body;
+    strm.avail_in = (uInt)body_len;
+    strm.next_out = (Bytef*)buf;
+    strm.avail_out = (uInt)bound;
+
+    rc = deflate(&strm, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        deflateEnd(&strm);
         free(buf);
         return NULL;
     }
-    *out_len = (int)actual;
+    *out_len = (int)strm.total_out;
+    deflateEnd(&strm);
     return buf;
 #else
     (void)body; (void)body_len; (void)out_len;
@@ -1200,6 +1213,12 @@ static void* server_thread_fn(void* arg) {
         if (select(ms->listen_fd + 1, &fds, NULL, NULL, &tv) > 0) {
             int client = accept(ms->listen_fd, NULL, NULL);
             if (client < 0) continue;
+
+            /* 空闲超时：15 秒无数据自动断开，防止 keep-alive 僵尸连接
+             * 随 reload 累积线程，耗尽系统资源。read() 超时返回 -1，
+             * handle_client/client_thread_fn 的 if (n <= 0) { close; return; } 收尾。 */
+            struct timeval recv_to = { .tv_sec = 15, .tv_usec = 0 };
+            setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &recv_to, sizeof(recv_to));
 
             /* Handle each connection in its own detached thread so that a
              * long-lived SSE stream (/api/stream) cannot block the accept

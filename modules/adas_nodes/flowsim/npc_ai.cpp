@@ -334,15 +334,24 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
 
     /* Phase 2: road_pos 重新 init 到回收点。
-     * route.locate 把 route_s 转成 (road_id, s_local)，再用 npc.offset（保持
-     * 横向车道）init road_pos。失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
+     * route.locate 把 route_s 转成 (road_id, s_local)，再 init road_pos。
+     * 失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
      * 注意：road_pos.init 内部会 RM_DeletePosition 旧 handle 再 RM_CreatePosition，
-     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。 */
+     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。
+     *
+     * lane_id 必须传真实车道，不能硬编码 0：中心线 (type="none") 在
+     * align=true 下 RM_SetLanePosition 返回 h=PI，回收后的同向 NPC 会
+     * vx = speed*cos(PI) = -speed 倒着开。npc.lane_id 由 step_npc_vehicle
+     * 每帧从 frenet() 同步，回收时仍是该车所在车道，直接复用。
+     * offset 传 0.0：init 的 offset 是 lane 内偏移，npc.offset 是参考线
+     * 偏移，语义不同不可混用（车道中心时 lane 内偏移≈0）。 */
     if (npc.road_pos.ok() && roads && roads->loaded()) {
         int rid = 0, ridx = -1;
         double s_local = 0.0;
         route.locate(npc.route_s, rid, s_local, ridx);
-        if (npc.road_pos.init(*roads, rid, 0, s_local, npc.offset)) {
+        int recycle_lane = (npc.lane_id != 0) ? npc.lane_id
+                                              : ((npc.offset < 0.0) ? -1 : 1);
+        if (npc.road_pos.init(*roads, rid, recycle_lane, s_local, 0.0)) {
             /* 立即同步世界坐标 — 旧实现只 init road_pos 不更新 npc.x/y，
              * 下一帧 road_pos.world() 才把 npc.x/y 跳到新位置，evaluator
              * 在两次采样间反算出 45 m/s 的"伪速度"触发 respawn jump 告警。
@@ -350,6 +359,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
              * 让 NPC 在新位置以 speed=0 出现，dx/dy 跨帧无跳变。 */
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
+                double old_x = npc.x, old_y = npc.y;
                 npc.x = wp.x;
                 npc.y = wp.y;
                 double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
@@ -357,6 +367,13 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
                 while (h < -M_PI) h += 2.0 * M_PI;
                 npc.heading = h;
                 /* vx/vy 已在上面清零，保持 0 即可（speed=0） */
+                double disp = std::hypot(npc.x - old_x, npc.y - old_y);
+                if (disp > 10.0) {
+                    fprintf(stderr, "[npc_recycle] id=%d scenario_id=%d old=(%.1f,%.1f) "
+                            "new=(%.1f,%.1f) disp=%.1fm heading=%.1f° route_dir=%d\n",
+                            npc.id, npc.scenario_id, old_x, old_y,
+                            npc.x, npc.y, disp, npc.heading * 180.0 / M_PI, npc.route_dir);
+                }
             }
         }
     }
@@ -737,6 +754,7 @@ mobil_done: ;
                  * world_to_frenet 反向 sync road_pos 到分离后位置，让 cooldown
                  * 结束后第一帧 advance 用正确 s，不会跳回碰撞前位置。 */
                 if (!in_crash_cooldown) {
+                    double old_x = npc.x, old_y = npc.y;
                     npc.x = wp.x;
                     npc.y = wp.y;
                     double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
@@ -745,14 +763,27 @@ mobil_done: ;
                     npc.heading = h;
                     npc.vx = npc.speed * std::cos(h);
                     npc.vy = npc.speed * std::sin(h);
+                    double disp = std::hypot(npc.x - old_x, npc.y - old_y);
+                    if (disp > 10.0) {
+                        fprintf(stderr, "[npc_world_snap] id=%d scenario_id=%d old=(%.1f,%.1f) "
+                                "new=(%.1f,%.1f) disp=%.1fm heading=%.1f° route_dir=%d "
+                                "speed=%.1f cycle=%u\n",
+                                npc.id, npc.scenario_id, old_x, old_y,
+                                npc.x, npc.y, disp, npc.heading * 180.0 / M_PI,
+                                npc.route_dir, npc.speed, cycle);
+                    }
                 } else {
                     /* crash_cooldown：用 npc 当前 (x,y) 反向 sync road_pos
                      * 让 road_pos 内部 s 与 collision 分离后位置一致。
-                     * 注意 speed=0，vx/vy 已被 collision response 清零，无需重算。 */
+                     * 注意 speed=0，vx/vy 已被 collision response 清零，无需重算。
+                     *
+                     * lane_id 传 fp_sep.lane_id 真实车道（非 0 中心线）、
+                     * offset 传 0.0（lane 内偏移语义）—— 见 road_position.cpp
+                     * align=true 对中心线返回 h=PI 的坑。 */
                     FrenetPos fp_sep;
                     if (roads->world_to_frenet(npc.x, npc.y, fp_sep)) {
-                        npc.road_pos.init(*roads, fp_sep.road_id, 0,
-                                          fp_sep.s, npc.offset);
+                        npc.road_pos.init(*roads, fp_sep.road_id, fp_sep.lane_id,
+                                          fp_sep.s, 0.0);
                     }
                 }
             }

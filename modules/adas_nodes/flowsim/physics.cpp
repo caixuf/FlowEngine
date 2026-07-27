@@ -43,7 +43,10 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
     e.steer = steer;
 
     // 横向：自行车运动学
-    e.heading += (e.speed / e.wheelbase) * std::tan(steer) * dt;
+    // d(heading)/dt = (v / wb) * tan(steer)
+    double dheading_dt = (e.speed / e.wheelbase) * std::tan(steer);
+    e.yaw_rate = dheading_dt;
+    e.heading += dheading_dt * dt;
     // 航向归一化到 [-π, π]
     if (e.heading > M_PI)  e.heading -= 2.0 * M_PI;
     if (e.heading < -M_PI) e.heading += 2.0 * M_PI;

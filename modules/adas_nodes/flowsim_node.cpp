@@ -812,6 +812,7 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(vstate, "brk", ego.brake);
     cJSON_AddNumberToObject(vstate, "tgt", ego.target_vx);
     cJSON_AddNumberToObject(vstate, "st", ego.steer);
+    cJSON_AddNumberToObject(vstate, "yr", ego.yaw_rate);
     cJSON_AddNumberToObject(vstate, "t_us", (double)sim_time_us);
     cJSON_AddNumberToObject(vstate, "road_id", (double)ego.road_id);
     cJSON_AddNumberToObject(vstate, "lane_id", (double)ego.lane_id);
@@ -1169,23 +1170,21 @@ protected:
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
              *
-             * 运动学模式（physics_model=kinematic）：heading 每帧被
-             * road_pos.world() 重置为道路切线方向。运动学模型下控制回路
-             * 靠 cte_term + heading_term + 低通滤波 + dead zone 已足够稳定。
-             * 强行保留 bicycle model heading 会导致自由积分漂移 → 斜行。
+             * 运动学模式（physics_model=kinematic）——修复极限环：
+             *   step_bicycle 积分出 ego.heading（自行车运动学），esmini 不再覆盖它。
+             *   横向位移由 heading 与道路切线的偏差驱动：
+             *     delta_lat = v * dt * sin(ego.heading - road_h)
+             *   这样 heading 偏 → 横向漂 → CTE 变 → 控制器纠 steer → heading 回正，
+             *   形成完整控制闭环，消除纯 P 控制的极限环振荡。
              *
-             * 动力学模式（physics_model=dynamic）：跳过 heading 重置，
-             * 由 step_bicycle_dynamic 的轮胎侧偏力积分自主演化 heading。
+             * 上一轮修复失败原因：
+             *   保留了 heading 积分，但横向位移仍用 v*dt*tan(steer)（与 heading 解耦），
+             *   heading 成为开环积分器，任何 steer 偏置都导致发散跑飞。
              *
-             * 横向位移由 delta_lat 独立控制（与 heading 解耦）：
-             *   delta_lat = speed * dt * tan(steer) * gain
-             *   gain=1.0：tan(0.05) * 12 * 0.05 = 0.030 m/帧
-             *   直路巡航时 steer≈0.02 → delta_lat≈0.012 m/帧 → 过冲可控
-             *   变道 steer≈0.10 → delta_lat≈0.060 m/帧 → ~3.5s 完成车道变换 */
+             * 动力学模式（physics_model=dynamic）：由 step_bicycle_dynamic 的轮胎侧偏力
+             * 自主演化 heading，esmini 仅提供 x/y 位置。 */
             bool is_dynamic = (strcmp(g.physics_model, "dynamic") == 0);
             if (ego.road_pos.ok()) {
-                double delta_lat = ego.speed * FLOWSIM_DT_SEC
-                                 * std::tan(ego.steer) * 1.0;
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 if (dist > 0.0) {
                     if (!ego.road_pos.advance(dist, M_PI)) {
@@ -1195,16 +1194,31 @@ protected:
                     } else {
                         flowsim::FrenetPos fp_cur;
                         if (ego.road_pos.frenet(fp_cur)) {
-                            ego.road_pos.set_offset(fp_cur.offset + delta_lat);
+                            if (!is_dynamic) {
+                                /* 运动学模式：用 bicycle model heading 与道路切线偏差驱动横向 */
+                                flowsim::WorldPos wp_h;
+                                if (ego.road_pos.world(wp_h)) {
+                                    double heading_err = ego.heading - wp_h.h;
+                                    while (heading_err > M_PI) heading_err -= 2.0 * M_PI;
+                                    while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
+                                    double delta_lat = ego.speed * FLOWSIM_DT_SEC
+                                                     * std::sin(heading_err);
+                                    ego.road_pos.set_offset(fp_cur.offset + delta_lat);
+                                }
+                            } else {
+                                /* 动力学模式：delta_lat=0，由轮胎模型自主演化横向 */
+                                ego.road_pos.set_offset(fp_cur.offset);
+                            }
                         }
                         flowsim::WorldPos wp;
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
                             ego.y = wp.y;
                             if (!is_dynamic) {
-                                ego.heading = wp.h;
-                                ego.vx = ego.speed * std::cos(wp.h);
-                                ego.vy = ego.speed * std::sin(wp.h);
+                                /* 运动学模式：保留 step_bicycle 积分出的 ego.heading，
+                                 * 不覆盖为 wp.h（道路切线），形成完整控制闭环。 */
+                                ego.vx = ego.speed * std::cos(ego.heading);
+                                ego.vy = ego.speed * std::sin(ego.heading);
                             }
                             /* 动力学模式：heading/vx/vy 由 step_bicycle_dynamic 自主演化，
                              * 此处仅更新 x/y 位置，不覆盖 heading。 */
@@ -1308,6 +1322,26 @@ protected:
                 LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f npc=%d",
                          g.cycle, ego.x, ego.y, ego.speed,
                          g.pool.active_count() - 1);
+                /* NPC 详细状态：每 100 帧打印活跃 NPC 位置/速度/状态 */
+                for (int i = 1; i < g.pool.size(); i++) {
+                    const auto& e = g.pool[i];
+                    if (!e.active) continue;
+                    if (e.type == flowsim::EntityType::TrafficLight ||
+                        e.type == flowsim::EntityType::Pedestrian) continue;
+                    const char* st = "?";
+                    switch (e.state) {
+                        case flowsim::NpcState::Cruise:     st = "crs"; break;
+                        case flowsim::NpcState::Follow:     st = "fol"; break;
+                        case flowsim::NpcState::StopForTL:  st = "stl"; break;
+                        case flowsim::NpcState::Stopped:    st = "stp"; break;
+                        case flowsim::NpcState::LaneChange: st = "lc" ; break;
+                        case flowsim::NpcState::CutIn:      st = "cut"; break;
+                        case flowsim::NpcState::Yield:      st = "yld"; break;
+                        default: break;
+                    }
+                    LOG_INFO("flowsim", "  npc[%d] type=%d st=%s (%.0f,%.1f) spd=%.1f tgt=%.1f route_s=%.0f",
+                             i, (int)e.type, st, e.x, e.y, e.speed, e.target_vx, e.route_s);
+                }
             }
 
             /* ── 仿真基础层：每帧 digest + invariant 检查 ──

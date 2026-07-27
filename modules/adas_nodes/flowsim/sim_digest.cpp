@@ -539,14 +539,26 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
                     double ldx_n = ldx / lnorm;
                     double ldy_n = ldy / lnorm;
                     double dot_lane = fwd_x * ldx_n + fwd_y * ldy_n;
-                    /* dot_lane 应为正（与车道方向一致）。旧代码用 fabs
-                     * 导致对向来车（dot≈-1）也通过，掩盖方向 bug。 */
-                    if (dot_lane < std::cos(M_PI / 4.0)) {  // < cos(45°) = 方向不一致
+                    /* ldx/ldy 是沿参考线 +s 方向的切线。OpenDRIVE 约定：
+                     * lane_id < 0 顺 +s 行驶，lane_id > 0 逆 +s 行驶。
+                     * 故合法行驶方向 = expect_dir * 切线，对向车道上
+                     * dot_lane≈-1 是正确的，不是 bug。
+                     *
+                     * 旧代码用 fabs → 对向来车和真·逆行都通过，掩盖 bug；
+                     * 改成"必须为正"又把合法对向车（场景 actor 9，
+                     * y=+5.25 vx=-12）当成 FAIL 天天误报。两者都不对。
+                     * 正解是按 lane_id 符号取期望方向再比。
+                     * lane_id == 0（中心线）方向未定义，跳过不检查。 */
+                    int expect_dir = (a.lane_id > 0) ? -1 : 1;
+                    if (a.lane_id != 0 &&
+                        dot_lane * expect_dir < std::cos(M_PI / 4.0)) {
                         r.failed++;
                         char buf[256];
                         snprintf(buf, sizeof(buf),
-                            "  FAIL %s: dot(forward,lane)=%.3f < cos(45)=%.3f (与车道方向不一致)\n",
-                            tag, dot_lane, std::cos(M_PI / 4.0));
+                            "  FAIL %s: dot(forward,lane)=%.3f 期望符号=%+d "
+                            "(lane=%d) < cos(45)=%.3f (逆行/与车道方向不一致)\n",
+                            tag, dot_lane, expect_dir, a.lane_id,
+                            std::cos(M_PI / 4.0));
                         r.details += buf;
                     } else {
                         r.passed++;

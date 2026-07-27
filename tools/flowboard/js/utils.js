@@ -529,12 +529,11 @@ export function _buildSedan(color, secondaryColor, addSpots) {
   screen.position.set(0.52, 0.80, 0);
   screen.rotation.y = 0.3;
   g.add(screen);
-  // 方向盘（torus + 倾斜）
   var intWheelMat = new T.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+  // 方向盘 — z=-0.35 = 左舵（中国靠右行驶，驾驶员在左侧）
   var intWheel = new T.Mesh(_carGeom.intWheel, intWheelMat);
-  intWheel.position.set(0.70, 0.88, 0);
+  intWheel.position.set(0.70, 0.88, -0.35);
   intWheel.rotation.y = Math.PI / 2;
-  intWheel.rotation.x = -0.35;
   g.add(intWheel);
   // 座椅 ×2
   [-0.35, 0.35].forEach(function(z) {

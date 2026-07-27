@@ -295,6 +295,8 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                 }
             }
         }
+        /* ── 标记传送 & 日志 ── */
+        double old_x = target->x, old_y = target->y;
         target->x = new_x;
         target->y = new_y;
         target->vx = b->vx;
@@ -325,9 +327,18 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                 target->offset = lane_center_t + fp.offset;
                 /* 非 cutin 时 target_offset = offset（保持当前车道） */
                 /* cutin 的 target_offset 在下方动作块设置 */
-                /* reinit road_pos 到新位置 */
+                /* reinit road_pos 到新位置。
+                 *
+                 * lane_id 必须传 fp.lane_id 真实车道，不能硬编码 0：中心线
+                 * (type="none") 在 RoadPosition::init 的 align=true 下，
+                 * RM_SetLanePosition 返回 h=PI（对向），同向 NPC 随即
+                 * vx = speed*cos(PI) = -speed 倒着开。
+                 * offset 同理传 0.0 —— init 的 offset 是 lane 内偏移，
+                 * target->offset 是参考线偏移（lane_center + fp.offset），
+                 * 两者语义不同，混用会把 NPC 横向推出车道。
+                 * 参见 flowsim_node.cpp 的同模式修复。 */
                 if (target->road_pos.ok()) {
-                    target->road_pos.init(*roads, fp.road_id, 0, fp.s, target->offset);
+                    target->road_pos.init(*roads, fp.road_id, fp.lane_id, fp.s, 0.0);
                 }
                 /* 同步 route_s */
                 if (route && route->ok()) {
@@ -366,8 +377,11 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
             npc_request_state(*target, req, choreo_cfg);
         }
 
-        LOG_INFO("flowsim", "choreo beat t=%.1f actor=%d pos=(%.1f,%.1f) offset=%.2f vx=%.1f act='%s' (loop=%d)",
-                 b->t, actor_id, new_x, new_y, target->offset, b->vx, b->act, current_loop);
+        LOG_INFO("flowsim", "choreo beat t=%.1f actor=%d old=(%.1f,%.1f) new=(%.1f,%.1f) "
+                 "offset=%.2f vx=%.1f act='%s' (loop=%d, disp=%.1fm)",
+                 b->t, actor_id, old_x, old_y, new_x, new_y,
+                 target->offset, b->vx, b->act, current_loop,
+                 std::hypot(new_x - old_x, new_y - old_y));
     }
 }
 

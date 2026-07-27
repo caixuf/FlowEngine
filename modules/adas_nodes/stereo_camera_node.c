@@ -114,6 +114,9 @@
 
 /* ── 节点状态 ─────────────────────────────────────────────── */
 
+/* 障碍物缓存最大数量（与 flowsim vehicle/state 一致） */
+#define STEREO_MAX_OBS 8
+
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
@@ -138,10 +141,52 @@ static struct {
     /* dry-run 提示只打一次，避免刷屏 */
     int    dry_run_warned;
 
+    /* 真值缓存（从 vehicle/state 获取，dry-run 深度生成用） */
+    volatile int      has_truth;
+    double            ego_x, ego_y, ego_heading;
+    int               n_obs;
+    double            obs_x[STEREO_MAX_OBS], obs_y[STEREO_MAX_OBS];
+    double            obs_vx[STEREO_MAX_OBS];
+
     /* 托管模式：嵌入 TaskBase，由 node_start_managed 派生线程跑 stereo_execute。
      * 取代原先自管的 pthread thread / running / should_stop 三件套。 */
     TaskBase taskbase;
 } g;
+
+/* ── vehicle/state 订阅 —— 缓存仿真真值供 dry-run 深度生成 ── */
+static void on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
+        g.ego_x = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
+        g.ego_y = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "hdg")) && cJSON_IsNumber(j))
+        g.ego_heading = j->valuedouble;
+    int n = 0;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
+        n = (int)j->valuedouble;
+    if (n < 0) n = 0;
+    if (n > STEREO_MAX_OBS) n = STEREO_MAX_OBS;
+    g.n_obs = n;
+    for (int i = 0; i < n; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "ox%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_x[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "oy%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_y[i] = j->valuedouble;
+        snprintf(key, sizeof(key), "ov%d", i);
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
+            g.obs_vx[i] = j->valuedouble;
+    }
+    g.has_truth = 1;
+    cJSON_Delete(root);
+}
 
 /* ── 硬件适配点：读取一帧立体数据（左图 + 深度图） ───────────
  *
@@ -255,23 +300,107 @@ static int read_stereo_frame(StereoFrame* out) {
         out->left_jpeg_size = sz;
     }
 
-    /* 深度图：80×60=4800 个 float，中心近(~1m)、边缘远(~5m)，模拟前方有障碍物 */
+    /* 深度图：从仿真真值反算，80×60=4800 个 float。
+     *
+     * 对每个像素，从相机模型算光线方向，与地面和障碍物求交，取最近距离。
+     * 障碍物投影后周边扩展 3 像素模拟半影边缘。
+     * 无真值数据时回退到旧 bowl 模式（中心 1m → 边缘 5m）。 */
     {
-        const int DW = 80, DH = 60;          /* width/4 × height/4 降采样 */
-        const float half_w = (float)DW * 0.5f;
-        const float half_h = (float)DH * 0.5f;
+        const int DW = 80, DH = 60;
+        const float hfov = (float)(g.fov_deg * (M_PI / 180.0));
+        const float vfov = hfov * (float)DH / (float)DW;
+        const float camera_height = 0.5f;      /* 相机离地高度 (m) */
+        const float max_depth = 60.0f;          /* 最大有效深度 */
+        const float obs_radius = 0.7f;          /* 障碍物半径 (m) */
+        const float ground_z = -camera_height;   /* 地面在相机 Z 坐标 */
+
+        /* 障碍物世界 → 车体坐标（使用最新真值） */
+        float obs_body_x[STEREO_MAX_OBS], obs_body_y[STEREO_MAX_OBS];
+        int n_body_obs = 0;
+        double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+        if (g.has_truth) {
+            for (int k = 0; k < g.n_obs && k < STEREO_MAX_OBS; k++) {
+                double dx = g.obs_x[k] - g.ego_x;
+                double dy = g.obs_y[k] - g.ego_y;
+                /* 车体坐标系：前 +X，左 +Y */
+                double bx =  dx * ch + dy * sh;
+                double by = -dx * sh + dy * ch;
+                /* 只保留前方 60m 内的障碍物 */
+                if (bx < 0.5 || bx > max_depth) continue;
+                if (fabs(by) > 10.0f) continue;
+                obs_body_x[n_body_obs] = (float)bx;
+                obs_body_y[n_body_obs] = (float)by;
+                n_body_obs++;
+            }
+        }
+
+        /* 逐像素生成深度 */
         for (int j = 0; j < DH; j++) {
             for (int i = 0; i < DW; i++) {
-                float nx = ((float)i - half_w + 0.5f) / half_w;  /* -1..1 */
-                float ny = ((float)j - half_h + 0.5f) / half_h;
-                float r  = sqrtf(nx * nx + ny * ny);
-                if (r > 1.0f) r = 1.0f;
-                float depth = 1.0f + 4.0f * r;                   /* 1m(中心) ~ 5m(边缘) */
-                depth += (float)((rand() % 201) - 100) / 1000.0f; /* ±0.1m 噪声 */
+                float depth = max_depth;
+
+                /* 光线方向（相机坐标系：前 +X，左 +Y，上 +Z）
+                 * 与 traversability_node.c depth_to_points_3d 一致 */
+                float theta = ((float)(i + 0.5f) / (float)DW - 0.5f) * hfov;
+                float phi   = -((float)(j + 0.5f) / (float)DH - 0.5f) * vfov;
+                float cp = cosf(phi);
+                float rx = cosf(theta) * cp;  /* 前 */
+                float ry = sinf(theta) * cp;  /* 左 */
+                float rz = sinf(phi);         /* 上 */
+
+                /* 与地面求交：地面在 Z = -camera_height
+                 * t_ground = ground_z / rz (射线方程: Z(t) = 0 + rz * t)
+                 * 注意 rz < 0 时指向下方 */
+                if (rz < 0.0f) {
+                    float t_ground = ground_z / rz;
+                    if (t_ground > 0.0f && t_ground < depth)
+                        depth = t_ground;
+                }
+
+                /* 与障碍物求交：每个障碍物视为竖立圆柱体，
+                 * 在相机坐标系下以 (obs_body_x, obs_body_y) 为中心。
+                 * 将光线投影到 XY 平面，解圆柱求交。 */
+                for (int k = 0; k < n_body_obs; k++) {
+                    /* 光线在 XY 平面的方向 */
+                    float rxy_norm = sqrtf(rx * rx + ry * ry);
+                    if (rxy_norm < 1e-6f) continue;
+
+                    /* 从相机到障碍物中心的向量 */
+                    float dx_obs = obs_body_x[k];
+                    float dy_obs = obs_body_y[k];
+                    /* 相机在原点，光线方向 (rx, ry)，求光线到障碍物的最近距离 */
+                    float t_cand = (dx_obs * rx + dy_obs * ry) / (rxy_norm * rxy_norm);
+                    if (t_cand < 0.5f) continue;
+
+                    /* 最近点与障碍物中心的横向距离 */
+                    float px = rx * t_cand;
+                    float py = ry * t_cand;
+                    float d2 = (dx_obs - px) * (dx_obs - px) + (dy_obs - py) * (dy_obs - py);
+                    if (d2 < obs_radius * obs_radius) {
+                        /* 光线在障碍物前方经过 */
+                        float t_hit = t_cand - sqrtf(obs_radius * obs_radius - d2) / rxy_norm;
+                        if (t_hit < 0.0f) t_hit = t_cand;
+                        /* 检查高度是否过障碍物范围 */
+                        float z_at_hit = rz * t_hit;
+                        /* 假设障碍物高度 0.5m ~ 2.0m（地面到车顶），
+                         * 相机 Z 从 -camera_height 往上 */
+                        float obs_top = 2.0f - camera_height;
+                        float obs_bot = 0.3f - camera_height;
+                        if (z_at_hit >= obs_bot && z_at_hit <= obs_top) {
+                            if (t_hit > 0.0f && t_hit < depth)
+                                depth = t_hit;
+                        }
+                    }
+                }
+
+                /* 添加轻微噪声 */
+                depth += (float)((rand() % 201) - 100) / 500.0f;
+                if (depth < 0.3f) depth = 0.3f;
+                if (depth > max_depth) depth = max_depth;
                 out->depth_data[j * DW + i] = depth;
             }
         }
-        out->depth_count = (uint32_t)(DW * DH);  /* 4800 */
+        out->depth_count = (uint32_t)(DW * DH);
     }
 
     out->timestamp_us = clock_now_us();
@@ -340,7 +469,7 @@ static const TaskInterface stereo_vtable = {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
-static const char* s_inputs[]  = { NULL };
+static const char* s_inputs[]  = { "vehicle/state", NULL };
 static const char* s_outputs[] = { "sensor/stereo", NULL };
 
 static NodePlugin s_plugin;
@@ -349,10 +478,10 @@ static int stereo_camera_init(MessageBus* bus, Transport* transport,
                               DiscoveryManager* discovery, Scheduler* scheduler,
                               const char* params_json) {
     (void)bus;
-    g.scheduler = scheduler;
     memset(&g, 0, sizeof(g));
     g.transport = transport;
     g.discovery = discovery;
+    g.scheduler = scheduler;
 
     /* 默认参数 */
     g.enabled      = 1;
@@ -401,6 +530,11 @@ static int stereo_camera_init(MessageBus* bus, Transport* transport,
     }
     g.dry_run = 1;
 #endif
+
+    /* 订阅 vehicle/state（仿真真值，dry-run 深度生成用） */
+    transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
+    discovery_advertise(discovery, "vehicle/state", 0x1C0E5A7E,
+                        CAP_SUBSCRIBER, 0);
 
     /* 向 discovery 通告本节点发布 sensor/stereo
      * (StereoFrame, type_id=0x669200d2, STEREOFRAME_TYPE_ID) */

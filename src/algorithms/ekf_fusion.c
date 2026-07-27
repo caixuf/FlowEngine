@@ -216,6 +216,17 @@ static void ekf_update_generic(EkfFusion* ekf,
     }
 
     ekf->update_count++;
+
+    /* ── (v, ψ) 镜像简并归一化 ──
+     * ẋ = v·cos(ψ) 下 (v, ψ) 与 (−v, ψ+π) 给出相同位置轨迹。
+     * 低速时 heading 不可观，滤波器可能游走到镜像分支并锁死。
+     * 车辆模型 v ≥ 0，检测到 v < 0 时翻回物理分支。 */
+    if (ekf->x[2] < 0.0) {
+        ekf->x[2] = -ekf->x[2];
+        ekf->x[3] += M_PI;
+        while (ekf->x[3] >  M_PI) ekf->x[3] -= 2.0 * M_PI;
+        while (ekf->x[3] < -M_PI) ekf->x[3] += 2.0 * M_PI;
+    }
 }
 
 /* ══════════════════════════════════════════════════════════ */
@@ -305,6 +316,12 @@ void ekf_fusion_predict(EkfFusion* ekf) {
     /* ── 更新状态 ── */
     memcpy(ekf->x, x_pred, sizeof(x_pred));
     ekf->predict_count++;
+
+    /* 低速时 heading 协方差下限：零速时 heading 不可观，不让 P[3][3] 塌到
+     * 让滤波器"过度自信"锁死在镜像分支。保持 P_head ≥ 0.01 rad² 使 GPS
+     * heading 观测能正常修正。 */
+    if (ekf->x[2] < 1.0 && ekf->P[3*5 + 3] < 0.01)
+        ekf->P[3*5 + 3] = 0.01;
 
     /* 航向归一化到 [-π, π]，防止无限累积导致下游（Frenet 规划器等）误判 */
     while (ekf->x[3] >  M_PI) ekf->x[3] -= 2.0 * M_PI;

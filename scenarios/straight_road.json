@@ -34,7 +34,7 @@
     {"id": 7,  "type": "car",  "x": 550.0,  "y": -5.25, "vx": 9.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
     {"id": 8,  "type": "car",  "x": 750.0,  "y": -5.25, "vx": 10.5, "vy": 0.0, "len": 4.6, "wid": 2.0},
     {"id": 9,  "type": "car",  "x": 900.0,  "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 10, "type": "pedestrian", "x": 500.0, "y": -12.0, "vx": 0.0, "vy": 0.0, "len": 0.6, "wid": 0.6, "parked": true}
+    {"id": 10, "type": "pedestrian", "x": 500.0, "y": -9.0, "vx": 0.0, "vy": 1.5, "len": 0.6, "wid": 0.6}
   ],
   "traffic_lights": [
     {"id": 0,  "x": 200.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 0.0},

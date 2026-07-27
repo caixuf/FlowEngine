@@ -343,6 +343,10 @@ endif()
 add_executable(test_ekf_slam test_ekf_slam.c ekf_slam.c)
 target_link_libraries(test_ekf_slam ${NODE_LINK_LIBS} m)
 
+# EKF 融合单元测试：覆盖 (v,ψ) 镜像归一化 + 协方差下限
+add_executable(test_ekf_fusion test_ekf_fusion.c)
+target_link_libraries(test_ekf_fusion ${NODE_LINK_LIBS} m)
+
 # stereo_camera_node: 双目摄像头驱动节点（OAK-D left+depth → StereoFrame → sensor/stereo）
 # 真车视觉感知入口，为 perception 提供 RGB+深度输入。默认 dry-run 占位（生成模拟左图
 # + 中心近/边缘远模拟深度走完整链路），真实 OAK-D 通过 depthai 库经 HAVE_DEPTHAI 宏

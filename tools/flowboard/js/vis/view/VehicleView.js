@@ -177,7 +177,7 @@ function _applyCarPaintToScene(gltfScene, envMap) {
  * 旋转方向：steer > 0 = 右转，THREE rotation.z 正向逆时针，故取 -10 倍。 */
 function _createSteeringWheel() {
   const pos = new THREE.Group();
-  pos.position.set(0.5, 1.0, 0.4);
+  pos.position.set(0.5, 1.0, -0.4);  // z=-0.4 = 左舵（中国靠右行驶，方向盘在车左侧）
 
   const yaw = new THREE.Group();
   yaw.rotation.y = -Math.PI / 2;  // column: +Z → -X
@@ -233,8 +233,11 @@ export function initModels() {
 
 export function createVehicleView(scene, renderer, modelCache) {
   const vehicleMap = new Map();  // id → { group, lights, modelData, ... }
+  const pedMap = new Map();      // id → { group }
   let vehicleGroup = new THREE.Group();
   scene.add(vehicleGroup);
+  const pedGroup = new THREE.Group();  // 行人独立组
+  scene.add(pedGroup);
 
   // ── 辅助工具 ──
 
@@ -466,11 +469,66 @@ export function createVehicleView(scene, renderer, modelCache) {
     vehicleMap.delete(id);
   }
 
+  /* ── 行人渲染（简单人体：圆柱 body + 球 head） ── */
+  const PED_BODY_RADIUS = 0.25;
+  const PED_BODY_HEIGHT = 1.2;
+  const PED_HEAD_RADIUS = 0.15;
+
+  function _createPedestrianMesh() {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x4488cc, roughness: 0.8 });
+    // 身体
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(PED_BODY_RADIUS, PED_BODY_RADIUS, PED_BODY_HEIGHT, 8), mat);
+    body.position.y = PED_BODY_HEIGHT / 2;
+    group.add(body);
+    // 头
+    const head = new THREE.Mesh(new THREE.SphereGeometry(PED_HEAD_RADIUS, 8, 8), mat);
+    head.position.y = PED_BODY_HEIGHT + PED_HEAD_RADIUS * 0.8;
+    group.add(head);
+    return group;
+  }
+
+  function _updatePedestrian(data) {
+    let entry = pedMap.get(data.id);
+    if (!entry) {
+      const group = _createPedestrianMesh();
+      entry = { group };
+      pedMap.set(data.id, entry);
+      pedGroup.add(group);
+    }
+    const [tx, ty, tz] = worldToThree(data.x || 0, data.y || 0, data.z || 0);
+    entry.group.position.set(tx, ty, tz);
+    // 行人始终面向行走方向
+    entry.group.rotation.set(0, headingToRotationY(data.heading || 0), 0);
+  }
+
+  function _prunePedestrians(activeIds) {
+    const pedsToRemove = [];
+    for (const [id] of pedMap) {
+      if (!activeIds.has(id)) pedsToRemove.push(id);
+    }
+    for (const id of pedsToRemove) {
+      const entry = pedMap.get(id);
+      if (entry) {
+        pedGroup.remove(entry.group);
+        entry.group.traverse(c => { if (c.material) c.material.dispose(); });
+      }
+      pedMap.delete(id);
+    }
+  }
+
   /** 清理 */
   function dispose() {
     vehicleMap.forEach((entry, id) => removeVehicle(id));
     vehicleMap.clear();
     scene.remove(vehicleGroup);
+    // 清理行人
+    for (const [_, entry] of pedMap) {
+      pedGroup.remove(entry.group);
+      entry.group.traverse(c => { if (c.material) c.material.dispose(); });
+    }
+    pedMap.clear();
+    scene.remove(pedGroup);
     if (_pmrem) {
       _pmrem.dispose();
       _pmrem = null;
@@ -499,22 +557,28 @@ export function createVehicleView(scene, renderer, modelCache) {
       updateVehicle(egoId, store.ego, 'su7');
     }
 
-    // 2. 其他实体（car/truck/suv/pedestrian — 排除红绿灯/ETC/停止线等非车辆）
-    const VEHICLE_TYPES = new Set(['car', 'suv', 'truck', 'pedestrian']);
+    // 2. 其他实体（car/truck/suv — 排除红绿灯/ETC/停止线等非车辆）
+    const VEHICLE_TYPES = new Set(['car', 'suv', 'truck']);
     const entities = store.entities || [];
     for (const ent of entities) {
       if (!ent || !ent.id) continue;
+      if (ent.type === 'pedestrian') {
+        activeIds.add(ent.id);
+        _updatePedestrian(ent);
+        continue;
+      }
       if (!VEHICLE_TYPES.has(ent.type)) continue;
       activeIds.add(ent.id);
       updateVehicle(ent.id, ent, ent.type || 'car');
     }
 
-    // 3. 删除消失的车辆
+    // 3. 删除消失的车辆/行人
     for (const id of Array.from(vehicleMap.keys())) {
       if (!activeIds.has(id)) {
         removeVehicle(id);
       }
     }
+    _prunePedestrians(activeIds);
 
     // 4. 每帧动画：前轴转向 + 车轮旋转 + 灯光
     const animateVehicle = (id) => {
@@ -554,7 +618,7 @@ export function createVehicleView(scene, renderer, modelCache) {
 
     animateVehicle('ego');
     for (const ent of entities) {
-      if (ent && ent.id) animateVehicle(ent.id);
+      if (ent && ent.id && ent.type !== 'pedestrian') animateVehicle(ent.id);
     }
   }
 

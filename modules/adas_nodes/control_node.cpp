@@ -271,20 +271,40 @@ static void on_fusion(const Message* msg, void* user_data) {
         if (root) {
             cJSON* j;
             j = cJSON_GetObjectItemCaseSensitive(root, "v");
-            if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
+            if (cJSON_IsNumber(j)) {
+                g.current_speed = j->valuedouble;
+                /* 安全带：车辆模型 v≥0。EKF (v,ψ) 镜像简并在零速时可能
+                 * 翻到负速分支，控制层一旦追负速会放大成物理灾难（实测
+                 * −80 m/s → 267 km/h 倒车）。此处钳位而非静默，让负速
+                 * 在融合层被 ekf_fusion.c 的镜像归一化兜住。 */
+                if (g.current_speed < 0.0) g.current_speed = 0.0;
+            }
             j = cJSON_GetObjectItemCaseSensitive(root, "x");
             if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(root, "y");
             if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "heading");
-            if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
-            if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+            /* ego_heading/ego_yaw_rate 由 vehicle/state 的 hdg/yr 字段直读
+             * （绕过 EKF 低通滤波），此处不再赋值以避免覆盖瞬态真值。 */
             cJSON_Delete(root);
         }
         g.has_fusion = 1;
         g.last_fusion_us = clock_now_us();
     }
+}
+
+/* vehicle/state 订阅 —— 从 flowsim 真值获取 heading/yaw_rate（绕过 EKF
+ * 平滑延迟，使 heading_term / yaw_damp / v_lat_damp 提供真实瞬态阻尼）。 */
+static void on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    j = cJSON_GetObjectItemCaseSensitive(root, "hdg");
+    if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "yr");
+    if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+    cJSON_Delete(root);
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
@@ -1299,24 +1319,31 @@ protected:
                 }
                 /* ── 横向控制：CTE 比例 + 航向阻尼（负反馈）+ 横向速度阻尼 ──
                  *
-                 * heading_term 必须以「道路切线 ref_h_eff」为参考做负反馈阻尼：
-                 *   heading_term = kd * (ego_heading - 道路切线)
-                 *   steer -= heading_term  →  ego 偏航越大反向修正越强, 抑制过冲。
+                 * heading_term 参考：默认用道路切线 ref_h_eff（车道保持）。
+                 * 变道中切换到「指向目标车道的前视角」：
+                 *   h_target = atan2(lat_error, lookahead)
+                 *   lookahead = speed * 0.8s, min 5m
+                 * 此时 heading_term 阻尼的是"偏离目标方向"而非"偏离道路方向"，
+                 * 变道中 heading 偏离道路是需要的动作，不应被阻尼抵消；
+                 * 定位到目标方向时 h_target → 0，自然过渡回道路切线参考。
                  *
-                 * 历史教训（已修）：曾把参考改成「前视目标角」target_h=atan2(lat_error,L)。
-                 * 直道 ego_h=0 时 heading_term = kd*(0-target_h) = -kd*atan2(lat_error,L),
-                 * 与 cte_term 同号；合成式 steer = cte_term - heading_term 变成 +kd*atan2(...)
-                 * → 阻尼项符号翻转成额外比例项, P 增益翻倍；叠加 yaw/v_lat 阻尼项被
-                 * ego_h≡0 清零 → 纯比例控制器发散, steer 死贴饱和、y 4m 扫动（蛇形）。
-                 * 故 heading_term 参考必须用道路切线；前视思想只允许喂 cte_term, 不得混入阻尼项。 */
+                 * 历史教训（注释1326-1331）：前视角方案曾因 ego_h 被 wp.h 覆盖
+                 * 为道路切线（恒为零）而发散。现在 ego_heading 为自由积分
+                 * bicycle heading，非零的 heading 使阻尼项始终有效，
+                 * 前视角参考方向可正确工作。不需要砍阻尼/放限幅。 */
+                double damping_ref = ref_h_eff;  /* 默认：道路切线 */
+                if (lc_active) {
+                    double lookahead = fmax(g.current_speed * 0.8, 5.0);
+                    damping_ref = atan2(lat_error, lookahead);
+                }
                 double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
-                double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
+                double heading_term = lc_lat_kd * (g.ego_heading - damping_ref);
                 /* yaw_rate 阻尼项：保留作为高频抑制（与 v_lat 阻尼互补,
                  * yaw_damping 处理航向角速度, v_lat_damp 处理位移速度）。 */
                 double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
 
                 /* 横向速度阻尼（LQR 状态反馈核心项, 真车 ADAS 关键）:
-                 *   v_lat = speed * sin(ego_heading - 道路切线)
+                 *   v_lat = speed * sin(ego_heading - 参考方向)
                  *   steer -= k_v_lat * v_lat
                  * 物理意义: ego 横向运动越快, 反向减速越强, 抑制过冲。
                  * 这是 LQR K 矩阵里 [v_y] 状态反馈的工程实现,
@@ -1325,7 +1352,7 @@ protected:
                  * 阈值: 仅在速度 > 2 m/s 时启用 (低速泊车方向盘乱转不该阻尼)。 */
                 double v_lat_damp_term = 0.0;
                 if (g.current_speed > 2.0) {
-                    double heading_err = g.ego_heading - ref_road_heading;
+                    double heading_err = g.ego_heading - damping_ref;
                     while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
                     while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
                     double v_lat = g.current_speed * sin(heading_err);
@@ -1364,18 +1391,6 @@ protected:
                  * 变道中 (lc_active) 跳过死区，避免打断正常变道 steer。 */
                 if (!lc_active && fabs(steer) < 0.003) steer = 0.0;
                 g.prev_steer = steer;
-                /* 调试：变道时打印 steer 各分量，定位横向不动根因 */
-                if (lc_active) {
-                    static int lc_dbg_cnt = 0;
-                    if (++lc_dbg_cnt % 5 == 0) {
-                        LOG_INFO("control",
-                                 "LC_DBG steer=%.4f cte=%.3f hdg_t=%.3f yaw_t=%.3f vlat_t=%.3f lat_err=%.2f "
-                                 "ego_h=%.3f ref_heff=%.3f ref_h=%.3f v=%.1f kp=%.2f kd=%.2f lim=%.3f",
-                                 steer, cte_term, heading_term, yaw_damp_term, v_lat_damp_term, lat_error,
-                                 g.ego_heading, ref_h_eff, ref_road_heading, g.current_speed, lc_lat_kp, lc_lat_kd,
-                                 steer_limit_for_speed(g.current_speed, lc_lat_accel_max));
-                    }
-                }
             }
 
             /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
@@ -1710,6 +1725,7 @@ static int control_init(MessageBus* bus, Transport* transport,
      * 不再独立 scenario_load。 */
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
+    transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);

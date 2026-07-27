@@ -277,6 +277,42 @@
       "params": "{\"train_hz\":0.5,\"lr\":0.001,\"batch_size\":32,\"buffer_size\":512,\"full_finetune\":0,\"save_interval\":50,\"model_path\":\"tools/train/model.txt\",\"save_path\":\"/tmp/flow_learner_model.txt\"}"
     },
     {
+      "name": "stereo_camera",
+      "library_path": "build/lib/libstereo_camera_node.so",
+      "auto_start": true,
+      "subscribe": ["vehicle/state"],
+      "publish": [
+        {
+          "topic": "sensor/stereo",
+          "type": "StereoFrame",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
+      ],
+      "params": "{\"enable\":1,\"fps\":10,\"width\":320,\"height\":240,\"baseline_m\":0.075,\"fov_deg\":65.0,\"dry_run\":1}"
+    },
+    {
+      "name": "traversability",
+      "library_path": "build/lib/libtraversability_node.so",
+      "auto_start": true,
+      "subscribe": ["sensor/stereo"],
+      "publish": [
+        {
+          "topic": "perception/traversability",
+          "type": "text",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort"
+          }
+        }
+      ],
+      "params": "{\"enable\":1,\"camera_height_m\":0.50,\"camera_tilt_deg\":0.0,\"cell_size_m\":0.20,\"x_range_m\":6.0,\"y_range_m\":3.0,\"publish_hz\":10}"
+    },
+    {
       "name": "model_ota",
       "library_path": "build/lib/libmodel_ota_node.so",
       "auto_start": true,
