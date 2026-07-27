@@ -74,8 +74,8 @@ enum CtrlMode {
 /* ── 时序滑窗 ────────────────────────────────────────────────── */
 
 #define V2_DIM          16    /* 每帧特征维度 (v2) */
-#define V3_DIM          59    /* 每帧特征维度 (v3) */
-#define TEMPORAL_WINDOW  5    /* 时序滑窗帧数 (v2: 5×16=80, v3: 5×59=295) */
+#define V3_DIM          23    /* 每帧特征维度 (v3) */
+#define TEMPORAL_WINDOW  5    /* 时序滑窗帧数 (v2: 5×16=80, v3: 5×23=115) */
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
@@ -133,7 +133,7 @@ struct InferenceContext {
     double cfg_frequency_hz{20.0};
 
     /* 时序滑窗缓冲: 保存最近 TEMPORAL_WINDOW 帧的特征向量 */
-    float  frame_buf[TEMPORAL_WINDOW][V3_DIM];  /* 5×59，兼容 v2/v3 */
+    float  frame_buf[TEMPORAL_WINDOW][V3_DIM];  /* 5×23，兼容 v2/v3 */
     int    frame_dim{V2_DIM};                   /* 当前帧维度（自动检测） */
     int    frame_head{0};  /* 当前写入位置（环形） */
     int    frame_count{0}; /* 已写入帧数 */
@@ -375,7 +375,7 @@ static void on_road_geometry(const Message* msg, void* user_data) {
 /* 将当前时刻 ego + obstacles + control + scene context 打包成帧。
  * dim 为实际帧维度：
  *   V2_DIM=16 → 仅填充 v2 基础特征
- *   V3_DIM=59 → 额外填充场景上下文
+ *   V3_DIM=23 → 额外填充场景上下文（7维）
  */
 static void build_frame(float frame[V3_DIM], int dim) {
     memset(frame, 0, sizeof(float) * dim);
@@ -397,17 +397,16 @@ static void build_frame(float frame[V3_DIM], int dim) {
     frame[14] = (float)g.ctrl_brake;
     frame[15] = (float)g.ctrl_emergency_stop;
 
-    /* ── v3 场景上下文（索引 22-28）── */
+    /* ── v3 场景上下文（索引 16-22，共 7 维）── */
     if (dim >= V3_DIM) {
-        frame[22] = (float)g.tl_state;
-        frame[23] = (float)g.tl_distance;
-        frame[24] = (float)g.road_curvature;
-        frame[25] = (float)g.road_speed_limit;
-        frame[26] = (float)g.lane_count;
-        frame[27] = (float)g.lane_width;
+        frame[16] = (float)g.tl_state;
+        frame[17] = (float)g.tl_distance;
+        frame[18] = (float)g.road_curvature;
+        frame[19] = (float)g.road_speed_limit;
+        frame[20] = (float)g.lane_count;
+        frame[21] = (float)g.lane_width;
         g.ego_lane_offset = g.ego_y;  /* 默认道路参考线在 y=0 */
-        frame[28] = (float)g.ego_lane_offset;
-        /* 索引 16-21（感知统计）和 29-58（障碍物全貌）待数据流修复后填充 */
+        frame[22] = (float)g.ego_lane_offset;
     }
 }
 
@@ -426,7 +425,8 @@ static void push_frame(void) {
  * 输入特征维度 (in_dim) 由 model.txt 自动决定：
  *   in_dim=4   → v1: [ego_v, ego_y, ego_heading, ego_yaw_rate]（单帧）
  *   in_dim=16  → v2: v1 + front0/1 + control（单帧）
- *   in_dim=80  → v3: 5帧×16维时序滑窗（可预测行人轨迹/变道意图）
+ *   in_dim=80  → v2: 5帧×16维时序滑窗
+ *   in_dim=115 → v3: 5帧×23维时序滑窗（场景上下文）
  *
  * 输出维度 (out_dim) 由 model.txt 决定：
  *   out_dim=1 → target_speed
@@ -444,8 +444,8 @@ static void run_inference(double* out_speed, double* out_d,
     if (g.model.loaded) {
         float x[TINY_MLP_MAX_IN] = {0};
 
-        if (g.model.in_dim >= 295 && g.frame_count >= TEMPORAL_WINDOW) {
-            /* v3: 时序滑窗 5×59 = 295 维 */
+        if (g.model.in_dim >= 115 && g.frame_count >= TEMPORAL_WINDOW) {
+            /* v3: 时序滑窗 5×23 = 115 维 */
             int idx = 0;
             for (int w = 0; w < TEMPORAL_WINDOW; w++) {
                 int fi = (g.frame_head + w) % TEMPORAL_WINDOW;
@@ -825,7 +825,7 @@ static int inference_init(MessageBus* bus, Transport* transport,
     }
 
     /* 根据模型输入维度自动选择帧维度 */
-    g.frame_dim = (g.model.in_dim >= 295) ? V3_DIM : V2_DIM;
+    g.frame_dim = (g.model.in_dim >= 115) ? V3_DIM : V2_DIM;
 
     transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
     transport_subscribe(transport, "planning/trajectory", on_planning, nullptr);

@@ -23,8 +23,8 @@ class E2ETrainingToolsTest(unittest.TestCase):
                     json.dumps(
                         {
                             "t": 1000 + i,
-                            "schema_version": "flowengine.e2e_sample.v2",
-                            "features_v2": [
+                            "schema_version": "flowengine.e2e_sample.v3",
+                            "features_v3": [
                                 10.0 + 0.1 * i,          # ego_v
                                 -1.5 + 0.1 * i,           # ego_y
                                 0.0,                       # ego_heading
@@ -36,7 +36,24 @@ class E2ETrainingToolsTest(unittest.TestCase):
                                 1.0,                       # front0_confidence
                                 0.0, 0.0, 0.0, 0.0, 0.0,  # front1 (none)
                                 0.0, 0.0,                  # control_brake, emergency_stop
+                                # v3 场景上下文 (7维)
+                                0.0,                       # tl_state (green)
+                                -1.0,                      # tl_distance (no light)
+                                0.0,                       # road_curvature
+                                30.0,                      # road_speed_limit
+                                2.0,                       # lane_count
+                                3.5,                       # lane_width
+                                -1.5 + 0.1 * i,            # ego_lane_offset
                             ],
+                            "scene_context": {
+                                "tl_state": 0.0,
+                                "tl_distance": -1.0,
+                                "curvature": 0.0,
+                                "speed_limit": 30.0,
+                                "lane_count": 2.0,
+                                "lane_width": 3.5,
+                                "ego_lane_offset": -1.5 + 0.1 * i,
+                            },
                             "label": 8.0 + 0.2 * (i % 5),
                             "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
                             "ego": {"x": 0.5 * i, "y": -1.5 + 0.1 * i, "v": 10.0 + 0.1 * i},
@@ -66,7 +83,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
 
             metadata = json.loads((dataset / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["sample_count"], 40)
-            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v2")
+            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v3")
 
             artifact = work / "artifact"
             artifact.mkdir(parents=True, exist_ok=True)
@@ -96,8 +113,8 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "t": start_t + i,
-                        "schema_version": "flowengine.e2e_sample.v2",
-                        "features_v2": [
+                        "schema_version": "flowengine.e2e_sample.v3",
+                        "features_v3": [
                             10.0 + 0.1 * i,          # ego_v
                             -1.0 + 0.05 * i,          # ego_y
                             0.0,                       # ego_heading
@@ -109,7 +126,24 @@ class E2ETrainingToolsTest(unittest.TestCase):
                             1.0,                       # front0_confidence
                             0.0, 0.0, 0.0, 0.0, 0.0,  # front1 (none)
                             0.0, 0.0,                  # control_brake, emergency_stop
+                            # v3 场景上下文 (7维)
+                            0.0,                       # tl_state (green)
+                            -1.0,                      # tl_distance (no light)
+                            0.0,                       # road_curvature
+                            30.0,                      # road_speed_limit
+                            2.0,                       # lane_count
+                            3.5,                       # lane_width
+                            -1.0 + 0.05 * i,           # ego_lane_offset
                         ],
+                        "scene_context": {
+                            "tl_state": 0.0,
+                            "tl_distance": -1.0,
+                            "curvature": 0.0,
+                            "speed_limit": 30.0,
+                            "lane_count": 2.0,
+                            "lane_width": 3.5,
+                            "ego_lane_offset": -1.0 + 0.05 * i,
+                        },
                         "label": 6.0 + 0.15 * (i % 7),
                         "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
                         "ego": {"x": 0.25 * i, "y": -1.0 + 0.05 * i, "v": 10.0 + 0.1 * i},
@@ -261,34 +295,51 @@ class E2ETrainingToolsTest(unittest.TestCase):
             self.assertTrue(shadow["shadow"])
             self.assertIn("target_speed", shadow)
 
-    def test_v2_dataset_torch_and_sidecar_share_scene_features(self):
+    def test_v3_dataset_torch_and_sidecar_share_scene_features(self):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
-            source = work / "samples_v2.jsonl"
+            source = work / "samples_v3.jsonl"
             source.write_text(
                 "\n".join(
                     json.dumps(
                         {
-                            "schema_version": "flowengine.e2e_sample.v2",
+                            "schema_version": "flowengine.e2e_sample.v3",
                             "t": 4000 + i,
-                            "features": [float(i % 10), -0.8 + 0.04 * i, 0.01 * i, 0.02],
-                            "features_v2": [
-                                float(i % 10),
-                                -0.8 + 0.04 * i,
-                                0.01 * i,
-                                0.02,
-                                20.0 + 0.2 * i,
-                                0.5,
-                                -1.0,
-                                1.0,
-                                0.8,
-                                10.0 + 0.05 * i,
-                                0.2,
-                                0.0,
-                                1.0,
-                                0.0,
-                                0.0,
+                            "features_v3": [
+                                float(i % 10),            # ego_v
+                                -0.8 + 0.04 * i,          # ego_y
+                                0.01 * i,                  # ego_heading
+                                0.02,                      # ego_yaw_rate
+                                20.0 + 0.2 * i,            # front0_x
+                                0.5,                       # front0_y
+                                -1.0,                      # front0_vx
+                                1.0,                       # front0_type
+                                0.8,                       # front0_confidence
+                                10.0 + 0.05 * i,           # front1_x
+                                0.2,                       # front1_y
+                                0.0,                       # front1_vx
+                                1.0,                       # front1_type
+                                0.0,                       # front1_confidence
+                                0.0,                       # control_brake
+                                0.0,                       # control_emergency_stop
+                                # v3 场景上下文 (7维)
+                                0.0,                       # tl_state
+                                -1.0,                      # tl_distance
+                                0.0,                       # road_curvature
+                                30.0,                      # road_speed_limit
+                                2.0,                       # lane_count
+                                3.5,                       # lane_width
+                                -0.8 + 0.04 * i,           # ego_lane_offset
                             ],
+                            "scene_context": {
+                                "tl_state": 0.0,
+                                "tl_distance": -1.0,
+                                "curvature": 0.0,
+                                "speed_limit": 30.0,
+                                "lane_count": 2.0,
+                                "lane_width": 3.5,
+                                "ego_lane_offset": -0.8 + 0.04 * i,
+                            },
                             "label": 7.0 + 0.1 * (i % 6),
                             "ego": {"x": 0.3 * i, "y": -0.8 + 0.04 * i},
                             "planning": {"target_speed": 7.0 + 0.1 * (i % 6)},
@@ -305,7 +356,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            dataset = work / "dataset_v2"
+            dataset = work / "dataset_v3"
             subprocess.run(
                 [
                     sys.executable,
@@ -320,7 +371,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
             )
 
             metadata = json.loads((dataset / "metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v2")
+            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v3")
             self.assertEqual(metadata["sample_count"], 40)
             self.assertIn("front0_x", metadata["feature_names"])
             sample = json.loads((dataset / "samples.jsonl").read_text(encoding="utf-8").splitlines()[0])
@@ -328,7 +379,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
             self.assertIn("obstacles", sample)
             self.assertIn("control", sample)
 
-            artifact = work / "torch_artifact_v2"
+            artifact = work / "torch_artifact_v3"
             train_result = self.train_torch_artifact(dataset, artifact)
             if importlib.util.find_spec("torch") is None:
                 self.assertNotEqual(train_result.returncode, 0)
@@ -358,7 +409,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            output = work / "shadow_v2.json"
+            output = work / "shadow_v3.json"
             subprocess.run(
                 [
                     sys.executable,

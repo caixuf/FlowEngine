@@ -12,7 +12,8 @@
  *       特征 features = [ego_v, ego_y, ego_heading, ego_yaw_rate]
  *       标签 label    = planning_target_speed (模仿学习: 学 planning 的目标速度)
  *     v2 样本额外写入 obstacles/planning/control/features_v2，供 PyTorch
- *     场景特征训练使用；features 保持 v1 兼容。
+ *     场景特征训练使用；v3 样本额外写入 features_v3(23维) + scene_context，
+ *     含红绿灯/道路几何场景上下文。features 保持 v1 兼容。
  *   - 轻量: 只写文本 JSONL，不引入 Bag v2 二进制依赖，便于 Python 直接解析。
  *
  * NodePlugin 接口，编译为 libdata_recorder_node.so。
@@ -32,6 +33,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <math.h>
 
 #define RECORDER_MAX_OBSTACLES 8
 
@@ -58,6 +60,16 @@ static struct {
     volatile int has_planning;
     volatile int has_obstacles;
     volatile int has_control;
+
+    /* v3 特征: 场景上下文（来自 road/traffic_lights + road/geometry） */
+    double tl_state;        /* -1=无, 0=绿, 1=黄, 2=红 */
+    double tl_distance;     /* 距最近灯距离 (m), -1=无 */
+    double road_curvature;  /* 当前曲率 (1/R) */
+    double road_speed_limit;
+    double lane_count;
+    double lane_width;
+    double ego_lane_offset;
+    volatile int has_scene;
 
     double cfg_frequency_hz;
     int    sample_count;
@@ -119,6 +131,64 @@ static void on_control(const Message* msg, void* user_data) {
         g.control = cmd;
         g.has_control = 1;
     }
+}
+
+/* ── v3: 红绿灯状态回调 ─────────────────────────────────────── */
+static void on_traffic_lights(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* lights = cJSON_GetObjectItem(root, "lights");
+    if (!cJSON_IsArray(lights)) { cJSON_Delete(root); return; }
+
+    double nearest_red = 1e9;
+    int has_red = 0;
+    cJSON* light;
+    cJSON_ArrayForEach(light, lights) {
+        cJSON* s = cJSON_GetObjectItem(light, "state");
+        cJSON* x = cJSON_GetObjectItem(light, "x");
+        if (!cJSON_IsString(s) || !cJSON_IsNumber(x)) continue;
+        double dist = x->valuedouble - g.ego_x;
+        if (dist < 0) continue;
+        const char* state = s->valuestring;
+        if (strcmp(state, "red") == 0) {
+            if (dist < nearest_red) { nearest_red = dist; has_red = 1; }
+        } else if (strcmp(state, "yellow") == 0) {
+            if (!has_red && dist < nearest_red) nearest_red = dist;
+        }
+        if (!has_red && g.tl_state < 0.0 && strcmp(state, "green") == 0) {
+            g.tl_state = 0.0; g.tl_distance = dist;
+        }
+    }
+    if (has_red) { g.tl_state = 2.0; g.tl_distance = nearest_red; }
+    else if (g.tl_state < 0.0) g.tl_state = 0.0;
+    g.has_scene = 1;
+    cJSON_Delete(root);
+}
+
+/* ── v3: 道路几何回调 ───────────────────────────────────────── */
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    j = cJSON_GetObjectItem(root, "lane_width");
+    if (cJSON_IsNumber(j)) g.lane_width = j->valuedouble;
+    j = cJSON_GetObjectItem(root, "lane_count");
+    if (cJSON_IsNumber(j)) g.lane_count = j->valuedouble;
+    j = cJSON_GetObjectItem(root, "speed_limit");
+    if (cJSON_IsNumber(j)) g.road_speed_limit = j->valuedouble;
+    j = cJSON_GetObjectItem(root, "curve_offset_m");
+    if (cJSON_IsNumber(j)) {
+        double off = j->valuedouble;
+        j = cJSON_GetObjectItem(root, "curve_length_m");
+        double len = cJSON_IsNumber(j) ? j->valuedouble : 0.0;
+        if (len > 1.0) g.road_curvature = 2.0 * fabs(off) / (len * len);
+    }
+    g.has_scene = 1;
+    cJSON_Delete(root);
 }
 
 static void select_front_obstacles(const ObstacleList* src, const Obstacle** first, const Obstacle** second) {
@@ -206,6 +276,34 @@ static int recorder_execute(TaskBase* task) {
                 control_brake, (double)control_emergency_stop };
             cJSON_AddItemToObject(root, "features_v2", cJSON_CreateDoubleArray(arr, 16)); }
 
+        /* v3: features_v3 = v2 基础 16 维 + 场景上下文 7 维 = 23 维
+         * 维度契约（与 tools/train_e2e/feature_schema.py FEATURE_NAMES_V3 一致）：
+         *   0-15: 同 features_v2
+         *   16 tl_state, 17 tl_distance, 18 road_curvature,
+         *   19 road_speed_limit, 20 lane_count, 21 lane_width, 22 ego_lane_offset */
+        g.ego_lane_offset = g.ego_y;
+        {   double v3[23] = {
+                g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
+                front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
+                (double)(front0 ? (int)front0->type : 0), front0 ? front0->confidence : 0.0,
+                front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
+                (double)(front1 ? (int)front1->type : 0), front1 ? front1->confidence : 0.0,
+                control_brake, (double)control_emergency_stop,
+                g.tl_state, g.tl_distance, g.road_curvature,
+                g.road_speed_limit, g.lane_count, g.lane_width, g.ego_lane_offset };
+            cJSON_AddItemToObject(root, "features_v3", cJSON_CreateDoubleArray(v3, 23)); }
+
+        /* scene_context 供 PyTorch 训练侧 build_v3_features 重建特征 */
+        cJSON* scene_ctx = cJSON_CreateObject();
+        cJSON_AddNumberToObject(scene_ctx, "tl_state", g.tl_state);
+        cJSON_AddNumberToObject(scene_ctx, "tl_distance", g.tl_distance);
+        cJSON_AddNumberToObject(scene_ctx, "curvature", g.road_curvature);
+        cJSON_AddNumberToObject(scene_ctx, "speed_limit", g.road_speed_limit);
+        cJSON_AddNumberToObject(scene_ctx, "lane_count", g.lane_count);
+        cJSON_AddNumberToObject(scene_ctx, "lane_width", g.lane_width);
+        cJSON_AddNumberToObject(scene_ctx, "ego_lane_offset", g.ego_lane_offset);
+        cJSON_AddItemToObject(root, "scene_context", scene_ctx);
+
         cJSON_AddNumberToObject(root, "label", g.planning_target_speed);
 
         cJSON* ego = cJSON_CreateObject();
@@ -258,7 +356,7 @@ static const TaskInterface recorder_vtable = {
     .execute = recorder_execute,
 };
 
-static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "perception/obstacles", "control/cmd", NULL };
+static const char* s_inputs[]  = { "fusion/localization", "planning/trajectory", "perception/obstacles", "control/cmd", "road/traffic_lights", "road/geometry", NULL };
 static const char* s_outputs[] = { NULL };
 
 static NodePlugin s_plugin;  /* forward decl */
@@ -275,6 +373,15 @@ static int recorder_init(MessageBus* bus, Transport* transport,
 
     g.cfg_frequency_hz = 10.0;
     strncpy(g.out_path, "/tmp/flow_train_samples.jsonl", sizeof(g.out_path) - 1);
+
+    /* v3 场景上下文默认值（与 inference_node.cpp 一致） */
+    g.tl_state = -1.0;
+    g.tl_distance = -1.0;
+    g.road_curvature = 0.0;
+    g.road_speed_limit = 30.0;
+    g.lane_count = 2.0;
+    g.lane_width = 3.5;
+    g.ego_lane_offset = 0.0;
 
     if (params_json) {
         cJSON* p = cJSON_Parse(params_json);
@@ -298,6 +405,8 @@ static int recorder_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "planning/trajectory", on_planning, NULL);
     transport_subscribe(transport, "perception/obstacles", on_obstacles, NULL);
     transport_subscribe(transport, "control/cmd", on_control, NULL);
+    transport_subscribe(transport, "road/traffic_lights", on_traffic_lights, NULL);
+    transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
 
     discovery_advertise(discovery, "fusion/localization", 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);

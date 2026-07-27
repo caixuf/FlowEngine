@@ -17,8 +17,10 @@ sys.path.insert(0, str(ROOT / "tools" / "train_e2e"))
 from feature_schema import (  # noqa: E402
     DATASET_SCHEMA_V1,
     DATASET_SCHEMA_V2,
+    DATASET_SCHEMA_V3,
     FEATURE_NAMES_V1,
     FEATURE_NAMES_V2,
+    FEATURE_NAMES_V3,
     LABEL_NAMES,
     features_from_sample,
     sample_feature_names,
@@ -62,7 +64,10 @@ def export_dataset(input_path: Path, output_dir: Path, scenario: str | None) -> 
         raise SystemExit(f"error: no valid samples in {input_path}")
     feature_names = FEATURE_NAMES_V1
     schema_version = DATASET_SCHEMA_V1
-    if len(samples[0]["features"]) != len(FEATURE_NAMES_V1):
+    if len(samples[0]["features"]) == len(FEATURE_NAMES_V3):
+        feature_names = FEATURE_NAMES_V3
+        schema_version = DATASET_SCHEMA_V3
+    elif len(samples[0]["features"]) == len(FEATURE_NAMES_V2):
         feature_names = FEATURE_NAMES_V2
         schema_version = DATASET_SCHEMA_V2
 
