@@ -1262,11 +1262,10 @@ protected:
             const char* mode = "NONE";
             bool mpc_used = false;
 
-            /* MPC 预留（当前未启用）。iLQR 求解器在含变道的场景中会产生
-             * 大幅转向振荡（steer 在 ±0.25 间每帧翻转），导致车道偏离和蛇行。
-             * 稳态巡航已由 A9 feedforward-only 解决极限环问题，且无振荡风险。
-             * 保留 param_register 和 create 逻辑，后续可注释此条件启用调试。 */
-            if (0 && g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+            /* MPC 启用（2026-07 重构后）。状态向量扩展为 [x,y,θ,v,δ]，
+             * 控制变为 [a, dδ] —— r_ddelta 真正进入 R[1][1] 二阶项，
+             * 显式抑制转向速率振荡。变道蛇行问题在此版本中应得到解决。 */
+            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
@@ -1761,8 +1760,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.mpc_q_theta",  3.0f,          0.0,  100.0, "MPC cost weight heading");
     param_register_float("control.mpc_q_v",      2.0f,          0.0,  100.0, "MPC cost weight speed");
     param_register_float("control.mpc_r_a",      0.1f,          0.0,  10.0,  "MPC cost weight acceleration");
-    param_register_float("control.mpc_r_delta",  2.0f,          0.0,  20.0,  "MPC cost weight steering angle");
-    param_register_float("control.mpc_r_ddelta", 5.0f,          0.0,  20.0,  "MPC cost weight steering rate (higher = less oscillation)");
+    param_register_float("control.mpc_q_delta",  2.0f,          0.0,  100.0, "MPC cost weight steering angle state (vs delta_ref)");
+    param_register_float("control.mpc_r_ddelta", 5.0f,         0.0,  20.0,  "MPC cost weight steering rate dδ (higher = less oscillation)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
      * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；
@@ -1799,7 +1798,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.mpc_config.q_theta  = param_get_float("control.mpc_q_theta");
     g.mpc_config.q_v      = param_get_float("control.mpc_q_v");
     g.mpc_config.r_a      = param_get_float("control.mpc_r_a");
-    g.mpc_config.r_delta  = param_get_float("control.mpc_r_delta");
+    g.mpc_config.q_delta  = param_get_float("control.mpc_q_delta");
     g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
     g.mpc = mpc_create(&g.mpc_config);
     if (g.mpc) {
