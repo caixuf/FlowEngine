@@ -20,7 +20,7 @@ import { LANE_WIDTH } from '../core/Constants.js';
  */
 
 // C-5: edge 必填字段（length 单独处理，接受 length_m 别名）
-const EDGE_REQUIRED_FIELDS = ['id', 'type', 'lanes', 'lane_width', 'nodes'];
+const EDGE_REQUIRED_FIELDS = ['id', 'name', 'type', 'lanes', 'lane_width', 'nodes', 'oneway'];
 // C-5: 每个 node 应为 [x, y, z] 三元组
 const NODE_ARITY = 3;
 

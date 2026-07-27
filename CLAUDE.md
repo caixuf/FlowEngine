@@ -44,8 +44,8 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `src/core/flow_registry.c` | 统一元信息注册中心（Task/Topic/Type/Plugin/Schema） |
 | `src/core/param_registry.c` | 参数系统（int/float/bool/string，范围校验，hot-reload） |
 | `src/core/scenario_loader.c` | 场景 JSON 加载器（actor 定义 + ego 配置） |
-| `modules/adas_nodes/flowsim/physics.cpp` | 动态双轮自行车模型（轮胎侧偏+松弛长度+摩擦圆），v<0.5m/s 退化到运动学 |
-| `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 轮胎动力学状态） |
+| `modules/adas_nodes/flowsim/physics.cpp` | 运动学自行车模型；dynamics 桩（未实现，降级到运动学） |
+| `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 动力学桩字段，运行时未使用） |
 | `scenarios/straight_road.json` | 直道场景（默认，唯一） |
 | `modules/adas_nodes/data_recorder_node.c` | 训练样本采集（Learning Loop Stage 0） |
 | `modules/adas_nodes/inference_node.cpp` | tiny-MLP 影子推理（Learning Loop Stage 2） |
@@ -271,33 +271,27 @@ npm run vis:check:all
 
 ### 违反以上规范的代码不会被合并。
 
-## NPC 智能 — IDM + MOBIL + 边界权限门（2026-07）
+## NPC 智能 — IDM + 边界权限门（2026-07）
 
-> NPC 行为从「简单 IDM 跟车 + 基础安全换道」升级为「IDM 纵向 + MOBIL 变道决策 + 边界权限门 + 红绿灯协调」。
+> NPC 行为使用「IDM 纵向跟车 + 边界权限门」。
 
 ### 架构
 
 ```
 每帧 NPC tick:
   1. 找同车道前车 (find_lead) → IDM 期望速度
-  2. MOBIL 变道评估:
-     a. boundary_permissive(): 检查目标车道边界是否虚线（相邻同向车道存在）
-     b. mobil_gain(): 计算变道代价函数 gain = a'_c - a_c + p*(a'_n - a_n + a'_o - a_o)
-     c. 安全约束: a'_n > -b_safe（新跟随者不会被迫急刹）
-     d. 避障兜底: MOBIL 未找到好车道但被前车阻挡时，退回到基础安全换道
-  3. 红绿灯/让行期间不评估变道（StopForTL/Yield 状态保持当前车道）
-  4. 纵向积分 + 位置更新（Frenet 车道跟随 + road_pos 推进）
+  2. 纵向积分 + 位置更新（Frenet 车道跟随 + road_pos 推进）
+  3. 红绿灯/让行期间停车（StopForTL/Yield 状态保持当前车道）
 ```
 
-### MOBIL 参数（NpcAiConfig）
+### MOBIL 变道
+
+MOBIL 变道已禁用（`#if 0`）。完整代码保留在 `npc_ai.cpp` 中作为参考，可通过将 `#if 0` 改为 `#if 1` 重新启用。当前演示场景中 NPC 各守其道不变道。
 
 | 参数 | 默认值 | 含义 |
 |------|--------|------|
-| `mobil_politeness` | 0.5 | 礼貌因子 [0,1]，0=纯利己 |
-| `mobil_safe_brake` | 4.0 | 安全减速度阈值 (m/s²) |
-| `mobil_gain_threshold` | 0.2 | 增益阈值，gain>此值才变道 |
-| `mobil_back_look` | 15.0 | 后向搜索距离 (m) |
-| `mobil_lane_change_cooldown` | 4.0 | 变道冷却时间 (s) |
+| IDM 跟车 | base=5.0, time=1.5 | 安全间距 = base + v × time |
+| 加速/减速 | 1.5 / 3.5 m/s² | 平稳加减速 |
 
 ### 关键文件
 
@@ -374,14 +368,14 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 仪表盘/3D 一直 "Waiting for data"，curl 却有数据 | 仪表盘 JSON 是 cJSON_Print 多行格式，SSE 单 `data:` 帧发送被 EventSource 按行丢弃，浏览器只收到 45 字节前缀。已在发送前压平为单行，详见 [排查文档](docs/TROUBLESHOOTING_3D_DASHBOARD.md) | `monitor_server.c` handle_sse |
 | 3D 场景整屏黑（curl 有数据、console 报 `Unexpected token 'export'`） | MVC 重构（c5e4ba9）拆 Controller 层时 `_renderFrame` 相机块漏闭合一个 `}`，scene3d.js 顶层 `export` 被当块内语句、整模块编译失败不执行 → `init3DScene` 未导出。已补回 | `scene3d.js:2159` 附近 |
 | 仪表盘所有请求挂死（端口在监听） | 终端对前台 demo.sh 按了 Ctrl+Z，整个进程组 `T (stopped)`。Ctrl+C 结束或后台运行 | `scripts/demo.sh` |
-| 车速降到 0 后永久卡死 | ROAD_GUARD 低俗恢复条件要求 `|y|>=road_center_limit`，但车可在任意 `2.1<|y|<2.5` 停下。改为只要 `speed<2.5` 就给小油门 | `control_node.cpp:534` |
+| 车速降到 0 后永久卡死 | ROAD_GUARD 低速恢复条件要求 `|y|>=road_center_limit`，但车可在任意 `2.1<|y|<2.5` 停下。改为只要 `speed<2.5` 就给小油门 | `control_node.cpp:534` |
 | 变道冲出车道 | Stanley heading 阻尼硬编码 0.5，pipeline.json 的 `lat_kd_heading` 未生效 | `control_node.cpp:548` |
-| NPC 瞬移 | 障碍物回收逻辑放入 100m 外（设计如此，非 bug） | `sim_world_node.c:204` |
-| NPC/车飞出路面、不在车道上、坐标飞到几千米外 | flowsim NPC 用 `step_bicycle(steer=0)` 世界系直线积分、不跟道路几何，路一拐弯就直线冲出路网。已改为中央 `Route`（把 esmini 各 road 连成有序主路）+ Frenet 沿车道推进 + 到头回收 | `npc_ai.cpp` step_npc_vehicle / `flowsim/route.cpp` |
-| 感知降频 | DBSCAN 点云过多时聚类耗时超过 deadline | `perception_node.c` |
+| NPC 瞬移 | 障碍物回收逻辑放入 100m 外（设计如此，非 bug） | `flowsim/npc_ai.cpp:204` |
+| NPC/车飞出路面、不在车道上、坐标飞到几千米外 | flowsim NPC 用 `step_bicycle(steer=0)` 世界系直线积分、不跟道路几何，路一拐弯就直线冲出路网。已改为中央 `Route`（把各 road 连成有序主路）+ Frenet 沿车道推进 + 到头回收 | `npc_ai.cpp` step_npc_vehicle / `flowsim/route.cpp` |
+| 感知降频 | DBSCAN 点云过多时聚类耗时超过 deadline | `perception_node.cpp` |
 | 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 覆盖 ego.heading 为道路切线，导致 control_node 的 `v_lat_damp` 失效（heading_err≈0），LQR 阻尼不掉，退化为纯 P 控制。修复：保留 bicycle model heading，不用 wp.h 覆盖 | `flowsim_node.cpp:1178-1182` |
-| steer 打到 0.25 硬限幅导致抖动 | 动态自行车模型下轮胎侧偏力有松弛滞后，同样 steer 的 ay 低于运动学模型。`steer_limit_for_speed` 限幅过紧，控制器累积误差后撞 physics clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
-| 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，动态模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
+| steer 打到 0.25 硬限幅导致抖动 | 运动学自行车模型下 heading 漂移可达 0.8 rad，steer 限幅过紧导致控制器累积误差撞 clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
+| 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，运动学模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
 
 ## 最新 tag
 
@@ -393,8 +387,19 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 
 详见 [可视化架构](docs/VISUALIZATION_ARCHITECTURE.md)。
 
-可视化由统一的 C 监控守护进程 **flowmond**（`src/flowmond.c` → `build/bin/flowmond`）提供，
-内置 HTTP 仪表盘，同时启用两条等价数据链路，按可用性自动回退：
+前端 3D 渲染使用 `vis/` 架构：
+
+```
+tools/flowboard/js/vis/
+├── main.js           — 入口
+├── core/             — 核心渲染框架（SceneDirector, CameraRig, Lighting, Constants, Layer, Renderer, SkyEnv, ViewRegistry, AssetFactory, DeadReckon）
+├── director/         — 场景导演（SceneDirector, FrameValidator）
+├── view/             — 3D 视图（VehicleView, RoadView, GroundView, ViaductView, BarrierView, TreeView, TrafficLightView, ETCGateView, StreetlightView, ConnectorView, VehicleLights）
+├── math/             — 坐标/几何工具（Coord.js — 唯一事实源, Curve, GeometryMerge, RoadHeight）
+└── store/            — 场景状态（SceneStore）
+```
+
+数据链路由 C 监控守护进程 **flowmond**（`src/flowmond.c` → `build/bin/flowmond`）提供：
 
 ```
 monitor_node → 10Hz 写 /tmp/flow_topology.json → flowmond :8800 → 浏览器 (文件桥接回退)

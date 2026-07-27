@@ -1,8 +1,10 @@
 import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 /**
  * CameraRig.js — 相机控制器
  * 支持 chase / top / driver / front / map / orbit 六种模式
+ * D-2: orbit 模式改用 OrbitControls，跟车模式保持手动计算
  */
 
 /* 流畅专题：复用单个 Box3，替代每帧 new THREE.Box3().setFromObject()。
@@ -20,39 +22,20 @@ export function createCameraRig(canvas) {
 
   let mode = 'chase';
 
-  // Orbit 状态
-  let orbitYaw = 0, orbitPitch = Math.PI / 4, orbitDist = 80;
-  let orbitDragging = false, orbitPrevX = 0, orbitPrevY = 0;
-
-  // 拖拽事件
-  canvas.addEventListener('mousedown', (e) => {
-    if (mode === 'orbit') {
-      orbitDragging = true;
-      orbitPrevX = e.clientX;
-      orbitPrevY = e.clientY;
-    }
-  });
-  window.addEventListener('mouseup', () => { orbitDragging = false; });
-  window.addEventListener('mousemove', (e) => {
-    if (!orbitDragging) return;
-    const dx = e.clientX - orbitPrevX;
-    const dy = e.clientY - orbitPrevY;
-    orbitYaw -= dx * 0.005;
-    orbitPitch = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, orbitPitch - dy * 0.005));
-    orbitPrevX = e.clientX;
-    orbitPrevY = e.clientY;
-  });
-  canvas.addEventListener('wheel', (e) => {
-    if (mode === 'orbit' || mode === 'map') {
-      orbitDist = Math.max(20, Math.min(500, orbitDist + e.deltaY * 0.1));
-    }
-  });
+  // D-2: OrbitControls — 初始 disabled，仅 orbit 模式启用
+  const orbitControls = new OrbitControls(camera, canvas);
+  orbitControls.enabled = false;
+  orbitControls.target.set(0, 0, 0);
+  orbitControls.update();
 
   function update(ego, roadGroup, now) {
     let ex = ego ? ego.x : 0;
     const ez = ego ? -(ego.y) : 0;
     const eh = ego ? ego.heading || 0 : 0;
     const eg = ego ? ego.z || 0 : 0;
+
+    // D-2: 每帧更新 orbitControls.target 跟随 ego
+    orbitControls.target.set(ex, eg, ez);
 
     // 流畅专题：原先这里每帧 const c = getCenter(roadGroup) 但 c 在所有
     // switch 分支里都被各自的 const c 覆盖，属于死代码 + 白算一次 Box3。
@@ -108,13 +91,8 @@ export function createCameraRig(canvas) {
         break;
       }
       case 'orbit': {
-        const cosP = Math.cos(orbitPitch), sinP = Math.sin(orbitPitch);
-        camera.position.set(
-          ex + Math.cos(orbitYaw) * orbitDist * cosP,
-          eg + orbitDist * sinP,
-          ez + Math.sin(orbitYaw) * orbitDist * cosP
-        );
-        camera.lookAt(ex, eg, ez);
+        // D-2: OrbitControls 自动处理，无需手动设置
+        orbitControls.update();
         break;
       }
     }
@@ -123,13 +101,14 @@ export function createCameraRig(canvas) {
   function setMode(m) {
     if (['chase', 'top', 'driver', 'front', 'map', 'orbit'].includes(m)) {
       mode = m;
+      // D-2: orbit 模式启用 OrbitControls，其他模式禁用
+      orbitControls.enabled = (mode === 'orbit');
     }
   }
 
   function reset(roadGroup) {
-    orbitYaw = 0;
-    orbitPitch = Math.PI / 4;
-    orbitDist = 80;
+    orbitControls.target.set(0, 0, 0);
+    orbitControls.update();
 
     if (mode === 'chase' || mode === 'top' || mode === 'driver' || mode === 'front' || mode === 'map') {
       // B3 fix: 不再用路包围盒中心（10km 路→x=5000，车在 x≈50 时看空路），

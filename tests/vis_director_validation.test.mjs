@@ -89,6 +89,22 @@ check('road_network.edges 非数组 → skipRoad=true', badRn2.skipRoad, true);
 check('road_network.edges 非数组 → warning key=road_network.edges',
   hasWarningKey(badRn2, 'road_network.edges'), true);
 
+console.log('\n--- C-5: edge 必填字段 + nodes arity 校验 ---');
+const missingFields = validateFrame({ road_network: { edges: [{ id: 1, lanes: 2, nodes: [[0, 0], [100, 0]] }] } });
+check('edge 缺 name → warning', hasWarningKey(missingFields, 'road_network.edges[0].name'), true);
+check('edge 缺 type → warning', hasWarningKey(missingFields, 'road_network.edges[0].type'), true);
+check('edge 缺 lane_width → warning', hasWarningKey(missingFields, 'road_network.edges[0].lane_width'), true);
+check('edge 缺 oneway → warning', hasWarningKey(missingFields, 'road_network.edges[0].oneway'), true);
+check('edge 缺 length → warning', hasWarningKey(missingFields, 'road_network.edges[0].length'), true);
+check('nodes 二元组 [0,0] → warning', hasWarningKey(missingFields, 'road_network.edges[0].nodes[0].arity'), true);
+check('nodes 二元组 [100,0] → warning', hasWarningKey(missingFields, 'road_network.edges[0].nodes[1].arity'), true);
+
+const completeEdge = validateFrame({
+  road_network: { edges: [{ id: 1, name: 'test', type: 'highway', lanes: 3, lane_width: 3.5, nodes: [[0, 0, 0], [100, 0, 0]], oneway: true, length: 100 }] }
+});
+const schemaWarnings = completeEdge.warnings.filter(w => w.key.startsWith('road_network.edges'));
+check('完整字段 edge → 0 条 schema warning', schemaWarnings.length, 0);
+
 console.log('\n--- ego 校验 ---');
 const badEgo1 = validateFrame({ ego: 'oops' });
 check('ego 非 object → skipEgo=true', badEgo1.skipEgo, true);
@@ -155,7 +171,7 @@ check('组合 3 条 warnings',
 
 console.log('\n--- 高度不变量校验 ---');
 const heightOk = validateFrame({
-  road_network: { edges: [{ id: 0, lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]] }] },
+  road_network: { edges: [{ id: 0, name: 'test', type: 'highway', lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]], oneway: true, length: 1000 }] },
   ego: { x: 100, y: -1.75, z: 0 },
   entities: [{ type: 'car', x: 200, y: -1.75, z: 0 }, { type: 'tl', x: 300, y: 0, z: 0 }],
 });
@@ -163,7 +179,7 @@ check('entity 在路面上 → 无 height warning', hasWarningKey(heightOk, 'hei
 check('entity 在路面上 → warnings 数=0', heightOk.warnings.length, 0);
 
 const heightBad = validateFrame({
-  road_network: { edges: [{ id: 0, lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]] }] },
+  road_network: { edges: [{ id: 0, name: 'test', type: 'highway', lanes: 4, lane_width: 3.5, nodes: [[0, 0, 0], [1000, 0, 0]], oneway: true, length: 1000 }] },
   ego: { x: 100, y: -1.75, z: 8 },
   entities: [{ type: 'car', x: 200, y: -1.75, z: -5 }],
 });
