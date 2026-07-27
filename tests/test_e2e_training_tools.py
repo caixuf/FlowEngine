@@ -23,7 +23,20 @@ class E2ETrainingToolsTest(unittest.TestCase):
                     json.dumps(
                         {
                             "t": 1000 + i,
-                            "features": [float(i % 8), -1.5 + 0.1 * i, 0.01 * i, 0.0],
+                            "schema_version": "flowengine.e2e_sample.v2",
+                            "features_v2": [
+                                10.0 + 0.1 * i,          # ego_v
+                                -1.5 + 0.1 * i,           # ego_y
+                                0.0,                       # ego_heading
+                                0.0,                       # ego_yaw_rate
+                                30.0 + 0.1 * i,            # front0_x
+                                0.0,                       # front0_y
+                                8.0,                       # front0_vx
+                                1.0,                       # front0_type (car)
+                                1.0,                       # front0_confidence
+                                0.0, 0.0, 0.0, 0.0, 0.0,  # front1 (none)
+                                0.0, 0.0,                  # control_brake, emergency_stop
+                            ],
                             "label": 8.0 + 0.2 * (i % 5),
                             "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
                             "ego": {"x": 0.5 * i, "y": -1.5 + 0.1 * i, "v": 10.0 + 0.1 * i},
@@ -53,7 +66,7 @@ class E2ETrainingToolsTest(unittest.TestCase):
 
             metadata = json.loads((dataset / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["sample_count"], 40)
-            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v1")
+            self.assertEqual(metadata["schema_version"], "flowengine.e2e_dataset.v2")
 
             artifact = work / "artifact"
             artifact.mkdir(parents=True, exist_ok=True)
@@ -83,7 +96,20 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 json.dumps(
                     {
                         "t": start_t + i,
-                        "features": [float(i % 10), -1.0 + 0.05 * i, 0.005 * i, 0.01],
+                        "schema_version": "flowengine.e2e_sample.v2",
+                        "features_v2": [
+                            10.0 + 0.1 * i,          # ego_v
+                            -1.0 + 0.05 * i,          # ego_y
+                            0.0,                       # ego_heading
+                            0.0,                       # ego_yaw_rate
+                            30.0 + 0.1 * i,            # front0_x
+                            0.0,                       # front0_y
+                            8.0,                       # front0_vx
+                            1.0,                       # front0_type (car)
+                            1.0,                       # front0_confidence
+                            0.0, 0.0, 0.0, 0.0, 0.0,  # front1 (none)
+                            0.0, 0.0,                  # control_brake, emergency_stop
+                        ],
                         "label": 6.0 + 0.15 * (i % 7),
                         "control": {"throttle": 0.1 + 0.01 * i, "brake": 0.0, "steer": 0.0, "lane_change": 0, "confidence": 1.0},
                         "ego": {"x": 0.25 * i, "y": -1.0 + 0.05 * i, "v": 10.0 + 0.1 * i},
