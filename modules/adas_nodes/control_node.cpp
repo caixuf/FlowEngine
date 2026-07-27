@@ -691,6 +691,60 @@ static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
     }
 
     pthread_mutex_unlock(&g.ref_path_mtx);
+
+    /* A10 变道参考注入：lc_state=1 (变道中) / 3 (回切中) 时，
+     * ref_path 仍是原车道中心线，MPC 跟随它会一直留在原车道。
+     * 把参考 y 替换为 ego 当前 y → lc_target_y 的平滑过渡，
+     * 让 MPC 主动变道。x 仍沿 ref_path 弧长推进（道路前进方向），
+     * 这样 (x, y) = (道路前进, 横向变道) 解耦参数化变道路径。
+     *
+     * 关键 1：参考横向位移 dy_ref 必须裁剪到 horizon 内可达范围。
+     * 若直接把 dy_total 全部塞进参考（如 dy=3.2m 但 horizon 0.5s ×
+     * 13 m/s = 6.5m 预测距离），参考末尾 y 远超预测可达，iLQR 每次
+     * rollout cost 都很大且不下降，导致 max_iter=50 仍不收敛，单帧
+     * MPC 耗时 >1s 阻塞整个 pipeline。
+     *
+     * 关键 2：曲线形状必须前段就有较大梯度。smoothstep (3t²-2t³) 和
+     * 半余弦 0.5*(1-cos(πt)) 在 t=0 附近梯度均≈0，MPC 在 horizon 前几步
+     * 看到的横向偏差小 → steer 输出 0.02~0.05 rad → 实际横向速度仅
+     * ~0.3 m/s，3.5m 变道需要 11s。改用 ease-out `s=1-(1-t)²`：
+     *   - t=0: 梯度=2（最大）
+     *   - t=0.5: s=0.75
+     *   - t=1: 梯度=0（平滑收敛）
+     * 前段梯度是 smoothstep 的 6 倍，MPC 在 horizon 第一步就看到明显
+     * 横向偏差，立即输出较大 steer。
+     *
+     * v_lat_max=3 m/s 是合理变道横向速度上限（~11 km/h 横移），
+     * horizon_t = n * dt，dy_max = v_lat_max * horizon_t。
+     * 每帧推进 dy_max，多帧累积完成完整变道。 */
+    if ((g.lc_state == 1 || g.lc_state == 3) && n > 1) {
+        double y_start  = g.ego_y;
+        double y_end    = g.lc_target_y;
+        double dy_total = y_end - y_start;
+        if (fabs(dy_total) > 0.05) {
+            double horizon_t = (double)n * g.mpc_config.dt;
+            double v_lat_max = 5.0;  /* m/s，变道横向速度上限（激进） */
+            double dy_max    = v_lat_max * horizon_t;
+            double dy_ref    = dy_total;
+            if (fabs(dy_ref) > dy_max) {
+                dy_ref = (dy_ref > 0.0) ? dy_max : -dy_max;
+            }
+            /* 关键 3：参考起点前瞻。若 y_start = ego_y，参考曲线 s=0
+             * 处 ref.y = ego_y，MPC 在 horizon 第一步看到的横向偏差=0，
+             * 输出 steer 仅 0.02~0.07 rad。让参考起点前瞻 15% dy_ref：
+             *   y_start' = ego_y + 0.15 * dy_ref
+             * 这样 MPC 第一步就看到 0.15 * |dy_ref| 偏差，立即输出较大
+             * steer 主动变道。前瞻比例 0.3 实测过激（lateral excursion
+             * 4.10m > 4.0m 阈值，min_forward_gap 1.97m），0.15 较温和。 */
+            double y_start_lookahead = y_start + 0.15 * dy_ref;
+            for (int k = 0; k < n; k++) {
+                double t = (double)k / (double)(n - 1);
+                double s = 1.0 - (1.0 - t) * (1.0 - t);  /* ease-out，前段梯度=2 */
+                ref[k].y = y_start_lookahead + dy_ref * s;
+            }
+        }
+    }
+
     return n;
 }
 
@@ -1191,11 +1245,19 @@ protected:
                     int in_noa_mode = (strncmp(g.driving_mode, "NOA", 3) == 0);
                     if (!in_noa_mode && (g.route_lane < 0 || g.route_lane == g.committed_lane_side)) {
                         /* 无 NOA 路线约束：评估是否可安全返回原始车道。
-                         * 条件：原始车道前车间距 > 安全间距的 1.5 倍（说明已清空），
-                         * 且后方无风险、无行人风险。 */
+                         * 条件：
+                         *   1. 原始车道前车间距 > 安全间距的 1.5 倍（说明已清空）
+                         *   2. 当前车道前车比原车道前车慢（ego 在当前车道遇到慢车
+                         *      才需要离开；若当前车道更快/空旷则留在当前车道，
+                         *      不主动回切——避免"右边空旷却马上变回左边"的蛇行）
+                         *   3. 后方无风险、无行人风险 */
                         double orig_gap = lane_lead_gap(original_lane_y, same_lane_tol);
                         double orig_safe = min_gap + g.current_speed * time_headway;
-                        int    can_return = (orig_gap > orig_safe * 1.5) &&
+                        double cur_speed  = lane_lead_speed(cruise_lane_y, same_lane_tol);
+                        double orig_speed = lane_lead_speed(original_lane_y, same_lane_tol);
+                        int    cur_lane_slower = (cur_speed < orig_speed - 1.0);
+                        int    can_return = cur_lane_slower &&
+                                            (orig_gap > orig_safe * 1.5) &&
                                             !lane_has_pedestrian_risk(original_lane_y, same_lane_tol) &&
                                             lane_rear_safe(original_lane_y, same_lane_tol);
                         if (can_return) {
@@ -1262,10 +1324,10 @@ protected:
             const char* mode = "NONE";
             bool mpc_used = false;
 
-            /* MPC 启用（2026-07 重构后）。状态向量扩展为 [x,y,θ,v,δ]，
-             * 控制变为 [a, dδ] —— r_ddelta 真正进入 R[1][1] 二阶项，
-             * 显式抑制转向速率振荡。变道蛇行问题在此版本中应得到解决。 */
-            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+            /* MPC 暂时禁用：变道速度调优未完成，回退到 PID+Stanley。
+             * MPC 控制器本身（状态扩展 + r_ddelta 二阶项）保留，待变道
+             * 参考注入逻辑完善后重新启用。 */
+            if (0 && g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
