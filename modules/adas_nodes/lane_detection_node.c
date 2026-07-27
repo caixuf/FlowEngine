@@ -6,7 +6,7 @@
  * on camera image to detect lane markings.
  *
  * Input topics:  road/geometry      — JSON road curve + lane params (from flowsim_node)
- *                sensor/camera      — reserved for real vision (no-op in sandbox)
+ *                vehicle/state      — ego x-position for curve evaluation
  * Output topics: perception/lanes   — JSON array of LaneBoundary objects
  *
  * Sandbox algorithm:
@@ -112,13 +112,6 @@ static void on_road_geometry(const Message* msg, void* user_data) {
         g.lane_count = (int)j->valuedouble;
     g.has_road_geometry = 1;
     cJSON_Delete(root);
-}
-
-/* ── sensor/camera callback (reserved, no-op in sandbox) ── */
-static void on_camera(const Message* msg, void* user_data) {
-    (void)msg;
-    (void)user_data;
-    /* Reserved for HAVE_CV real vision processing — no-op in sandbox */
 }
 
 /* ── Fit cubic polynomial coefficients for a lane boundary ─
@@ -253,7 +246,7 @@ static const TaskInterface lane_detection_vtable = {
 
 /* ── NodePlugin lifecycle ────────────────────────────────── */
 
-static const char* s_inputs[]  = { "road/geometry", "sensor/camera", "vehicle/state", NULL };
+static const char* s_inputs[]  = { "road/geometry", "vehicle/state", NULL };
 static const char* s_outputs[] = { "perception/lanes", NULL };
 
 static NodePlugin s_plugin;
@@ -283,9 +276,10 @@ static int lane_detection_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Subscribe to road geometry and camera (reserved) */
+    /* Subscribe to road geometry and vehicle state.
+     * B-3a: 删除了空的 on_camera 回调与 sensor/camera 订阅（沙箱不消费图像，
+     * 真实 HAVE_CV 版本会在此订阅并实现 Canny+Hough）。 */
     transport_subscribe(transport, "road/geometry", on_road_geometry, NULL);
-    transport_subscribe(transport, "sensor/camera", on_camera, NULL);
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, NULL);
 
     /* Advertise output */

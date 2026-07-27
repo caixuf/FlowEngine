@@ -254,10 +254,8 @@ set(CORE_SOURCES
     src/core/crash_handler.c
     src/core/health.c
     src/core/auto_tuner.c
-    src/core/node_context.c
     src/core/mpc_controller.c
     src/core/intent_predictor.c
-    src/core/typed_topic.c
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────

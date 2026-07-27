@@ -15,6 +15,12 @@ const __dirname = _resolve(fileURLToPath(import.meta.url), '..');
 const SHIM_URL = new URL('three-shim.mjs', import.meta.url).href;
 
 export async function resolve(specifier, context, nextResolve) {
+  // D-2: OrbitControls 走真实 vendor 文件（不能用 shim，因为 class extends 需要
+  // 真实 EventDispatcher 基类），让测试能跑到真实的 OrbitControls 代码路径。
+  if (specifier === 'three/addons/controls/OrbitControls.js') {
+    const vendorUrl = new URL('../../tools/flowboard/vendor/three/jsm/controls/OrbitControls.js', import.meta.url);
+    return { url: vendorUrl.href, format: 'module', shortCircuit: true };
+  }
   // 拦截所有 'three' 导入（包括子路径如 'three/examples/...'）
   if (specifier === 'three' || specifier.startsWith('three/')) {
     return {

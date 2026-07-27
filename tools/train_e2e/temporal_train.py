@@ -36,7 +36,7 @@ from pathlib import Path
 
 WINDOW = 5       # 时序滑窗帧数
 V2_DIM = 16      # 每帧特征维度 (v2)
-V3_DIM = 59      # 每帧特征维度 (v3 计划)
+V3_DIM = 23      # 每帧特征维度 (v3) = v2 基础 16 + 场景上下文 7；与 feature_schema.py 一致
 OUT_DIM = 5      # throttle, brake, steer, lane_change, confidence
 
 # ── 数据加载 ──────────────────────────────────────────────────
@@ -66,8 +66,16 @@ def build_windows(samples: list[dict], feat_dim: int = V2_DIM) -> tuple[list[lis
         for s in window:
             fv = s.get("features_v2", s.get("features", [0]*feat_dim))
             fv = s.get("features_v3", fv)  # try v3 features first
-            while len(fv) < feat_dim:
-                fv.append(0.0)
+            # C-3 修复：维度不匹配硬报错，禁止静默补零。
+            # 旧 15 维 features_v2（缺 front1_confidence）会被补到 16 维造成索引错位，
+            # 让模型把 control_brake 当成 front1_confidence 学习。data_recorder_node.c
+            # 已修复为 16 维；混训旧数据须重新采集，不得静默补零。
+            if len(fv) != feat_dim:
+                raise ValueError(
+                    f"sample features_v2/v3 dim {len(fv)} != feat_dim {feat_dim} "
+                    f"(schema expects {feat_dim}). "
+                    f"旧 15 维数据已被 C-3 修复为 16 维；如需混训请重新采集。"
+                )
             x.extend(fv[:feat_dim])
 
         # 目标样本 = 窗口最后一帧

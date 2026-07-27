@@ -13,7 +13,16 @@ import { LANE_WIDTH } from '../core/Constants.js';
  *   6. ego.x 必须是 finite number；heading / lights 若发则必须是 number
  *   7. entities 必须是 array
  *   8. 每个 entity 必须有 type 字段（仅检查非 ego 实体，与 build 过滤一致）
+ *
+ * C-5 schema 校验：在原有 range 检查基础上加 edge 必填字段 + nodes arity：
+ *   9. 每个 edge 必须有 id / type / lanes / lane_width / length(或 length_m) / nodes
+ *  10. 每个 node 必须是 [x, y, z] 三元组（arity=3，缺 z 会让路网高度插值退化）
  */
+
+// C-5: edge 必填字段（length 单独处理，接受 length_m 别名）
+const EDGE_REQUIRED_FIELDS = ['id', 'type', 'lanes', 'lane_width', 'nodes'];
+// C-5: 每个 node 应为 [x, y, z] 三元组
+const NODE_ARITY = 3;
 
 function _typeOf(v) {
   if (v === null) return 'null';
@@ -75,6 +84,25 @@ export function validateFrame(topoData) {
       for (let i = 0; i < rn.edges.length; i++) {
         const edge = rn.edges[i];
         if (!edge) continue;
+
+        // C-5: 必填字段检查（id / type / lanes / lane_width / nodes）
+        for (const field of EDGE_REQUIRED_FIELDS) {
+          if (edge[field] === undefined || edge[field] === null) {
+            warnings.push({
+              key: 'road_network.edges[' + i + '].' + field,
+              msg: 'edge[' + i + '].' + field + ' 缺失（必填字段），可能影响道路渲染',
+            });
+          }
+        }
+        // C-5: length 接受 length_m 别名，两者皆缺才告警
+        if ((edge.length === undefined || edge.length === null) &&
+            (edge.length_m === undefined || edge.length_m === null)) {
+          warnings.push({
+            key: 'road_network.edges[' + i + '].length',
+            msg: 'edge[' + i + '].length 缺失（必填字段，接受 length 或 length_m），回退默认长度',
+          });
+        }
+
         if (edge.lane_width != null && (edge.lane_width <= 0 || edge.lane_width > 10)) {
           warnings.push({
             key: 'road_network.edges[' + i + '].lane_width',
@@ -93,6 +121,21 @@ export function validateFrame(topoData) {
             key: 'road_network.edges[' + i + '].nodes',
             msg: 'edge[' + i + '].nodes 无效（需至少 2 个节点），道路可能无法渲染',
           });
+        } else {
+          // C-5: nodes arity 检查 —— 每个 node 必须是 [x, y, z] 三元组
+          // 缺 z（2 元组）会让 _roadHeightAt 的 a[2] || 0 静默退化为 0，
+          // 高架场景下路面高度插值失真，故显式告警。
+          for (let j = 0; j < edge.nodes.length; j++) {
+            const node = edge.nodes[j];
+            if (!Array.isArray(node) || node.length !== NODE_ARITY) {
+              warnings.push({
+                key: 'road_network.edges[' + i + '].nodes[' + j + '].arity',
+                msg: 'edge[' + i + '].nodes[' + j + '] 元素数=' +
+                     (Array.isArray(node) ? node.length : _typeOf(node)) +
+                     '（应为 ' + NODE_ARITY + ': [x, y, z]）',
+              });
+            }
+          }
         }
       }
     }

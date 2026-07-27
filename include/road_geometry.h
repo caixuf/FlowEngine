@@ -17,6 +17,15 @@
  *
  * sim_world_node / planning_node / control_node 三方共享这份计算，
  * 保证仿真物理、Frenet 参考路径、车道居中控制对"道路在哪里"的理解一致。
+ *
+ * @note 两套并存的几何实现（不要混用）：
+ *   - 本文件是 **Cartesian**（世界系 x/y），用 smoothstep 参数化弯道中心线，
+ *     供 control_node / planning_node 等不依赖 esmini 的节点使用；
+ *   - modules/adas_nodes/flowsim/lane_frenet.h 是 **Frenet**（路网系
+ *     road_id/lane_id/s/offset），依赖 esmini RoadManager，供 flowsim 内部
+ *     ego/NPC 车道定位使用（lane_center_t / offset_from_lane_internal 等）。
+ *   同一帧不要把 road_center_y 的结果当 offset 喂给 lane_frenet 的 helper，
+ *   两套坐标系独立演化，混用会导致横向位置错位。
  */
 
 #include <math.h>

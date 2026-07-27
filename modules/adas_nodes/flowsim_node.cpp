@@ -43,6 +43,7 @@
 #include "flowsim/actor/VehicleActor.h"   /* 车灯信号派生（Phase 1 重构）*/
 #include "flowsim/route.h"
 #include "flowsim/sim_digest.h"
+#include "flowsim/lane_frenet.h"          /* C-2: 共享车道中心横向偏移公式 */
 
 #include <stdlib.h>
 #include <string.h>
@@ -553,16 +554,13 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                                               * 导致同向 NPC vx = speed*cos(PI) = -speed
                                               * 倒着开（npc1 从 x=120 倒退到 x=99）。 */
                     e.s       = fp.s;
-                    /* fp.offset 是车道内偏移（车在车道中心时≈0），
-                     * 需换算成相对参考线的横向偏移：
-                     *   lane_center = sign(lane_id) * (|lane_id| - 0.5) * lane_width
-                     *   ref_offset  = lane_center + fp.offset
+                    /* fp.offset 是车道内偏移（车在车道中心时≈0），需换算成相对
+                     * 参考线的横向偏移：ref_offset = lane_center + fp.offset。
+                     * C-2: 用 lane_frenet.h 共享 helper 替换手写公式，避免各处
+                     * 复制 sign(lane_id)·(|lane_id|−0.5)·lane_width 同一公式。
                      * 这与 ego 路径一致（ego 走 fp.lane_id，road_pos 内部算车道中心）。 */
-                    double lw = g.roads.lane_width(fp.road_id, fp.lane_id, fp.s);
-                    if (lw <= 0.0) lw = 3.5;
-                    double lane_center_t = (fp.lane_id > 0 ? 1.0 : -1.0)
-                                         * (std::abs(fp.lane_id) - 0.5) * lw;
-                    e.offset        = lane_center_t + fp.offset;
+                    e.offset        = flowsim::offset_from_lane_internal(
+                                          g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
                     e.target_offset = e.offset;
                 }
                 /* world_to_frenet 失败 → route_dir 保持 0，走旧世界系兜底 */
@@ -975,6 +973,11 @@ static void publish_traffic_lights() {
         if (!e.active || e.type != flowsim::EntityType::TrafficLight) continue;
         cJSON* light = cJSON_CreateObject();
         cJSON_AddNumberToObject(light, "id", e.id);
+        /* C-6: 加 scenario_id 字段（场景业务 id，前端用它匹配场景 JSON 的
+         * traffic_lights[*].id 做 phase override / choreography beat 定位）。
+         * e.id 是 pool 索引（全局唯一但与场景无关），scenario_id 是场景里
+         * 写死的业务 id，二者不可混用——前端旧代码用 e.id 反查场景配置会失败。 */
+        cJSON_AddNumberToObject(light, "scenario_id", e.scenario_id);
         cJSON_AddNumberToObject(light, "x", e.x);
         /* y_lane = 车道中心 y（停止线判定用），非灯杆 3D 位置。
          * 灯杆的 3D y 在 scene/frame entities 中以 "y" 字段发布。
@@ -1318,9 +1321,10 @@ protected:
                 // 空间 invariant
                 auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);
+                /* A-4b: 始终打印 passed/failed/warned 计数，失败时再补 stderr。 */
+                LOG_INFO("flowsim", "spatial_invariant: %d passed, %d failed, %d warned",
+                         spatial.passed, spatial.failed, spatial.warned);
                 if (spatial.failed > 0) {
-                    LOG_WARN("flowsim", "spatial_invariant: %d passed, %d FAILED, %d warned",
-                             spatial.passed, spatial.failed, spatial.warned);
                     g.invariant_fail_count.fetch_add(spatial.failed, std::memory_order_relaxed);
                     // 失败详情写入 stderr 供 evaluator 捕获
                     if (!spatial.details.empty()) {
@@ -1331,9 +1335,9 @@ protected:
                 // 运动方向 invariant
                 auto motion = flowsim::check_motion_direction(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);
+                LOG_INFO("flowsim", "motion_direction: %d passed, %d failed, %d warned",
+                         motion.passed, motion.failed, motion.warned);
                 if (motion.failed > 0) {
-                    LOG_WARN("flowsim", "motion_direction: %d passed, %d FAILED, %d warned",
-                             motion.passed, motion.failed, motion.warned);
                     g.invariant_fail_count.fetch_add(motion.failed, std::memory_order_relaxed);
                     if (!motion.details.empty()) {
                         fprintf(stderr, "[flowsim::motion_direction] cycle=%u\n%s",
@@ -1344,9 +1348,9 @@ protected:
                 if (g.prev_dynamic_digest.actors.size() > 0) {
                     auto temporal = flowsim::check_temporal_invariants(
                         g.prev_dynamic_digest, dd, FLOWSIM_DT_SEC * 20);
+                    LOG_INFO("flowsim", "temporal_invariant: %d passed, %d failed, %d warned",
+                             temporal.passed, temporal.failed, temporal.warned);
                     if (temporal.failed > 0) {
-                        LOG_WARN("flowsim", "temporal_invariant: %d passed, %d FAILED, %d warned",
-                                 temporal.passed, temporal.failed, temporal.warned);
                         g.invariant_fail_count.fetch_add(temporal.failed, std::memory_order_relaxed);
                         if (!temporal.details.empty()) {
                             fprintf(stderr, "[flowsim::temporal_invariant] cycle=%u\n%s",
@@ -1515,9 +1519,13 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                  g.static_digest.traffic_lights.size());
         /* 静态 invariant：车道宽/边界自洽/标线/红绿灯朝向等 */
         auto static_inv = flowsim::check_static_invariants(g.static_digest);
+        /* A-4b: 始终打印 passed/failed/warned 计数——旧行为只在 failed>0 时打印，
+         * 让"所有检查都 passed"的正常路径看不到任何输出，无法判断 invariant
+         * 是否真的在跑。改为无条件 LOG_INFO，失败时再补 LOG_WARN + stderr。 */
+        LOG_INFO("flowsim", "static_invariant: %d passed, %d failed, %d warned",
+                static_inv.passed, static_inv.failed, static_inv.warned);
         if (static_inv.failed > 0) {
-            LOG_WARN("flowsim", "static_invariant: %d passed, %d FAILED, %d warned",
-                    static_inv.passed, static_inv.failed, static_inv.warned);
+            g.invariant_fail_count.fetch_add(static_inv.failed, std::memory_order_relaxed);
             if (!static_inv.details.empty()) {
                 fprintf(stderr, "[flowsim::static_invariant]\n%s", static_inv.details.c_str());
             }

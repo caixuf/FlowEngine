@@ -8,7 +8,6 @@
  * using color blob analysis / deep learning.
  *
  * Input topics:  road/traffic_lights   — JSON (from flowsim_node)
- *                sensor/camera         — reserved for real vision (no-op in sandbox)
  * Output topics: perception/traffic_lights — JSON with added perception metadata
  *
  * Sandbox algorithm:
@@ -70,13 +69,6 @@ static void on_road_traffic_lights(const Message* msg, void* user_data) {
     memcpy(g.cached_json, msg->data, copy);
     g.cached_json[copy] = '\0';
     g.has_cached = 1;
-}
-
-/* ── sensor/camera callback (reserved, no-op in sandbox) ── */
-static void on_camera(const Message* msg, void* user_data) {
-    (void)msg;
-    (void)user_data;
-    /* Reserved for HAVE_CV real vision processing */
 }
 
 /* ── Add confidence=1.0 to each light in the lights array ─
@@ -161,7 +153,7 @@ static const TaskInterface tl_vtable = {
 
 /* ── NodePlugin lifecycle ────────────────────────────────── */
 
-static const char* s_inputs[]  = { "road/traffic_lights", "sensor/camera", NULL };
+static const char* s_inputs[]  = { "road/traffic_lights", NULL };
 static const char* s_outputs[] = { "perception/traffic_lights", NULL };
 
 static NodePlugin s_plugin;
@@ -187,9 +179,10 @@ static int tl_recognition_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* Subscribe to road/traffic_lights (flowsim_node source) and camera (reserved) */
+    /* Subscribe to road/traffic_lights (flowsim_node source).
+     * B-3a: 删除了空的 on_camera 回调与 sensor/camera 订阅（沙箱不消费图像，
+     * 真实 HAVE_CV 版本会在此订阅并做颜色 blob / 深度学习检测）。 */
     transport_subscribe(transport, "road/traffic_lights", on_road_traffic_lights, NULL);
-    transport_subscribe(transport, "sensor/camera", on_camera, NULL);
 
     /* Advertise output */
     transport_advertise(transport, "perception/traffic_lights", PERCEPTION_TRAFFIC_LIGHTS_TYPE_ID);

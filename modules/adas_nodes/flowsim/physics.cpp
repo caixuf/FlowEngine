@@ -45,8 +45,10 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
     // 横向：自行车运动学
     e.heading += (e.speed / e.wheelbase) * std::tan(steer) * dt;
     // 航向归一化到 [-π, π]
-    if (e.heading > M_PI)  e.heading -= 2.0 * M_PI;
-    if (e.heading < -M_PI) e.heading += 2.0 * M_PI;
+    // 用 while 而非 if：heading 可能因多圈累计（如高速原地打方向盘）远超 2π，
+    // 单次 if 只减一个 2π 不足以归一化，会留下 [π, 3π] 等区间导致下游 cos/sin 错。
+    while (e.heading >  M_PI) e.heading -= 2.0 * M_PI;
+    while (e.heading < -M_PI) e.heading += 2.0 * M_PI;
 
     e.x += e.speed * dt * std::cos(e.heading);
     e.y += e.speed * dt * std::sin(e.heading);

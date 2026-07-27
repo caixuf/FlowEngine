@@ -14,6 +14,11 @@
  * 新代码请使用 FlowCoroTask 协程范式（见 modules/adas_nodes/fusion_node.cpp），
  * 直接订阅 sensor/ 系列话题并调用 message_buffer_ / ekf_fusion_ 系列函数即可，
  * 无需继承 FusionNodeCpp 基类（已移除）。
+ *
+ * B-3 标注：FusionNode C API（fusion_node_create/add_input/start/...）仅被
+ * tests/test_modules.c 引用，生产流水线已迁移到 fusion_node.cpp（FlowCoro 协程）。
+ * MessageBuffer / SyncedFrame / FusionPolicy 数据结构仍被 fusion_node.cpp 复用，
+ * 属于活跃 API；FusionNode 生命周期管理 API 属于测试覆盖的遗留接口。
  */
 
 #include "message_bus.h"

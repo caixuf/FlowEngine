@@ -5,6 +5,15 @@
  * @file intent_predictor.h
  * @brief 基于历史轨迹的意图预测 + 交互预测引擎
  *
+ * ── B-3 死代码标注 ────────────────────────────────────────
+ * 本模块（intent_predictor.h + src/core/intent_predictor.c）已完整实现意图分类
+ * （特征提取 + 得分计算 + softmax）+ 交互预测（ego 轨迹影响修正）+ 物理约束轨迹
+ * 生成，但全仓库零外部调用方——prediction_node 使用自有规则 CV/LK/LC 三模式，
+ * 未接入 intent_predictor。属于"已实现但未上线"的储备算法。保留代码以供未来
+ * prediction_node 升级为交互感知预测时直接复用；当前不得在生产链路依赖，编译进
+ * libflowengine_core 但无任何节点调用 intent_predictor_* 系列 API。
+ * ──────────────────────────────────────────────────────────
+ *
  * 相比原始 prediction_node 的纯规则 CV/LK/LC 三模式：
  *   1. 意图分类：基于横纵向速度、相对车道位置、航向角偏差推断意图
  *   2. 置信度：从固定 0.7/0.2/0.1 改为基于特征的成本函数

@@ -5,6 +5,14 @@
  * @file mpc_controller.h
  * @brief 自行车模型 + 线性 MPC 控制器
  *
+ * ── B-3 死代码标注 ────────────────────────────────────────
+ * 本模块（mpc_controller.h + src/core/mpc_controller.c）已完整实现 iLQR 风格
+ * MPC 求解器（线性化 + Riccati 反向传播 + 线搜索前向 rollout），但全仓库零外部
+ * 调用方——control_node 使用 PID + Stanley，未接入 MPC。属于"已实现但未上线"的
+ * 储备算法。保留代码以供未来 control_node 切换 MPC 时直接复用；当前不得在生产
+ * 链路依赖，编译进 libflowengine_core 但无任何节点调用 mpc_* 系列 API。
+ * ──────────────────────────────────────────────────────────
+ *
  * 基于运动学自行车模型 (Kinematic Bicycle Model)：
  *   x[t+1] = x[t] + v * cos(θ + δ) * dt
  *   y[t+1] = y[t] + v * sin(θ + δ) * dt

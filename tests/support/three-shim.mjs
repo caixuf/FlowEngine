@@ -228,6 +228,42 @@ export const PolarGridHelper = THREE;
 export const VertexNormalsHelper = THREE;
 export const FaceNormalsHelper = THREE;
 
+// ── D-2: OrbitControls 依赖的具名导出 ──
+// OrbitControls.js (vendor) `import { EventDispatcher, MOUSE, Spherical, TOUCH, Ray } from 'three'`。
+// 这些不能用 Proxy：class OrbitControls extends EventDispatcher 需要真实 constructor，
+// `switch (event.button) { case MOUSE.ROTATE }` 需要真实数值常量。
+// 因此 EventDispatcher / Spherical / Ray 用最小空类，MOUSE / TOUCH 用与 three.module.js
+// 一致的数值常量对象。
+class _EventDispatcher {
+  addEventListener() { return this; }
+  hasEventListener() { return false; }
+  removeEventListener() { return this; }
+  dispatchEvent() { return this; }
+}
+class _Spherical {
+  constructor(radius = 1, phi = 0, theta = 0) {
+    this.radius = radius; this.phi = phi; this.theta = theta;
+  }
+  set(radius, phi, theta) { this.radius = radius; this.phi = phi; this.theta = theta; return this; }
+  copy(other) { this.radius = other.radius; this.phi = other.phi; this.theta = other.theta; return this; }
+  setFromVector3() { return this; }
+  setFromCamera() { return this; }
+  makeSafe() { return this; }
+  clone() { return new _Spherical(this.radius, this.phi, this.theta); }
+}
+class _Ray {
+  constructor(origin, direction) { this.origin = origin; this.direction = direction; }
+  set(origin, direction) { this.origin = origin; this.direction = direction; return this; }
+  at(t, target) { return target; }
+  intersectPlane() { return null; }
+}
+export const EventDispatcher = _EventDispatcher;
+export const Spherical = _Spherical;
+export const Ray = _Ray;
+// 与 three.module.js r160 中的常量保持一致
+export const MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
+export const TOUCH = { ROTATE: 0, PAN: 1, DOLLY_PAN: 2, DOLLY_ROTATE: 3 };
+
 // 常量导出
 export const DoubleSide = 2;
 export const FrontSide = 0;

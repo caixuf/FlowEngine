@@ -6,9 +6,9 @@
  *
  * 关键设计：
  *   - 道路网络采样：若 esmini RoadManager 已加载，按 road 索引遍历，每条 road 在
- *     参考线（lane_id=0, offset=0）上等距采样 N 点，输出为 nodes [[x,y],...]
+ *     参考线（lane_id=0, offset=0）上等距采样 N 点，输出为 nodes [[x,y,z],...]
  *     给前端用 CatmullRomCurve3 渲染。esmini 未加载时退化为单条直/弯道 edge，
- *     端点用 road_geometry.h 的 road_center_y() 计算。
+ *     端点用 road_geometry.h 的 road_center_y() 计算，z 恒为 0（C-5 统一 schema）。
  *   - 实体序列化：按 EntityType 分发到不同字段集合，事件触发器（TL/ETCGate）
  *     只发可视化必需字段，避免每帧冗余传输。
  *   - cJSON 内存管理：所有 cJSON 节点最终由 cJSON_Delete(root) 递归释放，
@@ -142,6 +142,9 @@ void sample_legacy_road_nodes(const ScenePubConfig& cfg, cJSON* nodes_array) {
         cJSON* pt = cJSON_CreateArray();
         cJSON_AddItemToArray(pt, cJSON_CreateNumber(x));
         cJSON_AddItemToArray(pt, cJSON_CreateNumber(y));
+        /* C-5: 与 esmini 模式 nodes 三元组对齐，统一 schema。
+         * legacy 道路无 elevation，z 恒为 0；前端 nodes[ni][2] || 0 仍兼容。 */
+        cJSON_AddItemToArray(pt, cJSON_CreateNumber(0.0));
         cJSON_AddItemToArray(nodes_array, pt);
     }
 }
@@ -222,6 +225,9 @@ cJSON* build_road_network_json(ScenePubConfig& cfg) {
         double total_len = cfg.curve_start_x + cfg.curve_length_m;
         if (total_len < 200.0) total_len = 200.0;
         cJSON_AddNumberToObject(edge, "length", total_len);
+        /* C-5: 与 esmini 模式 edge schema 对齐——legacy edge 显式标注 type="road"，
+         * 前端无需再对缺失 type 字段做特判分支。 */
+        cJSON_AddStringToObject(edge, "type", "road");
         cJSON_AddItemToArray(edges, edge);
     }
 

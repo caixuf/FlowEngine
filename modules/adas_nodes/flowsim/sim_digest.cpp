@@ -32,23 +32,46 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
 
         // 采样道路中线
         int n_lanes = roads.drivable_lane_count((int)ri.id, 0);
-        double half_w = n_lanes * 3.5 * 0.5;
+
+        /* B-2 修复：原代码硬编码 lane_id=0，把参考线采样 n_lanes 次，每条
+         * "车道"的中线都是参考线，车道宽恒为 3.5。这导致：
+         *   - check_static_invariants 的"车道宽 ∈ [2.5,4.0]"检查恒为 pass（硬编码 3.5）
+         *   - "lane 中线落在可行驶多边形内"检查的是参考线而非真实车道中心
+         *   - "红绿灯朝向 · 车道方向"用参考线方向，对单向多车道场景无意义
+         *
+         * 修复：用 lane_width 探测真实 drivable lane_ids（OpenDRIVE 约定
+         * 0=参考线非 drivable，正=左，负=右），为每条车道采样各自中心线 +
+         * 查询真实车道宽度。无 lane_id 枚举 API，用 lane_width>0 作存在性探测。 */
+        std::vector<int> lane_ids;
+        for (int lid = -n_lanes; lid <= n_lanes; ++lid) {
+            if (lid == 0) continue;  // 参考线不是 drivable lane
+            if (roads.lane_width((int)ri.id, lid, 0.0) > 0.0) {
+                lane_ids.push_back(lid);
+            }
+        }
+
+        // 用真实车道宽度算 half_w（替代硬编码 3.5）
+        double road_lane_w = 3.5;  // fallback
+        if (!lane_ids.empty()) {
+            road_lane_w = roads.lane_width((int)ri.id, lane_ids[0], 0.0);
+            if (road_lane_w <= 0.0) road_lane_w = 3.5;
+        }
+        double half_w = n_lanes * road_lane_w * 0.5;
         if (half_w > max_half_width) max_half_width = half_w;
 
-        // 为每个车道生成 digest
-        for (int li = 0; li < n_lanes; ++li) {
-            int lane_id = 0;
-            // 用 esmini API 取车道 ID
-            int drivable = roads.drivable_lane_count((int)ri.id, 0);
-            if (drivable <= 0) continue;
+        // 为每个车道生成 digest（用探测到的真实 lane_id 采样各自中心线）
+        for (size_t li = 0; li < lane_ids.size(); ++li) {
+            int lane_id = lane_ids[li];
+            double lw = roads.lane_width((int)ri.id, lane_id, 0.0);
+            if (lw <= 0.0) lw = road_lane_w;  // 探测已成功，兜底防 s 变化
 
             LaneDigest ld;
             ld.id = (int)sd.lanes.size();
             ld.road_id = (int)ri.id;
-            ld.lane_id = lane_id;
-            ld.width = 3.5;
+            ld.lane_id = lane_id;       // 真实车道 id（替代硬编码 0）
+            ld.width = lw;              // 真实车道宽度（替代硬编码 3.5）
 
-            // 采样中心线（沿 s 每 10m 采样）
+            // 采样该车道中心线（沿 s 每 10m 采样，offset=0 即车道中心）
             for (double s = 0; s < ri.length; s += 10.0) {
                 WorldPos wp;
                 if (roads.frenet_to_world((int)ri.id, lane_id, s, 0, wp)) {
@@ -73,7 +96,7 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
         }
 
         // Road marking digest
-        for (int li = 0; li < n_lanes - 1; ++li) {
+        for (int li = 0; li < (int)lane_ids.size() - 1; ++li) {
             RoadMarkingDigest rm;
             rm.type = 0;  // 虚线（同向分隔）
             rm.dash_length = 3.0;
@@ -239,25 +262,9 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
     }
 
     // 3. 虚线段长 ~3m、间距 ~6–9m
-    for (size_t i = 0; i < sd.markings.size(); ++i) {
-        const auto& m = sd.markings[i];
-        if (m.type == 0) {  // 虚线
-            if (m.dash_length < 2.0 || m.dash_length > 4.0) {
-                r.warned++;
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                    "  WARN marking[%zu]: dash_length=%.2f not ≈3m\n", i, m.dash_length);
-                r.details += buf;
-            } else { r.passed++; }
-            if (m.gap_length < 5.0 || m.gap_length > 10.0) {
-                r.warned++;
-                char buf[256];
-                snprintf(buf, sizeof(buf),
-                    "  WARN marking[%zu]: gap_length=%.2f not ≈6-9m\n", i, m.gap_length);
-                r.details += buf;
-            } else { r.passed++; }
-        }
-    }
+    /* B-2 删除：此检查依赖 build_static_digest 中硬编码的 dash_length=3.0 /
+     * gap_length=6.0（esmini 不暴露标线几何），检查恒为 pass，无法检测真实
+     * 标线问题。RoadMarkingDigest 仍保留（未来接入真实标线数据后可恢复检查）。 */
 
     // 4. 可行驶区闭合检查
     if (sd.drivable_poly_x.size() >= 3) {
@@ -416,17 +423,11 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
         }
 
         // 3. rotationY == headingToRotationY(heading)
-        // headingToRotationY(h) = h，所以 rotation_y 应等于 heading
-        if (std::fabs(a.rotation_y - a.heading) > 0.01) {
-            r.failed++;
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                "  FAIL %s: rotation_y=%.4f != heading=%.4f (ENU→THREE 符号翻错)\n",
-                tag, a.rotation_y, a.heading);
-            r.details += buf;
-        } else {
-            r.passed++;
-        }
+        /* B-2 删除：此检查恒为 pass —— build_dynamic_digest 中
+         * `ad.rotation_y = e.heading` 直接从 heading 赋值，二者必然相等，
+         * 检查 |rotation_y - heading| < 0.01 永远成立，无法检测 ENU→THREE
+         * 符号翻转 bug。rotation_y 字段保留，仅供调试观察；要恢复真实检查需
+         * 让 rotation_y 由独立路径计算而非复制 heading。 */
 
         // 4. 速度范围：0 ≤ speed ≤ 1.5×限速
         double speed_limit = 33.3;  // 默认 120km/h
@@ -465,6 +466,10 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
     }
 
     // 6. 两 actor bbox 不重叠检查
+    /* B-2 升级：从 WARN 升级为 FAIL。bbox 重叠意味着两车穿模/碰撞，是必须
+     * 修复的硬错误，WARN 会被 evaluator 忽略。collision.cpp 已做 OBB SAT
+     * 碰撞响应，此处 digest 检查是事后校验（采样间隔 20 帧），重叠即说明
+     * 碰撞响应未生效或 NPC 被传送到重叠位置。 */
     for (size_t i = 0; i < d.actors.size(); ++i) {
         for (size_t j = i + 1; j < d.actors.size(); ++j) {
             const auto& a = d.actors[i];
@@ -474,10 +479,10 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
             double ox = (a.bbox[0] + b.bbox[0]) * 0.5;
             double oy = (a.bbox[1] + b.bbox[1]) * 0.5;
             if (dx < ox && dy < oy) {
-                r.warned++;
+                r.failed++;
                 char buf[256];
                 snprintf(buf, sizeof(buf),
-                    "  WARN actor[%d]↔actor[%d]: bbox 重叠 dx=%.2f<%.2f dy=%.2f<%.2f (碰撞/穿模)\n",
+                    "  FAIL actor[%d]↔actor[%d]: bbox 重叠 dx=%.2f<%.2f dy=%.2f<%.2f (碰撞/穿模)\n",
                     a.id, b.id, dx, ox, dy, oy);
                 r.details += buf;
             }
@@ -656,17 +661,46 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
         }
 
         // 4. accel ∈ [−8, +4] m/s²
+        /* B-2 升级：从 WARN 升级为 FAIL。超出运动学可行加速度范围意味着
+         * 物理积分出错或外部传送未标记，是必须修复的硬错误。 */
         double dv = ca.speed - pa->speed;
         double accel = dv / dt;
         if (accel < ACCEL_MIN || accel > ACCEL_MAX) {
-            r.warned++;
+            r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),
-                "  WARN %s: accel=%.2f ∉ [%.0f,%.0f] m/s² (运动学不可行)\n",
+                "  FAIL %s: accel=%.2f ∉ [%.0f,%.0f] m/s² (运动学不可行)\n",
                 tag, accel, ACCEL_MIN, ACCEL_MAX);
             r.details += buf;
         } else {
             r.passed++;
+        }
+
+        // 5. anti-reverse: Δs 与 route_dir 方向一致（不倒车）
+        /* B-2 新增：用 Δs 和 route_dir 检测倒车。route_dir>0 的顺行车 s 应递增，
+         * route_dir<0 的对向车 s 应递减。同一 road 上 Δs 方向与 route_dir 相反
+         * 即倒车（如顺行车 s 减小 = 倒退）。teleported 时 s 被重置，跳过检查。
+         * 跨 road 时 s 范围重置，也跳过（road_id 不一致）。容差 0.5m 防数值噪声。 */
+        if (!teleported && ca.route_dir != 0 && pa->route_dir != 0
+            && ca.route_dir == pa->route_dir && ca.road_id == pa->road_id) {
+            double ds = ca.s - pa->s;
+            if (ca.route_dir > 0 && ds < -0.5) {
+                r.failed++;
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "  FAIL %s: Δs=%.3f < 0 but route_dir=+1 (倒车/逆行)\n",
+                    tag, ds);
+                r.details += buf;
+            } else if (ca.route_dir < 0 && ds > 0.5) {
+                r.failed++;
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "  FAIL %s: Δs=%.3f > 0 but route_dir=-1 (倒车/逆行)\n",
+                    tag, ds);
+                r.details += buf;
+            } else {
+                r.passed++;
+            }
         }
     }
 
@@ -789,86 +823,6 @@ std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& d
     out += "E=ego C=car *=pedestrian ><^v=朝向 -=车道线 #=双黄 G/Y/R=灯(绿黄红)\n";
     out += "frame:" + std::to_string(dd.frame) + " time:" + std::to_string(dd.sim_time) + "\n";
     return out;
-}
-
-// ═══════════════════════════════════════════════════════════
-// Golden 快照（transform 记账 + diff，用于回归检测位置漂移）
-// ═══════════════════════════════════════════════════════════
-
-std::string golden_snapshot(const DynamicDigest& dd) {
-    // 按 id 排序后生成 (name, pos, rotY, scale) 列表
-    std::vector<ActorDigest> sorted = dd.actors;
-    std::sort(sorted.begin(), sorted.end(),
-              [](const ActorDigest& a, const ActorDigest& b) { return a.id < b.id; });
-
-    std::string s = "{\n  \"frame\":" + std::to_string(dd.frame) + ",\n";
-    s += "  \"sim_time\":" + std::to_string(dd.sim_time) + ",\n";
-    s += "  \"actors\":[\n";
-    for (size_t i = 0; i < sorted.size(); ++i) {
-        const auto& a = sorted[i];
-        char buf[512];
-        char name[32];
-        snprintf(name, sizeof(name), "actor_%d", a.id);
-        snprintf(buf, sizeof(buf),
-          "    {\"name\":\"%s\",\"pos\":[%.4f,%.4f,%.4f],\"rotY\":%.4f,\"scale\":[%.2f,%.2f,%.2f]}%s\n",
-          name,
-          a.pos[0], a.pos[1], a.pos[2],
-          a.rotation_y,
-          a.bbox[0], a.bbox[1], a.bbox[2],
-          (i < sorted.size() - 1) ? "," : "");
-        s += buf;
-    }
-    s += "  ]\n}";
-    return s;
-}
-
-std::string golden_diff(const std::string& golden, const std::string& current,
-                         double tolerance) {
-    if (golden == current) return "";  // 完全一致
-
-    // 简易逐行 diff（不引入完整 JSON 解析器，仅做数值容差比较）
-    std::string diff;
-    std::istringstream gs(golden), cs(current);
-    std::string gl, cl;
-    int line = 0;
-    while (std::getline(gs, gl) && std::getline(cs, cl)) {
-        line++;
-        if (gl != cl) {
-            // 提取行内所有数值，按容差比较
-            auto extract_nums = [](const std::string& ln) -> std::vector<double> {
-                std::vector<double> nums;
-                const char* p = ln.c_str();
-                while (*p) {
-                    if ((*p >= '0' && *p <= '9') || *p == '-' || *p == '.') {
-                        char* end;
-                        double v = strtod(p, &end);
-                        if (end > p) {
-                            nums.push_back(v);
-                            p = end;
-                            continue;
-                        }
-                    }
-                    p++;
-                }
-                return nums;
-            };
-            auto gn = extract_nums(gl);
-            auto cn = extract_nums(cl);
-            bool numeric_diff = false;
-            if (gn.size() == cn.size() && gn.size() > 0) {
-                for (size_t i = 0; i < gn.size(); ++i) {
-                    if (std::fabs(gn[i] - cn[i]) > tolerance) {
-                        numeric_diff = true;
-                        break;
-                    }
-                }
-                if (!numeric_diff) continue;  // 数值差异在容差内，跳过
-            }
-            diff += "  L" + std::to_string(line) + " golden: " + gl.substr(0, 80) + "\n";
-            diff += "  L" + std::to_string(line) + " current: " + cl.substr(0, 80) + "\n";
-        }
-    }
-    return diff;
 }
 
 }  // namespace flowsim

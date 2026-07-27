@@ -1606,50 +1606,12 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.min_overtake_gap_speed_mult = 0.7; /* 原硬编码 current_speed * 2.0（绝对速度），改为相对速度乘数，避免高速下 gap 永远无法满足 */
     g.steer_min_clamp             = 0.016; /* 原硬编码 0.012，提高最小转向钳位以缩短高速变道耗时 */
 
-    /* 注册参数到 param_registry (类型安全，可运行时热重载) */
-    param_register_float("control.pid_kp", g.cfg_kp, 0.0, 5000.0, "PID proportional gain");
-    param_register_float("control.pid_ki", g.cfg_ki, 0.0, 1000.0, "PID integral gain");
-    param_register_float("control.pid_kd", g.cfg_kd, 0.0, 2000.0, "PID derivative gain");
-    param_register_float("control.cruise_speed", g.cfg_cruise_speed, 1.0, 50.0, "Target cruise speed m/s");
-    param_register_float("control.lane_width", g.lane_width, 2.5, 5.0, "Lane width meters");
-    param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
-    param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
-    param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
-    param_register_float("control.lat_lookahead_gain", g.lat_lookahead_gain, 0.1, 3.0, "Lookahead time gain (s): lookahead=max(5m, speed*gain), Apollo-style target trajectory");
-    param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
-    param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
-    param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
-    param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
-    param_register_float("control.lc_cooldown_after_return_s", g.lc_cooldown_after_return_s, 0.0, 30.0, "Cooldown after returning to original lane");
-    param_register_float("control.min_overtake_gap_base", g.min_overtake_gap_base, 1.0, 100.0, "Base min lead gap to trigger overtake (m)");
-    param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
-    param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
-    param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
-
-    /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载) */
-    g.kp = param_get_float("control.pid_kp");
-    g.ki = param_get_float("control.pid_ki");
-    g.kd = param_get_float("control.pid_kd");
-    g.cfg_cruise_speed = param_get_float("control.cruise_speed");
-    g.lane_width       = param_get_float("control.lane_width");
-    g.lat_kp           = param_get_float("control.lat_kp");
-    g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
-    g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
-    g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
-    g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
-    g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
-    g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
-    g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
-    g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
-    g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
-    g.yaw_damping                 = param_get_float("control.yaw_damping");
-    g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
-    g.k_v_lat                     = param_get_float("control.k_v_lat");
-
-    /* 初始化反射式状态机 */
-    statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
-    statem_send_event(&g.sm, SM_EVENT_START, nullptr);  /* INITIALIZED → RUNNING */
-
+    /* A-2 修复：先解析 JSON 配置（pipeline_car.json 等通过 params_json 传入），
+     * 把 JSON 中的值刷入 g.* 字段；随后 param_register_* 用这些（可能被 JSON
+     * 覆盖过的）值作为代码默认值注册。若 bootstrap 已把同名参数预加载进
+     * registry，param_register 不会覆盖其 current_value（见 param_registry.c A-1）。
+     * 不使用 param_set_float 回写 JSON 值——那会在参数尚未注册（无 min/max 元信息）
+     * 时引入脆弱的范围校验失败。 */
     if (params_json) {
         cJSON* p = cJSON_Parse(params_json);
         if (p) {
@@ -1705,6 +1667,55 @@ static int control_init(MessageBus* bus, Transport* transport,
             g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
         }
     }
+
+    /* 注册参数到 param_registry (类型安全，可运行时热重载)。
+     * 注意：此时 g.* 已被 JSON 覆盖（若 JSON 提供了对应字段），故注册的代码默认值
+     * 就是 JSON 值；若 registry 中已存在同名参数（bootstrap 预加载），register
+     * 不会覆盖其 current_value，仅刷新 min/max/desc。 */
+    param_register_float("control.pid_kp", g.cfg_kp, 0.0, 5000.0, "PID proportional gain");
+    param_register_float("control.pid_ki", g.cfg_ki, 0.0, 1000.0, "PID integral gain");
+    param_register_float("control.pid_kd", g.cfg_kd, 0.0, 2000.0, "PID derivative gain");
+    param_register_float("control.cruise_speed", g.cfg_cruise_speed, 1.0, 50.0, "Target cruise speed m/s");
+    param_register_float("control.lane_width", g.lane_width, 2.5, 5.0, "Lane width meters");
+    param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
+    param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
+    param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
+    param_register_float("control.lat_lookahead_gain", g.lat_lookahead_gain, 0.1, 3.0, "Lookahead time gain (s): lookahead=max(5m, speed*gain), Apollo-style target trajectory");
+    param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
+    param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
+    param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
+    param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
+    param_register_float("control.lc_cooldown_after_return_s", g.lc_cooldown_after_return_s, 0.0, 30.0, "Cooldown after returning to original lane");
+    param_register_float("control.min_overtake_gap_base", g.min_overtake_gap_base, 1.0, 100.0, "Base min lead gap to trigger overtake (m)");
+    param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
+    param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
+    param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
+
+    /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
+     * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；
+     * 若 registry 已被 bootstrap 预加载，此处取到的是预加载值。 */
+    g.kp = param_get_float("control.pid_kp");
+    g.ki = param_get_float("control.pid_ki");
+    g.kd = param_get_float("control.pid_kd");
+    g.cfg_cruise_speed = param_get_float("control.cruise_speed");
+    g.lane_width       = param_get_float("control.lane_width");
+    g.lat_kp           = param_get_float("control.lat_kp");
+    g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
+    g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
+    g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
+    g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
+    g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
+    g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
+    g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
+    g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
+    g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
+    g.yaw_damping                 = param_get_float("control.yaw_damping");
+    g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
+    g.k_v_lat                     = param_get_float("control.k_v_lat");
+
+    /* 初始化反射式状态机 */
+    statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
+    statem_send_event(&g.sm, SM_EVENT_START, nullptr);  /* INITIALIZED → RUNNING */
 
     /* Phase 2: 道路几何从 road/geometry topic 获取（flowsim_node 发布），
      * 不再独立 scenario_load。 */

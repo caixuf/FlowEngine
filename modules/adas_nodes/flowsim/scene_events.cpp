@@ -18,6 +18,7 @@
 #include "physics.h"
 #include "road_network.h"
 #include "route.h"
+#include "lane_frenet.h"   /* C-2: 共享车道中心横向偏移公式 */
 #include "logger.h"
 #include "scenario_loader.h"
 
@@ -317,12 +318,10 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
             if (roads->world_to_frenet(new_x, new_y, fp)) {
                 target->road_id = fp.road_id;
                 target->s       = fp.s;
-                /* fp.offset 是车道内偏移，需换算成相对参考线的横向偏移 */
-                double lw = roads->lane_width(fp.road_id, fp.lane_id, fp.s);
-                if (lw <= 0.0) lw = 3.5;
-                double lane_center_t = (fp.lane_id > 0 ? 1.0 : -1.0)
-                                     * (std::abs(fp.lane_id) - 0.5) * lw;
-                target->offset = lane_center_t + fp.offset;
+                /* fp.offset 是车道内偏移，需换算成相对参考线的横向偏移。
+                 * C-2: 用 lane_frenet.h::offset_from_lane_internal 替换手写公式。 */
+                target->offset = offset_from_lane_internal(*roads, fp.road_id,
+                                                            fp.lane_id, fp.s, fp.offset);
                 /* 非 cutin 时 target_offset = offset（保持当前车道） */
                 /* cutin 的 target_offset 在下方动作块设置 */
                 /* reinit road_pos 到新位置 */

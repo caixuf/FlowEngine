@@ -189,13 +189,22 @@ static int recorder_execute(TaskBase* task) {
         {   double arr[] = {g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate};
             cJSON_AddItemToObject(root, "features", cJSON_CreateDoubleArray(arr, 4)); }
 
+        /* C-3 修复：features_v2 必须为 16 维，含 front1_confidence。
+         * 维度契约（与 tools/train_e2e/feature_schema.py 一致）：
+         *   0 ego_v, 1 ego_y, 2 ego_heading, 3 ego_yaw_rate,
+         *   4 front0_x, 5 front0_y, 6 front0_vx, 7 front0_type, 8 front0_confidence,
+         *   9 front1_x, 10 front1_y, 11 front1_vx, 12 front1_type, 13 front1_confidence,
+         *   14 control_brake, 15 control_emergency_stop
+         * 旧 15 维数据缺 front1_confidence，导致索引错位；temporal_train.py 已改为
+         * 维度不匹配硬报错，禁止静默补零混训。 */
         {   double arr[] = {
                 g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
                 front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
                 (double)(front0 ? (int)front0->type : 0), front0 ? front0->confidence : 0.0,
                 front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
-                (double)(front1 ? (int)front1->type : 0), control_brake, (double)control_emergency_stop };
-            cJSON_AddItemToObject(root, "features_v2", cJSON_CreateDoubleArray(arr, 15)); }
+                (double)(front1 ? (int)front1->type : 0), front1 ? front1->confidence : 0.0,
+                control_brake, (double)control_emergency_stop };
+            cJSON_AddItemToObject(root, "features_v2", cJSON_CreateDoubleArray(arr, 16)); }
 
         cJSON_AddNumberToObject(root, "label", g.planning_target_speed);
 

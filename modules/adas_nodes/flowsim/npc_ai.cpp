@@ -20,6 +20,7 @@
 #include "physics.h"
 #include "road_network.h"
 #include "route.h"
+#include "lane_frenet.h"   /* C-2: 共享车道中心横向偏移公式 */
 
 #include <algorithm>
 #include <cmath>
@@ -702,19 +703,15 @@ mobil_done: ;
             // 修复：先取 road_pos 刚 advance 后的 lane_id（可能与上一帧 npc.lane_id
             // 不同，过路口时 esmini 可能切车道），把 npc.offset 转换为
             //   lane_internal = npc.offset - lane_center_t
-            // 其中 lane_center_t = sign(lane_id) * (|lane_id| - 0.5) * lane_width
-            // （与 flowsim_node.cpp:552-553 / 本文件 line 834-835 公式一致）。
-            // lane_id == 0 时 offset 即 road ref，无需转换。
+            // C-2: 用 lane_frenet.h::lane_internal_from_offset 替换手写公式，
+            // lane_id == 0 时 helper 直接返回 ref_offset（即 npc.offset），无需转换。
             double lane_internal = npc.offset;
             int rp_lane = npc.road_pos.lane_id();
             if (rp_lane != 0 && roads && roads->loaded()) {
                 int    rp_road = npc.road_pos.road_id();
                 double rp_s    = npc.road_pos.s();
-                double lw = roads->lane_width(rp_road, rp_lane, rp_s);
-                if (lw <= 0.0) lw = 3.5;
-                double lane_center_t = (rp_lane > 0 ? 1.0 : -1.0)
-                                     * (std::abs(rp_lane) - 0.5) * lw;
-                lane_internal = npc.offset - lane_center_t;
+                lane_internal = lane_internal_from_offset(*roads, rp_road, rp_lane,
+                                                          rp_s, npc.offset);
             }
             npc.road_pos.set_offset(lane_internal);
             WorldPos wp;
@@ -858,12 +855,10 @@ mobil_done: ;
              * 间"变来变去"。
              *
              * 修复：与 init 一致，把 f.offset 转换为 lane_center + f.offset 后
-             * 再写入 npc.offset，保持横向位置语义一致。 */
-            double lw = roads->lane_width(f.road_id, f.lane_id, f.s);
-            if (lw <= 0.0) lw = 3.5;
-            double lane_center_t = (f.lane_id > 0 ? 1.0 : -1.0)
-                                 * (std::abs(f.lane_id) - 0.5) * lw;
-            npc.offset = lane_center_t + f.offset;
+             * 再写入 npc.offset，保持横向位置语义一致。
+             * C-2: 用 lane_frenet.h::offset_from_lane_internal 替换手写公式。 */
+            npc.offset = offset_from_lane_internal(*roads, f.road_id, f.lane_id,
+                                                    f.s, f.offset);
             /* NPC 横向控制权归零：兜底 NPC 通常 route_dir=0（不在主 route 上），
              * 不参与变道，强制 target_offset = offset 让它沿当前车道直行。
              * 注意此处 offset 已是正确的 lane_center + f.offset。 */

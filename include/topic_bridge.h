@@ -5,6 +5,14 @@
  * @file topic_bridge.h
  * @brief 跨进程 Topic 桥接 — 显式把一组 topic 在两个独立进程间对拷
  *
+ * ── B-3 死代码标注 ────────────────────────────────────────
+ * 本模块（topic_bridge.h + src/core/topic_bridge.c）已完整实现跨进程 topic 桥接
+ *（PUB/SUB/BIDIR 三方向，复用 ipc_channel SHM+信号量传输，BIDIR 带 "bridge:" 前缀
+ * 防回环），但全仓库零外部调用方——当前 FlowEngine 为单进程 NodePlugin 架构，
+ * 多进程仿真部署（Phase 10）尚未落地。属于"已实现但未上线"的储备能力。保留代码
+ * 以供未来多进程拆分时直接复用；当前不得在生产链路依赖。
+ * ──────────────────────────────────────────────────────────
+ *
  * ── 定位 ──────────────────────────────────────────────────
  * 这是一个 **接口契约（scaffold）**，用于跨进程 topic bridge 的
  * Phase 10「多进程仿真部署验证」（plan 主线 A3）。
@@ -27,14 +35,14 @@
  *     topic_bridge_add_topic(b, "sensor/lidar", LIDARFRAME_TYPE_ID);
  *     topic_bridge_start(b);   // sensor/lidar 现在会出现在 busB 上
  *
- * ── 实现指引（给后续实现者） ────────────────────────────────
- * 建议实现文件：src/core/topic_bridge.c，并加入 CMakeLists 的 flowengine_core。
- * 复用已有能力：
- *   - `ipc_channel.h`   —— 共享内存传输（同机跨进程）。
- *   - `serializer.h`    —— 出站 message_bus_publish 前序列化 / 入站反序列化。
- *   - `message_bus.h`   —— 本进程收发（PUB 侧订阅本地 topic；SUB 侧向本地发布）。
- * 所有函数当前**未实现**，返回 ERR_OK/句柄即视为契约占位；实现前请勿在生产链路依赖。
+ * ── 实现状态（B-3 修正） ───────────────────────────────────
+ * 原标注"所有函数当前未实现"已过时——src/core/topic_bridge.c 已完整实现：
+ *   - PUB 方向：本地 bus 订阅 → ipc_channel_publish → 对端进程
+ *   - SUB 方向：ipc_channel recv 线程 → message_bus_publish → 本地 bus
+ *   - BIDIR：以 "bridge:" 前缀标记转发消息，防回环重发
+ * 复用能力：ipc_channel.h（SHM+信号量）、message_bus.h（本地收发）。
  * 详见 skills/04_ipc_channel.md（IPC 教程）。
+ * 注意：实现完整但无外部调用方（见顶部 B-3 标注），待多进程部署落地后启用。
  */
 
 #include "message_bus.h"

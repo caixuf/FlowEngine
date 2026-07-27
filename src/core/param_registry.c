@@ -13,9 +13,17 @@ static ParamEntry    g_params[PARAM_MAX_ENTRIES];
 static int           g_param_count = 0;
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static ParamEntry* find_or_create(const char* name) {
+/* 拆分原 find_or_create：find_param 只查找，create_param 只创建。
+ * 这样 param_register_* 可以先 find_param，若参数已存在（如从 JSON 配置
+ * 预加载到 registry）则只更新 min/max/desc 等元信息，绝不覆盖 current_value，
+ * 避免 JSON 配置的值被代码默认值覆盖（A-1 修复）。 */
+static ParamEntry* find_param(const char* name) {
     for (int i = 0; i < g_param_count; i++)
         if (strcmp(g_params[i].name, name) == 0) return &g_params[i];
+    return NULL;
+}
+
+static ParamEntry* create_param(const char* name) {
     if (g_param_count >= PARAM_MAX_ENTRIES) return NULL;
     ParamEntry* e = &g_params[g_param_count++];
     memset(e, 0, sizeof(*e));
@@ -24,12 +32,27 @@ static ParamEntry* find_or_create(const char* name) {
     return e;
 }
 
-/* ── Register ────────────────────────────────────────────── */
+/* ── Register ──────────────────────────────────────────────
+ * 注册语义（A-1 修复）：
+ *   - 若参数已存在（例如 bootstrap 已从 pipeline_*.json 把值预加载进 registry）：
+ *     不覆盖 current_value，只刷新 type/default/min/max/desc 元信息。
+ *   - 若参数不存在：create_param 并把 current_value 设为传入的代码默认值。
+ *   - 这样保证「JSON 配置优先于代码默认值」，且 param_set_* 仍可带范围校验改值。 */
 
 int param_register_int(const char* name, int64_t def, int64_t min, int64_t max, const char* desc) {
     if (!name) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&g_mutex);
-    ParamEntry* e = find_or_create(name);
+    ParamEntry* e = find_param(name);
+    if (e) {
+        e->type = PARAM_INT;
+        e->default_value.int_val = def;
+        e->min_value.int_val = min;
+        e->max_value.int_val = max;
+        if (desc) snprintf(e->description, PARAM_DESC_LEN, "%s", desc);
+        pthread_mutex_unlock(&g_mutex);
+        return 0;
+    }
+    e = create_param(name);
     if (!e) { pthread_mutex_unlock(&g_mutex); return ERR_OVERFLOW; }
     e->type = PARAM_INT;
     e->default_value.int_val = def;
@@ -44,7 +67,17 @@ int param_register_int(const char* name, int64_t def, int64_t min, int64_t max, 
 int param_register_float(const char* name, double def, double min, double max, const char* desc) {
     if (!name) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&g_mutex);
-    ParamEntry* e = find_or_create(name);
+    ParamEntry* e = find_param(name);
+    if (e) {
+        e->type = PARAM_FLOAT;
+        e->default_value.float_val = def;
+        e->min_value.float_val = min;
+        e->max_value.float_val = max;
+        if (desc) snprintf(e->description, PARAM_DESC_LEN, "%s", desc);
+        pthread_mutex_unlock(&g_mutex);
+        return 0;
+    }
+    e = create_param(name);
     if (!e) { pthread_mutex_unlock(&g_mutex); return ERR_OVERFLOW; }
     e->type = PARAM_FLOAT;
     e->default_value.float_val = def;
@@ -59,7 +92,15 @@ int param_register_float(const char* name, double def, double min, double max, c
 int param_register_bool(const char* name, bool def, const char* desc) {
     if (!name) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&g_mutex);
-    ParamEntry* e = find_or_create(name);
+    ParamEntry* e = find_param(name);
+    if (e) {
+        e->type = PARAM_BOOL;
+        e->default_value.bool_val = def;
+        if (desc) snprintf(e->description, PARAM_DESC_LEN, "%s", desc);
+        pthread_mutex_unlock(&g_mutex);
+        return 0;
+    }
+    e = create_param(name);
     if (!e) { pthread_mutex_unlock(&g_mutex); return ERR_OVERFLOW; }
     e->type = PARAM_BOOL;
     e->default_value.bool_val = def;
@@ -72,7 +113,15 @@ int param_register_bool(const char* name, bool def, const char* desc) {
 int param_register_string(const char* name, const char* def, const char* desc) {
     if (!name) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&g_mutex);
-    ParamEntry* e = find_or_create(name);
+    ParamEntry* e = find_param(name);
+    if (e) {
+        e->type = PARAM_STRING;
+        if (def) snprintf(e->default_value.str_val, 64, "%s", def);
+        if (desc) snprintf(e->description, PARAM_DESC_LEN, "%s", desc);
+        pthread_mutex_unlock(&g_mutex);
+        return 0;
+    }
+    e = create_param(name);
     if (!e) { pthread_mutex_unlock(&g_mutex); return ERR_OVERFLOW; }
     e->type = PARAM_STRING;
     if (def) snprintf(e->default_value.str_val, 64, "%s", def);
@@ -85,7 +134,7 @@ int param_register_string(const char* name, const char* def, const char* desc) {
 int param_set_callback(const char* name, ParamChangeCallback cb, void* user_data) {
     if (!name) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&g_mutex);
-    ParamEntry* e = find_or_create(name);
+    ParamEntry* e = find_param(name);
     if (!e) { pthread_mutex_unlock(&g_mutex); return ERR_NOT_FOUND; }
     e->on_change = cb;
     e->change_user_data = user_data;

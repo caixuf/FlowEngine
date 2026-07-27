@@ -3,7 +3,7 @@
 > 模块: `modules/adas_nodes/flowsim/sim_digest.{h,cpp}`
 > 调用方: `flowsim_node.cpp`（init 阶段 + 每帧主循环）
 > 目的: 把"眼睛会检查的位置关系"编码为数值断言，错一个符号即 FAIL；
->       附带调试可视化（ASCII 俯视）与回归基线（golden 快照）。
+>       附带调试可视化（ASCII 俯视）。
 
 ## 1. 数据模型
 
@@ -194,36 +194,7 @@ cat /tmp/flow_ascii_overhead.txt
 watch -n 1 cat /tmp/flow_ascii_overhead.txt   # 实时刷新
 ```
 
-## 4. Golden 快照（回归基线）
-
-### 4.1 `golden_snapshot(dd)`
-
-按 actor id 排序后生成 JSON：
-```json
-{
-  "frame":80,
-  "sim_time":3.95,
-  "actors":[
-    {"name":"actor_0","pos":[102.5,-1.75,0.0],"rotY":0.05,"scale":[4.60,2.00,1.50]},
-    {"name":"actor_1","pos":[120.0,-1.75,0.0],"rotY":0.00,"scale":[4.60,2.00,1.50]}
-  ]
-}
-```
-
-可 commit 到仓库 `tests/golden/` 作为基准参考。
-
-### 4.2 `golden_diff(golden, current, tolerance=0.01)`
-
-简易逐行 diff（不引入完整 JSON 解析器）：
-- 完全相同 → 返回空字符串（PASS）
-- 行不同 → 提取行内所有数值，按容差比较
-  - 数值差异在容差内 → 跳过
-  - 超出容差或结构不同 → 记录 `L{n} golden: ... / current: ...`
-
-**用途**：任何 actor 的 pos/rotY/scale 偏差超过 tolerance 即 FAIL。
-只有几何合法变更时才需更新 golden（PR 附截图）。
-
-## 5. 调用流程
+## 4. 调用流程
 
 ```cpp
 // flowsim_node.cpp init 阶段（line 1410）
@@ -251,11 +222,11 @@ if (g.cycle % 20 == 0 && g.digest_initialized) {
 }
 ```
 
-## 6. 相关文件
+## 5. 相关文件
 
 | 文件 | 角色 |
 |------|------|
 | `modules/adas_nodes/flowsim/sim_digest.h` | 公开 API：结构体 + 函数声明 |
-| `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 构建 + invariant + ASCII + golden |
+| `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 构建 + invariant + ASCII |
 | `modules/adas_nodes/flowsim_node.cpp` | 调用方：init 构建 static_digest，主循环每 20 帧跑 invariant + 写 ASCII |
 | `tools/demo_evaluator.py` | 解析 stderr 的 invariant 失败详情 |

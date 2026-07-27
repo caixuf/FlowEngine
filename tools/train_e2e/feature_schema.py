@@ -29,15 +29,10 @@ FEATURE_NAMES_V3 = [
     "front1_x", "front1_y", "front1_vx", "front1_type", "front1_confidence",
     "control_brake", "control_emergency_stop",
 
-    # ── 感知统计（6 维，索引 16-21）──
-    "lidar_point_count",        # 点云总点数
-    "lidar_front_density",      # 前方 30m 点密度
-    "lidar_clutter_ratio",      # 杂波比例 (z<0.3m 的点 / 总点)
-    "perception_obj_count",     # 检测到的障碍物数
-    "perception_max_conf",      # 最高置信度
-    "perception_mean_conf",     # 平均置信度
-
-    # ── 场景上下文（7 维，索引 22-28）──
+    # ── 场景上下文（7 维，索引 16-22）──
+    # C-3 修复：原 59 维设计含未实现的感知统计（6 维 lidar，车端未采集，恒为 0）
+    # 与障碍物全貌统计（30 维，与 v2 front0/front1 冗余），这 36 维稀释有效特征。
+    # 截断为实际可得的 23 维 = v2 16 + 场景上下文 7。
     "tl_state",                 # 0=green, 1=yellow, 2=red, -1=无灯
     "tl_distance",              # 距最近红灯距离 (m)
     "road_curvature",           # 当前道路曲率 (1/R, m⁻¹)
@@ -45,33 +40,6 @@ FEATURE_NAMES_V3 = [
     "lane_count",               # 车道数
     "lane_width",               # 车道宽度 (m)
     "ego_lane_offset",          # 距车道中心偏移 (m)
-
-    # ── 障碍物全貌统计（30 维，索引 29-58）──
-    # 类型分布 (5): 车/卡车/行人/未知/总计
-    "obs_count",
-    "obs_car_count", "obs_truck_count", "obs_ped_count", "obs_unknown_count",
-    # 距离分布 (5): min/p25/p50/p75/max
-    "obs_dist_min", "obs_dist_p25", "obs_dist_p50", "obs_dist_p75", "obs_dist_max",
-    # 速度分布 (5): min/p25/p50/p75/max
-    "obs_speed_min", "obs_speed_p25", "obs_speed_p50", "obs_speed_p75", "obs_speed_max",
-    # 前方最近间距 (5): 左/中/右 + 绝对值 + 相对速度
-    "front_min_gap",
-    "left_min_gap",
-    "right_min_gap",
-    "front_min_gap_rel_v",
-    "front_min_gap_diff",
-    # 后方来车情况 (5)
-    "rear_min_gap",
-    "rear_has_fast_approach",
-    "rear_closest_vx",
-    "rear_closest_length",
-    "rear_closest_width",
-    # 左右车道占用 (5)
-    "left_lane_occupied",
-    "right_lane_occupied",
-    "left_lane_nearest_x",
-    "right_lane_nearest_x",
-    "left_lane_nearest_vx",
 ]
 
 LABEL_NAMES = ["target_speed"]
@@ -79,7 +47,7 @@ LABEL_NAMES = ["target_speed"]
 # ── 维度常量 ──────────────────────────────────────────────────
 
 V2_DIM = len(FEATURE_NAMES_V2)   # 16
-V3_DIM = len(FEATURE_NAMES_V3)   # 59
+V3_DIM = len(FEATURE_NAMES_V3)   # 23
 
 
 def sample_feature_names(sample: dict) -> list[str]:
@@ -133,7 +101,7 @@ def get_full_obstacles(obstacles: object) -> list[dict]:
 
 # ── v3 特征构建 ──────────────────────────────────────────────
 
-V3_DIM_TOTAL = V3_DIM  # 59
+V3_DIM_TOTAL = V3_DIM  # 23
 
 
 def build_v2_features(ego: object, obstacles: object, control: object, fallback_features: object = None) -> list[float]:
@@ -191,37 +159,28 @@ def build_v3_features(
     fallback_features: object | None = None,
 ) -> list[float]:
     """
-    v3 特征构建（59 维）。
+    v3 特征构建（23 维）= v2 基础 16 维 + 场景上下文 7 维。
+
+    C-3 修复：原 59 维设计含未实现的感知统计（6 维 lidar_stats，车端未采集，恒为 0）
+    与障碍物全貌统计（30 维，与 v2 front0/front1 冗余），这 36 维稀释有效特征。
+    截断为实际可得的 23 维 = v2 16 + 场景上下文 7。
 
     参数：
         ego: {v, y, heading, yaw_rate, x, lane_offset, lane_center_y}
         obstacles: [{x, y, vx, vy, type, confidence, length, width}]
         control: {throttle, brake, steering, emergency_stop}
-        lidar_stats: {point_count, front_density, clutter_ratio}
+        lidar_stats: 保留参数兼容旧调用方，v3 不再使用（车端未采集）
         scene_context: {tl_state, tl_distance, curvature, speed_limit,
                         lane_count, lane_width, ego_lane_offset}
     """
     ego_obj = ego if isinstance(ego, dict) else {}
     control_obj = control if isinstance(control, dict) else {}
-    lidar = lidar_stats if isinstance(lidar_stats, dict) else {}
     ctx = scene_context if isinstance(scene_context, dict) else {}
 
-    # ── v2 基础（16 维） ──
+    # ── v2 基础（16 维，索引 0-15） ──
     features = build_v2_features(ego, obstacles, control, fallback_features)
 
-    # ── 感知统计（6 维，索引 16-21） ──
-    features.append(_float(lidar.get("point_count", 0.0)))
-    features.append(_float(lidar.get("front_density", 0.0)))
-    features.append(_float(lidar.get("clutter_ratio", 0.0)))
-
-    all_obs = get_full_obstacles(obstacles)
-    obj_count = len(all_obs)
-    confs = [_float(o.get("confidence", 0.0)) for o in all_obs if _float(o.get("confidence", 0.0)) > 0]
-    features.append(float(obj_count))
-    features.append(max(confs) if confs else 0.0)
-    features.append(sum(confs) / len(confs) if confs else 0.0)
-
-    # ── 场景上下文（7 维，索引 22-28） ──
+    # ── 场景上下文（7 维，索引 16-22） ──
     features.append(_float(ctx.get("tl_state", -1.0)))
     features.append(_float(ctx.get("tl_distance", -1.0)))
     features.append(_float(ctx.get("curvature", 0.0)))
@@ -229,131 +188,6 @@ def build_v3_features(
     features.append(_float(ctx.get("lane_count", 2.0)))
     features.append(_float(ctx.get("lane_width", 3.5)))
     features.append(_float(ctx.get("ego_lane_offset", 0.0)))
-
-    # ── 障碍物全貌统计（30 维，索引 29-58） ──
-    # 类型分布
-    type_counts = {1: 0, 2: 0, 3: 0, 0: 0}
-    for o in all_obs:
-        tc = _obstacle_type_code(o)
-        type_counts[tc] = type_counts.get(tc, 0) + 1
-
-    features.append(float(len(all_obs)))
-    features.append(float(type_counts.get(1, 0)))  # car
-    features.append(float(type_counts.get(2, 0)))  # truck
-    features.append(float(type_counts.get(3, 0)))  # pedestrian
-    features.append(float(type_counts.get(0, 0)))  # unknown
-
-    # 距离分布
-    dists = [math.hypot(_float(o.get("x", 0)), _float(o.get("y", 0))) for o in all_obs]
-    if dists:
-        ds = sorted(dists)
-        features.extend([ds[0], _percentile(dists, 25), _percentile(dists, 50),
-                         _percentile(dists, 75), ds[-1]])
-    else:
-        features.extend([0.0] * 5)
-
-    # 速度分布
-    speeds = [abs(_float(o.get("vx", 0))) for o in all_obs if abs(_float(o.get("vx", 0))) > 0.01]
-    if speeds:
-        ss = sorted(speeds)
-        features.extend([ss[0], _percentile(speeds, 25), _percentile(speeds, 50),
-                         _percentile(speeds, 75), ss[-1]])
-    else:
-        features.extend([0.0] * 5)
-
-    # 前方/左/右最近间距
-    ego_x = _float(ego_obj.get("x", 0))
-    ego_y = _float(ego_obj.get("y", 0))
-    lane_width = _float(ctx.get("lane_width", 3.5))
-    lane_center_y = _float(ego_obj.get("lane_center_y", ego_y))
-
-    front_gaps = []
-    left_gaps = []
-    right_gaps = []
-    rear_obs = []
-    front_obs = []
-
-    for o in all_obs:
-        ox = _float(o.get("x", 1e9))
-        oy = _float(o.get("y", 0))
-        dx = ox - ego_x
-        dy = oy - ego_y
-        dist = math.hypot(dx, dy)
-
-        # 前后区分
-        if dx > 0:
-            front_obs.append(o)
-            if abs(dy) < lane_width * 0.5 + 1.5:
-                front_gaps.append(dist)
-            elif dy < -lane_width * 0.5:
-                left_gaps.append(dist)
-            elif dy > lane_width * 0.5:
-                right_gaps.append(dist)
-        else:
-            rear_obs.append(o)
-
-    features.append(min(front_gaps) if front_gaps else 200.0)
-    features.append(min(left_gaps) if left_gaps else 200.0)
-    features.append(min(right_gaps) if right_gaps else 200.0)
-
-    # 前车相对速度
-    if front_gaps and front_obs:
-        closest = min(front_obs, key=lambda o: math.hypot(_float(o.get("x", 0)) - ego_x,
-                                                          _float(o.get("y", 0)) - ego_y))
-        rel_v = _float(closest.get("vx", 0)) - _float(ego_obj.get("v", 0))
-        features.append(rel_v)
-        features.append(front_gaps[0] - (features[-3] if len(features) >= 3 else 3.0))
-    else:
-        features.extend([0.0, 0.0])
-
-    # 后方来车
-    if rear_obs:
-        rear_dists = [math.hypot(_float(o.get("x", 0)) - ego_x, _float(o.get("y", 0)) - ego_y)
-                      for o in rear_obs]
-        rear_closest = min(rear_obs, key=lambda o: math.hypot(_float(o.get("x", 0)) - ego_x,
-                                                               _float(o.get("y", 0)) - ego_y))
-        features.append(min(rear_dists))
-        rear_vx = _float(rear_closest.get("vx", 0))
-        features.append(1.0 if rear_vx > _float(ego_obj.get("v", 0)) + 2.0 else 0.0)
-        features.append(rear_vx)
-        features.append(_float(rear_closest.get("length", 4.6)))
-        features.append(_float(rear_closest.get("width", 2.0)))
-    else:
-        features.extend([200.0, 0.0, 0.0, 0.0, 0.0])
-
-    # 左右车道占用
-    left_occ = 0
-    right_occ = 0
-    left_nearest = 200.0
-    right_nearest = 200.0
-    left_vx = 0.0
-    right_vx = 0.0
-    for o in all_obs:
-        oy = _float(o.get("y", 0))
-        ox = _float(o.get("x", 0))
-        if abs(oy - (lane_center_y - lane_width)) < lane_width * 0.7 and ox > 0:
-            left_occ = 1
-            d = math.hypot(ox - ego_x, oy - ego_y)
-            if d < left_nearest:
-                left_nearest = d
-                left_vx = _float(o.get("vx", 0))
-        if abs(oy - (lane_center_y + lane_width)) < lane_width * 0.7 and ox > 0:
-            right_occ = 1
-            d = math.hypot(ox - ego_x, oy - ego_y)
-            if d < right_nearest:
-                right_nearest = d
-                right_vx = _float(o.get("vx", 0))
-    features.append(float(left_occ))
-    features.append(float(right_occ))
-    features.append(left_nearest)
-    features.append(right_nearest)
-    features.append(left_vx)
-
-    # 确保刚好 59 维
-    while len(features) < V3_DIM_TOTAL:
-        features.append(0.0)
-    if len(features) > V3_DIM_TOTAL:
-        features = features[:V3_DIM_TOTAL]
 
     return features
 

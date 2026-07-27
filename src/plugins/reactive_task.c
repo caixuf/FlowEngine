@@ -1,6 +1,10 @@
 /**
  * reactive_task.c — 消息驱动任务示例（Step 4）
  *
+ * B-3 标注：本文件为教学示例插件（src/plugins/），编译为 libreactive_task.so 并
+ * 安装到 lib/flowengine/plugins/，但流水线从不加载它——实际融合走 fusion_node
+ *（FlowCoro 协程版）。保留作 message_bus 数据驱动调度范式的参考示例。
+ *
  * 与 example_task 的区别：
  *  - 不使用 sleep 轮询，而是等待 message_bus 上的消息
  *  - 收到 "sensor/lidar" 消息后立即处理并 publish 结果到 "fusion/result"
