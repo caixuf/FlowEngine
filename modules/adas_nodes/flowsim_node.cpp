@@ -1280,6 +1280,9 @@ protected:
             if (n_col > 0) {
                 flowsim::apply_collision_response(g.pool, pairs);
                 for (const auto& p : pairs) {
+                    /* 碰撞分离是位置跳变，标记 teleport 供 invariant 跳过 Δpos 检查 */
+                    if (g.pool[p.a].is_vehicle()) g.pool[p.a].last_teleport_cycle = g.cycle;
+                    if (g.pool[p.b].is_vehicle()) g.pool[p.b].last_teleport_cycle = g.cycle;
                     int is_ego = (p.a == 0 || p.b == 0);
                     if (is_ego) {
                         LOG_ERROR("flowsim", "COLLISION ego↔entity%d", p.a == 0 ? p.b : p.a);

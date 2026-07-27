@@ -723,20 +723,16 @@ static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
         double dy_total = y_end - y_start;
         if (fabs(dy_total) > 0.05) {
             double horizon_t = (double)n * g.mpc_config.dt;
-            double v_lat_max = 5.0;  /* m/s，变道横向速度上限（激进） */
+            double v_lat_max = 2.0;  /* m/s，变道横向速度上限 */
             double dy_max    = v_lat_max * horizon_t;
             double dy_ref    = dy_total;
             if (fabs(dy_ref) > dy_max) {
                 dy_ref = (dy_ref > 0.0) ? dy_max : -dy_max;
             }
-            /* 关键 3：参考起点前瞻。若 y_start = ego_y，参考曲线 s=0
-             * 处 ref.y = ego_y，MPC 在 horizon 第一步看到的横向偏差=0，
-             * 输出 steer 仅 0.02~0.07 rad。让参考起点前瞻 15% dy_ref：
-             *   y_start' = ego_y + 0.15 * dy_ref
-             * 这样 MPC 第一步就看到 0.15 * |dy_ref| 偏差，立即输出较大
-             * steer 主动变道。前瞻比例 0.3 实测过激（lateral excursion
-             * 4.10m > 4.0m 阈值，min_forward_gap 1.97m），0.15 较温和。 */
-            double y_start_lookahead = y_start + 0.15 * dy_ref;
+            /* 参考起点前瞻：让 MPC 在 horizon 第一步就看到横向偏差，
+             * 立即输出 steer 主动变道。0.05 较保守，避免 MPC 追不上
+             * 参考导致 steer 饱和、safety_control 介入停车。 */
+            double y_start_lookahead = y_start + 0.05 * dy_ref;
             for (int k = 0; k < n; k++) {
                 double t = (double)k / (double)(n - 1);
                 double s = 1.0 - (1.0 - t) * (1.0 - t);  /* ease-out，前段梯度=2 */
@@ -1311,78 +1307,83 @@ protected:
                 g.integral = 0;
             }
 
-            /* ── MPC 控制（替代 PID 纵向 + Stanley 横向） ──
+            /* ── 纵向控制：始终使用 PID+ACC，保证跟车安全 ──
              *
-             * 优先使用 MPC 控制器。若 MPC 不可用（未初始化、无参考轨迹、求解失败）
-             * 则回退到 PID 纵向 + Stanley 横向。
-             *
-             * MPC 同时优化纵向和横向，输出 throttle/brake/steer。
-             * 回退保留原有 PID+Stanley 行为，确保退化安全。 */
+             * MPC 只做横向轨迹优化（变道更平滑），纵向仍由 PID+ACC 负责。
+             * 原因：MPC 代价函数中没有前车距离约束，单独优化纵向会导致追尾。 */
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
             double throttle = 0, brake = 0, steer = 0;
             const char* mode = "NONE";
-            bool mpc_used = false;
+            bool mpc_used_lat = false;
 
-            /* MPC 暂时禁用：变道速度调优未完成，回退到 PID+Stanley。
-             * MPC 控制器本身（状态扩展 + r_ddelta 二阶项）保留，待变道
-             * 参考注入逻辑完善后重新启用。 */
-            if (0 && g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+            /* PID 纵向（目标为 ACC 限速后的值） */
+            g.integral += error * 0.05;
+            if (g.integral > 500)  g.integral = 500;
+            if (g.integral < -200) g.integral = -200;
+
+            double derivative = (error - g.prev_error) / 0.05;
+            double output = g.kp * error + g.ki * g.integral + g.kd * derivative;
+
+            if (output > 0) {
+                throttle = output / 5000.0;
+                if (throttle > 1.0) throttle = 1.0;
+                brake = 0;
+                mode = (error < 1.0) ? "HOLD" : "ACCEL";
+            } else {
+                throttle = 0;
+                brake = (-output) / 8000.0;
+                if (brake > 1.0) brake = 1.0;
+                mode = "BRAKE";
+            }
+
+            /* Anti-windup */
+            if (g.integral > 0 && throttle >= 1.0 && error > 0)
+                g.integral -= error * 0.05;
+            if (g.integral < 0 && brake >= 1.0 && error < 0)
+                g.integral -= error * 0.05;
+
+            /* ── 横向控制：优先 MPC，失败回退 Stanley ── */
+            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
                     mpc_set_reference(g.mpc, g.mpc_ref_buf, n_ref);
                     mpc_set_state(g.mpc, g.ego_x, g.ego_y, g.ego_heading, g.current_speed);
                     mpc_set_prev_steer(g.mpc, g.prev_steer);
-                    if (mpc_solve(g.mpc, &g.mpc_result) == 0) {
-                        throttle = g.mpc_result.throttle;
-                        brake    = g.mpc_result.brake;
-                        steer    = g.mpc_result.steer;
-                        /* MPC steer 也需要速度相关限幅，与 PID+Stanley 回退路径一致。
-                         * 不限幅会导致 steer saturation > 10% 评估器 FAIL。 */
-                        double mpc_steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+                    if (mpc_solve(g.mpc, &g.mpc_result) == 0 && g.mpc_result.converged) {
+                        steer = g.mpc_result.steer;
+                        /* 变道中放宽侧向加速度限制（与 Stanley 变道模式一致）。
+                         * 车道保持用 1.4 m/s²，变道用 3.0 m/s²，否则高速时 steer
+                         * limit 太小（10 m/s 时仅 ~0.04 rad），变道极慢。 */
+                        int lc_active_mpc = (g.lc_state == 1) || (g.lc_state == 3) ||
+                                            (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
+                        double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
+                        double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
+                        int steer_saturated = (fabs(steer) >= mpc_steer_limit * 0.95);
                         if (steer >  mpc_steer_limit) steer =  mpc_steer_limit;
                         if (steer < -mpc_steer_limit) steer = -mpc_steer_limit;
                         g.prev_steer = steer;
-                        g.integral   = 0;  /* 清 PID 积分防残留 */
-                        mode = "MPC";
-                        mpc_used = true;
+                        mpc_used_lat = true;
                         if (g.cycle % 20 == 1) {
-                            LOG_INFO("control", "#%d MPC ok: thr=%.2f brk=%.2f st=%.4f accel=%.2f iter=%d cost=%.2e",
+                            LOG_INFO("control", "#%d MPC_LAT+PID_LON: thr=%.2f brk=%.2f st=%.4f accel=%.2f iter=%d cost=%.2e",
                                      g.cycle, throttle, brake, steer, g.mpc_result.accel_cmd,
                                      g.mpc_result.iterations, g.mpc_result.cost);
+                        }
+                        if (steer_saturated) {
+                            LOG_WARN("control", "#%d MPC steer saturated (%.4f >= %.4f)",
+                                     g.cycle, fabs(steer), mpc_steer_limit);
+                        }
+                    } else {
+                        if (g.cycle % 20 == 1) {
+                            LOG_WARN("control", "#%d MPC not converged (iter=%d cost=%.2e) — falling back to Stanley",
+                                     g.cycle, g.mpc_result.iterations, g.mpc_result.cost);
                         }
                     }
                 }
             }
 
-            if (!mpc_used) {
-                /* ── 回退：PID 纵向 (目标为 ACC 限速后的值) ── */
-                g.integral += error * 0.05;
-                if (g.integral > 500)  g.integral = 500;
-                if (g.integral < -200) g.integral = -200;
-
-                double derivative = (error - g.prev_error) / 0.05;
-                double output = g.kp * error + g.ki * g.integral + g.kd * derivative;
-
-                if (output > 0) {
-                    throttle = output / 5000.0;
-                    if (throttle > 1.0) throttle = 1.0;
-                    brake = 0;
-                    mode = (error < 1.0) ? "HOLD" : "ACCEL";
-                } else {
-                    throttle = 0;
-                    brake = (-output) / 8000.0;
-                    if (brake > 1.0) brake = 1.0;
-                    mode = "BRAKE";
-                }
-
-                /* Anti-windup */
-                if (g.integral > 0 && throttle >= 1.0 && error > 0)
-                    g.integral -= error * 0.05;
-                if (g.integral < 0 && brake >= 1.0 && error < 0)
-                    g.integral -= error * 0.05;
-
+            if (!mpc_used_lat) {
                 /* ── 回退：Stanley 横向 ── */
                 steer = 0.0;
                 if (fabs(g.ego_y - road_c) <= road_center_limit - 0.4) {
