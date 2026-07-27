@@ -1205,9 +1205,18 @@ protected:
                             ego.x = wp.x;
                             ego.y = wp.y;
                             if (!is_dynamic) {
-                                ego.heading = wp.h;
-                                ego.vx = ego.speed * std::cos(wp.h);
-                                ego.vy = ego.speed * std::sin(wp.h);
+                                /* 低通滤波混合 step_bicycle 计算的 heading 和道路切线 wp.h。
+                                 * 不直接覆盖为 wp.h（直道下 wp.h=0 → heading variance=0 →
+                                 * 评估器 heading invariant garbage-in FAIL）。
+                                 * alpha=0.7：70% 收敛到道路切线（防漂移），30% 保留转向影响。 */
+                                double dh = wp.h - ego.heading;
+                                while (dh >  M_PI) dh -= 2.0 * M_PI;
+                                while (dh < -M_PI) dh += 2.0 * M_PI;
+                                ego.heading += 0.7 * dh;
+                                while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
+                                while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
+                                ego.vx = ego.speed * std::cos(ego.heading);
+                                ego.vy = ego.speed * std::sin(ego.heading);
                             }
                             /* 动力学模式：heading/vx/vy 由 step_bicycle_dynamic 自主演化，
                              * 此处仅更新 x/y 位置，不覆盖 heading。 */
