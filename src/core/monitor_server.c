@@ -386,17 +386,27 @@ static void send_response(int fd, const char* status, const char* content_type,
 static char* gzip_compress(const char* body, int body_len, int* out_len) {
 #ifdef FLOWENGINE_USE_ZLIB
     if (!body || body_len <= 0) return NULL;
-    uLong bound = compressBound((uLong)body_len);
+    /* compress2 输出 zlib 格式，但浏览器按 Content-Encoding: gzip
+     * 解压时要求真正的 gzip 格式（1f8b 头 + CRC32）。改用 deflateInit2
+     * 的 16+15 window bits 输出 gzip 格式，与 HTTP header 一致。 */
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+    int rc = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                          15 + 16, 8, Z_DEFAULT_STRATEGY);
+    if (rc != Z_OK) return NULL;
+    uLong bound = deflateBound(&strm, (uLong)body_len);
     char* buf = (char*)malloc(bound);
-    if (!buf) return NULL;
-    uLongf actual = bound;
-    int rc = compress2((Bytef*)buf, &actual, (const Bytef*)body,
-                       (uLong)body_len, Z_DEFAULT_COMPRESSION);
-    if (rc != Z_OK) {
-        free(buf);
-        return NULL;
+    if (!buf) { deflateEnd(&strm); return NULL; }
+    strm.next_in   = (Bytef*)body;
+    strm.avail_in  = (uInt)body_len;
+    strm.next_out  = (Bytef*)buf;
+    strm.avail_out = (uInt)bound;
+    rc = deflate(&strm, Z_FINISH);
+    if (rc != Z_STREAM_END) {
+        free(buf); deflateEnd(&strm); return NULL;
     }
-    *out_len = (int)actual;
+    *out_len = (int)strm.total_out;
+    deflateEnd(&strm);
     return buf;
 #else
     (void)body; (void)body_len; (void)out_len;
