@@ -479,7 +479,7 @@ protected:
             tracked.frame_id     = (uint32_t)(g.frames_out & 0xFFFFFFFFu);
             tracked.timestamp_us = now;
 
-            uint8_t buf[280];
+            uint8_t buf[4240];  /* ObstacleList 序列化大小 = 16 + 128*33 */
             size_t len = 0;
             if (ObstacleList_serialize(&tracked, buf, &len) == 0 && len > 0) {
                 transport_publish(transport_, g.output_topic, buf, (uint32_t)len);
