@@ -280,8 +280,10 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
                         const EntityPool& pool, FlowRoadNetwork* roads,
                         uint32_t cycle, const NpcAiConfig& cfg) {
     const double total = route.total_length();
-    // 按 id 错开回收距离（50..138m），避免所有车叠在同一点
-    const double back = 50.0 + (double)(npc.id % 5) * 22.0;
+    // 按 id 错开回收距离（50..230m），避免所有车叠在同一点。
+    // 用 id%10 产生 10 个不同位置（每类最多 4 个 NPC），20m 间距够 IDM 跟车安全。
+    // 旧 id%5 只有 5 个位置（每类 8 个 NPC），B4 防叠车 5 次重试不够，第 6-8 个叠车。
+    const double back = 50.0 + (double)(npc.id % 10) * 20.0;
     double target;
     if (ego_route_s > 1.0) {
         target = (npc.route_dir > 0) ? (ego_route_s - back)   // 顺行：回 ego 后方
@@ -289,9 +291,9 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     } else {
         target = (npc.route_dir > 0) ? 0.0 : total;           // ego 未定位：回起/末端
     }
-    // B4: 防叠车 — 目标点 8m 内若已有同方向 NPC，再后退 12m，最多重试 5 次。
-    // 解决 ego_route_s=0 时所有 NPC 都被回收到 route 起点（target=0）的叠车问题。
-    for (int attempt = 0; attempt < 5; ++attempt) {
+    // B4: 防叠车 — 目标点 8m 内若已有同方向 NPC，再后退 15m，最多重试 8 次。
+    // id%10 每类最多 4 个 NPC，3 次重试即够；8 次留充足余量应对边界情况。
+    for (int attempt = 0; attempt < 8; ++attempt) {
         bool occupied = false;
         for (int i = 0; i < pool.size(); ++i) {
             const Entity& o = pool[i];
@@ -301,7 +303,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
             if (std::fabs(o.route_s - target) < 8.0) { occupied = true; break; }
         }
         if (!occupied) break;
-        target += (npc.route_dir > 0) ? -12.0 : 12.0;
+        target += (npc.route_dir > 0) ? -15.0 : 15.0;
     }
     if (target < 0.0)   target = 0.0;
     if (target > total) target = total;
