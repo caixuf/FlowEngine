@@ -219,7 +219,14 @@ void statem_init(ReflectiveStateMachine* sm, const TransitionRule* table,
     sm->last_event     = SM_EVENT_NONE;
     sm->entered_at_us  = clock_now_us();
     sm->static_table   = table;
-    sm->task_name      = task_name;
+    /* 拷贝而非存指针：调用方多为栈上的 TaskConfig.name，存指针会在
+     * 调用方返回后变成野指针（stack-use-after-return）。 */
+    if (task_name) {
+        snprintf(sm->task_name_buf, sizeof(sm->task_name_buf), "%s", task_name);
+        sm->task_name = sm->task_name_buf;
+    } else {
+        sm->task_name = NULL;
+    }
     sm->trace_enabled  = false;
 
     /* Count static table entries */

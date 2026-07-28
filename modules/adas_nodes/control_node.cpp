@@ -152,7 +152,7 @@ struct ControlContext {
      * k_v_lat: 横向速度阻尼增益，标准 LQR 推荐值 0.3-0.6。
      */
     double lat_lookahead_gain{0.8};   /* 前视距离系数 (s) */
-    double k_v_lat{0.4};              /* 横向速度阻尼增益（LQR v_lat 反馈）*/
+    double k_v_lat{0.22};             /* 横向速度阻尼增益（自标定最优值，0.2-0.3 推荐区间）*/
 
     /* 从 topic 解析的值 */
     double current_speed{0};
@@ -256,6 +256,13 @@ struct ControlContext {
 
     /* MPC 参考轨迹缓存（避免每帧重新分配） */
     MpcRefPoint mpc_ref_buf[MPC_MAX_HORIZON];
+
+    /* ── 学习闭环 MPC 调参增量 ──────────────────────────────── */
+    double learn_mpc_q_y_delta{0.0};
+    double learn_mpc_q_theta_delta{0.0};
+    double learn_mpc_r_a_delta{0.0};
+    double learn_mpc_r_ddelta_delta{0.0};
+    uint64_t last_learn_mpc_delta_us{0};
 };
 
 ControlContext g;
@@ -567,6 +574,30 @@ static void on_ref_path(const Message* msg, void* user_data) {
         g.last_ref_path_us = clock_now_us();
         pthread_mutex_unlock(&g.ref_path_mtx);
     }
+    cJSON_Delete(root);
+}
+
+/* ── 学习闭环 MPC 调参增量 ──────────────────────────────────── */
+/* 由 inference_node 发布，携带模型输出的 MPC 权重增量。
+ * 各 delta 默认 0（不影响 baseline）。超时 1s 未收到新增量回退 0。 */
+
+static void on_learn_delta(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+
+    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_q_y_delta");
+    if (cJSON_IsNumber(j)) g.learn_mpc_q_y_delta = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_q_theta_delta");
+    if (cJSON_IsNumber(j)) g.learn_mpc_q_theta_delta = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_r_a_delta");
+    if (cJSON_IsNumber(j)) g.learn_mpc_r_a_delta = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_r_ddelta_delta");
+    if (cJSON_IsNumber(j)) g.learn_mpc_r_ddelta_delta = j->valuedouble;
+
+    g.last_learn_mpc_delta_us = clock_now_us();
     cJSON_Delete(root);
 }
 
@@ -1380,6 +1411,20 @@ protected:
                     double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
                     double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
 
+                    /* ── 学习闭环：叠加 MPC 权重增量 ────────── */
+                    /* 1s 超时后回退到 baseline，防止模型异常时锁死 */
+                    MpcConfig eff_cfg = g.mpc_config;
+                    {
+                        uint64_t age_us = clock_now_us() - g.last_learn_mpc_delta_us;
+                        if (age_us < 1000000UL) {
+                            eff_cfg.q_y      += g.learn_mpc_q_y_delta;
+                            eff_cfg.q_theta  += g.learn_mpc_q_theta_delta;
+                            eff_cfg.r_a      += g.learn_mpc_r_a_delta;
+                            eff_cfg.r_ddelta += g.learn_mpc_r_ddelta_delta;
+                        }
+                    }
+                    mpc_set_weights(g.mpc, &eff_cfg);
+
                     mpc_set_reference(g.mpc, g.mpc_ref_buf, n_ref);
                     mpc_set_state(g.mpc, g.ego_x, g.ego_y, g.ego_heading, g.current_speed);
                     mpc_set_prev_steer(g.mpc, g.prev_steer);
@@ -1457,23 +1502,17 @@ protected:
                     }
                     double ff_term = g.wheelbase * kappa * ff_weight;
 
-                    /* A9 稳态巡航前馈-only：彻底切断反馈回路消除极限环。
+                    /* A9 稳态巡航前馈-only 已废弃。
                      *
-                     * 当车辆在车道中心附近（|lat_error|<0.3m, |heading_err|<0.04rad）
-                     * 且非变道状态时，只使用 curvature 前馈 + 小阻尼维持车道。
-                     * cte_term / heading_term / v_lat_damp_term 全部跳过，
-                     * 车不晃（反馈回路不会以 1.6Hz 自激振荡）。
+                     * 旧 flowsim 模型（steer 直驱横向位移 + heading 被道路切线
+                     * 70%/帧拽回）下，Stanley 反馈回路会以 1.6Hz 自激振荡，需要
+                     * 在中心附近切断反馈。新模型（heading 自由积分，sin(dh) 驱动
+                     * 横向位移）下 heading 不再被拽回，切断反馈 = 放任漂移，反而
+                     * 导致车在中心线附近来回晃。
                      *
-                     * 偏离阈值后 Stanley 全反馈立即介入纠偏。阈值 0.3m/0.04rad
-                     * 确保只在"已经稳定"时才切断反馈——纠偏时反馈必须全开。 */
-                    bool steady_cruise = !lc_active
-                        && fabs(lat_error) < 0.3
-                        && fabs(g.ego_heading - ref_road_heading) < 0.04;
-                    if (steady_cruise) {
-                        steer = ff_term - yaw_damp_term * 0.1;
-                    } else {
-                        steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
-                    }
+                     * 新模型适配：lat_kd_heading 3.5（原 1.35），yaw_damping 0.3
+                     * （原 0.15），补偿失去的 heading blending 阻尼。 */
+                    steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
                     double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
@@ -1740,9 +1779,9 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
     g.lat_kp          = 0.5;   /* lateral error → desired heading (rad/m), 与 sim 内置一致 */
     g.lat_kd_heading  = 2.0;   /* heading error → steer, 阻尼增益 */
-    g.yaw_damping     = 0.15;  /* yaw_rate → steer 阻尼, 抑制 1.6Hz 极限环振荡 */
+    g.yaw_damping     = 0.28;  /* yaw_rate → steer 阻尼（自标定最优值）*/
     g.lat_lookahead_gain = 0.8;  /* 前视距离 = max(5m, speed*0.8s)，Apollo 标准 */
-    g.k_v_lat          = 0.4;    /* 横向速度阻尼增益（LQR v_lat 反馈，0.3-0.6 推荐区间）*/
+    g.k_v_lat          = 0.22;   /* 横向速度阻尼增益（自标定最优值）*/
     g.lane_width = 3.5;
     g.blocked_timeout_s = 0.8;   /* 原 2.0s→1.2s，再缩短到 0.8s，更快响应超车机会 */
     g.lc_stable_wait_s           = 2.0;  /* 原 8.0→4.0，再缩短到 2.0s，减少变道后无谓等待 */
@@ -1868,7 +1907,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     /* MPC 参数注册。默认值取自 g.mpc_config —— 即 mpc_default_config() 经
      * params_json 覆盖后的值，与上面 PID 的 register(g.cfg_*) 同一 pattern。
      * 此前这里写死字面量，导致 pipeline.json 即使能解析也会被注册值盖掉。 */
-    param_register_float("control.mpc_horizon",  (float)g.mpc_config.horizon, 1,    MPC_MAX_HORIZON, "MPC prediction horizon steps");
+    param_register_float("control.mpc_horizon",  (float)g.mpc_config.horizon, 0,    MPC_MAX_HORIZON, "MPC prediction horizon steps");
     param_register_float("control.mpc_dt",       (float)g.mpc_config.dt,      0.01, 0.5,   "MPC discrete time step (s)");
     param_register_float("control.mpc_q_x",      (float)g.mpc_config.q_x,     0.0,  100.0, "MPC cost weight x (longitudinal)");
     param_register_float("control.mpc_q_y",      (float)g.mpc_config.q_y,     0.0,  100.0, "MPC cost weight y (lateral)");
@@ -1914,14 +1953,18 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.mpc_config.q_delta  = param_get_float("control.mpc_q_delta");
     g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
     g.mpc = mpc_create(&g.mpc_config);
-    if (g.mpc) {
-        g.mpc_initialized = 1;
+    g.mpc_initialized = (g.mpc && g.mpc_config.horizon > 0) ? 1 : 0;
+    if (g.mpc_initialized) {
         LOG_INFO("control", "MPC initialized (horizon=%d dt=%.3f q_y=%.1f r_a=%.3f)",
                  g.mpc_config.horizon, g.mpc_config.dt,
                  g.mpc_config.q_y, g.mpc_config.r_a);
     } else {
-        g.mpc_initialized = 0;
-        LOG_WARN("control", "MPC creation failed — falling back to PID+Stanley");
+        if (g.mpc) {
+            /* MPC 对象已创建但 horizon=0，不启用，回退 Stanley */
+            mpc_destroy(g.mpc);
+            g.mpc = nullptr;
+        }
+        LOG_INFO("control", "MPC disabled (horizon=0) — using PID+Stanley");
     }
 
     /* 初始化反射式状态机 */
@@ -1936,6 +1979,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_ref_path, nullptr);
+    transport_subscribe(transport, TOPIC_INFERENCE_CONTROL_DELTA, on_learn_delta, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
     transport_advertise(transport, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID);
 

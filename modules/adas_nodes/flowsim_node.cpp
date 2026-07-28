@@ -1199,8 +1199,22 @@ protected:
              *   变道 steer≈0.10 → delta_lat≈0.060 m/帧 → ~3.5s 完成车道变换 */
             bool is_dynamic = (strcmp(g.physics_model, "dynamic") == 0);
             if (ego.road_pos.ok()) {
-                double delta_lat = ego.speed * FLOWSIM_DT_SEC
-                                 * std::tan(ego.steer) * 1.0;
+                /* ⚠ 横向位移由 heading 与道路切线的夹角 dh 驱动，不是由 steer 直接驱动。
+                 *
+                 * 原 bug（3d092ad）：delta_lat = v * dt * tan(steer) 把转角当成了
+                 * 横向速度，真车不是这样。两个后果：
+                 *   1. 变道慢：v_lat = v*tan(0.047) = 0.56 m/s，3.5m 要 6 秒
+                 *   2. MPC 模型失配（P1 级）：AutoMPC 内部用含侧偏角模型
+                 *      x_dot = v*cos(θ+β), y_dot = v*sin(θ+β), β=atan(0.5*tan(δ))
+                 *      θ_dot = v/L*cos(β)*tan(δ)，而 flowsim step_bicycle 用纯运动学
+                 *      θ_dot = v/L*tan(δ), x_dot=v*cos(θ)。AutoMPC 是代码生成器产物，
+                 *      QP 求解器矩阵与模型绑定，单独改前向积分公式会破坏内部一致性。
+                 *      MPC 依赖反馈校正补偿此失配，影响预测精度但不影响稳定性。
+                 *
+                 * 模型：转角 → heading（step_bicycle 自由积分）→ 横向速度，
+                 * delta_lat = v * dt * sin(ego.heading - wp.h)
+                 * sin(dh) 本身构成负反馈：heading 偏 → 横向漂 → 控制器看到
+                 * lat_error → 回打 → heading 收回来，闭环自洽。 */
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 if (dist > 0.0) {
                     if (!ego.road_pos.advance(dist, M_PI)) {
@@ -1210,21 +1224,24 @@ protected:
                     } else {
                         flowsim::FrenetPos fp_cur;
                         if (ego.road_pos.frenet(fp_cur)) {
-                            ego.road_pos.set_offset(fp_cur.offset + delta_lat);
-                        }
-                        flowsim::WorldPos wp;
-                        if (ego.road_pos.world(wp)) {
-                            ego.x = wp.x;
-                            ego.y = wp.y;
-                            if (!is_dynamic) {
-                                /* 低通滤波混合 step_bicycle 计算的 heading 和道路切线 wp.h。
-                                 * 不直接覆盖为 wp.h（直道下 wp.h=0 → heading variance=0 →
-                                 * 评估器 heading invariant garbage-in FAIL）。
-                                 * alpha=0.7：70% 收敛到道路切线（防漂移），30% 保留转向影响。 */
-                                double dh = wp.h - ego.heading;
+                            flowsim::WorldPos wp;
+                            if (ego.road_pos.world(wp)) {
+                                double dh = ego.heading - wp.h;
                                 while (dh >  M_PI) dh -= 2.0 * M_PI;
                                 while (dh < -M_PI) dh += 2.0 * M_PI;
-                                ego.heading += 0.7 * dh;
+                                double delta_lat = ego.speed * FLOWSIM_DT_SEC * std::sin(dh);
+                                ego.road_pos.set_offset(fp_cur.offset + delta_lat);
+                            }
+                        }
+                        flowsim::WorldPos wp2;
+                        if (ego.road_pos.world(wp2)) {
+                            ego.x = wp2.x;
+                            ego.y = wp2.y;
+                            if (!is_dynamic) {
+                                /* heading 由 step_bicycle 的自行车模型自由积分，
+                                 * 不再被道路切线拽回。sin(dh) 已构成负反馈闭环，
+                                 * heading 漂移会自动产生横向位移被控制器纠正。
+                                 * 只保留 heading 归一化防数值溢出。 */
                                 while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
                                 while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
                                 ego.vx = ego.speed * std::cos(ego.heading);

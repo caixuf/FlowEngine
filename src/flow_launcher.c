@@ -44,6 +44,7 @@
 #include "adas_msgs_gen.h"
 #include "crash_handler.h"
 #include "param_bridge.h"
+#include "param_registry.h"   /* param_count() — 启动日志报告已注册参数数 */
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
 

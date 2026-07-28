@@ -54,6 +54,7 @@
 #define TOPIC_CONTROL_RAW_CMD_TEXT "control/raw_cmd/text"
 #define TOPIC_CONTROL_CTE         "control/cte"
 #define TOPIC_CONTROL_LDW         "control/ldw"
+#define TOPIC_INFERENCE_CONTROL_DELTA "inference/control_delta"
 
 /* ── Vehicle topics ─────────────────────────────────────────── */
 

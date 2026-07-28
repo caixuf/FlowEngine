@@ -105,9 +105,13 @@ int task_base_init(TaskBase* task, const TaskInterface* vtable, const TaskConfig
     task->config = *config;
     task->state  = TASK_STATE_INITIALIZED;
 
-    /* Initialize reflective state machine */
+    /* Initialize reflective state machine.
+     * 注意必须传 task->config.name（本结构体内的副本）而非 config->name：
+     * statem_init 把 task_name 当指针存下来不做拷贝，而各节点的 TaskConfig
+     * 都是 xxx_init() 里的栈变量，init 返回后 config->name 即为野指针，
+     * 工作线程打 trace 日志时会 stack-use-after-return。 */
     statem_init(&task->sm, SM_TABLE_STANDARD,
-                SM_STATE_INITIALIZED, config->name);
+                SM_STATE_INITIALIZED, task->config.name);
     task->sm_enabled = true;  /* enabled by default */
     /* Enable trace by default for easy debugging */
     task->sm.trace_enabled = true;

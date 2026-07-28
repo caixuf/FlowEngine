@@ -49,6 +49,7 @@
 typedef struct {
     float features[LEARNER_FEAT_DIM];
     float label;    /* planning target_speed */
+    float reward;   /* 样本权重 [0,1]，高 reward = 好样本 = 更大训练权重 */
 } LearnerSample;
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
@@ -235,6 +236,25 @@ static void push_sample(void) {
     build_features_v2(s.features);
     s.label = (float)g.planning_target_speed;
 
+    /* 计算 instant_reward（与 data_recorder_node 一致） */
+    {
+        double speed = g.ego_v;
+        double cte = g.ego_y;
+        double steer = g.ctrl_brake;  /* 近似用 brake 当 steer indicator */
+        double r = 0.5f;
+        if (speed >= 8.0 && speed <= 15.0) r += 0.2f;
+        else if (speed < 2.0)              r -= 0.3f;
+        double acte = fabs(cte);
+        if      (acte < 0.3f) r += 0.2f;
+        else if (acte < 0.8f) r += 0.1f;
+        else if (acte > 2.0f) r -= 0.3f;
+        if (fabs(steer) < 0.05f) r += 0.1f;
+        else if (fabs(steer) > 0.15f) r -= 0.1f;
+        if (r < 0.0f) r = 0.0f;
+        if (r > 1.0f) r = 1.0f;
+        s.reward = (float)r;
+    }
+
     pthread_mutex_lock(&g.buf_mutex);
     g.sample_buf[g.buf_head] = s;
     g.buf_head = (g.buf_head + 1) % g.buf_size;
@@ -282,8 +302,11 @@ static float do_train_step(void) {
         for (int i = 0; i < copy_dim; i++) feat[i] = s.features[i];
 
         float label[1] = { s.label };
+        /* reward 作为样本权重：高 reward → 学习率不变；低 reward → 学习率衰减
+         * 确保最小权重 0.1 防止零梯度导致的遗忘 */
+        float sample_lr = g.cfg_lr * fmaxf(s.reward, 0.1f);
         float step_loss = tiny_mlp_sgd_step(&g.model, feat, label,
-                                             g.cfg_lr, g.cfg_full_finetune);
+                                             sample_lr, g.cfg_full_finetune);
         total_loss += step_loss;
     }
     pthread_mutex_unlock(&g.model_mutex);

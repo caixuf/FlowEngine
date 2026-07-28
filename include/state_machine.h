@@ -148,6 +148,10 @@ typedef struct {
     SmIllegalPolicy       illegal_policy;    /**< 非法转移处理策略（默认 WARN） */
 
     /* ── 所属任务名（用于日志）───────────────────────── */
+    /* statem_init 把 task_name 拷进 task_name_buf 并令 task_name 指向它，
+     * 调用方传栈上的名字也安全。task_name 保持 const char* 且可为 NULL，
+     * 以便读侧沿用 `sm->task_name ? sm->task_name : "?"` 写法。 */
+    char                  task_name_buf[64];
     const char*           task_name;
 } ReflectiveStateMachine;
 

@@ -433,13 +433,16 @@ static void push_frame(void) {
  *   out_dim=2 → target_speed + lateral_d
  *   out_dim=4 → target_speed + lateral_d + throttle + steer
  *   out_dim=5 → throttle + brake + steer + lane_change + confidence（direct_ctrl 完整输出）
+ *   out_dim=9 → throttle + brake + steer + lane_change + confidence + k_v_lat_delta + lat_kp_delta + lat_kd_heading_delta + yaw_damping_delta（控制调参）
  */
 static void run_inference(double* out_speed, double* out_d,
                           double* out_throttle, double* out_brake,
-                          double* out_steer, double* out_lc, double* out_conf) {
+                          double* out_steer, double* out_lc, double* out_conf,
+                          double* out_kv, double* out_kp, double* out_kd, double* out_yd) {
     float y[TINY_MLP_MAX_OUT];
     *out_lc = 0.0;
     *out_conf = 0.0;
+    *out_kv = 0.0; *out_kp = 0.0; *out_kd = 0.0; *out_yd = 0.0;
 
     if (g.model.loaded) {
         float x[TINY_MLP_MAX_IN] = {0};
@@ -474,7 +477,20 @@ static void run_inference(double* out_speed, double* out_d,
         }
 
         int n = tiny_mlp_forward(&g.model, x, y);
-        if (n >= 5) {
+        if (n >= 9) {
+            /* direct_ctrl + 控制调参输出 */
+            *out_throttle = y[0];
+            *out_brake    = y[1];
+            *out_steer    = y[2];
+            *out_lc       = y[3];
+            *out_conf     = y[4];
+            *out_kv       = y[5];  /* mpc_q_y_delta */
+            *out_kp       = y[6];  /* mpc_q_theta_delta */
+            *out_kd       = y[7];  /* mpc_r_a_delta — 注意：旧语义为 lat_kd_heading, 现重映射 */
+            *out_yd       = y[8];  /* mpc_r_ddelta_delta */
+            *out_speed    = g.ego_v + (y[0] - y[1]) * 5.0;
+            *out_d        = 0.0;
+        } else if (n >= 5) {
             /* direct_ctrl 完整输出 */
             *out_throttle = y[0];
             *out_brake    = y[1];
@@ -601,9 +617,11 @@ protected:
             double pred_speed = 0.0, pred_d = 0.0;
             double pred_throttle = 0.0, pred_brake = 0.0, pred_steer = 0.0;
             double pred_lc = 0.0, pred_conf = 0.0;
+            double pred_kv = 0.0, pred_kp = 0.0, pred_kd = 0.0, pred_yd = 0.0;
             run_inference(&pred_speed, &pred_d,
                           &pred_throttle, &pred_brake, &pred_steer,
-                          &pred_lc, &pred_conf);
+                          &pred_lc, &pred_conf,
+                          &pred_kv, &pred_kp, &pred_kd, &pred_yd);
 
             /* 影子对比: 与 planning 输出的目标速度差 */
             double shadow_delta = g.has_planning
@@ -646,6 +664,21 @@ protected:
                                   (const uint8_t*)tj_s, (uint32_t)strlen(tj_s) + 1);
                 free(tj_s);
                 cJSON_Delete(tj_root);
+            }
+
+            /* 发布 MPC 权重调参增量（学习闭环输出 → control_node） */
+            {
+                cJSON* cd_root = cJSON_CreateObject();
+                cJSON_AddNumberToObject(cd_root, "mpc_q_y_delta", pred_kv);
+                cJSON_AddNumberToObject(cd_root, "mpc_q_theta_delta", pred_kp);
+                cJSON_AddNumberToObject(cd_root, "mpc_r_a_delta", pred_kd);
+                cJSON_AddNumberToObject(cd_root, "mpc_r_ddelta_delta", pred_yd);
+                cJSON_AddNumberToObject(cd_root, "infer", g.infer_count);
+                char* cd_s = cJSON_PrintUnformatted(cd_root);
+                transport_publish(transport_, "inference/control_delta",
+                                  (const uint8_t*)cd_s, (uint32_t)strlen(cd_s) + 1);
+                free(cd_s);
+                cJSON_Delete(cd_root);
             }
 
             /* plan_assist 模式: 额外发布结构化轨迹供 planning 消费 */

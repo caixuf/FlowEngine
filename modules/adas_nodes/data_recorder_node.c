@@ -330,11 +330,29 @@ static int recorder_execute(TaskBase* task) {
         cJSON_AddItemToArray(obstacles, build_obstacle_json(front1));
         cJSON_AddItemToObject(root, "obstacles", obstacles);
 
+        /* ── instant_reward（用于 learner reward-weighted 训练）── */
+        {
+            double speed = g.ego_v;
+            double cte = g.ego_y;  /* 直路场景 ≈ CTE */
+            double steer = g.has_control ? g.control.steering : 0.0;
+            double r = 0.5;
+            if (speed >= 8.0 && speed <= 15.0) r += 0.2;
+            else if (speed < 2.0)              r -= 0.3;
+            double acte = fabs(cte);
+            if      (acte < 0.3) r += 0.2;
+            else if (acte < 0.8) r += 0.1;
+            else if (acte > 2.0) r -= 0.3;
+            if (fabs(steer) < 0.05) r += 0.1;
+            else if (fabs(steer) > 0.15) r -= 0.1;
+            if (r < 0.0) r = 0.0;
+            if (r > 1.0) r = 1.0;
+            cJSON_AddNumberToObject(root, "reward", r);
+        }
+
         char* s = cJSON_PrintUnformatted(root);
         fprintf(g.out, "%s\n", s);
         free(s);
         cJSON_Delete(root);
-        fflush(g.out);
         g.sample_count++;
 
         if (g.sample_count % 50 == 1) {
