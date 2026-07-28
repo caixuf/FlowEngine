@@ -71,6 +71,10 @@ WARNING_LEAD_FAIL_S = 0.3
 TRUTH_TYPE_VEHICLE = {"car", "truck", "suv"}
 TRUTH_TYPE_VRU = {"pedestrian"}  # Vulnerable Road User
 TRUTH_TYPE_INFRA = {"ego", "tl", "etc_gate"}  # 基础设施，不计入识别率
+
+# 绿灯卡死检测的近邻窗口 (m)：只有 ego 在停止线前后这个范围内，才算"在等这盏灯"。
+# 取 60m 与 planning 注入红绿灯虚拟墙的前瞻距离一致（planning_node.cpp dx_tl > 60 跳过）。
+GREEN_STOP_NEAR_M = 60.0
 TRUTH_LAYER_FOR_TYPE = {
     "car": "vehicle",
     "truck": "vehicle",
@@ -879,7 +883,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     green_phase_max_stop_s = 0.0
     has_signal_data = False
 
-    if has_red_light_check and scenario_lights:
+    # 有灯就扫。闯红灯判定仍受 no_red_light_violation 控制，但"绿灯下卡死"是
+    # 通用死锁检测，不该被无关开关关掉 —— straight_road.json 没声明该 flag，
+    # 整块被跳过，ego 绿灯下静止 30s 仍报 0.000，放行了 planning 的闭锁。
+    if scenario_lights:
         for tl_def in scenario_lights:
             if not isinstance(tl_def, dict):
                 continue
@@ -913,8 +920,13 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                     if crossed and "red" in (prev_state, curr_state):
                         red_light_violation = True
 
-                # 绿灯期间不必要停车检测：灯为绿、ego 尚未过停止线、车速极低
-                if curr_state == "green" and ego_x_i < stop_x and m["speed"] < 0.5:
+                # 绿灯期间不必要停车检测：灯为绿、ego 在停止线前的合理接近范围内、车速极低。
+                #
+                # 近邻约束不可省：本循环对每盏灯各跑一遍，而场景有 10 盏
+                # （x=200..9200）。对远处的灯 "ego_x_i < stop_x" 恒为真，ego 在
+                # x=177 等红灯的静止会被记到 1000m 外那盏绿灯头上，误报 5-6.8s。
+                near_stop_line = -GREEN_STOP_NEAR_M < (stop_x - ego_x_i) <= GREEN_STOP_NEAR_M
+                if curr_state == "green" and near_stop_line and m["speed"] < 0.5:
                     if green_stop_start_ts is None:
                         green_stop_start_ts = ts_i
                 else:
@@ -934,16 +946,22 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                     green_phase_max_stop_s = stop_dur
 
         if not has_signal_data:
+            # 措辞跟着 has_red_light_check 走：这段现在对任何有灯的场景都跑，
+            # 对没声明 no_red_light_violation 的场景说"check enabled"是错的。
+            what = "red-light check" if has_red_light_check else "green-stall check"
             warnings.append(
-                "red-light check enabled but no traffic_light state data in samples "
+                f"{what} has no traffic_light state data in samples "
                 "(scene.entities may not include tl type)"
             )
-        elif red_light_violation:
+        elif red_light_violation and has_red_light_check:
             failures.append("red light violation: ego crossed stop line during red phase")
         if green_phase_max_stop_s > 5.0:
-            warnings.append(
-                f"unnecessary stop during green: ego stopped {green_phase_max_stop_s:.1f}s "
-                f"while light was green (possible over-conservative planning)"
+            # FAIL 而非 WARN：绿灯下长时间不动是功能性死锁。只报 WARN 时，
+            # 45s 里静止 30s 的 run 照样 PASS，只靠 avg_speed 偶然兜底 ——
+            # 而 avg_speed 在长 run 里会被摊薄。
+            failures.append(
+                f"stuck during green: ego stopped {green_phase_max_stop_s:.1f}s "
+                f"while light was green (>5s — planning/control deadlock)"
             )
 
     # P2-7: steer 饱和阈值从 0.219 降到 0.17。
