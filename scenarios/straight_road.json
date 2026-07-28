@@ -69,7 +69,7 @@
     {"id": 42, "type": "pedestrian", "x": 500.0, "y": -12.0, "vx": 0.0, "vy": 0.0, "len": 0.6, "wid": 0.6, "parked": true}
   ],
   "traffic_lights": [
-    {"id": 0,  "x": 200.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 0.0},
+    {"id": 0,  "x": 350.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 0.0},
     {"id": 1,  "x": 1200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 2.5},
     {"id": 2,  "x": 2200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 5.0},
     {"id": 3,  "x": 3200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 7.5},

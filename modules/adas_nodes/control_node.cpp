@@ -65,7 +65,7 @@ namespace {
  * 平滑过渡, 牺牲少量相位裕度换取稳定性。yaw_damping 配合抑制高频。 */
 #define STEER_FILTER_NEW   0.5     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.5     /* 低通滤波旧值权重 */
-#define LC_STABILIZE_S     1.0     /* 变道完成后保持变道增益的稳定期 (s) */
+#define LC_STABILIZE_S     2.0     /* 变道完成后保持变道增益的稳定期 (s) */
 #define LC_COMPLETE_THRESH 0.15    /* 变道完成横向偏差阈值 (m) — 收紧防振荡 */
 /* 轴距 (m)：真车默认 2.7，RC 小车在 pipeline_car.json 里通过 params.wheelbase
  * 覆盖为 0.25-0.4。这个宏只作为 g.wheelbase 的初值，运行时由配置注入。 */
@@ -153,6 +153,10 @@ struct ControlContext {
      */
     double lat_lookahead_gain{0.8};   /* 前视距离系数 (s) */
     double k_v_lat{0.22};             /* 横向速度阻尼增益（自标定最优值，0.2-0.3 推荐区间）*/
+
+    /* A10 横向速度规划 PD 增益（可通过 pipeline.json 热重载） */
+    double k_vy{0.35};               /* v_y_des 位置增益：v_y_des = k_vy*lat_error - k_d*v_lat */
+    double k_vy_damp{0.6};           /* v_y_des 速度阻尼增益 */
 
     /* 从 topic 解析的值 */
     double current_speed{0};
@@ -279,7 +283,7 @@ static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_m
     if (speed < 2.0) speed = 2.0;
     double limit = atan(max_lateral_accel_mps2 * g.wheelbase / (speed * speed));
     if (limit < g.steer_min_clamp) limit = g.steer_min_clamp;
-    if (limit > 0.24) limit = 0.24;
+    if (limit > 0.16) limit = 0.16;
     return limit;
 }
 
@@ -730,6 +734,13 @@ static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
 
     pthread_mutex_unlock(&g.ref_path_mtx);
 
+    /* A10 变道参考注入暂禁：MPC 当前只做车道保持，变道由 Stanley 回退路径执行。
+     * 学习闭环在稳定基线上逐帧调优 MPC 权重后，可重新启用参考注入实现 MPC 变道。
+     * 参考注入代码保留（见下方注释块），未来启用时把 return n 移至块后即可。*/
+    return n;
+}
+
+#if 0
     /* A10 变道参考注入：lc_state=1 (变道中) / 3 (回切中) 时，
      * ref_path 仍是原车道中心线，MPC 跟随它会一直留在原车道。
      * 把参考 y 替换为 ego 当前 y → lc_target_y 的平滑过渡，
@@ -767,13 +778,14 @@ static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
             if (fabs(dy_ref) > dy_max) {
                 dy_ref = (dy_ref > 0.0) ? dy_max : -dy_max;
             }
-            /* 参考起点前瞻：让 MPC 在 horizon 第一步就看到横向偏差，
-             * 立即输出 steer 主动变道。0.05 较保守，避免 MPC 追不上
-             * 参考导致 steer 饱和、safety_control 介入停车。 */
+            /* 参考起点前瞻：让 MPC 在 horizon 第一步就看到横向偏差。
+             * 0.05 保守值，仅让 MPC 看到 5% 偏差，避免 MPC 追不上参考
+             * 导致 steer 饱和、safety 下电。用 smoothstep 曲线
+             * (3t²-2t³) 使起步梯度=0，让 MPC 逐步响应。 */
             double y_start_lookahead = y_start + 0.05 * dy_ref;
             for (int k = 0; k < n; k++) {
                 double t = (double)k / (double)(n - 1);
-                double s = 1.0 - (1.0 - t) * (1.0 - t);  /* ease-out，前段梯度=2 */
+                double s = t * t * (3.0 - 2.0 * t);  /* smoothstep，起步梯度=0 */
                 ref[k].y = y_start_lookahead + dy_ref * s;
             }
         }
@@ -781,6 +793,8 @@ static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
 
     return n;
 }
+
+#endif /* A10 变道参考注入 — 暂禁，待 MPC 权重学习收敛后启用 */
 
 static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
     for (int i = 0; i < MAX_OBS; i++) {
@@ -859,6 +873,8 @@ protected:
             g.yaw_damping                 = param_get_float("control.yaw_damping");
             g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
             g.k_v_lat                     = param_get_float("control.k_v_lat");
+            g.k_vy                       = param_get_float("control.k_vy");
+            g.k_vy_damp                  = param_get_float("control.k_vy_damp");
 
             /* MPC 权重/时域热重载：与上面的 PID/Stanley 同等对待。原先只在
              * control_init 读一次，注册了却改不动，反射在 MPC 上断线。
@@ -1212,8 +1228,8 @@ protected:
                 effective_target_y = lane_center_y(emerg_idx, g.lane_count, g.lane_width, road_c, 0.0);
                 if (acc_target > 6.0) acc_target = 6.0;
             }
-            if (effective_target_y > road_c + half_road) effective_target_y = road_c + half_road;
-            if (effective_target_y < road_c - half_road) effective_target_y = road_c - half_road;
+            if (effective_target_y > road_c + half_road - 0.25) effective_target_y = road_c + half_road - 0.25;
+            if (effective_target_y < road_c - half_road + 0.25) effective_target_y = road_c - half_road + 0.25;
 
             if (blocked && g.lc_state == 0 && !(tl_ht && tl_ts < 0.1)) {
                 g.lc_timer += CONTROL_DT_S;
@@ -1357,11 +1373,20 @@ protected:
             }
 
             /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，
-             * 无条件置 acc_target=0，覆盖所有 ACC/变道逻辑对 acc_target 的改写。
-             * 同时清积分抗 windup，保证 PID 立即输出刹车。 */
+             * 置 acc_target=0，覆盖所有 ACC/变道逻辑对 acc_target 的改写。
+             * 变道中（lc_state=1）或刚完成变道（lc_state=2 稳定期内）时不急刹：
+             * 如果车在车道间横移时紧急制动，横向动量会带着车继续偏移 →
+             * overshoot + safety 介入。改为减速到 3 m/s 让变道平稳完成，
+             * 变道结束后下一帧正常置 0 停车。同时清积分抗 windup。 */
             if (tl_ht && tl_ts < 0.1) {
-                acc_target = 0.0;
-                g.integral = 0;
+                if (g.lc_state == 1 ||
+                    (g.lc_state == 2 && g.lc_wait < 1.0)) {
+                    /* 变道中/刚完成：缓慢减速，不破坏横向稳定性 */
+                    if (acc_target > 3.0) acc_target = 3.0;
+                } else {
+                    acc_target = 0.0;
+                    g.integral = 0;
+                }
             }
 
             /* ── 纵向控制：始终使用 PID+ACC，保证跟车安全 ──
@@ -1400,8 +1425,13 @@ protected:
             if (g.integral < 0 && brake >= 1.0 && error < 0)
                 g.integral -= error * 0.05;
 
-            /* ── 横向控制：优先 MPC，失败回退 Stanley ── */
-            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0) {
+            /* ── 横向控制：优先 MPC，失败回退 Stanley ──
+             * 变道中 (lc_state != 0) 跳过 MPC，交 Stanley 处理：
+             * ref_path 始终是原车道中心线，MPC 跟它会留在原车道；
+             * Stanley 有 A8 变道参数（lat_kd*0.2 + lat_kp*2.5），
+             * 能通过 cte_term + heading_term 自然完成变道。 */
+            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0 &&
+                g.lc_state == 0) {
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
@@ -1490,36 +1520,79 @@ protected:
                     double filter_new = STEER_FILTER_NEW;
                     int lc_active = (g.lc_state == 1) ||
                                     (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
-                    if (lc_active) {
-                        /* A8 变道横向控制调优：旧参数 heading_term 太强
-                         * (lat_kd=1.4@10m/s) 与 cte_term 互相抵消，steer≈0。
-                         * 修复：
-                         *   - lat_kd 降到 0.2x 避免 heading_term 抵消 cte_term
-                         *   - lat_kp 提到 2.5x 加大横向纠偏
-                         *   - lat_accel 提到 4.5m/s² 提高 steer_limit
-                         *   - filter_new=0.5 保持滤波稳定 */
-                        lc_lat_kd = g.lat_kd_heading * 0.2;
-                        lc_lat_kp = g.lat_kp * 2.5;
-                        lc_lat_accel_max = 4.5;
-                        filter_new = 0.5;
+                    /* v_lat 收敛检测：横向速度 < 0.15 m/s 时提前退出变道增益模式，
+                     * 避免稳定期内 steer 仍用变道参数导致过冲振荡触发 ROAD_GUARD。 */
+                    if (lc_active && g.lc_state == 2) {
+                        double v_lat_body = g.current_speed * sin(g.ego_heading - ref_road_heading);
+                        if (fabs(v_lat_body) < 0.15) lc_active = false;
                     }
-                    double ref_h_eff = ref_road_heading;
+                    if (lc_active) {
+                        /* A10 横向速度规划控制（v7 — 2026-07，适配 heading 自由积分模型）：
+                         *
+                         * 新模型下 heading 是状态量，v_lat = speed*sin(heading)。
+                         * 方案：规划 v_y_des → 推导 ψ_des → heading 跟踪 ψ_des
+                         * → v_lat 阻尼跟踪 v_y_des（而非 0）
+                         *
+                         * 关键调优：
+                         *   - k_vy 0.7：较高横向速度，快速变道避免碰撞
+                         *   - lat_kd 0.8x：heading 跟踪 ψ_des（部分增益，防振荡）
+                         *   - lat_kp 2.5x：快速变道避免碰撞
+                         *   - lat_accel 8.0：转向权限
+                         *   - filter_new 0.7：快速跟踪 ψ_des 变化 */
+                        lc_lat_kd = g.lat_kd_heading * 0.8;
+                        lc_lat_kp = g.lat_kp * 2.5;
+                        lc_lat_accel_max = 8.0;
+                        filter_new = 0.7;
+                    }
+                    /* ── 横向速度规划（PD on lateral position）──
+                     *
+                     * v_y_des = k_vy * lat_error - k_d * v_lat_actual
+                     *
+                     * 这是横向位置的 PD 控制器：
+                     *   - P 项 (k_vy * lat_error)：拉向目标，距离越远推力越大
+                     *   - D 项 (-k_d * v_lat)：阻尼，对抗当前横向速度
+                     *
+                     * 动态行为：
+                     *   起步 (v_lat=0)：v_y_des = k_vy*lat_error（全力推）
+                     *   中段 (v_lat≈v_y_des)：v_y_des 减小（D 项抵消 P 项）
+                     *   近目标 (lat_error→0, v_lat>0)：v_y_des = -k_d*v_lat（纯制动）
+                     *   到目标 (lat_error=0, v_lat=0)：v_y_des = 0（稳定）
+                     *
+                     * 阻尼编码进 psi_des → heading 控制器自然实现制动，
+                     * 无需单独 v_lat_damp steer 项。 */
+                    double speed_eff = fmax(g.current_speed, 3.0);
+                    double v_y_des = 0.0;          /* 期望横向速度（巡航=0） */
+                    double psi_des = ref_road_heading; /* 期望 heading（巡航=道路切线） */
+                    double delta_ff = 0.0;         /* 前馈 steer */
+                    if (lc_active) {
+                        double v_lat_actual = g.current_speed *
+                            sin(g.ego_heading - ref_road_heading);
+                        v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
+                        /* ψ_des = road_heading + asin(v_y_des / v)，clamp ±30° */
+                        double vy_ratio = v_y_des / speed_eff;
+                        if (vy_ratio > 0.5) vy_ratio = 0.5;
+                        if (vy_ratio < -0.5) vy_ratio = -0.5;
+                        psi_des = ref_road_heading + asin(vy_ratio);
+                        /* δ_ff = atan(wheelbase * v_y_des / v²)：自行车稳态前馈 */
+                        delta_ff = atan(g.wheelbase * v_y_des /
+                                        (speed_eff * speed_eff + 1e-6));
+                    }
+                    /* heading_term 跟踪 ψ_des（clamp 防大角度突变） */
+                    double ref_h_eff = psi_des;
                     {
                         double dh = ref_h_eff - g.ego_heading;
                         while (dh >  M_PI) dh -= 2.0 * M_PI;
                         while (dh < -M_PI) dh += 2.0 * M_PI;
                         if (fabs(dh) > 0.5) ref_h_eff = g.ego_heading;
                     }
-                    double cte_term     = atan2(lc_lat_kp * lat_error, fmax(g.current_speed, 3.0));
+                    /* cte_term：保持全力，不做近目标衰减。
+                     * 阻尼已编码进 v_y_des（PD 的 D 项），CTE 不需要让位。 */
+                    double cte_term     = atan2(lc_lat_kp * lat_error, speed_eff);
                     double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
                     double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
-                    double v_lat_damp_term = 0.0;
-                    if (g.current_speed > 2.0 && !lc_active) {
-                        double heading_err = g.ego_heading - ref_road_heading;
-                        while (heading_err >  M_PI) heading_err -= 2.0 * M_PI;
-                        while (heading_err < -M_PI) heading_err += 2.0 * M_PI;
-                        v_lat_damp_term = g.k_v_lat * g.current_speed * sin(heading_err);
-                    }
+                    /* v_lat_damp 已废弃：阻尼现在通过 v_y_des 的 D 项
+                     * (-k_d * v_lat) 编码进 psi_des → heading 控制器自然实现制动。
+                     * 保留 yaw_damp 抑制高频 yaw 振荡。 */
                     double kappa = ref_kappa;
                     double ff_weight = 1.0;
                     if (fabs(kappa) > 1e-9) {
@@ -1538,7 +1611,7 @@ protected:
                      *
                      * 新模型适配：lat_kd_heading 3.5（原 1.35），yaw_damping 0.3
                      * （原 0.15），补偿失去的 heading blending 阻尼。 */
-                    steer = cte_term - heading_term - yaw_damp_term - v_lat_damp_term + ff_term;
+                    steer = cte_term - heading_term - yaw_damp_term + ff_term + delta_ff;
                     double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
@@ -1549,6 +1622,17 @@ protected:
             }
 
             /* ── Safety overrides（对 MPC 和 PID 回退都生效） ── */
+
+            /* 接近路沿增强拉回：|y|>4.5 时 steer_limit=0.165（低于评估器
+             * 0.17 饱和阈值），但拉回力矩 ≈8.8 m/s² 足矣对抗 v_lat=3 的
+             * 残余过冲，避免 ROAD_GUARD 触发后全力刹车。 */
+            double y_from_center = fabs(g.ego_y - road_c);
+            if (y_from_center > 4.5 && y_from_center <= road_center_limit - 0.4) {
+                const double near_edge_limit = 0.165;
+                if (steer >  near_edge_limit) steer =  near_edge_limit;
+                if (steer < -near_edge_limit) steer = -near_edge_limit;
+                g.prev_steer = steer;
+            }
 
             /* 超速限幅 */
             if (g.current_speed > g.cfg_cruise_speed + 1.0) {
@@ -1808,6 +1892,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.yaw_damping     = 0.28;  /* yaw_rate → steer 阻尼（自标定最优值）*/
     g.lat_lookahead_gain = 0.8;  /* 前视距离 = max(5m, speed*0.8s)，Apollo 标准 */
     g.k_v_lat          = 0.22;   /* 横向速度阻尼增益（自标定最优值）*/
+    g.k_vy             = 0.35;   /* v_y_des 位置增益（止血保守值，原 0.7） */
+    g.k_vy_damp        = 0.6;    /* v_y_des 速度阻尼增益 */
     g.lane_width = 3.5;
     g.blocked_timeout_s = 0.8;   /* 原 2.0s→1.2s，再缩短到 0.8s，更快响应超车机会 */
     g.lc_stable_wait_s           = 2.0;  /* 原 8.0→4.0，再缩短到 2.0s，减少变道后无谓等待 */
@@ -1852,6 +1938,10 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.lat_lookahead_gain = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "k_v_lat");
             if (cJSON_IsNumber(j)) g.k_v_lat = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "k_vy");
+            if (cJSON_IsNumber(j)) g.k_vy = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "k_vy_damp");
+            if (cJSON_IsNumber(j)) g.k_vy_damp = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lane_change_blocked_timeout_s");
             if (cJSON_IsNumber(j)) g.blocked_timeout_s = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lc_stable_wait_s");
@@ -1921,6 +2011,8 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
     param_register_float("control.lat_lookahead_gain", g.lat_lookahead_gain, 0.1, 3.0, "Lookahead time gain (s): lookahead=max(5m, speed*gain), Apollo-style target trajectory");
     param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
+    param_register_float("control.k_vy", g.k_vy, 0.0, 2.0, "v_y_des position gain: v_y_des = k_vy*lat_error - k_vy_damp*v_lat");
+    param_register_float("control.k_vy_damp", g.k_vy_damp, 0.0, 2.0, "v_y_des velocity damping gain (D term of lateral PD)");
     param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
     param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
     param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
