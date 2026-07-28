@@ -213,7 +213,7 @@ flowctl state <task>
 flowctl topic stats <topic>
 flowctl bag info|check <file>
 flowctl schema <type>
-flowctl param list|get|set
+flowctl param list|get|set     # 打到运行中的 flow_launcher，set 下一帧生效
 flowctl registry
 flowctl dashboard
 flowctl version

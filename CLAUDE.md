@@ -43,6 +43,7 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `src/flowctl.c` | CLI 工具（list/inspect/dashboard/param/bag 等子命令） |
 | `src/core/flow_registry.c` | 统一元信息注册中心（Task/Topic/Type/Plugin/Schema） |
 | `src/core/param_registry.c` | 参数系统（int/float/bool/string，范围校验，hot-reload） |
+| `src/core/param_bridge.c` | 参数跨进程通道（AF_UNIX，`flowctl param set` 边跑边调） |
 | `src/core/scenario_loader.c` | 场景 JSON 加载器（actor 定义 + ego 配置） |
 | `modules/adas_nodes/flowsim/physics.cpp` | 运动学自行车模型；dynamics 桩（未实现，降级到运动学） |
 | `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 动力学桩字段，运行时未使用） |
@@ -139,6 +140,41 @@ cJSON_Delete(p);
 
 - ❌ **禁止** `strstr(params_json, "\"param_name\":")` + `sscanf` 手写参数解析
 - ✅ **必须** 用 `cJSON_Parse(params_json)` 解析所有节点参数
+
+### 调参 → `flowctl param set`（不要改常量重编译）
+
+```bash
+flowctl param list                              # 运行中进程的实时参数
+flowctl param get control.mpc_r_ddelta
+flowctl param set control.mpc_r_ddelta 2.0      # 下一帧生效，不用重启
+```
+
+新增一个可调参数，**三处都要通，只做注册等于没做**：
+
+1. `params_json` 里加 `cJSON_GetObjectItemCaseSensitive` 解析分支
+   （漏了这步，pipeline.json 里那行就是死字符串）
+2. `param_register_*` 的默认值用 `g.<字段>` 而非硬编码字面量
+   （用字面量会把上一步解析到的值盖掉）
+3. 逐帧 tick 里 `param_get_float` 重读
+   （漏了这步，注册了也改不动，只能重启）
+
+- ❌ **禁止** 为了试一个值去改代码常量重新编译
+- ✅ 整段 run 的聚合指标 A/B（avg_speed / flip_rate）用 `tools/mpc_sweep.py`，
+  它每个取值重启一次是必需的 —— 要可比就得从 x=0 起跑干净的 run
+
+### 节点线程 → `node_pump()`
+
+```c
+flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
+ex.spawn(ct.run(), "node_name");
+node_pump(ex, [] { return (bool)g.should_stop; });
+ex.shutdown();
+```
+
+- ❌ **禁止** 裸 `while (!g.should_stop) ex.run();` —— `run()` 是非阻塞 tick，
+  这样写 100% 忙等自旋占满一个核
+- ❌ **禁止** 靠 `RtExecutor::Config` 的 `idle_sleep_us` 限速 —— 它只被
+  `run_blocking()` 读取，而 `run_blocking()` 零调用者
 
 ### 重构/替代 → 同一 commit 删旧
 
@@ -369,11 +405,14 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 3D 场景整屏黑（curl 有数据、console 报 `Unexpected token 'export'`） | MVC 重构（c5e4ba9）拆 Controller 层时 `_renderFrame` 相机块漏闭合一个 `}`，scene3d.js 顶层 `export` 被当块内语句、整模块编译失败不执行 → `init3DScene` 未导出。已补回 | `scene3d.js:2159` 附近 |
 | 仪表盘所有请求挂死（端口在监听） | 终端对前台 demo.sh 按了 Ctrl+Z，整个进程组 `T (stopped)`。Ctrl+C 结束或后台运行 | `scripts/demo.sh` |
 | 车速降到 0 后永久卡死 | ROAD_GUARD 低速恢复条件要求 `|y|>=road_center_limit`，但车可在任意 `2.1<|y|<2.5` 停下。改为只要 `speed<2.5` 就给小油门 | `control_node.cpp:534` |
+| 红灯停稳后灯转绿也不走（评估器双峰：要么跑完 x≈306，要么卡死 x≈180） | planning 用 `spd_out[0]`（≈当前车速）覆盖 `command_speed`，停稳后 `v=0 → target=0 → 油门=0 → v=0` 自维持闭锁；TL override 只置 0 从不恢复，解不开。改为取 max | `planning_node.cpp:787` |
+| MPC 输出每帧翻符号（bang-bang），调 `r_ddelta` 无效 | 求解器内部 `max_steer=0.35` 而外部限幅 ≈0.027，差 12.9 倍。解从不触及自身约束边界，平滑项全部失效。改为 solve 前 `mpc_set_max_steer()` 注入真实限幅 | `control_node.cpp:1372` |
+| 8 个节点线程各占满一个核 | 裸 `while(!stop) ex.run();` 忙等；`idle_sleep_us` 只被零调用者的 `run_blocking()` 读取。改用 `node_pump()` | `coroutine_task.h` node_pump |
 | 变道冲出车道 | Stanley heading 阻尼硬编码 0.5，pipeline.json 的 `lat_kd_heading` 未生效 | `control_node.cpp:548` |
 | NPC 瞬移 | 障碍物回收逻辑放入 100m 外（设计如此，非 bug） | `flowsim/npc_ai.cpp:204` |
 | NPC/车飞出路面、不在车道上、坐标飞到几千米外 | flowsim NPC 用 `step_bicycle(steer=0)` 世界系直线积分、不跟道路几何，路一拐弯就直线冲出路网。已改为中央 `Route`（把各 road 连成有序主路）+ Frenet 沿车道推进 + 到头回收 | `npc_ai.cpp` step_npc_vehicle / `flowsim/route.cpp` |
 | 感知降频 | DBSCAN 点云过多时聚类耗时超过 deadline | `perception_node.cpp` |
-| 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 覆盖 ego.heading 为道路切线，导致 control_node 的 `v_lat_damp` 失效（heading_err≈0），LQR 阻尼不掉，退化为纯 P 控制。修复：保留 bicycle model heading，不用 wp.h 覆盖 | `flowsim_node.cpp:1178-1182` |
+| 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 每帧把 ego.heading 重置为道路切线，control 的 `v_lat_damp` 失效（heading_err≈0），退化为纯 P。**注意：此处曾尝试"保留 bicycle model heading"，已被推翻并回滚** —— 运动学模式下自由积分会漂移导致斜行。现状是运动学模式仍重置 heading（靠 cte+heading 项+低通+死区稳住），动力学模式才跳过重置 | `flowsim_node.cpp:1185-1200` |
 | steer 打到 0.25 硬限幅导致抖动 | 运动学自行车模型下 heading 漂移可达 0.8 rad，steer 限幅过紧导致控制器累积误差撞 clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
 | 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，运动学模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
 
