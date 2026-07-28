@@ -613,7 +613,12 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
         double dx = abs_curr_x - abs_prev_x;
         double dy = abs_curr_y - abs_prev_y;
         double dist = std::sqrt(dx * dx + dy * dy);
-        double expected = pa->speed * dt;
+        /* 用平均速度估算期望位移，避免起步时 prev.speed=0 导致 expected≈0、
+         * 实际位移因加速远大于 expected 而误报瞬移。
+         * 例：红灯起步 2 m/s²，1s 位移 1m，但 prev.speed=0 → expected=0，
+         * 阈值仅 0.5m → 误报。用平均速度 (prev+curr)/2 × dt 更合理。 */
+        double avg_speed = (pa->speed + ca.speed) * 0.5;
+        double expected = avg_speed * dt;
 
         // 设计内瞬移：choreography beat / recycle_npc 把 actor 显式传送到新位置，
         // 这是场景循环机制，非 bug。若上次采样帧到本次采样帧之间（含 prev 帧
