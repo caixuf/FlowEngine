@@ -263,6 +263,13 @@ struct ControlContext {
     double learn_mpc_r_a_delta{0.0};
     double learn_mpc_r_ddelta_delta{0.0};
     uint64_t last_learn_mpc_delta_us{0};
+
+    /* 学习增量平滑状态（EMA 低通，抑制 TinyMLP 输出抖动导致 MPC 权重每帧跳变） */
+    double smooth_q_y_delta{0.0};
+    double smooth_q_theta_delta{0.0};
+    double smooth_r_a_delta{0.0};
+    double smooth_r_ddelta_delta{0.0};
+    int    smooth_initialized{0};
 };
 
 ControlContext g;
@@ -1411,16 +1418,35 @@ protected:
                     double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
                     double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
 
-                    /* ── 学习闭环：叠加 MPC 权重增量 ────────── */
-                    /* 1s 超时后回退到 baseline，防止模型异常时锁死 */
+                    /* ── 学习闭环：叠加 MPC 权重增量 ──────────
+                     * 三重保护抑制 TinyMLP 输出抖动导致的横向晃动：
+                     *   1. EMA 低通：平滑 delta，时间常数 ~0.5s（20Hz 下 alpha=0.1）
+                     *   2. 限幅：delta 不超过 baseline 的 ±40%，防止权重漂过头
+                     *   3. 死区：|delta| < baseline 的 3% 视为噪声归零
+                     * 1s 超时后回退到 baseline，防止模型异常时锁死 */
                     MpcConfig eff_cfg = g.mpc_config;
                     {
                         uint64_t age_us = clock_now_us() - g.last_learn_mpc_delta_us;
                         if (age_us < 1000000UL) {
-                            eff_cfg.q_y      += g.learn_mpc_q_y_delta;
-                            eff_cfg.q_theta  += g.learn_mpc_q_theta_delta;
-                            eff_cfg.r_a      += g.learn_mpc_r_a_delta;
-                            eff_cfg.r_ddelta += g.learn_mpc_r_ddelta_delta;
+                            const double alpha = 0.1;  /* EMA 平滑系数 */
+                            const double clamp_ratio = 0.4;  /* delta 限幅比例 */
+                            const double deadband_ratio = 0.03; /* 死区比例 */
+                            auto apply = [&](double raw, double base, double& smooth) -> double {
+                                if (!g.smooth_initialized) smooth = raw;
+                                else smooth = smooth + alpha * (raw - smooth);
+                                double limit = base * clamp_ratio;
+                                if (smooth >  limit) smooth =  limit;
+                                if (smooth < -limit) smooth = -limit;
+                                if (fabs(smooth) < base * deadband_ratio) return 0.0;
+                                return smooth;
+                            };
+                            eff_cfg.q_y      += apply(g.learn_mpc_q_y_delta,      g.mpc_config.q_y,      g.smooth_q_y_delta);
+                            eff_cfg.q_theta  += apply(g.learn_mpc_q_theta_delta,  g.mpc_config.q_theta,  g.smooth_q_theta_delta);
+                            eff_cfg.r_a      += apply(g.learn_mpc_r_a_delta,      g.mpc_config.r_a,      g.smooth_r_a_delta);
+                            eff_cfg.r_ddelta += apply(g.learn_mpc_r_ddelta_delta, g.mpc_config.r_ddelta, g.smooth_r_ddelta_delta);
+                            g.smooth_initialized = 1;
+                        } else {
+                            g.smooth_initialized = 0;  /* 超时回退后下次重新初始化平滑 */
                         }
                     }
                     mpc_set_weights(g.mpc, &eff_cfg);
