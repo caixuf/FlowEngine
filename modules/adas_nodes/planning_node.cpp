@@ -784,7 +784,13 @@ protected:
 
             char traj[1024];
             if (n_wp > 0) {
-                command_speed = spd_out[0];
+                /* spd_out[0] ≈ 当前车速，只能抬高、不能覆盖 command_speed。
+                 * 直接赋值会在停稳后形成自维持闭锁：
+                 *   v=0 → target_speed=0 → control PID 误差=0 → 油门=0 → v=0
+                 * 下方 TL override 只强制置 0、从不恢复，于是灯转绿也走不了。
+                 * 需要停车的路径（TL override、control 的 ACC）都显式置 0 且
+                 * 有明确解除条件，不依赖这里。 */
+                if (spd_out[0] > command_speed) command_speed = spd_out[0];
 
                 /* ── 红绿灯速度强制 override ──
                  * Frenet 轨迹的第一个点速度 spd_out[0] ≈ 当前车速，control 节点
