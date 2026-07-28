@@ -156,6 +156,28 @@ void mpc_set_state(MpcController* mpc,
 void mpc_set_prev_steer(MpcController* mpc, double steer);
 
 /**
+ * 设置转向角上限（状态 δ 的约束），随车速逐帧更新。
+ *
+ * 必须与调用方施加在 mpc_solve 输出上的外部限幅一致 —— 否则解从不触及
+ * 自身约束边界，平滑项失效，输出被外部砍平成 bang-bang。
+ *
+ * @param max_steer  转向角绝对值上限 (rad)，非正值忽略
+ */
+void mpc_set_max_steer(MpcController* mpc, double max_steer);
+
+/**
+ * 热更新代价权重与时域（支持 flowctl param set 边跑边调）。
+ *
+ * 只覆盖 horizon / dt / Q / R 这些"偏好"参数，不动 max_steer 等约束字段
+ * —— 后者随车速逐帧由 mpc_set_max_steer 设定，整体 memcpy 会把它冲掉。
+ *
+ * horizon 由调用方保证 ≤ MPC_MAX_HORIZON。
+ *
+ * @param cfg  仅读取权重/时域字段
+ */
+void mpc_set_weights(MpcController* mpc, const MpcConfig* cfg);
+
+/**
  * 求解 MPC 优化问题。
  * 使用线性化 + QP 近似（迭代 LQR / iLQR 风格），
  * 在 MPC_MAX_ITER 次内收敛或返回最佳可行解。

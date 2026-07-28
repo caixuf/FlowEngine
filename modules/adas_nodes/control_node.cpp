@@ -822,6 +822,25 @@ protected:
             g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
             g.k_v_lat                     = param_get_float("control.k_v_lat");
 
+            /* MPC 权重/时域热重载：与上面的 PID/Stanley 同等对待。原先只在
+             * control_init 读一次，注册了却改不动，反射在 MPC 上断线。
+             * horizon 必须夹到 MPC_MAX_HORIZON，越界会写坏定长工作数组。 */
+            {
+                int h = (int)param_get_float("control.mpc_horizon");
+                if (h > MPC_MAX_HORIZON) h = MPC_MAX_HORIZON;
+                if (h < 1)               h = 1;
+                g.mpc_config.horizon  = h;
+                g.mpc_config.dt       = param_get_float("control.mpc_dt");
+                g.mpc_config.q_x      = param_get_float("control.mpc_q_x");
+                g.mpc_config.q_y      = param_get_float("control.mpc_q_y");
+                g.mpc_config.q_theta  = param_get_float("control.mpc_q_theta");
+                g.mpc_config.q_v      = param_get_float("control.mpc_q_v");
+                g.mpc_config.r_a      = param_get_float("control.mpc_r_a");
+                g.mpc_config.q_delta  = param_get_float("control.mpc_q_delta");
+                g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
+                if (g.mpc) mpc_set_weights(g.mpc, &g.mpc_config);
+            }
+
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
             uint64_t now_us = clock_now_us();
             if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;
@@ -1348,18 +1367,25 @@ protected:
                 /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
                 int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
                 if (n_ref > 0) {
+                    /* 限幅必须在 solve 前注入，让求解器内部 cfg.max_steer 与
+                     * 下面的外部限幅同值。否则 MPC 在宽一个数量级的可行域里
+                     * 最优化，r_ddelta / q_delta 平滑项永不触发，输出被外部
+                     * 砍平后每帧翻符号（bang-bang）。
+                     *
+                     * 变道中放宽侧向加速度限制（与 Stanley 变道模式一致）。
+                     * 车道保持用 1.4 m/s²，变道用 3.0 m/s²，否则高速时 steer
+                     * limit 太小（10 m/s 时仅 ~0.04 rad），变道极慢。 */
+                    int lc_active_mpc = (g.lc_state == 1) || (g.lc_state == 3) ||
+                                        (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
+                    double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
+                    double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
+
                     mpc_set_reference(g.mpc, g.mpc_ref_buf, n_ref);
                     mpc_set_state(g.mpc, g.ego_x, g.ego_y, g.ego_heading, g.current_speed);
                     mpc_set_prev_steer(g.mpc, g.prev_steer);
+                    mpc_set_max_steer(g.mpc, mpc_steer_limit);
                     if (mpc_solve(g.mpc, &g.mpc_result) == 0 && g.mpc_result.converged) {
                         steer = g.mpc_result.steer;
-                        /* 变道中放宽侧向加速度限制（与 Stanley 变道模式一致）。
-                         * 车道保持用 1.4 m/s²，变道用 3.0 m/s²，否则高速时 steer
-                         * limit 太小（10 m/s 时仅 ~0.04 rad），变道极慢。 */
-                        int lc_active_mpc = (g.lc_state == 1) || (g.lc_state == 3) ||
-                                            (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
-                        double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
-                        double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
                         int steer_saturated = (fabs(steer) >= mpc_steer_limit * 0.95);
                         if (steer >  mpc_steer_limit) steer =  mpc_steer_limit;
                         if (steer < -mpc_steer_limit) steer = -mpc_steer_limit;
@@ -1728,6 +1754,11 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.min_overtake_gap_speed_mult = 0.7; /* 原硬编码 current_speed * 2.0（绝对速度），改为相对速度乘数，避免高速下 gap 永远无法满足 */
     g.steer_min_clamp             = 0.016; /* 原硬编码 0.012，提高最小转向钳位以缩短高速变道耗时 */
 
+    /* MPC 默认配置必须在 params_json 解析之前取，否则 JSON 里的 mpc_* 会被
+     * 后面的 mpc_default_config() 整体覆盖回默认值。 */
+    g.mpc_config = mpc_default_config();
+    g.mpc_config.wheelbase = g.wheelbase;  /* 与 control 节点轴距一致 */
+
     /* A-2 修复：先解析 JSON 配置（pipeline_car.json 等通过 params_json 传入），
      * 把 JSON 中的值刷入 g.* 字段；随后 param_register_* 用这些（可能被 JSON
      * 覆盖过的）值作为代码默认值注册。若 bootstrap 已把同名参数预加载进
@@ -1785,6 +1816,27 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.curve_ff_boost_radius_m = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "curve_ff_boost_factor");
             if (cJSON_IsNumber(j)) g.curve_ff_boost_factor = j->valuedouble;
+            /* MPC 权重/时域。此前 pipeline.json 里写着 "mpc_horizon": 15.0
+             * 却没有对应的解析分支，那行 JSON 是死字符串，实跑的是注册默认值 10。
+             * 补齐后 ρ = r_ddelta / q_y 可以只改 JSON 扫参，不必重编译。 */
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_horizon");
+            if (cJSON_IsNumber(j)) g.mpc_config.horizon = (int)j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_dt");
+            if (cJSON_IsNumber(j)) g.mpc_config.dt = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_x");
+            if (cJSON_IsNumber(j)) g.mpc_config.q_x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_y");
+            if (cJSON_IsNumber(j)) g.mpc_config.q_y = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_theta");
+            if (cJSON_IsNumber(j)) g.mpc_config.q_theta = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_v");
+            if (cJSON_IsNumber(j)) g.mpc_config.q_v = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_r_a");
+            if (cJSON_IsNumber(j)) g.mpc_config.r_a = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_delta");
+            if (cJSON_IsNumber(j)) g.mpc_config.q_delta = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_r_ddelta");
+            if (cJSON_IsNumber(j)) g.mpc_config.r_ddelta = j->valuedouble;
             cJSON_Delete(p);
             g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
         }
@@ -1813,18 +1865,18 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
     param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
 
-    /* MPC 参数注册。从 mpc_default_config() 取默认值，确保 param_get_float
-     * 返回合理值而非 0（之前未注册导致 MPC 初始化后 horizon=0 永不被使用）。
-     * 支持通过 pipeline.json params 或 flowctl param set 覆盖运行时调优。 */
-    param_register_float("control.mpc_horizon",  10.0f,         1,    50,    "MPC prediction horizon steps");
-    param_register_float("control.mpc_dt",       0.05f,         0.01, 0.5,   "MPC discrete time step (s)");
-    param_register_float("control.mpc_q_x",      1.0f,          0.0,  100.0, "MPC cost weight x (longitudinal)");
-    param_register_float("control.mpc_q_y",      8.0f,          0.0,  100.0, "MPC cost weight y (lateral)");
-    param_register_float("control.mpc_q_theta",  3.0f,          0.0,  100.0, "MPC cost weight heading");
-    param_register_float("control.mpc_q_v",      2.0f,          0.0,  100.0, "MPC cost weight speed");
-    param_register_float("control.mpc_r_a",      0.1f,          0.0,  10.0,  "MPC cost weight acceleration");
-    param_register_float("control.mpc_q_delta",  2.0f,          0.0,  100.0, "MPC cost weight steering angle state (vs delta_ref)");
-    param_register_float("control.mpc_r_ddelta", 5.0f,         0.0,  20.0,  "MPC cost weight steering rate dδ (higher = less oscillation)");
+    /* MPC 参数注册。默认值取自 g.mpc_config —— 即 mpc_default_config() 经
+     * params_json 覆盖后的值，与上面 PID 的 register(g.cfg_*) 同一 pattern。
+     * 此前这里写死字面量，导致 pipeline.json 即使能解析也会被注册值盖掉。 */
+    param_register_float("control.mpc_horizon",  (float)g.mpc_config.horizon, 1,    MPC_MAX_HORIZON, "MPC prediction horizon steps");
+    param_register_float("control.mpc_dt",       (float)g.mpc_config.dt,      0.01, 0.5,   "MPC discrete time step (s)");
+    param_register_float("control.mpc_q_x",      (float)g.mpc_config.q_x,     0.0,  100.0, "MPC cost weight x (longitudinal)");
+    param_register_float("control.mpc_q_y",      (float)g.mpc_config.q_y,     0.0,  100.0, "MPC cost weight y (lateral)");
+    param_register_float("control.mpc_q_theta",  (float)g.mpc_config.q_theta, 0.0,  100.0, "MPC cost weight heading");
+    param_register_float("control.mpc_q_v",      (float)g.mpc_config.q_v,     0.0,  100.0, "MPC cost weight speed");
+    param_register_float("control.mpc_r_a",      (float)g.mpc_config.r_a,     0.0,  10.0,  "MPC cost weight acceleration");
+    param_register_float("control.mpc_q_delta",  (float)g.mpc_config.q_delta, 0.0,  100.0, "MPC cost weight steering angle state (vs delta_ref)");
+    param_register_float("control.mpc_r_ddelta", (float)g.mpc_config.r_ddelta, 0.0, 20.0,  "MPC cost weight steering rate dδ (higher = less oscillation)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
      * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；
@@ -1848,12 +1900,10 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
     g.k_v_lat                     = param_get_float("control.k_v_lat");
 
-    /* ── MPC 控制器初始化 ── */
-    g.mpc_config = mpc_default_config();
-    g.mpc_config.wheelbase = g.wheelbase;  /* 与 control 节点轴距一致 */
-    /* 从 param_registry 读取 MPC 参数（支持 flowctl param set 热重载，
-     * 但 MPC 重建需要 mpc_destroy + mpc_create，此处仅初始化时读取一次；
-     * 运行时热重载需要重启节点）。 */
+    /* ── MPC 控制器初始化 ──
+     * g.mpc_config 已在 params_json 解析前由 mpc_default_config() 填好，
+     * 并被 JSON 覆盖过；此处从 registry 回读一次，覆盖 bootstrap 预加载的值。
+     * 权重/时域的逐帧热重载在 control_tick 里做（mpc_set_weights）。 */
     g.mpc_config.horizon  = (int)param_get_float("control.mpc_horizon");
     g.mpc_config.dt       = param_get_float("control.mpc_dt");
     g.mpc_config.q_x      = param_get_float("control.mpc_q_x");

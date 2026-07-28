@@ -654,6 +654,27 @@ void mpc_set_prev_steer(MpcController* mpc, double steer) {
     mpc->ego_delta = steer;   /* δ 状态初值 */
 }
 
+void mpc_set_max_steer(MpcController* mpc, double max_steer) {
+    if (!mpc || max_steer <= 0.0) return;
+    mpc->cfg.max_steer = max_steer;
+}
+
+void mpc_set_weights(MpcController* mpc, const MpcConfig* cfg) {
+    if (!mpc || !cfg) return;
+    int h = cfg->horizon;
+    if (h > MPC_MAX_HORIZON) h = MPC_MAX_HORIZON;
+    if (h < 1)               h = 1;
+    mpc->cfg.horizon  = h;
+    if (cfg->dt > 0.0) mpc->cfg.dt = cfg->dt;
+    mpc->cfg.q_x      = cfg->q_x;
+    mpc->cfg.q_y      = cfg->q_y;
+    mpc->cfg.q_theta  = cfg->q_theta;
+    mpc->cfg.q_v      = cfg->q_v;
+    mpc->cfg.q_delta  = cfg->q_delta;
+    mpc->cfg.r_a      = cfg->r_a;
+    mpc->cfg.r_ddelta = cfg->r_ddelta;
+}
+
 int mpc_solve(MpcController* mpc, MpcResult* result) {
     if (!mpc || !result) return -1;
     const MpcConfig* cfg = &mpc->cfg;
