@@ -68,7 +68,7 @@ struct PerceptionContext {
     /* 障碍物世界系位置/速度，从 flowsim vehicle/state 的 ox/oy/ov/ovy 字段接收。
      * 下游 planning/control/safety 经 ego_heading 旋回车体系做几何判断；
      * 速度方向直接用世界系（对向迎面 obs_vx<0 即可识别）。 */
-    double  obs_x[64]{}, obs_y[64]{}, obs_vx[64]{}, obs_vy[64]{};
+    double  obs_x[128]{}, obs_y[128]{}, obs_vx[128]{}, obs_vy[128]{};
 
     /* 发布帧计数 */
     uint32_t frame_id{0};
@@ -138,7 +138,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     int n = 0;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
         n = (int)j->valuedouble;
-    if (n < 1 || n > 64) n = 3;
+    if (n < 1 || n > 128) n = 3;
     g.n_obs = n;
     for (int i = 0; i < n; i++) {
         char key[16];
@@ -193,7 +193,7 @@ protected:
 
             /* ── DBSCAN ── */
             {
-                Point3D pts[256];
+                Point3D pts[512];
                 int np = 0;
                 double ch = cos(-g.ego_heading), sh = sin(-g.ego_heading);
 
@@ -207,19 +207,19 @@ protected:
                 }
 
                 /* 地面环 */
-                for (int ring = 0; ring < 2 && np < 256; ring++) {
+                for (int ring = 0; ring < 2 && np < 512; ring++) {
                     float r = 6.0f + (float)ring * 4.0f;
-                    for (int k = 0; k < 12 && np < 256; k++) {
+                    for (int k = 0; k < 12 && np < 512; k++) {
                         float a = (float)k / 12.0f * 2.0f * (float)M_PI;
                         pts[np].x = cosf(a) * r; pts[np].y = sinf(a) * r;
                         pts[np].z = 0.05f; pts[np].intensity = 0.3f; np++;
                     }
                 }
                 /* 传感器可见障碍物（FOV/量程/简化遮挡） */
-                double vis_rx[64], vis_ry[64], vis_r[64], vis_a[64];
-                int vis_idx[64];
+                double vis_rx[128], vis_ry[128], vis_r[128], vis_a[128];
+                int vis_idx[128];
                 int vis_count = 0;
-                for (int oi = 0; oi < g.n_obs && vis_count < 64; oi++) {
+                for (int oi = 0; oi < g.n_obs && vis_count < 128; oi++) {
                     double dx = g.obs_x[oi] - ego_ref_x;
                     double dy = g.obs_y[oi] - ego_ref_y;
                     double rx = dx * ch - dy * sh;
@@ -235,7 +235,7 @@ protected:
                     vis_count++;
                 }
 
-                int vis_keep[64];
+                int vis_keep[128];
                 for (int i = 0; i < vis_count; i++) vis_keep[i] = 1;
                 if (g.enable_simple_occlusion) {
                     const double occ_beam = 5.0 * M_PI / 180.0;
@@ -252,12 +252,12 @@ protected:
                 }
 
                 /* 障碍物表面点 */
-                for (int vi = 0; vi < vis_count && np < 256; vi++) {
+                for (int vi = 0; vi < vis_count && np < 512; vi++) {
                     if (!vis_keep[vi]) continue;
                     (void)vis_idx[vi];
                     double rx = vis_rx[vi];
                     double ry = vis_ry[vi];
-                    for (int k = 0; k < 8 && np < 256; k++) {
+                    for (int k = 0; k < 8 && np < 512; k++) {
                         pts[np].x = (float)rx + ((float)(k % 3) - 1.0f) * 0.8f + (float)rand_uniform_signed(g.obs_noise_std_m);
                         pts[np].y = (float)ry + ((float)(k / 3) - 1.0f) * 1.6f + (float)rand_uniform_signed(g.obs_noise_std_m);
                         pts[np].z = 0.6f + (float)(k % 4) * 0.4f;
@@ -298,7 +298,7 @@ protected:
                  * (obs_v < -2) 与 planning 的 Frenet 位置外推都依赖速度，
                  * 缺失速度 → 对向来车 TTC 永不触发、Frenet 用零速度外推。 */
                 double ch_w = cos(g.ego_heading), sh_w = sin(g.ego_heading);
-                for (int ci = 0; ci < n_clusters && obs_list.count < 64; ci++) {
+                for (int ci = 0; ci < n_clusters && obs_list.count < 128; ci++) {
                     const ClusterBounds* cb = dbscan_get_cluster(&g.dbscan, ci);
                     if (!cb || cb->point_count < 3) continue;
                     Obstacle* ob = &obs_list.obstacles[obs_list.count++];

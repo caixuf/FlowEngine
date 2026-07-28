@@ -35,7 +35,7 @@
 #include <time.h>
 #include <math.h>
 
-#define RECORDER_MAX_OBSTACLES 64
+#define RECORDER_MAX_OBSTACLES 128
 
 static struct {
     Transport*        transport;

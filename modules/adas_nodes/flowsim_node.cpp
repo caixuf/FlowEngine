@@ -822,7 +822,7 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
         if (e.type == flowsim::EntityType::TrafficLight ||
             e.type == flowsim::EntityType::ETCGate ||
             e.type == flowsim::EntityType::StopLine) continue;
-        if (n_obs >= 64) break;
+        if (n_obs >= 128) break;
 
         char key[20];
         snprintf(key, sizeof(key), "ox%d", n_obs);

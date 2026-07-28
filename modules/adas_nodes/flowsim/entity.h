@@ -1,7 +1,7 @@
 /**
  * entity.h — FlowSim v2 Entity System
  *
- * 固定池 64 实体，AOS（Array of Structs）布局。池小（64），AOS 简单且
+ * 固定池 128 实体，AOS（Array of Structs）布局。池小（128），AOS 简单且
  * 缓存友好（tick 时遍历全部实体）。设计文档提到 SOA 是远期优化方向，
  * 当前 AOS 足够。
  *
@@ -11,7 +11,7 @@
  *   - Pedestrian: 行人，横穿或路边行走
  *   - TrafficLight/ETCGate/StopLine: 场景事件触发器（无动力学）
  *
- * EntityId 是 pool 索引（0..63），-1 表示无效。Ego 固定占用 index 0。
+ * EntityId 是 pool 索引（0..127），-1 表示无效。Ego 固定占用 index 0。
  */
 
 #ifndef FLOWSIM_ENTITY_H
@@ -27,7 +27,7 @@ namespace flowsim {
 
 using EntityId = int;
 constexpr EntityId INVALID_ENTITY = -1;
-constexpr int MAX_ENTITIES = 64;
+constexpr int MAX_ENTITIES = 128;
 
 enum class EntityType : uint8_t {
     None,

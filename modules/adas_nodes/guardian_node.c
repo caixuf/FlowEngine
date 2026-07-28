@@ -86,7 +86,7 @@ static struct {
     uint64_t last_ego_state_us;
 
     /* 障碍物 */
-    struct { double x, y, vx, vy; int valid; } obstacles[64];
+    struct { double x, y, vx, vy; int valid; } obstacles[128];
     volatile int has_obstacles;
     uint64_t last_obstacles_us;
 

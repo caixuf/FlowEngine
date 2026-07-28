@@ -121,9 +121,9 @@ struct PlanningContext {
     volatile int has_fusion{0};
 
     /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
-    /* 容量与 perception 发布的 ObstacleList.obstacles[64] 对齐（adas_msgs_gen.h
-     * 生成的 ObstacleList.h 中 obstacles[64]）。直接用编译期常量避免运行时切片越界。 */
-    static constexpr int kMaxObs = 64;
+    /* 容量与 perception 发布的 ObstacleList.obstacles[128] 对齐（adas_msgs_gen.h
+     * 生成的 ObstacleList.h 中 obstacles[128]）。直接用编译期常量避免运行时切片越界。 */
+    static constexpr int kMaxObs = 128;
     double obs_x[kMaxObs]{}, obs_y[kMaxObs]{}, obs_vx[kMaxObs]{}, obs_vy[kMaxObs]{};  /* Phase 3: +vy */
     volatile int has_vstate{0};
 
@@ -676,12 +676,12 @@ protected:
             /* 向 Frenet 规划器注入障碍物（世界坐标），触发自动避障/变道 */
 #ifdef HAVE_FRENET
             if (g.has_vstate) {
-                /* 障碍物数组扩容到 64：vehicle/state 障碍物 + 最多 4 个
+                /* 障碍物数组扩容到 128：vehicle/state 障碍物 + 最多 4 个
              * 红绿灯虚拟停止线墙。红绿灯墙在红灯/黄灯时注入，绿灯时不注入。
              * Phase 3: 添加 vx/vy 数组，传给 Frenet 做位置外推。 */
-            double ox[64], oy[64], ow[64], ol[64], ovx[64], ovy[64];
+            double ox[128], oy[128], ow[128], ol[128], ovx[128], ovy[128];
             int n_obs = 0;
-            for (int i = 0; i < g.kMaxObs && n_obs < 64; i++) {
+            for (int i = 0; i < g.kMaxObs && n_obs < 128; i++) {
                     /* 只传入前方和侧方的有效障碍物（排除行人 y>4） */
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < OBS_MIN_DX_M || dx > OBS_MAX_DX_M) continue;
@@ -709,7 +709,7 @@ protected:
                  * 刹停距离估算: d_brake = v² / (2*a) + 余量，a≈4 m/s²。
                  * 黄灯判据: 仅当能安全刹停时注入（dx > min_stop_dist）；
                  *           太近无法安全刹停时不注入（让车通过，避免急刹追尾）。 */
-                if (g.has_traffic_lights && n_obs < 64) {
+                if (g.has_traffic_lights && n_obs < 128) {
                     double v = g.ego_v;
                     if (v < 0.0) v = 0.0;
                     /* 刹停距离 = v²/(2*4) + 3m 安全余量；最小 5m 保证近距也能停 */
@@ -718,7 +718,7 @@ protected:
                     /* 黄灯最小安全刹停距离：速度太低时用 3m */
                     double min_yellow_stop = (v > 2.0) ? 3.0 : 0.0;
 
-                    for (int ti = 0; ti < g.tl_count && n_obs < 64; ti++) {
+                    for (int ti = 0; ti < g.tl_count && n_obs < 128; ti++) {
                         if (g.tl_state[ti] == 0) continue;  /* 绿灯，不注入 */
                         double dx_tl = g.tl_x[ti] - g.ego_x;
                         if (dx_tl <= 0.0) continue;  /* 已过停止线 */

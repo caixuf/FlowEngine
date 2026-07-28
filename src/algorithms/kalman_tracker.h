@@ -42,7 +42,7 @@ extern "C" {
 
 /* ── 常量 ────────────────────────────────────────────────────── */
 #define KTRACKER_MAX_TRACKS   32      /**< 最大跟踪目标数 */
-#define KTRACKER_MAX_DETS     32      /**< 每帧最大检测数 */
+#define KTRACKER_MAX_DETS    128      /**< 每帧最大检测数（与 ObstacleList.obstacles[128] 对齐） */
 #define KTRACKER_STATE_DIM    4       /**< [x, y, vx, vy] */
 
 /* ── 跟踪状态 ────────────────────────────────────────────────── */

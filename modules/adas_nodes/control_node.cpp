@@ -48,14 +48,14 @@ namespace {
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
-/* NOA Phase 6: 障碍物槽位扩到 64。
+/* NOA Phase 6: 障碍物槽位扩到 128（与 ObstacleList.obstacles[128] 对齐）。
  * 0-3: vehicle/state topic 提供的 ego-relative 障碍物（fusion 发布）
  * 4-7: scene/frame entities 提供的世界坐标车辆（flowsim 发布），由
  *      on_scene_frame 填充前方/侧方最近的车辆，补全 24-NPC 场景下 vehicle/state
  *      4 槽位截断导致的感知盲区——这是 P0 pipeline 冻结的根因之一：ego 被慢车
  *      阻挡但该慢车未进入 vehicle/state 的 4 个槽位，control 的被动超车逻辑
  *      因 best_gap=1e9 而不触发变道，ego 减速至 0 后管道静默。 */
-#define MAX_OBS 64
+#define MAX_OBS 128
 
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
