@@ -41,8 +41,8 @@ static struct {
     double ego_speed;
 
     int n_obs;
-    double obs_x[16];
-    double obs_y[16];
+    double obs_x[64];
+    double obs_y[64];
 
     uint32_t frame_id;
 
@@ -129,7 +129,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     int n = 0;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
         n = (int)j->valuedouble;
-    if (n < 1 || n > 16) n = 3;
+    if (n < 1 || n > 64) n = 3;
     g.n_obs = n;
 
     for (int i = 0; i < n; i++) {
@@ -145,13 +145,13 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 }
 
 static uint32_t estimate_visible_point_count(void) {
-    double vis_r[16], vis_a[16];
+    double vis_r[64], vis_a[64];
     int vis_count = 0;
 
     const double ch = cos(-g.ego_heading);
     const double sh = sin(-g.ego_heading);
 
-    for (int i = 0; i < g.n_obs && vis_count < 16; i++) {
+    for (int i = 0; i < g.n_obs && vis_count < 64; i++) {
         const double dx = g.obs_x[i] - g.ego_x;
         const double dy = g.obs_y[i] - g.ego_y;
         const double rx = dx * ch - dy * sh;
@@ -166,7 +166,7 @@ static uint32_t estimate_visible_point_count(void) {
 
     int visible_after_occ = vis_count;
     if (g.enable_simple_occlusion) {
-        int keep[16];
+        int keep[64];
         const double occ_beam = 5.0 * M_PI / 180.0;
         for (int i = 0; i < vis_count; i++) keep[i] = 1;
         for (int i = 0; i < vis_count; i++) {

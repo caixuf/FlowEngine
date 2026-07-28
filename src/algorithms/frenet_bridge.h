@@ -53,7 +53,7 @@ void frenet_set_obstacles(FrenetHandle* fh,
  * @param ox, oy   Obstacle center positions (global coordinates)
  * @param ow, ol   Obstacle width, length
  * @param vx, vy   Obstacle velocities (m/s, global frame). NULL → treated as 0.
- * @param n        Number of obstacles (max 8)
+ * @param n        Number of obstacles (max 64)
  */
 void frenet_set_obstacles_v(FrenetHandle* fh,
                             const double* ox, const double* oy,

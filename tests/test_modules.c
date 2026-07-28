@@ -108,14 +108,14 @@ static void test_schema_metadata(void) {
     ObstacleList_register_type();
     const TypeRegistryEntry* ol = serializer_lookup_by_name("ObstacleList");
     ASSERT(ol != NULL, "ObstacleList should be registered");
-    /* obstacles[8] is a nested array field */
+    /* obstacles[64] is a nested array field */
     bool found_nested_array = false;
     for (uint16_t i = 0; i < ol->field_count; i++) {
-        if (ol->fields[i].kind == FIELD_KIND_NESTED && ol->fields[i].array_len == 8) {
+        if (ol->fields[i].kind == FIELD_KIND_NESTED && ol->fields[i].array_len == 64) {
             found_nested_array = true;
         }
     }
-    ASSERT(found_nested_array, "should find nested array field obstacles[8]");
+    ASSERT(found_nested_array, "should find nested array field obstacles[64]");
 
     PASS();
 }

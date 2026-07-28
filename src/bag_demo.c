@@ -169,7 +169,7 @@ static void on_replay_state(const Message* msg, void* user_data) {
 
     cJSON* obstacles = cJSON_CreateArray();
     if (vehicle_state) {
-        for (int i = 0; i < n_obs && i < 16; i++) {
+        for (int i = 0; i < n_obs && i < 64; i++) {
             char kx[16], ky[16];
             snprintf(kx, sizeof(kx), "ox%d", i);
             snprintf(ky, sizeof(ky), "oy%d", i);

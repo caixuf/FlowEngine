@@ -735,9 +735,9 @@ static void export_dashboard_json(void) {
 
     /* 障碍物（从 vehicle/state 动态读取） */
     int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");
-    if (n_obs < 0 || n_obs > 16) n_obs = 0;
+    if (n_obs < 0 || n_obs > 64) n_obs = 0;
 
-#define MAX_OBS_SCENE 16
+#define MAX_OBS_SCENE 64
 #define OBS_FALLBACK_CAR_LEN   4.6
 #define OBS_FALLBACK_CAR_WID   2.0
 #define OBS_FALLBACK_PED_SIZE  0.6

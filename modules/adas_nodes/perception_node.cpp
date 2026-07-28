@@ -68,7 +68,7 @@ struct PerceptionContext {
     /* 障碍物世界系位置/速度，从 flowsim vehicle/state 的 ox/oy/ov/ovy 字段接收。
      * 下游 planning/control/safety 经 ego_heading 旋回车体系做几何判断；
      * 速度方向直接用世界系（对向迎面 obs_vx<0 即可识别）。 */
-    double  obs_x[16]{}, obs_y[16]{}, obs_vx[16]{}, obs_vy[16]{};
+    double  obs_x[64]{}, obs_y[64]{}, obs_vx[64]{}, obs_vy[64]{};
 
     /* 发布帧计数 */
     uint32_t frame_id{0};
@@ -86,7 +86,7 @@ struct PerceptionContext {
     int    dbscan_min_pts{4};
     int    lidar_rate_hz{20};
     double lidar_fov_deg{120.0};
-    double lidar_max_range_m{60.0};
+    double lidar_max_range_m{120.0};
     double obs_noise_std_m{0.08};
     int    enable_simple_occlusion{1};
 
@@ -138,7 +138,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     int n = 0;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
         n = (int)j->valuedouble;
-    if (n < 1 || n > 16) n = 3;
+    if (n < 1 || n > 64) n = 3;
     g.n_obs = n;
     for (int i = 0; i < n; i++) {
         char key[16];
@@ -216,10 +216,10 @@ protected:
                     }
                 }
                 /* 传感器可见障碍物（FOV/量程/简化遮挡） */
-                double vis_rx[16], vis_ry[16], vis_r[16], vis_a[16];
-                int vis_idx[16];
+                double vis_rx[64], vis_ry[64], vis_r[64], vis_a[64];
+                int vis_idx[64];
                 int vis_count = 0;
-                for (int oi = 0; oi < g.n_obs && vis_count < 16; oi++) {
+                for (int oi = 0; oi < g.n_obs && vis_count < 64; oi++) {
                     double dx = g.obs_x[oi] - ego_ref_x;
                     double dy = g.obs_y[oi] - ego_ref_y;
                     double rx = dx * ch - dy * sh;
@@ -235,7 +235,7 @@ protected:
                     vis_count++;
                 }
 
-                int vis_keep[16];
+                int vis_keep[64];
                 for (int i = 0; i < vis_count; i++) vis_keep[i] = 1;
                 if (g.enable_simple_occlusion) {
                     const double occ_beam = 5.0 * M_PI / 180.0;
@@ -298,7 +298,7 @@ protected:
                  * (obs_v < -2) 与 planning 的 Frenet 位置外推都依赖速度，
                  * 缺失速度 → 对向来车 TTC 永不触发、Frenet 用零速度外推。 */
                 double ch_w = cos(g.ego_heading), sh_w = sin(g.ego_heading);
-                for (int ci = 0; ci < n_clusters && obs_list.count < 8; ci++) {
+                for (int ci = 0; ci < n_clusters && obs_list.count < 64; ci++) {
                     const ClusterBounds* cb = dbscan_get_cluster(&g.dbscan, ci);
                     if (!cb || cb->point_count < 3) continue;
                     Obstacle* ob = &obs_list.obstacles[obs_list.count++];

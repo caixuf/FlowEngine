@@ -118,7 +118,7 @@ struct ObstacleList {
     uint32   frame_id
     uint64   timestamp_us   # CLOCK_MONOTONIC 时间戳（微秒）
     uint32   count          # 有效障碍物数量
-    Obstacle obstacles[8]   # 固定 8 个障碍物
+    Obstacle obstacles[64]  # 固定 64 个障碍物
 }
 
 struct EgoState {
