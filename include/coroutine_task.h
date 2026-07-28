@@ -11,10 +11,10 @@
  *
  * 节点建线程 pattern：
  * @code
- *   flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+ *   flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
  *   g_node_exec = &ex;
- *   ex.spawn(g.task->run());
- *   while (!g.should_stop) ex.run();
+ *   ex.spawn(g.task->run(), "node_name");
+ *   node_pump(ex, [] { return g.should_stop; });   // 禁止裸 while(...) ex.run()
  *   ex.shutdown();
  *   g_node_exec = nullptr;
  * @endcode
@@ -61,6 +61,28 @@
  * other header-defined awaitables to read the wrong (null) g_node_exec when the
  * dynamic linker resolves the inline function to a different .so's copy. */
 inline thread_local flowcoro::rt::RtExecutor* g_node_exec = nullptr;
+
+/* ─────────────────────────────────────────────────────────
+ * 宿主 tick 循环 — 所有节点线程的唯一合法出口
+ *
+ * ex.run() 是非阻塞 tick（不 sleep / 不 notify / 不 syscall），节奏控制是宿主
+ * 责任。Config 的 idle_sleep_us 仅被 run_blocking() 读取，对 run() 无效 ——
+ * 裸 `while (!stop) ex.run();` 会 100% 忙等自旋占满一个核。
+ *
+ * 200µs sleep 的代价：20Hz 定频节点定时器精度损失 0.4%，消息驱动节点事件延迟
+ * +0~200µs（远小于 lidar / 对齐窗口的 50ms），stop 响应最坏迟 200µs。
+ * 硬约束：sleep 必须 ≪ 最小对齐窗口。
+ *
+ * @param ex        已 spawn 过任务的 executor
+ * @param stopped   返回 true 时退出循环（读 g.should_stop 或 impl->should_stop()）
+ */
+template <typename StopFn>
+inline void node_pump(flowcoro::rt::RtExecutor& ex, StopFn stopped) {
+    while (!stopped()) {
+        ex.run();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+}
 
 /* ─────────────────────────────────────────────────────────
  * 1. Task 别名 — 所有 `Task run() override` 自动跟随
@@ -659,16 +681,7 @@ static int prefix##_execute(TaskBase* b) {                                    \
         g_node_exec = &ex;                                                    \
         CoroutineTask& ct = *w->impl;                                          \
         ex.spawn(ct.run(), #prefix);                                             \
-        /* run() 是非阻塞 tick（不 sleep / 不 notify / 不 syscall），节奏控制是宿主责任。
-         * idle_sleep_us 仅 run_blocking() 读取，对 run() 无效 —— 裸 run() 循环会 100% 忙等自旋。
-         * 这里补 200µs sleep：定频轮询节点（control/planning 20Hz 等）的定时器精度损失
-         * 仅 0.4%；消息驱动节点（fusion/safety_control）跨线程事件延迟 +0~200µs，
-         * 远小于 lidar 50ms / 对齐窗口 50ms 周期。硬约束：sleep 必须 ≪ 最小对齐窗口。
-         * should_stop() 响应性最坏迟 200µs。若实测睡过头致 20Hz→18Hz，降到 50µs 或 sched_yield。 */ \
-        while (!w->impl->should_stop()) {                                     \
-            ex.run();                                                         \
-            std::this_thread::sleep_for(std::chrono::microseconds(200));      \
-        }                                                                     \
+        node_pump(ex, [w] { return w->impl->should_stop(); });                 \
         ex.shutdown();                                                        \
         g_node_exec = nullptr;                                                \
         return 0;                                                             \

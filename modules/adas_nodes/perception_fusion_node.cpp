@@ -517,11 +517,11 @@ private:
 void* fusion_thread(void*) {
     pthread_setname_np(pthread_self(), "p_fusion");
     try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
+        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
         g_node_exec = &ex;
         CoroutineTask& ct = *g.task;
         ex.spawn(ct.run(), "p_fusion");
-        while (!g.should_stop) ex.run();
+        node_pump(ex, [] { return (bool)g.should_stop; });
         ex.shutdown();
         g_node_exec = nullptr;
     } catch (...) {
