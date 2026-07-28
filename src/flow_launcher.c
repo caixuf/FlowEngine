@@ -43,6 +43,7 @@
 #include "bag.h"
 #include "adas_msgs_gen.h"
 #include "crash_handler.h"
+#include "param_bridge.h"
 
 /* ── 节点描述 ──────────────────────────────────────────────── */
 
@@ -220,6 +221,16 @@ static int run_dlopen_mode(int duration, int stagger_ms,
 
     LOG_INFO("launcher", "all nodes running (%ds) — dashboard: http://localhost:8800", duration);
 
+    /* 参数服务：必须在所有 init() 之后启动 —— 节点的 param_register_* 经符号
+     * interposition 写进本进程这份 registry，此刻才齐全。启动失败不致命，
+     * 只是失去远程调参能力，pipeline 照跑。 */
+    ParamBridgeServer* param_srv = param_bridge_server_start(NULL);
+    if (param_srv)
+        LOG_INFO("launcher", "param bridge listening (%d params) — "
+                 "flowctl param set <name> <value>", param_count());
+    else
+        LOG_WARN("launcher", "param bridge failed to start — remote tuning unavailable");
+
     /* 等待运行时间或信号: duration ≤ 0 表示持续运行直到 Ctrl+C */
     if (duration > 0) {
         for (int t = 0; t < duration && g_running; t++) sleep(1);
@@ -230,6 +241,8 @@ static int run_dlopen_mode(int duration, int stagger_ms,
 
     /* 优雅停止 */
     LOG_INFO("launcher", "stopping nodes...");
+    /* 先停参数服务：之后 registry 里的值不会再被外部改动，节点可以安心退出。 */
+    param_bridge_server_stop(param_srv);
     for (int i = g_node_count - 1; i >= 0; i--) {
         if (g_nodes[i].plugin) { g_nodes[i].plugin->stop(); }
     }

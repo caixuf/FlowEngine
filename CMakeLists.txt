@@ -240,6 +240,7 @@ set(CORE_SOURCES
     src/core/transport.c
     src/core/flow_registry.c
     src/core/param_registry.c
+    src/core/param_bridge.c
     src/core/monitor_server.c
     src/core/stats_bridge.c
     src/core/dashboard_bridge.c
