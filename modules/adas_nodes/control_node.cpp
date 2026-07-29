@@ -157,6 +157,37 @@ struct ControlContext {
     /* A10 横向速度规划 PD 增益（可通过 pipeline.json 热重载） */
     double k_vy{0.35};               /* v_y_des 位置增益：v_y_des = k_vy*lat_error - k_d*v_lat */
     double k_vy_damp{0.6};           /* v_y_des 速度阻尼增益 */
+    /* 梯形横向速度剖面（trapezoid lateral velocity profile）
+     * 变道时主动规划横向速度时间曲线（加速段→匀速段→减速段），给 PD 一副"时刻表"。
+     * lc_use_trapezoid 开关控制，开启后 v_y_des = v_y_ff + kp*lat_err - damp*v_lat。 */
+    int    lc_trap_active{0};        /* 剖面是否激活（变道/回切触发时置 1） */
+    double lc_trap_start_y{0.0};     /* 变道起点 y */
+    double lc_trap_target_y{0.0};    /* 变道目标 y（= lc_target_y） */
+    uint64_t lc_trap_start_us{0};    /* 剖面起始时刻 (monotonic us) */
+    double lc_trap_D{0.0};           /* 总横向位移 |target-start| (m) */
+    double lc_trap_dir{0.0};         /* 方向 +1 / -1 */
+    double lc_trap_t_accel{0.0};     /* 加速段时长 (s) */
+    double lc_trap_t_cruise{0.0};    /* 匀速段时长 (s)，=0 退化为三角形 */
+    double lc_trap_v_peak{0.0};      /* 峰值横向速度 (m/s) */
+    /* 梯形剖面可调参数（param_registry 热重载） */
+    double lc_use_trapezoid{1.0};    /* >0.5=梯形前馈+PD修正, <=0.5=纯PD(原逻辑) */
+    double lc_trapezoid_accel{1.2};  /* 横向加速度 (m/s²)，决定减速时机 */
+    double lc_trapezoid_vmax{1.5};   /* 横向速度上限 (m/s) */
+    double lc_trapezoid_kp{0.15};    /* 梯形模式位移反馈增益（替代 k_vy 做修正） */
+    /* LQR 反馈层（替换手调 PD，与梯形前馈叠加）
+     * v_y_des = v_y_ff - (K1*e_y + K2*e_φ + K3*v_lat)
+     * 增益由 Riccati 方程在线解算，随速度自适应 */
+    double lc_use_lqr{1.0};          /* >0.5=LQR 反馈, <=0.5=手调 PD */
+    double lqr_q_ey{0.3};            /* 横向位置误差权重 */
+    double lqr_q_ephi{1.0};          /* 航向误差权重 */
+    double lqr_q_vlat{0.2};          /* 横向速度权重 */
+    double lqr_r_steer{2.0};         /* 转向控制代价（越小越激进） */
+    double lqr_fb_scale{0.15};       /* LQR→v_y_des 映射系数（K 面向 δ，需缩放） */
+    /* 诊断字段（每帧写入，发布到 control/raw_cmd/text 供观测） */
+    double diag_v_y_des{0.0};        /* 期望横向速度（含前馈+PD） */
+    double diag_v_y_ff{0.0};         /* 梯形前馈横向速度 */
+    double diag_v_lat_actual{0.0};   /* 实际横向速度 speed*sin(h-ref_h) */
+    int    diag_trap_active{0};      /* 梯形剖面是否激活 */
 
     /* 从 topic 解析的值 */
     double current_speed{0};
@@ -277,6 +308,111 @@ struct ControlContext {
 };
 
 ControlContext g;
+
+/* ── 梯形横向速度剖面 ── */
+static void lc_trapezoid_start(ControlContext& ctx, double start_y, double target_y,
+                               uint64_t now_us) {
+    double D = fabs(target_y - start_y);
+    if (D < 0.05) { ctx.lc_trap_active = 0; return; }
+    ctx.lc_trap_active   = 1;
+    ctx.lc_trap_start_y  = start_y;
+    ctx.lc_trap_target_y = target_y;
+    ctx.lc_trap_start_us = now_us;
+    ctx.lc_trap_D        = D;
+    ctx.lc_trap_dir      = (target_y > start_y) ? 1.0 : -1.0;
+    double accel = fmax(ctx.lc_trapezoid_accel, 0.05);
+    double vmax  = fmax(ctx.lc_trapezoid_vmax, 0.1);
+    double d_a_full = vmax * vmax / (2.0 * accel);
+    if (2.0 * d_a_full <= D) {
+        ctx.lc_trap_v_peak   = vmax;
+        ctx.lc_trap_t_accel  = vmax / accel;
+        ctx.lc_trap_t_cruise = (D - 2.0 * d_a_full) / vmax;
+    } else {
+        ctx.lc_trap_v_peak   = sqrt(D * accel);
+        ctx.lc_trap_t_accel  = ctx.lc_trap_v_peak / accel;
+        ctx.lc_trap_t_cruise = 0.0;
+    }
+}
+
+static double lc_trapezoid_vy(const ControlContext& ctx, uint64_t now_us) {
+    if (!ctx.lc_trap_active) return 0.0;
+    double t = (double)(now_us - ctx.lc_trap_start_us) / 1e6;
+    if (t < 0.0) return 0.0;
+    double accel   = fmax(ctx.lc_trapezoid_accel, 0.05);
+    double v_peak  = ctx.lc_trap_v_peak;
+    double t_a     = ctx.lc_trap_t_accel;
+    double t_c     = ctx.lc_trap_t_cruise;
+    double t_total = 2.0 * t_a + t_c;
+    double vy;
+    if (t < t_a) {
+        vy = accel * t;
+    } else if (t < t_a + t_c) {
+        vy = v_peak;
+    } else if (t < t_total) {
+        vy = v_peak - accel * (t - t_a - t_c);
+    } else {
+        vy = 0.0;
+    }
+    return ctx.lc_trap_dir * vy;
+}
+
+/* ── LQR 横向反馈增益 ──
+ * 状态 x = [e_y, e_φ, v_lat]，控制 u = δ。
+ * 线性化运动学自行车模型：A = [[0,v,1],[0,0,0],[0,-v,0]], B = [[0],[v/L],[0]]
+ * 迭代离散 Riccati，稳态反馈 u = -K·x。增益随速度变化，每帧重解。 */
+static void lqr_solve_gain(double speed, double wheelbase,
+                           double q_ey, double q_ephi, double q_vlat, double r_steer,
+                           double K_out[3]) {
+    const double dt = 0.05;
+    double v = fmax(speed, 2.0);
+    double L = fmax(wheelbase, 0.5);
+    double Ad[3][3] = {
+        {1.0,       v*dt,  dt},
+        {0.0,       1.0,   0.0},
+        {0.0,      -v*dt,  1.0}
+    };
+    double Bd[3] = { 0.0, (v/L)*dt, 0.0 };
+    double Qd[3] = { q_ey, q_ephi, q_vlat };
+    double Rd    = fmax(r_steer, 1e-3);
+    double P[6] = { Qd[0], Qd[1], Qd[2], 0.0, 0.0, 0.0 };
+    for (int iter = 0; iter < 50; iter++) {
+        double p00=P[0], p11=P[1], p22=P[2], p01=P[3], p02=P[4], p12=P[5];
+        double APB[3];
+        APB[0] = Ad[0][0]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][0]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][0]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
+        APB[1] = Ad[0][1]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][1]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][1]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
+        APB[2] = Ad[0][2]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][2]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][2]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
+        double BtPB = Bd[0]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Bd[1]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Bd[2]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
+        double S = Rd + BtPB;
+        if (S < 1e-9) S = 1e-9;
+        double APA[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                double sum = 0.0;
+                for (int k = 0; k < 3; k++) {
+                    for (int l = 0; l < 3; l++) {
+                        double Pkl = (k==0)?((l==0)?p00:(l==1)?p01:p02) : (k==1)?((l==0)?p01:(l==1)?p11:p12) : ((l==0)?p02:(l==1)?p12:p22);
+                        sum += Ad[k][i] * Pkl * Ad[l][j];
+                    }
+                }
+                APA[i][j] = sum;
+            }
+        }
+        double Pn[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                double Qij = (i==j) ? Qd[i] : 0.0;
+                Pn[i][j] = Qij + APA[i][j] - APB[i]*APB[j]/S;
+            }
+        }
+        double diff = fabs(Pn[0][0]-p00)+fabs(Pn[1][1]-p11)+fabs(Pn[2][2]-p22);
+        P[0]=Pn[0][0]; P[1]=Pn[1][1]; P[2]=Pn[2][2]; P[3]=Pn[0][1]; P[4]=Pn[0][2]; P[5]=Pn[1][2];
+        if (diff < 1e-7) break;
+    }
+    double p00=P[0], p11=P[1], p22=P[2], p01=P[3], p02=P[4], p12=P[5];
+    K_out[0] = (Bd[0]*p00 + Bd[1]*p01 + Bd[2]*p02) / Rd;
+    K_out[1] = (Bd[0]*p01 + Bd[1]*p11 + Bd[2]*p12) / Rd;
+    K_out[2] = (Bd[0]*p02 + Bd[1]*p12 + Bd[2]*p22) / Rd;
+}
 
 static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_mps2) {
     double speed = speed_mps;
@@ -875,6 +1011,16 @@ protected:
             g.k_v_lat                     = param_get_float("control.k_v_lat");
             g.k_vy                       = param_get_float("control.k_vy");
             g.k_vy_damp                  = param_get_float("control.k_vy_damp");
+            g.lc_use_trapezoid           = param_get_float("control.lc_use_trapezoid");
+            g.lc_trapezoid_accel         = param_get_float("control.lc_trapezoid_accel");
+            g.lc_trapezoid_vmax          = param_get_float("control.lc_trapezoid_vmax");
+            g.lc_trapezoid_kp            = param_get_float("control.lc_trapezoid_kp");
+            g.lc_use_lqr                 = param_get_float("control.lc_use_lqr");
+            g.lqr_q_ey                   = param_get_float("control.lqr_q_ey");
+            g.lqr_q_ephi                 = param_get_float("control.lqr_q_ephi");
+            g.lqr_q_vlat                 = param_get_float("control.lqr_q_vlat");
+            g.lqr_r_steer                = param_get_float("control.lqr_r_steer");
+            g.lqr_fb_scale               = param_get_float("control.lqr_fb_scale");
 
             /* MPC 权重/时域热重载：与上面的 PID/Stanley 同等对待。原先只在
              * control_init 读一次，注册了却改不动，反射在 MPC 上断线。
@@ -1280,6 +1426,7 @@ protected:
                         effective_target_y = g.lc_target_y;
                         if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
                         g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
+                        lc_trapezoid_start(g, g.ego_y, g.lc_target_y, clock_now_us());
                         statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_START, NULL);
                         LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f mode=%s)",
                                  route_triggered ? "NOA_ROUTE" : (overtake_worthwhile ? "OVERTAKE" : "BLOCKED"),
@@ -1337,6 +1484,7 @@ protected:
                             effective_target_y = g.lc_target_y;
                             g.lc_state = 3;
                             g.lc_wait = 0.0;
+                            lc_trapezoid_start(g, g.ego_y, g.lc_target_y, clock_now_us());
                             LOG_INFO("control", ">>> RETURN to original lane (orig_gap=%.1f safe=%.1f)", orig_gap, orig_safe);
                         } else {
                             /* 还不安全：重置允许后续超车评估但不回切 */
@@ -1361,6 +1509,7 @@ protected:
                 g.committed_lane_side = (g.lc_target_idx >= 0) ? g.lc_target_idx
                                                                 : lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
                 g.lc_state = 2; g.lc_wait = 0;
+                g.lc_trap_active = 0;
                 statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
                 LOG_INFO("control", ">>> lane change complete");
             }
@@ -1369,6 +1518,7 @@ protected:
                 g.lc_attempted = 0;
                 g.lc_cooldown = g.lc_cooldown_after_return_s;
                 g.lc_timer = 0.0;
+                g.lc_trap_active = 0;
                 LOG_INFO("control", ">>> returned to original lane");
             }
 
@@ -1564,10 +1714,51 @@ protected:
                     double v_y_des = 0.0;          /* 期望横向速度（巡航=0） */
                     double psi_des = ref_road_heading; /* 期望 heading（巡航=道路切线） */
                     double delta_ff = 0.0;         /* 前馈 steer */
+                    double v_y_ff = 0.0;
+                    double v_lat_actual = 0.0;
                     if (lc_active) {
-                        double v_lat_actual = g.current_speed *
+                        v_lat_actual = g.current_speed *
                             sin(g.ego_heading - ref_road_heading);
-                        v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
+                        if (g.lc_use_trapezoid > 0.5 && g.lc_trap_active) {
+                            v_y_ff = lc_trapezoid_vy(g, clock_now_us());
+                            double remain = (g.lc_trap_target_y - g.ego_y) * g.lc_trap_dir;
+                            /* 3.0x 安全裕量：控制器跟踪有滞后，理论制动距离不够，
+                             * 提前切断前馈让 PD 阻尼接管，避免冲过目标。 */
+                            double brake_dist = 3.0 * (v_lat_actual * v_lat_actual) /
+                                                (2.0 * fmax(g.lc_trapezoid_accel, 0.05) + 1e-6);
+                            if (remain < brake_dist && v_lat_actual * g.lc_trap_dir > 0.05) {
+                                v_y_ff = 0.0;
+                            } else if (remain <= 0.0) {
+                                v_y_ff = -g.lc_trap_dir * fmax(g.lc_trapezoid_accel, 0.05) * 0.5;
+                            }
+                            v_y_des = v_y_ff
+                                    + g.lc_trapezoid_kp * lat_error
+                                    - g.k_vy_damp * v_lat_actual;
+                            if (g.lc_use_lqr > 0.5) {
+                                double K[3];
+                                double e_phi = g.ego_heading - ref_road_heading;
+                                while (e_phi >  M_PI) e_phi -= 2.0 * M_PI;
+                                while (e_phi < -M_PI) e_phi += 2.0 * M_PI;
+                                lqr_solve_gain(g.current_speed, g.wheelbase,
+                                               g.lqr_q_ey, g.lqr_q_ephi, g.lqr_q_vlat,
+                                               g.lqr_r_steer, K);
+                                /* LQR 反馈叠加：u = -K·x，x=[e_y,e_φ,v_lat]。
+                                 * K 由 Riccati 解出（面向转向 δ），此处作为 v_y_des 的反馈修正。
+                                 * 注意：K[2]*v_lat 在转向域是阻尼，但映射到速度域后变为正反馈
+                                 * （K[2]<0，-K[2]*v_lat 与 v_lat 同号→加速而非制动）。
+                                 * 因此只用 K[0]/K[1] 做位置+航向反馈，v_lat 阻尼仍由 k_vy_damp 承担。 */
+                                double lqr_fb = -(K[0]*lat_error + K[1]*e_phi);
+                                v_y_des = v_y_ff + g.lqr_fb_scale * lqr_fb
+                                        - g.k_vy_damp * v_lat_actual;
+                            }
+                            {
+                                double vy_cap = g.lc_trapezoid_vmax;
+                                if (v_y_des >  vy_cap) v_y_des =  vy_cap;
+                                if (v_y_des < -vy_cap) v_y_des = -vy_cap;
+                            }
+                        } else {
+                            v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
+                        }
                         /* ψ_des = road_heading + asin(v_y_des / v)，clamp ±30° */
                         double vy_ratio = v_y_des / speed_eff;
                         if (vy_ratio > 0.5) vy_ratio = 0.5;
@@ -1576,6 +1767,14 @@ protected:
                         /* δ_ff = atan(wheelbase * v_y_des / v²)：自行车稳态前馈 */
                         delta_ff = atan(g.wheelbase * v_y_des /
                                         (speed_eff * speed_eff + 1e-6));
+                    }
+                    /* 诊断字段写入 */
+                    {
+                        double v_lat_diag = g.current_speed * sin(g.ego_heading - ref_road_heading);
+                        g.diag_v_y_des      = v_y_des;
+                        g.diag_v_y_ff       = v_y_ff;
+                        g.diag_v_lat_actual = v_lat_diag;
+                        g.diag_trap_active  = (g.lc_use_trapezoid > 0.5 && g.lc_trap_active) ? 1 : 0;
                     }
                     /* heading_term 跟踪 ψ_des（clamp 防大角度突变） */
                     double ref_h_eff = psi_des;
@@ -1724,6 +1923,13 @@ protected:
             memset(raw.mode, 0, sizeof(raw.mode));
             snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
 
+            /* 梯形剖面诊断：变道中每 0.5s 打一条 LOG */
+            if (g.diag_trap_active && (g.cycle % 10) == 0) {
+                LOG_INFO("control", "TRAP lc_state=%d lat_err=%.2f vy_ff=%.3f vy_des=%.3f v_lat=%.3f steer=%.4f y=%.2f tgt_y=%.2f",
+                         g.lc_state, lat_error, g.diag_v_y_ff, g.diag_v_y_des,
+                         g.diag_v_lat_actual, steer, g.ego_y, g.lc_target_y);
+            }
+
             uint8_t raw_buf[64];
             size_t  raw_len = sizeof(raw_buf);
             ControlRaw_serialize(&raw, raw_buf, &raw_len);
@@ -1731,14 +1937,17 @@ protected:
                               raw_buf, (uint32_t)raw_len);
 
             /* Also publish text format for backward compat (monitor/logging) */
-            char cmd_text[256];
+            char cmd_text[384];
             snprintf(cmd_text, sizeof(cmd_text),
                      "throttle=%.2f brake=%.2f steer=%.4f "
                      "speed=%.1f target=%.1f error=%.1f mode=%s "
-                     "turn_signal=%d hazard=%d",
+                     "turn_signal=%d hazard=%d "
+                     "vy_des=%.3f vy_ff=%.3f v_lat=%.3f trap=%d lat_err=%.2f",
                      throttle, brake, steer,
                      g.current_speed, acc_target, error, mode,
-                     (int)turn_signal, (int)hazard);
+                     (int)turn_signal, (int)hazard,
+                     g.diag_v_y_des, g.diag_v_y_ff, g.diag_v_lat_actual,
+                     g.diag_trap_active, lat_error);
             transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
@@ -1894,6 +2103,16 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.k_v_lat          = 0.22;   /* 横向速度阻尼增益（自标定最优值）*/
     g.k_vy             = 0.35;   /* v_y_des 位置增益（止血保守值，原 0.7） */
     g.k_vy_damp        = 0.6;    /* v_y_des 速度阻尼增益 */
+    g.lc_use_trapezoid   = 1.0;
+    g.lc_trapezoid_accel = 1.2;
+    g.lc_trapezoid_vmax  = 1.5;
+    g.lc_trapezoid_kp    = 0.15;
+    g.lc_use_lqr       = 1.0;
+    g.lqr_q_ey         = 0.3;
+    g.lqr_q_ephi       = 1.0;
+    g.lqr_q_vlat       = 0.2;
+    g.lqr_r_steer      = 2.0;
+    g.lqr_fb_scale     = 0.15;
     g.lane_width = 3.5;
     g.blocked_timeout_s = 0.8;   /* 原 2.0s→1.2s，再缩短到 0.8s，更快响应超车机会 */
     g.lc_stable_wait_s           = 2.0;  /* 原 8.0→4.0，再缩短到 2.0s，减少变道后无谓等待 */
@@ -1942,6 +2161,26 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.k_vy = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "k_vy_damp");
             if (cJSON_IsNumber(j)) g.k_vy_damp = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_use_trapezoid");
+            if (cJSON_IsNumber(j)) g.lc_use_trapezoid = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_accel");
+            if (cJSON_IsNumber(j)) g.lc_trapezoid_accel = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_vmax");
+            if (cJSON_IsNumber(j)) g.lc_trapezoid_vmax = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_kp");
+            if (cJSON_IsNumber(j)) g.lc_trapezoid_kp = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lc_use_lqr");
+            if (cJSON_IsNumber(j)) g.lc_use_lqr = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_ey");
+            if (cJSON_IsNumber(j)) g.lqr_q_ey = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_ephi");
+            if (cJSON_IsNumber(j)) g.lqr_q_ephi = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_vlat");
+            if (cJSON_IsNumber(j)) g.lqr_q_vlat = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_r_steer");
+            if (cJSON_IsNumber(j)) g.lqr_r_steer = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_fb_scale");
+            if (cJSON_IsNumber(j)) g.lqr_fb_scale = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lane_change_blocked_timeout_s");
             if (cJSON_IsNumber(j)) g.blocked_timeout_s = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "lc_stable_wait_s");
@@ -2013,6 +2252,16 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
     param_register_float("control.k_vy", g.k_vy, 0.0, 2.0, "v_y_des position gain: v_y_des = k_vy*lat_error - k_vy_damp*v_lat");
     param_register_float("control.k_vy_damp", g.k_vy_damp, 0.0, 2.0, "v_y_des velocity damping gain (D term of lateral PD)");
+    param_register_float("control.lc_use_trapezoid", g.lc_use_trapezoid, 0.0, 1.0, "Trapezoid lateral velocity profile enable (>0.5=ff+PD, <=0.5=pure PD)");
+    param_register_float("control.lc_trapezoid_accel", g.lc_trapezoid_accel, 0.1, 5.0, "Trapezoid lateral acceleration m/s^2");
+    param_register_float("control.lc_trapezoid_vmax", g.lc_trapezoid_vmax, 0.2, 4.0, "Trapezoid peak lateral velocity m/s");
+    param_register_float("control.lc_trapezoid_kp", g.lc_trapezoid_kp, 0.0, 1.0, "Trapezoid mode position feedback gain");
+    param_register_float("control.lc_use_lqr", g.lc_use_lqr, 0.0, 1.0, "LQR feedback enable (>0.5=LQR, <=0.5=manual PD)");
+    param_register_float("control.lqr_q_ey", g.lqr_q_ey, 0.0, 10.0, "LQR lateral position error weight");
+    param_register_float("control.lqr_q_ephi", g.lqr_q_ephi, 0.0, 10.0, "LQR heading error weight");
+    param_register_float("control.lqr_q_vlat", g.lqr_q_vlat, 0.0, 10.0, "LQR lateral velocity weight");
+    param_register_float("control.lqr_r_steer", g.lqr_r_steer, 0.01, 5.0, "LQR steering control cost (smaller=more aggressive)");
+    param_register_float("control.lqr_fb_scale", g.lqr_fb_scale, 0.0, 1.0, "LQR feedback scale (maps steering-domain K to v_y_des)");
     param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
     param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
     param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
@@ -2056,6 +2305,16 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.yaw_damping                 = param_get_float("control.yaw_damping");
     g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
     g.k_v_lat                     = param_get_float("control.k_v_lat");
+    g.lc_use_trapezoid           = param_get_float("control.lc_use_trapezoid");
+    g.lc_trapezoid_accel         = param_get_float("control.lc_trapezoid_accel");
+    g.lc_trapezoid_vmax          = param_get_float("control.lc_trapezoid_vmax");
+    g.lc_trapezoid_kp            = param_get_float("control.lc_trapezoid_kp");
+    g.lc_use_lqr                 = param_get_float("control.lc_use_lqr");
+    g.lqr_q_ey                   = param_get_float("control.lqr_q_ey");
+    g.lqr_q_ephi                 = param_get_float("control.lqr_q_ephi");
+    g.lqr_q_vlat                 = param_get_float("control.lqr_q_vlat");
+    g.lqr_r_steer                = param_get_float("control.lqr_r_steer");
+    g.lqr_fb_scale               = param_get_float("control.lqr_fb_scale");
 
     /* ── MPC 控制器初始化 ──
      * g.mpc_config 已在 params_json 解析前由 mpc_default_config() 填好，
