@@ -33,7 +33,7 @@ FlowEngine 是一个从零搭建的自动驾驶中间件，灵感来自 Apollo C
 | 默认场景 | `scenarios/straight_road.json`（10km 双向 4 车道直路） |
 | 许可证 | MIT |
 
-核心能力一览：Pub/Sub 消息总线（零拷贝）、IPC 共享内存、TCP/网络传输、C++20 协程调度器、反射式状态机、UDP 服务发现、Bag v2/MCAP 录制回放、EKF 传感器融合、Frenet 最优轨迹规划、PID/MPC 控制、FlowCoro 安全包络、FlowBoard 3D 仪表盘、车端学习闭环（数据采集→训练→影子推理→SGD 微调→OTA）。
+核心能力一览：Pub/Sub 消息总线（零拷贝）、IPC 共享内存、TCP/网络传输、C++20 协程调度器、反射式状态机、UDP 服务发现、Bag v2/MCAP 录制回放、EKF 传感器融合、Frenet 最优轨迹规划、PID 控制（原 MPC 已废弃）、FlowCoro 安全包络、FlowBoard 3D 仪表盘、车端学习闭环（数据采集→训练→影子推理→SGD 微调→OTA）。
 
 ---
 
@@ -77,7 +77,7 @@ control_node ──control/raw_cmd──► [safety_control_node] ──control/
    │                                                        │
    └── control/raw_cmd/text ──► [guardian_node] ──control/emergency_stop──► (旁路紧急制动)
 
-mpc_controller  ← mpc_set_*  ← control_node (每帧)
+mpc_controller  ← mpc_set_*  ← control_node (每帧)  【已废弃，代码已删除】
 frenet_bridge   ← frenet_plan ← planning_node (20Hz)
 flowsim/physics ← step_bicycle ← flowsim_node (20Hz tick, 闭环 ego)
 ```
@@ -134,7 +134,7 @@ flowctl param set control.k_vy 0.5     # 下一帧生效，无需重启
 | `perception` | libperception_node.so | 10Hz | DBSCAN 点云聚类 + 目标检测 |
 | `fusion` | libfusion_node.so | 20Hz | EKF 传感器融合（定位 + 时间对齐） |
 | `planning` | libplanning_node.so | 20Hz | Frenet 最优轨迹规划（变道/超车） |
-| `control` | libcontrol_node.so | 20Hz | PID 纵向 + 横向 Stanley/MPC |
+| `control` | libcontrol_node.so | 20Hz | PID 纵向 + 横向 Stanley（原 MPC 已废弃） |
 | `safety_control` | libsafety_control_node.so | 协程 | FlowCoro 安全包络（TTC/横向交叉/行人） |
 | `inference` | libinference_node.so | 20Hz | tiny-MLP 影子推理（shadow mode） |
 | `data_recorder` | libdata_recorder_node.so | 20Hz | 训练样本采集（模仿学习 JSONL） |
@@ -189,7 +189,6 @@ class MyTask : public CoroutineTask {
 | 横向级联 PD | `lat_kp`、`lat_kd_heading`、`yaw_damping`、`ego_heading`、`ego_yaw_rate`、`prev_steer` | Stanley 横向控制 |
 | 真车级横向 | `lat_lookahead_gain`、`k_v_lat` | Apollo LQR 风格前视+横向速度阻尼 |
 | **横向速度规划** | **`k_vy`、`k_vy_damp`** | **v_y_des = k_vy*lat_error - k_vy_damp*v_lat**（详见 5.1.4） |
-| MPC | `mpc`、`mpc_config`、`mpc_result`、`mpc_initialized` | iLQR 横向优化器 |
 | 障碍物 | `obs_x/y/vx[128]`、`obs_valid[128]`、`ped_index` | 128 槽位（0-3 来自 vehicle/state，4-7 来自 scene/frame） |
 | 变道状态机 | `lc_state`、`lc_target_y`、`lc_target_idx`、`committed_lane_side`、`lc_timer/wait/cooldown` | 0=巡航 1=左变道 2=稳定 3=回切 |
 
@@ -205,11 +204,10 @@ class ControlTask : public CoroutineTask {
             /* 1. 热重载所有参数（param_get_float）—— 支持运行时调参 */
             g.k_vy = param_get_float("control.k_vy");
             g.k_vy_damp = param_get_float("control.k_vy_damp");
-            /* ... MPC 权重也热重载 ... */
             /* 2. 数据陈旧检测（>1s 清 flag），陈旧时发安全减速 fallback */
             /* 3. ACC 跟车：算 acc_target（gap-based 速度匹配） */
             /* 4. 纵向 PID：output = kp*err + ki*integral + kd*deriv */
-            /* 5. 横向控制：MPC 优先（巡航），失败回退 Stanley（变道） */
+            /* 5. 横向控制：Stanley（原 MPC 已删除） */
             /* 6. Safety overrides：ROAD_GUARD / 超速限幅 / 死锁恢复 */
             /* 7. 序列化发布 control/raw_cmd */
         }
@@ -221,7 +219,7 @@ class ControlTask : public CoroutineTask {
 
 #### 5.1.3 纵向控制：PID + ACC（[L1392](file:///workspace/modules/adas_nodes/control_node.cpp#L1392)）
 
-纵向**始终用 PID+ACC**，MPC 只做横向（MPC 代价函数无前车距离约束，单独优化纵向会追尾）。
+纵向**始终用 PID+ACC**，横向用 Stanley（原 MPC 已删除）。
 
 ```
 acc_target 计算（L1130-1218）:
@@ -239,16 +237,11 @@ PID（L1402）:
   output < 0 → brake    = -output / 8000  (clamp [0,1])
 ```
 
-#### 5.1.4 横向控制：Stanley / MPC 双路径（[L1428](file:///workspace/modules/adas_nodes/control_node.cpp#L1428)）
+#### 5.1.4 横向控制：Stanley（[L1428](file:///workspace/modules/adas_nodes/control_node.cpp#L1428)）
 
-横向控制有两条路径，按 `lc_state` 选择：
+横向控制只有 Stanley 路径（原 MPC 代码已删除）：
 
-**路径 A — MPC（巡航 `lc_state==0`，[L1433](file:///workspace/modules/adas_nodes/control_node.cpp#L1433)）**
-- 构建参考轨迹 → 注入 `mpc_set_max_steer`（speed-dependent 真实限幅）→ `mpc_solve` → `steer = mpc_result.steer`
-- 未收敛则回退 Stanley
-- pipeline.json 默认 `mpc_horizon=0`，即**默认禁用 MPC，纯走 Stanley 路径**
-
-**路径 B — Stanley + 横向速度规划（变道 `lc_active`，[L1513](file:///workspace/modules/adas_nodes/control_node.cpp#L1513)）**
+**Stanley + 横向速度规划（变道 `lc_active`，[L1513](file:///workspace/modules/adas_nodes/control_node.cpp#L1513)）**
 
 这是用户调参纠结的核心。变道时启用「横向速度规划 PD」：
 
@@ -280,7 +273,7 @@ steer = filter_new*steer + (1-filter_new)*prev_steer                   // L1618 
 
 #### 5.1.5 Safety Overrides（[L1624](file:///workspace/modules/adas_nodes/control_node.cpp#L1624)）
 
-对 MPC 和 PID 回退都生效的硬保护：
+对 Stanley 和 PID 回退都生效的硬保护：
 - **接近路沿增强拉回**（|y|>4.5）：steer_limit 降到 0.165，但拉回力矩≈8.8 m/s² 对抗残余过冲
 - **超速限幅**：speed > cruise+1 → throttle=0 + 比例刹车
 - **全域速度死锁恢复**（`SPEED_ZERO_RECOVER_S=5.0`）：速度持续为 0 超阈值 → 小油门 thr=0.15
@@ -298,45 +291,9 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 
 车道判定有迟滞（`LANE_HYSTERESIS_M=0.5`），避免骑线时目标车道每帧翻转抖振。
 
-### 5.2 mpc_controller — iLQR MPC
+### 5.2 mpc_controller — iLQR MPC 【已废弃，代码已删除】
 
-**文件**：[mpc_controller.c](file:///workspace/src/core/mpc_controller.c)（750 行）/ [mpc_controller.h](file:///workspace/include/mpc_controller.h)
-
-5 维状态扩展版 iLQR：状态 `[x, y, θ, v, δ]`（δ 升级为状态），控制 `[a, dδ]`（dδ=转向角速率）。迭代线性化 + Riccati 反向传播 + 线搜索前向 rollout。
-
-| 关键函数 | 行号 | 说明 |
-|----------|------|------|
-| `bike_model_step()` | L90 | 运动学积分：β=atan(tan(δ)*0.5)，θ+=v*sin(β)/L*dt |
-| `bike_model_linearize()` | L118 | Jacobian A[5×5]/B[5×2] |
-| `rollout()` | L198 | 前向积分算总代价（含 r_a*a² + r_ddelta*dδ²） |
-| `backward_pass()` | L284 | iLQR Riccati 反向传播，算反馈增益 K[k] 与前馈 k[k] |
-| `forward_pass()` | L506 | 线搜索：du=α*k+K*dx，控制约束 + δ 状态约束 |
-| `mpc_solve()` | L678 | 冷启动检测→迭代至收敛，输出 accel_cmd/steer/steer_rate |
-
-**默认配置**（`mpc_default_config`，[L587](file:///workspace/src/core/mpc_controller.c#L587)）：
-
-| 参数 | 默认 | 含义 |
-|------|------|------|
-| `horizon` | 10 | 预测步数（pipeline.json 设 0 = 禁用） |
-| `dt` | 0.05s | 离散步长 |
-| `q_y` | 8.0 | 横向位置误差权重（高） |
-| `q_theta` | 3.0 | 航向误差 |
-| `r_ddelta` | 5.0 | **转向角速率代价（抑制振荡）** |
-| `max_steer` | 0.35 rad | δ 状态约束 |
-| `max_dsteer` | 0.5 rad/s | dδ 控制约束 |
-| `wheelbase` | 2.7 m | |
-
-> **关键陷阱 — bang-bang 振荡**（[CLAUDE.md L409](file:///workspace/CLAUDE.md)）：求解器内部默认 `max_steer=0.35`，而 control_node 外部限幅≈0.027（差 12.9 倍）。MPC 在宽一个数量级的可行域里最优化，`r_ddelta/q_delta` 平滑项永不触发，输出被外部砍平后每帧翻符号。**修复**：control_node 每帧 `mpc_set_max_steer(mpc_steer_limit)` 注入 speed-dependent 真实限幅（[L1487](file:///workspace/modules/adas_nodes/control_node.cpp#L1487)）。
-
-**调用序列**（control_node 每帧，[L1482](file:///workspace/modules/adas_nodes/control_node.cpp#L1482)）：
-```cpp
-mpc_set_weights(g.mpc, &eff_cfg);           // 含学习闭环 delta 叠加
-mpc_set_reference(g.mpc, ref_buf, n_ref);
-mpc_set_state(g.mpc, ego_x, ego_y, ego_heading, speed);
-mpc_set_prev_steer(g.mpc, g.prev_steer);
-mpc_set_max_steer(g.mpc, mpc_steer_limit);  // 注入真实限幅
-mpc_solve(g.mpc, &g.mpc_result);
-```
+MPC 控制器已从 control_node 中移除。横向控制统一使用 Stanley 路径。
 
 ### 5.3 planning_node — Frenet 轨迹规划
 
@@ -353,12 +310,11 @@ mpc_solve(g.mpc, &g.mpc_result);
 
 **驾驶模式状态机**：NA→ACC→CP→NP→NOA 逐级升级（guard 检查 fusion/vstate/路线就绪），fusion 超 1.5s 未更新降级回 NA。
 
-**轨迹下发格式**：
-```
-{"type":"frenet"|"lane_keep_fallback"|"failsafe","plan":N,"wp":N,
- "target_speed":V, "path":[[s,d,speed],...],
- "speed=V mode=CP/NP/NOA route_lane=L route_type=lane_change|branch_select|merge"}
-```
+**轨迹下发格式**：二进制 `Trajectory` 结构体（`adas_msgs_gen.h` 定义），
+含 `seq`, `stamp_us`, `ref_line_id`, `point_count`, `points[64]` 及 `valid` 标志。
+每个 `TrajectoryPoint` 含 `t_rel_us`, `x`, `y`, `s`, `l`, `heading`, `kappa`, `v`, `a`, `jerk`。
+不再是 JSON `{"type":"frenet", "path":[[s,d,speed],...]}`。
+下游用 `Trajectory_deserialize()` 反序列化，见 `planning_node.cpp` 的发布端和 `inference_node.cpp` 的消费端。
 
 > **重要澄清 — 梯形速度剖面不存在**：全仓库搜索 `trapezoidal/梯形` 仅命中前端渲染几何，**planning_node 没有显式梯形速度剖面模块**。速度剖面由开源 Frenet Optimal Trajectory (FOT) 规划器在 `frenet_plan()` 内部通过代价函数（`kv/ka/kj/klat/klon` 权重）优化产生；fallback 路径是恒速剖面（所有点统一 `command_speed`）。若需要"梯形减速"语义，需在 planning 层新增独立模块。
 
@@ -473,20 +429,17 @@ C wrapper 封装开源 Frenet Optimal Trajectory (FOT) 规划器（Apache-2.0）
 
 | 类/函数 | 文件 | 作用 |
 |---------|------|------|
-| `ControlContext` | [control_node.cpp:112](file:///workspace/modules/adas_nodes/control_node.cpp#L112) | 控制节点全局状态（PID/横向/障碍物/变道/MPC） |
-| `ControlTask::run()` | [control_node.cpp:843](file:///workspace/modules/adas_nodes/control_node.cpp#L843) | 20Hz 协程主循环 |
-| `control_init()` | [control_node.cpp:1830](file:///workspace/modules/adas_nodes/control_node.cpp#L1830) | 节点初始化（参数解析+注册+MPC 创建+状态机） |
-| `build_mpc_reference()` | control_node.cpp | 从 ref_path 采样 horizon 步参考轨迹 |
+| `ControlContext` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 控制节点全局状态（PID/横向/障碍物/变道） |
+| `ControlTask::run()` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 20Hz 协程主循环 |
+| `control_init()` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 节点初始化（参数解析+注册+状态机） |
 | `steer_limit_for_speed()` | control_node.cpp | speed-dependent 转向限幅（lat_accel 约束） |
 | `lane_center_y()` / `lane_idx_from_y()` | control_node.cpp | N 车道模型：y↔车道索引互转 |
-| `MpcController` / `MpcConfig` | [mpc_controller.h](file:///workspace/include/mpc_controller.h) | iLQR MPC 求解器 |
-| `mpc_solve()` / `mpc_set_max_steer()` | [mpc_controller.c:678](file:///workspace/src/core/mpc_controller.c#L678) | 求解 / 注入真实限幅 |
-| `PlanningContext` / `PlanningTask` | [planning_node.cpp:57](file:///workspace/modules/adas_nodes/planning_node.cpp#L57) | 规划节点 |
-| `FrenetHandle` / `frenet_plan()` | [frenet_bridge.cpp:97](file:///workspace/src/algorithms/frenet_bridge.cpp#L97) | FOT 包装 |
-| `step_bicycle()` | [physics.cpp:29](file:///workspace/modules/adas_nodes/flowsim/physics.cpp#L29) | 运动学自行车积分 |
-| `Entity` / `EntityPool` | [entity.h:76](file:///workspace/modules/adas_nodes/flowsim/entity.h#L76) | 仿真实体固定池（128，Ego=index 0） |
-| `apply_safety()` | [safety_control_node.cpp:374](file:///workspace/modules/adas_nodes/safety_control_node.cpp#L374) | 安全包络总入口（限幅+TTC+行人+横向交叉） |
-| `publish_emergency_stop()` | [guardian_node.c:330](file:///workspace/modules/adas_nodes/guardian_node.c#L330) | 熔断紧急制动 |
+| `PlanningContext` / `PlanningTask` | [planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp) | 规划节点 |
+| `FrenetHandle` / `frenet_plan()` | [frenet_bridge.cpp](file:///workspace/src/algorithms/frenet_bridge.cpp) | FOT 包装 |
+| `step_bicycle()` | [physics.cpp](file:///workspace/modules/adas_nodes/flowsim/physics.cpp) | 运动学自行车积分 |
+| `Entity` / `EntityPool` | [entity.h](file:///workspace/modules/adas_nodes/flowsim/entity.h) | 仿真实体固定池（128，Ego=index 0） |
+| `apply_safety()` | [safety_control_node.cpp](file:///workspace/modules/adas_nodes/safety_control_node.cpp) | 安全包络总入口（限幅+TTC+行人+横向交叉） |
+| `publish_emergency_stop()` | [guardian_node.c](file:///workspace/modules/adas_nodes/guardian_node.c) | 熔断紧急制动 |
 
 ### 核心中间件
 
@@ -520,8 +473,7 @@ C wrapper 封装开源 Frenet Optimal Trajectory (FOT) 规划器（Apache-2.0）
 ### 7.2 模块依赖图（控制相关）
 
 ```
-control_node ─┬─► mpc_controller (iLQR)
-              ├─► param_registry (热重载)
+control_node ─┬─► param_registry (热重载)  【原 mpc_controller 已删除】
               ├─► state_machine (变道状态机)
               ├─► road_geometry / topic_registry (道路几何)
               └─► adas_msgs_gen (ControlRaw 序列化)
@@ -591,7 +543,7 @@ bash scripts/demo.sh --record    # 录制 Bag
 flowctl param list                       # 所有实时参数
 flowctl param get control.k_vy           # 读取
 flowctl param set control.k_vy 0.5       # 下一帧生效
-flowctl param set control.mpc_horizon 10 # 启用 MPC
+flowctl param set control.mpc_horizon 10 # 启用 MPC（已废弃，代码已删除）
 flowctl topic stats control/raw_cmd      # topic 延迟/吞吐
 flowctl graph                           # ASCII 拓扑
 ```
@@ -620,15 +572,15 @@ docker run --rm flowengine demo 30
 
 ### 9.1 当前横向控制架构
 
-pipeline.json 默认 `mpc_horizon=0`（MPC 禁用），横向控制走 **Stanley + 横向速度规划**路径。变道时（`lc_active`）的核心公式：
+MPC 已从代码中删除。横向控制统一走 **Stanley + 横向速度规划**路径。变道时（`lc_active`）的核心公式：
 
 ```
-v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual     (control_node.cpp:1570)
+v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual
 ψ_des   = road_heading + asin(v_y_des / v)
 steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 ```
 
-默认值（[pipeline.json:198](file:///workspace/config/pipeline.json#L198)）：`k_vy=0.35`、`k_vy_damp=0.6`、`lat_kp=0.5`、`lat_kd_heading=3.5`、`yaw_damping=0.28`。
+默认值（[pipeline.json](file:///workspace/config/pipeline.json)）：`k_vy=0.35`、`k_vy_damp=0.6`、`lat_kp=0.5`、`lat_kd_heading=3.5`、`yaw_damping=0.28`。
 
 ### 9.2 参数矛盾矩阵（用户痛点）
 
@@ -648,18 +600,12 @@ steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 ### 9.4 调参建议
 
 **A. 在当前 PD 框架内缓解**（`flowctl param set` 边跑边调）：
-- 先固定 `k_vy_damp`，扫 `k_vy`（用 [tools/mpc_sweep.py](file:///workspace/tools/mpc_sweep.py) 做 A/B 聚合）
+- 先固定 `k_vy_damp`，扫 `k_vy`
 - 观察过冲量 vs 变道耗时，找权衡点
 - 配合 `lat_kd_heading`（heading 阻尼）和 `yaw_damping` 抑制极限环
 - 注意 `steer_min_clamp`（高速最小转向限幅）和 `lc_lat_accel_max`
 
-**B. 启用 MPC**（更平滑，但需重新调权重）：
-```bash
-flowctl param set control.mpc_horizon 10    # 启用
-flowctl param set control.mpc_q_y 8.0       # 横向权重
-flowctl param set control.mpc_r_ddelta 5.0  # 转向速率代价（抑制振荡）
-```
-MPC 有预测时域，天然带"预见性"，比 PD 更接近"梯形剖面"语义。注意必须 `mpc_set_max_steer` 注入真实限幅（control_node 已自动做），否则 bang-bang。
+**B. 启用 MPC**（已删除，不再可用）
 
 **C. 若需真正的梯形速度剖面**：当前代码**不存在**该模块。需在 planning 层新增：规划变道横向位移的梯形速度曲线（加速段→匀速段→减速段），下发 `v_y_des` 时间序列给 control 跟踪，把"规划"与"控制"剥离。这样调参维度从三维（P/D/限幅）降为一维（减速时机）。
 
@@ -667,12 +613,12 @@ MPC 有预测时域，天然带"预见性"，比 PD 更接近"梯形剖面"语�
 
 | 现象 | 根因 | 位置 |
 |------|------|------|
-| MPC 输出每帧翻符号（bang-bang） | 求解器 max_steer=0.35 与外部限幅差 12.9 倍，平滑项失效 | [control_node.cpp:1372](file:///workspace/modules/adas_nodes/control_node.cpp#L1372) |
-| 变道冲出车道 | Stanley heading 阻尼硬编码，`lat_kd_heading` 未生效 | [control_node.cpp:548](file:///workspace/modules/adas_nodes/control_node.cpp#L548) |
-| 车身左右晃（1-2Hz 极限环） | heading 重置逻辑使 v_lat_damp 失效，退化为纯 P | [flowsim_node.cpp:1185](file:///workspace/modules/adas_nodes/flowsim_node.cpp#L1185) |
-| steer 打到硬限幅抖动 | heading 漂移撞 clamp，`lc_lat_accel_max` 2.4→4.5，`steer_min_clamp` 0.016→0.030 | [control_node.cpp:1245](file:///workspace/modules/adas_nodes/control_node.cpp#L1245) |
-| 红灯停稳后转绿不走 | planning 用 spd_out[0] 覆盖 command_speed 自维持闭锁 | [planning_node.cpp:787](file:///workspace/modules/adas_nodes/planning_node.cpp#L787) |
-| 车速降到 0 永久卡死 | ROAD_GUARD 恢复条件盲区，改为 speed<2.5 给小油门 | [control_node.cpp:534](file:///workspace/modules/adas_nodes/control_node.cpp#L534) |
+| MPC 输出每帧翻符号（bang-bang）【已删除】 | 求解器 max_steer=0.35 与外部限幅差 12.9 倍，平滑项失效 | 原 `control_node.cpp` |
+| 变道冲出车道 | Stanley heading 阻尼硬编码，`lat_kd_heading` 未生效 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
+| 车身左右晃（1-2Hz 极限环） | heading 重置逻辑使 v_lat_damp 失效，退化为纯 P | [flowsim_node.cpp](file:///workspace/modules/adas_nodes/flowsim_node.cpp) |
+| steer 打到硬限幅抖动 | heading 漂移撞 clamp，`lc_lat_accel_max` 2.4→4.5，`steer_min_clamp` 0.016→0.030 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
+| 红灯停稳后转绿不走 | planning 用 spd_out[0] 覆盖 command_speed 自维持闭锁 | [planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp) |
+| 车速降到 0 永久卡死 | ROAD_GUARD 恢复条件盲区，改为 speed<2.5 给小油门 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
 
 ---
 
@@ -684,7 +630,6 @@ MPC 有预测时域，天然带"预见性"，比 PD 更接近"梯形剖面"语�
 | [TECHNICAL_DESIGN.md](file:///workspace/docs/TECHNICAL_DESIGN.md) | 架构设计 |
 | [PIPELINE_ARCHITECTURE.md](file:///workspace/docs/PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
 | [ALGORITHM_STACK.md](file:///workspace/docs/ALGORITHM_STACK.md) | 算法总览 |
-| [FLOWSIM_ARCHITECTURE.md](file:///workspace/docs/FLOWSIM_ARCHITECTURE.md) | flowsim 仿真器架构 |
 | [CALIBRATION_GUIDE.md](file:///workspace/docs/CALIBRATION_GUIDE.md) | 标定指南（含 k_vy 等） |
 | [REAL_VEHICLE_ROADMAP.md](file:///workspace/docs/REAL_VEHICLE_ROADMAP.md) | 真车部署待办 |
 | [LEARNING_LOOP.md](file:///workspace/docs/LEARNING_LOOP.md) | 车端学习闭环 |

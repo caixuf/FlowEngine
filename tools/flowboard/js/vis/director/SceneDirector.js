@@ -118,10 +118,12 @@ export function createSceneDirector(scene) {
     const defaultRN = {
       edges: [{
         id: 0,
+        name: 'highway',
         type: 'highway',
         lanes: 4,
         lane_width: LANE_WIDTH,
         length: 10000,
+        oneway: false,
         nodes: [[0, 0, 0], [10000, 0, 0]]
       }]
     };

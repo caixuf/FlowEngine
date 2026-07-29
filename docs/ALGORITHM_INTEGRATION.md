@@ -12,33 +12,46 @@ FlowEngine 不做算法，只做算法的"插座"。
 ## 架构
 
 ```
-┌────────────────────────────────────────────────┐
-│                  FlowEngine                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Scheduler│  │  State   │  │  Discovery   │ │
-│  │ (Choreo) │  │ Machine  │  │  + Transport │ │
-│  └──────────┘  └──────────┘  └──────────────┘ │
-│       │              │               │          │
-│       ▼              ▼               ▼          │
-│  ┌──────────────────────────────────────────┐  │
-│  │        Algorithm Plugin SDK              │  │
-│  │  AlgorithmInterface (C ABI, dlopen)      │  │
-│  └──────────────────────────────────────────┘  │
-│       │         │         │         │          │
-│       ▼         ▼         ▼         ▼          │
-│  ┌────────┐┌────────┐┌────────┐┌────────┐    │
-│  │Percept ││ Fusion ││Planning││Control │    │
-│  │Plugin  ││Plugin  ││Plugin  ││Plugin  │    │
-│  └────────┘└────────┘└────────┘└────────┘    │
-└────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│                   FlowEngine                       │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐   │
+│  │ Scheduler│  │  State   │  │  Discovery    │   │
+│  │ (Choreo) │  │ Machine  │  │  + Transport  │   │
+│  └──────────┘  └──────────┘  └───────────────┘   │
+│       │              │               │            │
+│       ▼              ▼               ▼            │
+│  ┌─────────────────────────────────────────────┐  │
+│  │     中间件能力（2026-07-29 已接入）         │  │
+│  │  degrade_ladder │ backpressure │ select_for │  │
+│  │  Req/Reply      │ heartbeat    │ Choreo(待) │  │
+│  └─────────────────────────────────────────────┘  │
+│       │         │         │         │             │
+│       ▼         ▼         ▼         ▼             │
+│  ┌────────┐┌────────┐┌────────┐┌────────┐       │
+│  │ Fusion ││Planning││Control ││Safety  │       │
+│  │ Plugin ││Plugin  ││Plugin  ││Plugin  │       │
+│  └────────┘└────────┘└────────┘└────────┘       │
+└───────────────────────────────────────────────────┘
          │         │         │         │
          ▼         ▼         ▼         ▼
-   ┌─────────────────────────────────────────┐
-   │        Third-Party Libraries             │
-   │  OpenCV  │ Eigen  │ OMPL  │ Apollo      │
-   │  TensorRT│ Ceres  │ GTSAM │ Control     │
-   └─────────────────────────────────────────┘
+   ┌──────────────────────────────────────────┐
+   │         Third-Party Libraries             │
+   │  Eigen │ cJSON │ pthread │ flowcoro      │
+   └──────────────────────────────────────────┘
 ```
+
+## 中间件使用现状（2026-07-29）
+
+| 能力 | 状态 | 详情 |
+|------|------|------|
+| **Pub/Sub** | ✅ 完全使用 | 全部 12 节点通过 `transport_publish/subscribe` 通信 |
+| **Topic 发现** | ✅ 使用 | `discovery_advertise()` 在 init 时广播 |
+| **心跳 + 降级阶梯** | ✅ 已接入 | 9 个原因码，supervisor 自动递进 L0-L3 |
+| **反压检测** | ✅ 已接入 | control/safety_control 发布前检查 `topic_is_full` |
+| **消息驱动 select_for** | ✅ 已接入 | control/planning/fusion 用 `select_for` 替代 sleep_us polling |
+| **Req/Reply** | ✅ 已接入 | safety_control 注册 `safety/status` 服务，control 每 5s 查询 |
+| **Choreo 调度** | ❌ 未启用 | 调度器 DAG 编排已实现，节点仍走 polling 模式 |
+| **零拷贝** | ❌ 未启用 | `publish_zero_copy` 存在但无节点使用 |
 
 ## 接入步骤
 

@@ -50,7 +50,7 @@
 > 无 PTP/gPTP/NTP、无 offset/drift 估计。主机、每个传感器、MCU 各跑各的钟。
 
 - [ ] **时间戳语义改为「采集时刻」** — 现在所有传感器时间戳是「主机到达时刻」
-      （imu_driver_node.c:240、lidar:291 都是处理到那一行时打 `clock_now_us()`）。
+      （传感器驱动处理到该行时打 `clock_now_us()`）。
       GPS 1Hz / LiDAR 整帧扫描 / IMU 100~1000Hz 各自管道延迟不同 → 融合时在对齐
       实际不同时刻采集的数据，定位/融合误差就从这来。
 - [ ] **接 GNSS 纪律主机钟** — `gps_driver_node.c` 只 `#include <time.h>`，NMEA 里

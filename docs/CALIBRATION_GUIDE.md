@@ -19,14 +19,14 @@
 
 | 特性 | 运动学模型（当前） | 动力学模型 |
 |------|-------------------|-----------|
-| heading 来源 | 道路切线（每帧重置） | 轮胎侧偏力积分 |
+| heading 来源 | 自行车模型积分（自由演化） | 轮胎侧偏力积分 |
 | 侧偏角 | 假设为 0 | 有（由轮胎模型计算） |
 | 转向不足/过度 | 不体现 | 可体现 |
 | 参数数量 | 少（wheelbase + PID + Stanley） | 多（+ 轮胎刚度 + 转动惯量 + 松弛长度） |
 | 标定难度 | 低 | 高 |
 | 适用场景 | 直道、高速公路巡航 | 急弯、极限工况 |
 
-**当前项目使用运动学模型**，heading 每帧由 `road_pos.world()` 重置为道路切线。这是高速公路巡航仿真的合理简化——假设车辆完美跟随道路曲率。RC 小车低速（<5 m/s）场景下，运动学假设比动力学模型更接近真实。
+**当前项目使用运动学模型**，heading 由 `heading += steer * v / L * dt` 每帧自由积分，不强制重置为道路切线。这使得车辆能在变道/超车时自然累积横向偏移。高速公路巡航场景下，运动学模型是轨迹追踪验证的合理简化。
 
 ### 1.3 物理模型切换
 
@@ -40,8 +40,8 @@
 "params": "{..., \"physics_model\": \"dynamic\"}"
 ```
 
-- `"kinematic"`：shiping 模型 + heading 每帧重置为道路切线。稳定、可预测。
-- `"dynamic"`：调用 `step_bicycle_dynamic()` 桩函数，当前降级到 kinematic 并打印一次 LOG_WARN。未来实现时，heading 由轮胎侧偏力积分自主演化，不做道路切线重置。
+- `"kinematic"`：运动学自行车模型，heading 自由积分。稳定、可预测。
+- `"dynamic"`：调用 `step_bicycle_dynamic()` 桩函数，当前降级到 kinematic 并打印一次 LOG_WARN。未来实现时，heading 由轮胎侧偏力积分自主演化。
 
 **实现动力学模型前需要准备：**
 1. 在 `entity.h` 的预留字段中填入 `tire_stiffness_f/r`、`yaw_inertia` 等参数
@@ -59,6 +59,10 @@
 |------|-----------|----------|------|
 | `wheelbase` | 2.7 m | 0.3 m | 轴距。真车 ~2.5-3.0m，RC 小车 ~0.25-0.4m |
 | `target_speed` | 12.0 m/s | 2.0 m/s | 巡航目标速度 |
+| `steer_tau` | 0.15 s | 0.10 s | EPS 转向一阶滞后时间常数，仿真 `step_bicycle` 中使用 |
+| `steer_rate_max` | 0.6 rad/s | 1.2 rad/s | 最大转向速率，仿真 `step_bicycle` 中使用 |
+
+> **steer_tau / steer_rate_max** 是 2026-07-29 新增的仿真物理参数。`steer_tau` 控制转向响应的滞后程度（越大越滞后），`steer_rate_max` 限制每帧转角变化量。RC 小车舵机响应快，`steer_tau` 可设小，`steer_rate_max` 设大。
 
 > **轴距是最关键的几何参数。** 它直接影响 `steer_limit_for_speed()` 的计算：
 > `limit = atan(lat_accel_max * wheelbase / speed²)`。轴距缩小 9 倍，同样 steer 下转弯半径缩 9 倍，必须同步调整。
@@ -108,6 +112,20 @@
 |------|--------|------|
 | `curve_ff_boost_radius_m` | 60.0 | 曲率半径小于此值触发前馈提升 |
 | `curve_ff_boost_factor` | 1.5 | 前馈权重乘数 |
+
+### 2.6 NPC 行为参数（场景 JSON `npc_lane_change` 开关）
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `enable_mobil` | false | NpcAiConfig 结构体中的运行时开关（默认关闭，各守其道） |
+| `mobil_politeness` | 0.5 | MOBIL 礼貌因子 [0,1]，0=纯利己，1=考虑他人 |
+| `mobil_safe_brake` | 4.5 | MOBIL 安全减速度阈值 (m/s²)，新跟随者不得低于此值 |
+| `mobil_gain_threshold` | 0.5 | MOBIL 增益阈值 (m/s²)，gain>此值才变道 |
+| `mobil_lane_change_cooldown` | 8.0 | 变道冷却时间 (s) |
+
+> NPC 自主变道通过场景 JSON 顶层 `"npc_lane_change": true` 启用。
+> `straight_road.json` 保持关闭，`lane_change_traffic.json` 开启。
+> 开启后 NPC 用 MOBIL 代价函数评估变道收益，频繁变道会阻塞 ego，需配合车流密度调参。
 
 > 真车 L2 不依赖 road/geometry 发布弯道信息，不受这些参数影响。
 
@@ -185,7 +203,7 @@
 ### 4.4 仿真和真车同一套参数，表现差异很大
 
 **这是正常现象。** 因为：
-- 仿真模型是运动学的（heading 被道路切线约束），不是自由物理
+- 仿真模型是运动学的（heading 自由积分），不是带轮胎侧偏的完整物理
 - 真实小车有舵机延迟、轮胎侧滑、地面不平
 - 仿真没有传感器噪声，真车 GPS/IMU 有噪声
 

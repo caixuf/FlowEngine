@@ -9,7 +9,7 @@
 
 ### 1.1 静态场景 digest — `StaticDigest`
 
-几何变更时构建一次（`flowsim_node.cpp:1410` 在 esmini 网络加载后调用）。
+几何变更时构建一次（`flowsim_node.cpp` 在 esmini 网络加载后调用）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -97,7 +97,7 @@ struct DynamicDigest {
 
 ## 2. Invariant 检查
 
-`flowsim_node.cpp:1243` 每 20 帧跑一次完整 invariant，避免每帧序列化开销过大。
+`flowsim_node.cpp` 每 20 帧跑一次完整 invariant，避免每帧序列化开销过大。
 失败详情写入 stderr 供 `demo_evaluator.py` 捕获。
 
 ### 2.1 静态 invariant — `check_static_invariants(sd)`
@@ -136,7 +136,7 @@ struct DynamicDigest {
 
 ### 2.4 时序 invariant — `check_temporal_invariants(prev, curr, dt)`
 
-需要连续两帧，从第 2 帧开始（`flowsim_node.cpp:1282` 在 cycle=1 初始化 prev）。
+需要连续两帧，从第 2 帧开始（`flowsim_node.cpp` 在 cycle=1 初始化 prev）。
 
 | # | 检查 | 容差 |
 |---|------|------|
@@ -152,7 +152,7 @@ struct DynamicDigest {
 
 ### 3.1 ASCII 俯视渲染 — `render_ascii_overhead(sd, dd, w=80, h=40)`
 
-终端调试用，无需 GUI。3D pipeline 运行时 `flowsim_node.cpp:1284` 自动调用，
+终端调试用，无需 GUI。3D pipeline 运行时 `flowsim_node.cpp` 自动调用，
 每秒覆盖写入 `/tmp/flow_ascii_overhead.txt`。
 
 **渲染规则**：
@@ -197,12 +197,12 @@ watch -n 1 cat /tmp/flow_ascii_overhead.txt   # 实时刷新
 ## 4. 调用流程
 
 ```cpp
-// flowsim_node.cpp init 阶段（line 1410）
+// flowsim_node.cpp init 阶段
 g.static_digest = flowsim::build_static_digest(g.roads, g.route, g.pool);
 auto static_inv = flowsim::check_static_invariants(g.static_digest);
 if (static_inv.failed > 0) { /* LOG_WARN + stderr */ }
 
-// flowsim_node.cpp 主循环（line 1243，每 20 帧）
+// flowsim_node.cpp 主循环（每 20 帧）
 if (g.cycle % 20 == 0 && g.digest_initialized) {
     auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, g.cycle, true);
     // 单帧 invariant

@@ -15,7 +15,7 @@
 
 ```
 b012cb6 统一 API 迁移（2026-07 cJSON 重构）
-  └─ monitor_node.c:755  cJSON_Print(root)          ← 多行 + \t 缩进（文件写入规范如此）
+  └─ monitor_node.c  cJSON_Print(root)          ← 多行 + \t 缩进（文件写入规范如此）
        └─ /tmp/flow_topology.json（文件桥接）
        └─ dashboard_bridge IPC（SHM 桥接）
             └─ flowmond 缓存 cached_json（仍是多行）
@@ -95,6 +95,6 @@ demo.sh 是**前台**脚本（监控循环持续打印）。在终端按 **Ctrl+
 | 文件 | 角色 |
 |------|------|
 | `src/core/monitor_server.c` | 修复点：`sse_flatten_payload()` + handle_sse 调用 |
-| `modules/adas_nodes/monitor_node.c:755` | 多行 JSON 源头（`cJSON_Print`，文件写入规范） |
+| `modules/adas_nodes/monitor_node.c` | 多行 JSON 源头（`cJSON_Print`，文件写入规范） |
 | `src/flowmond.c` | IPC/文件双桥接，注入 cached_json |
-| `tools/flowboard/js/app.js:472` | 前端 EventSource 消费端 |
+| `tools/flowboard/js/app.js` | 前端 EventSource 消费端 |
