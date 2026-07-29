@@ -826,6 +826,8 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
         if (n_obs >= 128) break;
 
         char key[20];
+        snprintf(key, sizeof(key), "oid%d", n_obs);
+        cJSON_AddNumberToObject(vstate, key, (double)e.id);
         snprintf(key, sizeof(key), "ox%d", n_obs);
         cJSON_AddNumberToObject(vstate, key, e.x);
         snprintf(key, sizeof(key), "oy%d", n_obs);
@@ -1367,6 +1369,59 @@ protected:
             /* scene/frame：完整场景帧 20Hz 给 3D 前端（Phase 2.2） */
             flowsim::publish_scene_frame(g.transport, g.pool, g.scene_pub_cfg,
                                          sim_time_us, g.cycle);
+
+            /* P3 DEBUG: 跨周期 NPC 位移检测。记录上一周期各 NPC 的 x，
+             * 本周期 publish 后对比。若 >50m 且 tp_cycle 未变（非合法 teleport），
+             * 打印详情。用途：定位 evaluator 观测到的 +200m 协同位移根因
+             * — 若 flowsim 内部无大位移，则问题在 monitor/evaluator 数据管道。 */
+            {
+                static double prev_x[128] = {0};
+                static uint32_t prev_tp[128] = {0};
+                static bool prev_init = false;
+                int n = g.pool.size();
+                if (n > 128) n = 128;
+                if (prev_init) {
+                    int shift_count = 0;
+                    double first_shift_dx = 0;
+                    int first_shift_id = -1;
+                    for (int i = 1; i < n; ++i) {
+                        flowsim::Entity& e = g.pool[i];
+                        if (!e.active || !e.is_npc_vehicle()) continue;
+                        double dx = e.x - prev_x[i];
+                        if (std::fabs(dx) > 50.0 && e.last_teleport_cycle != g.cycle) {
+                            shift_count++;
+                            if (first_shift_id < 0) {
+                                first_shift_dx = dx;
+                                first_shift_id = e.id;
+                            }
+                        }
+                    }
+                    if (shift_count >= 3) {
+                        fprintf(stderr, "[DBG shift] cyc=%u shifted=%d NPCs first_id=%d "
+                                "dx=%.1f ego_x=%.1f ego_v=%.1f\n",
+                                g.cycle, shift_count, first_shift_id,
+                                first_shift_dx, ego.x, ego.speed);
+                        /* 打印所有 NPC 的位置，用于看是否协同位移 */
+                        for (int i = 1; i < n && i < 40; ++i) {
+                            flowsim::Entity& e = g.pool[i];
+                            if (!e.active || !e.is_npc_vehicle()) continue;
+                            double dx = e.x - prev_x[i];
+                            if (std::fabs(dx) > 10.0) {
+                                fprintf(stderr, "  id=%d prev_x=%.1f cur_x=%.1f dx=%.1f "
+                                        "tp=%u/%u route_s=%.1f road_ok=%d\n",
+                                        e.id, prev_x[i], e.x, dx,
+                                        prev_tp[i], e.last_teleport_cycle,
+                                        e.route_s, e.road_pos.ok() ? 1 : 0);
+                            }
+                        }
+                    }
+                }
+                for (int i = 0; i < n; ++i) {
+                    prev_x[i] = g.pool[i].x;
+                    prev_tp[i] = g.pool[i].last_teleport_cycle;
+                }
+                prev_init = true;
+            }
 
             g.cycle++;
             if (g.cycle % 100 == 0) {

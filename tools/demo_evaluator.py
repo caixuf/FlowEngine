@@ -455,6 +455,22 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         if rel_x > 0 and rel_y < 2.5:
             min_forward_gap = min(min_forward_gap, rel_x - (4.6 + length) * 0.5)
 
+    # P3: 提取每个 truth entity 的 tp_cycle（last_teleport_cycle），供 NPC teleport
+    # 检查区分合法 recycle（设计内瞬移）vs id-collision pollution。entity id 与
+    # obstacle id 都是 pool index（flowsim entity.id），可直接关联。
+    tp_cycle_by_id: dict[int, int] = {}
+    if isinstance(scn_entities, list):
+        for ent in scn_entities:
+            if not isinstance(ent, dict):
+                continue
+            eid = ent.get("id")
+            if eid is None:
+                continue
+            try:
+                tp_cycle_by_id[int(eid)] = int(ent.get("tp_cycle", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
     return {
         "speed": speed,
         "x": x,
@@ -472,6 +488,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "driver_mode": str(metrics.get("driver_mode", "") or ""),
         "route_lane": int(metrics.get("route_lane", 0) or 0),
         "entities": scn_entities if isinstance(scn_entities, list) else [],
+        "tp_cycle_by_id": tp_cycle_by_id,
     }
 
 
@@ -703,6 +720,39 @@ def collect_samples(duration: int, json_file: Path, interval: float,
     if output:
         print(output.rstrip())
     return samples, proc.returncode or 0
+
+
+# P3 诊断辅助：dump 单帧 sample 到 /tmp，供分析 NPC 瞬移根因。
+class _DbgDumped:
+    done = False
+
+_dbg_dumped = _DbgDumped()
+
+
+def _dbg_dump_sample(filename: str, sample: dict) -> None:
+    """把单帧 entities 写到 /tmp/<filename>，仅保留 NPC 车辆 + ego，按 id 排序。
+    sample 可以是 sample_metrics() 输出（entities 在顶层）或原始 topology JSON
+    （entities 在 metrics.scene.entities）。"""
+    import json as _json
+    ents = sample.get("entities") if isinstance(sample, dict) else None
+    if ents is None:
+        scn = sample.get("scene", {}) if isinstance(sample, dict) else {}
+        ents = scn.get("entities", []) if isinstance(scn, dict) else []
+    rows = []
+    for e in ents:
+        if not isinstance(e, dict):
+            continue
+        t = e.get("type")
+        if t in TRUTH_TYPE_VEHICLE or t == "ego":
+            rows.append({
+                "id": e.get("id"), "type": t,
+                "x": e.get("x"), "y": e.get("y"),
+                "vx": e.get("vx"), "tp_cycle": e.get("tp_cycle", 0),
+                "heading": e.get("heading"),
+            })
+    rows.sort(key=lambda r: (r.get("type") != "ego", r.get("id", 0)))
+    with open(f"/tmp/{filename}", "w") as fh:
+        _json.dump({"entity_count": len(ents), "vehicles": rows}, fh, indent=2)
 
 
 def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None) -> tuple[list[str], list[str], dict]:
@@ -1014,6 +1064,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # 旧逻辑 `if disp > 30.0: continue` 把最严重的瞬移直接跳过，
     # 1000m 级瞬移连样本都不进 → P0-2 漏检。
     npc_teleport_displacements: list[tuple[int, float]] = []
+    # P3: NPC 跟踪改用 ground-truth entities（scene_frame，绝对坐标 + tp_cycle），
+    # 不再用 scene.obstacles（vehicle_state，由 monitor 从多个独立缓存的 buffer
+    # 非原子拼装，ego/obstacles 可能来自不同 sim cycle → 同一 id 出现 +200m 伪位移）。
+    # entities 是 flowsim scene_frame 单帧快照，自洽且携带 tp_cycle，可直接判定
+    # 合法瞬移（recycle / 碰撞分离）。
     for i in range(1, len(series)):
         dt = timestamps[i] - timestamps[i - 1]
         if dt <= 1e-3 or dt > 2.0:
@@ -1021,21 +1076,45 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         yaw_rates.append(abs(angle_diff(headings[i], headings[i - 1])) / dt)
         steer_rates.append(abs(steer_signed[i] - steer_signed[i - 1]) / dt)
 
-        prev_obs = {o["id"]: o for o in series[i - 1]["obs_world"]}
-        for obs in series[i]["obs_world"]:
-            prev = prev_obs.get(obs["id"])
-            if not prev:
+        prev_ents = {
+            e.get("id"): e for e in series[i - 1].get("entities", [])
+            if e.get("type") in TRUTH_TYPE_VEHICLE and "x" in e
+        }
+        for e in series[i].get("entities", []):
+            if e.get("type") not in TRUTH_TYPE_VEHICLE:
                 continue
-            dx = obs["x"] - prev["x"]
-            dy = obs["y"] - prev["y"]
+            eid = e.get("id")
+            pe = prev_ents.get(eid)
+            if not pe or "x" not in pe:
+                continue
+            dx = float(e["x"]) - float(pe["x"])
+            dy = float(e["y"]) - float(pe["y"])
             disp = math.hypot(dx, dy)
             if disp > 30.0:
-                # 30-200m: 可能是 recycle/respawn（设计内瞬移），记录但不 FAIL。
-                # >200m: 几乎必然是 P0-2 类 id 撞车污染，直接 FAIL。
-                npc_teleport_displacements.append((obs.get("id", -1), disp))
-                if disp > 200.0:
+                # tp_cycle 增大 ⇒ 本区间内发生过 recycle/碰撞分离 ⇒ 合法瞬移
+                curr_tp = int(e.get("tp_cycle", 0) or 0)
+                prev_tp = int(pe.get("tp_cycle", 0) or 0)
+                is_legitimate = curr_tp > prev_tp
+                # DEBUG: 临时打印每个 >30m 位移的 tp_cycle 详情
+                import os as _os
+                if _os.environ.get("EVAL_DEBUG_TELEPORT"):
+                    print(f"[DBG] teleport i={i} id={eid} disp={disp:.1f} "
+                          f"curr_tp={curr_tp} prev_tp={prev_tp} legit={is_legitimate} "
+                          f"x_prev={float(pe['x']):.1f} x_curr={float(e['x']):.1f} "
+                          f"t_prev={timestamps[i-1]:.2f} t_curr={timestamps[i]:.2f}",
+                          file=sys.stderr)
+                    # P3 诊断：第一次出现 >200m 位移时，dump 前后两帧的全部 NPC 实体，
+                    # 用于判断是"整帧坐标平移/ID 错位"还是"单车真实瞬移"。
+                    if disp > 200.0 and not getattr(_dbg_dumped, "done", False):
+                        _dbg_dumped.done = True
+                        _dbg_dump_sample("frame_dump_prev.json", series[i - 1])
+                        _dbg_dump_sample("frame_dump_curr.json", series[i])
+                # 30-200m 且非合法: 可能是 respawn 残差，记录但不 FAIL。
+                # >200m 且非合法: 几乎必然是 P0-2 类 id 撞车污染，直接 FAIL。
+                npc_teleport_displacements.append((eid if isinstance(eid, int) else -1, disp))
+                if disp > 200.0 and not is_legitimate:
                     failures.append(
-                        f"npc teleport: id={obs.get('id', -1)} displaced {disp:.1f} m "
+                        f"npc teleport: id={eid} displaced {disp:.1f} m "
                         f"in one frame (>200m threshold, likely id-collision pollution)"
                     )
                 continue

@@ -732,7 +732,7 @@ protected:
             if (g.has_behavior) {
                 float beh_speed = g.current_behavior.target_speed;
                 int8_t beh_cmd = g.current_behavior.command;
-                if (beh_cmd == BEH_FOLLOW && beh_speed > 0.0f && beh_speed < command_speed) {
+                if (beh_cmd == BEH_FOLLOW && beh_speed >= 0.0f && beh_speed < command_speed) {
                     command_speed = (double)beh_speed;
                 } else if (beh_cmd == BEH_STOP || beh_cmd == BEH_YIELD || beh_cmd == BEH_EMERGENCY) {
                     command_speed = 0.0;
@@ -1259,7 +1259,7 @@ void* planning_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, TOPIC_PLANNING_BEHAVIOR, nullptr };
 static const char* s_outputs[] = { TOPIC_PLANNING_TRAJECTORY, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */

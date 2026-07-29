@@ -99,6 +99,12 @@ static struct {
                                           *   前端 3D 场景只剩 ego。扩到 64KB 足够 30+ 实体。 */
     char   scene_ego_json[4096];        /* ego 实体 JSON（含 lights/brake/vx/vy，~1.5KB 实测） */
     volatile int has_scene_frame;
+    /* P3 修复：scene_frame 缓存 mutex。on_scene_frame 在消息总线线程 memcpy
+     * scene_entities_json，export_dashboard_json 在主线程 cJSON_Parse 同一 buffer。
+     * 无锁时 cJSON_Parse 可能读到半新半旧的 JSON（memcpy 写到一半），产生
+     * "全 NPC 同时前移 200m" 的伪位移 → evaluator 误报 npc teleport FAIL。
+     * 加锁保证读到的永远是完整的某一帧 JSON。 */
+    pthread_mutex_t scene_frame_mutex;
 
     /* 节点拓扑: 从 flowengine/node_info topic 收集 (B 方案) */
 #define MAX_TOPO_NODES 16
@@ -330,18 +336,28 @@ static void on_scene_frame(const Message* msg, void* user_data) {
                 }
                 len = sizeof(g.scene_road_network_json) - 1;
             }
+            pthread_mutex_lock(&g.scene_frame_mutex);
             memcpy(g.scene_road_network_json, rn_str, len);
             g.scene_road_network_json[len] = '\0';
+            pthread_mutex_unlock(&g.scene_frame_mutex);
             free(rn_str);
         }
     }
 
     /* NOA Phase 2.2: 透传完整 entities 数组（不再过滤类型）。
      * 前端 vis/main.js 按 type 分发渲染：ego/NPC/pedestrian/tl/etc_gate/stop_line，
-     * scn.obstacles (vehicle/state) 作为旧场景 fallback。 */
+     * scn.obstacles (vehicle/state) 作为旧场景 fallback。
+     *
+     * P3 修复：整段 buffer 写入用 scene_frame_mutex 保护。on_scene_frame 在
+     * 消息总线线程执行，export_dashboard_json 在主线程 cJSON_Parse 读同一
+     * buffer。无锁时主线程可能读到 memcpy 写到一半的半新半旧 JSON，产生
+     * "全 NPC 同时前移 ~200m" 的伪位移 → evaluator 误报 npc teleport FAIL。
+     * 锁粒度：cJSON_PrintUnformatted 在锁外生成字符串（耗时与锁无关），
+     * 仅 memcpy + NUL 写入在锁内，持锁时间 < 10μs。 */
     cJSON* entities = cJSON_GetObjectItem(root, "entities");
     if (entities && cJSON_IsArray(entities)) {
         char* ent_str = cJSON_PrintUnformatted(entities);
+        char* ego_str = NULL;
         if (ent_str) {
             size_t len = strlen(ent_str);
             if (len >= sizeof(g.scene_entities_json)) {
@@ -356,8 +372,10 @@ static void on_scene_frame(const Message* msg, void* user_data) {
                 }
                 len = sizeof(g.scene_entities_json) - 1;
             }
+            pthread_mutex_lock(&g.scene_frame_mutex);
             memcpy(g.scene_entities_json, ent_str, len);
             g.scene_entities_json[len] = '\0';
+            pthread_mutex_unlock(&g.scene_frame_mutex);
             free(ent_str);
         }
 
@@ -372,24 +390,26 @@ static void on_scene_frame(const Message* msg, void* user_data) {
         cJSON_ArrayForEach(entity, entities) {
             cJSON* type = cJSON_GetObjectItem(entity, "type");
             if (type && cJSON_IsString(type) && strcmp(type->valuestring, "ego") == 0) {
-                char* ego_str = cJSON_PrintUnformatted(entity);
-                if (ego_str) {
-                    size_t len = strlen(ego_str);
-                    if (len >= sizeof(g.scene_ego_json)) {
-                        static int ego_truncate_warn = 0;
-                        if (ego_truncate_warn < 3) {
-                            LOG_WARN("monitor", "scene_ego_json truncated: %zu > %zu",
-                                     len, sizeof(g.scene_ego_json) - 1);
-                            ego_truncate_warn++;
-                        }
-                        len = sizeof(g.scene_ego_json) - 1;
-                    }
-                    memcpy(g.scene_ego_json, ego_str, len);
-                    g.scene_ego_json[len] = '\0';
-                    free(ego_str);
-                }
+                ego_str = cJSON_PrintUnformatted(entity);
                 break;
             }
+        }
+        if (ego_str) {
+            size_t len = strlen(ego_str);
+            if (len >= sizeof(g.scene_ego_json)) {
+                static int ego_truncate_warn = 0;
+                if (ego_truncate_warn < 3) {
+                    LOG_WARN("monitor", "scene_ego_json truncated: %zu > %zu",
+                             len, sizeof(g.scene_ego_json) - 1);
+                    ego_truncate_warn++;
+                }
+                len = sizeof(g.scene_ego_json) - 1;
+            }
+            pthread_mutex_lock(&g.scene_frame_mutex);
+            memcpy(g.scene_ego_json, ego_str, len);
+            g.scene_ego_json[len] = '\0';
+            pthread_mutex_unlock(&g.scene_frame_mutex);
+            free(ego_str);
         }
     }
 
@@ -712,7 +732,17 @@ static void export_dashboard_json(void) {
      * 其余字段从 scene/frame 补充。scene/frame 与 vehicle/state 来自同一帧，
      * 时间戳一致，不会有 stale data 问题。 */
     if (g.has_scene_frame && g.scene_ego_json[0] != '\0') {
-        cJSON* ego_src = cJSON_Parse(g.scene_ego_json);
+        /* P3 修复：在锁内快照 buffer 到栈副本，锁外 cJSON_Parse。
+         * 避免持锁解析（cJSON_Parse ~50μs）阻塞 on_scene_frame 写入。 */
+        char ego_snap[sizeof(g.scene_ego_json)];
+        size_t ego_snap_len;
+        pthread_mutex_lock(&g.scene_frame_mutex);
+        ego_snap_len = strlen(g.scene_ego_json);
+        if (ego_snap_len >= sizeof(ego_snap)) ego_snap_len = sizeof(ego_snap) - 1;
+        memcpy(ego_snap, g.scene_ego_json, ego_snap_len);
+        ego_snap[ego_snap_len] = '\0';
+        pthread_mutex_unlock(&g.scene_frame_mutex);
+        cJSON* ego_src = cJSON_Parse(ego_snap);
         if (ego_src) {
             /* 从 scene/frame ego 补充的字段清单（不在 vehicle/state 中） */
             const char* merge_fields[] = {
@@ -749,7 +779,16 @@ static void export_dashboard_json(void) {
      * CatmullRomCurve3 构建多段道路。旧场景无 scene/frame 时此字段缺省，
      * 前端 fallback 到 scene.road 的单段弯道几何。 */
     if (g.has_scene_frame && g.scene_road_network_json[0] != '\0') {
-        cJSON* rn = cJSON_Parse(g.scene_road_network_json);
+        /* P3 修复：锁内快照，锁外解析（同 ego 缓存处理）。 */
+        char rn_snap[sizeof(g.scene_road_network_json)];
+        size_t rn_snap_len;
+        pthread_mutex_lock(&g.scene_frame_mutex);
+        rn_snap_len = strlen(g.scene_road_network_json);
+        if (rn_snap_len >= sizeof(rn_snap)) rn_snap_len = sizeof(rn_snap) - 1;
+        memcpy(rn_snap, g.scene_road_network_json, rn_snap_len);
+        rn_snap[rn_snap_len] = '\0';
+        pthread_mutex_unlock(&g.scene_frame_mutex);
+        cJSON* rn = cJSON_Parse(rn_snap);
         if (rn) {
             cJSON_AddItemToObject(scene, "road_network", rn);
         } else {
@@ -758,7 +797,7 @@ static void export_dashboard_json(void) {
             static int rn_parse_warn = 0;
             if (rn_parse_warn < 3) {
                 LOG_WARN("monitor", "scene_road_network_json cJSON_Parse failed (len=%zu, first 80 chars: %.80s)",
-                         strlen(g.scene_road_network_json), g.scene_road_network_json);
+                         rn_snap_len, rn_snap);
                 rn_parse_warn++;
             }
         }
@@ -769,7 +808,20 @@ static void export_dashboard_json(void) {
      * 优先消费 scn.entities 渲染障碍物池（扩到 24），scn.obstacles 作为旧场景
      * fallback。 */
     if (g.has_scene_frame && g.scene_entities_json[0] != '\0') {
-        cJSON* ents = cJSON_Parse(g.scene_entities_json);
+        /* P3 修复：锁内快照到堆缓冲（64KB 过大不入栈），锁外 cJSON_Parse。
+         * 半新半旧 JSON 是 evaluator 误报 npc teleport 的根因：cJSON 按顺序
+         * 解析 entity 数组，若 memcpy 正在覆写中间某个 entity 的 x 坐标，
+         * cJSON 会读到旧 y + 新 x（或反之）→ 单帧位移数十~数百米。 */
+        size_t ent_snap_len;
+        pthread_mutex_lock(&g.scene_frame_mutex);
+        ent_snap_len = strlen(g.scene_entities_json);
+        char* ent_snap = (char*)malloc(ent_snap_len + 1);
+        if (ent_snap) {
+            memcpy(ent_snap, g.scene_entities_json, ent_snap_len);
+            ent_snap[ent_snap_len] = '\0';
+        }
+        pthread_mutex_unlock(&g.scene_frame_mutex);
+        cJSON* ents = ent_snap ? cJSON_Parse(ent_snap) : NULL;
         if (ents) {
             cJSON_AddItemToObject(scene, "entities", ents);
         } else {
@@ -778,10 +830,11 @@ static void export_dashboard_json(void) {
             static int ent_parse_warn = 0;
             if (ent_parse_warn < 3) {
                 LOG_WARN("monitor", "scene_entities_json cJSON_Parse failed (len=%zu, first 80 chars: %.80s)",
-                         strlen(g.scene_entities_json), g.scene_entities_json);
+                         ent_snap_len, ent_snap ? ent_snap : "(null)");
                 ent_parse_warn++;
             }
         }
+        free(ent_snap);
     }
 
     /* 规划轨迹 path 数组透传给 3D 前端。
@@ -806,9 +859,12 @@ static void export_dashboard_json(void) {
 #define OBS_FALLBACK_PED_SIZE  0.6
     double ox[MAX_OBS_SCENE], oy[MAX_OBS_SCENE], ovx[MAX_OBS_SCENE], ovy[MAX_OBS_SCENE];
     double olen[MAX_OBS_SCENE], owid[MAX_OBS_SCENE];
+    int    oid[MAX_OBS_SCENE];
     char   otype[MAX_OBS_SCENE][16];
     char kn[20];
     for (int i = 0; i < n_obs; i++) {
+        snprintf(kn, sizeof(kn), "oid%d", i);
+        oid[i] = json_extract_int(g.latest_vehicle_state, kn);
         snprintf(kn, sizeof(kn), "ox%d", i);
         ox[i] = json_extract_double(g.latest_vehicle_state, kn);
         snprintf(kn, sizeof(kn), "oy%d", i);
@@ -835,7 +891,7 @@ static void export_dashboard_json(void) {
         double rx = ox[i] - ego_x;
         double ry = oy[i] - ego_y;
         cJSON* ob = cJSON_CreateObject();
-        cJSON_AddNumberToObject(ob, "id", i);
+        cJSON_AddNumberToObject(ob, "id", oid[i] > 0 ? oid[i] : i);
         cJSON_AddStringToObject(ob, "type", otype[i]);
         cJSON_AddNumberToObject(ob, "x", rx);
         cJSON_AddNumberToObject(ob, "y", ry);
@@ -1119,6 +1175,10 @@ static int monitor_init(MessageBus* bus, Transport* transport,
      * 注意：subscriber 必须在 publisher 之后 open，否则 publisher 端的
      * ipc_channel_publish 会因无 subscriber 而丢弃早期包（可接受，启动竞态）。 */
     pthread_mutex_init(&g.remote_stats_mutex, NULL);
+    /* P3 修复：初始化 scene_frame 缓存 mutex，避免未初始化锁行为未定义。
+     * on_scene_frame（消息总线线程）写 scene_entities_json，
+     * export_dashboard_json（主线程）读同一 buffer。 */
+    pthread_mutex_init(&g.scene_frame_mutex, NULL);
     g.stats_sub = stats_bridge_subscriber_open(on_remote_stats, NULL);
     if (g.stats_sub) {
         ipc_channel_start(g.stats_sub);

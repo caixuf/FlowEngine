@@ -282,6 +282,9 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "throttle", e.throttle);
     /* 车灯位掩码（同 ego）：CutIn→转向灯，Yield/Stop→双闪，Cruise→随 steer */
     cJSON_AddNumberToObject(j, "lights", (double)e.lights.mask);
+    /* P3: 传播 last_teleport_cycle 供 evaluator 区分合法 recycle（设计内瞬移）
+     * vs id-collision pollution。evaluator 据此跳过 recycle 引起的 >200m 位移 FAIL。 */
+    cJSON_AddNumberToObject(j, "tp_cycle", (double)e.last_teleport_cycle);
     return j;
 }
 

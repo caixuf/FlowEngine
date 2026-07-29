@@ -337,15 +337,22 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
 
     /* Phase 2: road_pos 重新 init 到回收点。
-     * route.locate 把 route_s 转成 (road_id, s_local)，再用 npc.offset（保持
+     * route.locate 把 route_s 转成 (road_id, s_local)，再用 npc.lane_id（保持
      * 横向车道）init road_pos。失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
      * 注意：road_pos.init 内部会 RM_DeletePosition 旧 handle 再 RM_CreatePosition，
-     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。 */
+     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。
+     *
+     * P3 修复：原代码硬编码 lane_id=0（参考线），RM_SetLanePosition 对 type="none"
+     * 的中心线车道返回 h=PI，导致同向 NPC (route_dir=+1) 回收后 heading 翻转为 PI
+     * （车头朝后），后续帧逆向行驶 → motion_direction invariant 失败 + 与 ego 对撞。
+     * 这与 flowsim_node.cpp:548-555 (P1 修复) 是同一个 bug 模式：spawn 时已用真实
+     * lane_id，但 recycle 漏改。改用 npc.lane_id（回收前已由 road_pos.frenet 同步），
+     * offset 用 0.0（lane-internal，车道中心），与 flowsim_node.cpp:611-615 一致。 */
     if (npc.road_pos.ok() && roads && roads->loaded()) {
         int rid = 0, ridx = -1;
         double s_local = 0.0;
         route.locate(npc.route_s, rid, s_local, ridx);
-        if (npc.road_pos.init(*roads, rid, 0, s_local, npc.offset)) {
+        if (npc.road_pos.init(*roads, rid, npc.lane_id, s_local, 0.0)) {
             /* 立即同步世界坐标 — 旧实现只 init road_pos 不更新 npc.x/y，
              * 下一帧 road_pos.world() 才把 npc.x/y 跳到新位置，evaluator
              * 在两次采样间反算出 45 m/s 的"伪速度"触发 respawn jump 告警。
@@ -752,12 +759,14 @@ mobil_done: ;
                 } else {
                     /* crash_cooldown: 用 collision-separated route_s 重建 road_pos，
                      * 而非用 (x,y) 反向 sync — 后者会回到碰撞前位置，使分离失效。
-                     * 同时同步世界坐标，让 crash_cooldown 结束后第一帧位置正确。 */
+                     * 同时同步世界坐标，让 crash_cooldown 结束后第一帧位置正确。
+                     * P3: 同 recycle_npc，用 npc.lane_id + lane-internal offset=0
+                     * 而非 lane_id=0（否则 esmini 返回 h=PI 致 heading 翻转）。 */
                     if (route && route->ok() && npc.route_dir != 0) {
                         int rid = 0, ridx = -1;
                         double s_local = 0.0;
                         route->locate(npc.route_s, rid, s_local, ridx);
-                        npc.road_pos.init(*roads, rid, 0, s_local, npc.offset);
+                        npc.road_pos.init(*roads, rid, npc.lane_id, s_local, 0.0);
                         WorldPos wp_sep;
                         if (npc.road_pos.world(wp_sep)) {
                             npc.x = wp_sep.x;
