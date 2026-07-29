@@ -273,7 +273,7 @@ void ktracker_associate_and_update(KalmanTracker* kt,
             /* 初始协方差 */
             memset(t->P, 0, 16 * sizeof(double));
             t->P[0] = kt->r_pos;  t->P[5] = kt->r_pos;
-            t->P[10] = 100.0;     t->P[15] = 100.0;
+            t->P[10] = 5.0;      t->P[15] = 5.0;
             t->width  = dets[d].width;
             t->length = dets[d].length;
             t->cls    = dets[d].cls;
@@ -361,7 +361,7 @@ void ktracker_associate_and_update(KalmanTracker* kt,
     /* ── Step 3: 删除过期轨迹 ── */
     int write = 0;
     for (int i = 0; i < kt->n_tracks; i++) {
-        if (kt->tracks[i].state == TRACK_TENTATIVE && kt->tracks[i].misses >= 2) continue;
+        if (kt->tracks[i].state == TRACK_TENTATIVE && kt->tracks[i].misses >= 3) continue;
         if (kt->tracks[i].misses >= kt->max_misses_before_delete) continue;
         if (i != write) kt->tracks[write] = kt->tracks[i];
         write++;
@@ -381,7 +381,7 @@ void ktracker_associate_and_update(KalmanTracker* kt,
         t->x[2]  = dets[d].vx;  t->x[3] = dets[d].vy;
         memset(t->P, 0, 16 * sizeof(double));
         t->P[0] = kt->r_pos;  t->P[5]  = kt->r_pos;
-        t->P[10] = 100.0;     t->P[15] = 100.0;
+        t->P[10] = 5.0;      t->P[15] = 5.0;
         t->width  = dets[d].width;
         t->length = dets[d].length;
         t->cls    = dets[d].cls;

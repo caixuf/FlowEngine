@@ -725,6 +725,20 @@ protected:
              * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
             double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
 
+            /* ── Behavior planner 跟车/停车/让行速度覆盖 ──
+             * behavior_planner 在 FOLLOW 状态下发送 target_speed = lead_speed，
+             * STOP/YIELD 状态发送 target_speed = 0。规划层必须消费此值，
+             * 否则 FOLLOW 时仍按巡航速度行驶 → 追尾。 */
+            if (g.has_behavior) {
+                float beh_speed = g.current_behavior.target_speed;
+                int8_t beh_cmd = g.current_behavior.command;
+                if (beh_cmd == BEH_FOLLOW && beh_speed > 0.0f && beh_speed < command_speed) {
+                    command_speed = (double)beh_speed;
+                } else if (beh_cmd == BEH_STOP || beh_cmd == BEH_YIELD || beh_cmd == BEH_EMERGENCY) {
+                    command_speed = 0.0;
+                }
+            }
+
             /* 安全夹紧：scenario JSON 的 target_speed 是"信任来源"，但安全上限不变量
              * 应在规划层就守住——任何来源的目标速度都不能超过 cfg_max_speed。
              *
@@ -1387,6 +1401,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, TOPIC_ROAD_TRAFFIC_LIGHTS, 0x7E5C0FFEu,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_SCENE_FRAME,         0x5CF12A60u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_PLANNING_BEHAVIOR,   0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);

@@ -33,8 +33,9 @@
 
 /* ── Constants ────────────────────────────────────────────────── */
 #define TRACKER_TOPIC_IN       "perception/obstacles"
+#define TRACKER_TOPIC_EGO      "vehicle/state"
 #define TRACKER_TOPIC_OUT      "perception/tracked_objects"
-#define TRACKER_DEFAULT_HZ     10.0f
+#define TRACKER_DEFAULT_HZ     20.0f
 #define STATIC_SPEED_THRESHOLD 0.5f   /**< m/s below which target is candidate-static */
 #define STATIC_FRAMES_MIN      20u    /**< consecutive low-speed frames to declare static */
 
@@ -58,11 +59,11 @@ static struct {
     float          rate_hz;
     uint32_t       frame_id;
 
-    /* ── Incoming detection buffer (written by callback, read by thread) ── */
-    double obs_x[KTRACKER_MAX_DETS];
-    double obs_y[KTRACKER_MAX_DETS];
-    double obs_vx[KTRACKER_MAX_DETS];
-    double obs_vy[KTRACKER_MAX_DETS];
+    /* ── Incoming detection buffer (body-frame raw, written by callback, read by thread) ── */
+    double obs_bx[KTRACKER_MAX_DETS];      /* body-frame x (forward) */
+    double obs_by[KTRACKER_MAX_DETS];      /* body-frame y (left) */
+    double obs_bvx[KTRACKER_MAX_DETS];     /* body-frame vx (absolute, projected) */
+    double obs_bvy[KTRACKER_MAX_DETS];     /* body-frame vy (absolute, projected) */
     double obs_width[KTRACKER_MAX_DETS];
     double obs_length[KTRACKER_MAX_DETS];
     double obs_confidence[KTRACKER_MAX_DETS];
@@ -76,16 +77,42 @@ static struct {
     /* ── Static classification lookup (track-id-keyed) ── */
     TrackStaticEntry static_cache[KTRACKER_MAX_TRACKS];
     int              n_static_cache;
+
+    /* ── Ego pose (world frame, for coordinate transform) ── */
+    double ego_x, ego_y, ego_heading, ego_v;
+    volatile int has_ego;
 } g;
 
-/* ── Subscription callback: perception/obstacles (binary ObstacleList) ── */
+/* ── Subscription callback: vehicle/state (ego pose in world frame, JSON) ── */
+static void on_ego_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))   g.ego_x = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))   g.ego_y = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "hdg")) && cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "spd")) && cJSON_IsNumber(j)) g.ego_v = j->valuedouble;
+    if (!g.has_ego) {
+        LOG_INFO("tracker", "Got ego from vehicle/state: x=%.1f y=%.1f hdg=%.2f v=%.1f",
+                 g.ego_x, g.ego_y, g.ego_heading, g.ego_v);
+    }
+    g.has_ego = 1;
+    cJSON_Delete(root);
+}
+
+/* ── Subscription callback: perception/obstacles (binary ObstacleList, body frame) ──
+ * Stores raw body-frame detections. Coordinate transform to world frame is done
+ * in the main loop using the latest ego pose, ensuring temporal consistency. */
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     ObstacleList obs_list;
-    if (ObstacleList_deserialize(&obs_list, (const uint8_t*)msg->data, msg->data_size) != 0) {
-        LOG_WARN("tracker", "ObstacleList deserialize failed (size=%u)", msg->data_size);
+    int deser_rc = ObstacleList_deserialize(&obs_list, (const uint8_t*)msg->data, msg->data_size);
+    if (deser_rc != 0) {
+        LOG_WARN("tracker", "ObstacleList deserialize failed rc=%d size=%u", deser_rc, msg->data_size);
         return;
     }
 
@@ -97,10 +124,10 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
     for (int i = 0; i < n; i++) {
         const Obstacle* o = &obs_list.obstacles[i];
-        g.obs_x[i]         = (double)o->x;
-        g.obs_y[i]         = (double)o->y;
-        g.obs_vx[i]        = (double)o->vx;
-        g.obs_vy[i]        = (double)o->vy;
+        g.obs_bx[i]        = (double)o->x;
+        g.obs_by[i]        = (double)o->y;
+        g.obs_bvx[i]       = (double)o->vx;
+        g.obs_bvy[i]       = (double)o->vy;
         g.obs_width[i]     = (double)o->width;
         g.obs_length[i]    = (double)o->length;
         g.obs_cls[i]       = (int)o->type;
@@ -167,17 +194,28 @@ static int tracker_execute(TaskBase* task) {
         usleep((unsigned long)period_us);
         if (task->should_stop) break;
 
-        /* ── Snapshot incoming detections under lock ── */
+        /* ── Snapshot incoming detections + ego pose under lock ── */
         pthread_mutex_lock(&g.mutex);
         const int   has_data = g.has_new_data;
         const int   n_dets   = g.obs_count;
+        /* Snapshot ego pose at the same moment as detections */
+        const double ego_x_snap  = g.ego_x;
+        const double ego_y_snap  = g.ego_y;
+        const double ego_h_snap  = g.ego_heading;
         KTrackDetection dets[KTRACKER_MAX_DETS];
-        if (has_data && n_dets > 0) {
+        if (has_data && n_dets > 0 && g.has_ego) {
+            const double ch = cos(ego_h_snap);
+            const double sh = sin(ego_h_snap);
             for (int i = 0; i < n_dets; i++) {
-                dets[i].x          = (float)g.obs_x[i];
-                dets[i].y          = (float)g.obs_y[i];
-                dets[i].vx         = (float)g.obs_vx[i];
-                dets[i].vy         = (float)g.obs_vy[i];
+                /* body-frame (x forward, y left) → world frame */
+                const double bx  = g.obs_bx[i];
+                const double by  = g.obs_by[i];
+                const double bvx = g.obs_bvx[i];
+                const double bvy = g.obs_bvy[i];
+                dets[i].x          = (float)(ego_x_snap + bx * ch - by * sh);
+                dets[i].y          = (float)(ego_y_snap + bx * sh + by * ch);
+                dets[i].vx         = (float)(bvx * ch - bvy * sh);
+                dets[i].vy         = (float)(bvx * sh + bvy * ch);
                 dets[i].width      = (float)g.obs_width[i];
                 dets[i].length     = (float)g.obs_length[i];
                 dets[i].cls        = g.obs_cls[i];
@@ -187,13 +225,50 @@ static int tracker_execute(TaskBase* task) {
         g.has_new_data = 0;
         pthread_mutex_unlock(&g.mutex);
 
+        /* Skip if no ego pose yet */
+        const int has_ego = g.has_ego;
+
         /* ── Step a: Predict ── */
         ktracker_predict(&g.kt);
 
-        /* ── Step b+c: Associate & update ── */
-        if (has_data) {
+        /* ── Step b+c: Associate & update (only if we have ego + detections) ── */
+        if (has_data && has_ego) {
             ktracker_associate_and_update(&g.kt, dets, n_dets);
         }
+
+        /* ── 日志：每10帧打一次track状态 ── */
+        if (g.frame_id % 10 == 0) {
+            int n_total = g.kt.n_tracks;
+            int n_confirmed = 0, n_tentative = 0, n_coasting = 0;
+            for (int i = 0; i < n_total; i++) {
+                switch (g.kt.tracks[i].state) {
+                    case TRACK_CONFIRMED: n_confirmed++; break;
+                    case TRACK_TENTATIVE: n_tentative++; break;
+                    case TRACK_COASTING:  n_coasting++;  break;
+                    default: break;
+                }
+            }
+            LOG_INFO("tracker", "frame=%u has_data=%d n_dets=%d tracks(total=%d conf=%d tent=%d coast=%d)",
+                     g.frame_id, has_data, n_dets, n_total, n_confirmed, n_tentative, n_coasting);
+
+            /* 有障碍物但没确认track时，额外打印hits_streak信息 */
+            if (has_data && n_dets > 0 && n_confirmed == 0) {
+                for (int i = 0; i < n_total && i < 5; i++) {
+                    const KTrack* t = &g.kt.tracks[i];
+                    LOG_INFO("tracker", "  track[%d]: id=%d state=%d hits=%d streak=%d misses=%d age=%d "
+                             "pos(%.1f,%.1f) vel(%.1f,%.1f)",
+                             i, t->id, t->state, t->hits, t->hits_streak, t->misses, t->age,
+                             t->x[0], t->x[1], t->x[2], t->x[3]);
+                }
+            }
+        }
+
+        /* ── Snapshot ego pose for world→body transform (no lock needed, double is atomic enough for tracking) ── */
+        const double ego_h = g.ego_heading;
+        const double ego_xx = g.ego_x;
+        const double ego_yy = g.ego_y;
+        const double ch_out = cos(ego_h);
+        const double sh_out = sin(ego_h);
 
         /* ── Step d: Build cJSON output ── */
         cJSON* root      = cJSON_CreateObject();
@@ -206,9 +281,12 @@ static int tracker_execute(TaskBase* task) {
             const KTrack* trk = &g.kt.tracks[i];
             if (trk->state != TRACK_CONFIRMED) continue;
 
-            const float vx    = (float)trk->x[2];
-            const float vy    = (float)trk->x[3];
-            const float speed = sqrtf(vx * vx + vy * vy);
+            /* world-frame absolute state from Kalman filter */
+            const double wx = trk->x[0];
+            const double wy = trk->x[1];
+            const double wvx = trk->x[2];
+            const double wvy = trk->x[3];
+            const float speed = sqrtf(wvx * wvx + wvy * wvy);
 
             /* ── Static / dynamic classification ── */
             int sidx = static_cache_find_or_create(trk->id);
@@ -222,15 +300,24 @@ static int tracker_execute(TaskBase* task) {
             const int is_static = (sidx >= 0 &&
                 (unsigned int)g.static_cache[sidx].counter >= STATIC_FRAMES_MIN) ? 1 : 0;
 
+            /* world → body (Ego-centered, x-forward, y-left) */
+            const double dx = wx - ego_xx;
+            const double dy = wy - ego_yy;
+            const double bx = dx * ch_out + dy * sh_out;
+            const double by = -dx * sh_out + dy * ch_out;
+            /* absolute velocity (inertial) projected onto body axes */
+            const double bvx = wvx * ch_out + wvy * sh_out;
+            const double bvy = -wvx * sh_out + wvy * ch_out;
+
             cJSON* obj = cJSON_CreateObject();
             cJSON_AddNumberToObject(obj, "id",         (double)trk->id);
             cJSON_AddNumberToObject(obj, "track_age",  (double)trk->age);
             cJSON_AddStringToObject(obj, "type",       type_to_string(trk->cls));
-            cJSON_AddNumberToObject(obj, "x",          trk->x[0]);
-            cJSON_AddNumberToObject(obj, "y",          trk->x[1]);
+            cJSON_AddNumberToObject(obj, "x",          bx);
+            cJSON_AddNumberToObject(obj, "y",          by);
             cJSON_AddNumberToObject(obj, "z",          0.0);
-            cJSON_AddNumberToObject(obj, "vx",         (double)vx);
-            cJSON_AddNumberToObject(obj, "vy",         (double)vy);
+            cJSON_AddNumberToObject(obj, "vx",         bvx);
+            cJSON_AddNumberToObject(obj, "vy",         bvy);
             cJSON_AddNumberToObject(obj, "vz",         0.0);
             cJSON_AddNumberToObject(obj, "ax",         0.0);
             cJSON_AddNumberToObject(obj, "ay",         0.0);
@@ -248,6 +335,14 @@ static int tracker_execute(TaskBase* task) {
 
         /* ── Prune stale static cache entries ── */
         static_cache_prune();
+
+        /* ── 日志：输出障碍物计数 ── */
+        {
+            int out_count = cJSON_GetArraySize(j_objects);
+            if (out_count > 0 || g.frame_id % 10 == 0) {
+                LOG_INFO("tracker", "publishing %d tracked objects (frame=%u)", out_count, g.frame_id);
+            }
+        }
 
         /* ── Publish ── */
         char* json_str = cJSON_PrintUnformatted(root);
@@ -273,7 +368,7 @@ static const TaskInterface tracker_vtable = {
 };
 
 /* ── NodePlugin lifecycle ────────────────────────────────────── */
-static const char* s_inputs[]  = { TRACKER_TOPIC_IN, NULL };
+static const char* s_inputs[]  = { TRACKER_TOPIC_IN, TRACKER_TOPIC_EGO, NULL };
 static const char* s_outputs[] = { TRACKER_TOPIC_OUT, NULL };
 
 static NodePlugin s_plugin;
@@ -306,10 +401,12 @@ static int tracker_init(MessageBus* bus, Transport* transport,
 
     /* ── Subscriptions ── */
     transport_subscribe(transport, TRACKER_TOPIC_IN, on_obstacles, NULL);
-    transport_advertise(transport, TRACKER_TOPIC_OUT, 0x0B5A010Eu);
+    transport_subscribe(transport, TRACKER_TOPIC_EGO, on_ego_state, NULL);
+    transport_advertise(transport, TRACKER_TOPIC_OUT, 0xDA7A7A11u);
 
     /* ── Discovery ── */
     discovery_advertise(discovery, TRACKER_TOPIC_IN,  0x0B5A010Eu, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TRACKER_TOPIC_EGO, 0u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TRACKER_TOPIC_OUT, 0xDA7A7A11u, CAP_PUBLISHER, g.rate_hz);
 
     /* ── Mutex ── */

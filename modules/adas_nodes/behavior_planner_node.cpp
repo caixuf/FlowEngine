@@ -517,6 +517,10 @@ protected:
 
             /* 同步 state 镜像 */
             g.state = beh_state_to_cmd(statem_current(&g.sm));
+            /* 应用新速度/车道/跟车目标（状态机转移时计算的新值） */
+            g.target_speed = new_target_speed;
+            g.target_lane_idx = new_target_lane;
+            g.follow_obs_id = new_follow_id;
             /* 未发生转移时保持计时递增 */
             if (g.state_timer == 0.0 && old_timer > 0.0) {
                 /* statem_send_event 成功时会置 0，静置 */

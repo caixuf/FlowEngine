@@ -132,7 +132,8 @@
       "library_path": "build/lib/libobject_tracker_node.so",
       "auto_start": true,
       "subscribe": [
-        "perception/obstacles"
+        "perception/obstacles",
+        "vehicle/state"
       ],
       "publish": [
         {
@@ -140,16 +141,16 @@
           "type": "TrackedObjectList"
         }
       ],
-      "params": "{}"
+      "params": "{\"rate_hz\":20.0}"
     },
     {
       "name": "fusion",
       "library_path": "build/lib/libfusion_node.so",
       "auto_start": true,
       "subscribe": [
-        "perception/tracked_objects",
         "sensor/gps",
-        "sensor/lidar"
+        "sensor/lidar",
+        "sensor/pose"
       ],
       "publish": [
         {
