@@ -63,6 +63,9 @@ typedef struct {
     int    update_count;
     double last_innovation;  /* 最后一次更新的新息范数 */
     int    diverged;         /* 协方差是否发散 */
+
+    /* χ² innovation gating (ALGORITHM_REFACTOR_PLAN §6) */
+    int    chi2_fail_count;  /* 连续 χ² 检验失败次数 */
 } EkfFusion;
 
 /* ── API ────────────────────────────────────────────────────── */

@@ -36,6 +36,7 @@
 #include "discovery.h"
 #include "coroutine_task.h"
 #include "clock_service.h"
+#include "degrade_ladder.h"
 #include <cjson/cJSON.h>
 #undef LOG_TRACE
 #undef LOG_DEBUG
@@ -135,6 +136,9 @@ protected:
             auto res = co_await select_for(bus(), {"sensor/lidar", "sensor/gps", "sensor/pose"}, 100000);
             (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
             if (should_stop()) break;
+
+            /* §11.2: heartbeat 上报 — monitor_node 的 degrade_supervisor_tick 据此检测超时 */
+            degrade_supervisor_record_heartbeat("fusion_node", clock_now_us() / 1000);
 
             const Message* lidar_msg = message_buffer_latest(lidar_buf_);
             if (!lidar_msg) continue;
@@ -323,11 +327,17 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "sensor/lidar", on_lidar, nullptr);
     transport_subscribe(transport, "sensor/gps",   on_gps,   nullptr);
     transport_subscribe(transport, "sensor/pose",  on_pose,  nullptr);
+    /* discovery_advertise 已声明 fusion 订阅 perception/tracked_objects，
+     * 但此处不需要 transport_subscribe — object_tracker_node 发布后直接走
+     * 消息总线，behavior_planner_node 已独立订阅 perception/tracked_objects。
+     * 留空行以保持管道图一致性（pipeline.json 中 fusion→tracked_objects 的
+     * subscribe 声明仅用于发现/拓扑，不产生运行时副作用）。 */
 
     /* Discovery 广告 */
     discovery_advertise(discovery, "sensor/lidar", LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "sensor/gps",   GPSDATA_TYPE_ID,   CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "sensor/pose",  POSE2D_TYPE_ID,    CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "perception/tracked_objects", 0u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "fusion/localization", LOCALIZATION_TYPE_ID, CAP_FUSION | CAP_PUBLISHER, 10.0);
     discovery_advertise(discovery, "fusion/latency",      LATENCYREPORT_TYPE_ID, CAP_PUBLISHER, 2.0);
 

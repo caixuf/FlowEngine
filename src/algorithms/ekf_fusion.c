@@ -37,6 +37,12 @@
 #define INIT_P_HEAD_VAR          1.0     /* 航向 (rad²) */
 #define INIT_P_YR_VAR            0.1     /* 偏航角速度 */
 
+/* χ² innovation gating 阈值 (ALGORITHM_REFACTOR_PLAN §6) */
+#define CHI2_THRESHOLD_1DOF      3.841   /* α=0.05, 1-DOF */
+#define CHI2_THRESHOLD_2DOF      5.991   /* α=0.05, 2-DOF */
+#define CHI2_THRESHOLD_4DOF      9.488   /* α=0.05, 4-DOF */
+#define CHI2_MAX_CONSECUTIVE     10      /* 连续失败上限 → diverged */
+
 /* ══════════════════════════════════════════════════════════ */
 /*  内部: 小型矩阵运算                                        */
 /* ══════════════════════════════════════════════════════════ */
@@ -110,8 +116,7 @@ static void ekf_update_generic(EkfFusion* ekf,
             S[i*m + j] += R[i*m + j];
         }
 
-    /* ── K = P*Hᵀ * S⁻¹ (5×m) ── */
-    /* 对 m≤4 直接求 S⁻¹ (小矩阵解析求逆) */
+    /* ── Sinv = S⁻¹ (小矩阵解析求逆) ── */
     double Sinv[4 * 4] = {0};
     if (m == 1) {
         Sinv[0] = 1.0 / S[0];
@@ -163,6 +168,30 @@ static void ekf_update_generic(EkfFusion* ekf,
         for (int i = 0; i < 4; i++)
             for (int j = 0; j < 4; j++)
                 Sinv[i*4 + j] = A[i*8 + 4 + j];
+    }
+
+    /* ── χ² innovation gating：计算马氏距离平方 yᵀ·S⁻¹·y ── */
+    {
+        double md2 = 0.0;
+        for (int i = 0; i < m; i++)
+            for (int j = 0; j < m; j++)
+                md2 += y[i] * Sinv[i*m + j] * y[j];
+        double threshold = (m == 1) ? CHI2_THRESHOLD_1DOF :
+                          (m == 2) ? CHI2_THRESHOLD_2DOF :
+                          (m == 4) ? CHI2_THRESHOLD_4DOF : 5.991;
+        /* ── 收敛期免检 ──
+         * update_count < 100（~5s, 20Hz）为初始收敛阶段，跳过 χ² gating。
+         * 此时 P 大、innovation 大是正常现象，gating 会阻止滤波器建立正确的
+         * 状态估计，导致 EKF 永远无法收敛（见 §7.2.3 的 bug 复盘）。 */
+        if (ekf->update_count >= 100 && md2 > threshold) {
+            ekf->chi2_fail_count++;
+            if (ekf->chi2_fail_count > CHI2_MAX_CONSECUTIVE)
+                ekf->diverged = 1;
+            /* skip update — 观测与预测不一致，保持预测状态 */
+            ekf->update_count++;
+            return;
+        }
+        ekf->chi2_fail_count = 0;  /* 通过检验，重置计数器 */
     }
 
     /* K = PHT * Sinv */
@@ -415,8 +444,17 @@ void ekf_fusion_get_covariance_diag(const EkfFusion* ekf, double diag[EKF_STATE_
 }
 
 void ekf_fusion_reset(EkfFusion* ekf) {
-    /* 清零状态向量，避免 NaN 持续传播 */
+    /* 保存速度 (x[2]) 和航向 (x[3])，仅复位位置和偏航角速度。
+     * 原代码 memset 清零全部状态，导致 velocity=5→0、heading=真实值→0，
+     * 使得 predict 步毫无进展（v=0 时 x/y 停止传播），且 heading=0 的
+     * 假设与真值偏差 ~0rad 反而让 χ² gating 继续拒绝 lidar 测量——
+     * 双向恶化，EKF 永远无法收敛（§7.2.3 bug 复盘）。 */
+    double saved_v = ekf->x[2];
+    double saved_h = ekf->x[3];
     memset(ekf->x, 0, sizeof(ekf->x));
+    ekf->x[2] = (saved_v > 0.0 && saved_v < 100.0) ? saved_v : 5.0;
+    ekf->x[3] = saved_h;
+
     memset(ekf->P, 0, sizeof(ekf->P));
     ekf->P[0*5 + 0] = INIT_P_POS_VAR;
     ekf->P[1*5 + 1] = INIT_P_POS_VAR;
@@ -424,4 +462,7 @@ void ekf_fusion_reset(EkfFusion* ekf) {
     ekf->P[3*5 + 3] = INIT_P_HEAD_VAR;
     ekf->P[4*5 + 4] = INIT_P_YR_VAR;
     ekf->diverged = 0;
+
+    /* χ² 连续失败计数也一并复位，让滤波器从干净的 slate 重启 */
+    ekf->chi2_fail_count = 0;
 }

@@ -18,6 +18,7 @@
 #include "adas_msgs_gen.h"
 #include "json_extract.h"
 #include "clock_service.h"
+#include "degrade_ladder.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -53,6 +54,12 @@ static struct {
     volatile int has_obstacles;
     volatile int has_vehicle_state;
 
+    /* §11.1 测量回路：CTE 监控 */
+    volatile double latest_cte;       /* 最新横向跟踪误差 (m) */
+    double cte_fail_timer;            /* CTE 超阈值持续计时 (s) */
+    double cte_fail_threshold;        /* CTE 触发 FAIL 的阈值 (m) */
+    double cte_fail_timeout;          /* CTE 持续超阈值超过此时间触发 FAIL (s) */
+
     /* NOA 驾驶模式 (来自 planning/trajectory 的 "mode=" / "route_lane="
      * 追加字段，见 planning_node.c / control_node.c)。用于仪表盘展示当前
      * 模式层级 (NA/ACC/CP/NP/NOA) 及 NOA 导航驱动的目标车道。
@@ -64,6 +71,9 @@ static struct {
     int  route_lane;
     char trajectory_path_json[4096];  /* path 数组 JSON 文本，如 [[s,d,spd],...] */
     int  ego_road_id;                 /* ego 所在道路段 id（flowsim_node 发布） */
+
+    /* 行为规划状态（来自 behavior/state JSON topic）*/
+    char behavior_state_json[512];
     volatile int has_planning;
 
     /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，flowsim_node 发布） */
@@ -208,30 +218,52 @@ static void on_remote_stats(const Message* msg, void* user_data) {
     pthread_mutex_unlock(&g.remote_stats_mutex);
 }
 
-/* planning/trajectory 订阅 — 提取驾驶模式 + NOA 导航路线目标车道，供仪表盘展示
- * (见 planning_node.c 追加的 "mode=" / "route_lane=" 字段，与 control_node.c 的
- * 解析方式一致，采用宽松的 strstr + sscanf)。
+/* planning/trajectory 订阅 — 提取规划轨迹路径点，供 3D 前端绘制轨迹线。
  *
- * NOA Phase 6: 同时提取 JSON 部分的 path 数组（Frenet [s,d,spd]），透传给
- * 3D 前端画规划轨迹线。planning 消息格式: <json>{"path":[[s,d,spd],...],...}
- * speed=... mode=... route_lane=...，cJSON_Parse 只解析前缀 JSON，尾部文本
- * 自动忽略。path 数组重新序列化为紧凑 JSON 文本缓存，避免每帧重复解析。 */
+ * planning 消息已从 JSON 迁移到二进制 Trajectory 结构体（2581B），
+ * 包含 64 个世界坐标轨迹点。strstr+sscanf 在二进制数据上搜索 "mode="
+ * 会匹配随机字节 -> sscanf(strtod_l) 触发 glibc 断言崩溃（详见 §7.2.4
+ * bug 复盘）。现在优先用 Trajectory_deserialize 解析二进制数据，
+ * 解析成功后将 points[] 构建为 [[x,y,v],...] 紧凑 JSON 缓存，
+ * cJSON_Parse 仅作为旧版 JSON 回退路径保留。 */
 static void on_planning_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
 
-    const char* p = strstr(d, "mode=");
-    if (p) {
-        char buf[32] = {0};
-        sscanf(p + 5, "%31s", buf);
-        snprintf(g.driver_mode, sizeof(g.driver_mode), "%s", buf);
+    /* driver_mode 从 behavior/state 获取，不再依赖 trajectory 尾部文本 */
+    g.route_lane = 0;
+
+    /* ── 二进制 Trajectory 反序列化（主路径） ── */
+    Trajectory traj;
+    if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) == 0) {
+        if (traj.valid && traj.point_count > 0) {
+            /* 构建 path JSON: [[x0,y0,v0], [x1,y1,v1], ...] */
+            cJSON* path_arr = cJSON_CreateArray();
+            uint16_t n = traj.point_count < 64 ? traj.point_count : 64;
+            for (uint16_t i = 0; i < n; i++) {
+                cJSON* pt = cJSON_CreateArray();
+                cJSON_AddItemToArray(pt, cJSON_CreateNumber(traj.points[i].x));
+                cJSON_AddItemToArray(pt, cJSON_CreateNumber(traj.points[i].y));
+                cJSON_AddItemToArray(pt, cJSON_CreateNumber(traj.points[i].v));
+                cJSON_AddItemToArray(path_arr, pt);
+            }
+            char* path_str = cJSON_PrintUnformatted(path_arr);
+            cJSON_Delete(path_arr);
+            if (path_str) {
+                size_t len = strlen(path_str);
+                if (len >= sizeof(g.trajectory_path_json))
+                    len = sizeof(g.trajectory_path_json) - 1;
+                memcpy(g.trajectory_path_json, path_str, len);
+                g.trajectory_path_json[len] = '\0';
+                free(path_str);
+            }
+        }
+        g.has_planning = 1;
+        return;
     }
-    p = strstr(d, "route_lane=");
-    if (p) sscanf(p + 11, "%d", &g.route_lane);
 
-    /* NOA Phase 6: 提取 path 数组并缓存为 JSON 文本 */
-    cJSON* root = cJSON_Parse(d);
+    /* ── 回退：旧版 JSON 路径（trajectory 消息仍是 JSON 格式时） ── */
+    cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* path = cJSON_GetObjectItem(root, "path");
         if (path && cJSON_IsArray(path)) {
@@ -392,6 +424,29 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
     }
 }
 
+/* §11.1: CTE 监控回调 — 从 control/cte JSON topic 解析横向跟踪误差 */
+static void on_control_cte(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (root) {
+        cJSON* item = cJSON_GetObjectItem(root, "cte");
+        if (cJSON_IsNumber(item)) g.latest_cte = item->valuedouble;
+        cJSON_Delete(root);
+    }
+}
+
+/* ── behavior/state 订阅 — 缓存行为规划状态 ── */
+static void on_behavior_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    size_t copy = msg->data_size;
+    if (copy >= sizeof(g.behavior_state_json)) copy = sizeof(g.behavior_state_json) - 1;
+    memcpy(g.behavior_state_json, msg->data, copy);
+    g.behavior_state_json[copy] = '\0';
+}
+
 /* JSON 标量提取辅助（json_extract_double / json_extract_int / json_extract_string）
  * 已迁移至共享工具 include/json_extract.h，避免与其他模块（如
  * src/algorithms/nuscenes_loader.c）各自维护一份不一致的实现。 */
@@ -541,6 +596,14 @@ static void export_dashboard_json(void) {
     cJSON_AddStringToObject(metrics, "driver_mode",
                             g.driver_mode[0] ? g.driver_mode : "NA:READY");
     cJSON_AddNumberToObject(metrics, "route_lane", g.route_lane);
+
+    /* 行为规划状态 */
+    if (g.behavior_state_json[0]) {
+        cJSON* bs = cJSON_Parse(g.behavior_state_json);
+        if (bs) {
+            cJSON_AddItemToObject(metrics, "behavior", bs);
+        }
+    }
 
     /* Topic 统计：合并本进程 + 跨进程（stats bridge）。
      * 同名 topic 跨进程累加 pub/del/drop，freq 取最大值（代表发布频率），
@@ -913,6 +976,9 @@ static int monitor_execute(TaskBase* task) {
         /* 收集并导出仪表盘 JSON */
         export_dashboard_json();
 
+        /* §11.2: degrade supervisor tick — 检查各节点心跳超时，自动递进降级 */
+        degrade_supervisor_tick(clock_now_us() / 1000);
+
         /* Publish stats via IPC bridge for flowmond */
         if (g.stats_ch) {
             stats_bridge_publish(g.stats_ch, g.bus, "monitor_node");
@@ -929,8 +995,20 @@ static int monitor_execute(TaskBase* task) {
         int task_count = 0;
         if (g.scheduler) task_count = scheduler_task_count(g.scheduler);
 
-        LOG_INFO("monitor", "bus pub=%lu del=%lu drop=%lu tasks=%d",
-                 (unsigned long)pub, (unsigned long)del, (unsigned long)drop, task_count);
+        /* §11.1: CTE 检查 — CTE > 0.5m 持续 3s 触发 FAIL */
+        double cte = g.latest_cte;
+        if (fabs(cte) > 0.5) {
+            g.cte_fail_timer += period_us * 1e-6;
+            if (g.cte_fail_timer > 3.0) {
+                LOG_ERROR("monitor", "FAIL: CTE=%.2fm > 0.5m for %.0fs (tracking lost)",
+                          cte, g.cte_fail_timer);
+            }
+        } else {
+            g.cte_fail_timer = 0.0;
+        }
+
+        LOG_INFO("monitor", "bus pub=%lu del=%lu drop=%lu tasks=%d cte=%.2f",
+                 (unsigned long)pub, (unsigned long)del, (unsigned long)drop, task_count, cte);
     }
 
     LOG_INFO("monitor", "stopped");
@@ -949,7 +1027,7 @@ static const TaskInterface monitor_vtable = {
 static const char* s_inputs[]  = { TOPIC_PERCEPTION_OBSTACLES, TOPIC_VEHICLE_STATE,
                                    TOPIC_FUSION_LATENCY, TOPIC_FLOWENGINE_NODE_INFO,
                                    TOPIC_PLANNING_TRAJECTORY, TOPIC_ROAD_GEOMETRY,
-                                   TOPIC_SCENE_FRAME,
+                                   TOPIC_SCENE_FRAME, TOPIC_CONTROL_CTE,
                                    "traffic/traffic_lights", NULL };
 static const char* s_outputs[] = { NULL };
 
@@ -969,7 +1047,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     snprintf(g.state_file, sizeof(g.state_file), "%s", sf ? sf : "/tmp/flow_topology.json");
 
     /* 解析参数 */
-    g.frequency_hz = 5.0;  /* 5Hz: 经 SSE 事件驱动优化后 10Hz 冗余，降频减少 I/O */
+    g.frequency_hz = 20.0;  /* 20Hz: §11.1 从 5Hz 提频，与控制对齐 */
     g.lane_width   = 3.5;
     g.lane_count   = 2;
     if (params_json) {
@@ -1001,14 +1079,21 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     /* sysmon */
     g.sysmon = sysmonitor_create();
 
+    /* §11.1: CTE 监控初始化 */
+    g.latest_cte = 0.0;
+    g.cte_fail_timer = 0.0;
+    g.cte_fail_threshold = 0.5;
+    g.cte_fail_timeout = 3.0;
+
     /* 订阅 */
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_obstacles, NULL);
     transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, NULL);
     transport_subscribe(transport, TOPIC_FUSION_LATENCY, on_fusion_latency, NULL);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_planning_trajectory, NULL);
+    transport_subscribe(transport, TOPIC_CONTROL_CTE, on_control_cte, NULL);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, NULL);
-    /* Phase 3: scene/frame — 从 flowsim_node 获取 road_network 供 3D 多段道路渲染 */
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, NULL);
+    transport_subscribe(transport, "behavior/state", on_behavior_state, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, TOPIC_FLOWENGINE_NODE_INFO, on_node_info, NULL);
     g.node_info_count = 0;
