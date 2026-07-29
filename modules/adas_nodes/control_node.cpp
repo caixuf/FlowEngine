@@ -3,9 +3,8 @@
  *
  * 从 control_node.c 迁移而来，采用 CoroutineTask 协程框架：
  *   - co_await sleep_us(50000) 替代 usleep 20Hz 轮询（可被 stop 取消）
- *   - 保留 on_fusion / on_trajectory / on_vehicle_state / on_road_geometry 回调
- *   - PID + ACC + 变道状态机逻辑原样搬入 run()
- *   - was_blocked_sm 从函数 static 改为 Task 成员（语义等价）
+ *   - 保留 on_fusion / on_trajectory 回调（on_ref_path 已移除，自推参考路径已断）
+ *   - PID + Stanley 横向控制逻辑原样搬入 run()
  *
  * 采用 CoroutineTask（同步 resume），而非 FlowCoroTask（线程池 resume）：
  * control 是延迟敏感的闭环控制，周期精度直接影响横向稳定性。FlowCoroTask
@@ -22,13 +21,13 @@
 #include "node_plugin.h"
 #include "param_registry.h"
 #include "state_machine.h"
-#include "road_geometry.h"
 #include "topic_registry.h"
 #include "adas_msgs_gen.h"       /* ControlRaw_serialize, CONTROLRAW_TYPE_ID */
+#include "degrade_ladder.h"
+#include "ltv_mpc.h"
 #include "coroutine_task.h"
 #include "logger.h"
 #include "clock_service.h"
-#include "mpc_controller.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -48,15 +47,6 @@ namespace {
 
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
-/* NOA Phase 6: 障碍物槽位扩到 128（与 ObstacleList.obstacles[128] 对齐）。
- * 0-3: vehicle/state topic 提供的 ego-relative 障碍物（fusion 发布）
- * 4-7: scene/frame entities 提供的世界坐标车辆（flowsim 发布），由
- *      on_scene_frame 填充前方/侧方最近的车辆，补全 24-NPC 场景下 vehicle/state
- *      4 槽位截断导致的感知盲区——这是 P0 pipeline 冻结的根因之一：ego 被慢车
- *      阻挡但该慢车未进入 vehicle/state 的 4 个槽位，control 的被动超车逻辑
- *      因 best_gap=1e9 而不触发变道，ego 减速至 0 后管道静默。 */
-#define MAX_OBS 128
-
 /* 横向级联 PD 常量 */
 #define MAX_PSI_DES_RAD    0.349   /* 最大期望航向角 ≈ ±20° */
 /* 低通滤波新值权重：0.5 = -3dB@1.2Hz (20Hz 采样)。
@@ -65,43 +55,24 @@ namespace {
  * 平滑过渡, 牺牲少量相位裕度换取稳定性。yaw_damping 配合抑制高频。 */
 #define STEER_FILTER_NEW   0.5     /* 低通滤波新值权重 */
 #define STEER_FILTER_PREV  0.5     /* 低通滤波旧值权重 */
-#define LC_STABILIZE_S     2.0     /* 变道完成后保持变道增益的稳定期 (s) */
-#define LC_COMPLETE_THRESH 0.15    /* 变道完成横向偏差阈值 (m) — 收紧防振荡 */
 /* 轴距 (m)：真车默认 2.7，RC 小车在 pipeline_car.json 里通过 params.wheelbase
  * 覆盖为 0.25-0.4。这个宏只作为 g.wheelbase 的初值，运行时由配置注入。 */
 #define CONTROL_WHEELBASE_DEFAULT_M 2.7
 /* 控制环周期: 20Hz → 50ms。所有计时器累加步长使用此常量, 与实际循环频率保持一致。 */
 #define CONTROL_DT_S       0.05
 
-/* 车道判定迟滞: 已提交车道保持不变, 直到 ego_y 越过中心线 ±此死区才切换,
- * 避免车骑在车道线 (y≈0) 附近时目标车道每帧翻转造成的横向抖振。 */
-#define LANE_HYSTERESIS_M   0.5
-/* 死锁恢复: 近乎静止且横向卡在车道线附近持续超过此秒数, 强制收敛到最近车道中心。 */
+/* 死锁恢复: 车长时间近乎静止时，给一点前向油门打破静摩擦。 */
 #define STUCK_SPEED_MPS     0.5    /* 判定"近乎静止"的速度阈值 */
-#define STUCK_LATERAL_M     0.6    /* 判定"卡在车道线附近"的 |ego_y| 阈值 */
-#define STUCK_RECOVER_S     3.0    /* 触发恢复所需持续时间 (秒) */
-/* 全域速度死锁: 不依赖横向位置, 只要速度持续为0超过此秒数就给小油门。
- * 覆盖 STUCK (|y|<0.6) 和 ROAD_GUARD (|y|>2.1) 之间的盲区 0.6<|y|<2.1。 */
+/* 全域速度死锁: 只要速度持续为0超过此秒数就给小油门。 */
 #define SPEED_ZERO_RECOVER_S  5.0  /* 全域速度死锁触发阈值 (秒) */
+/* ROAD_GUARD 触发阈值: 距道路中心超过此值强制回正。车道判定已移到 planning，
+ * 此阈值仅为安全冗余，保持 control 独立于 lane_width/lane_count 配置。 */
+#define ROAD_GUARD_THRESHOLD_M 3.0
 
 /* ── 控制节点状态机定义 ─────────────────────────────────────── */
-/* 自定义事件 (从 SM_EVENT_USER_BASE=16 开始) */
-#define CTL_EVENT_OBSTACLE_BLOCKED  16
-#define CTL_EVENT_OBSTACLE_CLEARED  17
-#define CTL_EVENT_LANE_CHANGE_START 18
-#define CTL_EVENT_LANE_CHANGE_DONE  19
-#define CTL_EVENT_SPEED_LIMITED     20
-
-/* 自定义状态 */
-#define CTL_STATE_CRUISING    SM_STATE_RUNNING     /* 复用 RUNNING = 正常巡航 */
-/* blocked/lane_change 通过 TransitionRule 的 description 区分 */
 
 static const TransitionRule g_ctl_transitions[] = {
     { SM_STATE_INITIALIZED, SM_EVENT_START,             SM_STATE_RUNNING,    "INIT→RUNNING",          false },
-    { SM_STATE_RUNNING,     CTL_EVENT_OBSTACLE_BLOCKED, SM_STATE_RUNNING,    "RUNNING: obstacle_blocked", false },
-    { SM_STATE_RUNNING,     CTL_EVENT_OBSTACLE_CLEARED, SM_STATE_RUNNING,    "RUNNING: obstacle_cleared", false },
-    { SM_STATE_RUNNING,     CTL_EVENT_LANE_CHANGE_START,SM_STATE_RUNNING,    "RUNNING: lane_change_start",false },
-    { SM_STATE_RUNNING,     CTL_EVENT_LANE_CHANGE_DONE, SM_STATE_RUNNING,    "RUNNING: lane_change_done", false },
     { SM_STATE_RUNNING,     SM_EVENT_STOP,              SM_STATE_STOPPING,   "RUNNING→STOPPING",       false },
     { SM_STATE_STOPPING,    SM_EVENT_DONE,              SM_STATE_STOPPED,    "STOPPING→STOPPED",       false },
     { SM_STATE_RUNNING,     SM_EVENT_ERROR,             SM_STATE_ERROR,      "RUNNING→ERROR",          false },
@@ -130,64 +101,13 @@ struct ControlContext {
     double ego_yaw_rate{0};    /* 从 fusion 获取的偏航角速度 (rad/s) */
     double prev_steer{0};
 
-    /* ── 真车级横向控制（替代 Stanley 极限环补偿）──
-     *
-     * 旧实现：Stanley 控制器 + 低通滤波 + yaw_damping 补丁。
-     * 变道时 cte_term（朝目标车道拉）与 heading_term（按道路切线纠偏）
-     * 互相反向，形成 1.6Hz 极限环 → 车左摇右晃，展示效果差。
-     *
-     * 真车 ADAS（Apollo LQR / Autoware MPC）核心：
-     *   1) heading_term 跟随「目标轨迹切线」而非道路切线
-     *      target_heading = atan2(lat_error, lookahead_distance)
-     *      变道中 ego_heading 朝目标车道方向偏，与 target_heading 一致，
-     *      heading_term ≈ 0，不再反向拉，cte_term 主导把车拉过去；
-     *      到达目标车道时 lat_error→0, target_heading→道路切线，自然回正。
-     *   2) 横向速度阻尼（LQR 状态反馈核心项）：
-     *      v_lat = speed * sin(ego_heading - ref_road_heading)
-     *      steer -= k_v_lat * v_lat
-     *      预判横向运动趋势，过冲时提前反向减速，比 yaw_damping 更根本。
-     *
-     * lat_lookahead_gain: 前视距离 = max(5m, speed * gain)
-     *   高速 lookahead 大（轨迹平滑），低速小（响应快）。
-     * k_v_lat: 横向速度阻尼增益，标准 LQR 推荐值 0.3-0.6。
-     */
+    /* ── 真车级横向控制（替代 Stanley 极限环补偿）── */
     double lat_lookahead_gain{0.8};   /* 前视距离系数 (s) */
     double k_v_lat{0.22};             /* 横向速度阻尼增益（自标定最优值，0.2-0.3 推荐区间）*/
 
     /* A10 横向速度规划 PD 增益（可通过 pipeline.json 热重载） */
     double k_vy{0.35};               /* v_y_des 位置增益：v_y_des = k_vy*lat_error - k_d*v_lat */
     double k_vy_damp{0.6};           /* v_y_des 速度阻尼增益 */
-    /* 梯形横向速度剖面（trapezoid lateral velocity profile）
-     * 变道时主动规划横向速度时间曲线（加速段→匀速段→减速段），给 PD 一副"时刻表"。
-     * lc_use_trapezoid 开关控制，开启后 v_y_des = v_y_ff + kp*lat_err - damp*v_lat。 */
-    int    lc_trap_active{0};        /* 剖面是否激活（变道/回切触发时置 1） */
-    double lc_trap_start_y{0.0};     /* 变道起点 y */
-    double lc_trap_target_y{0.0};    /* 变道目标 y（= lc_target_y） */
-    uint64_t lc_trap_start_us{0};    /* 剖面起始时刻 (monotonic us) */
-    double lc_trap_D{0.0};           /* 总横向位移 |target-start| (m) */
-    double lc_trap_dir{0.0};         /* 方向 +1 / -1 */
-    double lc_trap_t_accel{0.0};     /* 加速段时长 (s) */
-    double lc_trap_t_cruise{0.0};    /* 匀速段时长 (s)，=0 退化为三角形 */
-    double lc_trap_v_peak{0.0};      /* 峰值横向速度 (m/s) */
-    /* 梯形剖面可调参数（param_registry 热重载） */
-    double lc_use_trapezoid{1.0};    /* >0.5=梯形前馈+PD修正, <=0.5=纯PD(原逻辑) */
-    double lc_trapezoid_accel{1.2};  /* 横向加速度 (m/s²)，决定减速时机 */
-    double lc_trapezoid_vmax{1.5};   /* 横向速度上限 (m/s) */
-    double lc_trapezoid_kp{0.15};    /* 梯形模式位移反馈增益（替代 k_vy 做修正） */
-    /* LQR 反馈层（替换手调 PD，与梯形前馈叠加）
-     * v_y_des = v_y_ff - (K1*e_y + K2*e_φ + K3*v_lat)
-     * 增益由 Riccati 方程在线解算，随速度自适应 */
-    double lc_use_lqr{1.0};          /* >0.5=LQR 反馈, <=0.5=手调 PD */
-    double lqr_q_ey{0.3};            /* 横向位置误差权重 */
-    double lqr_q_ephi{1.0};          /* 航向误差权重 */
-    double lqr_q_vlat{0.2};          /* 横向速度权重 */
-    double lqr_r_steer{2.0};         /* 转向控制代价（越小越激进） */
-    double lqr_fb_scale{0.15};       /* LQR→v_y_des 映射系数（K 面向 δ，需缩放） */
-    /* 诊断字段（每帧写入，发布到 control/raw_cmd/text 供观测） */
-    double diag_v_y_des{0.0};        /* 期望横向速度（含前馈+PD） */
-    double diag_v_y_ff{0.0};         /* 梯形前馈横向速度 */
-    double diag_v_lat_actual{0.0};   /* 实际横向速度 speed*sin(h-ref_h) */
-    int    diag_trap_active{0};      /* 梯形剖面是否激活 */
 
     /* 从 topic 解析的值 */
     double current_speed{0};
@@ -195,45 +115,13 @@ struct ControlContext {
     int    has_target_speed{0};  /* trajectory 回调是否已设置 target_speed */
     double ego_x{0}, ego_y{0};
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
+    double road_center_y{0};   /* 当前帧目标道路中心 y（来自 trajectory 第一个点，供 fallback 使用） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
-    /* NOA 导航路线要求的目标车道索引。
-     * 语义：-1=无目标（保持当前车道），0..N-1=目标车道索引。
-     * 旧约定（{-1=左, 0=无, +1=右}）已被多车道模型取代，planning 下发时
-     * 会做兼容映射（详见 planning_node.cpp 的 route_target_lane 注释）。 */
-    int    route_lane{-1};
-
-    /* 障碍物数据 (从 vehicle/state 解析) */
-    double obs_x[MAX_OBS]{}, obs_y[MAX_OBS]{}, obs_vx[MAX_OBS]{};
-    int    obs_valid[MAX_OBS]{};
-    char   obs_type[MAX_OBS][16]{}; /* e.g. "car", "pedestrian" */
-    int    ped_index{-1};              /* index of pedestrian obs, -1 if none */
 
     volatile int has_fusion{0};
     volatile int has_planning{0};
     uint64_t last_fusion_us{0};    /* monotonic timestamp of last fusion message */
     uint64_t last_planning_us{0};  /* monotonic timestamp of last planning message */
-
-    /* 变道状态机 */
-    int    lc_state{0};     /* 0=正常 1=左变道中 2=左车道巡航 3=右回正 */
-    int    lc_attempted{0};
-    double lc_timer{0};
-    double lc_wait{0};
-    double lc_cooldown{0};
-    double lc_origin_y{0};
-    double lc_target_y{0};
-    int    lc_target_idx{-1};   /* 变道目标车道索引（变道发起时记录，完成时 commit 到 committed_lane_side） */
-    double lane_width{3.5};
-    int    lane_count{2};       /* 当前 ego 所在路段可行驶车道数（从 road/geometry 实时订阅） */
-    double blocked_timeout_s{0};
-
-    /* NOA 超车调优参数（原硬编码，现可配置 + pipeline.json 即时生效） */
-    double lc_stable_wait_s{0};           /* 变道后稳定巡航多久允许再次评估变道 (原硬编码 8.0) */
-    double lc_cooldown_after_stable_s{0}; /* 稳定期结束后的冷却 (原硬编码 3.0) */
-    double lc_cooldown_after_return_s{0}; /* 回到原车道后的冷却 (原硬编码 4.0) */
-    double min_overtake_gap_base{0};      /* 触发超车所需最小本车道前车间距基准 (原硬编码 18.0) */
-    double min_overtake_gap_cap{0};       /* min_overtake_gap 上限, 高速时不再无脑扩大 (原硬编码 60.0) */
-    double min_overtake_gap_speed_mult{0};/* min_overtake_gap 相对速度乘数 (原硬编码 current_speed * 2.0，高速下会导致 gap 过大无法触发超车) */
-    double steer_min_clamp{0};            /* 高速最小转向钳位 (原硬编码 0.012，高速下变道耗时过长) */
 
     /* LDW 车道偏离预警 */
     double ldw_threshold{0.5};            /* 横向偏离阈值 (m)，|cte| 超此值发警告 */
@@ -241,12 +129,8 @@ struct ControlContext {
     double ldw_cooldown{2.0};            /* 告警冷却期 (s)，避免刷屏 */
     double ldw_last_warn_time{0};        /* 上次告警时间 (s) */
 
-    /* 车道迟滞 + 死锁恢复状态。
-     * 字段名保留 committed_lane_side 以减少 diff，但语义已改为
-     * committed_lane_idx: -1=未初始化, 0..N-1=车道索引（0=最左, N-1=最右）。
-     * 旧约定 {-1=左, 0=未初始化, +1=右} 在 N 车道模型下不够用，已废弃。 */
-    int    committed_lane_side{-1};
-    double stuck_timer{0};          /* 近乎静止且卡在车道线附近的累计时间 (秒) */
+    /* 死锁恢复状态 */
+    double stuck_timer{0};          /* 近乎静止的累计时间 (秒) */
     double speed_zero_timer{0};     /* 全域速度死锁: 无论 y 位置, 速度持续为0的累计时间 (秒) */
 
     uint32_t cycle{0};
@@ -259,15 +143,10 @@ struct ControlContext {
     double cfg_cruise_speed{0};
     double wheelbase{CONTROL_WHEELBASE_DEFAULT_M};  /* 轴距 (m)：真车 2.7，RC 小车 0.25-0.4 */
 
-    /* 道路几何（Phase 2: 从 road/geometry topic 获取，全零 = 直道） */
-    double curve_start_x{0};
-    double curve_length_m{0};
-    double curve_offset_m{0};
-
-    /* ego route-following 参考路径（从 road/ref_path topic 获取）。
-     * 当 ref_path 非空时，Stanley 横向控制用最近点的 (y, h, kappa) 替代 curve_*
-     * 单段直线参考，让 ego 能跟随多 edge + fork 路网（如匝道分叉）。
-     * 空 ref_path 时回退到 curve_*（兼容旧场景/旧 flowsim）。 */
+    /* ego route-following 参考路径：来自 planning/trajectory，on_trajectory
+     * 回调将其存为 ref_path。Stanley 横向控制用最近点的 (y, h, kappa) 替代
+     * curve_* 单段直线参考，让 ego 能跟随多 edge + fork 路网（如匝道分叉）。
+     * 不再独立订阅 road/geometry 或 road/ref_path。 */
     struct RefPt { double x, y, h, kappa, rs; };
     std::vector<RefPt> ref_path;
     uint64_t last_ref_path_us{0};
@@ -283,142 +162,20 @@ struct ControlContext {
     /* 协程任务 */
     std::unique_ptr<class ControlTask> task;
 
-    /* MPC 控制器 */
-    MpcController* mpc{nullptr};
-    MpcResult mpc_result;
-    MpcConfig mpc_config;
-    int mpc_initialized{0};
+    /* LTV MPC 控制器（§10 替代已删除的 mpc_controller + LQR） */
+    LtvMpcSolver* ltv_mpc{nullptr};
+    int use_ltv_mpc{0};         /* 是否启用 LTV MPC */
+    LtvMpcConfig ltv_mpc_cfg;   /* MPC 配置 */
 
-    /* MPC 参考轨迹缓存（避免每帧重新分配） */
-    MpcRefPoint mpc_ref_buf[MPC_MAX_HORIZON];
-
-    /* ── 学习闭环 MPC 调参增量 ──────────────────────────────── */
-    double learn_mpc_q_y_delta{0.0};
-    double learn_mpc_q_theta_delta{0.0};
-    double learn_mpc_r_a_delta{0.0};
-    double learn_mpc_r_ddelta_delta{0.0};
-    uint64_t last_learn_mpc_delta_us{0};
-
-    /* 学习增量平滑状态（EMA 低通，抑制 TinyMLP 输出抖动导致 MPC 权重每帧跳变） */
-    double smooth_q_y_delta{0.0};
-    double smooth_q_theta_delta{0.0};
-    double smooth_r_a_delta{0.0};
-    double smooth_r_ddelta_delta{0.0};
-    int    smooth_initialized{0};
-};
+    };
 
 ControlContext g;
-
-/* ── 梯形横向速度剖面 ── */
-static void lc_trapezoid_start(ControlContext& ctx, double start_y, double target_y,
-                               uint64_t now_us) {
-    double D = fabs(target_y - start_y);
-    if (D < 0.05) { ctx.lc_trap_active = 0; return; }
-    ctx.lc_trap_active   = 1;
-    ctx.lc_trap_start_y  = start_y;
-    ctx.lc_trap_target_y = target_y;
-    ctx.lc_trap_start_us = now_us;
-    ctx.lc_trap_D        = D;
-    ctx.lc_trap_dir      = (target_y > start_y) ? 1.0 : -1.0;
-    double accel = fmax(ctx.lc_trapezoid_accel, 0.05);
-    double vmax  = fmax(ctx.lc_trapezoid_vmax, 0.1);
-    double d_a_full = vmax * vmax / (2.0 * accel);
-    if (2.0 * d_a_full <= D) {
-        ctx.lc_trap_v_peak   = vmax;
-        ctx.lc_trap_t_accel  = vmax / accel;
-        ctx.lc_trap_t_cruise = (D - 2.0 * d_a_full) / vmax;
-    } else {
-        ctx.lc_trap_v_peak   = sqrt(D * accel);
-        ctx.lc_trap_t_accel  = ctx.lc_trap_v_peak / accel;
-        ctx.lc_trap_t_cruise = 0.0;
-    }
-}
-
-static double lc_trapezoid_vy(const ControlContext& ctx, uint64_t now_us) {
-    if (!ctx.lc_trap_active) return 0.0;
-    double t = (double)(now_us - ctx.lc_trap_start_us) / 1e6;
-    if (t < 0.0) return 0.0;
-    double accel   = fmax(ctx.lc_trapezoid_accel, 0.05);
-    double v_peak  = ctx.lc_trap_v_peak;
-    double t_a     = ctx.lc_trap_t_accel;
-    double t_c     = ctx.lc_trap_t_cruise;
-    double t_total = 2.0 * t_a + t_c;
-    double vy;
-    if (t < t_a) {
-        vy = accel * t;
-    } else if (t < t_a + t_c) {
-        vy = v_peak;
-    } else if (t < t_total) {
-        vy = v_peak - accel * (t - t_a - t_c);
-    } else {
-        vy = 0.0;
-    }
-    return ctx.lc_trap_dir * vy;
-}
-
-/* ── LQR 横向反馈增益 ──
- * 状态 x = [e_y, e_φ, v_lat]，控制 u = δ。
- * 线性化运动学自行车模型：A = [[0,v,1],[0,0,0],[0,-v,0]], B = [[0],[v/L],[0]]
- * 迭代离散 Riccati，稳态反馈 u = -K·x。增益随速度变化，每帧重解。 */
-static void lqr_solve_gain(double speed, double wheelbase,
-                           double q_ey, double q_ephi, double q_vlat, double r_steer,
-                           double K_out[3]) {
-    const double dt = 0.05;
-    double v = fmax(speed, 2.0);
-    double L = fmax(wheelbase, 0.5);
-    double Ad[3][3] = {
-        {1.0,       v*dt,  dt},
-        {0.0,       1.0,   0.0},
-        {0.0,      -v*dt,  1.0}
-    };
-    double Bd[3] = { 0.0, (v/L)*dt, 0.0 };
-    double Qd[3] = { q_ey, q_ephi, q_vlat };
-    double Rd    = fmax(r_steer, 1e-3);
-    double P[6] = { Qd[0], Qd[1], Qd[2], 0.0, 0.0, 0.0 };
-    for (int iter = 0; iter < 50; iter++) {
-        double p00=P[0], p11=P[1], p22=P[2], p01=P[3], p02=P[4], p12=P[5];
-        double APB[3];
-        APB[0] = Ad[0][0]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][0]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][0]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
-        APB[1] = Ad[0][1]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][1]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][1]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
-        APB[2] = Ad[0][2]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Ad[1][2]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Ad[2][2]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
-        double BtPB = Bd[0]*(p00*Bd[0]+p01*Bd[1]+p02*Bd[2]) + Bd[1]*(p01*Bd[0]+p11*Bd[1]+p12*Bd[2]) + Bd[2]*(p02*Bd[0]+p12*Bd[1]+p22*Bd[2]);
-        double S = Rd + BtPB;
-        if (S < 1e-9) S = 1e-9;
-        double APA[3][3];
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                double sum = 0.0;
-                for (int k = 0; k < 3; k++) {
-                    for (int l = 0; l < 3; l++) {
-                        double Pkl = (k==0)?((l==0)?p00:(l==1)?p01:p02) : (k==1)?((l==0)?p01:(l==1)?p11:p12) : ((l==0)?p02:(l==1)?p12:p22);
-                        sum += Ad[k][i] * Pkl * Ad[l][j];
-                    }
-                }
-                APA[i][j] = sum;
-            }
-        }
-        double Pn[3][3];
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                double Qij = (i==j) ? Qd[i] : 0.0;
-                Pn[i][j] = Qij + APA[i][j] - APB[i]*APB[j]/S;
-            }
-        }
-        double diff = fabs(Pn[0][0]-p00)+fabs(Pn[1][1]-p11)+fabs(Pn[2][2]-p22);
-        P[0]=Pn[0][0]; P[1]=Pn[1][1]; P[2]=Pn[2][2]; P[3]=Pn[0][1]; P[4]=Pn[0][2]; P[5]=Pn[1][2];
-        if (diff < 1e-7) break;
-    }
-    double p00=P[0], p11=P[1], p22=P[2], p01=P[3], p02=P[4], p12=P[5];
-    K_out[0] = (Bd[0]*p00 + Bd[1]*p01 + Bd[2]*p02) / Rd;
-    K_out[1] = (Bd[0]*p01 + Bd[1]*p11 + Bd[2]*p12) / Rd;
-    K_out[2] = (Bd[0]*p02 + Bd[1]*p12 + Bd[2]*p22) / Rd;
-}
 
 static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_mps2) {
     double speed = speed_mps;
     if (speed < 2.0) speed = 2.0;
     double limit = atan(max_lateral_accel_mps2 * g.wheelbase / (speed * speed));
-    if (limit < g.steer_min_clamp) limit = g.steer_min_clamp;
+    if (limit < 0.016) limit = 0.016;
     if (limit > 0.16) limit = 0.16;
     return limit;
 }
@@ -453,300 +210,64 @@ static void on_fusion(const Message* msg, void* user_data) {
 
 static void on_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
-    const char* d = (const char*)msg->data;
+    if (!msg || !msg->data || msg->data_size == 0) return;
 
-    /* 解析 JSON 部分（cJSON 会忽略尾部附加文本） */
-    cJSON* root = cJSON_Parse(d);
-    if (root) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
-        if (cJSON_IsNumber(j)) {
-            g.target_speed = j->valuedouble;
-            g.has_target_speed = 1;
-        }
-        j = cJSON_GetObjectItemCaseSensitive(root, "lane_keep_d");
-        if (cJSON_IsNumber(j)) g.lane_d = j->valuedouble;
-        /* 解析路径数组 first element: [s,d,spd] */
-        cJSON* path = cJSON_GetObjectItemCaseSensitive(root, "path");
-        if (cJSON_IsArray(path) && cJSON_GetArraySize(path) > 0) {
-            cJSON* first = cJSON_GetArrayItem(path, 0);
-            if (cJSON_IsArray(first) && cJSON_GetArraySize(first) >= 2) {
-                cJSON* d_item = cJSON_GetArrayItem(first, 1);
-                if (cJSON_IsNumber(d_item)) g.lane_d = d_item->valuedouble;
-            }
-        }
-        cJSON_Delete(root);
-    } else {
-        /* cJSON parse failed, try text fallback for target_speed */
-        const char* r = strstr(d, "speed=");
-        if (r) sscanf(r + 6, "%lf", &g.target_speed);
+    Trajectory traj;
+    memset(&traj, 0, sizeof(traj));
+    if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) != 0) {
+        return;
     }
 
-    /* 尾部附加文本字段：mode=, route_lane= */
-    {
-        const char* p = strstr(d, "mode=");
-        if (p) {
-            char buf[32] = {0};
-            sscanf(p + 5, "%31s", buf);
-            snprintf(g.driving_mode, sizeof(g.driving_mode), "%s", buf);
-        }
+    uint32_t n_pts = traj.point_count;
+    if (n_pts == 0 || n_pts > 64) return;
+
+    /* §5: 退化轨迹检测 — valid==0 或全零 (x,y) 时静默丢弃并触发降级 */
+    if (!traj.valid) {
+        LOG_WARN("control", "trajectory valid=0 — skipping, triggering L1 degrade");
+        degrade_set_level(DEGRADE_L1, DEGRADE_REASON_PLANNING_TO);
+        return;
     }
-    {
-        const char* p = strstr(d, "route_lane=");
-        if (p) {
-            int v = -1;
-            sscanf(p + 11, "%d", &v);
-            /* 兼容旧约定：planning 仍可能下发 0=无目标（旧 2 车道场景）。
-             * 新约定下 -1=无目标，0=第 0 车道（最左）。仅在 lane_count==2 且
-             * |v|<=1 时把旧 0 映射为 -1；多车道场景下 0 是合法车道索引，原样保留。 */
-            if (g.lane_count == 2 && v >= -1 && v <= 1 && v == 0) v = -1;
-            /* 旧语义→新 N 车道索引转换：
-             * 旧场景（如 straight_road.json）的 route step 使用绝对语义：
-             *   -2=最左车道, -1=次左, +1=次右, +2=最右（以道路中心线为 0 参考）
-             * 新 N 车道模型 lane_center_y 的索引方向与旧语义相反：
-             *   lane 0=最右(y=+half_road-0.5*lw), lane N-1=最左(y=-half_road+0.5*lw)
-             * 转换公式（lane_count=N, half=N/2）：
-             *   旧<0: new = half - 1 - old     (例: N=4, -2→3, -1→2)
-             *   旧>0: new = half - old          (例: N=4, +1→1, +2→0)
-             * 仅当 v 看起来像旧语义（非 0..N-1 范围）时转换。 */
-            if (g.lane_count >= 2 && (v < 0 || v >= g.lane_count)) {
-                int half = g.lane_count / 2;
-                if (v < 0) {
-                    v = half - 1 - v;
-                } else if (v > 0) {
-                    v = half - v;
-                }
-                if (v < 0) v = 0;
-                if (v >= g.lane_count) v = g.lane_count - 1;
+    if (n_pts > 1) {
+        int all_zero = 1;
+        for (uint32_t i = 0; i < n_pts; i++) {
+            if (fabs((double)traj.points[i].x) > 0.001 ||
+                fabs((double)traj.points[i].y) > 0.001) {
+                all_zero = 0;
+                break;
             }
-            g.route_lane = v;
+        }
+        if (all_zero) {
+            LOG_WARN("control", "trajectory all-zero (x/y) — skipping, triggering L1 degrade");
+            degrade_set_level(DEGRADE_L1, DEGRADE_REASON_PLANNING_TO);
+            return;
         }
     }
+
+    /* 使用第一个点获取 target_speed 和 lane_d */
+    g.target_speed = (double)traj.points[0].v;
+    g.has_target_speed = 1;
+    g.lane_d = (double)traj.points[0].l;
+
+    /* 存储路径点供 Stanley 横向控制使用 */
+    pthread_mutex_lock(&g.ref_path_mtx);
+    g.ref_path.clear();
+    for (uint32_t i = 0; i < n_pts; i++) {
+        ControlContext::RefPt rp;
+        rp.x = (double)traj.points[i].x;
+        rp.y = (double)traj.points[i].y;
+        rp.h = (double)traj.points[i].heading;
+        rp.kappa = (double)traj.points[i].kappa;
+        rp.rs = (double)traj.points[i].s;
+        g.ref_path.push_back(rp);
+    }
+    pthread_mutex_unlock(&g.ref_path_mtx);
 
     g.has_planning = 1;
     g.last_planning_us = clock_now_us();
 }
 
-/* ── perception/obstacles 订阅 — 解析障碍物（车体坐标系→世界坐标） ──── */
-static void on_perception_obstacles(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-
-    ObstacleList list;
-    if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
-        return;
-
-    g.ped_index = -1;
-    double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
-    for (int i = 0; i < MAX_OBS; i++) {
-        if (i < (int)list.count) {
-            const Obstacle* o = &list.obstacles[i];
-            /* 车体坐标系 → 世界坐标 */
-            g.obs_x[i] = g.ego_x + o->x * ch - o->y * sh;
-            g.obs_y[i] = g.ego_y + o->x * sh + o->y * ch;
-            g.obs_vx[i] = o->vx * ch - o->vy * sh;
-            g.obs_valid[i] = 1;
-            /* 障碍物类型映射 */
-            switch (o->type) {
-                case OBJ_TYPE_PEDESTRIAN: strncpy(g.obs_type[i], "pedestrian", sizeof(g.obs_type[i])-1); break;
-                case OBJ_TYPE_CYCLIST:    strncpy(g.obs_type[i], "cyclist", sizeof(g.obs_type[i])-1); break;
-                default:                  strncpy(g.obs_type[i], "car", sizeof(g.obs_type[i])-1); break;
-            }
-            if (o->type == OBJ_TYPE_PEDESTRIAN && g.ped_index < 0)
-                g.ped_index = i;
-        } else {
-            g.obs_valid[i] = 0;
-            g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = 0.0;
-            g.obs_type[i][0] = '\0';
-        }
-    }
-}
-
-static double lane_lead_gap(double lane_y, double same_lane_tol) {
-    double best_gap = 1e9;
-    for (int i = 0; i < MAX_OBS; i++) {
-        if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
-        if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
-        double dx = g.obs_x[i] - g.ego_x;
-        double gap = dx - 4.6;
-        if (dx > 0 && gap < best_gap) best_gap = gap;
-    }
-    return best_gap;
-}
-
-/* ── scene/frame 订阅（NOA Phase 6 超车感知补全） ──────────────
- * 从 flowsim 的 scene/frame entities 取世界坐标车辆，填入 obs[4..7]。
- * 筛选：前方 dx∈[-10,120]m、横向 |dy|<6m、同向 vx>0 的 car/suv/truck。
- * 填充策略：按 dx 升序取前 4 辆填入 4-7 槽位，每帧覆盖（entities 是最新快照）。
- * 这补全了 vehicle/state 4 槽位截断导致的盲区，让 lane_lead_gap 等函数
- * 能看到前方慢车，触发被动超车状态机。 */
-static int _ent_cmp_dx(const void* a, const void* b) {
-    double da = ((const double*)a)[0], db = ((const double*)b)[0];
-    return (da > db) - (da < db);
-}
-
-static void on_scene_frame(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
-    cJSON* entities = cJSON_GetObjectItem(root, "entities");
-    if (!entities || !cJSON_IsArray(entities)) { cJSON_Delete(root); return; }
-
-    /* 收集候选车辆 [dx, x, y, vx, type_idx]，type_idx: 0=car 1=suv 2=truck */
-    double cand[32][5];
-    int ncand = 0;
-    cJSON* ent;
-    cJSON_ArrayForEach(ent, entities) {
-        if (ncand >= 32) break;
-        cJSON* jtype = cJSON_GetObjectItem(ent, "type");
-        if (!jtype || !cJSON_IsString(jtype)) continue;
-        const char* t = jtype->valuestring;
-        int tidx;
-        if (strcmp(t, "car") == 0) tidx = 0;
-        else if (strcmp(t, "suv") == 0) tidx = 1;
-        else if (strcmp(t, "truck") == 0) tidx = 2;
-        else continue;
-
-        cJSON* jx = cJSON_GetObjectItem(ent, "x");
-        cJSON* jy = cJSON_GetObjectItem(ent, "y");
-        cJSON* jvx = cJSON_GetObjectItem(ent, "vx");
-        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy) || !cJSON_IsNumber(jvx)) continue;
-
-        double ex = jx->valuedouble, ey = jy->valuedouble, evx = jvx->valuedouble;
-        double dx = ex - g.ego_x, dy = ey - g.ego_y;
-        if (dx < -10.0 || dx > 120.0) continue;       /* 前方 120m 内 */
-        if (fabs(dy) > 6.0) continue;                 /* 道路范围内 */
-        if (evx < 0.0) continue;                       /* 同向车 */
-
-        cand[ncand][0] = dx;
-        cand[ncand][1] = ex;
-        cand[ncand][2] = ey;
-        cand[ncand][3] = evx;
-        cand[ncand][4] = (double)tidx;
-        ncand++;
-    }
-    cJSON_Delete(root);
-
-    /* 先清空 4-63 槽位（每帧重填），0-3 保留 vehicle/state 数据 */
-    for (int i = 4; i < MAX_OBS; i++) g.obs_valid[i] = 0;
-
-    if (ncand == 0) return;
-    qsort(cand, ncand, sizeof(cand[0]), _ent_cmp_dx);  /* 按 dx 升序 */
-
-    static const char* type_names[] = { "car", "suv", "truck" };
-    int fill = 4;
-    for (int i = 0; i < ncand && fill < MAX_OBS; i++) {
-        g.obs_x[fill]    = cand[i][1];
-        g.obs_y[fill]    = cand[i][2];
-        g.obs_vx[fill]   = cand[i][3];
-        g.obs_valid[fill] = 1;
-        int tidx = (int)cand[i][4];
-        if (tidx < 0 || tidx > 2) tidx = 0;
-        snprintf(g.obs_type[fill], sizeof(g.obs_type[fill]), "%s", type_names[tidx]);
-        fill++;
-    }
-}
-
-static double lane_lead_speed(double lane_y, double same_lane_tol) {
-    double best_dx = 1e9;
-    double speed = 1e9;
-    for (int i = 0; i < MAX_OBS; i++) {
-        if (!g.obs_valid[i] || g.obs_vx[i] < 0) continue;
-        if (fabs(g.obs_y[i] - lane_y) > same_lane_tol) continue;
-        double dx = g.obs_x[i] - g.ego_x;
-        if (dx > 0 && dx < best_dx) {
-            best_dx = dx;
-            speed = g.obs_vx[i];
-        }
-    }
-    return speed;
-}
-
-/* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
-/* 从 flowsim_node 发布的 road/geometry topic 获取弯道参数 + 车道宽度，
- * 替代此前各自 scenario_load() 的冗余方式。 */
-static void on_road_geometry(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (root) {
-        cJSON* j;
-        j = cJSON_GetObjectItemCaseSensitive(root, "curve_start_x");
-        if (cJSON_IsNumber(j)) g.curve_start_x = j->valuedouble;
-        j = cJSON_GetObjectItemCaseSensitive(root, "curve_length_m");
-        if (cJSON_IsNumber(j)) g.curve_length_m = j->valuedouble;
-        j = cJSON_GetObjectItemCaseSensitive(root, "curve_offset_m");
-        if (cJSON_IsNumber(j)) g.curve_offset_m = j->valuedouble;
-        j = cJSON_GetObjectItemCaseSensitive(root, "lane_width");
-        if (cJSON_IsNumber(j)) g.lane_width = j->valuedouble;
-        j = cJSON_GetObjectItemCaseSensitive(root, "lane_count");
-        if (cJSON_IsNumber(j) && j->valuedouble >= 1.0) g.lane_count = (int)j->valuedouble;
-        cJSON_Delete(root);
-    }
-}
-
-/**
- * on_ref_path — ego route-following 参考路径订阅回调。
- *
- * flowsim 每帧采样 ego 前方 100m 内 N 个参考点 [(x,y,h,kappa,rs)]，control_node
- * 缓存到本地，Stanley 横向控制用最近点替代 curve_* 算 cte/heading/kappa。
- *
- * 解析在订阅回调里完成（轻量 cJSON 操作），缓存到 g.ref_path 加 mutex 保护，
- * 控制循环直接读缓存无需重新解析。
- */
-static void on_ref_path(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
-
-    cJSON* pts = cJSON_GetObjectItemCaseSensitive(root, "points");
-    if (cJSON_IsArray(pts)) {
-        std::vector<ControlContext::RefPt> new_pts;
-        new_pts.reserve(cJSON_GetArraySize(pts));
-        cJSON* pt = nullptr;
-        cJSON_ArrayForEach(pt, pts) {
-            ControlContext::RefPt r{};
-            cJSON* j;
-            j = cJSON_GetObjectItemCaseSensitive(pt, "x");     if (cJSON_IsNumber(j)) r.x = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(pt, "y");     if (cJSON_IsNumber(j)) r.y = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(pt, "h");     if (cJSON_IsNumber(j)) r.h = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(pt, "kappa");  if (cJSON_IsNumber(j)) r.kappa = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(pt, "rs");     if (cJSON_IsNumber(j)) r.rs = j->valuedouble;
-            new_pts.push_back(r);
-        }
-        pthread_mutex_lock(&g.ref_path_mtx);
-        g.ref_path.swap(new_pts);
-        g.last_ref_path_us = clock_now_us();
-        pthread_mutex_unlock(&g.ref_path_mtx);
-    }
-    cJSON_Delete(root);
-}
-
-/* ── 学习闭环 MPC 调参增量 ──────────────────────────────────── */
-/* 由 inference_node 发布，携带模型输出的 MPC 权重增量。
- * 各 delta 默认 0（不影响 baseline）。超时 1s 未收到新增量回退 0。 */
-
-static void on_learn_delta(const Message* msg, void* user_data) {
-    (void)user_data;
-    if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
-    cJSON* j;
-
-    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_q_y_delta");
-    if (cJSON_IsNumber(j)) g.learn_mpc_q_y_delta = j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_q_theta_delta");
-    if (cJSON_IsNumber(j)) g.learn_mpc_q_theta_delta = j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_r_a_delta");
-    if (cJSON_IsNumber(j)) g.learn_mpc_r_a_delta = j->valuedouble;
-    j = cJSON_GetObjectItemCaseSensitive(root, "mpc_r_ddelta_delta");
-    if (cJSON_IsNumber(j)) g.learn_mpc_r_ddelta_delta = j->valuedouble;
-
-    g.last_learn_mpc_delta_us = clock_now_us();
-    cJSON_Delete(root);
-}
+/* on_ref_path 已移除：规划层通过 planning/trajectory 下发轨迹，
+ * control 不独立订阅 road/ref_path。ref_path 仅由 on_trajectory 回调填充。 */
 
 /**
  * query_ref_at — 查找 ref_path 中离 (ego_x, ego_y) 最近的参考点。
@@ -791,183 +312,6 @@ static bool query_ref_at(double ego_x, double ego_y,
     return true;
 }
 
-/**
- * build_mpc_reference — 从 ref_path 构建 MPC 参考轨迹。
- *
- * 找到 ref_path 上离 ego 最近的点，以该点为起点沿路径采样 horizon 个参考点，
- * 参考点间距 = speed * dt，速度 = acc_target。
- *
- * @param ref         输出缓冲区（至少 MPC_MAX_HORIZON 大小）
- * @param acc_target  目标速度 (m/s)
- * @return 实际参考点数，0 表示 ref_path 不可用
- */
-static int build_mpc_reference(MpcRefPoint* ref, double acc_target) {
-    if (g.ref_path.empty()) return 0;
-
-    pthread_mutex_lock(&g.ref_path_mtx);
-    if (g.ref_path.empty()) {
-        pthread_mutex_unlock(&g.ref_path_mtx);
-        return 0;
-    }
-
-    /* 找到离 ego 最近的 ref_path 点 */
-    double best_d2 = 1e18;
-    int best_idx = 0;
-    for (int i = 0; i < (int)g.ref_path.size(); i++) {
-        double dx = g.ref_path[i].x - g.ego_x;
-        double dy = g.ref_path[i].y - g.ego_y;
-        double d2 = dx * dx + dy * dy;
-        if (d2 < best_d2) { best_d2 = d2; best_idx = i; }
-    }
-    if (best_d2 > 25.0) {  /* >5m, ego 偏离参考 */
-        pthread_mutex_unlock(&g.ref_path_mtx);
-        return 0;
-    }
-
-    int horizon = g.mpc_config.horizon;
-    if (horizon > MPC_MAX_HORIZON) horizon = MPC_MAX_HORIZON;
-    int n = 0;
-
-    /* 用 ref_path 的 rs（累计弧长）做 arc-length 参数化采样 */
-    double start_rs = g.ref_path[best_idx].rs;
-    double speed = fmax(g.current_speed, 2.0);  /* 防止低速时 dt*speed 过小 */
-
-    for (int k = 0; k < horizon; k++) {
-        double target_rs = start_rs + (double)(k + 1) * speed * g.mpc_config.dt;
-
-        /* 线性插值找到 target_rs 对应的点 */
-        if (target_rs <= g.ref_path[0].rs) {
-            ref[n] = { g.ref_path[0].x, g.ref_path[0].y,
-                       g.ref_path[0].h, acc_target, g.ref_path[0].kappa };
-        } else if (target_rs >= g.ref_path.back().rs) {
-            ref[n] = { g.ref_path.back().x, g.ref_path.back().y,
-                       g.ref_path.back().h, acc_target, g.ref_path.back().kappa };
-        } else {
-            int j = 0;
-            for (j = 0; j < (int)g.ref_path.size() - 1; j++) {
-                if (g.ref_path[j].rs <= target_rs && g.ref_path[j+1].rs >= target_rs) break;
-            }
-            if (j >= (int)g.ref_path.size() - 1) {
-                ref[n] = { g.ref_path.back().x, g.ref_path.back().y,
-                           g.ref_path.back().h, acc_target, g.ref_path.back().kappa };
-            } else {
-                double seg = g.ref_path[j+1].rs - g.ref_path[j].rs;
-                double frac = (seg > 1e-6) ? (target_rs - g.ref_path[j].rs) / seg : 0.0;
-                double dh = g.ref_path[j+1].h - g.ref_path[j].h;
-                while (dh >  M_PI) dh -= 2.0 * M_PI;
-                while (dh < -M_PI) dh += 2.0 * M_PI;
-                ref[n] = {
-                    g.ref_path[j].x + frac * (g.ref_path[j+1].x - g.ref_path[j].x),
-                    g.ref_path[j].y + frac * (g.ref_path[j+1].y - g.ref_path[j].y),
-                    g.ref_path[j].h + frac * dh,
-                    acc_target,
-                    g.ref_path[j].kappa + frac * (g.ref_path[j+1].kappa - g.ref_path[j].kappa)
-                };
-            }
-        }
-        n++;
-    }
-
-    pthread_mutex_unlock(&g.ref_path_mtx);
-
-    /* A10 变道参考注入暂禁：MPC 当前只做车道保持，变道由 Stanley 回退路径执行。
-     * 学习闭环在稳定基线上逐帧调优 MPC 权重后，可重新启用参考注入实现 MPC 变道。
-     * 参考注入代码保留（见下方注释块），未来启用时把 return n 移至块后即可。*/
-    return n;
-}
-
-#if 0
-    /* A10 变道参考注入：lc_state=1 (变道中) / 3 (回切中) 时，
-     * ref_path 仍是原车道中心线，MPC 跟随它会一直留在原车道。
-     * 把参考 y 替换为 ego 当前 y → lc_target_y 的平滑过渡，
-     * 让 MPC 主动变道。x 仍沿 ref_path 弧长推进（道路前进方向），
-     * 这样 (x, y) = (道路前进, 横向变道) 解耦参数化变道路径。
-     *
-     * 关键 1：参考横向位移 dy_ref 必须裁剪到 horizon 内可达范围。
-     * 若直接把 dy_total 全部塞进参考（如 dy=3.2m 但 horizon 0.5s ×
-     * 13 m/s = 6.5m 预测距离），参考末尾 y 远超预测可达，iLQR 每次
-     * rollout cost 都很大且不下降，导致 max_iter=50 仍不收敛，单帧
-     * MPC 耗时 >1s 阻塞整个 pipeline。
-     *
-     * 关键 2：曲线形状必须前段就有较大梯度。smoothstep (3t²-2t³) 和
-     * 半余弦 0.5*(1-cos(πt)) 在 t=0 附近梯度均≈0，MPC 在 horizon 前几步
-     * 看到的横向偏差小 → steer 输出 0.02~0.05 rad → 实际横向速度仅
-     * ~0.3 m/s，3.5m 变道需要 11s。改用 ease-out `s=1-(1-t)²`：
-     *   - t=0: 梯度=2（最大）
-     *   - t=0.5: s=0.75
-     *   - t=1: 梯度=0（平滑收敛）
-     * 前段梯度是 smoothstep 的 6 倍，MPC 在 horizon 第一步就看到明显
-     * 横向偏差，立即输出较大 steer。
-     *
-     * v_lat_max=3 m/s 是合理变道横向速度上限（~11 km/h 横移），
-     * horizon_t = n * dt，dy_max = v_lat_max * horizon_t。
-     * 每帧推进 dy_max，多帧累积完成完整变道。 */
-    if ((g.lc_state == 1 || g.lc_state == 3) && n > 1) {
-        double y_start  = g.ego_y;
-        double y_end    = g.lc_target_y;
-        double dy_total = y_end - y_start;
-        if (fabs(dy_total) > 0.05) {
-            double horizon_t = (double)n * g.mpc_config.dt;
-            double v_lat_max = 2.0;  /* m/s，变道横向速度上限 */
-            double dy_max    = v_lat_max * horizon_t;
-            double dy_ref    = dy_total;
-            if (fabs(dy_ref) > dy_max) {
-                dy_ref = (dy_ref > 0.0) ? dy_max : -dy_max;
-            }
-            /* 参考起点前瞻：让 MPC 在 horizon 第一步就看到横向偏差。
-             * 0.05 保守值，仅让 MPC 看到 5% 偏差，避免 MPC 追不上参考
-             * 导致 steer 饱和、safety 下电。用 smoothstep 曲线
-             * (3t²-2t³) 使起步梯度=0，让 MPC 逐步响应。 */
-            double y_start_lookahead = y_start + 0.05 * dy_ref;
-            for (int k = 0; k < n; k++) {
-                double t = (double)k / (double)(n - 1);
-                double s = t * t * (3.0 - 2.0 * t);  /* smoothstep，起步梯度=0 */
-                ref[k].y = y_start_lookahead + dy_ref * s;
-            }
-        }
-    }
-
-    return n;
-}
-
-#endif /* A10 变道参考注入 — 暂禁，待 MPC 权重学习收敛后启用 */
-
-static int lane_rear_safe(double target_lane_y, double same_lane_tol) {
-    for (int i = 0; i < MAX_OBS; i++) {
-        if (!g.obs_valid[i]) continue;
-        if (fabs(g.obs_y[i] - target_lane_y) > same_lane_tol) continue;
-        double dx = g.obs_x[i] - g.ego_x;
-        if (dx >= 0.0) continue;
-        double closing_speed = g.obs_vx[i] - g.current_speed;
-        double required_rear_gap = 12.0 + fmax(0.0, closing_speed) * 2.0;
-        if (-dx < required_rear_gap) return 0;
-    }
-    return 1;
-}
-
-static int lane_front_allows_merge(double target_lane_y, double same_lane_tol, int* need_accel) {
-    double target_gap = lane_lead_gap(target_lane_y, same_lane_tol);
-    double target_speed = lane_lead_speed(target_lane_y, same_lane_tol);
-    *need_accel = 0;
-    if (target_gap > 40.0) return 1;
-    if (target_gap > 18.0 && target_speed > g.current_speed + 1.5) {
-        *need_accel = 1;
-        return 1;
-    }
-    return 0;
-}
-
-static int lane_has_pedestrian_risk(double target_lane_y, double same_lane_tol) {
-    int pi = g.ped_index;
-    if (pi < 0 || pi >= MAX_OBS || !g.obs_valid[pi]) return 0;
-    double dx = g.obs_x[pi] - g.ego_x;
-    if (dx < -8.0 || dx > 90.0) return 0;
-    /* 路边行人 (|y|>5.0) 不会横穿到目标车道，不构成风险；
-     * 仅当行人实际处于路面范围内 (|y|<=5.0) 且靠近目标车道时才视为风险 */
-    if (fabs(g.obs_y[pi]) > 5.0) return 0;
-    return fabs(g.obs_y[pi] - target_lane_y) <= same_lane_tol + 0.8;
-}
-
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
 class ControlTask : public CoroutineTask {
@@ -979,68 +323,32 @@ protected:
     Task run() override {
         pthread_setname_np(pthread_self(), "control");
 
-        const double same_lane_tol = 2.0;
-        const double time_headway  = 1.4;
-        const double min_gap       = 5.0;
-
         while (!should_stop()) {
-            /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
-            co_await sleep_us(50000);  /* 20Hz */
+            /* select_for: 等待 fusion 或 planning 消息（消息驱动），
+             * 50ms 超时兜底保持 DATA_TIMEOUT fallback 及时性。
+             * 替代 usleep/sleep_us 轮询，降低空等 CPU 占用。 */
+            auto r = co_await select_for(bus(),
+                {TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY}, 50000);
+            (void)r;
             if (should_stop()) break;
 
             g.cycle++;
+
+            /* §11.2: heartbeat 上报 — monitor_node 的 degrade_supervisor_tick 据此检测超时 */
+            degrade_supervisor_record_heartbeat("control_node", clock_now_us() / 1000);
 
             /* 热重载：每帧从 param_registry 重新读取参数，支持 flowctl param set 运行时修改 */
             g.kp = param_get_float("control.pid_kp");
             g.ki = param_get_float("control.pid_ki");
             g.kd = param_get_float("control.pid_kd");
             g.cfg_cruise_speed = param_get_float("control.cruise_speed");
-            g.lane_width       = param_get_float("control.lane_width");
             g.lat_kp           = param_get_float("control.lat_kp");
             g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
-            g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
-            g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
-            g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
-            g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
-            g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
-            g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
-            g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
-            g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
-            g.yaw_damping                 = param_get_float("control.yaw_damping");
-            g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
-            g.k_v_lat                     = param_get_float("control.k_v_lat");
-            g.k_vy                       = param_get_float("control.k_vy");
-            g.k_vy_damp                  = param_get_float("control.k_vy_damp");
-            g.lc_use_trapezoid           = param_get_float("control.lc_use_trapezoid");
-            g.lc_trapezoid_accel         = param_get_float("control.lc_trapezoid_accel");
-            g.lc_trapezoid_vmax          = param_get_float("control.lc_trapezoid_vmax");
-            g.lc_trapezoid_kp            = param_get_float("control.lc_trapezoid_kp");
-            g.lc_use_lqr                 = param_get_float("control.lc_use_lqr");
-            g.lqr_q_ey                   = param_get_float("control.lqr_q_ey");
-            g.lqr_q_ephi                 = param_get_float("control.lqr_q_ephi");
-            g.lqr_q_vlat                 = param_get_float("control.lqr_q_vlat");
-            g.lqr_r_steer                = param_get_float("control.lqr_r_steer");
-            g.lqr_fb_scale               = param_get_float("control.lqr_fb_scale");
-
-            /* MPC 权重/时域热重载：与上面的 PID/Stanley 同等对待。原先只在
-             * control_init 读一次，注册了却改不动，反射在 MPC 上断线。
-             * horizon 必须夹到 MPC_MAX_HORIZON，越界会写坏定长工作数组。 */
-            {
-                int h = (int)param_get_float("control.mpc_horizon");
-                if (h > MPC_MAX_HORIZON) h = MPC_MAX_HORIZON;
-                if (h < 1)               h = 1;
-                g.mpc_config.horizon  = h;
-                g.mpc_config.dt       = param_get_float("control.mpc_dt");
-                g.mpc_config.q_x      = param_get_float("control.mpc_q_x");
-                g.mpc_config.q_y      = param_get_float("control.mpc_q_y");
-                g.mpc_config.q_theta  = param_get_float("control.mpc_q_theta");
-                g.mpc_config.q_v      = param_get_float("control.mpc_q_v");
-                g.mpc_config.r_a      = param_get_float("control.mpc_r_a");
-                g.mpc_config.q_delta  = param_get_float("control.mpc_q_delta");
-                g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
-                if (g.mpc) mpc_set_weights(g.mpc, &g.mpc_config);
-            }
-
+            g.yaw_damping      = param_get_float("control.yaw_damping");
+            g.lat_lookahead_gain = param_get_float("control.lat_lookahead_gain");
+            g.k_v_lat          = param_get_float("control.k_v_lat");
+            g.k_vy             = param_get_float("control.k_vy");
+            g.k_vy_damp        = param_get_float("control.k_vy_damp");
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
             uint64_t now_us = clock_now_us();
             if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;
@@ -1048,37 +356,22 @@ protected:
 
             /* 数据陈旧时不跳过输出——发布安全减速指令，保持下游流水线畅通 */
             if (!g.has_fusion || !g.has_planning) {
-                /* Phase 5: 弯道跟随。原始 fallback 把 target 钉死在 0.0，遇到弯道
-                 * （road_center_y != 0）会让车辆直线冲出行车道。现改为：先按
-                 * 道路中心线算一个 Stanley 风格转向指令，再做轻刹车保持车流连续。
-                 * 该指令沿用主控制器相同的 lat_kp / lat_kd_heading / 一阶低通，
-                 * 保证 fallback 与主控制输出在弯道中行为一致。 */
+                /* DATA_TIMEOUT fallback: 用最后缓存的 trajectory 路径点做横向保持。
+                 * 控制层不做独立车道判定——committed_lane_side 已移到 planning。 */
                 double fb_road_c = 0.0, fb_road_heading = 0.0, fb_kappa_unused = 0.0;
                 if (g.has_fusion) {
                     if (!query_ref_at(g.ego_x, g.ego_y, fb_road_c, fb_road_heading, fb_kappa_unused)) {
-                        /* ref_path 不可用 → 回退到 curve_* 单段直线参考 */
-                        fb_road_c = road_center_y(g.ego_x, g.curve_start_x,
-                                                  g.curve_length_m, g.curve_offset_m);
-                        fb_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
-                                                              g.curve_length_m, g.curve_offset_m);
+                        /* ref_path 不可用 → 保持当前位置，不自推车道参考 */
+                        fb_road_c = g.ego_y;
+                        fb_road_heading = g.ego_heading;
                     }
                 }
-                /* 关键：目标必须是 ego 所在车道中心，而非道路中心线 road_c。
-                 * 早期版本用 road_c 作目标，导致 ego 从 y=-1.75 被拉向 y=0，
-                 * 越过中心线后 committed_lane_side 翻转、lc_state 被强制设为 2 并进入
-                 * ROAD_GUARD，最终冲出右侧路沿 (road departure)。
-                 *
-                 * N 车道模型：用 lane_idx_from_y 算出 ego 当前所在车道 idx，
-                 * 再用 lane_center_y 算该车道中心 y。EKF 未收敛（|ego_y - road_c| < 1.0m）
-                 * 时 target=ego_y（横向不动），避免被拉向任意一侧。 */
-                double fb_target_y = fb_road_c;
-                if (g.has_fusion) {
-                    if (fabs(g.ego_y - fb_road_c) > 1.0) {
-                        int fb_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, fb_road_c, 0.0);
-                        fb_target_y = lane_center_y(fb_idx, g.lane_count, g.lane_width, fb_road_c, 0.0);
-                    } else {
-                        fb_target_y = g.ego_y;  /* EKF 未收敛, 横向保持不动 */
-                    }
+                /* 无 planning 时保持当前横向位置，不自推目标车道 */
+                double fb_target_y = (g.has_fusion && g.ref_path.size() > 0)
+                                     ? fb_road_c
+                                     : g.ego_y;
+                if (g.has_fusion && g.ref_path.size() > 0) {
+                    g.road_center_y = fb_road_c;
                 }
                 double fb_lat_error = fb_target_y - g.ego_y;
                 double fb_cte_term  = atan2(g.lat_kp * fb_lat_error, fmax(g.current_speed, 3.0));
@@ -1114,8 +407,11 @@ protected:
                 uint8_t raw_buf[64];
                 size_t  raw_len = sizeof(raw_buf);
                 ControlRaw_serialize(&raw, raw_buf, &raw_len);
-                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
-                                  raw_buf, (uint32_t)raw_len);
+                /* 反压检测：下游 safety_control 处理不过来时跳过本帧发布 */
+                if (!message_bus_topic_is_full(bus(), TOPIC_CONTROL_RAW_CMD)) {
+                    transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
+                                      raw_buf, (uint32_t)raw_len);
+                }
 
                 char cmd_text[256];
                 snprintf(cmd_text, sizeof(cmd_text),
@@ -1133,143 +429,45 @@ protected:
                 continue;
             }
 
-            if (g.lc_cooldown > 0.0) g.lc_cooldown -= CONTROL_DT_S;
-
-            /* 道路中心线在当前 ego_x 处的横向偏移（弯道禁用时恒为 0，下面所有
-             * "相对道路中心"的判断与之前的绝对 y 判断完全等价）。
-             *
-             * A4 ego route-following: 优先用 ref_path（flowsim 每帧采样 ego 前方
-             * 100m 路网中心线）替代 curve_* 单段直线参考。ref_path 不可用时回退
-             * curve_*，保证旧场景/旧 flowsim 兼容。
-             * road_heading / ref_kappa 缓存给下方 Stanley 块复用，避免重复查询。
-             *
-             * 注意：ref_path 的 y 是 ego 车道中心（publish_ref_path 用 ego.road_pos
-             * 沿 ego 所在车道采样），不是道路中心。把 ref_path y 当 road_c 会导致
-             * lane_center_y/lane_idx_from_y 映射全错（ego 被误判到错误车道 idx）。
-             * road_c 始终用道路中心（curve_offset_m），ref_path 只取 heading/kappa。 */
-            double road_c = 0.0;
+            /* 道路几何参数：仅来自 planning/trajectory 的 ref_path 参考点。
+             * 控制层不再独立计算 road_center_y，不做车道判定。 */
             double ref_road_heading = 0.0;
             double ref_kappa = 0.0;
-            double ref_y_unused = 0.0;  /* ref_path 的 y（ego 车道中心），此处不用 */
-            bool   ref_path_ok = query_ref_at(g.ego_x, g.ego_y,
-                                              ref_y_unused, ref_road_heading, ref_kappa);
-            /* road_c = 道路中心线 y（直道时 curve_offset_m=0 → road_c=0）。
-             * 不用 ref_path y，避免车道 idx 映射偏移。 */
-            road_c = road_center_y(g.ego_x, g.curve_start_x,
-                                   g.curve_length_m, g.curve_offset_m);
-            if (!ref_path_ok) {
-                ref_road_heading = road_center_heading(g.ego_x, g.curve_start_x,
-                                                       g.curve_length_m, g.curve_offset_m);
-                ref_kappa = road_center_curvature(g.ego_x, g.curve_start_x,
-                                                  g.curve_length_m, g.curve_offset_m);
+            double road_c = g.road_center_y;  /* 默认保持上一帧值 */
+            if (!query_ref_at(g.ego_x, g.ego_y,
+                              road_c, ref_road_heading, ref_kappa)) {
+                /* ref_path 不可用：road_c 保持上一帧值，heading/kappa 归零 */
+                ref_road_heading = 0.0;
+                ref_kappa = 0.0;
             }
-            /* N 车道模型下的"半路宽"——ego 允许的横向范围。
-             * 旧实现用 lane_width - 1.0 等价于"半车道宽 - 1m"，是 2 车道假设下的
-             * ROAD_GUARD 触发阈值。N 车道模型下应改为"半路宽 - 1m"。 */
-            double half_road = g.lane_count * g.lane_width * 0.5;
-            double road_center_limit = half_road - 1.0;
-            double half_lane = g.lane_width * 0.5;
+            g.road_center_y = road_c;
 
-            /* ── 车道判定加迟滞: 使用"已提交车道 idx", 只有 ego_y 明确越过当前
-             *    车道中心 ±LANE_HYSTERESIS_M 才重算 idx, 避免 y≈车道线处每帧翻转。
-             *
-             *    N 车道模型：committed_lane_side（实为 committed_lane_idx）
-             *    用 lane_idx_from_y 量化 ego_y 到最近车道中心 idx。
-             *    EKF 未收敛时（|ego_y - road_c| < 1.0m）保持 idx=-1（未初始化），
-             *    cruise_lane_y 退化为 ego_y（横向不动），避免被拉向任意一侧。 */
-            if (g.committed_lane_side < 0 && g.ego_x > 0.5) {
-                /* 仅在 ego_y 明确偏离道路中心 (EKF 收敛后) 才初始化车道 idx。
-                 * fusion_node EKF 初始 y=0, 场景 ego 实际从 y=-1.75 出发；
-                 * 收敛前 |ego_y - road_c| < 1.0m，此时不初始化。 */
-                if (fabs(g.ego_y - road_c) > 1.0) {
-                    g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                            g.lane_width, road_c, 0.0);
-                }
-                /* 否则保持 -1（未初始化），下方 cruise_lane_y 退化为 ego_y */
-            } else if (g.committed_lane_side >= 0) {
-                /* 已初始化：用迟滞判定是否切换到相邻车道。
-                 * 当前车道中心 y 与 ego_y 的偏差超过 LANE_HYSTERESIS_M 才重算 idx。 */
-                int cur_idx = g.committed_lane_side;
-                double cur_center = lane_center_y(cur_idx, g.lane_count, g.lane_width, road_c, 0.0);
-                if (fabs(g.ego_y - cur_center) > half_lane) {
-                    /* 已越过当前车道边界 → 量化到新车道 */
-                    int new_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
-                    if (new_idx != cur_idx) g.committed_lane_side = new_idx;
-                }
-            }
-            /* committed_lane_side<0 (EKF 未收敛) 时, 目标=当前 ego_y, 横向不动,
-             * 避免在车道侧未确定前把 ego 拉向任意一侧。 */
-            double cruise_lane_y = (g.committed_lane_side < 0)
-                                   ? g.ego_y
-                                   : lane_center_y(g.committed_lane_side, g.lane_count,
-                                                   g.lane_width, road_c, 0.0);
-            /* 相邻车道 y：N 车道下有 N-1 个邻车道，这里默认选"右侧邻车道"（idx+1），
-             * 用于被动超车评估。NOA 主动变道由 route_lane 显式指定 idx，
-             * 不依赖 adjacent_lane_y 的镜像假设。
-             * 最右车道（idx==lane_count-1）无右邻，回退到左邻（idx-1）。
-             * lane_lead_gap 等函数仍接收绝对 y，无需改签名。 */
-            int adj_idx = g.committed_lane_side + 1;
-            if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
-            if (adj_idx < 0) adj_idx = 0;  /* 单车道场景 */
-            double adjacent_lane_y = (g.committed_lane_side < 0)
-                                     ? g.ego_y
-                                     : lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
-            if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
-                /* 接近路沿 → 强制收敛到最近车道，触发 ROAD_GUARD-style 恢复 */
-                g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                        g.lane_width, road_c, 0.0);
-                cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
-                                               g.lane_width, road_c, 0.0);
-                adj_idx = g.committed_lane_side + 1;
-                if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
-                if (adj_idx < 0) adj_idx = 0;
-                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
-                g.lc_state = 2;
-                g.lc_timer = 0.0;
+            /* 车道保持目标：来自 planning/trajectory 的 lane_d。
+             * 控制层不做独立车道判定——committed_lane_side 已移到 planning。 */
+            double cruise_lane_y = g.road_center_y + g.lane_d;
+            if (!g.has_planning) {
+                /* 无 planning 时保持当前 y，不自行推导目标车道 */
+                cruise_lane_y = g.ego_y;
             }
 
-            /* ── 死锁恢复: 车长时间近乎静止且横向卡在车道线附近 (骑线不动) 时,
-             *    强制收敛到最近车道中心并复位变道状态机, 打破 chatter/死锁 ── */
-            if (g.current_speed < STUCK_SPEED_MPS && fabs(g.ego_y - road_c) < STUCK_LATERAL_M) {
+            /* ── 死锁恢复: 车长时间近乎静止时，给一点前向油门打破静摩擦 ── */
+            if (g.current_speed < STUCK_SPEED_MPS) {
                 g.stuck_timer += CONTROL_DT_S;
             } else {
                 g.stuck_timer = 0.0;
             }
-            if (g.stuck_timer > STUCK_RECOVER_S) {
-                g.committed_lane_side = lane_idx_from_y(g.ego_y, g.lane_count,
-                                                        g.lane_width, road_c, 0.0);
-                cruise_lane_y = lane_center_y(g.committed_lane_side, g.lane_count,
-                                               g.lane_width, road_c, 0.0);
-                adj_idx = g.committed_lane_side + 1;
-                if (adj_idx >= g.lane_count) adj_idx = g.committed_lane_side - 1;
-                if (adj_idx < 0) adj_idx = 0;
-                adjacent_lane_y = lane_center_y(adj_idx, g.lane_count, g.lane_width, road_c, 0.0);
-                g.lc_state     = 0;
-                g.lc_attempted = 0;
-                g.lc_cooldown  = 0.0;
-                g.lc_timer     = 0.0;
-                g.stuck_timer  = 0.0;
-                g.speed_zero_timer = 0.0;
-                LOG_WARN("control", ">>> STUCK RECOVERY: converge to lane y=%.2f (ego@(%.1f,%.1f))",
-                         cruise_lane_y, g.ego_x, g.ego_y);
-            }
 
-            /* ── 全域速度死锁恢复: 覆盖 0.6<|y|<2.1 盲区
-             *    ROAD_GUARD (|y|>2.1) 自带低速油门; STUCK (|y|<0.6) 由上方处理。
-             *    此处捕获中间盲区: 无论 y 值, 只要速度持续为0就计时, 到阈值给小油门打破死锁。 ── */
+            /* ── 全域速度死锁恢复: 无论 y 位置, 速度持续为0超过阈值就给小油门 ── */
             if (g.current_speed < STUCK_SPEED_MPS) {
                 g.speed_zero_timer += CONTROL_DT_S;
             } else {
                 g.speed_zero_timer = 0.0;
             }
-            /* ── ACC & 变道: 计算本车道前车间距 ── */
-            double best_gap = lane_lead_gap(cruise_lane_y, same_lane_tol);
-            double adjacent_gap = lane_lead_gap(adjacent_lane_y, same_lane_tol);
-            double lead_speed = lane_lead_speed(cruise_lane_y, same_lane_tol);
-            double safe_gap = min_gap + g.current_speed * time_headway;
+
+            /* ── 纵向控制：PID 跟踪 planning 下发的目标速度 ── */
             double boost_target;
             if (g.has_target_speed && g.target_speed < 0.1) {
-                boost_target = 0.0;  /* 红灯停车：不提升到巡航速度 */
+                boost_target = 0.0;  /* 红灯停车 */
             } else {
                 boost_target = fmax(g.target_speed, g.cfg_cruise_speed);  /* 正常巡航 */
             }
@@ -1282,274 +480,26 @@ protected:
             if (tl_ht && tl_ts < 0.01 && g.integral > 0) {
                 g.integral = 0;
             }
-            int blocked = 0;
-            int overtake_worthwhile = 0;
-            int overtake_need_accel = 0;
-            if (best_gap < safe_gap && best_gap < 80.0) {
-                /* 跟车目标速度: gap=0 时匹配前车速度, gap≥safe_gap 时恢复巡航。
-                 * 用 lead_speed 作下界替代 ratio*boost_target，避免 ego 减速过头
-                 * 导致 gap 反复振荡→速度归零→管道冻住。 */
-                double ratio = best_gap / safe_gap;
-                if (ratio > 1.0) ratio = 1.0;
-                if (ratio < 0.0) ratio = 0.0;
-                acc_target = lead_speed + (boost_target - lead_speed) * ratio;
-                if (acc_target > boost_target) acc_target = boost_target;
-                if (acc_target < boost_target * 0.7) blocked = 1;
-            }
-            /* 状态机: 跟踪障碍物阻塞状态变化（was_blocked_sm 从函数 static 改为成员） */
-            if (blocked && !was_blocked_sm_)
-                statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_BLOCKED, NULL);
-            else if (!blocked && was_blocked_sm_)
-                statem_send_event(&g.sm, CTL_EVENT_OBSTACLE_CLEARED, NULL);
-            was_blocked_sm_ = blocked;
-
-            /* 用相对速度 (ego - 前车) 代替绝对速度, 避免高速下 gap 门槛过大而永远无法触发超车。
-             * 若前车比 ego 快 (rel_speed<0), 说明并非"追尾慢车", 只需 base gap 即可, 不额外放大门槛。 */
-            double rel_speed = g.current_speed - lead_speed;
-            if (rel_speed < 0.0) rel_speed = 0.0;
-            double min_overtake_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
-            if (min_overtake_gap > g.min_overtake_gap_cap) min_overtake_gap = g.min_overtake_gap_cap;
-            if ((g.lc_state == 0) && (g.lc_cooldown <= 0.0) &&
-                (!g.lc_attempted) &&
-                best_gap > min_overtake_gap && best_gap < g.min_overtake_gap_cap) {
-                int lead_is_slow = lead_speed < boost_target - 2.0;
-                int front_allows_merge = lane_front_allows_merge(adjacent_lane_y, same_lane_tol, &overtake_need_accel);
-                if (lead_is_slow && !lane_has_pedestrian_risk(adjacent_lane_y, same_lane_tol) &&
-                    lane_rear_safe(adjacent_lane_y, same_lane_tol)) {
-                    /* 只在目标车道间距足够时立即发起变道（overtake_worthwhile=1）；
-                     * 间距不足时让 lc_timer 计时，超时后（blocked_timeout_s）重新评估，
-                     * 届时如果目标车道已清空仍能变道。 */
-                    if (front_allows_merge) {
-                        overtake_worthwhile = 1;
-                    }
-                    blocked = 1;
-                }
-            }
-
-            /* ── NOA: 导航路线驱动的主动变道 ──
-             * planning 节点仅在 NOA 模式下才会下发 route_lane≥0（见 planning_node.cpp
-             * 的 "route_lane=" 字段）；这里与被动超车共用同一套安全检查
-             * （rear/front gap、行人风险）和执行状态机，区别只是触发原因不是
-             * "前车太慢"而是"导航路线要求换道"（如提前变道以便驶出）。
-             *
-             * N 车道模型：route_lane 与 committed_lane_side（实为 idx）都是 0..N-1
-             * 索引，可以直接比较。-1=无目标。NOA 变道目标 y 用 lane_center_y 算出，
-             * 替代旧的 adjacent_lane_y 镜像假设。 */
-            int route_triggered = 0;
-            double route_target_y = cruise_lane_y;  /* NOA 触发时被覆盖 */
-            if (!blocked && g.route_lane >= 0 && g.route_lane != g.committed_lane_side &&
-                g.lc_state == 0 && g.lc_cooldown <= 0.0) {
-                /* 计算 NOA 目标车道中心 y */
-                route_target_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c, 0.0);
-                if (!lane_has_pedestrian_risk(route_target_y, same_lane_tol) &&
-                    lane_rear_safe(route_target_y, same_lane_tol)) {
-                    overtake_worthwhile = 1;
-                    blocked = 1;
-                    route_triggered = 1;
-                }
-            }
-
-            /* ── 变道等待期: 不减速，维持当前速度准备变道 ── */
-            if (blocked && overtake_worthwhile && g.lc_state == 0) {
-                if (acc_target < g.current_speed) acc_target = g.current_speed + 0.5;
-                if (overtake_need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
-            }
-
-            /* ── 变道中: 临时提高目标速度，加速完成变道 ── */
-            if (g.lc_state == 1) {
-                boost_target = g.cfg_cruise_speed;
-                acc_target = boost_target;
-            }
 
             if (acc_target > g.cfg_cruise_speed) acc_target = g.cfg_cruise_speed;
             if (g.current_speed > g.cfg_cruise_speed + 1.0) acc_target = g.cfg_cruise_speed - 1.0;
 
-            /* ── 自适应变道状态机 ──
-             * effective_target_y 钳到路宽 [road_c - half_road, road_c + half_road]，
-             * 不再钳到单车道边界（旧 2 车道假设）。N 车道下 ego 可以到达任何车道。 */
-            double effective_target_y = (g.lc_state != 0) ? g.lc_target_y : cruise_lane_y;
-            if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
-                /* 接近路沿 → 收敛到最近车道中心（不再硬钳到 ±half_lane） */
-                int emerg_idx = lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
-                effective_target_y = lane_center_y(emerg_idx, g.lane_count, g.lane_width, road_c, 0.0);
-                if (acc_target > 6.0) acc_target = 6.0;
-            }
-            if (effective_target_y > road_c + half_road - 0.25) effective_target_y = road_c + half_road - 0.25;
-            if (effective_target_y < road_c - half_road + 0.25) effective_target_y = road_c - half_road + 0.25;
-
-            if (blocked && g.lc_state == 0 && !(tl_ht && tl_ts < 0.1)) {
-                g.lc_timer += CONTROL_DT_S;
-                if (overtake_worthwhile || g.lc_timer > g.blocked_timeout_s) {
-                    int need_accel = 0;
-                    /* NOA 路线触发时用 route_target_y；被动超车用 adjacent_lane_y */
-                    double lc_target_y_candidate = route_triggered ? route_target_y : adjacent_lane_y;
-                    /* 防止逆行：多车道（lane_count>2，即顺行侧≥2 条）场景下，
-                     * 禁止 ego 跨过道路中心线进入对向车道。
-                     *
-                     * lane_center_y 约定：lane 0=最右(y=+half_road-0.5*lw),
-                     * lane N-1=最左(y=-half_road+0.5*lw)。双向道路同向 idx ∈ [N/2, N-1],
-                     * 对向 idx ∈ [0, N/2-1]。用 lane idx 判断同向/对向比用 y 坐标对比
-                     * road_c 更可靠——road_c 来自 ref_path 的 ego 车道中心（非道路中心），
-                     * 会导致同向变道被误判为跨中心线。
-                     *
-                     * 2 车道场景（lane_count==2，1 顺 + 1 对）保留旧行为：ego 可以
-                     * 借对向车道超车（前方安全时），因为顺行侧只有 1 条车道。
-                     *
-                     * 检查：lane_count>2 且候选 idx 与 ego idx 在中心线不同侧时拒绝。 */
-                    int half = g.lane_count / 2;
-                    int ego_idx = g.committed_lane_side;
-                    int cand_idx = route_triggered ? g.route_lane : adj_idx;
-                    int ego_same_dir  = (ego_idx  >= half);
-                    int cand_same_dir = (cand_idx >= half);
-                    if (g.lane_count > 2 && ego_idx >= 0 && cand_idx >= 0 &&
-                        ego_same_dir != cand_same_dir) {
-                        /* 拒绝变道但不清除 blocked：ego 必须继续跟车减速（ACC），
-                         * 而非以全速撞向前方障碍物。早期版本错误地清除 blocked=0，
-                         * 导致 ego 拒绝变道后既不换道也不减速，直接追尾前车
-                         * (CI evaluator collision detected 的根因)。 */
-                        LOG_WARN("control",
-                                 ">>> LANE CHANGE REJECTED (oncoming): ego_idx=%d cand_idx=%d "
-                                 "cross center (lane_count=%d half=%d) — staying in lane, ACC braking",
-                                 ego_idx, cand_idx, g.lane_count, half);
-                        g.lc_timer = g.blocked_timeout_s;  /* 冷却，避免反复尝试 */
-                        route_triggered = 0;
-                        overtake_worthwhile = 0;
-                        /* 注意：不清除 blocked — 保持 blocked=1 让 ACC 继续减速 */
-                    } else {
-                    int front_allows_merge = lane_front_allows_merge(lc_target_y_candidate, same_lane_tol, &need_accel);
-                    if (front_allows_merge &&
-                        !lane_has_pedestrian_risk(lc_target_y_candidate, same_lane_tol) &&
-                        lane_rear_safe(lc_target_y_candidate, same_lane_tol)) {
-                        g.lc_origin_y = cruise_lane_y;
-                        g.lc_target_y = lc_target_y_candidate;
-                        g.lc_target_idx = route_triggered ? g.route_lane : adj_idx;
-                        effective_target_y = g.lc_target_y;
-                        if (need_accel && acc_target < g.current_speed + 2.0) acc_target = g.current_speed + 2.0;
-                        g.lc_state = 1; g.lc_attempted = 1; g.lc_timer = 0;
-                        lc_trapezoid_start(g, g.ego_y, g.lc_target_y, clock_now_us());
-                        statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_START, NULL);
-                        LOG_INFO("control", ">>> LANE CHANGE %s%s (cur_gap=%.1f adj_gap=%.1f lead_v=%.1f ego@(%.1f,%.1f) target_y=%.1f mode=%s)",
-                                 route_triggered ? "NOA_ROUTE" : (overtake_worthwhile ? "OVERTAKE" : "BLOCKED"),
-                                 need_accel ? "+ACCEL" : "+CRUISE",
-                                 best_gap, adjacent_gap, lead_speed, g.ego_x, g.ego_y, effective_target_y,
-                                 g.driving_mode[0] ? g.driving_mode : "?");
-                    } else {
-                        LOG_INFO("control", ">>> LANE CHANGE BLOCKED by obstacle in target lane");
-                        g.lc_timer = g.blocked_timeout_s + 1.0;  /* +1s backoff 防每帧重试 */
-                    }
-                    }  /* end else (not oncoming) */
-                }
-            } else if (!blocked && g.lc_state == 0) {
-                g.lc_timer = 0;
-            }
-
-            /* 超车后稳定巡航 + 主动评估回原车道。
-             * 不强制回原车道（避免回切与慢车重叠），但主动检查原始车道前方是否已清空，
-             * 若清空则安全返回，比被动等待 lc_stable_wait_s 秒 + 冷却是更自然的驾驶行为。
-             * NOA 路线驱动时（route_triggered 历史），回原车道可能由下一条路线步骤触发，
-             * 此处只处理无路线步骤时的自主回切。
-             *
-             * N 车道模型：original_lane_idx 用变道发起时的 lc_target_idx 推回，
-             * 不再用 2.0*road_c - cruise_lane_y 镜像（只在 2 车道对称时正确）。 */
-            int original_lane_idx = (g.lc_target_idx >= 0) ? g.lc_target_idx : g.committed_lane_side;
-            double original_lane_y = lane_center_y(original_lane_idx, g.lane_count, g.lane_width, road_c, 0.0);
-            if (g.lc_state == 2) {
-                g.lc_wait += CONTROL_DT_S;
-                if (g.lc_wait > g.lc_stable_wait_s && g.lc_cooldown <= 0.0) {
-                    /* NOA 模式中（driving_mode 以 "NOA" 开头），路线步骤会接管变道决策，
-                     * 主动回切逻辑不应干预，避免在出口路段提前返回原车道。 */
-                    int in_noa_mode = (strncmp(g.driving_mode, "NOA", 3) == 0);
-                    if (!in_noa_mode && (g.route_lane < 0 || g.route_lane == g.committed_lane_side)) {
-                        /* 无 NOA 路线约束：评估是否可安全返回原始车道。
-                         * 条件：
-                         *   1. 原始车道前车间距 > 安全间距的 1.5 倍（说明已清空）
-                         *   2. 当前车道前车比原车道前车慢（ego 在当前车道遇到慢车
-                         *      才需要离开；若当前车道更快/空旷则留在当前车道，
-                         *      不主动回切——避免"右边空旷却马上变回左边"的蛇行）
-                         *   3. 后方无风险、无行人风险 */
-                        double orig_gap = lane_lead_gap(original_lane_y, same_lane_tol);
-                        double orig_safe = min_gap + g.current_speed * time_headway;
-                        double cur_speed  = lane_lead_speed(cruise_lane_y, same_lane_tol);
-                        double orig_speed = lane_lead_speed(original_lane_y, same_lane_tol);
-                        int    cur_lane_slower = (cur_speed < orig_speed - 1.0);
-                        int    can_return = cur_lane_slower &&
-                                            (orig_gap > orig_safe * 1.5) &&
-                                            !lane_has_pedestrian_risk(original_lane_y, same_lane_tol) &&
-                                            lane_rear_safe(original_lane_y, same_lane_tol);
-                        if (can_return) {
-                            /* 发起回切：设置 lc_state=3 (return) */
-                            g.lc_origin_y = cruise_lane_y;
-                            g.lc_target_y = original_lane_y;
-                            g.lc_target_idx = original_lane_idx;
-                            effective_target_y = g.lc_target_y;
-                            g.lc_state = 3;
-                            g.lc_wait = 0.0;
-                            lc_trapezoid_start(g, g.ego_y, g.lc_target_y, clock_now_us());
-                            LOG_INFO("control", ">>> RETURN to original lane (orig_gap=%.1f safe=%.1f)", orig_gap, orig_safe);
-                        } else {
-                            /* 还不安全：重置允许后续超车评估但不回切 */
-                            g.lc_state     = 0;
-                            g.lc_attempted = 0;
-                            g.lc_cooldown  = g.lc_cooldown_after_stable_s;
-                            g.lc_wait      = 0.0;
-                        }
-                    } else {
-                        /* NOA 路线要求保留在当前车道（如正在出口车道上），不回切 */
-                        g.lc_state     = 0;
-                        g.lc_attempted = 0;
-                        g.lc_cooldown  = g.lc_cooldown_after_stable_s;
-                        g.lc_wait      = 0.0;
-                    }
-                }
-            }
-
-            /* 检测变道完成 (横向偏差 < LC_COMPLETE_THRESH, 收紧防完成后振荡)。
-             * N 车道模型：直接 commit lc_target_idx（变道目标 idx）到 committed_lane_side。 */
-            if (g.lc_state == 1 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
-                g.committed_lane_side = (g.lc_target_idx >= 0) ? g.lc_target_idx
-                                                                : lane_idx_from_y(g.ego_y, g.lane_count, g.lane_width, road_c, 0.0);
-                g.lc_state = 2; g.lc_wait = 0;
-                g.lc_trap_active = 0;
-                statem_send_event(&g.sm, CTL_EVENT_LANE_CHANGE_DONE, NULL);
-                LOG_INFO("control", ">>> lane change complete");
-            }
-            if (g.lc_state == 3 && fabs(g.ego_y - effective_target_y) < LC_COMPLETE_THRESH) {
-                g.lc_state = 0;
-                g.lc_attempted = 0;
-                g.lc_cooldown = g.lc_cooldown_after_return_s;
-                g.lc_timer = 0.0;
-                g.lc_trap_active = 0;
-                LOG_INFO("control", ">>> returned to original lane");
-            }
-
-            /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，
-             * 置 acc_target=0，覆盖所有 ACC/变道逻辑对 acc_target 的改写。
-             * 变道中（lc_state=1）或刚完成变道（lc_state=2 稳定期内）时不急刹：
-             * 如果车在车道间横移时紧急制动，横向动量会带着车继续偏移 →
-             * overshoot + safety 介入。改为减速到 3 m/s 让变道平稳完成，
-             * 变道结束后下一帧正常置 0 停车。同时清积分抗 windup。 */
+            /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，置 acc_target=0 ── */
             if (tl_ht && tl_ts < 0.1) {
-                if (g.lc_state == 1 ||
-                    (g.lc_state == 2 && g.lc_wait < 1.0)) {
-                    /* 变道中/刚完成：缓慢减速，不破坏横向稳定性 */
-                    if (acc_target > 3.0) acc_target = 3.0;
-                } else {
-                    acc_target = 0.0;
-                    g.integral = 0;
-                }
+                acc_target = 0.0;
+                g.integral = 0;
             }
 
-            /* ── 纵向控制：始终使用 PID+ACC，保证跟车安全 ──
-             *
-             * MPC 只做横向轨迹优化（变道更平滑），纵向仍由 PID+ACC 负责。
-             * 原因：MPC 代价函数中没有前车距离约束，单独优化纵向会导致追尾。 */
+            /* 横向目标：直接使用 trajectory 提供的 lane_d（planning 负责车道决定）。
+             * 无变道场景下, cruise_lane_y = road_center_y + lane_d 即为目标车道中心。 */
+            double effective_target_y = cruise_lane_y;
+
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
             double throttle = 0, brake = 0, steer = 0;
             const char* mode = "NONE";
-            bool mpc_used_lat = false;
 
-            /* PID 纵向（目标为 ACC 限速后的值） */
+            /* PID 纵向 */
             g.integral += error * 0.05;
             if (g.integral > 500)  g.integral = 500;
             if (g.integral < -200) g.integral = -200;
@@ -1575,207 +525,57 @@ protected:
             if (g.integral < 0 && brake >= 1.0 && error < 0)
                 g.integral -= error * 0.05;
 
-            /* ── 横向控制：优先 MPC，失败回退 Stanley ──
-             * 变道中 (lc_state != 0) 跳过 MPC，交 Stanley 处理：
-             * ref_path 始终是原车道中心线，MPC 跟它会留在原车道；
-             * Stanley 有 A8 变道参数（lat_kd*0.2 + lat_kp*2.5），
-             * 能通过 cte_term + heading_term 自然完成变道。 */
-            if (g.mpc_initialized && g.mpc && g.mpc_config.horizon > 0 &&
-                g.lc_state == 0) {
-                /* 构建 MPC 参考轨迹（从 ref_path 采样 horizon 步） */
-                int n_ref = build_mpc_reference(g.mpc_ref_buf, acc_target);
-                if (n_ref > 0) {
-                    /* 限幅必须在 solve 前注入，让求解器内部 cfg.max_steer 与
-                     * 下面的外部限幅同值。否则 MPC 在宽一个数量级的可行域里
-                     * 最优化，r_ddelta / q_delta 平滑项永不触发，输出被外部
-                     * 砍平后每帧翻符号（bang-bang）。
-                     *
-                     * 变道中放宽侧向加速度限制（与 Stanley 变道模式一致）。
-                     * 车道保持用 1.4 m/s²，变道用 3.0 m/s²，否则高速时 steer
-                     * limit 太小（10 m/s 时仅 ~0.04 rad），变道极慢。 */
-                    int lc_active_mpc = (g.lc_state == 1) || (g.lc_state == 3) ||
-                                        (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
-                    double mpc_lat_accel = lc_active_mpc ? 3.0 : 1.4;
-                    double mpc_steer_limit = steer_limit_for_speed(g.current_speed, mpc_lat_accel);
-
-                    /* ── 学习闭环：叠加 MPC 权重增量 ──────────
-                     * 三重保护抑制 TinyMLP 输出抖动导致的横向晃动：
-                     *   1. EMA 低通：平滑 delta，时间常数 ~0.5s（20Hz 下 alpha=0.1）
-                     *   2. 限幅：delta 不超过 baseline 的 ±40%，防止权重漂过头
-                     *   3. 死区：|delta| < baseline 的 3% 视为噪声归零
-                     * 1s 超时后回退到 baseline，防止模型异常时锁死 */
-                    MpcConfig eff_cfg = g.mpc_config;
-                    {
-                        uint64_t age_us = clock_now_us() - g.last_learn_mpc_delta_us;
-                        if (age_us < 1000000UL) {
-                            const double alpha = 0.1;  /* EMA 平滑系数 */
-                            const double clamp_ratio = 0.4;  /* delta 限幅比例 */
-                            const double deadband_ratio = 0.03; /* 死区比例 */
-                            auto apply = [&](double raw, double base, double& smooth) -> double {
-                                if (!g.smooth_initialized) smooth = raw;
-                                else smooth = smooth + alpha * (raw - smooth);
-                                double limit = base * clamp_ratio;
-                                if (smooth >  limit) smooth =  limit;
-                                if (smooth < -limit) smooth = -limit;
-                                if (fabs(smooth) < base * deadband_ratio) return 0.0;
-                                return smooth;
-                            };
-                            eff_cfg.q_y      += apply(g.learn_mpc_q_y_delta,      g.mpc_config.q_y,      g.smooth_q_y_delta);
-                            eff_cfg.q_theta  += apply(g.learn_mpc_q_theta_delta,  g.mpc_config.q_theta,  g.smooth_q_theta_delta);
-                            eff_cfg.r_a      += apply(g.learn_mpc_r_a_delta,      g.mpc_config.r_a,      g.smooth_r_a_delta);
-                            eff_cfg.r_ddelta += apply(g.learn_mpc_r_ddelta_delta, g.mpc_config.r_ddelta, g.smooth_r_ddelta_delta);
-                            g.smooth_initialized = 1;
-                        } else {
-                            g.smooth_initialized = 0;  /* 超时回退后下次重新初始化平滑 */
-                        }
+            /* ── LTV MPC 横向控制 ── */
+            bool mpc_used = false;
+            if (g.use_ltv_mpc && g.has_planning && g.ref_path.size() > 1) {
+                if (!g.ltv_mpc) {
+                    g.ltv_mpc = ltv_mpc_create(&g.ltv_mpc_cfg);
+                }
+                if (g.ltv_mpc) {
+                    ltv_mpc_update_config(g.ltv_mpc, &g.ltv_mpc_cfg);
+                    double e_y = -lat_error;
+                    double heading_error = g.ego_heading - ref_road_heading;
+                    while (heading_error >  M_PI) heading_error -= 2.0 * M_PI;
+                    while (heading_error < -M_PI) heading_error += 2.0 * M_PI;
+                    double e_psi = -heading_error;
+                    ltv_mpc_set_state(g.ltv_mpc, e_y, e_psi, g.prev_steer, g.current_speed);
+                    double v_ref[LTV_MPC_MAX_HORIZON];
+                    double kappa_ref[LTV_MPC_MAX_HORIZON];
+                    int n_ref = (int)g.ref_path.size() < LTV_MPC_MAX_HORIZON ?
+                                 (int)g.ref_path.size() : LTV_MPC_MAX_HORIZON;
+                    for (int i = 0; i < n_ref; i++) {
+                        v_ref[i] = g.target_speed;
+                        kappa_ref[i] = g.ref_path[i].kappa;
                     }
-                    mpc_set_weights(g.mpc, &eff_cfg);
-
-                    mpc_set_reference(g.mpc, g.mpc_ref_buf, n_ref);
-                    mpc_set_state(g.mpc, g.ego_x, g.ego_y, g.ego_heading, g.current_speed);
-                    mpc_set_prev_steer(g.mpc, g.prev_steer);
-                    mpc_set_max_steer(g.mpc, mpc_steer_limit);
-                    if (mpc_solve(g.mpc, &g.mpc_result) == 0 && g.mpc_result.converged) {
-                        steer = g.mpc_result.steer;
-                        int steer_saturated = (fabs(steer) >= mpc_steer_limit * 0.95);
-                        if (steer >  mpc_steer_limit) steer =  mpc_steer_limit;
-                        if (steer < -mpc_steer_limit) steer = -mpc_steer_limit;
+                    ltv_mpc_set_reference(g.ltv_mpc, v_ref, kappa_ref, n_ref);
+                    double mpc_steer_delta = 0.0;
+                    int rc = ltv_mpc_solve(g.ltv_mpc, &mpc_steer_delta);
+                    if (rc == LTV_MPC_OK) {
+                        steer = g.prev_steer + mpc_steer_delta;
                         g.prev_steer = steer;
-                        mpc_used_lat = true;
-                        if (g.cycle % 20 == 1) {
-                            LOG_INFO("control", "#%d MPC_LAT+PID_LON: thr=%.2f brk=%.2f st=%.4f accel=%.2f iter=%d cost=%.2e",
-                                     g.cycle, throttle, brake, steer, g.mpc_result.accel_cmd,
-                                     g.mpc_result.iterations, g.mpc_result.cost);
-                        }
-                        if (steer_saturated) {
-                            LOG_WARN("control", "#%d MPC steer saturated (%.4f >= %.4f)",
-                                     g.cycle, fabs(steer), mpc_steer_limit);
-                        }
-                    } else {
-                        if (g.cycle % 20 == 1) {
-                            LOG_WARN("control", "#%d MPC not converged (iter=%d cost=%.2e) — falling back to Stanley",
-                                     g.cycle, g.mpc_result.iterations, g.mpc_result.cost);
-                        }
+                        mpc_used = true;
                     }
                 }
             }
 
-            if (!mpc_used_lat) {
-                /* ── 回退：Stanley 横向 ── */
+            /* ── Stanley 横向控制（LTV MPC 未启用或求解失败时回退）── */
+            if (!mpc_used) {
                 steer = 0.0;
-                if (fabs(g.ego_y - road_c) <= road_center_limit - 0.4) {
-                    double lc_lat_kd = g.lat_kd_heading;
-                    double lc_lat_kp = g.lat_kp;
-                    double lc_lat_accel_max = 1.4;
-                    double filter_new = STEER_FILTER_NEW;
-                    int lc_active = (g.lc_state == 1) ||
-                                    (g.lc_state == 2 && g.lc_wait < LC_STABILIZE_S);
-                    /* v_lat 收敛检测：横向速度 < 0.15 m/s 时提前退出变道增益模式，
-                     * 避免稳定期内 steer 仍用变道参数导致过冲振荡触发 ROAD_GUARD。 */
-                    if (lc_active && g.lc_state == 2) {
-                        double v_lat_body = g.current_speed * sin(g.ego_heading - ref_road_heading);
-                        if (fabs(v_lat_body) < 0.15) lc_active = false;
-                    }
-                    if (lc_active) {
-                        /* A10 横向速度规划控制（v7 — 2026-07，适配 heading 自由积分模型）：
-                         *
-                         * 新模型下 heading 是状态量，v_lat = speed*sin(heading)。
-                         * 方案：规划 v_y_des → 推导 ψ_des → heading 跟踪 ψ_des
-                         * → v_lat 阻尼跟踪 v_y_des（而非 0）
-                         *
-                         * 关键调优：
-                         *   - k_vy 0.7：较高横向速度，快速变道避免碰撞
-                         *   - lat_kd 0.8x：heading 跟踪 ψ_des（部分增益，防振荡）
-                         *   - lat_kp 2.5x：快速变道避免碰撞
-                         *   - lat_accel 8.0：转向权限
-                         *   - filter_new 0.7：快速跟踪 ψ_des 变化 */
-                        lc_lat_kd = g.lat_kd_heading * 0.8;
-                        lc_lat_kp = g.lat_kp * 2.5;
-                        lc_lat_accel_max = 8.0;
-                        filter_new = 0.7;
-                    }
-                    /* ── 横向速度规划（PD on lateral position）──
-                     *
-                     * v_y_des = k_vy * lat_error - k_d * v_lat_actual
-                     *
-                     * 这是横向位置的 PD 控制器：
-                     *   - P 项 (k_vy * lat_error)：拉向目标，距离越远推力越大
-                     *   - D 项 (-k_d * v_lat)：阻尼，对抗当前横向速度
-                     *
-                     * 动态行为：
-                     *   起步 (v_lat=0)：v_y_des = k_vy*lat_error（全力推）
-                     *   中段 (v_lat≈v_y_des)：v_y_des 减小（D 项抵消 P 项）
-                     *   近目标 (lat_error→0, v_lat>0)：v_y_des = -k_d*v_lat（纯制动）
-                     *   到目标 (lat_error=0, v_lat=0)：v_y_des = 0（稳定）
-                     *
-                     * 阻尼编码进 psi_des → heading 控制器自然实现制动，
-                     * 无需单独 v_lat_damp steer 项。 */
+                {
                     double speed_eff = fmax(g.current_speed, 3.0);
-                    double v_y_des = 0.0;          /* 期望横向速度（巡航=0） */
-                    double psi_des = ref_road_heading; /* 期望 heading（巡航=道路切线） */
-                    double delta_ff = 0.0;         /* 前馈 steer */
-                    double v_y_ff = 0.0;
-                    double v_lat_actual = 0.0;
-                    if (lc_active) {
-                        v_lat_actual = g.current_speed *
-                            sin(g.ego_heading - ref_road_heading);
-                        if (g.lc_use_trapezoid > 0.5 && g.lc_trap_active) {
-                            v_y_ff = lc_trapezoid_vy(g, clock_now_us());
-                            double remain = (g.lc_trap_target_y - g.ego_y) * g.lc_trap_dir;
-                            /* 3.0x 安全裕量：控制器跟踪有滞后，理论制动距离不够，
-                             * 提前切断前馈让 PD 阻尼接管，避免冲过目标。 */
-                            double brake_dist = 3.0 * (v_lat_actual * v_lat_actual) /
-                                                (2.0 * fmax(g.lc_trapezoid_accel, 0.05) + 1e-6);
-                            if (remain < brake_dist && v_lat_actual * g.lc_trap_dir > 0.05) {
-                                v_y_ff = 0.0;
-                            } else if (remain <= 0.0) {
-                                v_y_ff = -g.lc_trap_dir * fmax(g.lc_trapezoid_accel, 0.05) * 0.5;
-                            }
-                            v_y_des = v_y_ff
-                                    + g.lc_trapezoid_kp * lat_error
-                                    - g.k_vy_damp * v_lat_actual;
-                            if (g.lc_use_lqr > 0.5) {
-                                double K[3];
-                                double e_phi = g.ego_heading - ref_road_heading;
-                                while (e_phi >  M_PI) e_phi -= 2.0 * M_PI;
-                                while (e_phi < -M_PI) e_phi += 2.0 * M_PI;
-                                lqr_solve_gain(g.current_speed, g.wheelbase,
-                                               g.lqr_q_ey, g.lqr_q_ephi, g.lqr_q_vlat,
-                                               g.lqr_r_steer, K);
-                                /* LQR 反馈叠加：u = -K·x，x=[e_y,e_φ,v_lat]。
-                                 * K 由 Riccati 解出（面向转向 δ），此处作为 v_y_des 的反馈修正。
-                                 * 注意：K[2]*v_lat 在转向域是阻尼，但映射到速度域后变为正反馈
-                                 * （K[2]<0，-K[2]*v_lat 与 v_lat 同号→加速而非制动）。
-                                 * 因此只用 K[0]/K[1] 做位置+航向反馈，v_lat 阻尼仍由 k_vy_damp 承担。 */
-                                double lqr_fb = -(K[0]*lat_error + K[1]*e_phi);
-                                v_y_des = v_y_ff + g.lqr_fb_scale * lqr_fb
-                                        - g.k_vy_damp * v_lat_actual;
-                            }
-                            {
-                                double vy_cap = g.lc_trapezoid_vmax;
-                                if (v_y_des >  vy_cap) v_y_des =  vy_cap;
-                                if (v_y_des < -vy_cap) v_y_des = -vy_cap;
-                            }
-                        } else {
-                            v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
-                        }
-                        /* ψ_des = road_heading + asin(v_y_des / v)，clamp ±30° */
+                    double v_lat_actual = g.current_speed *
+                        sin(g.ego_heading - ref_road_heading);
+                    /* v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual（巡航模式） */
+                    double v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
+                    double psi_des = ref_road_heading;
+                    {
                         double vy_ratio = v_y_des / speed_eff;
                         if (vy_ratio > 0.5) vy_ratio = 0.5;
                         if (vy_ratio < -0.5) vy_ratio = -0.5;
                         psi_des = ref_road_heading + asin(vy_ratio);
-                        /* δ_ff = atan(wheelbase * v_y_des / v²)：自行车稳态前馈 */
-                        delta_ff = atan(g.wheelbase * v_y_des /
-                                        (speed_eff * speed_eff + 1e-6));
                     }
-                    /* 诊断字段写入 */
-                    {
-                        double v_lat_diag = g.current_speed * sin(g.ego_heading - ref_road_heading);
-                        g.diag_v_y_des      = v_y_des;
-                        g.diag_v_y_ff       = v_y_ff;
-                        g.diag_v_lat_actual = v_lat_diag;
-                        g.diag_trap_active  = (g.lc_use_trapezoid > 0.5 && g.lc_trap_active) ? 1 : 0;
-                    }
+                    double delta_ff = atan(g.wheelbase * v_y_des /
+                                            (speed_eff * speed_eff + 1e-6));
                     /* heading_term 跟踪 ψ_des（clamp 防大角度突变） */
                     double ref_h_eff = psi_des;
                     {
@@ -1784,14 +584,9 @@ protected:
                         while (dh < -M_PI) dh += 2.0 * M_PI;
                         if (fabs(dh) > 0.5) ref_h_eff = g.ego_heading;
                     }
-                    /* cte_term：保持全力，不做近目标衰减。
-                     * 阻尼已编码进 v_y_des（PD 的 D 项），CTE 不需要让位。 */
-                    double cte_term     = atan2(lc_lat_kp * lat_error, speed_eff);
-                    double heading_term = lc_lat_kd * (g.ego_heading - ref_h_eff);
+                    double cte_term     = atan2(g.lat_kp * lat_error, speed_eff);
+                    double heading_term = g.lat_kd_heading * (g.ego_heading - ref_h_eff);
                     double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
-                    /* v_lat_damp 已废弃：阻尼现在通过 v_y_des 的 D 项
-                     * (-k_d * v_lat) 编码进 psi_des → heading 控制器自然实现制动。
-                     * 保留 yaw_damp 抑制高频 yaw 振荡。 */
                     double kappa = ref_kappa;
                     double ff_weight = 1.0;
                     if (fabs(kappa) > 1e-9) {
@@ -1800,33 +595,48 @@ protected:
                     }
                     double ff_term = g.wheelbase * kappa * ff_weight;
 
-                    /* A9 稳态巡航前馈-only 已废弃。
-                     *
-                     * 旧 flowsim 模型（steer 直驱横向位移 + heading 被道路切线
-                     * 70%/帧拽回）下，Stanley 反馈回路会以 1.6Hz 自激振荡，需要
-                     * 在中心附近切断反馈。新模型（heading 自由积分，sin(dh) 驱动
-                     * 横向位移）下 heading 不再被拽回，切断反馈 = 放任漂移，反而
-                     * 导致车在中心线附近来回晃。
-                     *
-                     * 新模型适配：lat_kd_heading 3.5（原 1.35），yaw_damping 0.3
-                     * （原 0.15），补偿失去的 heading blending 阻尼。 */
                     steer = cte_term - heading_term - yaw_damp_term + ff_term + delta_ff;
-                    double steer_limit = steer_limit_for_speed(g.current_speed, lc_lat_accel_max);
+                    double steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
-                    steer = filter_new * steer + (1.0 - filter_new) * g.prev_steer;
-                    if (!lc_active && fabs(steer) < 0.005) steer = 0.0;
+                    steer = STEER_FILTER_NEW * steer + (1.0 - STEER_FILTER_NEW) * g.prev_steer;
+                    if (fabs(steer) < 0.005) steer = 0.0;
                     g.prev_steer = steer;
                 }
             }
 
-            /* ── Safety overrides（对 MPC 和 PID 回退都生效） ── */
+            /* §11.2 降级阶梯 */
+            {
+                DegradeState* ds = degrade_global_state();
+                if (ds->degrade_level >= DEGRADE_L2) {
+                    /* MRM: 车道内减速停车 */
+                    g.target_speed = 0.0;
+                    acc_target = 0.0;
+                    g.integral = 0;
+                    mode = "MRM";
+                }
+                /* L1: 禁变道——planning 的 overtake_state 会被忽略，control 只巡航 */
+
+                /* §n: Req/Reply — 每 ~5s 查询一次 safety 状态（非阻塞同步请求） */
+                if (g.cycle % 100 == 1) {
+                    Message reply;
+                    memset(&reply, 0, sizeof(reply));
+                    int rc = message_bus_request(bus(), "safety/status", "control_node",
+                                                 nullptr, 0, &reply, 100);
+                    if (rc == 0 && reply.data_size > 0) {
+                        LOG_DEBUG("control", "safety/status: %.*s",
+                                  (int)reply.data_size, (const char*)reply.data);
+                    }
+                }
+            }
+
+            /* ── Safety overrides ── */
 
             /* 接近路沿增强拉回：|y|>4.5 时 steer_limit=0.165（低于评估器
              * 0.17 饱和阈值），但拉回力矩 ≈8.8 m/s² 足矣对抗 v_lat=3 的
              * 残余过冲，避免 ROAD_GUARD 触发后全力刹车。 */
             double y_from_center = fabs(g.ego_y - road_c);
-            if (y_from_center > 4.5 && y_from_center <= road_center_limit - 0.4) {
+            if (y_from_center > 4.5) {
                 const double near_edge_limit = 0.165;
                 if (steer >  near_edge_limit) steer =  near_edge_limit;
                 if (steer < -near_edge_limit) steer = -near_edge_limit;
@@ -1845,21 +655,18 @@ protected:
 
             /* 全域速度死锁恢复 */
             if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-                fabs(g.ego_y - road_c) <= road_center_limit - 0.4 &&
+                fabs(g.ego_y - road_c) <= ROAD_GUARD_THRESHOLD_M &&
                 g.target_speed > 1.0) {
                 throttle = 0.15;
                 brake    = 0.0;
                 mode     = "SPEED_ZERO_RECOVERY";
-                g.lc_state     = 0;
-                g.lc_attempted = 0;
-                g.lc_cooldown  = 0.0;
                 g.speed_zero_timer = 0.0;
                 LOG_WARN("control", ">>> SPEED_ZERO RECOVERY: throttle bump at y=%.2f (ego@(%.1f,%.1f)) tgt=%.1f",
                          g.ego_y, g.ego_x, g.ego_y, g.target_speed);
             }
 
             /* ROAD_GUARD：车辆偏离道路中心过远时强制回正 */
-            if (fabs(g.ego_y - road_c) > road_center_limit - 0.4) {
+            if (fabs(g.ego_y - road_c) > ROAD_GUARD_THRESHOLD_M) {
                 double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
                 steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
                 if (g.current_speed < 2.5) {
@@ -1874,36 +681,9 @@ protected:
                 mode = "ROAD_GUARD";
             }
 
-            /* ── 转向灯 / 双闪指令（意图先行，决策下发） ──
-             * 转向灯：意图先行，在变道开始前就亮灯，通知周围车辆意图。
-             *   turn_signal: 0=off, 1=left, 2=right
-             * 优先级：
-             *   1. 变道中/回切中：根据目标 y 相对当前车道中心的方向判断
-             *   2. NOA 路线意图：route_lane 已设置但 lc 尚未开始，提前亮灯
-             * 双闪：紧急停车 / 碰撞时点亮。 */
+            /* 转向灯 / 双闪指令 */
             uint8_t turn_signal = 0;
             bool    hazard      = false;
-            if (g.lc_state == 1 || g.lc_state == 3) {
-                /* 变道中或回切中：根据目标 y 相对当前车道中心的方向判断 */
-                if (g.lc_target_y < g.lc_origin_y) {
-                    turn_signal = 1;  /* left */
-                } else if (g.lc_target_y > g.lc_origin_y) {
-                    turn_signal = 2;  /* right */
-                }
-            } else if (g.route_lane >= 0 && g.route_lane != g.committed_lane_side &&
-                       g.committed_lane_side >= 0 && g.lc_cooldown <= 0.0) {
-                /* NOA 路线意图先行：route_lane 已设置但尚未触发 lc_state=1，
-                 * 提前亮灯告知周围车辆即将变道。方向：用 lane_center_y 算
-                 * 目标/当前车道中心 y 比较（与变道中逻辑一致），而非 lane idx。
-                 * lane_center_y 约定：idx 越小越靠右(y 正)，idx 越大越靠左(y 负)。 */
-                double route_center_y = lane_center_y(g.route_lane, g.lane_count, g.lane_width, road_c, 0.0);
-                double cur_center_y   = lane_center_y(g.committed_lane_side, g.lane_count, g.lane_width, road_c, 0.0);
-                if (route_center_y < cur_center_y) {
-                    turn_signal = 1;  /* 目标 y 更负(左) → 左转灯 */
-                } else if (route_center_y > cur_center_y) {
-                    turn_signal = 2;  /* 目标 y 更正(右) → 右转灯 */
-                }
-            }
             /* 紧急制动时开双闪（ROAD_GUARD / collision recovery） */
             if (strcmp(mode, "ROAD_GUARD") == 0 && brake > 0.6) {
                 hazard = true;
@@ -1918,36 +698,30 @@ protected:
             raw.speed    = (float)g.current_speed;
             raw.target   = (float)acc_target;
             raw.error    = (float)error;
+            raw.cte      = (float)lat_error;
             raw.turn_signal = turn_signal;
             raw.hazard   = hazard;
             memset(raw.mode, 0, sizeof(raw.mode));
             snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
 
-            /* 梯形剖面诊断：变道中每 0.5s 打一条 LOG */
-            if (g.diag_trap_active && (g.cycle % 10) == 0) {
-                LOG_INFO("control", "TRAP lc_state=%d lat_err=%.2f vy_ff=%.3f vy_des=%.3f v_lat=%.3f steer=%.4f y=%.2f tgt_y=%.2f",
-                         g.lc_state, lat_error, g.diag_v_y_ff, g.diag_v_y_des,
-                         g.diag_v_lat_actual, steer, g.ego_y, g.lc_target_y);
-            }
-
             uint8_t raw_buf[64];
             size_t  raw_len = sizeof(raw_buf);
             ControlRaw_serialize(&raw, raw_buf, &raw_len);
-            transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
-                              raw_buf, (uint32_t)raw_len);
+            /* 反压检测：下游 safety_control 处理不过来时跳过本帧发布 */
+            if (!message_bus_topic_is_full(bus(), TOPIC_CONTROL_RAW_CMD)) {
+                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
+                                  raw_buf, (uint32_t)raw_len);
+            }
 
             /* Also publish text format for backward compat (monitor/logging) */
-            char cmd_text[384];
+            char cmd_text[256];
             snprintf(cmd_text, sizeof(cmd_text),
                      "throttle=%.2f brake=%.2f steer=%.4f "
                      "speed=%.1f target=%.1f error=%.1f mode=%s "
-                     "turn_signal=%d hazard=%d "
-                     "vy_des=%.3f vy_ff=%.3f v_lat=%.3f trap=%d lat_err=%.2f",
+                     "turn_signal=%d hazard=%d",
                      throttle, brake, steer,
                      g.current_speed, acc_target, error, mode,
-                     (int)turn_signal, (int)hazard,
-                     g.diag_v_y_des, g.diag_v_y_ff, g.diag_v_lat_actual,
-                     g.diag_trap_active, lat_error);
+                     (int)turn_signal, (int)hazard);
             transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
@@ -1988,9 +762,9 @@ protected:
             g.prev_error = error;
 
             if (g.cycle % 20 == 1) {
-                LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f target_y=%.2f lc=%d %s",
+                LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f target_y=%.2f %s",
                          g.cycle, g.current_speed, g.target_speed,
-                         error, throttle, brake, steer, g.lane_d, effective_target_y, g.lc_state, mode);
+                         error, throttle, brake, steer, g.lane_d, effective_target_y, mode);
             }
         }
 
@@ -2003,7 +777,6 @@ protected:
 
 private:
     Transport* transport_;
-    int was_blocked_sm_{0};  /* 原 control_thread 内的 static int, 跟踪阻塞状态变化 */
 };
 
 /* ── 协程宿主线程 ─────────────────────────────────────────────── */
@@ -2025,7 +798,7 @@ void* control_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY, TOPIC_VEHICLE_STATE, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_REF_PATH, TOPIC_SCENE_FRAME, nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY, nullptr };
 static const char* s_outputs[] = { TOPIC_CONTROL_RAW_CMD, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -2052,41 +825,17 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.ego_x = g.ego_y = 0.0;
     g.lane_d = 0.0;
     g.driving_mode[0] = '\0';
-    g.route_lane = -1;  /* N 车道模型：-1=无目标 */
-
-    for (int i = 0; i < MAX_OBS; i++) {
-        g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = 0.0;
-        g.obs_valid[i] = 0;
-        g.obs_type[i][0] = '\0';
-    }
-    g.ped_index = -1;
 
     g.has_fusion = 0;
     g.has_planning = 0;
     g.last_fusion_us = 0;
     g.last_planning_us = 0;
 
-    g.lc_state = 0;
-    g.lc_attempted = 0;
-    g.lc_timer = 0.0;
-    g.lc_wait = 0.0;
-    g.lc_cooldown = 0.0;
-    g.lc_origin_y = 0.0;
-    g.lc_target_y = 0.0;
-    g.lc_target_idx = -1;
-    g.lane_width = 3.5;
-    g.lane_count = 2;  /* 默认 2 车道，flowsim 发布 road/geometry 时会按 ego road_id 实时更新 */
-    g.blocked_timeout_s = 0.0;
-
-    g.committed_lane_side = -1;  /* N 车道模型：-1=未初始化 */
     g.stuck_timer = 0.0;
     g.speed_zero_timer = 0.0;
 
     g.cycle = 0;
 
-    g.curve_start_x = 0.0;
-    g.curve_length_m = 0.0;
-    g.curve_offset_m = 0.0;
     /* NOA Phase 3.4: 弯道前馈权重提升默认参数 */
     g.curve_ff_boost_radius_m = 60.0;
     g.curve_ff_boost_factor   = 1.5;
@@ -2103,32 +852,6 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.k_v_lat          = 0.22;   /* 横向速度阻尼增益（自标定最优值）*/
     g.k_vy             = 0.35;   /* v_y_des 位置增益（止血保守值，原 0.7） */
     g.k_vy_damp        = 0.6;    /* v_y_des 速度阻尼增益 */
-    g.lc_use_trapezoid   = 1.0;
-    g.lc_trapezoid_accel = 1.2;
-    g.lc_trapezoid_vmax  = 1.5;
-    g.lc_trapezoid_kp    = 0.15;
-    g.lc_use_lqr       = 1.0;
-    g.lqr_q_ey         = 0.3;
-    g.lqr_q_ephi       = 1.0;
-    g.lqr_q_vlat       = 0.2;
-    g.lqr_r_steer      = 2.0;
-    g.lqr_fb_scale     = 0.15;
-    g.lane_width = 3.5;
-    g.blocked_timeout_s = 0.8;   /* 原 2.0s→1.2s，再缩短到 0.8s，更快响应超车机会 */
-    g.lc_stable_wait_s           = 2.0;  /* 原 8.0→4.0，再缩短到 2.0s，减少变道后无谓等待 */
-    g.lc_cooldown_after_stable_s = 0.5;  /* 原 3.0→1.5，再缩短到 0.5s */
-    g.lc_cooldown_after_return_s = 1.0;  /* 原 4.0→2.0，再缩短到 1.0s */
-    g.min_overtake_gap_base      = 10.0; /* 原 18.0→14.0，再缩短到 10.0m，更早触发超车评估 */
-    g.min_overtake_gap_cap       = 90.0; /* 原 min_overtake_gap 计算中硬编码的上限 60.0（与 best_gap<90.0 的独立筛选阈值无关），
-                                           * 提高上限避免高速场景 min_overtake_gap 被过度收窄导致无法触发超车 */
-    g.min_overtake_gap_speed_mult = 0.7; /* 原硬编码 current_speed * 2.0（绝对速度），改为相对速度乘数，避免高速下 gap 永远无法满足 */
-    g.steer_min_clamp             = 0.016; /* 原硬编码 0.012，提高最小转向钳位以缩短高速变道耗时 */
-
-    /* MPC 默认配置必须在 params_json 解析之前取，否则 JSON 里的 mpc_* 会被
-     * 后面的 mpc_default_config() 整体覆盖回默认值。 */
-    g.mpc_config = mpc_default_config();
-    g.mpc_config.wheelbase = g.wheelbase;  /* 与 control 节点轴距一致 */
-
     /* A-2 修复：先解析 JSON 配置（pipeline_car.json 等通过 params_json 传入），
      * 把 JSON 中的值刷入 g.* 字段；随后 param_register_* 用这些（可能被 JSON
      * 覆盖过的）值作为代码默认值注册。若 bootstrap 已把同名参数预加载进
@@ -2161,42 +884,6 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.k_vy = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "k_vy_damp");
             if (cJSON_IsNumber(j)) g.k_vy_damp = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_use_trapezoid");
-            if (cJSON_IsNumber(j)) g.lc_use_trapezoid = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_accel");
-            if (cJSON_IsNumber(j)) g.lc_trapezoid_accel = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_vmax");
-            if (cJSON_IsNumber(j)) g.lc_trapezoid_vmax = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_trapezoid_kp");
-            if (cJSON_IsNumber(j)) g.lc_trapezoid_kp = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_use_lqr");
-            if (cJSON_IsNumber(j)) g.lc_use_lqr = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_ey");
-            if (cJSON_IsNumber(j)) g.lqr_q_ey = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_ephi");
-            if (cJSON_IsNumber(j)) g.lqr_q_ephi = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_q_vlat");
-            if (cJSON_IsNumber(j)) g.lqr_q_vlat = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_r_steer");
-            if (cJSON_IsNumber(j)) g.lqr_r_steer = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lqr_fb_scale");
-            if (cJSON_IsNumber(j)) g.lqr_fb_scale = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lane_change_blocked_timeout_s");
-            if (cJSON_IsNumber(j)) g.blocked_timeout_s = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_stable_wait_s");
-            if (cJSON_IsNumber(j)) g.lc_stable_wait_s = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_cooldown_after_stable_s");
-            if (cJSON_IsNumber(j)) g.lc_cooldown_after_stable_s = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "lc_cooldown_after_return_s");
-            if (cJSON_IsNumber(j)) g.lc_cooldown_after_return_s = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_base");
-            if (cJSON_IsNumber(j)) g.min_overtake_gap_base = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_cap");
-            if (cJSON_IsNumber(j)) g.min_overtake_gap_cap = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_speed_mult");
-            if (cJSON_IsNumber(j)) g.min_overtake_gap_speed_mult = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "steer_min_clamp");
-            if (cJSON_IsNumber(j)) g.steer_min_clamp = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "wheelbase");
             if (cJSON_IsNumber(j)) g.wheelbase = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "ldw_threshold");
@@ -2210,27 +897,15 @@ static int control_init(MessageBus* bus, Transport* transport,
             if (cJSON_IsNumber(j)) g.curve_ff_boost_radius_m = j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(p, "curve_ff_boost_factor");
             if (cJSON_IsNumber(j)) g.curve_ff_boost_factor = j->valuedouble;
-            /* MPC 权重/时域。此前 pipeline.json 里写着 "mpc_horizon": 15.0
-             * 却没有对应的解析分支，那行 JSON 是死字符串，实跑的是注册默认值 10。
-             * 补齐后 ρ = r_ddelta / q_y 可以只改 JSON 扫参，不必重编译。 */
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_horizon");
-            if (cJSON_IsNumber(j)) g.mpc_config.horizon = (int)j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_dt");
-            if (cJSON_IsNumber(j)) g.mpc_config.dt = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_x");
-            if (cJSON_IsNumber(j)) g.mpc_config.q_x = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_y");
-            if (cJSON_IsNumber(j)) g.mpc_config.q_y = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_theta");
-            if (cJSON_IsNumber(j)) g.mpc_config.q_theta = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_v");
-            if (cJSON_IsNumber(j)) g.mpc_config.q_v = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_r_a");
-            if (cJSON_IsNumber(j)) g.mpc_config.r_a = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_q_delta");
-            if (cJSON_IsNumber(j)) g.mpc_config.q_delta = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(p, "mpc_r_ddelta");
-            if (cJSON_IsNumber(j)) g.mpc_config.r_ddelta = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ltv_mpc_enable");
+            if (cJSON_IsNumber(j)) g.use_ltv_mpc = (j->valuedouble > 0.5) ? 1 : 0;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ltv_q_y");
+            if (cJSON_IsNumber(j)) g.ltv_mpc_cfg.q_y = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ltv_q_psi");
+            if (cJSON_IsNumber(j)) g.ltv_mpc_cfg.q_psi = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ltv_r_ddelta");
+            if (cJSON_IsNumber(j)) g.ltv_mpc_cfg.r_ddelta = j->valuedouble;
+            
             cJSON_Delete(p);
             g.kp = g.cfg_kp; g.ki = g.cfg_ki; g.kd = g.cfg_kd;
         }
@@ -2244,7 +919,6 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.pid_ki", g.cfg_ki, 0.0, 1000.0, "PID integral gain");
     param_register_float("control.pid_kd", g.cfg_kd, 0.0, 2000.0, "PID derivative gain");
     param_register_float("control.cruise_speed", g.cfg_cruise_speed, 1.0, 50.0, "Target cruise speed m/s");
-    param_register_float("control.lane_width", g.lane_width, 2.5, 5.0, "Lane width meters");
     param_register_float("control.lat_kp", g.lat_kp, 0.0, 2.0, "Lateral P gain");
     param_register_float("control.lat_kd_heading", g.lat_kd_heading, 0.0, 5.0, "Heading damping gain");
     param_register_float("control.yaw_damping", g.yaw_damping, 0.0, 2.0, "Yaw rate damping gain (suppress limit-cycle oscillation)");
@@ -2252,37 +926,6 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
     param_register_float("control.k_vy", g.k_vy, 0.0, 2.0, "v_y_des position gain: v_y_des = k_vy*lat_error - k_vy_damp*v_lat");
     param_register_float("control.k_vy_damp", g.k_vy_damp, 0.0, 2.0, "v_y_des velocity damping gain (D term of lateral PD)");
-    param_register_float("control.lc_use_trapezoid", g.lc_use_trapezoid, 0.0, 1.0, "Trapezoid lateral velocity profile enable (>0.5=ff+PD, <=0.5=pure PD)");
-    param_register_float("control.lc_trapezoid_accel", g.lc_trapezoid_accel, 0.1, 5.0, "Trapezoid lateral acceleration m/s^2");
-    param_register_float("control.lc_trapezoid_vmax", g.lc_trapezoid_vmax, 0.2, 4.0, "Trapezoid peak lateral velocity m/s");
-    param_register_float("control.lc_trapezoid_kp", g.lc_trapezoid_kp, 0.0, 1.0, "Trapezoid mode position feedback gain");
-    param_register_float("control.lc_use_lqr", g.lc_use_lqr, 0.0, 1.0, "LQR feedback enable (>0.5=LQR, <=0.5=manual PD)");
-    param_register_float("control.lqr_q_ey", g.lqr_q_ey, 0.0, 10.0, "LQR lateral position error weight");
-    param_register_float("control.lqr_q_ephi", g.lqr_q_ephi, 0.0, 10.0, "LQR heading error weight");
-    param_register_float("control.lqr_q_vlat", g.lqr_q_vlat, 0.0, 10.0, "LQR lateral velocity weight");
-    param_register_float("control.lqr_r_steer", g.lqr_r_steer, 0.01, 5.0, "LQR steering control cost (smaller=more aggressive)");
-    param_register_float("control.lqr_fb_scale", g.lqr_fb_scale, 0.0, 1.0, "LQR feedback scale (maps steering-domain K to v_y_des)");
-    param_register_float("control.blocked_timeout_s", g.blocked_timeout_s, 0.5, 30.0, "Blocked timeout seconds");
-    param_register_float("control.lc_stable_wait_s", g.lc_stable_wait_s, 1.0, 30.0, "Post lane-change stable cruise wait seconds");
-    param_register_float("control.lc_cooldown_after_stable_s", g.lc_cooldown_after_stable_s, 0.0, 30.0, "Cooldown after stable cruise period");
-    param_register_float("control.lc_cooldown_after_return_s", g.lc_cooldown_after_return_s, 0.0, 30.0, "Cooldown after returning to original lane");
-    param_register_float("control.min_overtake_gap_base", g.min_overtake_gap_base, 1.0, 100.0, "Base min lead gap to trigger overtake (m)");
-    param_register_float("control.min_overtake_gap_cap", g.min_overtake_gap_cap, 1.0, 200.0, "Max clip for min overtake gap at high speed (m)");
-    param_register_float("control.min_overtake_gap_speed_mult", g.min_overtake_gap_speed_mult, 0.0, 5.0, "Relative-speed multiplier for min overtake gap formula");
-    param_register_float("control.steer_min_clamp", g.steer_min_clamp, 0.001, 0.1, "Minimum steer limit clamp at high speed (rad)");
-
-    /* MPC 参数注册。默认值取自 g.mpc_config —— 即 mpc_default_config() 经
-     * params_json 覆盖后的值，与上面 PID 的 register(g.cfg_*) 同一 pattern。
-     * 此前这里写死字面量，导致 pipeline.json 即使能解析也会被注册值盖掉。 */
-    param_register_float("control.mpc_horizon",  (float)g.mpc_config.horizon, 0,    MPC_MAX_HORIZON, "MPC prediction horizon steps");
-    param_register_float("control.mpc_dt",       (float)g.mpc_config.dt,      0.01, 0.5,   "MPC discrete time step (s)");
-    param_register_float("control.mpc_q_x",      (float)g.mpc_config.q_x,     0.0,  100.0, "MPC cost weight x (longitudinal)");
-    param_register_float("control.mpc_q_y",      (float)g.mpc_config.q_y,     0.0,  100.0, "MPC cost weight y (lateral)");
-    param_register_float("control.mpc_q_theta",  (float)g.mpc_config.q_theta, 0.0,  100.0, "MPC cost weight heading");
-    param_register_float("control.mpc_q_v",      (float)g.mpc_config.q_v,     0.0,  100.0, "MPC cost weight speed");
-    param_register_float("control.mpc_r_a",      (float)g.mpc_config.r_a,     0.0,  10.0,  "MPC cost weight acceleration");
-    param_register_float("control.mpc_q_delta",  (float)g.mpc_config.q_delta, 0.0,  100.0, "MPC cost weight steering angle state (vs delta_ref)");
-    param_register_float("control.mpc_r_ddelta", (float)g.mpc_config.r_ddelta, 0.0, 20.0,  "MPC cost weight steering rate dδ (higher = less oscillation)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
      * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；
@@ -2291,91 +934,40 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.ki = param_get_float("control.pid_ki");
     g.kd = param_get_float("control.pid_kd");
     g.cfg_cruise_speed = param_get_float("control.cruise_speed");
-    g.lane_width       = param_get_float("control.lane_width");
     g.lat_kp           = param_get_float("control.lat_kp");
     g.lat_kd_heading   = param_get_float("control.lat_kd_heading");
-    g.blocked_timeout_s = param_get_float("control.blocked_timeout_s");
-    g.lc_stable_wait_s           = param_get_float("control.lc_stable_wait_s");
-    g.lc_cooldown_after_stable_s = param_get_float("control.lc_cooldown_after_stable_s");
-    g.lc_cooldown_after_return_s = param_get_float("control.lc_cooldown_after_return_s");
-    g.min_overtake_gap_base      = param_get_float("control.min_overtake_gap_base");
-    g.min_overtake_gap_cap       = param_get_float("control.min_overtake_gap_cap");
-    g.min_overtake_gap_speed_mult = param_get_float("control.min_overtake_gap_speed_mult");
-    g.steer_min_clamp             = param_get_float("control.steer_min_clamp");
-    g.yaw_damping                 = param_get_float("control.yaw_damping");
-    g.lat_lookahead_gain          = param_get_float("control.lat_lookahead_gain");
-    g.k_v_lat                     = param_get_float("control.k_v_lat");
-    g.lc_use_trapezoid           = param_get_float("control.lc_use_trapezoid");
-    g.lc_trapezoid_accel         = param_get_float("control.lc_trapezoid_accel");
-    g.lc_trapezoid_vmax          = param_get_float("control.lc_trapezoid_vmax");
-    g.lc_trapezoid_kp            = param_get_float("control.lc_trapezoid_kp");
-    g.lc_use_lqr                 = param_get_float("control.lc_use_lqr");
-    g.lqr_q_ey                   = param_get_float("control.lqr_q_ey");
-    g.lqr_q_ephi                 = param_get_float("control.lqr_q_ephi");
-    g.lqr_q_vlat                 = param_get_float("control.lqr_q_vlat");
-    g.lqr_r_steer                = param_get_float("control.lqr_r_steer");
-    g.lqr_fb_scale               = param_get_float("control.lqr_fb_scale");
-
-    /* ── MPC 控制器初始化 ──
-     * g.mpc_config 已在 params_json 解析前由 mpc_default_config() 填好，
-     * 并被 JSON 覆盖过；此处从 registry 回读一次，覆盖 bootstrap 预加载的值。
-     * 权重/时域的逐帧热重载在 control_tick 里做（mpc_set_weights）。 */
-    g.mpc_config.horizon  = (int)param_get_float("control.mpc_horizon");
-    g.mpc_config.dt       = param_get_float("control.mpc_dt");
-    g.mpc_config.q_x      = param_get_float("control.mpc_q_x");
-    g.mpc_config.q_y      = param_get_float("control.mpc_q_y");
-    g.mpc_config.q_theta  = param_get_float("control.mpc_q_theta");
-    g.mpc_config.q_v      = param_get_float("control.mpc_q_v");
-    g.mpc_config.r_a      = param_get_float("control.mpc_r_a");
-    g.mpc_config.q_delta  = param_get_float("control.mpc_q_delta");
-    g.mpc_config.r_ddelta = param_get_float("control.mpc_r_ddelta");
-    g.mpc = mpc_create(&g.mpc_config);
-    g.mpc_initialized = (g.mpc && g.mpc_config.horizon > 0) ? 1 : 0;
-    if (g.mpc_initialized) {
-        LOG_INFO("control", "MPC initialized (horizon=%d dt=%.3f q_y=%.1f r_a=%.3f)",
-                 g.mpc_config.horizon, g.mpc_config.dt,
-                 g.mpc_config.q_y, g.mpc_config.r_a);
-    } else {
-        if (g.mpc) {
-            /* MPC 对象已创建但 horizon=0，不启用，回退 Stanley */
-            mpc_destroy(g.mpc);
-            g.mpc = nullptr;
-        }
-        LOG_INFO("control", "MPC disabled (horizon=0) — using PID+Stanley");
-    }
+    g.yaw_damping      = param_get_float("control.yaw_damping");
+    g.lat_lookahead_gain = param_get_float("control.lat_lookahead_gain");
+    g.k_v_lat          = param_get_float("control.k_v_lat");
+    g.k_vy             = param_get_float("control.k_vy");
+    g.k_vy_damp        = param_get_float("control.k_vy_damp");
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, g_ctl_transitions, SM_STATE_INITIALIZED, "control");
     statem_send_event(&g.sm, SM_EVENT_START, nullptr);  /* INITIALIZED → RUNNING */
 
-    /* Phase 2: 道路几何从 road/geometry topic 获取（flowsim_node 发布），
-     * 不再独立 scenario_load。 */
+    /* 订阅：只订阅 fusion/localization 和 planning/trajectory。
+     * road/geometry 和 road/ref_path 不再独立于 planning 订阅。 */
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
-    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
-    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
-    transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_ref_path, nullptr);
-    transport_subscribe(transport, TOPIC_INFERENCE_CONTROL_DELTA, on_learn_delta, nullptr);
-    transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
     transport_advertise(transport, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, OBSTACLELIST_TYPE_ID,
-                        CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
-                        CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_ROAD_REF_PATH, 0x7E5A3C11u,
-                        CAP_SUBSCRIBER, 0);
-    discovery_advertise(discovery, TOPIC_SCENE_FRAME,         0x5CF12A60u,
-                        CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);
 
     g.task = std::make_unique<ControlTask>(bus, transport);
+
+    /* LTV MPC 初始化 */
+    g.ltv_mpc_cfg = ltv_mpc_default_config();
+    g.ltv_mpc_cfg.wheelbase = g.wheelbase;
+    g.ltv_mpc_cfg.horizon = 20;
+    g.ltv_mpc_cfg.dt = 0.05;
+    g.use_ltv_mpc = 0;  /* 默认禁用，通过 JSON 参数启用 */
 
     LOG_INFO("control", "initialized (FlowCoro, PID: kp=%.0f ki=%.0f kd=%.0f)",
              g.kp, g.ki, g.kd);

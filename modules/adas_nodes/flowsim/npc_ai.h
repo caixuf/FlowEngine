@@ -76,6 +76,7 @@ struct NpcAiConfig {
     double mobil_gain_threshold{0.5};   /**< MOBIL 增益阈值 (m/s²)，gain>此值才变道（原 0.2 太频繁） */
     double mobil_back_look{20.0};       /**< 后向搜索距离 (m)，加大让更多后车参与评估 */
     double mobil_lane_change_cooldown{8.0}; /**< 变道冷却时间 (s)，原 4s 太短导致频繁变道 */
+    bool   enable_mobil{false};         /**< 启用 MOBIL 自主变道（场景开关，默认关闭） */
 };
 
 /* ── 统一状态机：转移请求事件 ──

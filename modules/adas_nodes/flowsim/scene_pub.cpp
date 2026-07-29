@@ -246,6 +246,7 @@ cJSON* build_ego_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "heading", e.heading);
     cJSON_AddNumberToObject(j, "speed", e.speed);
     cJSON_AddNumberToObject(j, "steer", e.steer);
+    cJSON_AddNumberToObject(j, "yaw_rate", e.yaw_rate);
     cJSON_AddNumberToObject(j, "throttle", e.throttle);
     cJSON_AddNumberToObject(j, "brake", e.brake);
     cJSON_AddNumberToObject(j, "length", e.length);
@@ -270,6 +271,7 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "y", e.y);
     cJSON_AddNumberToObject(j, "heading", e.heading);
     cJSON_AddNumberToObject(j, "speed", e.speed);
+    cJSON_AddNumberToObject(j, "yaw_rate", e.yaw_rate);
     cJSON_AddNumberToObject(j, "length", e.length);
     cJSON_AddNumberToObject(j, "width", e.width);
     cJSON_AddStringToObject(j, "ai_state", npc_state_str(e.state));

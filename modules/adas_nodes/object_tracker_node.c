@@ -67,6 +67,7 @@ static struct {
     double obs_length[KTRACKER_MAX_DETS];
     double obs_confidence[KTRACKER_MAX_DETS];
     int    obs_cls[KTRACKER_MAX_DETS];
+    int    obs_lane_id[KTRACKER_MAX_DETS];
     int    obs_count;
     volatile int has_new_data;
 
@@ -104,6 +105,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
         g.obs_length[i]    = (double)o->length;
         g.obs_cls[i]       = (int)o->type;
         g.obs_confidence[i]= (double)o->confidence;
+        g.obs_lane_id[i]   = (int)o->lane_id;
     }
 
     g.has_new_data = 1;

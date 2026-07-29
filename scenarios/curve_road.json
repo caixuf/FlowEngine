@@ -1,0 +1,42 @@
+{
+  "name": "curve_road",
+  "description": "S 弯场景：R≈500m 左弯 + R≈200m 右弯，验证曲率限速和 LTV MPC kappa 前馈。双向 4 车道，3000m 弯道路段，无 NPC（先验证曲率通道）。",
+  "random_seed": 42,
+  "duration_s": 0,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 10.0,
+    "target_speed": 18.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "name": "s_curve",
+        "length_m": 3000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 22.0,
+        "nodes": [
+          [0,0,0], [200,0,0],
+          [400,20,0], [600,60,0], [800,100,0],
+          [1000,120,0], [1200,120,0],
+          [1400,100,0], [1600,50,0], [1800,-20,0],
+          [2000,-60,0], [2400,-60,0], [3000,-60,0]
+        ]
+      }
+    ]
+  },
+  "actors": [],
+  "traffic_lights": [],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 60.0,
+    "min_avg_speed_mps": 5.0
+  },
+  "route": [],
+  "scenarios": []
+}

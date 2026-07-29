@@ -810,6 +810,7 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(vstate, "brk", ego.brake);
     cJSON_AddNumberToObject(vstate, "tgt", ego.target_vx);
     cJSON_AddNumberToObject(vstate, "st", ego.steer);
+    cJSON_AddNumberToObject(vstate, "yr", ego.yaw_rate);
     cJSON_AddNumberToObject(vstate, "t_us", (double)sim_time_us);
     cJSON_AddNumberToObject(vstate, "road_id", (double)ego.road_id);
     cJSON_AddNumberToObject(vstate, "lane_id", (double)ego.lane_id);
@@ -1518,6 +1519,10 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     g.curve_offset_m = g.scenario->road.curve_offset_m;
     if (g.scenario->ego.init_speed > 0)   g.init_speed   = g.scenario->ego.init_speed;
     if (g.scenario->ego.target_speed > 0) g.target_speed = g.scenario->ego.target_speed;
+
+    /* NPC 行为开关：启用 MOBIL 自主变道 */
+    g.ai_cfg.enable_mobil = g.scenario->npc_lane_change;
+
     srand(g.random_seed);
 
     /* JSON → xodr → esmini RoadManager */

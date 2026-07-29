@@ -37,16 +37,26 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
     e.speed += accel * dt;
     if (e.speed < 0.0) e.speed = 0.0;
 
-    // 限幅方向盘转角，避免 tan 饱和
-    if (steer > 0.25) steer = 0.25;
-    if (steer < -0.25) steer = -0.25;
-    e.steer = steer;
+    // ── 一阶执行器滞后 + 速率限幅 ──
+    // steer_cmd 是指令，e.steer 是实际转角（有状态）。
+    // τ≈0.15s 是典型 EPS 响应
+    double steer_cmd = steer;
+    if (steer_cmd >  0.25) steer_cmd =  0.25;
+    if (steer_cmd < -0.25) steer_cmd = -0.25;
 
-    // 横向：自行车运动学
-    e.heading += (e.speed / e.wheelbase) * std::tan(steer) * dt;
+    double alpha = dt / (e.steer_tau + dt);          // τ=0.15
+    double steer_next = e.steer + alpha * (steer_cmd - e.steer);
+
+    double max_rate = e.steer_rate_max * dt;         // 0.6 rad/s
+    double d = steer_next - e.steer;
+    if (d >  max_rate) steer_next = e.steer + max_rate;
+    if (d < -max_rate) steer_next = e.steer - max_rate;
+    e.steer = steer_next;
+
+    // ── 显式 yaw_rate ──
+    e.yaw_rate = (e.speed / e.wheelbase) * std::tan(e.steer);
+    e.heading += e.yaw_rate * dt;
     // 航向归一化到 [-π, π]
-    // 用 while 而非 if：heading 可能因多圈累计（如高速原地打方向盘）远超 2π，
-    // 单次 if 只减一个 2π 不足以归一化，会留下 [π, 3π] 等区间导致下游 cos/sin 错。
     while (e.heading >  M_PI) e.heading -= 2.0 * M_PI;
     while (e.heading < -M_PI) e.heading += 2.0 * M_PI;
 
@@ -75,6 +85,10 @@ void step_bicycle_dynamic(Entity& e, double dt, double throttle, double brake, d
 }
 
 void apply_vehicle_defaults(Entity& e) {
+    /* 执行器滞后参数：所有车辆共用默认值 */
+    e.steer_tau = 0.15;
+    e.steer_rate_max = 0.6;
+
     switch (e.type) {
         case EntityType::Truck:
             e.length = 8.0;  e.width = 2.4;

@@ -128,12 +128,28 @@
       "params": "{\"frequency_hz\":10.0}"
     },
     {
+      "name": "object_tracker",
+      "library_path": "build/lib/libobject_tracker_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "perception/obstacles"
+      ],
+      "publish": [
+        {
+          "topic": "perception/tracked_objects",
+          "type": "TrackedObjectList"
+        }
+      ],
+      "params": "{}"
+    },
+    {
       "name": "fusion",
       "library_path": "build/lib/libfusion_node.so",
       "auto_start": true,
       "subscribe": [
-        "sensor/lidar",
-        "sensor/gps"
+        "perception/tracked_objects",
+        "sensor/gps",
+        "sensor/lidar"
       ],
       "publish": [
         {
@@ -151,6 +167,29 @@
       "params": "{\"frequency_hz\":20.0}"
     },
     {
+      "name": "behavior_planner",
+      "library_path": "build/lib/libbehavior_planner_node.so",
+      "auto_start": true,
+      "subscribe": [
+        "fusion/localization",
+        "perception/tracked_objects",
+        "road/geometry"
+      ],
+      "publish": [
+        {
+          "topic": "planning/behavior",
+          "type": "Behavior",
+          "qos": {
+            "depth": 1,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 50
+          }
+        }
+      ],
+      "params": "{\"target_speed\":12.0}"
+    },
+    {
       "name": "planning",
       "library_path": "build/lib/libplanning_node.so",
       "auto_start": true,
@@ -159,7 +198,8 @@
         "perception/obstacles",
         "road/geometry",
         "road/traffic_lights",
-        "scene/frame"
+        "scene/frame",
+        "planning/behavior"
       ],
       "publish": [
         {
@@ -179,9 +219,7 @@
       "subscribe": [
         "fusion/localization",
         "planning/trajectory",
-        "vehicle/state",
-        "road/geometry",
-        "scene/frame"
+        "road/ref_path"
       ],
       "publish": [
         {
@@ -195,7 +233,7 @@
           }
         }
       ],
-      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 12.0, \"lat_kp\": 0.5, \"lat_kd_heading\": 3.5, \"yaw_damping\": 0.28, \"k_v_lat\": 0.5, \"k_vy\": 0.35, \"k_vy_damp\": 1.2, \"lc_use_trapezoid\": 1.0, \"lc_trapezoid_accel\": 2.0, \"lc_trapezoid_vmax\": 0.4, \"lc_trapezoid_kp\": 0.15, \"lc_use_lqr\": 0.0, \"lqr_q_ey\": 0.3, \"lqr_q_ephi\": 1.0, \"lqr_q_vlat\": 0.2, \"lqr_r_steer\": 2.0, \"lane_change_blocked_timeout_s\": 0.6, \"lc_stable_wait_s\": 3.0, \"lc_cooldown_after_stable_s\": 5.0, \"lc_cooldown_after_return_s\": 3.0, \"min_overtake_gap_base\": 12.0, \"min_overtake_gap_cap\": 90.0, \"min_overtake_gap_speed_mult\": 0.8, \"steer_min_clamp\": 0.016, \"mpc_horizon\": 0, \"mpc_dt\": 0.05, \"mpc_q_x\": 1.0, \"mpc_q_y\": 8.0, \"mpc_q_theta\": 3.0, \"mpc_q_v\": 2.0, \"mpc_r_a\": 0.1, \"mpc_q_delta\": 2.0, \"mpc_r_ddelta\": 5.0, \"scenario_file\": \"scenarios/straight_road.json\", \"lqr_fb_scale\": 0.1}"
+      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 12.0, \"lat_kp\": 0.5, \"lat_kd_heading\": 3.5, \"yaw_damping\": 0.28, \"k_v_lat\": 0.5, \"k_vy\": 0.35, \"k_vy_damp\": 1.2, \"mpc_horizon\": 0, \"scenario_file\": \"scenarios/straight_road.json\"}"
     },
     {
       "name": "safety_control",

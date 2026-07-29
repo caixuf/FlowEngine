@@ -347,16 +347,56 @@ fi
 # ── Live monitor ────────────────────────────────────────────
 echo "───[5/5] Live monitor (${DURATION}s)..."
 echo ""
-echo "  ┌─ FlowSim ─→  Perception ─→  Fusion  ─→  Planning ─→  Control ┐"
-echo "  │  dynamics      DBSCAN          EKF          Frenet       PID      │"
-echo "  └───────────────────────────────────────────────────────────────────┘"
+
+# 准备行为日志过滤（tail stderr，筛选 [BEH] 和 [SM] 日志行）
+BEH_LOG="/tmp/flow_beh_monitor.txt"
+: > "$BEH_LOG"  # 清空
+sleep 1  # 等 stderr 文件就绪
+{
+  tail -F /tmp/flow_launcher_stderr.txt 2>/dev/null \
+    | grep --line-buffered -E '\[(BEH|SM)\]' \
+    > "$BEH_LOG"
+} &
+TAIL_BEH_PID=$!
+# cleanup 时 kill tail
+trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup" EXIT
+trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 130" INT
+trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 143" TERM
+
+echo "  ┌─ FlowSim ─→ Perception ─→ Behavior ─→ Planning ─→ Control ┐"
+echo "  │  dynamics      DBSCAN        SM        Frenet       PID      │"
+echo "  └──────────────────────────────────────────────────────────────┘"
 echo ""
 
 ELAPSED=0
+BEH_LINECOUNT=0
 # 持续运行: DURATION=0 时无限循环，直到脚本被 Ctrl+C 终止
 while true; do
   # 限时模式: 达到时长后退出循环
   if [ "$DURATION" -gt 0 ] 2>/dev/null && [ $ELAPSED -ge $DURATION ]; then break; fi
+
+  # ── 显示新增的 [BEH] / [SM] 日志行 ──
+  if [ -f "$BEH_LOG" ]; then
+    CURRENT_LC=$(wc -l < "$BEH_LOG" 2>/dev/null || echo 0)
+    if [ "$CURRENT_LC" -gt "$BEH_LINECOUNT" ]; then
+      # 显示新增的行（最多 5 行，避免刷屏）
+      DISPLAY_LINES=$((CURRENT_LC - BEH_LINECOUNT))
+      [ "$DISPLAY_LINES" -gt 5 ] && DISPLAY_LINES=5
+      START_LINE=$((CURRENT_LC - DISPLAY_LINES + 1))
+      [ "$START_LINE" -le 0 ] && START_LINE=1
+      sed -n "${START_LINE},${CURRENT_LC}p" "$BEH_LOG" 2>/dev/null | while IFS= read -r line; do
+        # 高亮：[BEH] 用青色，[SM] 用黄色
+        if echo "$line" | grep -q '\[BEH\]'; then
+          echo -e "\n  \033[36m$(echo "$line" | grep -oP '\[BEH\].*' || echo "$line")\033[0m"
+        elif echo "$line" | grep -q '\[SM\]'; then
+          echo -e "\n  \033[33m$(echo "$line" | grep -oP '\[SM\].*' || echo "$line")\033[0m"
+        fi
+      done
+      BEH_LINECOUNT=$CURRENT_LC
+    fi
+  fi
+
+  # ── 主状态行 ──
   if [ -f "$JSON_FILE" ]; then
     STATS=$(python3 -c "
 import json
@@ -366,7 +406,10 @@ m=d.get('metrics',{})
 b=m.get('bus',{})
 l=m.get('latency',{})
 v=m.get('vehicle',{})
-print(f\"pub={b.get('published',0)} del={b.get('delivered',0)} lat={l.get('avg_us',0)}us speed={v.get('speed',0):.1f}m/s\")
+beh=m.get('behavior',{})
+state=beh.get('state','?')
+lane=beh.get('committed_lane',-1)
+print(f\"pub={b.get('published',0)} del={b.get('delivered',0)} lat={l.get('avg_us',0)}us speed={v.get('speed',0):.1f}m/s beh={state} lane={lane}\")
 " 2>/dev/null)
     printf "\r  ⏱ %3ds  |  %s  " "$ELAPSED" "$STATS"
   else

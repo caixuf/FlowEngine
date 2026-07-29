@@ -16,6 +16,8 @@
 #include "node_plugin.h"
 #include "topic_registry.h"
 #include "adas_msgs_gen.h"
+#include "degrade_ladder.h"
+#include "clock_service.h"
 #include <cjson/cJSON.h>
 
 #include <algorithm>
@@ -340,15 +342,27 @@ public:
 protected:
     Task run() override {
         uint32_t cycle = 0;
+        uint64_t last_msg_us = clock_now_us();
+        bool last_has_state = false;
 
         LOG_INFO("safety_control", "safety gate started (synchronous resume)");
         while (!should_stop()) {
             auto r = co_await when_any_bus_for(bus(), {"control/raw_cmd", "inference/raw_cmd"}, 50000);
-            if (r.status == AwaitStatus::Timeout) continue;  // 50ms 周期醒来查 should_stop
+            if (r.status == AwaitStatus::Timeout) {
+                /* §11.2 数据超时检查 */
+                uint64_t now_us = clock_now_us();
+                if (now_us - last_msg_us > 1000000ULL) {
+                    /* 数据超时 > 1s → L3 立即停 */
+                    degrade_set_level(DEGRADE_L3, DEGRADE_REASON_HEARTBEAT);
+                }
+                continue;  // 50ms 周期醒来查 should_stop
+            }
             if (!r.ok()) continue;
             Message msg = r.message;
             if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
                 std::strcmp(msg.topic, "inference/raw_cmd") != 0) continue;
+
+            last_msg_us = clock_now_us();
 
             ControlCmd cmd = parse_control_cmd(msg);
             VehicleState state;
@@ -377,6 +391,15 @@ private:
             if (std::fabs(field - value) > 1e-6) changed = true;
             field = value;
         };
+
+        /* §11.2 降级触发 */
+        {
+            static int degrade_counter = 0;
+            if (!has_state) {
+                /* 传感器融合丢失 → L1 降级 */
+                degrade_set_level(DEGRADE_L1, DEGRADE_REASON_FUSION_TO);
+            }
+        }
 
         set_changed(cmd.throttle, clamp(cmd.throttle, 0.0, params_.max_throttle));
         set_changed(cmd.brake, clamp(cmd.brake, 0.0, params_.max_brake));
@@ -409,6 +432,10 @@ private:
                 set_changed(cmd.brake, std::max(cmd.brake, brake_floor));
                 if (ttc < 1.0 || (risk_dx < 6.5 && risk_dy < 1.9)) {
                     set_changed(cmd.brake, 1.0);
+                }
+                /* §11.2 TTC 过低 → L2 MRM 降级 */
+                if (ttc < 1.5) {
+                    degrade_set_level(DEGRADE_L2, DEGRADE_REASON_COLLISION);
                 }
             }
 
@@ -521,7 +548,10 @@ private:
         uint8_t buf[32];
         size_t len = sizeof(buf);
         ControlCmd_serialize(&bin, buf, &len);
-        transport_publish(transport_, "control/cmd", buf, (uint32_t)len);
+        /* 反压检测：下游订阅者处理不过来时跳过本帧发布 */
+        if (!message_bus_topic_is_full(bus(), "control/cmd")) {
+            transport_publish(transport_, "control/cmd", buf, (uint32_t)len);
+        }
 
         /* Text format for logging/backward compat */
         char out[320];
@@ -579,6 +609,20 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_advertise(transport, "control/cmd", CONTROL_CMD_TYPE_ID);
+
+    /* §n: 注册 Req/Reply 服务 — 查询安全状态 */
+    message_bus_register_service(bus, "safety/status", [](const Message* req, Message* rep, void*) {
+        (void)req;
+        char buf[128];
+        int n = snprintf(buf, sizeof(buf),
+            "{\"speed\":%.1f,\"has_state\":%s}",
+            g.latest_state.speed,
+            g.has_state ? "true" : "false");
+        if (n > 0 && (size_t)n < sizeof(buf) && (size_t)n <= sizeof(rep->data)) {
+            memcpy(rep->data, buf, (size_t)n);
+            rep->data_size = (uint32_t)n;
+        }
+    }, nullptr);
 
     discovery_advertise(discovery, "control/raw_cmd", CONTROL_RAW_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u, CAP_SUBSCRIBER, 0);

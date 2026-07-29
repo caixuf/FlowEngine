@@ -529,8 +529,7 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
      *      返回负加速度，应改用标准 IDM (1-(v/v0)^4) 项）
      *   3. 验证 lane_change_timer 冷却期间 target_offset 平滑插值无抖动
      * ────────────────────────────────────────────────────────────── */
-#if 0
-    {
+    if (cfg.enable_mobil) {
         // 仲裁门禁：存在更高优先级的横向控制时跳过
         if (npc.state == NpcState::CutIn ||
             npc.state == NpcState::LaneChange) { goto mobil_done; }
@@ -606,7 +605,6 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         }
 mobil_done: ;
     }
-#endif  /* MOBIL 自主变道禁用 */
 
     // 2. 计算 v_desired（碰撞冷却期间 v_desired=0）
     double v = npc.speed;

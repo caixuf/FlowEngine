@@ -193,6 +193,7 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.rotation_y = e.heading;  // headingToRotationY(h) = h
         ad.route_dir = e.route_dir;
         ad.last_teleport_cycle = e.last_teleport_cycle;
+        ad.yaw_rate = e.yaw_rate;
         dd.actors.push_back(ad);
     }
 

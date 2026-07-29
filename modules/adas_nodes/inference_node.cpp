@@ -173,14 +173,12 @@ static void on_fusion(const Message* msg, void* user_data) {
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (root) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
-        if (!cJSON_IsNumber(j))
-            j = cJSON_GetObjectItemCaseSensitive(root, "speed");
-        if (cJSON_IsNumber(j))
-            g.planning_target_speed = j->valuedouble;
-        cJSON_Delete(root);
+    /* 二进制 Trajectory 反序列化（已从 JSON 迁移到二进制） */
+    Trajectory traj;
+    if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) == 0) {
+        if (traj.point_count > 0 && traj.valid) {
+            g.planning_target_speed = (double)traj.points[0].v;
+        }
     }
     g.has_planning = 1;
 }

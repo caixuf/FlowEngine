@@ -108,12 +108,7 @@ struct ActorDigest {
     double rotation_y;          // 实际给 THREE 的 rotation.y
     int    route_dir;           // 行驶方向
     uint32_t last_teleport_cycle;  // 最近一次被显式传送的 cycle（choreography/recycle）
-    /* P2 清理：移除 yaw_rate / accel / ai_state ——
-     *   - yaw_rate / accel 仅 build_dynamic_digest 写入（恒为 0），
-     *     check_temporal_invariants 用 (ca.heading - pa->heading) / dt
-     *     和 (ca.speed - pa->speed) / dt 本地计算，不读 digest 字段。
-     *   - ai_state 仅 build_dynamic_digest 写入；前端显示的 ai_state 来自
-     *     scene_pub.cpp:255 的 npc_state_str(e.state)，与 digest 无关。 */
+    double yaw_rate;               // 偏航角速度 (rad/s), 用于 yaw 阻尼项
 };
 
 struct DynamicDigest {

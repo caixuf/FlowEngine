@@ -73,6 +73,11 @@ struct PerceptionContext {
     /* 发布帧计数 */
     uint32_t frame_id{0};
 
+    /* 道路几何缓存（从 road/geometry 订阅，用于 lane_id 赋值） */
+    int    lane_count{2};
+    double lane_width{3.5};
+    volatile int has_road_geometry{0};
+
     /* DBSCAN */
     DbscanCluster dbscan{};
 
@@ -97,7 +102,7 @@ struct PerceptionContext {
      *           见 NOA_SCENARIO_PLAN §2.3）。障碍物仍由 vehicle/state 经 FOV/噪声/
      *           遮挡滤波提供——sensor_model 目前发布的是定位级 LidarFrame（单点），
      *           障碍物级点云发布为后续工作。 */
-    int mode{0};  /* 0 = ground_truth, 1 = sensor */
+    int mode{1};  /* 1 = sensor mode (default) — obstacles from DBSCAN only */
     double lid_x{0}, lid_y{0};
     volatile int has_lidar{0};
 
@@ -135,25 +140,31 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_heading = j->valuedouble;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "spd")) && cJSON_IsNumber(j))
         g.ego_speed = j->valuedouble;
-    int n = 0;
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "n_obs")) && cJSON_IsNumber(j))
-        n = (int)j->valuedouble;
-    if (n < 1 || n > 128) n = 3;
-    g.n_obs = n;
-    for (int i = 0; i < n; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "ox%d", i);
-        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
-            g.obs_x[i] = j->valuedouble;
-        snprintf(key, sizeof(key), "oy%d", i);
-        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
-            g.obs_y[i] = j->valuedouble;
-        snprintf(key, sizeof(key), "ov%d", i);
-        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
-            g.obs_vx[i] = j->valuedouble;
-        snprintf(key, sizeof(key), "ovy%d", i);
-        if ((j = cJSON_GetObjectItemCaseSensitive(root, key)) && cJSON_IsNumber(j))
-            g.obs_vy[i] = j->valuedouble;
+    /* ground_truth 模式：从 vehicle/state JSON 读取障碍物（oxN/oyN/ovN/ovyN） */
+    cJSON* n_obs_j = cJSON_GetObjectItemCaseSensitive(root, "n_obs");
+    if (cJSON_IsNumber(n_obs_j)) {
+        int no = (int)n_obs_j->valuedouble;
+        if (no > 128) no = 128;
+        for (int i = 0; i < no; i++) {
+            char key[16];
+            snprintf(key, sizeof(key), "ox%d", i);
+            cJSON* jx = cJSON_GetObjectItemCaseSensitive(root, key);
+            snprintf(key, sizeof(key), "oy%d", i);
+            cJSON* jy = cJSON_GetObjectItemCaseSensitive(root, key);
+            snprintf(key, sizeof(key), "ov%d", i);
+            cJSON* jvx = cJSON_GetObjectItemCaseSensitive(root, key);
+            snprintf(key, sizeof(key), "ovy%d", i);
+            cJSON* jvy = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
+                g.obs_x[i] = jx->valuedouble;
+                g.obs_y[i] = jy->valuedouble;
+                g.obs_vx[i]= cJSON_IsNumber(jvx) ? jvx->valuedouble : 0.0;
+                g.obs_vy[i]= cJSON_IsNumber(jvy) ? jvy->valuedouble : 0.0;
+            }
+        }
+        g.n_obs = no;
+    } else {
+        g.n_obs = 0;
     }
     cJSON_Delete(root);
 }
@@ -174,6 +185,21 @@ static void on_sensor_lidar(const Message* msg, void* user_data) {
     g.has_lidar = 1;
 }
 
+/* ── road/geometry 订阅 — 获取车道参数（用于 lane_id 赋值） ──── */
+static void on_road_geometry(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "lane_count")) && cJSON_IsNumber(j))
+        g.lane_count = (int)j->valuedouble;
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "lane_width")) && cJSON_IsNumber(j))
+        g.lane_width = j->valuedouble;
+    g.has_road_geometry = 1;
+    cJSON_Delete(root);
+}
+
 /* ── 协程任务 ────────────────────────────────────────────────── */
 
 class PerceptionTask : public CoroutineTask {
@@ -190,6 +216,12 @@ protected:
             /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
             co_await sleep_us(period_us_);
             if (should_stop()) break;
+
+            /* ALGORITHM_REFACTOR_PLAN §4: sensor 模式无 lidar 时跳过 */
+            if (g.mode == 1 && !g.has_lidar) {
+                g.frame_id++;
+                continue;
+            }
 
             /* ── DBSCAN ── */
             {
@@ -291,14 +323,34 @@ protected:
                 memset(&obs_list, 0, sizeof(obs_list));
                 obs_list.frame_id = g.frame_id;
 
-                /* 聚类中心 cb->cx/cy 是车体系（DBSCAN 输入即车体系点云）。
-                 * 把它旋转回世界系，再和 flowsim 发的 vehicle/state 障碍物
-                 * 做最近邻匹配，取该真值障碍物的世界系速度 (vx, vy) 填入
-                 * Obstacle.vx/vy。下游 safety_control 的 min_oncoming_ttc
-                 * (obs_v < -2) 与 planning 的 Frenet 位置外推都依赖速度，
-                 * 缺失速度 → 对向来车 TTC 永不触发、Frenet 用零速度外推。 */
-                double ch_w = cos(g.ego_heading), sh_w = sin(g.ego_heading);
-                for (int ci = 0; ci < n_clusters && obs_list.count < 128; ci++) {
+                /* ground_truth 模式：直接使用 vehicle/state 中的障碍物数据 */
+                if (g.mode == 0 && g.n_obs > 0) {
+                    int lc = g.has_road_geometry ? g.lane_count : 2;
+                    double lw = g.has_road_geometry ? g.lane_width : 3.5;
+                    for (int i = 0; i < g.n_obs && obs_list.count < 128; i++) {
+                        Obstacle* ob = &obs_list.obstacles[obs_list.count++];
+                        ob->id = (uint32_t)(g.frame_id * 100 + (uint32_t)i);
+                        /* 世界坐标 → 车体坐标（Obstacle 约定车体系） */
+                        double dx = g.obs_x[i] - g.ego_x;
+                        double dy = g.obs_y[i] - g.ego_y;
+                        double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+                        ob->x = (float)(dx * ch + dy * sh);
+                        ob->y = (float)(-dx * sh + dy * ch);
+                        ob->vx = (float)(g.obs_vx[i] * ch + g.obs_vy[i] * sh);
+                        ob->vy = (float)(-g.obs_vx[i] * sh + g.obs_vy[i] * ch);
+                        ob->type = OBJ_TYPE_VEHICLE;
+                        ob->width = 2.0f; ob->length = 4.6f;
+                        ob->confidence = 1.0f;
+                        /* lane_id：从世界系 y 计算 */
+                        double offset = (-g.obs_y[i]) / lw + (lc - 1) * 0.5;
+                        int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                        if (idx < 0) idx = 0;
+                        if (idx >= lc) idx = lc - 1;
+                        ob->lane_id = (int8_t)idx;
+                    }
+                } else {
+                    /* sensor 模式（DBSCAN） */
+                    for (int ci = 0; ci < n_clusters && obs_list.count < 128; ci++) {
                     const ClusterBounds* cb = dbscan_get_cluster(&g.dbscan, ci);
                     if (!cb || cb->point_count < 3) continue;
                     Obstacle* ob = &obs_list.obstacles[obs_list.count++];
@@ -306,41 +358,34 @@ protected:
                     ob->x = cb->cx; ob->y = cb->cy;
                     ob->width = cb->width; ob->length = cb->length;
                     ob->confidence = cb->confidence;
+                    /* lane_id：车体系 cx/cy → 世界系 y → 车道索引 */
+                    {
+                        double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+                        double wx = g.ego_x + cb->cx * ch - cb->cy * sh;
+                        double wy = g.ego_y + cb->cx * sh + cb->cy * ch;
+                        int lc = g.has_road_geometry ? g.lane_count : 2;
+                        double lw = g.has_road_geometry ? g.lane_width : 3.5;
+                        /* lane_idx_from_y 公式：最左 = 0, 最右 = N-1 */
+                        double offset = (-wy) / lw + (lc - 1) * 0.5;
+                        int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                        if (idx < 0) idx = 0;
+                        if (idx >= lc) idx = lc - 1;
+                        ob->lane_id = (int8_t)idx;
+                    }
                     switch (cb->cls) {
                         case CLS_VEHICLE:    ob->type = OBJ_TYPE_VEHICLE;    break;
                         case CLS_PEDESTRIAN: ob->type = OBJ_TYPE_PEDESTRIAN; break;
                         default:             ob->type = OBJ_TYPE_UNKNOWN;    break;
                     }
-                    /* 速度匹配：聚类中心(车体系)→世界系 → 与 g.obs_x/y 最近邻 */
-                    double wx = g.ego_x + cb->cx * ch_w - cb->cy * sh_w;
-                    double wy = g.ego_y + cb->cx * sh_w + cb->cy * ch_w;
-                    int best_k = -1;
-                    double best_d2 = 9.0;  /* 阈值 3m 内才匹配（避免误关联） */
-                    for (int k = 0; k < g.n_obs; k++) {
-                        double ddx = wx - g.obs_x[k];
-                        double ddy = wy - g.obs_y[k];
-                        double d2 = ddx*ddx + ddy*ddy;
-                        if (d2 < best_d2) { best_d2 = d2; best_k = k; }
+                    /* 速度由 object_tracker 节点通过 KF 跟踪提供。
+                     * ALGORITHM_REFACTOR_PLAN §4: 移除 ground truth 速度匹配，
+                     * 速度在 object_tracker 的 KF 中跨帧关联得到。 */
                     }
-                    if (best_k >= 0) {
-                        /* g.obs_vx/vy 是世界系真值速度（来自 flowsim）。下游
-                         * planning/control/safety 都按"Obstacle.vx/vy 是车体系"
-                         * 做旋转还原世界系（见各自 on_perception_obstacles）。
-                         * 若直接写世界系速度，下游会对已世界系的速度再旋转一次，
-                         * ego_heading≠0（弯道/变道）时对向来车检测 (obs_vx<-2)
-                         * 和 min_oncoming_ttc 的符号会被破坏 → 静默误判。
-                         * 因此这里先把世界系速度旋转到车体系，与 ob->x/y 保持
-                         * 一致的车体坐标系，下游旋转后即可正确还原世界系速度。 */
-                        double wvx = g.obs_vx[best_k];
-                        double wvy = g.obs_vy[best_k];
-                        ob->vx = (float)( wvx * ch_w + wvy * sh_w);
-                        ob->vy = (float)(-wvx * sh_w + wvy * ch_w);
-                    }
-                }
+                }  /* closes sensor mode else block */
                 g.last_obs_list = obs_list;
                 g.has_last_obs  = 1;
 
-                uint8_t obs_buf[4240];  /* ObstacleList 序列化大小 = 16 + 128*33 */
+                uint8_t obs_buf[4368];  /* ObstacleList 序列化大小 = 16 + 128*34 */
                 size_t obs_len = 0;
                 if (ObstacleList_serialize(&obs_list, obs_buf, &obs_len) == 0 && obs_len > 0) {
                     transport_publish(transport_, "perception/obstacles", obs_buf, (uint32_t)obs_len);
@@ -378,7 +423,7 @@ void* perception_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { "vehicle/state", "sensor/lidar", nullptr };
+static const char* s_inputs[]  = { "vehicle/state", "sensor/lidar", "road/geometry", nullptr };
 static const char* s_outputs[] = { "perception/obstacles", nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -401,7 +446,7 @@ static int perception_init(MessageBus* bus, Transport* transport,
     g.lidar_max_range_m = 60.0;
     g.obs_noise_std_m = 0.08;
     g.enable_simple_occlusion = 1;
-    g.mode         = 0;       /* NOA Phase 2.1: 默认 ground_truth，向后兼容 */
+    g.mode         = 0;       /* 默认 ground_truth 模式 — 从 vehicle/state 读障碍物 */
     g.has_lidar    = 0;
     g.lid_x = g.lid_y = 0.0;
     g.transport    = transport;
@@ -442,9 +487,12 @@ static int perception_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "vehicle/state", on_vehicle_state, nullptr);
     /* sensor 模式额外消费 sensor/lidar（ground_truth 模式下订阅无害，仅更新 has_lidar） */
     transport_subscribe(transport, "sensor/lidar", on_sensor_lidar, nullptr);
+    /* 订阅 road/geometry 获取车道参数（用于 Obstacle.lane_id 赋值） */
+    transport_subscribe(transport, "road/geometry", on_road_geometry, nullptr);
 
     discovery_advertise(discovery, "vehicle/state",         0x1C0E5A7Eu, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, "sensor/lidar",          LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, "road/geometry",         0x80AD5C12u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, "perception/obstacles",  OBSTACLELIST_TYPE_ID, CAP_PUBLISHER, 20.0);
 
     transport_advertise(transport, "perception/obstacles", OBSTACLELIST_TYPE_ID);
