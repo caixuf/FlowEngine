@@ -22,6 +22,7 @@
 #include "road_geometry.h"
 #include "traffic_light.h"
 #include "adas_msgs_gen.h"   /* ObstacleList_deserialize */
+#include "piecewise_jerk_qp.h"
 
 #include "coroutine_task.h"
 #undef LOG_TRACE
@@ -32,6 +33,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "clock_service.h"
+#include "degrade_ladder.h"
 #include <cjson/cJSON.h>
 
 #ifdef HAVE_FRENET
@@ -125,6 +127,9 @@ struct PlanningContext {
      * 生成的 ObstacleList.h 中 obstacles[128]）。直接用编译期常量避免运行时切片越界。 */
     static constexpr int kMaxObs = 128;
     double obs_x[kMaxObs]{}, obs_y[kMaxObs]{}, obs_vx[kMaxObs]{}, obs_vy[kMaxObs]{};  /* Phase 3: +vy */
+    int8_t obs_lane_id[kMaxObs]{};  /* 感知计算的车道归属（从 perception/obstacles 提取） */
+    uint8_t obs_type[kMaxObs]{};    /* 障碍物类型：OBJ_TYPE_VEHICLE / PEDESTRIAN / CYCLIST */
+    float   obs_confidence[kMaxObs]{}; /* 置信度 */
     volatile int has_vstate{0};
 
     /* 配置参数 */
@@ -139,6 +144,8 @@ struct PlanningContext {
     double curve_start_x{0};
     double curve_length_m{0};
     double curve_offset_m{0};
+    int    lane_count{2};       /* 从 road/geometry 订阅获取 */
+    double lane_width{3.5};     /* 从 road/geometry 订阅获取 */
 
     /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，flowsim_node 发布）。
      * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
@@ -152,6 +159,21 @@ struct PlanningContext {
     volatile int has_traffic_lights{0};
 
     int tid{0};  /* scheduler task id */
+
+    /* §9 轨迹拼接：上帧轨迹缓存 */
+    Trajectory prev_traj;           /* 上帧发布的轨迹 */
+    uint64_t prev_traj_stamp_us;    /* 上帧轨迹发布时间戳 */
+    int stitch_skip_count;          /* 连续性跳过次数统计（>5%→FAIL） */
+    int stitch_total_count;
+
+    /* ── 被动超车变道状态（P1 替代 control 中被删除的 lc_state）。
+     * 规划层自己决策变道时机，通过 trajectory 输出偏移，控制层只跟轨迹。
+     * 状态机已拆到 behavior_planner_node，此处只消费 Behavior 指令。 */
+    int    overtake_state{0};       /* 0=巡航, 1=左变道, 2=右变道（缓存 behavior.command） */
+    double target_lane_offset{0.0}; /* 当前目标车道偏移 (m, 相对于道路中心) */
+    int    committed_lane_idx{0};  /* 当前所在车道索引（从 behavior_planner 的 Behavior.target_lane_idx 推导） */
+    Behavior current_behavior{};    /* 最新 behavior 指令 */
+    volatile int has_behavior{0};
 
     /* 协程任务 */
     std::unique_ptr<class PlanningTask> task;
@@ -233,10 +255,6 @@ static void update_reference_path(double start_x) {
     const int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
         wx[i] = start_x + (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
-        /* 参考路径沿道路中心线（d=0 表示 ego 在道路中心）。
-         * 旧实现把参考线放在 y=-1.75（2 车道左车道中心），是 2 车道硬假设；
-         * N 车道模型下参考线应放在道路中心，由 control 节点决定具体目标车道。
-         * curve_length_m<=0 时 road_center_y() 恒为 0，与既有直线参考路径完全一致。 */
         wy[i] = road_center_y(wx[i], g.curve_start_x, g.curve_length_m, g.curve_offset_m);
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
@@ -244,6 +262,74 @@ static void update_reference_path(double start_x) {
 #else
     (void)start_x;
 #endif
+}
+
+/**
+ * Frenet→Cartesian 转换：将 (s, d) 沿参考路径映射回全局坐标。
+ *
+ * 参考路径由 update_reference_path() 构建：等间距沿 x 轴采样，
+ * wy[i] = road_center_y(wx[i])。对每个 Frenet 输出点 (s, d)：
+ *   1. 找到 s 对应的参考线段，线性插值得 (ref_x, ref_y)
+ *   2. 由相邻参考点差分算 heading (theta)
+ *   3. x = ref_x - d * sin(theta), y = ref_y + d * cos(theta)
+ *   4. 由相邻点 heading 差分算 kappa
+ *
+ * @return true 成功，false 无效 s（超出参考路径范围或退化）
+ */
+static bool frenet_to_cartesian(double s, double d,
+                                double& out_x, double& out_y,
+                                double& out_heading, double& out_kappa) {
+    const int ref_n = 101;
+    double step = g.cfg_ref_path_length / (double)(ref_n - 1);
+    double ref_start = g.ref_path_start_x;
+
+    /* s 超出 [0, cfg_ref_path_length] → 夹紧到端点 */
+    if (s < 0.0) s = 0.0;
+    if (s > g.cfg_ref_path_length) s = g.cfg_ref_path_length;
+
+    int idx = (int)(s / step);
+    if (idx < 0) idx = 0;
+    if (idx >= ref_n - 1) idx = ref_n - 2;
+
+    double frac = (s - (double)idx * step) / step;
+    if (frac > 1.0) frac = 1.0;
+    if (frac < 0.0) frac = 0.0;
+
+    /* 参考点坐标 */
+    double rx0 = ref_start + (double)idx * step;
+    double rx1 = ref_start + (double)(idx + 1) * step;
+    double ry0 = road_center_y(rx0, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+    double ry1 = road_center_y(rx1, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+
+    double ref_x = rx0 + frac * (rx1 - rx0);
+    double ref_y = ry0 + frac * (ry1 - ry0);
+
+    /* heading = 参考线切线方向 */
+    double dx = rx1 - rx0;
+    double dy = ry1 - ry0;
+    double theta = atan2(dy, dx);
+
+    /* kappa = 参考线曲率（road_center_curvature 已实现了 smoothstep 二阶导） */
+    double kappa = 0.0;
+    if (frac < 0.5) {
+        kappa = road_center_curvature(rx0, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+    } else {
+        kappa = road_center_curvature(rx1, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+    }
+
+    /* Frenet→Cartesian：沿法向偏移 d */
+    out_x = ref_x - d * sin(theta);
+    out_y = ref_y + d * cos(theta);
+    out_heading = theta;
+    out_kappa = kappa;
+    return true;
+}
+
+/* 计算车道中心的 y 坐标 */
+static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
+    double road_c = 0.0;  /* 道路中心 y=0 */
+    double side_offset = 0.0;
+    return road_c + side_offset - (lane_idx - (n_lanes - 1) / 2.0) * lane_w;
 }
 
 /* ── fusion/localization 订阅回调 ───────────────────────────── */
@@ -290,8 +376,14 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
             g.obs_y[i]  = g.ego_y + o->x * sh + o->y * ch;
             g.obs_vx[i] = o->vx * ch - o->vy * sh;
             g.obs_vy[i] = o->vx * sh + o->vy * ch;
+            g.obs_lane_id[i] = o->lane_id;  /* 感知已算好的车道归属 */
+            g.obs_type[i] = (uint8_t)o->type;
+            g.obs_confidence[i] = o->confidence;
         } else {
             g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0;
+            g.obs_lane_id[i] = -1;
+            g.obs_type[i] = 0;
+            g.obs_confidence[i] = 0.0f;
         }
     }
     g.has_vstate = 1;
@@ -311,8 +403,23 @@ static void on_road_geometry(const Message* msg, void* user_data) {
         if ((item = cJSON_GetObjectItem(root, "curve_start_x")))  g.curve_start_x = item->valuedouble;
         if ((item = cJSON_GetObjectItem(root, "curve_length_m"))) g.curve_length_m = item->valuedouble;
         if ((item = cJSON_GetObjectItem(root, "curve_offset_m"))) g.curve_offset_m = item->valuedouble;
+        if ((item = cJSON_GetObjectItem(root, "lane_count")))     g.lane_count = item->valueint;
+        if ((item = cJSON_GetObjectItem(root, "lane_width")))     g.lane_width = item->valuedouble;
         cJSON_Delete(root);
     }
+}
+
+/* ── planning/behavior 订阅 — 接收行为规划指令 ──────────── */
+static void on_planning_behavior(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    Behavior beh;
+    if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0)
+        return;
+    g.current_behavior = beh;
+    g.overtake_state = (beh.command == BEH_LEFT_CHANGE) ? 1 :
+                       (beh.command == BEH_RIGHT_CHANGE) ? 2 : 0;
+    g.has_behavior = 1;
 }
 
 /* ── scene/frame 订阅回调（NOA Phase 6 merge 闭环） ─────────── */
@@ -422,6 +529,45 @@ public:
     PlanningTask(MessageBus* bus, Transport* transport)
         : CoroutineTask(bus), transport_(transport) {}
 
+    /* 在 Trajectory 上按时间插值。
+     * 返回距离 t_rel_us 最近的两个点的线性插值。 */
+    static bool traj_interpolate(const Trajectory* traj, uint32_t t_rel_us,
+                                  double* x, double* y, double* heading,
+                                  double* v, double* a) {
+        if (!traj || traj->point_count == 0) return false;
+        uint32_t n = traj->point_count;
+
+        /* 找到最后一个 t <= target 的点 */
+        int idx = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            if (traj->points[i].t_rel_us <= t_rel_us) idx = (int)i;
+        }
+
+        if (idx >= (int)n - 1) {
+            /* 超出轨迹末端，用最后一个点 */
+            *x = (double)traj->points[n-1].x;
+            *y = (double)traj->points[n-1].y;
+            *heading = (double)traj->points[n-1].heading;
+            *v = (double)traj->points[n-1].v;
+            *a = (double)traj->points[n-1].a;
+            return true;
+        }
+
+        const TrajectoryPoint* p0 = &traj->points[idx];
+        const TrajectoryPoint* p1 = &traj->points[idx+1];
+        double dt = (double)(p1->t_rel_us - p0->t_rel_us);
+        double frac = (dt > 0) ? (double)(t_rel_us - p0->t_rel_us) / dt : 0.0;
+        if (frac < 0.0) frac = 0.0;
+        if (frac > 1.0) frac = 1.0;
+
+        *x = (double)p0->x + frac * ((double)p1->x - (double)p0->x);
+        *y = (double)p0->y + frac * ((double)p1->y - (double)p0->y);
+        *heading = (double)p0->heading + frac * ((double)p1->heading - (double)p0->heading);
+        *v = (double)p0->v + frac * ((double)p1->v - (double)p0->v);
+        *a = (double)p0->a + frac * ((double)p1->a - (double)p0->a);
+        return true;
+    }
+
 protected:
     Task run() override {
         pthread_setname_np(pthread_self(), "planning");
@@ -432,9 +578,17 @@ protected:
         update_reference_path(0.0);
 
         while (!should_stop()) {
-            /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
-            co_await sleep_us(50000);  /* 20Hz 检查 */
-            if (should_stop() || !g.has_fusion) continue;
+            /* select_for: 等待 fusion、障碍物或道路几何更新触发规划（消息驱动），
+             * 50ms 超时兜底。替代 sleep_us 轮询，降低空等 CPU 占用。 */
+            auto r = co_await select_for(bus(),
+                {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY}, 50000);
+            (void)r;
+            if (should_stop()) break;
+
+            /* §11.2: heartbeat 上报 — monitor_node 的 degrade_supervisor_tick 据此检测超时 */
+            degrade_supervisor_record_heartbeat("planning_node", clock_now_us() / 1000);
+
+            if (!g.has_fusion) continue;
 
             /* ── 驾驶模式仲裁：周期性检查条件，尝试升级；定位丢失时立即降级 ── */
             uint64_t now_us = clock_now_us();
@@ -751,6 +905,31 @@ protected:
             }
 #endif
 
+            /* ── 消费 behavior_planner 的行为指令 ──
+             * behavior_planner_node 运行状态机（巡航/跟车/变道），
+             * 我们只根据 Behavior.target_lane_idx 算横向偏移。
+             * 变道完成检测由 behavior_planner 通过 ego_y 位置做。 */
+            {
+                double lane_w = g.lane_width;
+                int n_lanes = g.lane_count;
+
+                if (g.lane_count < 1 || g.lane_count > 16 || g.lane_width < 1.0 || g.lane_width > 10.0) {
+                    LOG_WARN("planning", "lane invariant: lane_count=%d lane_width=%.1f (unreasonable)",
+                             g.lane_count, g.lane_width);
+                }
+
+                /* 更新 target_lane_offset */
+                if (g.has_behavior && g.current_behavior.target_lane_idx >= 0 &&
+                    g.current_behavior.target_lane_idx < n_lanes &&
+                    (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
+                    double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+                    double target_lane_y = lane_center_y(g.current_behavior.target_lane_idx, n_lanes, lane_w);
+                    g.target_lane_offset = target_lane_y - rc_y;
+                } else {
+                    g.target_lane_offset = 0.0;
+                }
+            }
+
             /* 规划轨迹 */
             double s_out[50], d_out[50], spd_out[50];
             int n_wp = 0;
@@ -782,7 +961,41 @@ protected:
             }
 #endif
 
-            char traj[1024];
+            /* 变道时偏移 Frenet 轨迹（控制层只跟轨迹，不自己决策） */
+            if (g.target_lane_offset != 0.0 && n_wp > 0) {
+                for (int i = 0; i < n_wp; i++) {
+                    double t = (double)i / (double)(n_wp - 1);
+                    /* 轨迹前 10% 逐渐偏移，后 90% 保持目标偏移 */
+                    double alpha = (t < 0.1) ? (t / 0.1) : 1.0;
+                    d_out[i] = d_out[i] * (1.0 - alpha) + g.target_lane_offset * alpha;
+                }
+            }
+
+            /* §9 轨迹拼接 */
+            g.stitch_total_count++;
+            bool use_stitch = false;
+            if (g.prev_traj.point_count > 0 && g.prev_traj_stamp_us > 0) {
+                /* 计算当前时刻在上一帧轨迹上的时间偏移 */
+                uint64_t dt_us = clock_now_us() - g.prev_traj_stamp_us;
+                if (dt_us < 500000) {  /* 只在上帧 0.5s 内有效 */
+                    double pred_x, pred_y, pred_h, pred_v, pred_a;
+                    if (traj_interpolate(&g.prev_traj, (uint32_t)dt_us,
+                                          &pred_x, &pred_y, &pred_h, &pred_v, &pred_a)) {
+                        /* 一致性检查 */
+                        double pos_diff = hypot(pred_x - g.ego_x, pred_y - g.ego_y);
+                        double spd_diff = fabs(pred_v - g.ego_v);
+                        if (pos_diff < 2.0 && spd_diff < 3.0) {
+                            use_stitch = true;
+                        }
+                    }
+                }
+            }
+
+            /* ── 构建二进制 Trajectory 数组 ── */
+            TrajectoryPoint points[64];
+            int n_pts = 0;
+            memset(points, 0, sizeof(points));
+
             if (n_wp > 0) {
                 /* spd_out[0] ≈ 当前车速，只能抬高、不能覆盖 command_speed。
                  * 直接赋值会在停稳后形成自维持闭锁：
@@ -791,6 +1004,7 @@ protected:
                  * 需要停车的路径（TL override、control 的 ACC）都显式置 0 且
                  * 有明确解除条件，不依赖这里。 */
                 if (spd_out[0] > command_speed) command_speed = spd_out[0];
+                if (command_speed > g.cfg_max_speed) command_speed = g.cfg_max_speed;
 
                 /* ── 红绿灯速度强制 override ──
                  * Frenet 轨迹的第一个点速度 spd_out[0] ≈ 当前车速，control 节点
@@ -813,81 +1027,175 @@ protected:
                         break;
                     }
                 }
-
-                /* Debuggability: report the ACTUAL planner mode instead of always
-                 * claiming "frenet". When built without Eigen (HAVE_FRENET undefined),
-                 * this path is the simple lane-keep fallback (d=0.0 always, no lane
-                 * changes) — that must be visible in the trajectory JSON / dashboard,
-                 * not just a one-line startup log that scrolls away. */
-#ifdef HAVE_FRENET
-                const char* traj_type = "frenet";
-#else
-                const char* traj_type = "lane_keep_fallback";
-#endif
-                cJSON* root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "type", traj_type);
-                cJSON_AddNumberToObject(root, "plan", g.plan_count);
-                cJSON_AddNumberToObject(root, "wp", n_wp);
-                cJSON_AddNumberToObject(root, "target_speed", command_speed);
-                cJSON* path = cJSON_AddArrayToObject(root, "path");
-                for (int i = 0; i < n_wp; i++) {
-                    if (i % 3 != 0 && i > 0 && i < n_wp - 1) continue;
-                    cJSON* pt = cJSON_CreateArray();
-                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(s_out[i]));
-                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(d_out[i]));
-                    cJSON_AddItemToArray(pt, cJSON_CreateNumber(spd_out[i]));
-                    cJSON_AddItemToArray(path, pt);
+                for (int i = 0; i < n_wp && n_pts < 64; i++) {
+                    points[n_pts].t_rel_us = (uint32_t)(i * 100);  /* 100ms per point (10Hz trajectory) */
+                    points[n_pts].x = 0.0f;   /* 占位，下面 Frenet→Cartesian 回填 */
+                    points[n_pts].y = 0.0f;
+                    points[n_pts].s = (float)s_out[i];
+                    points[n_pts].l = (float)d_out[i];
+                    points[n_pts].heading = 0.0f;  /* 占位 */
+                    points[n_pts].kappa = 0.0f;    /* 占位 */
+                    points[n_pts].v = (float)spd_out[i];
+                    points[n_pts].a = 0.0f;
+                    points[n_pts].jerk = 0.0f;
+                    n_pts++;
                 }
-                char* json_part = cJSON_PrintUnformatted(root);
-                cJSON_Delete(root);
-                snprintf(traj, sizeof(traj), "%s", json_part);
-                cJSON_free(json_part);
+                /* ── Frenet→Cartesian 回填：用 (s, d) 沿参考路径映射回全局 x/y/heading/kappa ── */
+                for (int i = 0; i < n_pts; i++) {
+                    double cx, cy, ch, ck;
+                    if (frenet_to_cartesian((double)points[i].s, (double)points[i].l,
+                                             cx, cy, ch, ck)) {
+                        points[i].x = (float)cx;
+                        points[i].y = (float)cy;
+                        points[i].heading = (float)ch;
+                        points[i].kappa = (float)ck;
+                    }
+                }
             } else {
+                /* 无有效路径时发布单点轨迹（failsafe 速度） */
                 double failsafe = command_speed;
                 if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
                 if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
-                cJSON* root = cJSON_CreateObject();
-                cJSON_AddStringToObject(root, "type", "failsafe");
-                cJSON_AddNumberToObject(root, "target_speed", failsafe);
-                cJSON_AddNumberToObject(root, "plan", g.plan_count);
-                cJSON_AddNumberToObject(root, "lane_keep_d", 0.0);
-                char* json_part = cJSON_PrintUnformatted(root);
-                cJSON_Delete(root);
-                snprintf(traj, sizeof(traj), "%s", json_part);
-                cJSON_free(json_part);
+                n_pts = 1;
+                points[0].t_rel_us = 0;
+                points[0].v = (float)failsafe;
             }
 
-            /* 后向兼容: PID 也读取 speed= 字段。附加 mode/route_lane 供 control 消费
-             * (NOA 主动变道) 及仪表盘展示驾驶模式，采用与 speed= 相同的宽松追加格式,
-             * 不影响既有基于 strstr 的解析。
-             *
-             * NOA Phase 3.2/3.3: 追加 route_type= 字段（lane_change/branch_select/merge）
-             * 供 control/monitor 区分当前 NOA 行为，branch_select 还附带 branch_id=。 */
-            char mode_buf[32];
-            statem_format_hierarchical(statem_current(&g.mode_sm), mode_buf, sizeof(mode_buf));
-            const char* route_type_str = "lane_change";
-            switch (g.route_type) {
-                case ROUTE_BRANCH_SELECT: route_type_str = "branch_select"; break;
-                case ROUTE_MERGE:         route_type_str = "merge";         break;
-                default:                  route_type_str = "lane_change";   break;
-            }
-            char traj_final[1200];
-            if (g.route_type == ROUTE_BRANCH_SELECT) {
-                snprintf(traj_final, sizeof(traj_final),
-                         "%s speed=%.1f mode=%s route_lane=%d route_type=%s branch_id=%d",
-                         traj, command_speed, mode_buf, g.route_target_lane,
-                         route_type_str, g.current_branch_id);
-            } else {
-                snprintf(traj_final, sizeof(traj_final),
-                         "%s speed=%.1f mode=%s route_lane=%d route_type=%s",
-                         traj, command_speed, mode_buf, g.route_target_lane,
-                         route_type_str);
+            /* ── 发布二进制 Trajectory ── */
+            Trajectory traj;
+            memset(&traj, 0, sizeof(traj));
+            traj.seq = g.plan_count;
+            traj.stamp_us = clock_now_us();
+            traj.ref_line_id = 0;  /* No reference line yet */
+            traj.point_count = (uint16_t)n_pts;
+            traj.planner_state = 2; /* QP */
+            traj.is_stitched = use_stitch ? 1 : 0;
+
+            for (int i = 0; i < n_pts && i < 64; i++) {
+                traj.points[i] = points[i];
             }
 
-            transport_publish(transport_, TOPIC_PLANNING_TRAJECTORY,
-                              (const uint8_t*)traj_final,
-                              (uint32_t)strlen(traj_final) + 1);
+            /* §8.5 可行性检查 */
+            traj.valid = 1;  /* 默认有效 */
+            if (n_wp > 1) {
+                for (int i = 0; i < n_pts && i < 64; i++) {
+                    /* kappa 超限检查 */
+                    if (fabs((double)traj.points[i].kappa) > 0.25) {  /* ~14deg steer equivalent */
+                        traj.valid = 0;
+                        break;
+                    }
+                    /* 横向加速度检查 */
+                    double a_lat = (double)traj.points[i].v * (double)traj.points[i].v * fabs((double)traj.points[i].kappa);
+                    if (a_lat > 5.0) {  /* 5 m/s² max lateral accel */
+                        traj.valid = 0;
+                        break;
+                    }
+                    /* 速度合法性 */
+                    if ((double)traj.points[i].v < -0.5 || (double)traj.points[i].v > g.cfg_max_speed * 1.1) {
+                        traj.valid = 0;
+                        break;
+                    }
+                }
+            }
+            /* #4: 全零退化轨迹检测 — 所有点 x==0 && y==0 时视为未初始化 */
+            if (traj.valid && n_pts > 1) {
+                int all_zero = 1;
+                for (int i = 0; i < n_pts; i++) {
+                    if (fabs((double)traj.points[i].x) > 0.001 ||
+                        fabs((double)traj.points[i].y) > 0.001) {
+                        all_zero = 0;
+                        break;
+                    }
+                }
+                if (all_zero) {
+                    traj.valid = 0;
+                    LOG_WARN("planning", "#%d all-zero trajectory (x/y all ==0) — marking invalid",
+                             g.plan_count);
+                }
+            }
+            if (!traj.valid) {
+                LOG_WARN("planning", "#%d trajectory FAILED feasibility check — publishing invalid",
+                         g.plan_count);
+            }
+
+            uint8_t buf[4096];
+            size_t ser_len = sizeof(buf);
+            int rc = Trajectory_serialize(&traj, buf, &ser_len);
+            if (rc == 0) {
+                transport_publish(transport_, TOPIC_PLANNING_TRAJECTORY, buf, (uint32_t)ser_len);
+            }
+            /* 缓存轨迹用于拼接 */
+            g.prev_traj_stamp_us = clock_now_us();
+            memcpy(&g.prev_traj, &traj, sizeof(traj));
             g.plan_count++;
+
+            /* ── 发布参考线（经 QP 平滑） ── */
+            {
+                ReferenceLinePoint ref_pts[101];
+                int n_ref = 101;
+                double ref_start = g.ego_x;
+                double ref_len = g.cfg_ref_path_length;
+
+                /* 收集原始路径点 */
+                double raw_x[101], raw_y[101];
+                for (int i = 0; i < n_ref; i++) {
+                    double px = ref_start + (double)i * (ref_len / (double)(n_ref - 1));
+                    double py = road_center_y(px, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+                    raw_x[i] = px;
+                    raw_y[i] = py;
+                }
+
+                /* QP 平滑 */
+                double sm_x[101], sm_y[101];
+                double w_raw = 10.0;  /* 原始点信任度，越大越贴合原始线型 */
+                pjqp_smooth_2d(sm_x, sm_y, raw_x, raw_y, w_raw, n_ref);
+
+                /* 填充参考线点，计算 heading 和曲率 */
+                for (int i = 0; i < n_ref; i++) {
+                    ref_pts[i].s = (float)(sm_x[i] - ref_start);
+                    ref_pts[i].x = (float)sm_x[i];
+                    ref_pts[i].y = (float)sm_y[i];
+
+                    /* heading = atan2(dy, dx) */
+                    if (i > 0 && i < n_ref - 1) {
+                        double dx = sm_x[i+1] - sm_x[i-1];
+                        double dy = sm_y[i+1] - sm_y[i-1];
+                        ref_pts[i].theta = (float)atan2(dy, dx);
+                    } else if (i == 0) {
+                        double dx = sm_x[1] - sm_x[0];
+                        double dy = sm_y[1] - sm_y[0];
+                        ref_pts[i].theta = (float)atan2(dy, dx);
+                    } else {
+                        double dx = sm_x[n_ref-1] - sm_x[n_ref-2];
+                        double dy = sm_y[n_ref-1] - sm_y[n_ref-2];
+                        ref_pts[i].theta = (float)atan2(dy, dx);
+                    }
+
+                    /* kappa = d(theta)/ds, 用三点中心差分 */
+                    if (i > 0 && i < n_ref - 1) {
+                        double ds = ref_pts[i+1].s - ref_pts[i-1].s;
+                        double dtheta = (double)(ref_pts[i+1].theta - ref_pts[i-1].theta);
+                        /* 角度归一化 */
+                        while (dtheta >  M_PI) dtheta -= 2.0 * M_PI;
+                        while (dtheta < -M_PI) dtheta += 2.0 * M_PI;
+                        ref_pts[i].kappa = (float)(dtheta / ds);
+                    } else {
+                        ref_pts[i].kappa = 0.0f;
+                    }
+
+                    ref_pts[i].dkappa = 0.0f;
+                    ref_pts[i].left_bound = 10.0f;
+                    ref_pts[i].right_bound = 10.0f;
+                    ref_pts[i].speed_limit = (float)g.cfg_max_speed;
+                }
+                uint8_t ref_buf[4096];
+                uint16_t ref_count = (uint16_t)n_ref;
+                uint32_t ref_len_bytes = 0;
+                memcpy(ref_buf, &ref_count, sizeof(ref_count));
+                memcpy(ref_buf + 2, ref_pts, n_ref * sizeof(ReferenceLinePoint));
+                ref_len_bytes = 2 + n_ref * sizeof(ReferenceLinePoint);
+                transport_publish(transport_, TOPIC_PLANNING_REFERENCE_LINE, ref_buf, ref_len_bytes);
+            }
 
             if (g.plan_count % 25 == 1) {
                 LOG_INFO("planning", "#%d ego@(%.0f,%.1f) v=%.1f → target=%.1f wp=%d",
@@ -967,8 +1275,27 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.current_branch_id  = -1;
 
     g.plan_count  = 0;
+
+    /* §9 轨迹拼接初始化 */
+    g.prev_traj.point_count = 0;
+    g.prev_traj_stamp_us = 0;
+    g.stitch_skip_count = 0;
+    g.stitch_total_count = 0;
+
+    /* 行为规划状态初始化 */
+    memset(&g.current_behavior, 0, sizeof(g.current_behavior));
+    g.has_behavior = 0;
+    g.overtake_state = 0;
+    g.committed_lane_idx = 0;
+    g.target_lane_offset = 0.0;
+
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;
-    for (int i = 0; i < g.kMaxObs; i++) { g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0; }
+    for (int i = 0; i < g.kMaxObs; i++) { 
+        g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0;
+        g.obs_lane_id[i] = -1;
+        g.obs_type[i] = 0;
+        g.obs_confidence[i] = 0.0f;
+    }
 
     g.curve_start_x   = 0.0;
     g.curve_length_m  = 0.0;
@@ -1048,6 +1375,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
+    transport_subscribe(transport, TOPIC_PLANNING_BEHAVIOR, on_planning_behavior, nullptr);
     transport_advertise(transport, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,

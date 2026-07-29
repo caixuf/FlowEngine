@@ -146,6 +146,13 @@ target_compile_definitions(perception_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(perception_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 target_link_libraries(perception_node ${NODE_LINK_LIBS} stdc++ atomic)
 
+# behavior_planner_node: 行为规划节点 (FlowCoro 协程版)
+# 消费感知语义输出，运行巡航/跟车/变道状态机，发布 planning/behavior。
+add_library(behavior_planner_node SHARED behavior_planner_node.cpp)
+target_compile_definitions(behavior_planner_node PRIVATE FLOWCORO_INTEGRATION)
+target_compile_options(behavior_planner_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
+target_link_libraries(behavior_planner_node ${NODE_LINK_LIBS} stdc++ atomic)
+
 # sensor_model_node: 噪声/FOV/遮挡传感器模型
 add_library(sensor_model SHARED sensor_model_node.c)
 target_link_libraries(sensor_model ${NODE_LINK_LIBS})

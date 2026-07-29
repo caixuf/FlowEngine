@@ -104,12 +104,13 @@ struct StereoFrame {
 # 嵌套结构体 — 被 ObstacleList 引用
 struct Obstacle {
     uint32   id             # 目标 ID（跨帧唯一）
-    float    x              # 纵向距离（米）
-    float    y              # 横向距离（米）
+    float    x              # 纵向距离（米，车体坐标系）
+    float    y              # 横向距离（米，车体坐标系）
     float    vx             # 纵向相对速度（m/s）
     float    vy             # 横向相对速度（m/s）
     float    width          # 目标宽度（米）
     float    length         # 目标长度（米）
+    int8     lane_id        # 感知计算的车道归属：0=最左, N-1=最右, -1=未分配
     ObstacleType type       # 目标类型（引用枚举）
     float    confidence     # 置信度 [0, 1]
 }
@@ -166,6 +167,7 @@ struct ControlRaw {
     float    speed          # 当前速度 (m/s)
     float    target         # 目标速度 (m/s)
     float    error          # 速度误差 (m/s)
+    float    cte            # 横向跟踪误差 (m)，正=偏左，负=偏右
     char     mode[24]       # 模式字符串: ACCEL/BRAKE/HOLD/ROAD_GUARD等
     uint8    turn_signal    # 转向灯指令：0=off, 1=left, 2=right（planning/control 决策下发）
     bool     hazard         # 双闪灯指令（紧急停车 / 碰撞时 planning/control 决策下发）
@@ -181,3 +183,83 @@ struct ControlCmd {
     uint8    turn_signal    # 转向灯指令：0=off, 1=left, 2=right（planning/control 决策下发，意图先行）
     bool     hazard         # 双闪灯指令（紧急停车 / 碰撞时 planning/control 决策下发）
 }
+
+# ── 规划输出 ─────────────────────────────────────────────────
+
+enum BehaviorCommand {
+    BEH_CRUISE       = 0     # 巡航（自由行驶）
+    BEH_FOLLOW       = 1     # 跟车（保持安全距离）
+    BEH_LEFT_CHANGE  = 2     # 向左变道
+    BEH_RIGHT_CHANGE = 3     # 向右变道
+    BEH_STOP         = 4     # 停车
+    BEH_YIELD        = 5     # 让行（减速等待）
+    BEH_EMERGENCY    = 6     # 紧急停车
+}
+
+struct Behavior {
+    uint32   seq            # 指令序号
+    uint64   stamp_us       # 发布时刻（微秒，CLOCK_MONOTONIC）
+    BehaviorCommand command # 行为指令
+    int8     target_lane_idx # 目标车道索引：-1=保持当前, 0..N-1=具体车道
+    float    target_speed   # 目标速度（m/s）
+    uint32   follow_obs_id  # 跟车目标障碍物 ID（0=无前车）
+}
+
+struct TrajectoryPoint {
+    uint32   t_rel_us       # 相对轨迹起点的时间偏移（微秒）
+    float    x              # X 坐标（米，全局坐标系）
+    float    y              # Y 坐标（米，全局坐标系）
+    float    s              # Frenet 纵坐标（米）
+    float    l              # Frenet 横坐标（米）
+    float    heading        # 期望航向角（弧度）
+    float    kappa          # 曲率（1/m）
+    float    v              # 期望速度（m/s）
+    float    a              # 期望加速度（m/s²）
+    float    jerk           # 加加速度（m/s³）
+}
+
+struct Trajectory {
+    uint32   seq            # 轨迹序号
+    uint64   stamp_us       # 发布时刻（微秒，CLOCK_MONOTONIC）
+    uint32   ref_line_id    # 参考线 ID（变了就禁用拼接）
+    uint16   point_count    # 有效轨迹点数
+    TrajectoryPoint points[64]  # 最多 64 个轨迹点
+    uint8    planner_state  # 规划器状态：0=unknown, 1=sampling, 2=qp, 3=failsafe
+    uint8    is_stitched    # 是否拼接轨迹（与上帧连续）
+    uint8    valid          # 轨迹是否通过可行性检查
+}
+
+struct PredictionHypothesis {
+    float    probability    # 该模态概率
+    float    sigma_x        # 纵向不确定度增长因子
+    float    sigma_y        # 横向不确定度增长因子
+    uint8    intent         # 意图：0=LANE_KEEP, 1=LEFT_CHANGE, 2=RIGHT_CHANGE, 3=TURN_LEFT, 4=TURN_RIGHT, 5=YIELD
+    uint32   point_count    # 有效轨迹点数
+    TrajectoryPoint points[25]  # 最多 25 个预测点（5s @ 0.2s）
+}
+
+struct PredictionSet {
+    uint32   seq            # 预测序号
+    uint64   stamp_us       # 发布时刻（微秒）
+    uint32   track_id       # 被预测的障碍物 track_id
+    uint8    n_hypotheses   # 有效假设数
+    PredictionHypothesis hypotheses[3]  # 最多 3 模态
+}
+
+struct ReferenceLinePoint {
+    float    s              # Frenet 纵坐标（米）
+    float    x              # 全局 X 坐标（米）
+    float    y              # 全局 Y 坐标（米）
+    float    theta          # 切线航向角（弧度）
+    float    kappa          # 曲率（1/m）
+    float    dkappa         # 曲率对 s 的导数（1/m²）
+    float    left_bound     # 左侧可通行边界（米，相对中心线）
+    float    right_bound    # 右侧可通行边界（米，相对中心线）
+    float    speed_limit    # 速度限制（m/s）
+}
+
+# 帧约定：
+#   Obstacle.x/y/vx/vy = 车体系
+#   TrajectoryPoint.x/y = 世界系
+#   TrajectoryPoint.heading = 世界系航向角（弧度）
+#   PredictionHypothesis 输出追踪均与世界系一致
