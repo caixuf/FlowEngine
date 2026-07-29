@@ -120,7 +120,10 @@ endif()
 
 # =============================================================================
 # flowcoro — C++20 高性能协程库 (https://github.com/caixuf/flowcoro)
-# 使用 FetchContent 从 GitHub 拉取完整源码
+# 查找顺序：
+#   1. ../flowcoro  (与FlowEngine同级目录的本地仓库，无网络依赖)
+#   2. third_party/flowcoro (vendored)
+#   3. FetchContent 从 GitHub 拉取（需要网络）
 # =============================================================================
 # 关闭 flowcoro 自身的测试/示例/文档，只编译核心库
 set(FLOWCORO_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
@@ -130,13 +133,32 @@ set(FLOWCORO_BUILD_DOCS      OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_ENABLE_DATABASE OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
 
-FetchContent_Declare(
-    flowcoro
-    GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
-    GIT_TAG        main
-    GIT_SHALLOW    TRUE
+# 候选路径：同级目录 > third_party > FetchContent
+set(_FLOWCORO_CANDIDATES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../flowcoro"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/flowcoro"
 )
-FetchContent_MakeAvailable(flowcoro)
+set(_FLOWCORO_FOUND_LOCAL FALSE)
+foreach(_cand IN LISTS _FLOWCORO_CANDIDATES)
+    if(EXISTS "${_cand}/include/flowcoro/rt_executor.h")
+        message(STATUS "Using local flowcoro from: ${_cand}")
+        add_subdirectory("${_cand}" "${CMAKE_BINARY_DIR}/_deps/flowcoro-build")
+        set(flowcoro_SOURCE_DIR "${_cand}")
+        set(_FLOWCORO_FOUND_LOCAL TRUE)
+        break()
+    endif()
+endforeach()
+
+if(NOT _FLOWCORO_FOUND_LOCAL)
+    message(STATUS "Local flowcoro not found, fetching from GitHub...")
+    FetchContent_Declare(
+        flowcoro
+        GIT_REPOSITORY https://github.com/caixuf/flowcoro.git
+        GIT_TAG        main
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(flowcoro)
+endif()
 # flowcoro main 新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
 # 纯 C 节点 / FFI 宿主可直接 #include <flowcoro/c_api.h> 调用
 # flowcoro_pool_create / flowcoro_pool_submit / flowcoro_task_wait /

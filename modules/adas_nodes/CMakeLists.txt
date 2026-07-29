@@ -27,10 +27,25 @@ message(STATUS "FlowEngine root:  ${FLOW_ROOT}")
 message(STATUS "FlowEngine build: ${FLOWENGINE_BUILD}")
 
 # ── 头文件目录 ────────────────────────────────────────────────
+# flowcoro 路径优先级：1. 同级目录本地仓库 2. third_party 3. FetchContent下载
+set(_FLOWCORO_INCLUDE_CANDIDATES
+    "${FLOW_ROOT}/../flowcoro/include"
+    "${FLOW_ROOT}/third_party/flowcoro/include"
+    "${FLOWENGINE_BUILD}/_deps/flowcoro-src/include"
+)
+set(FLOWCORO_INCLUDE_DIR "")
+foreach(_cand IN LISTS _FLOWCORO_INCLUDE_CANDIDATES)
+    if(EXISTS "${_cand}/flowcoro/rt_executor.h")
+        set(FLOWCORO_INCLUDE_DIR "${_cand}")
+        message(STATUS "flowcoro include: ${_cand}")
+        break()
+    endif()
+endforeach()
+
 include_directories(
     ${FLOW_ROOT}/include
     ${FLOW_ROOT}/src/algorithms            # ekf_fusion.h, dbscan_cluster.h
-    ${FLOWENGINE_BUILD}/_deps/flowcoro-src/include
+    ${FLOWCORO_INCLUDE_DIR}
     ${FLOWENGINE_BUILD}/gen                # 生成的 adas_msgs_gen.h
 )
 
