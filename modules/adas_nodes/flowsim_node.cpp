@@ -849,6 +849,26 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
         cJSON_AddNumberToObject(vstate, key, e.width);
         n_obs++;
     }
+    /* ── Mock NPC：场景无 actor 时注入两个前方慢车，供 behavior_planner 验证 ── */
+    if (n_obs == 0) {
+        /* 同车道（lane 2, y≈-1.75），前方 40m，时速 3m/s */
+        cJSON_AddNumberToObject(vstate, "ox0", ego.x + 40.0);
+        cJSON_AddNumberToObject(vstate, "oy0", ego.y);
+        cJSON_AddNumberToObject(vstate, "ov0", 3.0);
+        cJSON_AddNumberToObject(vstate, "ovy0", 0.0);
+        cJSON_AddStringToObject(vstate, "ot0", "car");
+        cJSON_AddNumberToObject(vstate, "ol0", 4.6);
+        cJSON_AddNumberToObject(vstate, "ow0", 2.0);
+        /* 右侧车道（lane 3, y≈-5.25），前方 60m，时速 4m/s */
+        cJSON_AddNumberToObject(vstate, "ox1", ego.x + 60.0);
+        cJSON_AddNumberToObject(vstate, "oy1", -5.25);
+        cJSON_AddNumberToObject(vstate, "ov1", 4.0);
+        cJSON_AddNumberToObject(vstate, "ovy1", 0.0);
+        cJSON_AddStringToObject(vstate, "ot1", "car");
+        cJSON_AddNumberToObject(vstate, "ol1", 4.6);
+        cJSON_AddNumberToObject(vstate, "ow1", 2.0);
+        n_obs = 2;
+    }
     cJSON_AddNumberToObject(vstate, "n_obs", n_obs);
 
     char* s = cJSON_PrintUnformatted(vstate);

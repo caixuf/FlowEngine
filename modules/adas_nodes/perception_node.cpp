@@ -102,7 +102,7 @@ struct PerceptionContext {
      *           见 NOA_SCENARIO_PLAN §2.3）。障碍物仍由 vehicle/state 经 FOV/噪声/
      *           遮挡滤波提供——sensor_model 目前发布的是定位级 LidarFrame（单点），
      *           障碍物级点云发布为后续工作。 */
-    int mode{1};  /* 1 = sensor mode (default) — obstacles from DBSCAN only */
+    int mode{0};  /* 0 = ground_truth (default) — obstacles from vehicle/state JSON */
     double lid_x{0}, lid_y{0};
     volatile int has_lidar{0};
 
