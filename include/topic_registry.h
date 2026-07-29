@@ -45,7 +45,15 @@
 
 /* ── Planning topics ────────────────────────────────────────── */
 
-#define TOPIC_PLANNING_TRAJECTORY  "planning/trajectory"
+#define TOPIC_PLANNING_TRAJECTORY       "planning/trajectory"
+#define TOPIC_PLANNING_BEHAVIOR         "planning/behavior"
+#define TOPIC_PLANNING_REFERENCE_LINE   "planning/reference_line"
+#define TOPIC_PLANNING_DEBUG            "planning/debug"
+
+/* ── Prediction topics ──────────────────────────────────────── */
+
+#define TOPIC_PREDICTION_TRACKS   "prediction/tracks"
+#define TOPIC_PREDICTION_SET      "prediction/set"
 
 /* ── Control topics ─────────────────────────────────────────── */
 
@@ -60,11 +68,7 @@
 
 #define TOPIC_VEHICLE_STATE       "vehicle/state"
 
-/* ── Prediction topics ──────────────────────────────────────── */
-
-#define TOPIC_PREDICTION_TRACKS   "prediction/tracks"
-
-/* ── Road / Map topics ──────────────────────────────────────── */
+/* ── Simulation topics ──────────────────────────────────────── */
 
 #define TOPIC_ROAD_GEOMETRY       "road/geometry"
 #define TOPIC_ROAD_REF_PATH       "road/ref_path"

@@ -150,6 +150,10 @@ ScenarioConfig* scenario_load(const char* path) {
         sc->criteria.no_collision = true;
     }
 
+    /* npc_lane_change: NPC 启用 MOBIL 自主变道（默认 false，各守其道） */
+    cJSON* jnpc_lc = cJSON_GetObjectItemCaseSensitive(root, "npc_lane_change");
+    sc->npc_lane_change = cJSON_IsTrue(jnpc_lc);
+
     /* route（可选）：导航路线主动变道指令，按 trigger_x 触发，与障碍物无关。
      * NOA Phase 3.1: 新增 type 字段（lane_change/branch_select/merge）+
      * branch_id（branch_select 选路）。无 type 字段 = ROUTE_LANE_CHANGE，

@@ -255,8 +255,9 @@ set(CORE_SOURCES
     src/core/crash_handler.c
     src/core/health.c
     src/core/auto_tuner.c
-    src/core/mpc_controller.c
-    src/core/intent_predictor.c
+    src/core/degrade_ladder.c
+    # src/core/mpc_controller.c — removed 2026-07-28, per ALGORITHM_REFACTOR_PLAN §12
+    # src/core/intent_predictor.c — removed 2026-07-28, per ALGORITHM_REFACTOR_PLAN §12
 )
 
 # ── 算法库 (纯 C，无外部依赖) ─────────────────────────────────
@@ -267,6 +268,9 @@ set(ALGORITHM_SOURCES
     src/algorithms/nuscenes_loader.c
     src/algorithms/nmea_parser.c
     src/algorithms/serial_port.c
+    src/algorithms/piecewise_jerk_qp.c
+    src/algorithms/scenario_router.c
+    src/algorithms/ltv_mpc.c
 )
 
 # ── Optional: Protobuf support ────────────────────────────

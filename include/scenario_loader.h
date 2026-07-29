@@ -316,6 +316,8 @@ typedef struct {
     int               script_count;
     /* ── 编舞循环（FlowSim v2 新增）── */
     Choreography      choreography;   /**< 编舞循环配置（可选，缺省 enabled=false） */
+    /* ── NPC 行为开关 ── */
+    bool              npc_lane_change;/**< NPC 启用 MOBIL 自主变道（默认 false，各守其道） */
 } ScenarioConfig;
 
 /**
