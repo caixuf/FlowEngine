@@ -356,6 +356,17 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
         g.obs_vx[i] = (double)o->vx * ch - (double)o->vy * sh;
         g.obs_vy[i] = (double)o->vx * sh + (double)o->vy * ch;
         g.obs_type[i] = (uint8_t)o->type;
+
+        /* DBG: 346257217 100 3452702473462112233452152603452112153344270252351232234347244231347211251 body=world 345235220346240207345217230346215242357274214347241256350256244344274240346204237346225260346215256345215217350256256 */
+        if (i < 3 && g.seq % 100 == 0) {
+            LOG_WARN("behavior", "[DBG_OBS] #%d body(x=%.1f y=%.1f vx=%.1f vy=%.1f) "
+                     "ego(x=%.1f y=%.1f h=%.3f) world(x=%.1f y=%.1f vx=%.1f) "
+                     "type=%d id=%u count=%d",
+                     i, (double)o->x, (double)o->y, (double)o->vx, (double)o->vy,
+                     g.ego_x, g.ego_y, g.ego_heading,
+                     g.obs_x[i], g.obs_y[i], g.obs_vx[i],
+                     o->type, o->id, n);
+        }
         g.obs_id[i] = o->id;
         /* lane_id */
         {

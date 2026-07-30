@@ -748,6 +748,15 @@ protected:
                 }
             }
 
+        /* DBG: 打印 behavior 覆盖后的 command_speed */
+        if (g.has_behavior && g.plan_count == 5) {
+            LOG_WARN("planning", "[DBG_SPD] route_ts=%.1f g.ts=%.1f beh_cmd=%d beh_spd=%.1f cmd_spd=%.1f has_beh=%d",
+                     g.route_target_speed >= 0.0 ? g.route_target_speed : -1.0,
+                     g.target_speed,
+                     g.has_behavior ? (int)g.current_behavior.command : -1,
+                     g.has_behavior ? (double)g.current_behavior.target_speed : -1.0,
+                     command_speed, g.has_behavior);
+        }
             /* 安全夹紧：scenario JSON 的 target_speed 是"信任来源"，但安全上限不变量
              * 应在规划层就守住——任何来源的目标速度都不能超过 cfg_max_speed。
              *
