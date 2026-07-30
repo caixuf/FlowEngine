@@ -358,6 +358,25 @@ static void on_fusion(const Message* msg, void* user_data) {
     g.last_fusion_us = clock_now_us();
 }
 
+/* ── vehicle/state 订阅 — 用 flowsim 真值覆盖 ego 位置 ── */
+static void on_vehicle_state(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* j;
+    if ((j = cJSON_GetObjectItem(root, "x")) && cJSON_IsNumber(j))
+        g.ego_x = j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "y")) && cJSON_IsNumber(j))
+        g.ego_y = j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "spd")) && cJSON_IsNumber(j))
+        g.ego_v = j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "hdg")) && cJSON_IsNumber(j))
+        g.ego_heading = j->valuedouble;
+    g.has_fusion = 1;
+    cJSON_Delete(root);
+}
+
 /* ── perception/obstacles 订阅 — 解析障碍物（车体坐标系→世界坐标） ──── */
 
 static void on_perception_obstacles(const Message* msg, void* user_data) {
@@ -1432,6 +1451,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
 #endif
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
+    transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
