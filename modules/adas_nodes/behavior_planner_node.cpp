@@ -160,7 +160,7 @@ struct BehaviorContext {
                                      * 防止远距离时目标速度被抬到超速 */
 
     /* ── 变道/跟车决策阈值（全部可热调） ── */
-    double blocked_range_mult{4.0};     /* blocked 检测距离 = max(min_m, desired_gap * mult) */
+    double blocked_range_mult{8.0};     /* blocked 检测距离 = max(min_m, desired_gap * mult) */
     double blocked_range_min{30.0};     /* blocked 检测最小距离 (m) */
     double follow_hysteresis{1.3};      /* FOLLOW→CRUISE 退出滞环倍数（进入紧退出松） */
     double lane_change_timeout_s{8.0};  /* 变道超时 (s)，超时回退 CRUISE */
