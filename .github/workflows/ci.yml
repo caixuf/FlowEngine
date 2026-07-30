@@ -331,6 +331,10 @@ jobs:
           cmake --build build/modules/adas_nodes -j$(nproc)
       - name: Regression evaluator (45s demo)
         run: python3 tools/demo_evaluator.py --duration 45 --interval 0.5
+      - name: Pipeline integrity check
+        continue-on-error: true
+        run: python3 tools/pipeline_check.py --json /tmp/flow_topology.json
+        run: python3 tools/demo_evaluator.py --duration 45 --interval 0.5
 
   # ── Scenario-matrix regression vs baseline (B2 收尾) ────────
   # Runs the full scenario suite (8 scenarios, one simulation each) and diffs

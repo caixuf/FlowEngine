@@ -14,13 +14,23 @@ and interpret results.
 ## How to run
 
 ```bash
-# Default: 15 s run, 0.25 s sampling interval
+# ── 0. 秒级管道检查（不启动 demo） ──
+python3 tools/pipeline_check.py
+
+# ── 1. 交互式调参 ──
+python3 tools/quick_verify.py --duration 120
+# 在交互终端中: set/eval/reset/params
+
+# ── 2. 调参前后回归对比 ──
+# 先存 baseline
+python3 tests/test_param_regression.py --save-baseline
+# 改参数后对比
+python3 tests/test_param_regression.py
+
+# ── 3. 全量回归（45s demo） ──
 python3 tools/demo_evaluator.py
 
-# Longer run to catch slow drifts (road-edge creep takes >20 s to manifest)
-python3 tools/demo_evaluator.py --duration 45 --interval 0.5
-
-# Evaluate the last run's data without re-launching demo.sh
+# ── 4. 仅分析已有数据 ──
 python3 tools/demo_evaluator.py --no-run
 ```
 
@@ -123,6 +133,21 @@ Negative-s NPCs fall through to world-frame fallback, and esmini may locate them
 nearest road start.
 **Fix:** All `s` values in scenario JSON actors must be ≥ 0. Negative s is semantically invalid
 in OpenDRIVE (no road surface exists before s=0).
+
+### Pattern 8: 积分饱和导致刹车失效（2026-07，已修复）
+**Symptom:** 遇到慢车时 control 不减速，油门全开撞上去。`throttle=1.0` 即使 error 是负数。
+**Root cause:** `control_node.cpp` anti-windup 两层 bug: (1) 条件 `g.integral < 0` 应为 `g.integral > 0`;
+(2) 运算 `-=` 应为 `+=`。加速阶段积分累积到 +500 (I=50×+500=+25000)，
+进入 FOLLOW 后 error=-8 时 P term 只有 -6400，总量 +18600 → 油门全开撞车。
+**Fix:** error 翻负（加速→减速过渡）时直接清零正积分；刹车饱和时正确泄放。
+
+### Pattern 9: overtake 触发太晚（2026-07，已修复）
+**Symptom:** `worthwhile = blocked && (best_gap < min_gap)` — 等 gap 小于最小安全距离
+才觉得"值得超车"，只剩 ~2s 变道窗口 → 要么追尾要么急刹出路沿。
+**Root cause:** `min_overtake_gap_base=10m, speed_mult=0.7` 在 8m/s 接近速度下
+`min_gap` 仅 15.6m (≈2s)。变道需要 3-5s，gap 不够。
+**Fix:** 改为 `best_gap > min_gap`（gap 还大时触发），阈值提至 base=25m, mult=2.0
+使 min_gap≈40m (≈5s)。
 
 ## 视觉验收（前端渲染验证 — 必做）
 

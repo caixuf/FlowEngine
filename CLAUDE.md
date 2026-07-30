@@ -38,6 +38,9 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `tools/flowboard/index.html` | 前端仪表盘（3D+2D+图表+D3 拓扑，ES modules） |
 | `tools/foxglove_bridge.py` | Foxglove Studio WebSocket 桥接 |
 | `tools/demo_evaluator.py` | 回归评估器：采样 JSON 并自动评分（碰撞/偏航/停滞/频率） |
+| `tools/pipeline_check.py` | 离线管道完整性检查：不启动 demo，秒级验证 9 类 32 项指标 |
+| `tools/quick_verify.py` | 交互式调参验证工具：实时仪表盘 + 即时 eval 评分 |
+| `tests/test_param_regression.py` | 参数回归对比：保存 baseline，改参后自动检测退化 |
 | `scripts/demo.sh` | 一键启动脚本 |
 | `src/flow_launcher.c` | 配置驱动启动器（读取 pipeline.json，dlopen 加载插件节点） |
 | `src/flowctl.c` | CLI 工具（list/inspect/dashboard/param/bag 等子命令） |
@@ -75,6 +78,9 @@ bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 ```bash
 # 每次改动 pipeline 链路上的节点后，跑评估器
 python3 tools/demo_evaluator.py --duration 45 --interval 0.5
+
+# 秒级离线检查（不启动 demo）
+python3 tools/pipeline_check.py
 
 # 仅分析当前数据，不重新启动 demo
 python3 tools/demo_evaluator.py --no-run
@@ -415,6 +421,10 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 每帧把 ego.heading 重置为道路切线，control 的 `v_lat_damp` 失效（heading_err≈0），退化为纯 P。**注意：此处曾尝试"保留 bicycle model heading"，已被推翻并回滚** —— 运动学模式下自由积分会漂移导致斜行。现状是运动学模式仍重置 heading（靠 cte+heading 项+低通+死区稳住），动力学模式才跳过重置 | `flowsim_node.cpp:1185-1200` |
 | steer 打到 0.25 硬限幅导致抖动 | 运动学自行车模型下 heading 漂移可达 0.8 rad，steer 限幅过紧导致控制器累积误差撞 clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
 | 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，运动学模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
+| 控制遇到慢车不减速、油门全开撞前车 | 积分饱和 anti-windup 逻辑错误：刹车分支 `g.integral < 0` 应为 `g.integral > 0`，`-= error*dt` 应为 `+=`。加速阶段积分累积到 +500，进入减速后 P term 不足以抵消 I term，油门全开撞车。修复：error 翻负时直接清零正积分 | `control_node.cpp:550-554` |
+| behavior planner 一直不进 FOLLOW | `worthwhile = blocked && (best_gap < min_gap)` 是反逻辑——等 gap 小于 15.6m 才觉得"值得超车"。高速 8m/s 接近速度下只剩 ~2s，变道来不及。修复：改为 `best_gap > min_gap`，阈值提至 base=25m，mult=2.0 | `behavior_planner_node.cpp:516` |
+| 管道检查 topics 列表缺 perception/obstacles | `monitor_node.c` 的 `TopicStats tstats[16]` 只能装 16 个 topic，第 17 个静默丢弃。扩到 64 | `monitor_node.c:647` |
+| HTTP 返回 JSON 在 64KB 被截断 | `monitor_server.c` 的 `MONITOR_HTTP_BUF_SIZE 65536` 不够装含 samples 的完整拓扑 JSON。扩到 131072 (128KB) | `monitor_server.c:46` |
 
 ## 最新 tag
 

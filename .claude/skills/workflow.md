@@ -77,6 +77,34 @@ cd build && ctest -LE "benchmark|manual|stability|integration" --output-on-failu
 
 改完 pipeline 链路节点后，跑 `/verify` 做系统性验证。
 
+完整的验证工作流（从快到慢）：
+
+```bash
+# 0. 秒级管道检查（不启动 demo，检查已有数据）
+python3 tools/pipeline_check.py
+
+# 1. 交互式调参验证（启动 demo）
+python3 tools/quick_verify.py --duration 120
+# 交互终端: set/eval 实时调参看效果
+
+# 2. 参数回归对比（前后各跑一次）
+python3 tests/test_param_regression.py --save-baseline
+# 改参数后...
+python3 tests/test_param_regression.py
+
+# 3. 全量回归门禁
+python3 tools/demo_evaluator.py --duration 45
+```
+
+各工具对比：
+
+| 工具 | 启动 demo? | 耗时 | 用途 |
+|------|-----------|------|------|
+| `pipeline_check.py` | 不启动 | ~1s | 静态检查数据完整性 |
+| `quick_verify.py` | 启动 | 交互式 | 实时调参 + 即时评估 |
+| `test_param_regression.py` | 启动 | ~30s | 参数前后对比 |
+| `demo_evaluator.py` | 启动 | ~60s | 全量回归门禁 |
+
 ## 四、持续迭代（Iterate）
 
 1. 验证暴露问题 → 分析根因 → 修复 → 再验证
