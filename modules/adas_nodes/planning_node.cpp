@@ -999,10 +999,10 @@ protected:
             }
 #endif
 
-            /* 速度覆盖：Frenet 规划器把 target_speed 当软约束（kv/ka 权衡），
-             * 减速场景下可能不降到目标速度 → 轨迹末点高于 behavior 下发值
-             * → control 不刹车 → 追尾。强制全轨迹线性减速到 command_speed。 */
-            if (command_speed < g.ego_v && n_wp > 2) {
+            /* 行为规划下发的 command_speed 是硬约束，不是 Frenet 的优化目标。
+             * Frenet 只决定横向路径（s, d），纵向速度全由 command_speed 确定。
+             * 从当前速度线性过渡到目标速度，保证轨迹末点 100% 跟踪行为指令。 */
+            if (n_wp > 2) {
                 double v0 = spd_out[0];
                 for (int i = 0; i < n_wp; i++) {
                     double t = (double)i / (double)(n_wp - 1);

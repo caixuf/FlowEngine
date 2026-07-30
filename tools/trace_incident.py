@@ -148,27 +148,29 @@ def trace(data: dict, at_s: float | None = None, verbose: bool = False) -> int:
         (f"off_road?", "🚨 YES" if off_road else "OK"),
     ])
 
-    # ── Layer 2: Perception ──
-    obstacles = scene.get("obstacles", [])
+    # ── Layer 2: Perception (真值 vs 感知) ──
+    obstacles = scene.get("obstacles", [])       # 真值（flowsim 透传）
     entities = scene.get("entities", [])
+    beh_obs_count = beh.get("obs_count", 0)       # 感知（perception/obstacles 过来的）
     same_lane_ahead = []
     for o in obstacles:
-        # topology obstacles 是 ego-relative 坐标，车道检测需转 world Y
         wy = sy + o.get("y", 0)
         if o.get("x", 0) > 0 and abs(wy - lcy) < lw * 0.5 + 0.6:
             o["_wy"] = wy
             same_lane_ahead.append(o)
 
-    print_layer("2. 感知 (Perception)", [
-        (f"total obstacles", f"{len(obstacles)}"),
-        (f"same-lane ahead", f"{len(same_lane_ahead)}"),
+    print_layer("2. 感知 (真值 vs 感知)", [
+        (f"truth obstacles", f"{len(obstacles)} (same-lane ahead: {len(same_lane_ahead)})"),
+        (f"perceived (behavior.obs_count)", f"{beh_obs_count}"),
+        (f"⚠️ 不匹配!" if beh_obs_count < len(obstacles) * 0.5 else "✅ 基本一致", ""),
     ])
     if same_lane_ahead:
         closest = min(same_lane_ahead, key=lambda o: o["x"])
-        print(f"    closest: id={closest['id']} dx={closest['x']:.0f}m vx={closest.get('vx',0):.1f} type={closest['type']}")
+        print(f"    truth closest: id={closest['id']} dx={closest['x']:.0f}m vx={closest.get('vx',0):.1f} type={closest['type']}")
         if verbose:
             for o in sorted(same_lane_ahead, key=lambda o: o["x"])[:5]:
                 print(f"      id={o['id']:2d} dx={o['x']:7.1f} vx={o.get('vx',0):.1f} type={o['type']}")
+    print(f"    behavior obs_count={beh_obs_count} — 如果 < 真值数量说明 perception 没送出来")
 
     # ── Layer 3: Behavior planner ──
     print_layer("3. 行为规划 (Behavior)", [
