@@ -73,6 +73,7 @@ struct PlanningContext {
     ReflectiveStateMachine mode_sm{};
     uint64_t mode_last_check_us{0};
     uint64_t last_fusion_us{0};      /* fusion 消息到达的单调时间戳（模式降级用） */
+    uint64_t last_plan_us{0};        /* 上次规划调度的单调时间戳（20Hz 限速用） */
     int      highway_ready{0};       /* ego_v 持续高于阈值一段时间 -> 视为高速工况 */
     double   highway_speed_timer{0.0};
 
@@ -584,6 +585,11 @@ protected:
                 {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY}, 50000);
             (void)r;
             if (should_stop()) break;
+
+            /* 20Hz rate limit */
+            uint64_t _plan_now = clock_now_us();
+            if (_plan_now - g.last_plan_us < 50000) continue;
+            g.last_plan_us = _plan_now;
 
             /* §11.2: heartbeat 上报 — monitor_node 的 degrade_supervisor_tick 据此检测超时 */
             degrade_supervisor_record_heartbeat("planning_node", clock_now_us() / 1000);

@@ -110,6 +110,13 @@ static struct {
     } samples[MAX_SAMPLES];
     int samples_head;   /* 下一个写入位置 */
     int samples_count;  /* 已写入的有效帧数 */
+
+    /* ── 流水线延迟监控 ── */
+    uint64_t last_perception_us;     /* 最新 perception/obstacles 到达时间 */
+    uint64_t last_planning_us;       /* 最新 planning/trajectory 到达时间 */
+    uint64_t last_fusion_us;         /* 最新 fusion/localization 到达时间 */
+    uint64_t last_control_us;        /* 最新 control/raw_cmd 到达时间 */
+
     volatile int has_scene_frame;
     /* P3 修复：scene_frame 缓存 mutex。on_scene_frame 在消息总线线程 memcpy
      * scene_entities_json，export_dashboard_json 在主线程 cJSON_Parse 同一 buffer。
@@ -155,6 +162,7 @@ static struct {
 
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
+    g.last_perception_us = clock_now_us();
     if (!msg || !msg->data) return;
     size_t copy = msg->data_size < sizeof(g.latest_obstacles_json) - 1
                   ? msg->data_size : sizeof(g.latest_obstacles_json) - 1;
@@ -247,6 +255,7 @@ static void on_remote_stats(const Message* msg, void* user_data) {
 static void on_planning_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
+    g.last_planning_us = clock_now_us();
 
     /* driver_mode 从 behavior/state 获取，不再依赖 trajectory 尾部文本 */
     g.route_lane = 0;
@@ -649,6 +658,16 @@ static void export_dashboard_json(void) {
             LOG_WARN("monitor", "behavior_state_json[0] == 0 — buffer empty");
             _beh_empty_warn++;
         }
+    }
+
+    /* ── 流水线端到端延迟 ── */
+    {
+        uint64_t _now = clock_now_us();
+        cJSON* pl = cJSON_AddObjectToObject(metrics, "pipeline_latency");
+        cJSON_AddNumberToObject(pl, "perception_age_ms",
+            g.last_perception_us > 0 ? (double)(_now - g.last_perception_us) / 1000.0 : -1.0);
+        cJSON_AddNumberToObject(pl, "planning_age_ms",
+            g.last_planning_us > 0 ? (double)(_now - g.last_planning_us) / 1000.0 : -1.0);
     }
 
     /* Topic 统计：合并本进程 + 跨进程（stats bridge）。

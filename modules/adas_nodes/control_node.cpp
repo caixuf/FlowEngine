@@ -93,6 +93,7 @@ struct ControlContext {
     double kp{0}, ki{0}, kd{0};
     double integral{0};
     double prev_error{0};
+    uint64_t last_ctrl_us{0};        /* 上次控制调度的单调时间戳（40Hz 限速用） */
     /* 横向级联 PD 状态 */
     double lat_kp{0};          /* lateral error → desired heading (rad/m) */
     double lat_kd_heading{0};  /* heading error → steer (阻尼) */
@@ -339,6 +340,11 @@ protected:
                 {TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY}, 50000);
             (void)r;
             if (should_stop()) break;
+
+            /* 40Hz rate limit */
+            uint64_t _ctrl_now = clock_now_us();
+            if (_ctrl_now - g.last_ctrl_us < 25000) continue;
+            g.last_ctrl_us = _ctrl_now;
 
             g.cycle++;
 
@@ -803,9 +809,13 @@ protected:
             g.prev_error = error;
 
             if (g.cycle % 20 == 1) {
-                LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f target_y=%.2f %s",
+                uint64_t _lat_now = clock_now_us();
+                uint64_t _plan_lat = (g.last_planning_us > 0) ? (_lat_now - g.last_planning_us) : 0;
+                uint64_t _fusion_lat = (g.last_fusion_us > 0) ? (_lat_now - g.last_fusion_us) : 0;
+                LOG_INFO("control", "#%d spd=%.1f→%.1f err=%.1f thr=%.2f brk=%.2f st=%.4f d=%.2f target_y=%.2f %s lat(plan=%lums fusion=%lums)",
                          g.cycle, g.current_speed, g.target_speed,
-                         error, throttle, brake, steer, g.lane_d, effective_target_y, mode);
+                         error, throttle, brake, steer, g.lane_d, effective_target_y, mode,
+                         (unsigned long)(_plan_lat / 1000), (unsigned long)(_fusion_lat / 1000));
             }
         }
 
