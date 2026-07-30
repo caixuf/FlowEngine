@@ -21,6 +21,7 @@
 #include "adas_msgs_gen.h"
 #include "road_geometry.h"
 #include "state_machine.h"
+#include "param_registry.h"
 #undef LOG_TRACE
 #undef LOG_DEBUG
 #undef LOG_INFO
@@ -138,6 +139,24 @@ struct BehaviorContext {
     double min_overtake_gap_base{10.0};
     double min_overtake_gap_cap{90.0};
     double min_overtake_gap_speed_mult{0.7};
+
+    /* ── ACC 常量时距（CTG）跟车律参数 ────────────────────────
+     * 期望间距 desired_gap = acc_standoff + acc_time_headway * ego_v
+     * 目标速度 v_target    = lead_speed + acc_k_gap * (gap - desired_gap)
+     *
+     * 原实现 `new_target_speed = lead_speed` 是纯速度跟随，**间距开环**：
+     * 从 12 m/s 减到前车的 7 m/s 需要时间，这期间 ego 一直在接近；到达
+     * 同速时 gap 已被吃掉一大截，随后冻结在那个偶然值，没有任何项把它
+     * 推回安全距离。前车再轻微减速就追尾 —— min_forward_gap 在 -0.69m
+     * 和 4.66m 之间随机漂移正是这个开环的表现，撞不撞取决于运气。
+     *
+     * CTG 律的关键性质：gap < desired 时 v_target **低于**前车速度，
+     * 主动拉开距离；稳态收敛到 gap == desired_gap，是闭环的。 */
+    double acc_standoff{5.0};       /* 静止安全余量 (m) */
+    double acc_time_headway{1.5};   /* 时距 (s)，与 safety_control 的 1.3 留余量 */
+    double acc_k_gap{0.4};          /* 间距误差增益 (1/s) */
+    double acc_gap_err_clamp{8.0};  /* 间距误差对目标速度的修正上限 (m/s)，
+                                     * 防止远距离时目标速度被抬到超速 */
 
     /* 协程 */
     std::unique_ptr<class BehaviorTask> task;
@@ -290,6 +309,47 @@ static void on_tracked_objects(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
+/* ── perception/obstacles 直连回退（object_tracker 未就绪时使用） ── */
+static void on_raw_obstacles(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data) return;
+
+    ObstacleList obs_list;
+    if (ObstacleList_deserialize(&obs_list, (const uint8_t*)msg->data, msg->data_size) != 0)
+        return;
+    if (obs_list.count == 0) return;
+
+    /* 直接覆盖 obs 缓存（优先级低于 tracked_objects） */
+    if (g.obs_count == 0) {
+        int lc = g.has_road_geometry ? g.lane_count : 2;
+        double lw = g.has_road_geometry ? g.lane_width : 3.5;
+        double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+        int n = obs_list.count < BEH_MAX_OBS ? (int)obs_list.count : BEH_MAX_OBS;
+        g.obs_count = 0;
+        for (int i = 0; i < n; i++) {
+            const Obstacle* o = &obs_list.obstacles[i];
+            /* 车体系 → 世界系 */
+            g.obs_x[i] = g.ego_x + (double)o->x * ch - (double)o->y * sh;
+            g.obs_y[i] = g.ego_y + (double)o->x * sh + (double)o->y * ch;
+            g.obs_vx[i] = (double)o->vx;
+            g.obs_vy[i] = (double)o->vy;
+            g.obs_type[i] = (uint8_t)o->type;
+            g.obs_id[i] = o->id;
+            /* lane_id */
+            {
+                double wy = g.obs_y[i];
+                double offset = (-wy) / lw + (lc - 1) * 0.5;
+                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                if (idx < 0) idx = 0;
+                if (idx >= lc) idx = lc - 1;
+                g.obs_lane_id[i] = (int8_t)idx;
+            }
+            g.obs_count++;
+        }
+        g.has_obs = 1;
+    }
+}
+
 /* ── road/geometry 订阅 ────────────────────────────────── */
 
 static void on_road_geometry(const Message* msg, void* user_data) {
@@ -325,6 +385,12 @@ protected:
                 continue;
             }
 
+            /* 参数热重载（三处之三）：漏了这步，注册了也改不动，只能重启。 */
+            g.acc_standoff      = param_get_float("behavior.acc_standoff");
+            g.acc_time_headway  = param_get_float("behavior.acc_time_headway");
+            g.acc_k_gap         = param_get_float("behavior.acc_k_gap");
+            g.acc_gap_err_clamp = param_get_float("behavior.acc_gap_err_clamp");
+
             int lc = g.has_road_geometry ? g.lane_count : 2;
             double lw = g.has_road_geometry ? g.lane_width : 3.5;
             if (lc < 1) lc = 2;
@@ -334,25 +400,53 @@ protected:
             g.state_timer += 0.05;
             if (g.cooldown > 0.0) g.cooldown -= 0.05;
 
-            /* ── 初始化车道索引（首次收到融合数据时从 ego_y 推定） ── */
-            if (g.committed_lane_idx == 0 && g.seq < 10) {
-                double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
-                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
-                if (idx < 0) idx = 0;
-                if (idx >= lc) idx = lc - 1;
-                g.committed_lane_idx = idx;
+            /* ── 当前车道索引：每帧从 ego_y 重算（带滞环） ──
+             *
+             * 原实现只在 `committed_lane_idx == 0 && seq < 10` 时算一次，
+             * 之后仅在变道完成时更新。ego 横向一漂，committed_lane_idx 就
+             * 与实际车道脱节，而前车筛选按它做精确匹配 → 前车周期性"消失"
+             * → best_gap=1e9 → blocked=false → LOST_LEAD 退出 FOLLOW。
+             * 实测 FOLLOW 进出只隔 150ms，ACC 从未连续作用过，ego 全速接近
+             * 前车直到 gap=-3.15m。**追尾的主因是这个，不是 ACC 律本身。**
+             *
+             * 滞环：只有偏离当前车道中心超过 (半车道 + LANE_HYST_M) 才换
+             * 索引，避免在车道线上抖动时索引来回跳。变道进行中不重算
+             * （由变道完成逻辑接管），否则会与 target_lane_idx 打架。 */
+            constexpr double LANE_HYST_M = 0.4;
+            {
+                StateId cur_st = statem_current(&g.sm);
+                bool changing = (cur_st == BEH_ST_LEFT_CHANGE ||
+                                 cur_st == BEH_ST_RIGHT_CHANGE);
+                if (!changing) {
+                    double cur_center = lane_center_y(g.committed_lane_idx, lc, lw, 0.0, 0.0);
+                    if (fabs(g.ego_y - cur_center) > lw * 0.5 + LANE_HYST_M) {
+                        double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
+                        int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                        if (idx < 0) idx = 0;
+                        if (idx >= lc) idx = lc - 1;
+                        g.committed_lane_idx = idx;
+                    }
+                }
             }
 
             int current_idx = g.committed_lane_idx;
             if (current_idx < 0) current_idx = 0;
 
-            /* ── 找本车道前车 ── */
+            /* ── 找本车道前车 ──
+             * 用横向距离而非车道号精确相等来筛。理由：离散车道号在车道线
+             * 附近会抖动，`obs_lane_id[i] != current_idx` 这种精确匹配会让
+             * 前车在抖动的一帧里整个消失，ACC 随之被踢出。真实 ACC 用的是
+             * 横向距离阈值 —— 它对索引抖动天然免疫，也能正确处理"前车正在
+             * 跨线切入本车道"这种索引尚未更新的情形。
+             * 阈值取半车道 + 0.6m 余量，略宽于车道以捕捉切入车。 */
+            double lane_center_cur = lane_center_y(current_idx, lc, lw, 0.0, 0.0);
+            double lead_lat_tol = lw * 0.5 + 0.6;
             double best_gap = 1e9;
             double lead_speed = g.target_speed;
             uint32_t lead_id = 0;
             for (int i = 0; i < g.obs_count; i++) {
                 if (g.obs_vx[i] < 0) continue;
-                if (g.obs_lane_id[i] != current_idx) continue;
+                if (fabs(g.obs_y[i] - lane_center_cur) > lead_lat_tol) continue;
                 double dx = g.obs_x[i] - g.ego_x;
                 if (dx > 0 && dx < best_gap) {
                     best_gap = dx;
@@ -361,8 +455,30 @@ protected:
                 }
             }
 
-            /* ── 超车判定 ── */
-            bool blocked = (best_gap < 80.0);
+            /* ── ACC 期望间距 + CTG 跟车目标速度 ──
+             * 在 blocked 判定之前算，因为 blocked 现在以 desired_gap 为尺度，
+             * 不再用裸 80m 魔法数。 */
+            double desired_gap = g.acc_standoff + g.acc_time_headway * g.ego_v;
+            double follow_speed = lead_speed;
+            if (best_gap < 1e8) {
+                double gap_err = best_gap - desired_gap;
+                if (gap_err >  g.acc_gap_err_clamp) gap_err =  g.acc_gap_err_clamp;
+                if (gap_err < -g.acc_gap_err_clamp) gap_err = -g.acc_gap_err_clamp;
+                follow_speed = lead_speed + g.acc_k_gap * gap_err;
+                if (follow_speed < 0.0) follow_speed = 0.0;
+                if (follow_speed > g.target_speed) follow_speed = g.target_speed;
+            }
+
+            /* ── 超车判定 ──
+             * blocked 的语义是"本车道前方有车影响通行"，用 desired_gap 的倍数
+             * 表达而非裸 80m：4× 时距间距在 12 m/s 下约 92m，与旧阈值同量级，
+             * 但会随车速自动伸缩（高速时更早察觉、低速时不误触发）。 */
+            double blocked_range = fmax(30.0, desired_gap * 4.0);
+            /* 滞环：已在 FOLLOW 时用 1.3× 的退出距离，避免前车在阈值附近
+             * 徘徊时 BLOCKED/LOST_LEAD 每帧翻转（实测曾 150ms 一次进出，
+             * 跟车律因此从未连续作用）。进入紧、退出松。 */
+            bool in_follow = (statem_current(&g.sm) == BEH_ST_FOLLOW);
+            bool blocked = (best_gap < (in_follow ? blocked_range * 1.3 : blocked_range));
             double rel_speed = g.ego_v - lead_speed;
             if (rel_speed < 0.0) rel_speed = 0.0;
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
@@ -463,18 +579,19 @@ protected:
                                  adj_idx, left_gap, left_rear_safe, right_gap, right_rear_safe);
                     } else if (blocked) {
                         ev = BEH_EV_BLOCKED;
-                        new_target_speed = lead_speed;
+                        new_target_speed = follow_speed;
                         new_follow_id = lead_id;
                         snprintf(reason, sizeof(reason),
-                                 "blocked gap=%.1f lead=%.1fm/s → FOLLOW id=%u (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
-                                 best_gap, lead_speed, lead_id, left_ok, right_ok, g.cooldown);
+                                 "blocked gap=%.1f/%.1f lead=%.1fm/s → FOLLOW id=%u v=%.1f (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
+                                 best_gap, desired_gap, lead_speed, lead_id, follow_speed,
+                                 left_ok, right_ok, g.cooldown);
                     }
                 } else if (cur == BEH_ST_FOLLOW) {
                     if (!blocked) {
                         ev = BEH_EV_LOST_LEAD;
                         new_follow_id = 0;
                         snprintf(reason, sizeof(reason),
-                                 "lead lost (gap=%.1f > 80m) → CRUISE", best_gap);
+                                 "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
                     } else if (worthwhile && adj_idx >= 0 && g.cooldown <= 0.0) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
@@ -485,7 +602,11 @@ protected:
                                  (ev == BEH_EV_OVERTAKE_LEFT) ? "LEFT_CHANGE" : "RIGHT_CHANGE",
                                  adj_idx, left_gap, right_gap);
                     } else {
-                        new_target_speed = lead_speed;
+                        /* FOLLOW 稳态：每帧重算 CTG 目标速度。
+                         * 这条分支是跟车期间的常驻路径 —— 原来这里也是
+                         * `= lead_speed`，所以即使入口帧算对了间距，稳态下
+                         * 又退回纯速度跟随，gap 依然无人闭环。 */
+                        new_target_speed = follow_speed;
                         new_follow_id = lead_id;
                     }
                 } else if (cur == BEH_ST_LEFT_CHANGE || cur == BEH_ST_RIGHT_CHANGE) {
@@ -673,6 +794,7 @@ void* behavior_thread(void*) {
 static const char* s_inputs[]  = {
     TOPIC_FUSION_LOCALIZATION,
     TOPIC_PERCEPTION_TRACKED_OBJECTS,
+    TOPIC_PERCEPTION_OBSTACLES,
     TOPIC_ROAD_GEOMETRY,
     nullptr
 };
@@ -724,13 +846,34 @@ static int behavior_init(MessageBus* bus, Transport* transport,
                 g.min_overtake_gap_base = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_cap")) && cJSON_IsNumber(j))
                 g.min_overtake_gap_cap = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "acc_standoff")) && cJSON_IsNumber(j))
+                g.acc_standoff = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "acc_time_headway")) && cJSON_IsNumber(j))
+                g.acc_time_headway = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "acc_k_gap")) && cJSON_IsNumber(j))
+                g.acc_k_gap = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "acc_gap_err_clamp")) && cJSON_IsNumber(j))
+                g.acc_gap_err_clamp = j->valuedouble;
             cJSON_Delete(p);
         }
     }
 
-    transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION,      on_fusion,                nullptr);
-    transport_subscribe(transport, TOPIC_PERCEPTION_TRACKED_OBJECTS, on_tracked_objects,      nullptr);
-    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY,            on_road_geometry,         nullptr);
+    /* ── 参数注册（默认值用 g.<字段>，即上面解析后的值，不用硬编码字面量，
+     *    否则会把 params_json 解析到的值盖掉）。逐帧 param_get_float 重读
+     *    见 BehaviorTask::run()，三处都通才能 `flowctl param set` 生效。 */
+    param_register_float("behavior.acc_standoff",      g.acc_standoff,      0.5, 20.0,
+                         "ACC 静止安全余量 (m)");
+    param_register_float("behavior.acc_time_headway",  g.acc_time_headway,  0.5, 4.0,
+                         "ACC 时距 (s)：desired_gap = standoff + headway*v");
+    param_register_float("behavior.acc_k_gap",         g.acc_k_gap,         0.0, 2.0,
+                         "ACC 间距误差增益 (1/s)");
+    param_register_float("behavior.acc_gap_err_clamp", g.acc_gap_err_clamp, 1.0, 30.0,
+                         "ACC 间距误差对目标速度的修正上限 (m/s)");
+
+    transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION,         on_fusion,             nullptr);
+    transport_subscribe(transport, TOPIC_PERCEPTION_TRACKED_OBJECTS,  on_tracked_objects,    nullptr);
+    transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES,        on_raw_obstacles,      nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_GEOMETRY,               on_road_geometry,      nullptr);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION,       0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_PERCEPTION_TRACKED_OBJECTS, 0u, CAP_SUBSCRIBER,  0);
