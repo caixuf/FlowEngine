@@ -328,11 +328,11 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
         g.obs_count = 0;
         for (int i = 0; i < n; i++) {
             const Obstacle* o = &obs_list.obstacles[i];
-            /* 车体系 → 世界系 */
+            /* 车体系 → 世界系（位置和速度都需要旋转） */
             g.obs_x[i] = g.ego_x + (double)o->x * ch - (double)o->y * sh;
             g.obs_y[i] = g.ego_y + (double)o->x * sh + (double)o->y * ch;
-            g.obs_vx[i] = (double)o->vx;
-            g.obs_vy[i] = (double)o->vy;
+            g.obs_vx[i] = (double)o->vx * ch - (double)o->vy * sh;
+            g.obs_vy[i] = (double)o->vx * sh + (double)o->vy * ch;
             g.obs_type[i] = (uint8_t)o->type;
             g.obs_id[i] = o->id;
             /* lane_id */
