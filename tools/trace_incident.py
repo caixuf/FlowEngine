@@ -100,20 +100,27 @@ def trace(data: dict, at_s: float | None = None, verbose: bool = False) -> int:
 
     if not incident:
         print("未发现事故")
+        print("提示: 用 --at <时间> 指定追溯点，或跑完 demo 后有碰撞/出路沿数据再来")
         return 0
 
+    at_val = incident.get("at_s", "?")
+    if isinstance(at_val, (int, float)):
+        at_str = f"~{at_val:.1f}s"
+    else:
+        at_str = str(at_val)
     print(f"\n{'='*60}")
     print(f"  事故类型: {incident['type']}")
-    print(f"  发生时间: ~{incident.get('at_s', '?'):.1f}s")
+    print(f"  发生时间: {at_str}")
     print(f"{'='*60}")
 
     # Find the sample closest to incident time
-    target_t = incident.get("at_s", 0)
     incident_sample = None
-    for s in samples:
-        if abs(s.get("t", 0) - data.get("timestamp", 0) - target_t) < 0.5:
-            incident_sample = s
-            break
+    target_t = incident.get("at_s")
+    if isinstance(target_t, (int, float)):
+        for s in samples:
+            if abs(s.get("t", 0) - data.get("timestamp", 0) - target_t) < 0.5:
+                incident_sample = s
+                break
     if incident_sample is None and samples:
         incident_sample = samples[-1]  # fallback to last
 
