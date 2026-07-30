@@ -104,6 +104,7 @@ struct BehaviorContext {
     /* ego 状态（从 fusion/localization JSON 解析） */
     double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0};
     volatile int has_fusion{0};
+    uint64_t last_fusion_us{0};
 
     /* 障碍物缓存（从 perception/obstacles 反序列化，世界坐标） */
     double obs_x[BEH_MAX_OBS]{}, obs_y[BEH_MAX_OBS]{};
@@ -249,6 +250,7 @@ static void on_fusion(const Message* msg, void* user_data) {
         g.ego_v = j->valuedouble;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "heading")) && cJSON_IsNumber(j))
         g.ego_heading = j->valuedouble;
+    g.last_fusion_us = clock_now_us();
     g.has_fusion = 1;
     cJSON_Delete(root);
 }
