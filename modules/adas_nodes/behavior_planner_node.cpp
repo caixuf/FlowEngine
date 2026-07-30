@@ -453,21 +453,14 @@ protected:
              * 滞环：只有偏离当前车道中心超过 (半车道 + LANE_HYST_M) 才换
              * 索引，避免在车道线上抖动时索引来回跳。变道进行中不重算
              * （由变道完成逻辑接管），否则会与 target_lane_idx 打架。 */
-            constexpr double LANE_HYST_M = 0.4;
+            // 逐帧重算车道索引，不依赖滞环。原滞环在 fusion 偶发错误帧时
+            // 会把 committed_lane_idx 锁死在错误值，导致永远看不到前车。
             {
-                StateId cur_st = statem_current(&g.sm);
-                bool changing = (cur_st == BEH_ST_LEFT_CHANGE ||
-                                 cur_st == BEH_ST_RIGHT_CHANGE);
-                if (!changing) {
-                    double cur_center = lane_center_y(g.committed_lane_idx, lc, lw, 0.0, 0.0);
-                    if (fabs(g.ego_y - cur_center) > lw * 0.5 + LANE_HYST_M) {
-                        double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
-                        int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
-                        if (idx < 0) idx = 0;
-                        if (idx >= lc) idx = lc - 1;
-                        g.committed_lane_idx = idx;
-                    }
-                }
+                double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
+                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                if (idx < 0) idx = 0;
+                if (idx >= lc) idx = lc - 1;
+                g.committed_lane_idx = idx;
             }
 
             int current_idx = g.committed_lane_idx;
