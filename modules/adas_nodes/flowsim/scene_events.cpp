@@ -324,9 +324,10 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                                                             fp.lane_id, fp.s, fp.offset);
                 /* 非 cutin 时 target_offset = offset（保持当前车道） */
                 /* cutin 的 target_offset 在下方动作块设置 */
-                /* reinit road_pos 到新位置 */
+                /* P4: 用 relocate 而非 init，避免 RM_DeletePosition 破坏 esmini
+                 * handle 数组导致其他 NPC handle 指向错误位置。 */
                 if (target->road_pos.ok()) {
-                    target->road_pos.init(*roads, fp.road_id, 0, fp.s, target->offset);
+                    target->road_pos.relocate(*roads, fp.road_id, 0, fp.s, target->offset);
                 }
                 /* 同步 route_s */
                 if (route && route->ok()) {

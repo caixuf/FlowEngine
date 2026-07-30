@@ -501,6 +501,19 @@ protected:
                         snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=5.0s)", g.state_timer);
                         LOG_WARN("behavior", "lane change timeout (state=%s, target_lane=%d, current=%d, timer=%.1f)",
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
+                    } else if (blocked) {
+                        /* P5 修复：变道进行中但仍在前车后方 → 保持跟车速度防追尾。
+                         *
+                         * 问题：原实现 LEFT_CHANGE/RIGHT_CHANGE 期间不更新 target_speed，
+                         * 保持进入时的 fmax(adj_speed, ego_v)≈ego_v（14.4 m/s）。但变道
+                         * 需要 3-5s 才能完成（planning 横向位移），期间 ego 仍在原车道，
+                         * 前方 NPC 仅 7 m/s → 5s 内位移差 35m，必然追尾。
+                         *
+                         * 修复：变道未完成（committed_lane_idx != target_lane_idx）时，
+                         * 若本车道仍有前车（blocked），target_speed = lead_speed（跟车速度）。
+                         * 变道完成进入新车道后才由 COMPLETED 转移到 CRUISE 释放速度。 */
+                        new_target_speed = lead_speed;
+                        new_follow_id = lead_id;
                     }
                 }
             }
@@ -512,6 +525,31 @@ protected:
                 } else {
                     /* 被 guard 拒绝：保留原状态，reason 不用 */
                     reason[0] = '\0';
+                }
+            }
+
+            /* ── P5 修复：变道超时后立即检查前车，避免 1-2 cycle 的 CRUISE 空窗期 ──
+             *
+             * 问题：LEFT_CHANGE 超时 → CRUISE 的转移在本周期完成，但 CRUISE 分支
+             * 的 blocked 检查在上方已跳过（进入分支时 cur 还是 LEFT_CHANGE）。
+             * 下一周期（50ms 后）才会检测到前车并转 FOLLOW。这 50ms 空窗期内
+             * planning 按 CRUISE 下发 target_speed=15（巡航），control 加速冲向
+             * 15 m/s，而前方 NPC 仅 7 m/s → 追尾（min_forward_gap=-4.56m）。
+             *
+             * 修复：状态机转移后，若新状态为 CRUISE 且当前帧已检测到 blocked
+             * （lead 搜索在上方 line 349-362 每周期都跑），立即发 BLOCKED 转
+             * FOLLOW，并设 target_speed=lead_speed。同一周期完成 CRUISE→FOLLOW，
+             * planning 直接收到 FOLLOW + lead_speed，无空窗期。 */
+            if (ev == BEH_EV_TIMEOUT || ev == BEH_EV_COMPLETED) {
+                StateId new_st = statem_current(&g.sm);
+                if (new_st == BEH_ST_CRUISE && blocked) {
+                    if (statem_send_event(&g.sm, BEH_EV_BLOCKED, nullptr)) {
+                        new_target_speed = lead_speed;
+                        new_follow_id = lead_id;
+                        snprintf(reason, sizeof(reason),
+                                 "post-timeout blocked gap=%.1f lead=%.1fm/s → FOLLOW id=%u (immediate)",
+                                 best_gap, lead_speed, lead_id);
+                    }
                 }
             }
 

@@ -247,6 +247,11 @@ static void on_trajectory(const Message* msg, void* user_data) {
     g.target_speed = (double)traj.points[0].v;
     g.has_target_speed = 1;
     g.lane_d = (double)traj.points[0].l;
+    /* DEBUG: 临时打印收到的轨迹首点速度 */
+    if (g.cycle > 900 && g.cycle < 1000) {
+        LOG_WARN("control", "[DBG traj] cycle=%d pts=%d v0=%.2f l0=%.2f valid=%d",
+                 g.cycle, n_pts, (double)traj.points[0].v, (double)traj.points[0].l, traj.valid);
+    }
 
     /* 存储路径点供 Stanley 横向控制使用 */
     pthread_mutex_lock(&g.ref_path_mtx);
@@ -464,12 +469,24 @@ protected:
                 g.speed_zero_timer = 0.0;
             }
 
-            /* ── 纵向控制：PID 跟踪 planning 下发的目标速度 ── */
+            /* ── 纵向控制：PID 跟踪 planning 下发的目标速度 ──
+             * P5 修复：原 `boost_target = fmax(g.target_speed, g.cfg_cruise_speed)`
+             * 把 planning 在 FOLLOW 状态下下发的 target_speed=lead_speed（如 7.0）
+             * 抬高到 cfg_cruise_speed（12.0），导致 ego 永远不肯减速到低于巡航速度
+             * → 与慢速前车追尾。原意是"无 planning 输入时用巡航速度兜底"，但条件
+             * 写错：has_target_speed=1 时也应尊重 planning 的 FOLLOW 降速指令。
+             *
+             * 三分支：
+             *   - planning 显式 target_speed≈0 → 红灯/stop 停车，acc_target=0
+             *   - planning 下发 target_speed>0 → 巡航或 FOLLOW，用 planning 值
+             *   - planning 未启动（has_target_speed=0）→ cfg_cruise_speed 兜底 */
             double boost_target;
             if (g.has_target_speed && g.target_speed < 0.1) {
                 boost_target = 0.0;  /* 红灯停车 */
+            } else if (g.has_target_speed) {
+                boost_target = g.target_speed;  /* planning 下发速度（含 FOLLOW 跟车降速） */
             } else {
-                boost_target = fmax(g.target_speed, g.cfg_cruise_speed);  /* 正常巡航 */
+                boost_target = g.cfg_cruise_speed;  /* 无 planning 输入时用巡航速度兜底 */
             }
             double acc_target = boost_target;
             /* 局部拷贝 target_speed 防回调线程覆盖（race condition） */
@@ -481,8 +498,16 @@ protected:
                 g.integral = 0;
             }
 
+            /* 上限夹紧：acc_target 不超过 cfg_cruise_speed（防止 planning 误下发超速值） */
             if (acc_target > g.cfg_cruise_speed) acc_target = g.cfg_cruise_speed;
-            if (g.current_speed > g.cfg_cruise_speed + 1.0) acc_target = g.cfg_cruise_speed - 1.0;
+            /* 超速降档：当前速度超过巡航+1时，把目标降到巡航-1（但仍允许 FOLLOW
+             * 更低的目标速度——只降不升，避免覆盖 FOLLOW 的 7.0 m/s）。
+             * P5 修复：原 `acc_target = g.cfg_cruise_speed - 1.0` 无条件赋值，
+             * 会把 FOLLOW 的 7.0 抬到 11.0，导致跟车降速失效。 */
+            if (g.current_speed > g.cfg_cruise_speed + 1.0 &&
+                acc_target > g.cfg_cruise_speed - 1.0) {
+                acc_target = g.cfg_cruise_speed - 1.0;
+            }
 
             /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，置 acc_target=0 ── */
             if (tl_ht && tl_ts < 0.1) {

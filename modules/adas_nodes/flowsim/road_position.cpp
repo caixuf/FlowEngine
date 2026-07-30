@@ -80,6 +80,26 @@ bool RoadPosition::init(FlowRoadNetwork& roads, int road_id, int lane_id,
     return true;
 }
 
+bool RoadPosition::relocate(FlowRoadNetwork& roads, int road_id, int lane_id,
+                            double s, double offset) {
+    /* 已有 handle 时直接 RM_SetLanePosition 重定位，不 delete+create。
+     * 这避免了 esmini 内部 handle 数组移位导致其他实体 handle 指向错误位置。 */
+    if (handle_ >= 0) {
+        if (!roads.loaded()) return false;
+        int rc = RM_SetLanePosition(handle_, (id_t)road_id, lane_id,
+                                    offset, s, true);
+        if (rc < 0) {
+            std::fprintf(stderr, "RoadPosition::relocate: SetLanePosition failed "
+                         "(rc=%d) road=%d lane=%d s=%.1f off=%.1f\n",
+                         rc, road_id, lane_id, s, offset);
+            return false;
+        }
+        return true;
+    }
+    /* 无 handle → 退回 init（首次创建） */
+    return init(roads, road_id, lane_id, s, offset);
+}
+
 bool RoadPosition::advance(double dist, double junction_angle) {
     if (handle_ < 0) return false;
     if (dist < 0) {

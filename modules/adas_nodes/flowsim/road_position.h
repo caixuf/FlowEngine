@@ -69,6 +69,25 @@ public:
               double s, double offset);
 
     /**
+     * 重定位已有 handle 到新 road/lane/s/offset（不销毁重建 handle）。
+     *
+     * 运行时 recycle/crash_cooldown 需要把 NPC 传送到新位置时必须用 relocate
+     * 而非 init。init 内部 RM_DeletePosition + RM_CreatePosition 会破坏
+     * esmini 内部 handle 数组的连续性（delete 后数组移位），导致其他 NPC
+     * 的 handle 指向错误位置 → 全体 NPC 协同位移 ~200m（= NPC 间距）。
+     * relocate 仅对已有 handle 调 RM_SetLanePosition，不动 handle 数组。
+     *
+     * @param roads   已加载的路网引用
+     * @param road_id 目标道路 id
+     * @param lane_id 目标车道 id
+     * @param s       目标纵向距离 (m)
+     * @param offset  目标横向偏移 (m)
+     * @return true 成功；false 表示 handle 无效或 SetLanePosition 失败
+     */
+    bool relocate(FlowRoadNetwork& roads, int road_id, int lane_id,
+                  double s, double offset);
+
+    /**
      * 是否已初始化（handle 有效）。
      */
     bool ok() const { return handle_ >= 0; }

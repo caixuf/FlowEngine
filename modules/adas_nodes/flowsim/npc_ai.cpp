@@ -336,11 +336,14 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     npc.route_fail_count = 0;
     npc.target_offset = npc.offset;  /* recycle 后保持当前车道，不残留变道目标 */
 
-    /* Phase 2: road_pos 重新 init 到回收点。
+    /* Phase 2: road_pos 重定位到回收点。
      * route.locate 把 route_s 转成 (road_id, s_local)，再用 npc.lane_id（保持
-     * 横向车道）init road_pos。失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
-     * 注意：road_pos.init 内部会 RM_DeletePosition 旧 handle 再 RM_CreatePosition，
-     * 不需要显式 destroy；失败时 RoadPosition::init 已 fprintf stderr 告警。
+     * 横向车道）relocate road_pos。失败则 road_pos 失效，下一帧 step5 走旧 route 逻辑。
+     *
+     * P4 修复：改用 relocate 而非 init。init 内部 RM_DeletePosition + RM_CreatePosition
+     * 会破坏 esmini 内部 handle 数组连续性（delete 后数组移位），导致其他 NPC 的
+     * handle 指向错误位置 → 全体 NPC 协同位移 ~200m（= NPC 间距）。relocate 仅对
+     * 已有 handle 调 RM_SetLanePosition，不触碰 handle 数组。
      *
      * P3 修复：原代码硬编码 lane_id=0（参考线），RM_SetLanePosition 对 type="none"
      * 的中心线车道返回 h=PI，导致同向 NPC (route_dir=+1) 回收后 heading 翻转为 PI
@@ -352,7 +355,7 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
         int rid = 0, ridx = -1;
         double s_local = 0.0;
         route.locate(npc.route_s, rid, s_local, ridx);
-        if (npc.road_pos.init(*roads, rid, npc.lane_id, s_local, 0.0)) {
+        if (npc.road_pos.relocate(*roads, rid, npc.lane_id, s_local, 0.0)) {
             /* 立即同步世界坐标 — 旧实现只 init road_pos 不更新 npc.x/y，
              * 下一帧 road_pos.world() 才把 npc.x/y 跳到新位置，evaluator
              * 在两次采样间反算出 45 m/s 的"伪速度"触发 respawn jump 告警。
@@ -730,11 +733,6 @@ mobil_done: ;
             npc.road_pos.set_offset(lane_internal);
             WorldPos wp;
             if (npc.road_pos.world(wp)) {
-                /* DEBUG: trace esmini heading（按场景业务 id=1 的 NPC） */
-                if (npc.scenario_id == 1 && (cycle % 50) == 1) {
-                    fprintf(stderr, "[DBG npc1] road_pos.world wp=(%.2f,%.2f,%.2f) h=%.3f route_dir=%d\n",
-                            wp.x, wp.y, wp.z, wp.h, npc.route_dir);
-                }
                 /* ── P1.2 修复：crash_cooldown 期间不覆写 npc.x/y ──
                  *
                  * 原实现无条件 `npc.x = wp.x; npc.y = wp.y;` —— 但 crash_cooldown
@@ -761,12 +759,14 @@ mobil_done: ;
                      * 而非用 (x,y) 反向 sync — 后者会回到碰撞前位置，使分离失效。
                      * 同时同步世界坐标，让 crash_cooldown 结束后第一帧位置正确。
                      * P3: 同 recycle_npc，用 npc.lane_id + lane-internal offset=0
-                     * 而非 lane_id=0（否则 esmini 返回 h=PI 致 heading 翻转）。 */
+                     * 而非 lane_id=0（否则 esmini 返回 h=PI 致 heading 翻转）。
+                     * P4: 用 relocate 而非 init（同 recycle_npc 修复），
+                     * 避免 RM_DeletePosition 破坏 esmini handle 数组。 */
                     if (route && route->ok() && npc.route_dir != 0) {
                         int rid = 0, ridx = -1;
                         double s_local = 0.0;
                         route->locate(npc.route_s, rid, s_local, ridx);
-                        npc.road_pos.init(*roads, rid, npc.lane_id, s_local, 0.0);
+                        npc.road_pos.relocate(*roads, rid, npc.lane_id, s_local, 0.0);
                         WorldPos wp_sep;
                         if (npc.road_pos.world(wp_sep)) {
                             npc.x = wp_sep.x;

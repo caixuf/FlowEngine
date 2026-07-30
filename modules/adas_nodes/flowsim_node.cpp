@@ -939,12 +939,29 @@ static void publish_ref_path(void) {
         std::vector<flowsim::RefPathPoint> samples;
         int n = 0;
         /* Phase 2: ego 有 road_pos 时优先用 RoadPosition 采样。
-         * 用 clone 避免污染 ego 主 position（sample_ahead 会推进 handle 状态）。
-         * junction_angle=M_PI 默认直行（后续可从 route step type 映射左/右转）。 */
+         *
+         * P5 修复（根因：NPC 协同位移 ~200m）：原实现用 `ego.road_pos.clone()`
+         * 创建临时 handle 采样，sample_ahead 完后 tmp 析构调 RM_DeletePosition。
+         * 每 cycle（20Hz）create+delete 一个 handle 会破坏 esmini 内部 handle
+         * 数组连续性（delete 后数组移位），导致其他 NPC 的 road_pos handle 指向
+         * 错误位置 → 全体 NPC 协同位移 ~200m（= NPC 间距），evaluator 误报
+         * npc teleport FAIL。
+         *
+         * 修复：直接用 ego.road_pos.sample_ahead（推进 handle 状态），采样完后
+         * 用 relocate 把 ego.road_pos 恢复到采样前位置。不 create/delete 任何
+         * handle，不触碰 handle 数组。relocate 仅调 RM_SetLanePosition 重定位
+         * 已有 handle，与 recycle_npc / scene_events 同模式。 */
         if (ego.road_pos.ok()) {
-            flowsim::RoadPosition tmp = ego.road_pos.clone();
-            if (tmp.ok()) {
-                n = tmp.sample_ahead(g.roads, 100.0, 5.0, M_PI, samples);
+            /* 保存采样前 frenet 状态，采样后恢复 */
+            flowsim::FrenetPos saved_fp;
+            bool has_saved = ego.road_pos.frenet(saved_fp);
+            flowsim::Entity& ego_mut = g.pool[0];
+            n = ego_mut.road_pos.sample_ahead(g.roads, 100.0, 5.0, M_PI, samples);
+            /* 恢复 ego.road_pos 到采样前位置（sample_ahead 推进到了最后采样点） */
+            if (has_saved) {
+                ego_mut.road_pos.relocate(g.roads, saved_fp.road_id,
+                                          saved_fp.lane_id, saved_fp.s,
+                                          saved_fp.offset);
             }
         }
         /* fallback：road_pos 未初始化或采样失败 → 旧 route.sample_ahead */
@@ -1369,59 +1386,6 @@ protected:
             /* scene/frame：完整场景帧 20Hz 给 3D 前端（Phase 2.2） */
             flowsim::publish_scene_frame(g.transport, g.pool, g.scene_pub_cfg,
                                          sim_time_us, g.cycle);
-
-            /* P3 DEBUG: 跨周期 NPC 位移检测。记录上一周期各 NPC 的 x，
-             * 本周期 publish 后对比。若 >50m 且 tp_cycle 未变（非合法 teleport），
-             * 打印详情。用途：定位 evaluator 观测到的 +200m 协同位移根因
-             * — 若 flowsim 内部无大位移，则问题在 monitor/evaluator 数据管道。 */
-            {
-                static double prev_x[128] = {0};
-                static uint32_t prev_tp[128] = {0};
-                static bool prev_init = false;
-                int n = g.pool.size();
-                if (n > 128) n = 128;
-                if (prev_init) {
-                    int shift_count = 0;
-                    double first_shift_dx = 0;
-                    int first_shift_id = -1;
-                    for (int i = 1; i < n; ++i) {
-                        flowsim::Entity& e = g.pool[i];
-                        if (!e.active || !e.is_npc_vehicle()) continue;
-                        double dx = e.x - prev_x[i];
-                        if (std::fabs(dx) > 50.0 && e.last_teleport_cycle != g.cycle) {
-                            shift_count++;
-                            if (first_shift_id < 0) {
-                                first_shift_dx = dx;
-                                first_shift_id = e.id;
-                            }
-                        }
-                    }
-                    if (shift_count >= 3) {
-                        fprintf(stderr, "[DBG shift] cyc=%u shifted=%d NPCs first_id=%d "
-                                "dx=%.1f ego_x=%.1f ego_v=%.1f\n",
-                                g.cycle, shift_count, first_shift_id,
-                                first_shift_dx, ego.x, ego.speed);
-                        /* 打印所有 NPC 的位置，用于看是否协同位移 */
-                        for (int i = 1; i < n && i < 40; ++i) {
-                            flowsim::Entity& e = g.pool[i];
-                            if (!e.active || !e.is_npc_vehicle()) continue;
-                            double dx = e.x - prev_x[i];
-                            if (std::fabs(dx) > 10.0) {
-                                fprintf(stderr, "  id=%d prev_x=%.1f cur_x=%.1f dx=%.1f "
-                                        "tp=%u/%u route_s=%.1f road_ok=%d\n",
-                                        e.id, prev_x[i], e.x, dx,
-                                        prev_tp[i], e.last_teleport_cycle,
-                                        e.route_s, e.road_pos.ok() ? 1 : 0);
-                            }
-                        }
-                    }
-                }
-                for (int i = 0; i < n; ++i) {
-                    prev_x[i] = g.pool[i].x;
-                    prev_tp[i] = g.pool[i].last_teleport_cycle;
-                }
-                prev_init = true;
-            }
 
             g.cycle++;
             if (g.cycle % 100 == 0) {

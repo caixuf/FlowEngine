@@ -728,11 +728,20 @@ protected:
             /* ── Behavior planner 跟车/停车/让行速度覆盖 ──
              * behavior_planner 在 FOLLOW 状态下发送 target_speed = lead_speed，
              * STOP/YIELD 状态发送 target_speed = 0。规划层必须消费此值，
-             * 否则 FOLLOW 时仍按巡航速度行驶 → 追尾。 */
+             * 否则 FOLLOW 时仍按巡航速度行驶 → 追尾。
+             *
+             * P5 修复：LEFT_CHANGE/RIGHT_CHANGE 期间也需消费 beh.target_speed。
+             * 变道需要 3-5s 完成，期间 ego 仍在原车道、前方有慢速 NPC。behavior
+             * 在变道未完成且 blocked 时下发 target_speed=lead_speed，若 planning
+             * 不消费此值，会回退到巡航速度 → 追尾。仅当 beh_speed < command_speed
+             * 时才覆盖（不抬升速度，只降速防追尾）。 */
             if (g.has_behavior) {
                 float beh_speed = g.current_behavior.target_speed;
                 int8_t beh_cmd = g.current_behavior.command;
                 if (beh_cmd == BEH_FOLLOW && beh_speed >= 0.0f && beh_speed < command_speed) {
+                    command_speed = (double)beh_speed;
+                } else if ((beh_cmd == BEH_LEFT_CHANGE || beh_cmd == BEH_RIGHT_CHANGE) &&
+                           beh_speed >= 0.0f && beh_speed < command_speed) {
                     command_speed = (double)beh_speed;
                 } else if (beh_cmd == BEH_STOP || beh_cmd == BEH_YIELD || beh_cmd == BEH_EMERGENCY) {
                     command_speed = 0.0;
@@ -1137,6 +1146,12 @@ protected:
             int rc = Trajectory_serialize(&traj, buf, &ser_len);
             if (rc == 0) {
                 transport_publish(transport_, TOPIC_PLANNING_TRAJECTORY, buf, (uint32_t)ser_len);
+            }
+            /* DEBUG: 临时打印发布的轨迹首点速度 */
+            if (g.plan_count >= 760 && g.plan_count <= 810) {
+                LOG_WARN("planning", "[DBG pub] #%d cmd_speed=%.2f pts[0].v=%.2f spd_out[0]=%.2f n_wp=%d beh_cmd=%d",
+                         g.plan_count, command_speed, (double)points[0].v, spd_out[0], n_wp,
+                         g.has_behavior ? (int)g.current_behavior.command : -1);
             }
             /* 缓存轨迹用于拼接 */
             g.prev_traj_stamp_us = clock_now_us();
