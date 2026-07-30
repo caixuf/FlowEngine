@@ -136,9 +136,9 @@ struct BehaviorContext {
     uint32_t follow_obs_id{0};
 
     /* 超车参数 */
-    double min_overtake_gap_base{10.0};
+    double min_overtake_gap_base{25.0};
     double min_overtake_gap_cap{90.0};
-    double min_overtake_gap_speed_mult{0.7};
+    double min_overtake_gap_speed_mult{2.0};
 
     /* ── ACC 常量时距（CTG）跟车律参数 ────────────────────────
      * 期望间距 desired_gap = acc_standoff + acc_time_headway * ego_v
@@ -513,7 +513,7 @@ protected:
             if (rel_speed < 0.0) rel_speed = 0.0;
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
-            bool worthwhile = blocked && (best_gap < min_gap);
+            bool worthwhile = blocked && (best_gap > min_gap);
 
             /* ── 左右车道评估 ──
              * 关键约束：禁止变道到对向车道！
