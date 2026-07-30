@@ -547,11 +547,18 @@ protected:
                 mode = "BRAKE";
             }
 
-            /* Anti-windup */
-            if (g.integral > 0 && throttle >= 1.0 && error > 0)
-                g.integral -= error * 0.05;
-            if (g.integral < 0 && brake >= 1.0 && error < 0)
-                g.integral -= error * 0.05;
+            /* Anti-windup：error 从正翻负时（加速→减速切换），积分饱和是追尾主因。
+             * 加速阶段积分可累积到 +500（I=50×+500=+25000），此时减速指令 P=800×(-8)=-6400，
+             * 总量 +18600 → 油门全开撞上去。
+             * 修复：error 翻负且 |error|>2 时直接清零正积分；正常饱和时慢速泄放。 */
+            if (error < -2.0 && g.integral > 0) {
+                g.integral = 0;  /* 从加速切到减速，残余正积分是催命符，立刻清零 */
+            } else {
+                if (g.integral > 0 && throttle >= 1.0 && error > 0)
+                    g.integral -= error * 0.05;
+                if (g.integral > 0 && brake >= 1.0 && error < 0)
+                    g.integral += error * 0.05;
+            }
 
             /* ── LTV MPC 横向控制 ── */
             bool mpc_used = false;
