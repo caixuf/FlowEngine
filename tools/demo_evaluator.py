@@ -919,10 +919,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                         f", entities=[{entity_ids_str}]")
 
     # P2-7: flowsim invariant 失败升级为 FAIL。
-    # flowsim_node.cpp:1604 在 cleanup 时打印 [INVARIANT_FAILED] total=N marker。
-    # 旧行为只 LOG_WARN，evaluator 看不到 → P0-2 类 id 撞车污染（pool 真值干净、
-    # 但前端 Map 污染）漏检。invariant 是后端真值校验，能拦下 pool 层面的异常。
-    invariant_match = re.search(r"\[INVARIANT_FAILED\]\s*total=(\d+)", log_text)
+    # flowsim_node.cpp 在 cleanup 时打印 [INV] summary total=N marker。
+    # 兼容旧格式 [INVARIANT_FAILED] total=N。
+    invariant_match = re.search(r"\[INV\]\s*summary\s*total=(\d+)", log_text)
+    if not invariant_match:
+        invariant_match = re.search(r"\[INVARIANT_FAILED\]\s*total=(\d+)", log_text)
     if invariant_match and int(invariant_match.group(1)) > 0:
         failures.append(
             f"flowsim invariant failed: total={invariant_match.group(1)} "

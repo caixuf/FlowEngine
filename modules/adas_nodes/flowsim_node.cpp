@@ -1407,9 +1407,8 @@ protected:
                          spatial.passed, spatial.failed, spatial.warned);
                 if (spatial.failed > 0) {
                     g.invariant_fail_count.fetch_add(spatial.failed, std::memory_order_relaxed);
-                    // 失败详情写入 stderr 供 evaluator 捕获
                     if (!spatial.details.empty()) {
-                        fprintf(stderr, "[flowsim::spatial_invariant] cycle=%u\n%s",
+                        fprintf(stderr, "[INV] spatial_invariant cycle=%u\n%s",
                                 g.cycle, spatial.details.c_str());
                     }
                 }
@@ -1421,20 +1420,25 @@ protected:
                 if (motion.failed > 0) {
                     g.invariant_fail_count.fetch_add(motion.failed, std::memory_order_relaxed);
                     if (!motion.details.empty()) {
-                        fprintf(stderr, "[flowsim::motion_direction] cycle=%u\n%s",
+                        fprintf(stderr, "[INV] motion_direction cycle=%u\n%s",
                                 g.cycle, motion.details.c_str());
                     }
                 }
                 // 时序 invariant（需要上一帧）
                 if (g.prev_dynamic_digest.actors.size() > 0) {
+                    /* 用实际 sim_time 差值作为 dt，避免帧率波动导致
+                     * Δpos/accel 检查误报。旧代码用固定 FLOWSIM_DT_SEC*20=1.0s，
+                     * 但实际帧间隔可能因系统负载偏移。 */
+                    double inv_dt = dd.sim_time - g.prev_dynamic_digest.sim_time;
+                    if (inv_dt < 0.01) inv_dt = FLOWSIM_DT_SEC * 20;  // fallback
                     auto temporal = flowsim::check_temporal_invariants(
-                        g.prev_dynamic_digest, dd, FLOWSIM_DT_SEC * 20);
+                        g.prev_dynamic_digest, dd, inv_dt);
                     LOG_INFO("flowsim", "temporal_invariant: %d passed, %d failed, %d warned",
                              temporal.passed, temporal.failed, temporal.warned);
                     if (temporal.failed > 0) {
                         g.invariant_fail_count.fetch_add(temporal.failed, std::memory_order_relaxed);
                         if (!temporal.details.empty()) {
-                            fprintf(stderr, "[flowsim::temporal_invariant] cycle=%u\n%s",
+                            fprintf(stderr, "[INV] temporal_invariant cycle=%u\n%s",
                                     g.cycle, temporal.details.c_str());
                         }
                     }
@@ -1692,14 +1696,12 @@ static void flowsim_cleanup(void) {
         g.running = false;
     }
     /* P2-7: invariant 失败汇总 marker。demo_evaluator.py 扫描此 marker
-     * 把 invariant 失败升级为 FAIL（旧逻辑只 LOG_WARN，evaluator 看不到）。
-     * marker 格式固定：[INVARIANT_FAILED] total=N
-     * 仅当 N>0 时打印，避免污染正常退出日志。 */
+     * 把 invariant 失败升级为 FAIL。demo.sh 实时监控也通过 [INV] 标签
+     * 展示失败详情。此处打印汇总（含 total=0 的正常路径，便于确认 invariant
+     * 确实跑了）。 */
     uint32_t inv_fails = g.invariant_fail_count.load(std::memory_order_relaxed);
-    if (inv_fails > 0) {
-        fprintf(stderr, "[INVARIANT_FAILED] total=%u (spatial+motion+temporal)\n", inv_fails);
-        fflush(stderr);
-    }
+    fprintf(stderr, "[INV] summary total=%u (spatial+motion+temporal)\n", inv_fails);
+    fflush(stderr);
     g.task.reset();
     g.roads.close();
     g.roads_loaded = false;

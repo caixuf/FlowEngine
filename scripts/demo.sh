@@ -348,13 +348,13 @@ fi
 echo "───[5/5] Live monitor (${DURATION}s)..."
 echo ""
 
-# 准备行为日志过滤（tail stderr，筛选 [BEH] 和 [SM] 日志行）
+# 准备行为日志过滤（tail stderr，筛选 [BEH]、[SM] 和 [INV] 日志行）
 BEH_LOG="/tmp/flow_beh_monitor.txt"
 : > "$BEH_LOG"  # 清空
 sleep 1  # 等 stderr 文件就绪
 {
   tail -F /tmp/flow_launcher_stderr.txt 2>/dev/null \
-    | grep --line-buffered -E '\[(BEH|SM)\]' \
+    | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
     > "$BEH_LOG"
 } &
 TAIL_BEH_PID=$!
@@ -390,6 +390,8 @@ while true; do
           echo -e "\n  \033[36m$(echo "$line" | grep -oP '\[BEH\].*' || echo "$line")\033[0m"
         elif echo "$line" | grep -q '\[SM\]'; then
           echo -e "\n  \033[33m$(echo "$line" | grep -oP '\[SM\].*' || echo "$line")\033[0m"
+        elif echo "$line" | grep -q '\[INV\]'; then
+          echo -e "\n  \033[31m$(echo "$line" | grep -oP '\[INV\].*' || echo "$line")\033[0m"
         fi
       done
       BEH_LINECOUNT=$CURRENT_LC

@@ -378,8 +378,6 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
 static const double EPS_Z = 0.5;        // 高度容差 (m)
 static const double EPS_LATERAL = 1.0;  // 横向容差 (m)
 static const double MAX_SPEED_FACTOR = 1.5;
-static const double CAR_BBOX[3] = {4.5, 1.8, 1.5};
-static const double PED_BBOX[3] = {0.5, 0.5, 1.7};
 
 InvariantResult check_spatial_invariants(const DynamicDigest& d,
                                           const StaticDigest& sd,
@@ -448,18 +446,18 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
             r.passed++;
         }
 
-        // 5. bbox 尺寸检查
-        const double* ref_bbox = (a.type == 4) ? PED_BBOX : CAR_BBOX;
-        double bbox_err = std::fabs(a.bbox[0] - ref_bbox[0])
-                        + std::fabs(a.bbox[1] - ref_bbox[1])
-                        + std::fabs(a.bbox[2] - ref_bbox[2]);
-        if (bbox_err > 2.0) {
+        // 5. bbox 合理性检查（用范围而非硬编码参考值）
+        /* 旧代码用硬编码 CAR_BBOX=[4.5,1.8,1.5] 做精确匹配，但场景中 NPC
+         * 可能有不同尺寸（卡车 length=8m、行人 length=0.5m 等），导致误报。
+         * 改为范围检查：length ∈ [0.3, 30]、width ∈ [0.3, 3.5]、height ∈ [0.5, 5.0]。 */
+        if (a.bbox[0] < 0.3 || a.bbox[0] > 30.0 ||
+            a.bbox[1] < 0.3 || a.bbox[1] > 3.5 ||
+            a.bbox[2] < 0.5 || a.bbox[2] > 5.0) {
             r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),
-                "  FAIL %s: bbox=[%.2f,%.2f,%.2f] vs ref=[%.2f,%.2f,%.2f] (尺度错)\n",
-                tag, a.bbox[0], a.bbox[1], a.bbox[2],
-                ref_bbox[0], ref_bbox[1], ref_bbox[2]);
+                "  FAIL %s: bbox=[%.2f,%.2f,%.2f] 超出合理范围 (尺度错)\n",
+                tag, a.bbox[0], a.bbox[1], a.bbox[2]);
             r.details += buf;
         } else {
             r.passed++;
