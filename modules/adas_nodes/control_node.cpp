@@ -456,6 +456,11 @@ protected:
             if (!g.has_planning) {
                 /* 无 planning 时保持当前 y，不自行推导目标车道 */
                 cruise_lane_y = g.ego_y;
+                /* 出路沿恢复：如果 |ego_y| 远超道路范围，强制回道路中心。
+                 * 高速上 4 车道宽 ~14m，取 15m 作为"确定出路沿"的判据。 */
+                if (fabs(g.ego_y - g.road_center_y) > 15.0) {
+                    cruise_lane_y = g.road_center_y;
+                }
             }
 
             /* ── 死锁恢复: 车长时间近乎静止时，给一点前向油门打破静摩擦 ── */

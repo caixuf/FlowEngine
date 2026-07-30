@@ -993,6 +993,17 @@ protected:
             }
 #endif
 
+            /* 速度覆盖：Frenet 规划器把 target_speed 当软约束（kv/ka 权衡），
+             * 减速场景下可能不降到目标速度 → 轨迹末点高于 behavior 下发值
+             * → control 不刹车 → 追尾。强制全轨迹线性减速到 command_speed。 */
+            if (command_speed < g.ego_v && n_wp > 2) {
+                double v0 = spd_out[0];
+                for (int i = 0; i < n_wp; i++) {
+                    double t = (double)i / (double)(n_wp - 1);
+                    spd_out[i] = v0 * (1.0 - t) + command_speed * t;
+                }
+            }
+
             /* 变道时偏移 Frenet 轨迹（控制层只跟轨迹，不自己决策） */
             if (g.target_lane_offset != 0.0 && n_wp > 0) {
                 for (int i = 0; i < n_wp; i++) {
