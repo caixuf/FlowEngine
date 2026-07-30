@@ -67,6 +67,13 @@ TTC_CRITICAL_S = 3.0
 WARNING_LEAD_WARN_S = 1.0
 # 预警提前量低于此阈值 → FAIL（系统几乎无预警，紧急刹车）。
 WARNING_LEAD_FAIL_S = 0.3
+# ACC 期望间距参数 —— 必须与 behavior_planner_node.cpp 的 acc_* 默认值一致。
+# 门禁用它把"跟车间距够不够"变成随车速伸缩的判据，而不是固定 5m。
+ACC_STANDOFF_M = 5.0
+ACC_TIME_HEADWAY_S = 1.5
+# 实际最小间距低于期望间距的这个比例 → FAIL。取 0.5 是因为 ACC 有超调是
+# 正常的，但掉到期望值一半以下意味着间距根本没被控制。
+ACC_GAP_FAIL_RATIO = 0.5
 # 真值实体 type → 分层类别映射（与 flowsim entity.h::EntityType 对齐）。
 TRUTH_TYPE_VEHICLE = {"car", "truck", "suv"}
 TRUTH_TYPE_VRU = {"pedestrian"}  # Vulnerable Road User
@@ -755,7 +762,104 @@ def _dbg_dump_sample(filename: str, sample: dict) -> None:
         _json.dump({"entity_count": len(ents), "vehicles": rows}, fh, indent=2)
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None) -> tuple[list[str], list[str], dict]:
+"""── 门禁有效性层 (liveness gate) ──────────────────────────────
+
+本项目的门禁被静默绕过至少六次，每次机制不同：
+  1. 分母为 0 → 比率算出满分   (truth_count_vru=0 → recognition_rate 1.000)
+  2. 被检查量恒为 0 → 上界永满足 (kappa≡0 → `|kappa|>0.25` 永假)
+  3. 判据写进 warnings → 可忽略  (steer_flip_rate)
+  4. 上游欠采样 → 目标频率混叠
+  5. 场景不含该情形 → 判据空跑
+  6. 指标与事实错配        (warning_lead=51s 却发生碰撞)
+
+逐条补特例永远落后一个，因为它们共享同一个结构缺陷：
+**门禁不知道自己有没有真的测到东西。**
+
+下面两个函数把「测到了吗」变成一等判据：
+
+- `liveness_report()` —— 统计每个进入判据的量在整个 run 里的取值分布。
+  恒为初值/恒为单值 = 该量结构性死掉，依赖它的判据全部无效。
+  这一条不需要枚举「哪些量可能为零」，覆盖上面 1/2/5 三种。
+- `require()` —— 判据显式声明前置条件；不满足时记为 INCONCLUSIVE
+  并计入 failures，而不是 `continue` 掉。无法判定 ≠ 通过。
+"""
+
+# 必须"活着"的量：run 结束时若恒为单一值，说明上游链路断了。
+# (字段名, 人类可读名, 允许恒定?) —— 允许恒定的量不参与死值判定。
+LIVENESS_FIELDS = [
+    ("speed",           "ego speed",        False),
+    ("x",               "ego x",            False),
+    ("y",               "ego y",            False),
+    ("heading",         "ego heading",      False),
+    ("steer_signed",    "steer command",    False),
+    ("lane_count",      "lane count",       True),   # 场景固定即合法
+]
+
+
+def liveness_report(series: list[dict]) -> dict:
+    """统计每个受监控量的取值分布，识别结构性死值。
+
+    返回 {field: {"unique": n, "min": .., "max": .., "dead": bool}}。
+    dead=True 表示整个 run 只有一个取值 —— 依赖它的判据无意义。
+    """
+    report: dict[str, dict] = {}
+    for field, label, may_be_const in LIVENESS_FIELDS:
+        vals = [m[field] for m in series
+                if field in m and isinstance(m[field], (int, float))
+                and math.isfinite(m[field])]
+        if not vals:
+            report[field] = {"label": label, "unique": 0, "min": None,
+                             "max": None, "dead": True, "reason": "no data"}
+            continue
+        uniq = len(set(round(v, 6) for v in vals))
+        dead = (uniq <= 1) and not may_be_const
+        report[field] = {
+            "label": label, "unique": uniq,
+            "min": min(vals), "max": max(vals),
+            "dead": dead,
+            "reason": "constant" if dead else "",
+        }
+    return report
+
+
+def require(failures: list[str], gate_name: str, conditions: dict) -> bool:
+    """判据前置条件检查。
+
+    conditions: {人类可读的前置描述: bool}。任一为 False → 该判据无法判定，
+    记为 INCONCLUSIVE 并计入 failures。**无法判定不等于通过** —— 这是与
+    旧 `if n < MIN: continue` 的关键区别，后者把"没测到"渲染成 PASS。
+
+    返回 True 表示前置齐备、调用方可以继续做实际判定。
+    """
+    unmet = [desc for desc, ok in conditions.items() if not ok]
+    if unmet:
+        failures.append(
+            f"INCONCLUSIVE [{gate_name}]: cannot evaluate — " + "; ".join(unmet)
+        )
+        return False
+    return True
+
+
+def scenario_actor_layer_counts(scenario: dict | None) -> dict[str, int]:
+    """场景 JSON 声明的各感知层 actor 数量。
+
+    这是"本应被感知到什么"的权威来源。识别率判据拿它做前置：场景里有
+    行人却没有 vru 真值样本 = 感知链路漏了整个类别，而不是"该层没数据、
+    跳过判定"。旧实现缺这个对照，所以 truth_count_vru=0 被当成正常。
+    """
+    counts: dict[str, int] = {"vehicle": 0, "vru": 0}
+    if not isinstance(scenario, dict):
+        return counts
+    for actor in scenario.get("actors", []) or []:
+        if not isinstance(actor, dict):
+            continue
+        layer = TRUTH_LAYER_FOR_TYPE.get(str(actor.get("type", "")).lower())
+        if layer in counts:
+            counts[layer] += 1
+    return counts
+
+
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None, scenario: dict | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -773,6 +877,23 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     steer_signed = [m["steer_signed"] for m in series]
     headings = [m["heading"] for m in series]
     timestamps = [float(s.get("timestamp", 0.0) or 0.0) for s in samples]
+    scenario_layer_counts = scenario_actor_layer_counts(scenario)
+
+    # ── 门禁有效性：量的活性检查 ──────────────────────────────
+    # 在任何判据之前跑。一个恒为初值的量意味着上游链路断了，
+    # 而所有依赖它的判据都会"通过"——这正是本项目反复翻车的机制
+    # (ego_v 恒 0 / obs 恒空 / kappa 恒 0)。死值直接 FAIL，
+    # 并且要先报出来，否则后面几十条 PASS 会掩盖它。
+    liveness = liveness_report(series)
+    for field, info in liveness.items():
+        if info["dead"]:
+            detail = (info["reason"] if info["reason"] != "constant"
+                      else f"constant at {info['min']}")
+            failures.append(
+                f"DEAD SIGNAL [{info['label']}]: {detail} across all "
+                f"{len(series)} samples — every check reading this quantity "
+                f"is vacuous"
+            )
 
     topics = topic_map(last)
     pubs, subs = node_topic_roles(last)
@@ -1156,13 +1277,34 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     # ── min_forward_gap 近距/碰撞 FAIL ──
     # 前方有车但 gap <= 0 → 追尾/碰撞，直接 FAIL（无论是否触发 COLLISION 正则）
+    #
+    # 判据必须与 ACC 的期望间距挂钩，而不是一个固定 5m。理由：ego 以 12 m/s
+    # 跟车时 desired_gap = 5 + 1.5*12 = 23m，此时 gap=6m 是"差点撞上"而非
+    # "安全"。旧实现把 4.66m 记为 WARN（可忽略），于是"追尾是运气问题"这件事
+    # 从未阻断过合并 —— 而 min_forward_gap 在 -0.69m 和 4.66m 之间随机漂移，
+    # 两次 run 的差别只是运气。用 desired_gap 的比例做阈值，判据随车速伸缩。
     valid_gaps = [m["min_forward_gap"] for m in series if not math.isinf(m["min_forward_gap"])]
     if valid_gaps:
         min_gap_all = min(valid_gaps)
+        # 取该帧车速估期望间距；用整段的中位速度避免个别低速帧放宽判据
+        _speeds_sorted = sorted(speeds)
+        v_med = _speeds_sorted[len(_speeds_sorted) // 2] if _speeds_sorted else 0.0
+        desired_gap = ACC_STANDOFF_M + ACC_TIME_HEADWAY_S * v_med
+        gap_fail_thresh = desired_gap * ACC_GAP_FAIL_RATIO
         if min_gap_all <= 0.0:
             failures.append(f"min_forward_gap <= 0 (min={min_gap_all:.2f}m): rear-end collision risk")
-        elif min_gap_all < 5.0:
-            warnings.append(f"min_forward_gap too small: min={min_gap_all:.2f}m (< 5m safety buffer)")
+        elif min_gap_all < gap_fail_thresh:
+            failures.append(
+                f"min_forward_gap {min_gap_all:.2f}m < {gap_fail_thresh:.2f}m "
+                f"({ACC_GAP_FAIL_RATIO:.0%} of desired {desired_gap:.1f}m at "
+                f"v_med={v_med:.1f} m/s): ACC is not holding headway — "
+                f"collision avoided by margin, not by control"
+            )
+        elif min_gap_all < desired_gap:
+            warnings.append(
+                f"min_forward_gap {min_gap_all:.2f}m below desired "
+                f"{desired_gap:.1f}m (v_med={v_med:.1f} m/s)"
+            )
 
     # ── 感知降频检测 ──
     # 场景有 entities 但 obstacles 长期为空 → 感知链路降频/掉线
@@ -1219,7 +1361,13 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # truth（flowsim scene.entities）vs perceived（scene.obstacles 转世界坐标）
     # 的匹配率，按 vehicle / vru 分层；预警提前量 = TTC 跌破临界时刻 - 首次检测时刻。
     perception = _compute_perception_metrics(series, timestamps)
-    # 分层识别率 FAIL/WARN（仅当该层有足够样本 ≥ 5 帧时才判定，避免小样本噪声）
+    # 分层识别率 FAIL/WARN。
+    #
+    # 旧实现 `if n < REC_MIN_SAMPLES: continue` 是本项目"虚假满分"的来源：
+    # 场景里有行人，但行人从未进入真值统计（truth_count_vru=0），于是
+    # recognition_rate_vru 被算成 1.000 且判据被 continue 跳过 —— 报告打印
+    # "感知 100%" 而实际那一层根本没测。现在改为：该层在场景中存在
+    # (scenario_expects) 但真值样本不足 → INCONCLUSIVE（计 FAIL）。
     REC_MIN_SAMPLES = 5
     for layer_name, rate_key, count_key in [
         ("vehicle", "recognition_rate_vehicle", "truth_count_vehicle"),
@@ -1227,8 +1375,17 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     ]:
         rate = perception[rate_key]
         n = perception[count_key]
+        expected_in_scene = scenario_layer_counts.get(layer_name, 0) > 0
+        if not require(failures, f"recognition_rate_{layer_name}", {
+            f"scenario declares {scenario_layer_counts.get(layer_name, 0)} "
+            f"{layer_name} actor(s) but only {n} truth samples reached the "
+            f"evaluator (>= {REC_MIN_SAMPLES} required) — "
+            f"the {layer_name} sensing path is not being measured":
+                (not expected_in_scene) or n >= REC_MIN_SAMPLES,
+        }):
+            continue
         if n < REC_MIN_SAMPLES:
-            continue  # 样本不足，跳过判定（仍写入 summary 供诊断）
+            continue  # 场景本身没有该类 actor，跳过属正常
         if rate < PERCEPTION_RATE_FAIL:
             failures.append(
                 f"{layer_name} recognition rate too low: {rate*100:.1f}% "
@@ -1305,7 +1462,41 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "critical_event_count": perception["critical_event_count"],
         "min_ttc_s": perception["min_ttc_s"],
         "perceived_track_count": perception["perceived_track_count"],
+        "liveness": {k: {"unique": v["unique"], "dead": v["dead"]}
+                     for k, v in liveness.items()},
+        "scenario_actor_counts": scenario_layer_counts,
+        # behavior 指标（从最后一个 sample 的 metrics.behavior 提取，
+        # 仅在 behavior/state 已发布时可用）
+        "behavior_state": last.get("metrics", {}).get("behavior", {}).get("state", ""),
+        "behavior_obs_count": int(last.get("metrics", {}).get("behavior", {}).get("obs_count", 0) or 0),
+        "best_gap_m": float(last.get("metrics", {}).get("behavior", {}).get("best_gap", -1.0) or -1.0),
+        "lead_speed_mps": float(last.get("metrics", {}).get("behavior", {}).get("lead_speed", 0.0) or 0.0),
+        "desired_gap_m": float(last.get("metrics", {}).get("behavior", {}).get("desired_gap", 0.0) or 0.0),
+        "committed_lane": int(last.get("metrics", {}).get("behavior", {}).get("committed_lane", -1) or -1),
+        "target_lane": int(last.get("metrics", {}).get("behavior", {}).get("target_lane", -1) or -1),
+        "blocked": bool(last.get("metrics", {}).get("behavior", {}).get("blocked", False)),
+        "worthwhile": bool(last.get("metrics", {}).get("behavior", {}).get("worthwhile", False)),
     }
+
+    # ── 门禁有效性：指标交叉一致性 ────────────────────────────
+    # 发生了碰撞，却报出 51s 的预警提前量 —— 这两个数不可能同时成立，
+    # 说明 warning_lead 算的是另一个目标（远处某辆车的首次检测），
+    # 与真正撞上的那个无关。指标与事实错配时，漂亮数字比没有数字更糟：
+    # 它让"感知 100% 却撞了"看起来像个谜，而不是一个 bug。
+    if collision_pub > 0 or collision_log_count > 0:
+        lead = perception["warning_lead_min_s"]
+        if perception["critical_event_count"] <= 0:
+            failures.append(
+                "METRIC MISMATCH: collision occurred but critical_event_count=0 "
+                "— the TTC/critical-event detector never saw the object that "
+                "was actually hit"
+            )
+        elif math.isfinite(lead) and lead > 5.0:
+            failures.append(
+                f"METRIC MISMATCH: collision occurred yet warning_lead_min="
+                f"{lead:.1f}s — the reported lead time is computed against a "
+                f"different target than the collision partner"
+            )
 
     # ── max_duration_s 超时检查 ──
     # 场景声明了 max_duration_s (>0) 时，实际运行时长不能超过它。
@@ -1342,8 +1533,57 @@ def main() -> int:
             duration = 60  # fallback
 
     if args.no_run:
-        sample = load_json(args.json_file)
-        samples = [sample] if sample else []
+        data = load_json(args.json_file)
+        if not data:
+            samples = []
+        else:
+            # 如果能从 ring buffer（monitor_node.c samples 数组）读到多帧，
+            # 用 ring buffer 重建时序 —— 否则只有 1 帧快照，所有时序检查都无效。
+            ring = data.get("samples", [])
+            if isinstance(ring, list) and len(ring) >= 3:
+                samples = []
+                base_scene = data.get("metrics", {}).get("scene", {})
+                base_lane = base_scene.get("lane", {})
+                base_ego = base_scene.get("ego", {})
+                base_metrics = data.get("metrics", {})
+                base_vehicle = base_metrics.get("vehicle", {})
+                base_driver = base_metrics.get("driver_mode", "NA:READY")
+                base_route = base_metrics.get("route_lane", 0)
+                base_behavior = base_metrics.get("behavior", {})
+                base_obstacles = base_scene.get("obstacles", [])
+                base_entities = base_scene.get("entities", [])
+
+                for r in ring:
+                    rx = float(r.get("x", base_ego.get("x", 0)))
+                    ry = float(r.get("y", base_ego.get("y", 0)))
+                    rh = float(r.get("heading", base_ego.get("heading", 0)))
+                    rs = float(r.get("speed", base_ego.get("speed", 0)))
+                    rst = float(r.get("steer", base_ego.get("steer", 0)))
+
+                    ego = dict(base_ego)
+                    ego["x"] = rx
+                    ego["y"] = ry
+                    ego["heading"] = rh
+                    ego["speed"] = rs
+                    ego["steer"] = rst
+
+                    samples.append({
+                        "timestamp": float(r.get("t", data.get("timestamp", 0))),
+                        "metrics": {
+                            "scene": {
+                                "ego": ego,
+                                "lane": base_lane,
+                                "obstacles": base_obstacles,
+                                "entities": base_entities,
+                            },
+                            "vehicle": base_vehicle,
+                            "driver_mode": base_driver,
+                            "route_lane": base_route,
+                            "behavior": base_behavior,
+                        },
+                    })
+            else:
+                samples = [data]
         returncode = 0
         criteria, scenario_name, has_noa_route, road, traffic_lights = load_scenario_criteria_from_pipeline()
     else:
@@ -1367,7 +1607,18 @@ def main() -> int:
         if returncode != 0:
             print(f"demo.sh exited with code {returncode}")
 
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road, traffic_lights=traffic_lights)
+    # 场景 actor 清单：识别率判据的前置对照（"本应感知到什么"）。
+    # 与 criteria/road 分开加载，避免改动 load_scenario_criteria_from_pipeline
+    # 的返回元组形状（三处调用方）。
+    _scn_file = args.scenario or _pipeline_flowsim_scenario_file()
+    _scn_dict = None
+    if _scn_file:
+        _scn_path = Path(_scn_file)
+        if not _scn_path.is_absolute():
+            _scn_path = ROOT / _scn_path
+        _scn_dict = load_json(_scn_path)
+
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road, traffic_lights=traffic_lights, scenario=_scn_dict)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():

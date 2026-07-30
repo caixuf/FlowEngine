@@ -73,7 +73,7 @@ static struct {
     int  ego_road_id;                 /* ego 所在道路段 id（flowsim_node 发布） */
 
     /* 行为规划状态（来自 behavior/state JSON topic）*/
-    char behavior_state_json[512];
+    char behavior_state_json[2048];
     volatile int has_planning;
 
     /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，flowsim_node 发布） */
@@ -98,6 +98,18 @@ static struct {
                                           * → export_dashboard_json 静默丢弃 scene.entities，
                                           *   前端 3D 场景只剩 ego。扩到 64KB 足够 30+ 实体。 */
     char   scene_ego_json[4096];        /* ego 实体 JSON（含 lights/brake/vx/vy，~1.5KB 实测） */
+
+#define MAX_SAMPLES 200  /* samples 环形缓冲长度：20Hz × 200 = 10s 窗口 */
+    /* ── samples 环形缓冲：最近 ~10s 的 ego 快照 ── */
+    struct {
+        double t;       /* UNIX 时间戳 (秒) */
+        double x, y;    /* ego 位置 */
+        double heading; /* ego 朝向 */
+        double speed;   /* ego 速度 */
+        double steer;   /* steer 指令 */
+    } samples[MAX_SAMPLES];
+    int samples_head;   /* 下一个写入位置 */
+    int samples_count;  /* 已写入的有效帧数 */
     volatile int has_scene_frame;
     /* P3 修复：scene_frame 缓存 mutex。on_scene_frame 在消息总线线程 memcpy
      * scene_entities_json，export_dashboard_json 在主线程 cJSON_Parse 同一 buffer。
@@ -622,6 +634,20 @@ static void export_dashboard_json(void) {
         cJSON* bs = cJSON_Parse(g.behavior_state_json);
         if (bs) {
             cJSON_AddItemToObject(metrics, "behavior", bs);
+        } else {
+            /* 诊断：JSON 解析失败时记录 buffer 前 80 字节 */
+            static int _beh_parse_warn = 0;
+            if (_beh_parse_warn < 3) {
+                LOG_WARN("monitor", "behavior_state_json cJSON_Parse failed (first 80: %.80s)",
+                         g.behavior_state_json);
+                _beh_parse_warn++;
+            }
+        }
+    } else {
+        static int _beh_empty_warn = 0;
+        if (_beh_empty_warn < 3) {
+            LOG_WARN("monitor", "behavior_state_json[0] == 0 — buffer empty");
+            _beh_empty_warn++;
         }
     }
 
@@ -632,8 +658,8 @@ static void export_dashboard_json(void) {
     int merged_n = 0;
 
     /* 先放入本进程 topics */
-    TopicStats tstats[16];
-    int nt = g.bus ? message_bus_get_all_topic_stats(g.bus, tstats, 16) : 0;
+    TopicStats tstats[64];
+    int nt = g.bus ? message_bus_get_all_topic_stats(g.bus, tstats, 64) : 0;
     for (int ti = 0; ti < nt && merged_n < 64; ti++) {
         snprintf(merged[merged_n].topic, sizeof(merged[merged_n].topic), "%s", tstats[ti].topic);
         merged[merged_n].pub  = tstats[ti].publish_count;
@@ -711,6 +737,16 @@ static void export_dashboard_json(void) {
     double ego_y = json_extract_double(g.latest_vehicle_state, "y");
     double hdg   = json_extract_double(g.latest_vehicle_state, "hdg");
     double steer = json_extract_double(g.latest_vehicle_state, "st");
+
+    /* ── samples 环形缓冲：追加当前帧 ego 快照，供 evaluator 时序分析 ── */
+    g.samples[g.samples_head].t = timestamp;
+    g.samples[g.samples_head].x = ego_x;
+    g.samples[g.samples_head].y = ego_y;
+    g.samples[g.samples_head].heading = hdg;
+    g.samples[g.samples_head].speed = spd;
+    g.samples[g.samples_head].steer = steer;
+    g.samples_head = (g.samples_head + 1) % MAX_SAMPLES;
+    if (g.samples_count < MAX_SAMPLES) g.samples_count++;
 
     cJSON* scene = cJSON_AddObjectToObject(metrics, "scene");
     /* schema_version 供前端做兼容性检查，见 docs/FLOWBOARD_SCENE_CONTRACT.md §6 */
@@ -970,6 +1006,23 @@ static void export_dashboard_json(void) {
         cJSON_AddItemToArray(threads_arr, thr);
     }
 
+    /* ── samples 数组（环形缓冲 -> JSON，供 evaluator 时序分析） ── */
+    cJSON* samples_arr = cJSON_AddArrayToObject(root, "samples");
+    int start_idx = (g.samples_count < MAX_SAMPLES) ? 0
+                    : g.samples_head;  /* samples_head 指向最旧的有效帧 */
+    for (int i = 0; i < g.samples_count; i++) {
+        int idx = (start_idx + i) % MAX_SAMPLES;
+        if (g.samples[idx].t == 0.0) continue;  /* 跳过未初始化帧 */
+        cJSON* s_obj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(s_obj, "t", g.samples[idx].t);
+        cJSON_AddNumberToObject(s_obj, "x", g.samples[idx].x);
+        cJSON_AddNumberToObject(s_obj, "y", g.samples[idx].y);
+        cJSON_AddNumberToObject(s_obj, "heading", g.samples[idx].heading);
+        cJSON_AddNumberToObject(s_obj, "speed", g.samples[idx].speed);
+        cJSON_AddNumberToObject(s_obj, "steer", g.samples[idx].steer);
+        cJSON_AddItemToArray(samples_arr, s_obj);
+    }
+
     /* ── Serialize to compact JSON string ──
      * cJSON_PrintUnformatted 比 cJSON_Print 小 30-40%（无缩进/换行），
      * SSE 端 sse_flatten_payload 本就会删掉这些空白，两边都省 CPU。
@@ -1101,6 +1154,17 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     /* state_file 可从环境变量或默认路径获得 */
     const char* sf = flowengine_state_file();
     snprintf(g.state_file, sizeof(g.state_file), "%s", sf ? sf : "/tmp/flow_topology.json");
+
+    /* behavior_state_json 启动默认值：避免前 0.5s 拓扑 JSON 缺 behavior 段。
+     * behavior/state 每 10 帧（0.5s @20Hz）发布一次，在此之前
+     * export_dashboard_json 的 g.behavior_state_json[0] == '\0' 导致
+     * metrics.behavior 缺失，quick_verify 所有 behavior 字段显示 "?"。 */
+    snprintf(g.behavior_state_json, sizeof(g.behavior_state_json),
+             "{\"state\":\"NA\",\"committed_lane\":0,\"obs_count\":0}");
+
+    /* samples 环形缓冲初始态 */
+    g.samples_head = 0;
+    g.samples_count = 0;
 
     /* 解析参数 */
     g.frequency_hz = 20.0;  /* 20Hz: §11.1 从 5Hz 提频，与控制对齐 */

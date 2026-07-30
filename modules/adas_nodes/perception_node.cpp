@@ -69,6 +69,11 @@ struct PerceptionContext {
      * 下游 planning/control/safety 经 ego_heading 旋回车体系做几何判断；
      * 速度方向直接用世界系（对向迎面 obs_vx<0 即可识别）。 */
     double  obs_x[128]{}, obs_y[128]{}, obs_vx[128]{}, obs_vy[128]{};
+    /* 障碍物类型与尺寸（来自 vehicle/state 的 ot/ol/ow 字段）。
+     * 类型必须逐个透传，不能硬编码 —— 行人与车的尺寸差 9 倍，
+     * 下游的让行逻辑、碰撞判定、识别率分层全依赖它。 */
+    uint8_t obs_type[128]{};
+    double  obs_length[128]{}, obs_width[128]{};
 
     /* 发布帧计数 */
     uint32_t frame_id{0};
@@ -155,11 +160,33 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
             cJSON* jvx = cJSON_GetObjectItemCaseSensitive(root, key);
             snprintf(key, sizeof(key), "ovy%d", i);
             cJSON* jvy = cJSON_GetObjectItemCaseSensitive(root, key);
+            /* ot/ol/ow：flowsim 一直在发（flowsim_node.cpp 的 ot%d/ol%d/ow%d），
+             * 但此前无人解析 —— ground_truth 分支把所有障碍物硬编码成
+             * OBJ_TYPE_VEHICLE，于是场景里的行人在整条链路上从不存在：
+             * VRU 真值统计恒为 0 → 识别率分母为 0 → 报告打印"感知 100%"，
+             * 而 safety_control 的行人让行逻辑一次都没被触发过。 */
+            snprintf(key, sizeof(key), "ot%d", i);
+            cJSON* jt = cJSON_GetObjectItemCaseSensitive(root, key);
+            snprintf(key, sizeof(key), "ol%d", i);
+            cJSON* jl = cJSON_GetObjectItemCaseSensitive(root, key);
+            snprintf(key, sizeof(key), "ow%d", i);
+            cJSON* jw = cJSON_GetObjectItemCaseSensitive(root, key);
             if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
                 g.obs_x[i] = jx->valuedouble;
                 g.obs_y[i] = jy->valuedouble;
                 g.obs_vx[i]= cJSON_IsNumber(jvx) ? jvx->valuedouble : 0.0;
                 g.obs_vy[i]= cJSON_IsNumber(jvy) ? jvy->valuedouble : 0.0;
+                /* 默认按车处理（尺寸也用车的默认值），仅在明确标注时改写 */
+                g.obs_type[i]   = OBJ_TYPE_VEHICLE;
+                g.obs_length[i] = 4.6;
+                g.obs_width[i]  = 2.0;
+                if (cJSON_IsString(jt) && jt->valuestring) {
+                    const char* t = jt->valuestring;
+                    if (strcmp(t, "pedestrian") == 0)   g.obs_type[i] = OBJ_TYPE_PEDESTRIAN;
+                    else if (strcmp(t, "cyclist") == 0) g.obs_type[i] = OBJ_TYPE_CYCLIST;
+                }
+                if (cJSON_IsNumber(jl)) g.obs_length[i] = jl->valuedouble;
+                if (cJSON_IsNumber(jw)) g.obs_width[i]  = jw->valuedouble;
             }
         }
         g.n_obs = no;
@@ -338,8 +365,9 @@ protected:
                         ob->y = (float)(-dx * sh + dy * ch);
                         ob->vx = (float)(g.obs_vx[i] * ch + g.obs_vy[i] * sh);
                         ob->vy = (float)(-g.obs_vx[i] * sh + g.obs_vy[i] * ch);
-                        ob->type = OBJ_TYPE_VEHICLE;
-                        ob->width = 2.0f; ob->length = 4.6f;
+                        ob->type = (ObstacleType)g.obs_type[i];
+                        ob->width = (float)g.obs_width[i];
+                        ob->length = (float)g.obs_length[i];
                         ob->confidence = 1.0f;
                         /* lane_id：从世界系 y 计算 */
                         double offset = (-g.obs_y[i]) / lw + (lc - 1) * 0.5;

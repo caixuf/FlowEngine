@@ -1,0 +1,63 @@
+{
+  "name": "urban_challenge",
+  "description": "城市复杂场景：前车急刹+行人横穿+红绿灯停车+邻道车辆cut-in。用于验证AEB/跟车/变道/行人避让/红绿灯响应的综合鲁棒性。双向4车道直路。",
+  "random_seed": 42,
+  "duration_s": 180,
+  "npc_lane_change": false,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 12.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "name": "urban_road",
+        "length_m": 10000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 17.0,
+        "nodes": [[0, 0, 0], [10000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1,  "type": "car",        "x": 60.0,   "y": -1.75, "vx": 14.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car",        "x": 90.0,   "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 3,  "type": "car",        "x": 25.0,   "y": -5.25, "vx": 14.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 4,  "type": "car",        "x": 200.0,  "y": -1.75, "vx": 13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 5,  "type": "car",        "x": 250.0,  "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 10, "type": "pedestrian", "x": 160.0,  "y": -8.5,  "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5},
+    {"id": 11, "type": "pedestrian", "x": 380.0,  "y": 8.5,   "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5},
+    {"id": 20, "type": "car",        "x": 600.0,  "y": 5.25,  "vx": -13.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 21, "type": "car",        "x": 800.0,  "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [
+    {"id": 0, "x": 480.0, "y_lane": -1.75, "green_s": 100.0, "yellow_s": 3.0, "red_s": 100.0, "phase_offset_s": 0.0}
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 120.0,
+    "min_avg_speed_mps": 3.0,
+    "min_distance_m": 400.0
+  },
+  "route": [],
+  "scenarios": [],
+  "choreography": {
+    "loop_period_s": 999,
+    "beats": [
+      {"t": 8.0,  "actor": "1",  "act": "brake", "vx": 2.0},
+      {"t": 8.0,  "actor": "2",  "act": "brake", "vx": 4.0},
+      {"t": 16.0, "actor": "10", "act": "cross", "vx": 1.5},
+      {"t": 32.0, "actor": "1",  "act": "brake", "vx": 14.0},
+      {"t": 32.0, "actor": "2",  "act": "brake", "vx": 10.0},
+      {"t": 40.0, "actor": "tl", "phase": "red"},
+      {"t": 50.0, "actor": "11", "act": "cross", "vx": -1.5},
+      {"t": 60.0, "actor": "tl", "phase": "green"}
+    ]
+  }
+}

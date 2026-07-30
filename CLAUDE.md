@@ -159,7 +159,7 @@ flowctl param set control.mpc_r_ddelta 2.0      # 下一帧生效，不用重启
    （漏了这步，注册了也改不动，只能重启）
 
 - ❌ **禁止** 为了试一个值去改代码常量重新编译
-- ✅ 整段 run 的聚合指标 A/B（avg_speed / flip_rate）用 `tools/mpc_sweep.py`，
+- ✅ 整段 run 的聚合指标 A/B（avg_speed / flip_rate）用 `tools/auto_tune_mpc.py` 或 `tools/scenario_regression.py`，
   它每个取值重启一次是必需的 —— 要可比就得从 x=0 起跑干净的 run
 
 ### 节点线程 → `node_pump()`

@@ -158,6 +158,18 @@ struct BehaviorContext {
     double acc_gap_err_clamp{8.0};  /* 间距误差对目标速度的修正上限 (m/s)，
                                      * 防止远距离时目标速度被抬到超速 */
 
+    /* ── 变道/跟车决策阈值（全部可热调） ── */
+    double blocked_range_mult{4.0};     /* blocked 检测距离 = max(min_m, desired_gap * mult) */
+    double blocked_range_min{30.0};     /* blocked 检测最小距离 (m) */
+    double follow_hysteresis{1.3};      /* FOLLOW→CRUISE 退出滞环倍数（进入紧退出松） */
+    double lane_change_timeout_s{8.0};  /* 变道超时 (s)，超时回退 CRUISE */
+    double lane_change_cooldown_s{3.0}; /* 变道完成冷却 (s) */
+    double lane_change_cooldown_timeout_s{5.0}; /* 变道超时后冷却 (s) */
+    double lc_gap_mult{1.5};            /* 目标车道前车间距阈值 = min_gap * mult */
+    double rear_safe_min_m{15.0};       /* 后向安全最小距离 (m) */
+    double rear_safe_time_s{3.0};       /* 后向安全时距 (s) */
+    double same_lane_tol_offset{0.6};   /* 车道归属横向容差偏移 (m)，半车道宽 + offset */
+
     /* 协程 */
     std::unique_ptr<class BehaviorTask> task;
 
@@ -241,75 +253,87 @@ static void on_fusion(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
-/* ── perception/tracked_objects 订阅（JSON，带 tracking） ── */
+/* ── perception/tracked_objects 订阅（JSON，带 tracking） ──
+ * 仅当 objects 数组非空时覆盖 obs 缓存；空数组或字段缺失时保留 on_raw_obstacles
+ * 填充的 raw 数据作为回退，避免 tracker 偶发空帧清空障碍物导致 FOLLOW 丢失。 */
 static void on_tracked_objects(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
-    g.obs_count = 0;
-
-    int lc = g.has_road_geometry ? g.lane_count : 2;
-    double lw = g.has_road_geometry ? g.lane_width : 3.5;
-    double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
 
     cJSON* objects = cJSON_GetObjectItemCaseSensitive(root, "objects");
     if (objects && cJSON_IsArray(objects)) {
         int n = cJSON_GetArraySize(objects);
-        if (n > BEH_MAX_OBS) n = BEH_MAX_OBS;
-        g.obs_count = n;
+        if (n > 0) {
+            int lc = g.has_road_geometry ? g.lane_count : 2;
+            double lw = g.has_road_geometry ? g.lane_width : 3.5;
+            double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+            if (n > BEH_MAX_OBS) n = BEH_MAX_OBS;
+            g.obs_count = 0;
 
-        for (int i = 0; i < n; i++) {
-            cJSON* obj = cJSON_GetArrayItem(objects, i);
-            if (!obj) continue;
-            cJSON* j;
+            for (int i = 0; i < n; i++) {
+                cJSON* obj = cJSON_GetArrayItem(objects, i);
+                if (!obj) continue;
+                cJSON* j;
 
-            /* 车体系坐标 */
-            double ox = 0.0, oy = 0.0;
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "x")) && cJSON_IsNumber(j)) ox = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "y")) && cJSON_IsNumber(j)) oy = j->valuedouble;
+                /* 车体系坐标 */
+                double ox = 0.0, oy = 0.0;
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "x")) && cJSON_IsNumber(j)) ox = j->valuedouble;
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "y")) && cJSON_IsNumber(j)) oy = j->valuedouble;
 
-            /* 车体 → 世界 */
-            g.obs_x[i] = g.ego_x + ox * ch - oy * sh;
-            g.obs_y[i] = g.ego_y + ox * sh + oy * ch;
+                /* 车体 → 世界 */
+                g.obs_x[i] = g.ego_x + ox * ch - oy * sh;
+                g.obs_y[i] = g.ego_y + ox * sh + oy * ch;
 
-            /* 速度（车体 → 世界） */
-            double vx = 0.0, vy = 0.0;
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "vx")) && cJSON_IsNumber(j)) vx = j->valuedouble;
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "vy")) && cJSON_IsNumber(j)) vy = j->valuedouble;
-            g.obs_vx[i] = vx * ch - vy * sh;
-            g.obs_vy[i] = vx * sh + vy * ch;
+                /* 速度（车体 → 世界） */
+                double vx = 0.0, vy = 0.0;
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "vx")) && cJSON_IsNumber(j)) vx = j->valuedouble;
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "vy")) && cJSON_IsNumber(j)) vy = j->valuedouble;
+                g.obs_vx[i] = vx * ch - vy * sh;
+                g.obs_vy[i] = vx * sh + vy * ch;
 
-            /* 类型 */
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "type")) && cJSON_IsString(j)) {
-                const char* t = j->valuestring;
-                if (strcmp(t, "VEHICLE") == 0)   g.obs_type[i] = 1;
-                else if (strcmp(t, "PEDESTRIAN") == 0) g.obs_type[i] = 2;
-                else if (strcmp(t, "CYCLIST") == 0)    g.obs_type[i] = 3;
-                else g.obs_type[i] = 0;
+                /* 类型 */
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "type")) && cJSON_IsString(j)) {
+                    const char* t = j->valuestring;
+                    if (strcmp(t, "VEHICLE") == 0)   g.obs_type[i] = 1;
+                    else if (strcmp(t, "PEDESTRIAN") == 0) g.obs_type[i] = 2;
+                    else if (strcmp(t, "CYCLIST") == 0)    g.obs_type[i] = 3;
+                    else g.obs_type[i] = 0;
+                }
+
+                /* ID */
+                g.obs_id[i] = 0;
+                if ((j = cJSON_GetObjectItemCaseSensitive(obj, "id")) && cJSON_IsNumber(j))
+                    g.obs_id[i] = (uint32_t)j->valuedouble;
+
+                /* lane_id：从世界系 y 计算 */
+                {
+                    double wy = g.obs_y[i];
+                    double offset = (-wy) / lw + (lc - 1) * 0.5;
+                    int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+                    if (idx < 0) idx = 0;
+                    if (idx >= lc) idx = lc - 1;
+                    g.obs_lane_id[i] = (int8_t)idx;
+                }
+                g.obs_count++;
             }
-
-            /* ID */
-            g.obs_id[i] = 0;
-            if ((j = cJSON_GetObjectItemCaseSensitive(obj, "id")) && cJSON_IsNumber(j))
-                g.obs_id[i] = (uint32_t)j->valuedouble;
-
-            /* lane_id：从世界系 y 计算 */
-            {
-                double wy = g.obs_y[i];
-                double offset = (-wy) / lw + (lc - 1) * 0.5;
-                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
-                if (idx < 0) idx = 0;
-                if (idx >= lc) idx = lc - 1;
-                g.obs_lane_id[i] = (int8_t)idx;
-            }
+            g.has_obs = 1;
         }
     }
-    g.has_obs = 1;
     cJSON_Delete(root);
 }
 
-/* ── perception/obstacles 直连回退（object_tracker 未就绪时使用） ── */
+/* ── perception/obstacles 直连回退（每帧无条件填充 raw 数据） ──
+ * 回调顺序保证：perception_node 先发布 raw obstacles → object_tracker 订阅后
+ * 发布 tracked_objects。因此 on_raw_obstacles 先执行，on_tracked_objects 后
+ * 执行。若 tracker 正常产出 tracked 数据，会在本回调之后覆盖 obs 缓存；若 tracker
+ * 停更/未就绪，本回调填充的 raw 数据保持最新。
+ *
+ * 之前的 if(g.obs_count == 0) 守卫存在致命问题：tracker 第一帧发布后停止产出，
+ * g.obs_count 停留在非零值，raw 数据永远无法刷新，障碍物坐标冻结在第一帧。
+ * 随着 ego 前进，前车 dx 变为负数（落在后方），best_gap 永远 1e9 → 永不进入
+ * FOLLOW，表现为"全速冲向前车直到追尾"。 */
 static void on_raw_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
@@ -319,35 +343,32 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
         return;
     if (obs_list.count == 0) return;
 
-    /* 直接覆盖 obs 缓存（优先级低于 tracked_objects） */
-    if (g.obs_count == 0) {
-        int lc = g.has_road_geometry ? g.lane_count : 2;
-        double lw = g.has_road_geometry ? g.lane_width : 3.5;
-        double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
-        int n = obs_list.count < BEH_MAX_OBS ? (int)obs_list.count : BEH_MAX_OBS;
-        g.obs_count = 0;
-        for (int i = 0; i < n; i++) {
-            const Obstacle* o = &obs_list.obstacles[i];
-            /* 车体系 → 世界系（位置和速度都需要旋转） */
-            g.obs_x[i] = g.ego_x + (double)o->x * ch - (double)o->y * sh;
-            g.obs_y[i] = g.ego_y + (double)o->x * sh + (double)o->y * ch;
-            g.obs_vx[i] = (double)o->vx * ch - (double)o->vy * sh;
-            g.obs_vy[i] = (double)o->vx * sh + (double)o->vy * ch;
-            g.obs_type[i] = (uint8_t)o->type;
-            g.obs_id[i] = o->id;
-            /* lane_id */
-            {
-                double wy = g.obs_y[i];
-                double offset = (-wy) / lw + (lc - 1) * 0.5;
-                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
-                if (idx < 0) idx = 0;
-                if (idx >= lc) idx = lc - 1;
-                g.obs_lane_id[i] = (int8_t)idx;
-            }
-            g.obs_count++;
+    int lc = g.has_road_geometry ? g.lane_count : 2;
+    double lw = g.has_road_geometry ? g.lane_width : 3.5;
+    double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
+    int n = obs_list.count < BEH_MAX_OBS ? (int)obs_list.count : BEH_MAX_OBS;
+    g.obs_count = 0;
+    for (int i = 0; i < n; i++) {
+        const Obstacle* o = &obs_list.obstacles[i];
+        /* 车体系 → 世界系（位置和速度都需要旋转） */
+        g.obs_x[i] = g.ego_x + (double)o->x * ch - (double)o->y * sh;
+        g.obs_y[i] = g.ego_y + (double)o->x * sh + (double)o->y * ch;
+        g.obs_vx[i] = (double)o->vx * ch - (double)o->vy * sh;
+        g.obs_vy[i] = (double)o->vx * sh + (double)o->vy * ch;
+        g.obs_type[i] = (uint8_t)o->type;
+        g.obs_id[i] = o->id;
+        /* lane_id */
+        {
+            double wy = g.obs_y[i];
+            double offset = (-wy) / lw + (lc - 1) * 0.5;
+            int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
+            if (idx < 0) idx = 0;
+            if (idx >= lc) idx = lc - 1;
+            g.obs_lane_id[i] = (int8_t)idx;
         }
-        g.has_obs = 1;
+        g.obs_count++;
     }
+    g.has_obs = 1;
 }
 
 /* ── road/geometry 订阅 ────────────────────────────────── */
@@ -386,10 +407,19 @@ protected:
             }
 
             /* 参数热重载（三处之三）：漏了这步，注册了也改不动，只能重启。 */
-            g.acc_standoff      = param_get_float("behavior.acc_standoff");
-            g.acc_time_headway  = param_get_float("behavior.acc_time_headway");
-            g.acc_k_gap         = param_get_float("behavior.acc_k_gap");
-            g.acc_gap_err_clamp = param_get_float("behavior.acc_gap_err_clamp");
+            g.acc_standoff              = param_get_float("behavior.acc_standoff");
+            g.acc_time_headway          = param_get_float("behavior.acc_time_headway");
+            g.acc_k_gap                 = param_get_float("behavior.acc_k_gap");
+            g.acc_gap_err_clamp         = param_get_float("behavior.acc_gap_err_clamp");
+            g.blocked_range_mult        = param_get_float("behavior.blocked_range_mult");
+            g.blocked_range_min         = param_get_float("behavior.blocked_range_min");
+            g.follow_hysteresis         = param_get_float("behavior.follow_hysteresis");
+            g.lane_change_timeout_s     = param_get_float("behavior.lane_change_timeout_s");
+            g.lane_change_cooldown_s    = param_get_float("behavior.lane_change_cooldown_s");
+            g.lc_gap_mult               = param_get_float("behavior.lc_gap_mult");
+            g.rear_safe_min_m           = param_get_float("behavior.rear_safe_min_m");
+            g.rear_safe_time_s          = param_get_float("behavior.rear_safe_time_s");
+            g.same_lane_tol_offset      = param_get_float("behavior.same_lane_tol_offset");
 
             int lc = g.has_road_geometry ? g.lane_count : 2;
             double lw = g.has_road_geometry ? g.lane_width : 3.5;
@@ -471,78 +501,111 @@ protected:
 
             /* ── 超车判定 ──
              * blocked 的语义是"本车道前方有车影响通行"，用 desired_gap 的倍数
-             * 表达而非裸 80m：4× 时距间距在 12 m/s 下约 92m，与旧阈值同量级，
-             * 但会随车速自动伸缩（高速时更早察觉、低速时不误触发）。 */
-            double blocked_range = fmax(30.0, desired_gap * 4.0);
-            /* 滞环：已在 FOLLOW 时用 1.3× 的退出距离，避免前车在阈值附近
+             * 表达而非裸 80m：mult× 时距间距在 12 m/s 下约 desired_gap*mult，
+             * 会随车速自动伸缩（高速时更早察觉、低速时不误触发）。 */
+            double blocked_range = fmax(g.blocked_range_min, desired_gap * g.blocked_range_mult);
+            /* 滞环：已在 FOLLOW 时用 hysteresis× 的退出距离，避免前车在阈值附近
              * 徘徊时 BLOCKED/LOST_LEAD 每帧翻转（实测曾 150ms 一次进出，
              * 跟车律因此从未连续作用）。进入紧、退出松。 */
             bool in_follow = (statem_current(&g.sm) == BEH_ST_FOLLOW);
-            bool blocked = (best_gap < (in_follow ? blocked_range * 1.3 : blocked_range));
+            bool blocked = (best_gap < (in_follow ? blocked_range * g.follow_hysteresis : blocked_range));
             double rel_speed = g.ego_v - lead_speed;
             if (rel_speed < 0.0) rel_speed = 0.0;
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
             bool worthwhile = blocked && (best_gap < min_gap);
 
-            /* ── 左右车道评估 ── */
+            /* ── 左右车道评估 ──
+             * 关键约束：禁止变道到对向车道！
+             *
+             * 双向道路以 y=0（道路中心）为界，同向车道的 y 与 ego_y 同号，
+             * 对向车道 y 与 ego_y 异号。中国靠右行驶（heading=0 朝 +X）：
+             *   - lane 2 (y=-1.75)、lane 3 (y=-5.25)：同向（y<0）
+             *   - lane 0 (y=+5.25)、lane 1 (y=+1.75)：对向（y>0），禁止变入
+             *
+             * 之前只检查 current_idx>0 / current_idx<lc-1，导致 lane 2→lane 1
+             * 被判定为合法变道，ego 冲入对向车道逆行。 */
             int adj_idx = -1;
             double adj_speed = g.target_speed;
 
-            /* 左 */
+            /* 道路中心 y（双向道路用0，单向road/geometry可传side_offset） */
+            double road_center_y_pos = 0.0;
+
+            /* 左：lane_idx 减小 → y 增大方向 */
             double left_gap = 1e9;
             double left_lead_v = g.target_speed;
             bool left_rear_safe = false;
+            bool left_same_side = false;  /* 是否与 ego 在道路中心同侧 */
             if (current_idx > 0) {
                 int tl = current_idx - 1;
-                for (int i = 0; i < g.obs_count; i++) {
-                    if (g.obs_vx[i] < 0) continue;
-                    if (g.obs_lane_id[i] != tl) continue;
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx > 0 && dx < left_gap) { left_gap = dx; left_lead_v = g.obs_vx[i]; }
-                }
-                left_rear_safe = true;
-                for (int i = 0; i < g.obs_count; i++) {
-                    if (g.obs_vx[i] < 0) continue;
-                    if (g.obs_lane_id[i] != tl) continue;
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx < 0) {
-                        double rd = -dx;
-                        double rrs = g.obs_vx[i] - g.ego_v;
-                        double min_rd = (rrs > 0.0) ? fmax(15.0, rrs * 3.0) : 15.0;
-                        if (rd < min_rd) left_rear_safe = false;
+                double tl_y = lane_center_y(tl, lc, lw, 0.0, 0.0);
+                left_same_side = (tl_y - road_center_y_pos) * (g.ego_y - road_center_y_pos) > 0.0;
+
+                if (left_same_side) {
+                    double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
+                    for (int i = 0; i < g.obs_count; i++) {
+                        if (g.obs_vx[i] < 0) continue;
+                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        double dx = g.obs_x[i] - g.ego_x;
+                        if (dx > 0 && dx < left_gap) { left_gap = dx; left_lead_v = g.obs_vx[i]; }
+                    }
+                    left_rear_safe = true;
+                    for (int i = 0; i < g.obs_count; i++) {
+                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        double dx = g.obs_x[i] - g.ego_x;
+                        if (dx < 0) {
+                            double rd = -dx;
+                            double rrs = g.obs_vx[i] - g.ego_v;
+                            double min_rd = (rrs > 0.0) ? fmax(g.rear_safe_min_m, rrs * g.rear_safe_time_s) : g.rear_safe_min_m;
+                            if (rd < min_rd) left_rear_safe = false;
+                        }
                     }
                 }
             }
 
-            /* 右 */
+            /* 右：lane_idx 增大 → y 减小方向 */
             double right_gap = 1e9;
             double right_lead_v = g.target_speed;
             bool right_rear_safe = false;
+            bool right_same_side = false;
             if (current_idx < lc - 1) {
                 int tl = current_idx + 1;
-                for (int i = 0; i < g.obs_count; i++) {
-                    if (g.obs_vx[i] < 0) continue;
-                    if (g.obs_lane_id[i] != tl) continue;
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx > 0 && dx < right_gap) { right_gap = dx; right_lead_v = g.obs_vx[i]; }
-                }
-                right_rear_safe = true;
-                for (int i = 0; i < g.obs_count; i++) {
-                    if (g.obs_vx[i] < 0) continue;
-                    if (g.obs_lane_id[i] != tl) continue;
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx < 0) {
-                        double rd = -dx;
-                        double rrs = g.obs_vx[i] - g.ego_v;
-                        double min_rd = (rrs > 0.0) ? fmax(15.0, rrs * 3.0) : 15.0;
-                        if (rd < min_rd) right_rear_safe = false;
+                double tl_y = lane_center_y(tl, lc, lw, 0.0, 0.0);
+                right_same_side = (tl_y - road_center_y_pos) * (g.ego_y - road_center_y_pos) > 0.0;
+
+                if (right_same_side) {
+                    double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
+                    for (int i = 0; i < g.obs_count; i++) {
+                        if (g.obs_vx[i] < 0) continue;
+                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        double dx = g.obs_x[i] - g.ego_x;
+                        if (dx > 0 && dx < right_gap) { right_gap = dx; right_lead_v = g.obs_vx[i]; }
+                    }
+                    right_rear_safe = true;
+                    for (int i = 0; i < g.obs_count; i++) {
+                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        double dx = g.obs_x[i] - g.ego_x;
+                        if (dx < 0) {
+                            double rd = -dx;
+                            double rrs = g.obs_vx[i] - g.ego_v;
+                            /* 右侧后方安全距离增强（超车后切回场景）：
+                             * 左道超车后切回右道时，被超的车虽在后方且更慢，
+                             * 但 ego 切回后立即减速至车流速度，后车会追上来。
+                             * 后车减速安全距离：直接用 min_gap 做阈值
+                             * （与前向 min_gap*lc_gap_mult 对称），
+                             * 确保 merge-back 有足够的双向安全裕度。 */
+                            double rear_min_gap = fmax(min_gap, g.rear_safe_min_m);
+                            double min_rd = (rrs > 0.0)
+                                ? fmax(rear_min_gap, rrs * g.rear_safe_time_s)
+                                : rear_min_gap;
+                            if (rd < min_rd) right_rear_safe = false;
+                        }
                     }
                 }
             }
 
-            bool left_ok  = (current_idx > 0) && left_rear_safe && (left_gap > min_gap * 1.5);
-            bool right_ok = (current_idx < lc - 1) && right_rear_safe && (right_gap > min_gap * 1.5);
+            bool left_ok  = left_same_side && left_rear_safe && (left_gap > min_gap * g.lc_gap_mult);
+            bool right_ok = right_same_side && right_rear_safe && (right_gap > min_gap * g.lc_gap_mult);
 
             if (left_ok && right_ok) {
                 adj_idx = (left_gap >= right_gap) ? current_idx - 1 : current_idx + 1;
@@ -613,13 +676,13 @@ protected:
                     if (g.committed_lane_idx == g.target_lane_idx) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
-                        g.cooldown = 3.0;
-                        snprintf(reason, sizeof(reason), "lane change complete → CRUISE (cooldown=3.0s)");
-                    } else if (g.state_timer > 5.0) {
+                        g.cooldown = g.lane_change_cooldown_s;
+                        snprintf(reason, sizeof(reason), "lane change complete → CRUISE (cooldown=%.1fs)", g.lane_change_cooldown_s);
+                    } else if (g.state_timer > g.lane_change_timeout_s) {
                         ev = BEH_EV_TIMEOUT;
                         new_target_lane = -1;
-                        g.cooldown = 5.0;
-                        snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=5.0s)", g.state_timer);
+                        g.cooldown = g.lane_change_cooldown_timeout_s;
+                        snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=%.1fs)", g.state_timer, g.lane_change_cooldown_timeout_s);
                         LOG_WARN("behavior", "lane change timeout (state=%s, target_lane=%d, current=%d, timer=%.1f)",
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
                     } else if (blocked) {
@@ -711,6 +774,83 @@ protected:
                 transport_publish(transport_, TOPIC_PLANNING_BEHAVIOR, buf, (uint32_t)len);
             }
 
+            /* ── FOLLOW/变道高频调试日志 + 实时metrics JSON（每 10 帧 ≈ 0.5s） ──
+             * metrics JSON (behavior/state) 与日志同步输出，供 quick_verify.py
+             * 等工具实时读取，包含跟车/变道全链路关键变量。 */
+            if (g.seq % 10 == 0) {
+                StateId cur = statem_current(&g.sm);
+                if (cur == BEH_ST_FOLLOW || cur == BEH_ST_LEFT_CHANGE || cur == BEH_ST_RIGHT_CHANGE || blocked) {
+                    LOG_INFO("behavior",
+                             "[BEH-DBG] %s ego_v=%.2f tgt=%.2f best_gap=%.1f lead_v=%.2f "
+                             "desired_gap=%.1f follow_v=%.2f blocked=%d worth=%d "
+                             "L(ok=%d gap=%.0f safe=%d same=%d) R(ok=%d gap=%.0f safe=%d same=%d) "
+                             "adj=%d lane=%d y=%.2f",
+                             beh_state_str(cur), g.ego_v, g.target_speed,
+                             best_gap, lead_speed,
+                             desired_gap, follow_speed,
+                             blocked, worthwhile,
+                             left_ok, left_gap, left_rear_safe, left_same_side,
+                             right_ok, right_gap, right_rear_safe, right_same_side,
+                             adj_idx, g.committed_lane_idx, g.ego_y);
+                }
+
+                /* 发布 monitor JSON（behavior/state topic，每 0.5s） */
+                {
+                    uint64_t elapsed_ms = (clock_now_us() - g.sm.entered_at_us) / 1000;
+                    cJSON* root = cJSON_CreateObject();
+                    cJSON_AddStringToObject(root, "state", beh_state_str(cur));
+                    cJSON_AddNumberToObject(root, "committed_lane", g.committed_lane_idx);
+                    cJSON_AddNumberToObject(root, "target_lane", g.target_lane_idx);
+                    cJSON_AddNumberToObject(root, "speed", g.ego_v);
+                    cJSON_AddNumberToObject(root, "target_speed", g.target_speed);
+                    cJSON_AddNumberToObject(root, "cooldown", g.cooldown);
+                    cJSON_AddNumberToObject(root, "elapsed_ms", (double)elapsed_ms);
+                    cJSON_AddNumberToObject(root, "obs_count", g.obs_count);
+                    cJSON_AddNumberToObject(root, "ego_x", g.ego_x);
+                    cJSON_AddNumberToObject(root, "ego_y", g.ego_y);
+                    cJSON_AddNumberToObject(root, "ego_heading", g.ego_heading);
+                    /* 跟车关键变量 */
+                    cJSON_AddNumberToObject(root, "best_gap", best_gap < 1e8 ? best_gap : -1.0);
+                    cJSON_AddNumberToObject(root, "lead_speed", lead_speed);
+                    cJSON_AddNumberToObject(root, "desired_gap", desired_gap);
+                    cJSON_AddNumberToObject(root, "follow_speed", follow_speed);
+                    cJSON_AddBoolToObject(root, "blocked", blocked);
+                    cJSON_AddBoolToObject(root, "worthwhile", worthwhile);
+                    /* 变道评估 */
+                    cJSON_AddNumberToObject(root, "left_gap", left_gap < 1e8 ? left_gap : -1.0);
+                    cJSON_AddNumberToObject(root, "right_gap", right_gap < 1e8 ? right_gap : -1.0);
+                    cJSON_AddBoolToObject(root, "left_ok", left_ok);
+                    cJSON_AddBoolToObject(root, "right_ok", right_ok);
+                    cJSON_AddBoolToObject(root, "left_rear_safe", left_rear_safe);
+                    cJSON_AddBoolToObject(root, "right_rear_safe", right_rear_safe);
+                    cJSON_AddNumberToObject(root, "adj_idx", adj_idx);
+                    cJSON_AddNumberToObject(root, "adj_speed", adj_speed);
+                    /* 转移历史：最近 3 条（仅在 50 帧时输出，减少带宽） */
+                    if (g.seq % 50 == 0) {
+                        cJSON* hist = cJSON_CreateArray();
+                        uint32_t n = g.sm.history_count > 3 ? 3 : g.sm.history_count;
+                        uint32_t start = (g.sm.history_head + SM_HISTORY_DEPTH - g.sm.history_count) % SM_HISTORY_DEPTH;
+                        for (uint32_t hi = 0; hi < n; hi++) {
+                            uint32_t idx = (start + hi) % SM_HISTORY_DEPTH;
+                            const TransitionRecord* rec = &g.sm.history[idx];
+                            cJSON* he = cJSON_CreateObject();
+                            cJSON_AddStringToObject(he, "from", beh_state_str(rec->from));
+                            cJSON_AddStringToObject(he, "to", beh_state_str(rec->to));
+                            cJSON_AddNumberToObject(he, "t_us", (double)rec->timestamp_us);
+                            cJSON_AddItemToArray(hist, he);
+                        }
+                        cJSON_AddItemToObject(root, "history", hist);
+                    }
+                    char* js = cJSON_PrintUnformatted(root);
+                    if (js) {
+                        transport_publish(transport_, "behavior/state",
+                                          (const uint8_t*)js, (uint32_t)strlen(js) + 1);
+                        free(js);
+                    }
+                    cJSON_Delete(root);
+                }
+            }
+
             /* ── 周期状态日志（每 50 帧 ≈ 2.5s） ── */
             if (g.seq % 50 == 0) {
                 StateId cur = statem_current(&g.sm);
@@ -725,39 +865,6 @@ protected:
                 LOG_INFO("behavior", "[SM] state=%s allowed=[%s] elapsed=%lums obs=%d lane=%d/%d v=%.1f",
                          beh_state_str(cur), ev_buf, (unsigned long)elapsed_ms,
                          g.obs_count, g.committed_lane_idx, lc, g.ego_v);
-
-                /* 发布 monitor JSON（behavior/state topic） */
-                {
-                    cJSON* root = cJSON_CreateObject();
-                    cJSON_AddStringToObject(root, "state", beh_state_str(cur));
-                    cJSON_AddNumberToObject(root, "committed_lane", g.committed_lane_idx);
-                    cJSON_AddNumberToObject(root, "target_lane", g.target_lane_idx);
-                    cJSON_AddNumberToObject(root, "speed", g.ego_v);
-                    cJSON_AddNumberToObject(root, "target_speed", g.target_speed);
-                    cJSON_AddNumberToObject(root, "cooldown", g.cooldown);
-                    cJSON_AddNumberToObject(root, "elapsed_ms", (double)elapsed_ms);
-                    /* 转移历史：最近 3 条 */
-                    cJSON* hist = cJSON_CreateArray();
-                    uint32_t n = g.sm.history_count > 3 ? 3 : g.sm.history_count;
-                    uint32_t start = (g.sm.history_head + SM_HISTORY_DEPTH - g.sm.history_count) % SM_HISTORY_DEPTH;
-                    for (uint32_t hi = 0; hi < n; hi++) {
-                        uint32_t idx = (start + hi) % SM_HISTORY_DEPTH;
-                        const TransitionRecord* rec = &g.sm.history[idx];
-                        cJSON* he = cJSON_CreateObject();
-                        cJSON_AddStringToObject(he, "from", beh_state_str(rec->from));
-                        cJSON_AddStringToObject(he, "to", beh_state_str(rec->to));
-                        cJSON_AddNumberToObject(he, "t_us", (double)rec->timestamp_us);
-                        cJSON_AddItemToArray(hist, he);
-                    }
-                    cJSON_AddItemToObject(root, "history", hist);
-                    char* js = cJSON_PrintUnformatted(root);
-                    if (js) {
-                        transport_publish(transport_, "behavior/state",
-                                          (const uint8_t*)js, (uint32_t)strlen(js) + 1);
-                        free(js);
-                    }
-                    cJSON_Delete(root);
-                }
             }
 
             g.seq++;
@@ -869,6 +976,24 @@ static int behavior_init(MessageBus* bus, Transport* transport,
                          "ACC 间距误差增益 (1/s)");
     param_register_float("behavior.acc_gap_err_clamp", g.acc_gap_err_clamp, 1.0, 30.0,
                          "ACC 间距误差对目标速度的修正上限 (m/s)");
+    param_register_float("behavior.blocked_range_mult",     g.blocked_range_mult,     1.0, 10.0,
+                         "blocked 检测距离倍数: max(min_m, desired_gap*mult)");
+    param_register_float("behavior.blocked_range_min",      g.blocked_range_min,      5.0, 100.0,
+                         "blocked 检测最小距离 (m)");
+    param_register_float("behavior.follow_hysteresis",      g.follow_hysteresis,      1.0, 3.0,
+                         "FOLLOW→CRUISE 退出滞环倍数（进入紧退出松）");
+    param_register_float("behavior.lane_change_timeout_s",  g.lane_change_timeout_s,  3.0, 20.0,
+                         "变道超时时间 (s)，超时回退 CRUISE");
+    param_register_float("behavior.lane_change_cooldown_s", g.lane_change_cooldown_s, 1.0, 10.0,
+                         "变道完成后冷却 (s)，期间不变道");
+    param_register_float("behavior.lc_gap_mult",            g.lc_gap_mult,            1.0, 5.0,
+                         "目标车道前车间距阈值倍数 = min_gap*mult");
+    param_register_float("behavior.rear_safe_min_m",        g.rear_safe_min_m,        5.0, 50.0,
+                         "后向安全最小距离 (m)");
+    param_register_float("behavior.rear_safe_time_s",       g.rear_safe_time_s,       1.0, 8.0,
+                         "后向安全时距 (s)：min_rd = max(min_m, rrs*time_s)");
+    param_register_float("behavior.same_lane_tol_offset",   g.same_lane_tol_offset,   0.1, 2.0,
+                         "车道归属横向容差偏移 (m)：半车道宽+offset");
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION,         on_fusion,             nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_TRACKED_OBJECTS,  on_tracked_objects,    nullptr);

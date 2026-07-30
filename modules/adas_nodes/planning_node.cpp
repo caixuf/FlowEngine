@@ -1020,14 +1020,20 @@ protected:
             memset(points, 0, sizeof(points));
 
             if (n_wp > 0) {
-                /* spd_out[0] ≈ 当前车速，只能抬高、不能覆盖 command_speed。
-                 * 直接赋值会在停稳后形成自维持闭锁：
-                 *   v=0 → target_speed=0 → control PID 误差=0 → 油门=0 → v=0
-                 * 下方 TL override 只强制置 0、从不恢复，于是灯转绿也走不了。
-                 * 需要停车的路径（TL override、control 的 ACC）都显式置 0 且
-                 * 有明确解除条件，不依赖这里。 */
-                if (spd_out[0] > command_speed) command_speed = spd_out[0];
+                /* 移除错误的 command_speed = max(command_speed, spd_out[0]) 逻辑。
+                 * 原注释担心的"停车闭锁"(v=0→target=0→永远0)实际不成立：
+                 *   - 红灯时 TL override 强制 command_speed=0
+                 *   - 灯转绿后 TL override 不再触发（dx_tl<=0 或 state==green），
+                 *     command_speed 自然回到巡航/跟车速度，不会被锁在0
+                 *
+                 * 而这行代码的实际危害是：FOLLOW 降速时，spd_out[0]≈当前车速(如15m/s)，
+                 * 会把 behavior 下发的 lead_speed(如7m/s) 覆盖回去，导致 PID 永远追不到
+                 * 目标速度，ego 以15m/s直冲7m/s前车→追尾。
+                 *
+                 * 加速度/减速度限制由 control 侧 PID 和 safety_control 负责，
+                 * planning 不应在此处"帮倒忙"。 */
                 if (command_speed > g.cfg_max_speed) command_speed = g.cfg_max_speed;
+                if (command_speed < 0.0) command_speed = 0.0;
 
                 /* ── 红绿灯速度强制 override ──
                  * Frenet 轨迹的第一个点速度 spd_out[0] ≈ 当前车速，control 节点

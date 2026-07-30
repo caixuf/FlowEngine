@@ -66,6 +66,8 @@ typedef struct {
 
     /* χ² innovation gating (ALGORITHM_REFACTOR_PLAN §6) */
     int    chi2_fail_count;  /* 连续 χ² 检验失败次数 */
+    int    gated_count;      /* 累计被 χ² 拒绝的观测数。与 update_count 分开计：
+                              * 混在一起会让"所有观测都被拒"在统计上不可见。 */
 } EkfFusion;
 
 /* ── API ────────────────────────────────────────────────────── */

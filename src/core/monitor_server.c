@@ -43,7 +43,7 @@
 #endif
 
 #define MONITOR_MAX_CLIENTS       8
-#define MONITOR_HTTP_BUF_SIZE     65536
+#define MONITOR_HTTP_BUF_SIZE     131072  /* 128 KB: 含 samples ~200 帧 (67916 bytes), 留余量给 scene.entities + obstacles */
 #define MONITOR_MAX_REMOTE_SRCS   8
 #define DASHBOARD_CACHE_STALE_SEC 3   /* seconds before cached JSON is flagged stale */
 #define DASHBOARD_CACHE_DROP_SEC  30  /* seconds before cached JSON is dropped entirely */

@@ -252,6 +252,12 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
         }
         if (!target) continue;
 
+        /* ── 动作类型判断：brake/cross 为"原地指令"，不重置位置 ── */
+        bool is_brake = (strcmp(b->act, "brake") == 0);
+        bool is_cross = (strcmp(b->act, "cross") == 0);
+        bool teleport = !is_brake && !is_cross;
+
+        if (teleport) {
         /* ── NPC 变道防御性禁用 ──
          *
          * 用户需求：演示场景中 NPC 各守其道不变道，仅 ego 变道超车。
@@ -338,10 +344,28 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                 }
             }
         }
+        } /* end teleport block */
 
         /* ── 动作：统一状态转移 ── */
         NpcTransitionRequest req;
-        if (b->act[0]) {
+        if (is_brake) {
+            /* brake：原地设置目标速度，让 NPC 自然减速/加速到 b->vx，不传送 */
+            req.event = NpcEvent::ScriptSet;
+            req.target_state = NpcState::Cruise;
+            req.target_vx = b->vx;
+        } else if (is_cross) {
+            /* cross：让行人开始横穿（vy = b->vx，正值=向左横穿） */
+            if (target->type == EntityType::Pedestrian) {
+                target->vy = b->vx;        /* b->vx 字段复用为横穿速度 (m/s) */
+                target->ped_parked = 0;    /* 取消路边等待状态 */
+                target->ped_wait_timer = 0.0;
+                /* vx=0 保持不纵向移动，横向速度由 step_npc_pedestrian 积分 */
+                target->vx = 0.0;
+                LOG_INFO("flowsim", "choreo cross t=%.1f ped_id=%d pos=(%.1f,%.1f) vy=%.1f (loop=%d)",
+                         b->t, actor_id, target->x, target->y, target->vy, current_loop);
+            }
+            continue; /* cross 不走 npc_request_state */
+        } else if (b->act[0]) {
             if (strcmp(b->act, "overtake") == 0) {
                 req.event = NpcEvent::ChoreoOvertake;
                 req.target_vx = b->vx;
@@ -366,8 +390,13 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
             npc_request_state(*target, req, choreo_cfg);
         }
 
-        LOG_INFO("flowsim", "choreo beat t=%.1f actor=%d pos=(%.1f,%.1f) offset=%.2f vx=%.1f act='%s' (loop=%d)",
-                 b->t, actor_id, new_x, new_y, target->offset, b->vx, b->act, current_loop);
+        if (is_brake) {
+            LOG_INFO("flowsim", "choreo brake t=%.1f actor=%d pos=(%.1f,%.1f) target_vx=%.1f cur_v=%.1f (loop=%d)",
+                     b->t, actor_id, target->x, target->y, b->vx, target->speed, current_loop);
+        } else {
+            LOG_INFO("flowsim", "choreo beat t=%.1f actor=%d pos=(%.1f,%.1f) offset=%.2f vx=%.1f act='%s' (loop=%d)",
+                     b->t, actor_id, target->x, target->y, target->offset, b->vx, b->act, current_loop);
+        }
     }
 }
 

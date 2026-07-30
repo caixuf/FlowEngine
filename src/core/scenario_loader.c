@@ -95,7 +95,17 @@ ScenarioConfig* scenario_load(const char* path) {
     cJSON* jactors = cJSON_GetObjectItemCaseSensitive(root, "actors");
     if (cJSON_IsArray(jactors)) {
         int n = cJSON_GetArraySize(jactors);
-        if (n > SCENARIO_MAX_ACTORS) n = SCENARIO_MAX_ACTORS;
+        if (n > SCENARIO_MAX_ACTORS) {
+            /* 静默截断曾让 straight_road.json 的第 42 个 actor（唯一的行人）
+             * 直接消失：actors=32 被打进日志但没人会注意到 42→32 丢了什么，
+             * 于是行人在整条链路上不存在 —— VRU 真值恒 0、识别率分母为 0、
+             * 报告打印"感知 100%"，safety_control 的行人让行逻辑一次都没跑过。
+             * 截断必须出声，且要说明丢了几个。 */
+            LOG_WARN("scenario", "actors truncated: %d in JSON > SCENARIO_MAX_ACTORS=%d "
+                     "(%d actor(s) DROPPED — raise SCENARIO_MAX_ACTORS if they matter)",
+                     n, SCENARIO_MAX_ACTORS, n - SCENARIO_MAX_ACTORS);
+            n = SCENARIO_MAX_ACTORS;
+        }
         sc->actor_count = n;
         for (int i = 0; i < n; i++) {
             cJSON* ja = cJSON_GetArrayItem(jactors, i);

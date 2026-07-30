@@ -113,7 +113,7 @@
  *
  * TOPIC_SENSOR_CAMERA:
  *   PRODUCERS: sensor_model_node [pipeline]
- *   CONSUMERS: (none in default pipeline — consumed by perception_fusion_node in pipeline_scene.json)
+ *   CONSUMERS: (none in default pipeline — consumed by perception_fusion_node in non-default pipeline configs)
  *
  * TOPIC_SENSOR_STEREO:
  *   PRODUCERS: stereo_camera_node

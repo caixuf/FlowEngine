@@ -70,7 +70,10 @@
 extern "C" {
 #endif
 
-#define SCENARIO_MAX_ACTORS      32   /* NOA 24-NPC 场景需要 >16 */
+#define SCENARIO_MAX_ACTORS      64   /* NOA 24-NPC 场景需要 >16；straight_road
+                                       * 有 41 车 + 1 行人 = 42，旧值 32 会把
+                                       * 行人静默截掉（见 scenario_loader.c 的
+                                       * 截断告警）。留一倍余量。 */
 #define SCENARIO_NAME_LEN        64
 #define SCENARIO_DESC_LEN       128
 #define SCENARIO_MAX_ROUTE_STEPS  8

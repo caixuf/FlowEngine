@@ -175,6 +175,11 @@ static void ekf_update_generic(EkfFusion* ekf,
         double md2 = 0.0;
         for (int i = 0; i < m; i++)
             for (int j = 0; j < m; j++)
+                /* Sinv 的布局是 stride-m（每个分支各自 packed）：m==1 写
+                 * Sinv[0]；m==2 写 Sinv[0..3] 为 2×2；m==4 分支里的
+                 * Sinv[i*4+j] 恰好 4==m。故此处必须用 i*m+j。
+                 * 注意：不要"看到 :170 是 i*4+j 就跟着改成 i*4+j" ——
+                 * 那行在 m==4 分支内，改了会让 m==2 读到零元素。 */
                 md2 += y[i] * Sinv[i*m + j] * y[j];
         double threshold = (m == 1) ? CHI2_THRESHOLD_1DOF :
                           (m == 2) ? CHI2_THRESHOLD_2DOF :
@@ -185,10 +190,13 @@ static void ekf_update_generic(EkfFusion* ekf,
          * 状态估计，导致 EKF 永远无法收敛（见 §7.2.3 的 bug 复盘）。 */
         if (ekf->update_count >= 100 && md2 > threshold) {
             ekf->chi2_fail_count++;
+            /* gated_count 与 update_count 分开计：被拒的观测不是一次成功更新。
+             * 混在一起会让"所有观测都被拒"在统计上完全不可见 —— 这正是上面
+             * 那个维度 bug 能潜伏下来的原因。fusion_node 应把它发布出去。 */
+            ekf->gated_count++;
             if (ekf->chi2_fail_count > CHI2_MAX_CONSECUTIVE)
                 ekf->diverged = 1;
             /* skip update — 观测与预测不一致，保持预测状态 */
-            ekf->update_count++;
             return;
         }
         ekf->chi2_fail_count = 0;  /* 通过检验，重置计数器 */
@@ -463,6 +471,8 @@ void ekf_fusion_reset(EkfFusion* ekf) {
     ekf->P[4*5 + 4] = INIT_P_YR_VAR;
     ekf->diverged = 0;
 
-    /* χ² 连续失败计数也一并复位，让滤波器从干净的 slate 重启 */
+    /* χ² 连续失败计数也一并复位，让滤波器从干净的 slate 重启。
+     * gated_count 是累计诊断量，不复位 —— 它记录整个生命周期里被拒的
+     * 观测总数，复位会掩盖 reset 前的拒绝历史。 */
     ekf->chi2_fail_count = 0;
 }

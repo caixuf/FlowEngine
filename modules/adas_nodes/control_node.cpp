@@ -244,7 +244,10 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
 
     /* 使用第一个点获取 target_speed 和 lane_d */
-    g.target_speed = (double)traj.points[0].v;
+    /* 目标速度取轨迹末点：规划器可生成从当前速度到目标速度的减速轨迹，
+     * 取首点 (=当前速度) 会让控制器永远不减速 → 追尾前车。
+     * 取末点 (=规划期内的期望速度) 让控制器跟随减速/加速意图。 */
+    g.target_speed = (double)traj.points[n_pts - 1].v;
     g.has_target_speed = 1;
     g.lane_d = (double)traj.points[0].l;
     /* DEBUG: 临时打印收到的轨迹首点速度 */
