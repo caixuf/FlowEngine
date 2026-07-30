@@ -456,12 +456,11 @@ protected:
             if (!g.has_planning) {
                 /* 无 planning 时保持当前 y，不自行推导目标车道 */
                 cruise_lane_y = g.ego_y;
-                /* 出路沿恢复：如果 |ego_y| 远超道路范围，强制回最近车道。
-                 * 注意不能回 road_center_y=0（道路中心线），否则会跨到对向车道。
-                 * 取偏离方向同侧的第一个车道中心：100% 保证不会跨过中心线。 */
+                /* 出路沿恢复：如果 |ego_y| 远超道路范围（>15m），强制回默认车道。
+                 * 车起步时在 lane 2（y=-1.75），这是可靠的东向车道参考。
+                 * 不能回 road_center_y=0 或同侧最近车道——都会跨到对向。 */
                 if (fabs(g.ego_y - g.road_center_y) > 15.0) {
-                    double sign = (g.ego_y - g.road_center_y >= 0) ? 1.0 : -1.0;
-                    cruise_lane_y = g.road_center_y + sign * 1.75;
+                    cruise_lane_y = -1.75;
                 }
             }
 
