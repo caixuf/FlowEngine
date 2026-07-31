@@ -375,10 +375,38 @@ target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 # inference_node: 内置 tiny-MLP 车端推理（影子模式，支持 OTA 热重载，FlowCoro 协程版）
 # 采用 FlowCoroTask（线程池 resume）：MLP 推理为重计算，同步 resume 会阻塞
 # 消息总线分发线程导致 drops，故改用线程池 resume。
-add_library(inference_node SHARED inference_node.cpp)
+#
+# 前向计算有两个可切换后端：tiny-MLP（纯 C，默认，零依赖）与 ONNX Runtime（可选）。
+# ENABLE_ONNX 开关：cmake -DENABLE_ONNX=ON ...。开启且系统装有 onnxruntime 时，
+# 定义 HAVE_ONNXRUNTIME 并链接 ORT，inference_node 可加载 .onnx 模型；未开启或未找到
+# 时 onnx_backend.cpp 编成降级桩（load→-1），运行时自动回退 tiny-MLP，行为零变化。
+# 后端切换只影响「前向计算」一步，特征组装/输出映射/影子逻辑完全复用（见 onnx_backend.h）。
+option(ENABLE_ONNX "Enable ONNX Runtime inference backend (requires onnxruntime)" OFF)
+add_library(inference_node SHARED inference_node.cpp onnx_backend.cpp)
 target_compile_definitions(inference_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(inference_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 target_link_libraries(inference_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
+if(ENABLE_ONNX)
+    # 优先 CONFIG 包（onnxruntime 官方 CMake 导出），兜底 find_path + find_library。
+    find_package(onnxruntime CONFIG QUIET)
+    if(onnxruntime_FOUND)
+        target_compile_definitions(inference_node PRIVATE HAVE_ONNXRUNTIME)
+        target_link_libraries(inference_node onnxruntime::onnxruntime)
+        message(STATUS "inference_node: HAVE_ONNXRUNTIME enabled (onnxruntime CONFIG package)")
+    else()
+        find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+                  PATH_SUFFIXES onnxruntime onnxruntime/core/session)
+        find_library(ONNXRUNTIME_LIB NAMES onnxruntime)
+        if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
+            target_compile_definitions(inference_node PRIVATE HAVE_ONNXRUNTIME)
+            target_include_directories(inference_node PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+            target_link_libraries(inference_node ${ONNXRUNTIME_LIB})
+            message(STATUS "inference_node: HAVE_ONNXRUNTIME enabled (${ONNXRUNTIME_LIB})")
+        else()
+            message(WARNING "ENABLE_ONNX=ON 但未找到 onnxruntime，onnx_backend 编为降级桩，运行时回退 tiny-MLP")
+        endif()
+    endif()
+endif()
 
 # data_recorder_node: 训练样本采集（模仿学习 JSONL）
 add_library(data_recorder_node SHARED data_recorder_node.c)
