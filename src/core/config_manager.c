@@ -35,6 +35,12 @@ LauncherConfig* config_load(const char* config_file) {
     LauncherConfig* cfg = (LauncherConfig*)calloc(1, sizeof(LauncherConfig));
     if (!cfg) { cJSON_Delete(root); return NULL; }
 
+    /* scheduler.mode 缺省 = CHOREO(1)：PR #72 前 launcher 硬编码 CHOREO，
+     * 读取配置后 calloc 零初始化把缺省变成 CLASSIC(0)——外部配置缺 scheduler 段
+     * 或 mode 字段时，会静默从 DAG 编排切到 thread-per-task 轮询（行为差异大）。
+     * 这里恢复历史默认：显式写 "classic" 仍会在下面覆盖为 0。 */
+    cfg->scheduler.mode = 1;  /* SCHEDULER_MODE_CHOREO */
+
     /* log_file */
     cJSON* jlog = cJSON_GetObjectItemCaseSensitive(root, "log_file");
     if (cJSON_IsString(jlog) && jlog->valuestring) {

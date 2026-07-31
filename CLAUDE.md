@@ -425,7 +425,7 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | NPC 瞬移 | 障碍物回收逻辑放入 100m 外（设计如此，非 bug） | `flowsim/npc_ai.cpp:204` |
 | NPC/车飞出路面、不在车道上、坐标飞到几千米外 | flowsim NPC 用 `step_bicycle(steer=0)` 世界系直线积分、不跟道路几何，路一拐弯就直线冲出路网。已改为中央 `Route`（把各 road 连成有序主路）+ Frenet 沿车道推进 + 到头回收 | `npc_ai.cpp` step_npc_vehicle / `flowsim/route.cpp` |
 | 感知降频 | DBSCAN 点云过多时聚类耗时超过 deadline | `perception_node.cpp` |
-| 车身左右晃动（1-2Hz 极限环） | `road_pos.world()` 每帧把 ego.heading 重置为道路切线，control 的 `v_lat_damp` 失效（heading_err≈0），退化为纯 P。**注意：此处曾尝试"保留 bicycle model heading"，已被推翻并回滚** —— 运动学模式下自由积分会漂移导致斜行。现状是运动学模式仍重置 heading（靠 cte+heading 项+低通+死区稳住），动力学模式才跳过重置 | `flowsim_node.cpp:1185-1200` |
+| 车身左右晃动（1-2Hz 极限环） | 历史根因：`road_pos.world()` 每帧把 ego.heading 重置为道路切线，control 的 `v_lat_damp` 失效（heading_err≈0），退化为纯 P。**96447a9 起已改为两模式都自由积分 heading**：运动学模式由 step_bicycle 积分，靠 `sin(dh)` 负反馈闭环 + cte/heading 项 + 低通 + 死区稳住（曾尝试自由积分导致斜行后回滚，后加 sin(dh) 反馈再启用）；动力学模式由轮胎侧偏力积分。故 `is_dynamic` 分支对两模式一视同仁，只做 heading 归一化 | `flowsim_node.cpp` 主循环 ego 段 |
 | steer 打到 0.25 硬限幅导致抖动 | 运动学自行车模型下 heading 漂移可达 0.8 rad，steer 限幅过紧导致控制器累积误差撞 clamp。修复：`lc_lat_accel_max` 从 2.4→4.5，`steer_min_clamp` 从 0.016→0.030 | `control_node.cpp:1245-1253` `pipeline.json:198` |
 | 内部巡航 fallback 输出大 steer | `internal_cruise_control` 用 `road_h - heading` 全量前馈，运动学模型下 heading 漂移可达 0.8 rad，公式输出 0.8 被 clamp 到 0.25。修复：改用 `heading_err*0.3 + yaw_damp + lat_err*0.03`，cap 降到 0.15 | `flowsim_node.cpp:1007-1027` |
 | 控制遇到慢车不减速、油门全开撞前车 | 积分饱和 anti-windup 逻辑错误：刹车分支 `g.integral < 0` 应为 `g.integral > 0`，`-= error*dt` 应为 `+=`。加速阶段积分累积到 +500，进入减速后 P term 不足以抵消 I term，油门全开撞车。修复：error 翻负时直接清零正积分 | `control_node.cpp:550-554` |

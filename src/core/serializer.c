@@ -28,7 +28,11 @@ bool serializer_is_big_endian(void) {
 }
 
 uint8_t serializer_endian_marker(void) {
-    return serializer_is_big_endian() ? ENDIAN_MARKER_BE : ENDIAN_MARKER_LE;
+    /* wire 格式自 PR #72 起无条件小端（msg_codegen 的 serializer_store_le），
+     * marker 若报主机序，会在假想 BE 主机上产生"wire=LE 但 marker=BE"的矛盾
+     * （当前所有支持平台均 LE，marker 又是死字段，故纯理论）。统一恒报 LE，
+     * 与序列化实现一致；未来接 normalize_endian 时 BE 主机据此正确交换。 */
+    return ENDIAN_MARKER_LE;
 }
 
 void serializer_swap16(uint8_t* v) {
