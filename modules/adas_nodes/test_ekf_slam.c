@@ -296,26 +296,33 @@ int main(int argc, char** argv) {
 
     printf("\nTest 5: Course-over-ground heading observation (航向收敛断言)\n");
     printf("=================================================\n");
-    /* 隔离 slam_node 的 course-over-ground 航向观测语义：车实际以固定航向
-     * TRUE_HDG 直线行驶，但 EKF 初始 heading=0（错 TRUE_HDG rad），gyro_z=0
-     * （IMU 提供不了航向变化）。若像老 bug 那样把 EKF 自己的 heading 当观测
-     * 喂回，残差恒 0、heading 永远卡在 0；喂真实 atan2(Δy,Δx) 航向观测，
-     * heading 才会从 0 收敛到 TRUE_HDG。断言：残差下降、末端收敛、非恒 0。 */
+    /* 隔离 slam_node 的 course-over-ground 航向观测语义：车以固定航向 TRUE_HDG
+     * 直线行驶，EKF 初始 heading=0（错 π/4），gyro_z=0（IMU 不提供航向增量）。
+     *
+     * 已知边界（2026-07 实测）：本 EKF 的 F 阵有位置↔航向交叉耦合，纯位置观测
+     * 也能间接校正 heading（三者收敛：atan2≈19 帧 / pos-only≈22 / 老 bug 自己
+     * heading 当观测≈26 帧，差距仅 3-4 帧）——所以不做"有无航向观测"的收敛速度
+     * 断言（会 flaky）。真正的回归点是：**atan2 分支必须真的触发**。旧版测试用
+     * DT=10ms（单步位移 0.15m < 0.4 阈值）导致该分支从不执行，纯位置路径照样
+     * 通过——断言的是一条从未被测过的路径。此处改 50ms 步长（=slam_node 20Hz），
+     * 断言：①航向观测路径确实触发 ②观测值本身≈真实航向 ③滤波收敛到 TRUE_HDG。 */
     const float TRUE_HDG = 0.7853982f;  /* π/4 */
     const float V5 = 15.0f;
+    const float DT5_US = 50000.0f;      /* 20Hz，与 slam_node publish_hz 一致 */
     ekf_slam_init(&ekf, 0.0f, 0.0f, 0.0f);
     ekf.x.v = V5;
 
     float chx = cosf(TRUE_HDG), chy = sinf(TRUE_HDG);
     float last_ox = 0.0f, last_oy = 0.0f;
-    int have_last = 0;
+    int have_last = 0, cog_triggers = 0;
     float initial_resid = -1.0f, final_resid = 0.0f, final_hdg = 0.0f;
+    float obs_hdg_sum = 0.0f;  /* 累计航向观测，验证观测本身正确 */
 
     for (int i = 0; i < NUM_SAMPLES; i++) {
-        uint64_t ts = (uint64_t)(i * DT_US);
+        uint64_t ts = (uint64_t)(i * DT5_US);
         ekf_slam_predict(&ekf, 0.0f, 0.0f, ts);  /* gyro_z=0：航向不来自 IMU */
 
-        float t = (float)i * DT_US / 1e6f;
+        float t = (float)i * DT5_US / 1e6f;
         float true_x5 = V5 * t * chx;
         float true_y5 = V5 * t * chy;
         /* lidar 观测位置带噪 */
@@ -327,6 +334,8 @@ int main(int argc, char** argv) {
             float disp = sqrtf(dx * dx + dy * dy);
             if (disp > 0.4f) {  /* 与 slam_node heading_obs_min_disp 一致 */
                 float obs_heading = atan2f(dy, dx);
+                obs_hdg_sum += obs_heading;
+                cog_triggers++;
                 ekf_slam_update(&ekf, ox, oy, obs_heading);
                 last_ox = ox; last_oy = oy;
             } else {
@@ -345,8 +354,12 @@ int main(int argc, char** argv) {
         final_hdg = h;
     }
 
-    printf("initial_resid(@50)=%.4f final_resid=%.4f final_hdg=%.4f (true=%.4f)\n",
-           initial_resid, final_resid, final_hdg, TRUE_HDG);
+    float obs_hdg_mean = cog_triggers > 0 ? obs_hdg_sum / (float)cog_triggers : 0.0f;
+    printf("cog_triggers=%d obs_hdg_mean=%.4f initial_resid(@50)=%.4f "
+           "final_resid=%.4f final_hdg=%.4f (true=%.4f)\n",
+           cog_triggers, obs_hdg_mean, initial_resid, final_resid, final_hdg, TRUE_HDG);
+    CHECK(cog_triggers > 0, "course-over-ground observation path fired");
+    CHECK(fabsf(obs_hdg_mean - TRUE_HDG) < 0.2f, "course-over-ground measurement ≈ true course");
     CHECK(initial_resid > 0.0f, "captured initial heading residual");
     CHECK(final_resid < initial_resid, "heading residual decreased over time");
     CHECK(final_resid < 0.2f, "heading converged (residual < 0.2 rad)");

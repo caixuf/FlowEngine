@@ -70,6 +70,12 @@
 #define POSE_SOURCE_SLAM      2u
 #define POSE_SOURCE_ODOMETRY  3u
 
+/* lidar 停流陈旧守卫：超过该时长未收到新帧即视为断流，转航位推算。
+ * 若无此守卫，have_lidar 恒 1，陈旧 last_lidar 被每帧重复量测，位置被钉在
+ * 最后一个观测点而非随 IMU 漂移（2026-07 审查发现，单点伪 lidar 停流的
+ * 典型丢失场景）。1s = 20 帧 @20Hz（pipeline.json lidar_rate_hz=20）。 */
+#define LIDAR_STALE_US 1000000ULL
+
 static struct {
     Transport*        transport;
     DiscoveryManager* discovery;
@@ -221,7 +227,7 @@ static void slam_update_ekf_slam(Pose2D* pose) {
         ekf_slam_predict(&g.ekf_slam_state, g.last_imu.accel_x, g.last_imu.gyro_z, now);
     }
 
-    if (g.have_lidar) {
+    if (g.have_lidar && now - g.last_lidar_us <= LIDAR_STALE_US) {
         /* 航向观测：course-over-ground（航迹方向反推）。
          *
          * 单点伪 lidar 无法 scan-match，唯一诚实的独立航向观测是从连续两帧

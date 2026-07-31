@@ -42,8 +42,10 @@ void ekf_slam_predict(EkfSlam* ekf, float accel_x, float gyro_z, uint64_t curren
 
 void ekf_slam_update(EkfSlam* ekf, float obs_x, float obs_y, float obs_heading);
 
-/* 仅位置观测（2×2）：位移不足以可靠反推航迹方向时用它，只修正 x/y，
- * heading/v/omega 靠 predict 的运动学耦合间接更新（不硬喂假航向）。 */
+/* 仅位置观测（2×2）：位移不足以可靠反推航迹方向时用它（slam_node 在
+ * course-over-ground 位移阈值未达标时走此路径）。名为"位置观测"，但标准
+ * EKF 的增益 K 交叉协方差项仍会直接修正 heading/v/omega（实测纯位置观测
+ * 也能收敛航向，仅比显式航向观测慢数帧）；关键是它不喂假的航向观测。 */
 void ekf_slam_update_pos(EkfSlam* ekf, float obs_x, float obs_y);
 
 void ekf_slam_get_pose(const EkfSlam* ekf, float* x, float* y, float* heading,
