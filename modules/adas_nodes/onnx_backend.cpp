@@ -59,13 +59,43 @@ extern "C" int onnx_backend_load(OnnxBackend* b, const char* path) {
         h->input_name  = in_nm.get();
         h->output_name = out_nm.get();
 
-        /* 读输入/输出维度：形状取末维（[1, N] 或 [N]），须静态。 */
-        auto in_shape  = h->session.GetInputTypeInfo(0)
-                             .GetTensorTypeAndShapeInfo().GetShape();
-        auto out_shape = h->session.GetOutputTypeInfo(0)
-                             .GetTensorTypeAndShapeInfo().GetShape();
-        int64_t in_last  = in_shape.empty()  ? -1 : in_shape.back();
-        int64_t out_last = out_shape.empty() ? -1 : out_shape.back();
+        /* 读输入/输出形状与元素类型。 */
+        auto in_ti  = h->session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        auto out_ti = h->session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        auto in_shape  = in_ti.GetShape();
+        auto out_shape = out_ti.GetShape();
+
+        /* 元素类型必须 float32：forward 用 GetTensorData<float> 直接取数。
+         * fp16/int8 等模型拒绝，避免静默错推理。 */
+        if (in_ti.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+            out_ti.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+            fprintf(stderr, "[onnx] %s: 仅支持 float32 输入/输出 "
+                    "(in_type=%d out_type=%d)\n",
+                    path, (int)in_ti.GetElementType(), (int)out_ti.GetElementType());
+            delete h;
+            return -1;
+        }
+
+        /* 形状：接受 [N]（rank-1）或 [1, N]（rank-2）——本工具导出恒为 [1, N]。
+         * rank≥3（如 [1,2,5]）无法确定单样本向量语义，forward 会按末维错取
+         * 元素数；rank-2 首维须 1（单样本批）。一律拒绝而非静默错推理。 */
+        size_t in_rank = in_shape.size(), out_rank = out_shape.size();
+        if (!(in_rank == 1 || in_rank == 2) || !(out_rank == 1 || out_rank == 2)) {
+            fprintf(stderr, "[onnx] %s: 输入/输出须 rank 1/2（实际 "
+                    "in_rank=%zu out_rank=%zu）\n", path, in_rank, out_rank);
+            delete h;
+            return -1;
+        }
+        if (in_rank == 2 && in_shape[0] != 1) {
+            fprintf(stderr, "[onnx] %s: 输入首维须 1（batch），实际 %lld\n",
+                    path, (long long)in_shape[0]);
+            delete h;
+            return -1;
+        }
+
+        /* 末维即特征数，须静态且 > 0。 */
+        int64_t in_last  = in_shape.back();
+        int64_t out_last = out_shape.back();
         if (in_last <= 0 || out_last <= 0) {
             fprintf(stderr, "[onnx] %s: 输入/输出维度非静态（in=%lld out=%lld）\n",
                     path, (long long)in_last, (long long)out_last);

@@ -428,11 +428,13 @@ static bool path_has_suffix(const char* path, const char* suffix) {
 }
 
 /* 输入/输出维度是否落在推理链路支持集内（与 run_inference 的分支一致）。
- * in ∈ {4,16,80,115}（单帧 v1/v2 或 5 帧时序 v2/v3），out ∈ {1,2,4,5,9}。 */
+ * in ∈ {4,16,80,115}（单帧 v1/v2 或 5 帧时序 v2/v3）。
+ * out：run_inference 按 n>=9/>=5/>=4/>=2/==1 处理任意正 out_dim，tiny-MLP 路径
+ * 亦然，故 ONNX 门禁对齐为 out_dim>=1（旧版只收 {1,2,4,5,9}，与 onnx_backend.h
+ * 声明的"可切换、语义一致"契约不符——同一 out_dim=3/6/7/8 模型 tiny 能跑 ONNX 被拒）。 */
 static bool dims_supported(int in_dim, int out_dim) {
     bool in_ok  = (in_dim == 4 || in_dim == 16 || in_dim == 80 || in_dim == 115);
-    bool out_ok = (out_dim == 1 || out_dim == 2 || out_dim == 4 ||
-                   out_dim == 5 || out_dim == 9);
+    bool out_ok = (out_dim >= 1);
     return in_ok && out_ok;
 }
 
@@ -630,6 +632,13 @@ protected:
                         g.onnx = nb;
                         g.use_onnx = true;
                         g.reload_count++;
+                        /* 重载可能跨越维度边界（16↔115）：frame_dim 只 init 时设过
+                         * 一次，不重算会让 build_frame 按旧列数写缓冲、新模型读满
+                         * 23 列 → 场景上下文维度恒 0/陈旧。同时重置时序窗口，避免
+                         * 新旧维度帧混在 5×23 缓冲里。 */
+                        g.frame_dim = (g.onnx.in_dim >= 115) ? V3_DIM : V2_DIM;
+                        g.frame_head = 0;
+                        g.frame_count = 0;
                         LOG_INFO("inference", "OTA hot-reload #%d ONNX from %s (in=%d out=%d)",
                                  g.reload_count, g.model_path, g.onnx.in_dim, g.onnx.out_dim);
                     } else {
@@ -642,6 +651,10 @@ protected:
                         g.model = new_model;
                         g.use_onnx = false;
                         g.reload_count++;
+                        /* 同上：重载跨维度边界时重算 frame_dim + 重置时序窗口 */
+                        g.frame_dim = (g.model.in_dim >= 115) ? V3_DIM : V2_DIM;
+                        g.frame_head = 0;
+                        g.frame_count = 0;
                         LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
                                  g.reload_count, g.model_path,
                                  g.model.in_dim, g.model.hid_dim, g.model.out_dim);
@@ -954,7 +967,8 @@ static int inference_init(MessageBus* bus, Transport* transport,
     else if (g.control_mode == CTRL_MODE_DIRECT) mode_str = "direct_ctrl";
     LOG_INFO("inference", "initialized (FlowCoro, mode=%s, %.0f Hz, max=%.0f m/s, %s)",
              mode_str, g.cfg_frequency_hz, g.cfg_max_speed,
-             g.model.loaded ? "model loaded" : "heuristic fallback");
+             g.use_onnx ? "onnx loaded"
+                        : (g.model.loaded ? "tiny-mlp loaded" : "heuristic fallback"));
     return 0;
 }
 

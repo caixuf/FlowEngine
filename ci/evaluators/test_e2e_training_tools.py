@@ -620,53 +620,61 @@ class E2ETrainingToolsTest(unittest.TestCase):
         b2 = [0.05, -0.05]
         norm_mean = [10.0, -1.0, 0.0, 0.0]
         norm_scale = [5.0, 2.0, 1.0, 0.5]
-        out_mean = [8.0, 0.0]
-        out_scale = [3.0, 1.5]
 
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp)
-            model_txt = work / "model.txt"
-            model_txt.write_text(
-                "# flowengine-tinymlp v2 (parity test)\n"
-                "in 4\nhidden 3\nout 2\n"
-                f"norm_mean {fmt(norm_mean)}\n"
-                f"norm_scale {fmt(norm_scale)}\n"
-                f"out_mean {fmt(out_mean)}\n"
-                f"out_scale {fmt(out_scale)}\n"
-                f"w1 {fmt(w1)}\nb1 {fmt(b1)}\n"
-                f"w2 {fmt(w2)}\nb2 {fmt(b2)}\n",
-                encoding="utf-8",
-            )
+        # 参考：tiny_mlp.h::tiny_mlp_forward 的纯 Python 复刻（norm→tanh 层→gemm→denorm）。
+        # 注意 C 前向输出层 y=acc*out_scale+out_mean 对 out_scale 无 0→1 保护
+        # （0 保护只在输入 norm_scale），故 tiny_mlp_ref 同样直乘。
+        def tiny_mlp_ref(x, out_scale, out_mean):
+            xn = [(x[i] - norm_mean[i]) / (norm_scale[i] or 1.0) for i in range(4)]
+            h = []
+            for j in range(3):
+                acc = b1[j] + sum(w1[j * 4 + i] * xn[i] for i in range(4))
+                h.append(math.tanh(acc))
+            y = []
+            for k in range(2):
+                acc = b2[k] + sum(w2[k * 3 + j] * h[j] for j in range(3))
+                y.append(acc * out_scale[k] + out_mean[k])
+            return y
 
-            onnx_path = work / "model.onnx"
-            build_onnx(parse_tiny_mlp(model_txt), onnx_path)
-            self.assertTrue(onnx_path.exists())
+        # 两种 out_scale 配置：常规非零 scale + 0-scale 边界（PR #72 修复点——
+        # export 曾把 0 视作 1，0 scale 时与 C 前向数值分歧；此处若回归，out1
+        # 会随 acc 变化而失配）。
+        for name, out_scale, out_mean in [
+            ("normal",     [3.0, 1.5], [8.0, 0.0]),
+            ("zero_scale", [3.0, 0.0], [8.0, 2.0]),  # out_scale=0 → 输出恒=out_mean
+        ]:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    work = Path(tmp)
+                    model_txt = work / "model.txt"
+                    model_txt.write_text(
+                        "# flowengine-tinymlp v2 (parity test)\n"
+                        "in 4\nhidden 3\nout 2\n"
+                        f"norm_mean {fmt(norm_mean)}\n"
+                        f"norm_scale {fmt(norm_scale)}\n"
+                        f"out_mean {fmt(out_mean)}\n"
+                        f"out_scale {fmt(out_scale)}\n"
+                        f"w1 {fmt(w1)}\nb1 {fmt(b1)}\n"
+                        f"w2 {fmt(w2)}\nb2 {fmt(b2)}\n",
+                        encoding="utf-8",
+                    )
 
-            # 参考：tiny_mlp.h::tiny_mlp_forward 的纯 Python 复刻（norm→tanh 层→gemm→denorm）
-            def tiny_mlp_ref(x):
-                xn = [(x[i] - norm_mean[i]) / (norm_scale[i] or 1.0) for i in range(4)]
-                h = []
-                for j in range(3):
-                    acc = b1[j] + sum(w1[j * 4 + i] * xn[i] for i in range(4))
-                    h.append(math.tanh(acc))
-                y = []
-                for k in range(2):
-                    acc = b2[k] + sum(w2[k * 3 + j] * h[j] for j in range(3))
-                    y.append(acc * out_scale[k] + out_mean[k])
-                return y
+                    onnx_path = work / "model.onnx"
+                    build_onnx(parse_tiny_mlp(model_txt), onnx_path)
+                    self.assertTrue(onnx_path.exists())
 
-            sess = ort.InferenceSession(str(onnx_path),
-                                        providers=["CPUExecutionProvider"])
-            in_name = sess.get_inputs()[0].name
-            for x in ([12.0, -0.5, 0.1, 0.2],
-                      [8.0, -2.0, -0.3, 0.0],
-                      [15.0, 1.0, 0.05, -0.1]):
-                ref = tiny_mlp_ref(x)
-                got = sess.run(None, {in_name: np.array([x], dtype=np.float32)})[0][0]
-                for k in range(2):
-                    self.assertLess(abs(float(got[k]) - ref[k]), 1e-3,
-                                    f"onnx vs tiny_mlp mismatch @out{k}: "
-                                    f"{got[k]} vs {ref[k]} (x={x})")
+                    sess = ort.InferenceSession(str(onnx_path),
+                                                providers=["CPUExecutionProvider"])
+                    in_name = sess.get_inputs()[0].name
+                    for x in ([12.0, -0.5, 0.1, 0.2],
+                              [8.0, -2.0, -0.3, 0.0],
+                              [15.0, 1.0, 0.05, -0.1]):
+                        ref = tiny_mlp_ref(x, out_scale, out_mean)
+                        got = sess.run(None, {in_name: np.array([x], dtype=np.float32)})[0][0]
+                        for k in range(2):
+                            self.assertLess(abs(float(got[k]) - ref[k]), 1e-3,
+                                            f"onnx vs tiny_mlp mismatch @out{k}: "
+                                            f"{got[k]} vs {ref[k]} (x={x})")
 
 
 if __name__ == "__main__":

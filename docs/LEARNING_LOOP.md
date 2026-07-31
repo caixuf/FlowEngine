@@ -425,7 +425,7 @@ python3 tools/modelctl.py ota status
 - **导出**：`python3 tools/train_e2e/export_onnx.py --model <model.txt> --output <model.onnx>`
   把 tiny-MLP 权重导成**数值等价**的 ONNX 图（归一化/反归一化折进图，喂同一份原始特征）。
   导出需 `pip install onnx numpy`；运行时推理只需 onnxruntime。
-- **等价性门禁**：`tests/test_e2e_training_tools.py::test_onnx_export_parity_with_tiny_mlp`
+- **等价性门禁**：`ci/evaluators/test_e2e_training_tools.py::test_onnx_export_parity_with_tiny_mlp`
   对同一批输入断言 `onnx_forward` 与 `tiny_mlp_forward` 逐元素 |Δ|<1e-3（缺 onnx/ort 时 skip）。
 - **不做 TensorRT**：NVIDIA 专有、CI 无法通用覆盖，故仅提供 ONNX 一条可移植路径。
 - 车端算力有限，建议从小模型 / 端到端小网络起步；把工程闭环跑通比追求模型规模更有价值。

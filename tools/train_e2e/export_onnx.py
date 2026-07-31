@@ -66,11 +66,14 @@ def parse_tiny_mlp(path: Path):
     norm_scale = data.get("norm_scale", [1.0] * in_dim)[:in_dim]
     out_mean = data.get("out_mean", [0.0] * out_dim)[:out_dim]
     out_scale = data.get("out_scale", [1.0] * out_dim)[:out_dim]
-    # 补齐 + 把 0 scale 视作 1（与 C 的 scale!=0?scale:1 一致）
+    # 补齐。0→1 保护只对输入 norm_scale 有效（C tiny_mlp.h forward 输入层
+    # norm_scale[i]!=0 ? norm_scale[i] : 1）；输出层 y = acc*out_scale + out_mean
+    # 对 out_scale 无保护，0 scale 时输出恒 = out_mean。导出必须与 C 逐位一致，
+    # 故 out_scale 不做 0→1 替换（旧代码误读 C，0 scale 会导错数值）。
     norm_mean = (norm_mean + [0.0] * in_dim)[:in_dim]
     norm_scale = [(s if s != 0.0 else 1.0) for s in (norm_scale + [1.0] * in_dim)[:in_dim]]
     out_mean = (out_mean + [0.0] * out_dim)[:out_dim]
-    out_scale = [(s if s != 0.0 else 1.0) for s in (out_scale + [1.0] * out_dim)[:out_dim]]
+    out_scale = (out_scale + [1.0] * out_dim)[:out_dim]
 
     # 隐层权重 [hid][prev]
     layers = []
