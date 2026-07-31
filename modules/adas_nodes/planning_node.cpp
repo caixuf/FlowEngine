@@ -1629,7 +1629,12 @@ static int planning_init(MessageBus* bus, Transport* transport,
     }
 #else
     g.frenet = nullptr;
-    LOG_INFO("planning", "built without Frenet — using lane-keep fallback");
+    LOG_WARN("planning", "════════════════════════════════════════════════════════");
+    LOG_WARN("planning", "构建未启用 Frenet/Eigen — 规划已降级为「恒速车道保持」");
+    LOG_WARN("planning", "  · 无横向轨迹优化：不做超车/绕障/变道路径规划");
+    LOG_WARN("planning", "  · 障碍物仅由行为层减速处理，规划层不主动避让");
+    LOG_WARN("planning", "  如需完整规划：装 Eigen 并以 -DHAVE_FRENET 重新构建");
+    LOG_WARN("planning", "════════════════════════════════════════════════════════");
 #endif
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
