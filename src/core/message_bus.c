@@ -1077,6 +1077,32 @@ int message_bus_topic_is_full(MessageBus* bus, const char* topic) {
     return -1;  /* topic not found */
 }
 
+/* ── 主动读取：按 topic 窥视最新一条消息（非阻塞，不消费） ──────
+ * 2026-07-31：flowsim 的 select_for + transport 回调在 control/cmd 高频
+ * （发布频率 >> 消费频率）下曾双双断流 15s，内置巡航接管导致追尾。
+ * 本接口给高频关键指令一个不依赖被动唤醒的主动通道：
+ *   - 扫描队列复制最后一条匹配 topic 的消息（depth=1 drop_oldest 下即最新）
+ *   - 只读不消费：广播订阅回调仍由 dispatch 线程正常分发，不破坏语义
+ *   - 消费者重复解析同一条消息是幂等的（指令值不变），用于刷新新鲜度
+ * @return 0=取到, ERR_NOT_FOUND=队列中无该 topic 消息
+ */
+int message_bus_peek_latest(MessageBus* bus, const char* topic, Message* out) {
+    if (!bus || !topic || !out) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->queue.mutex);
+    int found_idx = -1;
+    for (uint32_t i = 0; i < bus->queue.count; i++) {
+        uint32_t idx = (bus->queue.tail + i) % MSG_BUS_QUEUE_SIZE;
+        if (strcmp(bus->queue.msgs[idx].topic, topic) == 0) found_idx = (int)i;
+    }
+    if (found_idx < 0) {
+        pthread_mutex_unlock(&bus->queue.mutex);
+        return ERR_NOT_FOUND;
+    }
+    *out = bus->queue.msgs[(bus->queue.tail + (uint32_t)found_idx) % MSG_BUS_QUEUE_SIZE];
+    pthread_mutex_unlock(&bus->queue.mutex);
+    return 0;
+}
+
 int message_bus_list_topics(MessageBus* bus, char topics[][64], int max) {
     if (!bus || !topics || max <= 0) return ERR_INVALID_PARAM;
     pthread_mutex_lock(&bus->topic_mutex);
