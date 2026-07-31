@@ -78,6 +78,10 @@ static struct {
 
     /* 行为规划状态（来自 behavior/state JSON topic）*/
     char behavior_state_json[2048];
+    /* 控制层 debug（来自 control/debug JSON topic，全链路横向调试） */
+    char control_debug_json[2048];
+    /* 规划层 debug（来自 planning/debug JSON topic，全链路横向调试） */
+    char planning_debug_json[2048];
     volatile int has_planning;
 
     /* Phase 2: 道路几何缓存（从 road/geometry topic 获取，flowsim_node 发布） */
@@ -492,6 +496,26 @@ static void on_behavior_state(const Message* msg, void* user_data) {
     g.behavior_state_json[copy] = '\0';
 }
 
+/* ── control/debug 订阅 — 缓存控制层横向调试数据 ── */
+static void on_control_debug(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    size_t copy = msg->data_size;
+    if (copy >= sizeof(g.control_debug_json)) copy = sizeof(g.control_debug_json) - 1;
+    memcpy(g.control_debug_json, msg->data, copy);
+    g.control_debug_json[copy] = '\0';
+}
+
+/* ── planning/debug 订阅 — 缓存规划层横向调试数据 ── */
+static void on_planning_debug(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    size_t copy = msg->data_size;
+    if (copy >= sizeof(g.planning_debug_json)) copy = sizeof(g.planning_debug_json) - 1;
+    memcpy(g.planning_debug_json, msg->data, copy);
+    g.planning_debug_json[copy] = '\0';
+}
+
 /* JSON 标量提取辅助（json_extract_double / json_extract_int / json_extract_string）
  * 已迁移至共享工具 include/json_extract.h，避免与其他模块（如
  * src/algorithms/nuscenes_loader.c）各自维护一份不一致的实现。 */
@@ -661,6 +685,22 @@ static void export_dashboard_json(void) {
         if (_beh_empty_warn < 3) {
             LOG_WARN("monitor", "behavior_state_json[0] == 0 — buffer empty");
             _beh_empty_warn++;
+        }
+    }
+
+    /* 控制层 debug（横向控制链全链路变量） */
+    if (g.control_debug_json[0]) {
+        cJSON* cd = cJSON_Parse(g.control_debug_json);
+        if (cd) {
+            cJSON_AddItemToObject(metrics, "control_debug", cd);
+        }
+    }
+
+    /* 规划层 debug（Frenet规划全链路变量） */
+    if (g.planning_debug_json[0]) {
+        cJSON* pd = cJSON_Parse(g.planning_debug_json);
+        if (pd) {
+            cJSON_AddItemToObject(metrics, "planning_debug", pd);
         }
     }
 
@@ -1190,6 +1230,8 @@ static int monitor_init(MessageBus* bus, Transport* transport,
      * metrics.behavior 缺失，quick_verify 所有 behavior 字段显示 "?"。 */
     snprintf(g.behavior_state_json, sizeof(g.behavior_state_json),
              "{\"state\":\"NA\",\"committed_lane\":0,\"obs_count\":0}");
+    g.control_debug_json[0] = '\0';
+    g.planning_debug_json[0] = '\0';
 
     /* samples 环形缓冲初始态 */
     g.samples_head = 0;
@@ -1243,6 +1285,8 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, NULL);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, NULL);
     transport_subscribe(transport, "behavior/state", on_behavior_state, NULL);
+    transport_subscribe(transport, TOPIC_CONTROL_DEBUG, on_control_debug, NULL);
+    transport_subscribe(transport, TOPIC_PLANNING_DEBUG, on_planning_debug, NULL);
     /* 收集其他节点的自描述广播 (方案B: 数据驱动拓扑感知) */
     transport_subscribe(transport, TOPIC_FLOWENGINE_NODE_INFO, on_node_info, NULL);
     g.node_info_count = 0;

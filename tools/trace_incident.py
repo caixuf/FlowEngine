@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -199,13 +200,131 @@ def trace(data: dict, at_s: float | None = None, verbose: bool = False) -> int:
         print(f"    speed profile: {[f'{s:.1f}' for s in speeds]}")
         print(f"    target_speed (末点): {speeds[-1]:.1f} m/s")
 
+    # ── Layer 4b: Planning debug (Frenet/横向规划变量) ──
+    pd = metrics.get("planning_debug", {})
+    if pd:
+        print_layer("4b. 规划Debug (横向链路)", [
+            (f"ego_x / ego_y", f"{pd.get('ego_x',0):.1f} / {pd.get('ego_y',0):.2f}"),
+            (f"road_center_y (rc_y)", f"{pd.get('road_center_y',0):.3f} m"),
+            (f"ego_d (ego_y - rc_y)", f"{pd.get('ego_d',0):.3f} m"),
+            (f"target_lane_offset (d目标)", f"{pd.get('target_lane_offset',0):.3f} m"),
+            (f"command_speed", f"{pd.get('command_speed',0):.2f} m/s"),
+            (f"n_wp (轨迹点数)", f"{int(pd.get('n_wp',0))}"),
+            (f"traj_valid", "✅" if pd.get("traj_valid",0) > 0.5 else "❌ INVALID"),
+            (f"n_lanes / lane_width", f"{int(pd.get('n_lanes',0))} / {pd.get('lane_width',0):.1f}m"),
+        ])
+        if pd.get("beh_target_lane", -1) >= 0:
+            print(f"    beh_cmd={int(pd.get('beh_cmd',-1))} target_lane={int(pd.get('beh_target_lane',-1))} "
+                  f"d: start={pd.get('d_start',0):.3f} → lookahead={pd.get('d_lookahead',0):.3f} → end={pd.get('d_end',0):.3f}")
+
     # ── Layer 5: Control command ──
     vehicle = metrics.get("vehicle", {})
+    cd = metrics.get("control_debug", {})
     print_layer("5. 控制输出 (Control)", [
         (f"speed / target", f"{vehicle.get('speed', 0):.1f} / {vehicle.get('target_speed', 0):.1f} m/s"),
         (f"throttle / brake", f"{vehicle.get('throttle', 0):.2f} / {vehicle.get('brake', 0):.2f}"),
         (f"error", f"{vehicle.get('error', 0):.1f} m/s"),
     ])
+
+    # ── Layer 5b: Control debug (Stanley/横向控制变量) ──
+    if cd:
+        mpc_str = "MPC" if cd.get("mpc_used", 0) > 0.5 else "Stanley"
+        hazard_str = "🚨 HAZARD" if cd.get("hazard", 0) > 0.5 else "ok"
+        print_layer("5b. 控制Debug (横向链路)", [
+            (f"controller", f"{mpc_str}"),
+            (f"ego_y", f"{cd.get('ego_y',0):.3f} m"),
+            (f"lane_d (来自traj)", f"{cd.get('lane_d',0):.3f} m"),
+            (f"road_center_y (rc_y)", f"{cd.get('road_center_y',0):.3f} m"),
+            (f"target_y (rc_y + lane_d)", f"{cd.get('target_y',0):.3f} m"),
+            (f"lat_error (target - ego)", f"{cd.get('lat_error',0):.3f} m"),
+            (f"steer (rad/deg)", f"{cd.get('steer',0):.4f} / {math.degrees(cd.get('steer',0)):.1f}°"),
+            (f"y_from_target", f"{cd.get('y_from_target',0):.3f} m"),
+            (f"hazard", f"{hazard_str}"),
+            (f"mode", f"{cd.get('mode','?')}"),
+            (f"has_planning", "✅" if cd.get("has_planning",0) > 0.5 else "❌ NO"),
+            (f"lookahead_dist", f"{cd.get('lookahead_dist',0):.1f}m"),
+        ])
+
+    # ── 横向链路一致性检查 ──
+    lateral_verdicts = []
+    if pd and cd:
+        # planning 输出的 target_lane_offset 应该等于 control 的 lane_d
+        pd_d = pd.get("target_lane_offset", 0)
+        cd_lane_d = cd.get("lane_d", 0)
+        if abs(pd_d - cd_lane_d) > 0.1:
+            lateral_verdicts.append(f"❌ planning.target_lane_offset={pd_d:.3f} ≠ control.lane_d={cd_lane_d:.3f} → 轨迹横向偏移没传到control")
+        else:
+            lateral_verdicts.append(f"✅ planning→control 横向偏移一致: d={pd_d:.3f}m")
+
+        # control 的 target_y = road_center_y + lane_d
+        expected_target = cd.get("road_center_y", 0) + cd_lane_d
+        actual_target = cd.get("target_y", 0)
+        if abs(expected_target - actual_target) > 0.05:
+            lateral_verdicts.append(f"❌ target_y计算错误: expected rc_y+lane_d={expected_target:.3f}, got {actual_target:.3f}")
+
+        # 变道中检查：ego_y 是否朝 target_y 方向移动
+        beh_target = pd.get("beh_target_lane", -1)
+        if beh_target >= 0 and cd.get("lat_error", 0) != 0:
+            lat_err = cd.get("lat_error", 0)
+            steer = cd.get("steer", 0)
+            # steer方向应该与lat_error一致（正误差→负steer修正向左，反之向右，取决于坐标约定）
+            # 这里只检查 steer!=0 且方向有意义
+            if abs(steer) < 0.001 and abs(lat_err) > 0.3:
+                lateral_verdicts.append(f"❌ lat_error={lat_err:.3f}m 但 steer≈0 → Stanley没有输出修正方向")
+
+    # ── F: 碰撞复盘（碰撞前 5s 时间线） ──
+    if incident and incident["type"] == "collision":
+        print_layer("F. 碰撞复盘 (Collision Timeline)", [])
+        # 从 launcher stderr 提取碰撞现场数据
+        launcher_log = Path("/tmp/flow_launcher_stderr.txt")
+        col_data = {}
+        if launcher_log.exists():
+            txt = launcher_log.read_text(encoding="utf-8", errors="ignore")
+            # 匹配 COLLISION 行中的 JSON 片段
+            col_match = re.search(r"COLLISION\s+ego.*?\{.*?overlap", txt, re.DOTALL)
+            if col_match:
+                # 尝试提取 JSON 尾部的数值字段
+                for key in ("obs_x", "obs_y", "obs_vx", "obs_vy", "obs_heading", "obs_speed", "obs_id"):
+                    vm = re.search(rf'"{key}"\s*:\s*([-\d.e+]+)', txt)
+                    if vm:
+                        col_data[key] = float(vm.group(1))
+
+        if col_data:
+            print(f"    碰撞对象: id={int(col_data.get('obs_id', -1))}")
+            print(f"    NPC 位置:  x={col_data.get('obs_x',0):.1f}  y={col_data.get('obs_y',0):.2f}")
+            print(f"    NPC 速度:  {col_data.get('obs_speed',0):.1f} m/s  vx={col_data.get('obs_vx',0):.1f}  vy={col_data.get('obs_vy',0):.1f}")
+            print(f"    NPC 航向:  {math.degrees(col_data.get('obs_heading',0)):.0f}°")
+            print()
+
+        # 碰撞前 5s 时间线（从 samples 中提取 ego + NPC 轨迹）
+        if len(samples) >= 3:
+            # 找到碰撞时间点（最后一个样本的 t）
+            col_t = max(s.get("t_demo", s.get("t", 0)) for s in samples)
+            timeline_start = col_t - 5.0
+            print(f"    ┌─ 碰撞前 5s 时间线 (t={timeline_start:.1f}s → {col_t:.1f}s) ──")
+            print(f"    │  {'t(s)':>6}  {'ego_x':>7}  {'ego_y':>7}  {'speed':>6}  {'gap':>6}  {'lead':>6}  {'state':>10}")
+            col_id = int(col_data.get("obs_id", -1)) if col_data else -1
+            for s in samples:
+                ts = s.get("t_demo", s.get("t", 0))
+                if ts < timeline_start or ts > col_t:
+                    continue
+                sx = s.get("x", 0)
+                sy = s.get("y", 0)
+                ss = s.get("speed", 0)
+                # 碰撞对象的相对位置
+                npc_x = None
+                gap = float("inf")
+                for ent in s.get("metrics", {}).get("scene", {}).get("entities", []):
+                    if int(ent.get("id", -1)) == col_id:
+                        npc_x = float(ent.get("x", 0))
+                        gap = npc_x - sx
+                        break
+                bm = s.get("metrics", {}).get("behavior", {})
+                state = bm.get("state", "?")
+                lead = bm.get("lead_speed", 0)
+                gap_str = f"{gap:.1f}" if math.isfinite(gap) else "∞"
+                print(f"    │  {ts:>6.1f}  {sx:>7.1f}  {sy:>7.2f}  {ss:>6.1f}  {gap_str:>6}  {lead:>6.1f}  {state:>10}")
+            print(f"    └{'─'*65}")
 
     # ── Summary: who failed? ──
     print()
@@ -224,6 +343,15 @@ def trace(data: dict, at_s: float | None = None, verbose: bool = False) -> int:
             verdicts.append(f"🚨 出路沿时速度 {vehicle.get('speed',0):.1f} m/s → 恢复了但太慢")
         else:
             verdicts.append("⚠️ 出路沿但速度低 → 恢复中")
+
+    # 横向链路诊断
+    verdicts.extend(lateral_verdicts)
+    # 变道超时检测
+    if beh.get("state") in ("LEFT_CHANGE", "RIGHT_CHANGE"):
+        timer = beh.get("state_timer", 0)
+        dist = beh.get("dist_to_target_lane", -1)
+        verdicts.append(f"ℹ️ 变道中: state_timer={timer:.1f}s dist_to_target={dist:.2f}m "
+                        f"committed→target: {int(beh.get('committed_lane',-1))}→{int(beh.get('target_lane',-1))}")
 
     if not verdicts:
         verdicts.append("✅ 所有模块行为一致，事故因外部因素（场景/初始化）")

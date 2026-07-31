@@ -25,12 +25,12 @@ import math
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_evaluator():
     spec = importlib.util.spec_from_file_location(
-        "demo_evaluator", ROOT / "tools" / "demo_evaluator.py")
+        "demo_evaluator", ROOT / "ci" / "evaluators" / "demo_evaluator.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

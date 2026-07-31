@@ -23,15 +23,15 @@ python3 tools/quick_verify.py --duration 120
 
 # ── 2. 调参前后回归对比 ──
 # 先存 baseline
-python3 tests/test_param_regression.py --save-baseline
+python3 ci/evaluators/test_param_regression.py --save-baseline
 # 改参数后对比
-python3 tests/test_param_regression.py
+python3 ci/evaluators/test_param_regression.py
 
 # ── 3. 全量回归（45s demo） ──
-python3 tools/demo_evaluator.py
+python3 ci/evaluators/demo_evaluator.py
 
 # ── 4. 仅分析已有数据 ──
-python3 tools/demo_evaluator.py --no-run
+python3 ci/evaluators/demo_evaluator.py --no-run
 ```
 
 The evaluator:
