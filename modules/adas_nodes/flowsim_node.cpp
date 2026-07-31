@@ -1142,111 +1142,88 @@ protected:
 
         flowsim::Entity& ego = g.pool[0];
 
-        while (!should_stop()) {
-            /* 50ms tick：select_for 等待 control/cmd 或超时（20Hz 节拍）。
-             * stop() 触发 cancel_token 立即唤醒，无需外发消息。 */
-            auto res = co_await select_for(bus(), {TOPIC_CONTROL_CMD}, FLOWSIM_DT_US);
-            if (should_stop()) break;
+        /* 常驻订阅桥：订阅生命周期=节点，替代 WhenAnyBusAwaitableT
+         * （select_for）的反复订阅/退订——该适配器多次循环后消息与超时
+         * fire 双失效（2026-07-31 safety/flowsim 均复现永久挂起，
+         * control/cmd 断流 → 内置巡航追尾）。桥的回调只覆盖单槽
+         * （depth=1 drop_oldest 语义），协程每 tick try_take 取走。 */
+        BusQueueBridge cmd_bridge(bus(), {TOPIC_CONTROL_CMD});
 
-            /* 主动窥视兜底：select_for + transport 回调在 control/cmd 高频
-             * 发布下可能双双丢失唤醒（2026-07-31 追尾事故：15s 断流 → 内置
-             * 巡航 15.1 直冲前车）。每 tick 直接窥视总线队列里最新一条指令
-             * 并解析（只读不消费，广播回调不受影响；重复解析幂等），
-             * 保证 atomics/last_control_cmd_us 持续新鲜——use_internal_cruise
-             * 永不因唤醒丢失而错误接管。 */
+        while (!should_stop()) {
+            bool use_internal_cruise = true;
+
+            /* 每 tick：桥取最新控制指令（若有）并解析到 atomics。
+             * 固定 50ms 周期（sleep_us），不再依赖消息唤醒——即使
+             * 消息迟到/丢失，主循环仍以 20Hz 稳定推进。
+             * 解析成功即置 use_internal_cruise=false（直接路径，不依赖
+             * 陈旧检查——仿真时钟同 tick 内 now==last）。 */
             {
-                Message peek_msg;
-                if (message_bus_peek_latest(bus(), TOPIC_CONTROL_CMD, &peek_msg) == 0 &&
-                    peek_msg.data_size > 0) {
+                Message take_msg;
+                if (cmd_bridge.try_take(TOPIC_CONTROL_CMD, &take_msg) &&
+                    take_msg.data_size > 0) {
+                    use_internal_cruise = false;
+                    /* 二进制 ControlCmd 路径 */
                     ControlCmd bin;
-                    if (ControlCmd_deserialize(&bin, (const uint8_t*)peek_msg.data,
-                                               peek_msg.data_size) == 0) {
+                    if (ControlCmd_deserialize(&bin,
+                            (const uint8_t*)take_msg.data, take_msg.data_size) == 0) {
                         g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
                         g.ego_brake.store(bin.brake, std::memory_order_relaxed);
                         g.ego_steer.store(bin.steering, std::memory_order_relaxed);
+                        g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
+                        g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
                         g.last_control_cmd_us.store(clock_now_us(),
-                                                    std::memory_order_relaxed);
+                            std::memory_order_relaxed);
                     } else {
-                        cJSON* root = cJSON_Parse((const char*)peek_msg.data);
+                        /* JSON fallback */
+                        cJSON* root = cJSON_Parse((const char*)take_msg.data);
                         if (root) {
                             cJSON* j;
                             if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
                                 && cJSON_IsNumber(j))
                                 g.ego_throttle.store(j->valuedouble,
-                                                     std::memory_order_relaxed);
+                                    std::memory_order_relaxed);
                             if ((j = cJSON_GetObjectItemCaseSensitive(root, "brake"))
                                 && cJSON_IsNumber(j))
                                 g.ego_brake.store(j->valuedouble,
-                                                  std::memory_order_relaxed);
+                                    std::memory_order_relaxed);
                             if ((j = cJSON_GetObjectItemCaseSensitive(root, "steer"))
                                 && cJSON_IsNumber(j))
                                 g.ego_steer.store(j->valuedouble,
-                                                  std::memory_order_relaxed);
+                                    std::memory_order_relaxed);
                             cJSON_Delete(root);
                             g.last_control_cmd_us.store(clock_now_us(),
-                                                        std::memory_order_relaxed);
+                                std::memory_order_relaxed);
                         }
                     }
                 }
             }
 
-            /* 直接从 select_for 返回的消息中解析控制指令，不再依赖
-             * transport 层回调更新 atomics（两者订阅同一个 bus，但
-             * 回调触发时序不可靠，这里直接用消息体更鲁棒）。 */
-            bool use_internal_cruise = true;
-            if (res.ok() && res->data_size > 0) {
-                /* 二进制 ControlCmd 路径 */
-                ControlCmd bin;
-                if (ControlCmd_deserialize(&bin,
-                        (const uint8_t*)res->data, res->data_size) == 0) {
-                    g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
-                    g.ego_brake.store(bin.brake, std::memory_order_relaxed);
-                    g.ego_steer.store(bin.steering, std::memory_order_relaxed);
-                    g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
-                    g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
-                    g.last_control_cmd_us.store(clock_now_us(),
-                        std::memory_order_relaxed);
-                    use_internal_cruise = false;
-                } else {
-                    /* JSON fallback */
-                    cJSON* root = cJSON_Parse((const char*)res->data);
-                    if (root) {
-                        cJSON* j;
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
-                            && cJSON_IsNumber(j))
-                            g.ego_throttle.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "brake"))
-                            && cJSON_IsNumber(j))
-                            g.ego_brake.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "steer"))
-                            && cJSON_IsNumber(j))
-                            g.ego_steer.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        cJSON_Delete(root);
-                        g.last_control_cmd_us.store(clock_now_us(),
-                            std::memory_order_relaxed);
-                        use_internal_cruise = false;
-                    }
-                }
-            }
-
-            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航 */
+            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航。
+             * 注意 now >= last（非严格大于）：仿真时钟按 tick 推进，
+             * 本 tick 刚收到指令时 now == last，严格大于会把"刚收到"误判
+             * 为"从未收到"→ 内置巡航恒运行（2026-07-31 定位：STALE_DBG
+             * now=10000000 last=10000000 diff=0）。 */
             if (use_internal_cruise) {
                 uint64_t now = clock_now_us();
                 uint64_t last = g.last_control_cmd_us.load(
                     std::memory_order_relaxed);
-                if (last > 0 && now > last
+                if (last > 0 && now >= last
                     && now - last < CONTROL_STALE_TIMEOUT_US) {
-                    /* 消息在 select_for 订阅间隙到达，但 transport 回调
-                     * 已更新 atomics — 仍可信且可用。 */
                     use_internal_cruise = false;
                 }
             }
             if (use_internal_cruise && g.last_control_cmd_us.load(
                     std::memory_order_relaxed) == 0) {
                 ; /* 冷启动：尚无任何控制指令，用内置巡航起步 */
+            }
+            /* 判定诊断：打印 use_internal_cruise 的原始依据（每 200 cycle） */
+            if (g.cycle % 200 == 0) {
+                uint64_t last_dbg = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                double age_dbg = last_dbg > 0
+                    ? (double)(clock_now_us() - last_dbg) / 1000.0 : -1.0;
+                LOG_WARN("flowsim", "[CRUISE_DBG] use_internal_cruise=%d last_age=%.0fms "
+                         "(timeout=%dus)", use_internal_cruise ? 1 : 0, age_dbg,
+                         CONTROL_STALE_TIMEOUT_US);
             }
 
             /* ── Step 1: ego 动力学 ──
@@ -1475,16 +1452,22 @@ protected:
             flowsim::publish_scene_frame(g.transport, g.pool, g.scene_pub_cfg,
                                          sim_time_us, g.cycle);
 
+            /* 固定 20Hz 节拍：原 select_for 的消息/超时唤醒由 BusQueueBridge
+             * + 固定周期取代——主循环不依赖消息到达即可稳定推进。 */
+            co_await sleep_us(FLOWSIM_DT_US);
+
             g.cycle++;
             if (g.cycle % 100 == 0) {
                 uint64_t last_cmd = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 double cmd_age_ms = last_cmd > 0
                     ? (double)(clock_now_us() - last_cmd) / 1000.0 : -1.0;
-                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f thr=%.2f brk=%.2f st=%.3f npc=%d cruise=%d cmd_age=%.0fms",
+                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f thr=%.2f brk=%.2f st=%.3f npc=%d cruise=%d cmd_age=%.0fms bridge_cb=%llu",
                          g.cycle, ego.x, ego.y, ego.speed,
                          ego.throttle, ego.brake, ego.steer,
                          g.pool.active_count() - 1, use_internal_cruise ? 1 : 0,
-                         cmd_age_ms);
+                         cmd_age_ms,
+                         (unsigned long long)BusQueueBridge::g_cb_count.load(
+                             std::memory_order_relaxed));
             }
             /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 5 帧打一次，
              * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。 */

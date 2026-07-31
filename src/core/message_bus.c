@@ -330,6 +330,24 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
             snap[snap_count++] = (CbSnap){ s->callback, s->user_data, s };
         }
     }
+    /* 2026-07-31 断流诊断：control/cmd 每 200 条打印一次订阅者画像——
+     * 确认 dispatch 是否分发给 flowsim（回调指针对比）。 */
+    if (msg->type == MSG_TYPE_PUBLISH &&
+        strcmp(msg->topic, "control/cmd") == 0) {
+        static uint64_t s_cmd_diag = 0;
+        if (++s_cmd_diag % 200 == 1) {
+            char who[128] = "";
+            for (int i = 0; i < snap_count && i < 6; i++) {
+                char tmp[24];
+                snprintf(tmp, sizeof tmp, " %s%p", i > 0 ? "," : "",
+                         (void*)snap[i].cb);
+                strncat(who, tmp, sizeof who - strlen(who) - 1);
+            }
+            LOG_WARN("message_bus", "[CMD_DIAG] control/cmd dispatch #%llu: "
+                     "%d subscribers (cb:%s)", (unsigned long long)s_cmd_diag,
+                     snap_count, who);
+        }
+    }
     pthread_mutex_unlock(&bus->sub_mutex);
 
     for (int i = 0; i < snap_count; i++) {
@@ -719,6 +737,13 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
     /* No free slot found — allocate a new one */
     if (!e) {
         if (bus->sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
+            /* 2026-07-31 safety_control 协程挂起事故候选：订阅表 32 槽满时
+             * 静默失败（WhenAnyBusAwaitableT::await_suspend 不检查返回值），
+             * 节点收不到消息且无任何日志。此处打 WARN 暴露。 */
+            LOG_WARN("message_bus", "SUB_OVERFLOW: topic '%s' cb=%p ud=%p — subscriber table "
+                     "full (%d/%d), subscription silently dropped!",
+                     topic, (void*)callback, user_data,
+                     bus->sub_count, MSG_BUS_MAX_SUBSCRIBERS);
             pthread_mutex_unlock(&bus->sub_mutex);
             return ERR_OVERFLOW;
         }

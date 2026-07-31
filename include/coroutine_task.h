@@ -570,6 +570,91 @@ inline auto sleep_us(uint64_t us) { return delay_us(us); }  // 旧名兼容
 inline DelayAwaitable delay_ms(uint64_t ms) { return DelayAwaitable{ms * 1000ULL}; }
 
 /* ─────────────────────────────────────────────────────────
+ * 2f. BusQueueBridge — 常驻订阅桥（替代 when_any_bus_for/select_for）
+ * ─────────────────────────────────────────────────────────
+ * WhenAnyBusAwaitableT 的订阅随 awaitable 生命周期反复注册/退订，多次
+ * 循环后消息与超时 fire 双失效（2026-07-31 事故：safety_control 启动后
+ * 1-3s 永久挂起 → control/cmd 断流 → flowsim 内置巡航追尾；同一适配器
+ * 在 flowsim 上亦复现）。本桥把订阅提升到节点生命周期：
+ *   - 节点 init 注册一次（回调只覆盖槽，持互斥，dispatch 线程上轻量）
+ *   - 协程每 tick try_take 取走最新消息（depth=1 drop_oldest 语义，
+ *     与 control/cmd 的 QoS 配置一致）
+ *   - 彻底消除订阅生命周期竞态；resume 仍在 executor 线程（契约合规）
+ */
+class BusQueueBridge {
+public:
+    struct SlotMsg {
+        bool    has{false};
+        Message msg{};
+    };
+
+    /* 诊断：on_message 回调总调用次数（跨全部桥实例）。
+     * 断流事故排查用——确认 dispatch 是否调用了桥回调。 */
+    static inline std::atomic<uint64_t> g_cb_count{0};
+
+    BusQueueBridge(MessageBus* bus, std::initializer_list<const char*> topics)
+        : bus_(bus) {
+        for (const char* t : topics) {
+            slots_.emplace_back(std::string(t), SlotMsg{});
+            message_bus_subscribe(bus_, t, &BusQueueBridge::on_message, this);
+        }
+    }
+    ~BusQueueBridge() {
+        for (auto& [topic, slot] : slots_) {
+            (void)slot;
+            message_bus_unsubscribe_ex(bus_, topic.c_str(),
+                                       &BusQueueBridge::on_message, this);
+        }
+    }
+    BusQueueBridge(const BusQueueBridge&) = delete;
+    BusQueueBridge& operator=(const BusQueueBridge&) = delete;
+
+    /* 取走指定 topic 的最新消息（若有），返回 true 并清除槽 */
+    bool try_take(const char* topic, Message* out) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto& [t, slot] : slots_) {
+            if (t == topic && slot.has) {
+                *out = slot.msg;
+                slot.has = false;
+                return true;
+            }
+        }
+        return false;
+    }
+    /* 取走任意 topic 的最新消息（多 topic 等待语义） */
+    bool try_take_any(std::string* topic_out, Message* out) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto& [t, slot] : slots_) {
+            if (slot.has) {
+                *out = slot.msg;
+                *topic_out = t;
+                slot.has = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    static void on_message(const Message* msg, void* user_data) {
+        g_cb_count.fetch_add(1, std::memory_order_relaxed);
+        auto* self = static_cast<BusQueueBridge*>(user_data);
+        std::lock_guard<std::mutex> lk(self->mtx_);
+        for (auto& [t, slot] : self->slots_) {
+            if (t == msg->topic) {
+                slot.msg = *msg;
+                slot.has = true;  /* 覆盖旧值：depth=1 drop_oldest */
+                return;
+            }
+        }
+    }
+
+    MessageBus* bus_;
+    std::mutex  mtx_;
+    std::vector<std::pair<std::string, SlotMsg>> slots_;
+};
+
+/* ─────────────────────────────────────────────────────────
  * 2e. run_blocking
  * ───────────────────────────────────────────────────────── */
 inline void run_blocking(std::function<void()> fn) {

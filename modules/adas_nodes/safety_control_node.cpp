@@ -344,41 +344,44 @@ protected:
         uint32_t cycle = 0;
         uint64_t last_msg_us = clock_now_us();
 
-        LOG_INFO("safety_control", "safety gate started (synchronous resume)");
+        /* 常驻订阅桥：替代 when_any_bus_for——该适配器（WhenAnyBusAwaitableT
+         * 反复订阅/退订）多次循环后消息与超时 fire 双失效，safety 曾 3 次
+         * run 均在启动后 1-3s 永久挂起（control/cmd 断流 → 内置巡航追尾）。
+         * 桥订阅生命周期=节点，5ms 轮询取槽，不再依赖事件唤醒。 */
+        BusQueueBridge cmd_bridge(bus(), {"control/raw_cmd", "inference/raw_cmd"});
+
+        LOG_INFO("safety_control", "safety gate started (bus bridge polling)");
         while (!should_stop()) {
-            auto r = co_await when_any_bus_for(bus(), {"control/raw_cmd", "inference/raw_cmd"}, 50000);
-            if (r.status == AwaitStatus::Timeout) {
-                /* §11.2 数据超时检查 */
+            std::string topic;
+            Message msg;
+            if (cmd_bridge.try_take_any(&topic, &msg)) {
+                last_msg_us = clock_now_us();
+
+                ControlCmd cmd = parse_control_cmd(msg);
+                VehicleState state;
+                bool has_state = false;
+                pthread_mutex_lock(&g.state_mutex);
+                state = g.latest_state;
+                has_state = g.has_state;
+                pthread_mutex_unlock(&g.state_mutex);
+                bool intervened = apply_safety(cmd, state, has_state);
+                publish_cmd(cmd, intervened);
+
+                ++cycle;
+                if (intervened || cycle % 20 == 1) {
+                    LOG_INFO("safety_control", "#%u thr=%.2f brk=%.2f st=%.4f spd=%.1f tgt=%.1f %s",
+                             cycle, cmd.throttle, cmd.brake, cmd.steer, cmd.speed, cmd.target,
+                             intervened ? "INTERVENED" : "pass");
+                }
+            } else {
+                /* 无新消息：数据超时检查 + 固定 5ms 轮询 */
                 uint64_t now_us = clock_now_us();
                 if (now_us - last_msg_us > 1000000ULL) {
                     /* 数据超时 > 1s → L3 立即停 */
                     degrade_set_level(DEGRADE_L3, DEGRADE_REASON_HEARTBEAT);
                 }
-                continue;  // 50ms 周期醒来查 should_stop
             }
-            if (!r.ok()) continue;
-            Message msg = r.message;
-            if (std::strcmp(msg.topic, "control/raw_cmd") != 0 &&
-                std::strcmp(msg.topic, "inference/raw_cmd") != 0) continue;
-
-            last_msg_us = clock_now_us();
-
-            ControlCmd cmd = parse_control_cmd(msg);
-            VehicleState state;
-            bool has_state = false;
-            pthread_mutex_lock(&g.state_mutex);
-            state = g.latest_state;
-            has_state = g.has_state;
-            pthread_mutex_unlock(&g.state_mutex);
-            bool intervened = apply_safety(cmd, state, has_state);
-            publish_cmd(cmd, intervened);
-
-            ++cycle;
-            if (intervened || cycle % 20 == 1) {
-                LOG_INFO("safety_control", "#%u thr=%.2f brk=%.2f st=%.4f spd=%.1f tgt=%.1f %s",
-                         cycle, cmd.throttle, cmd.brake, cmd.steer, cmd.speed, cmd.target,
-                         intervened ? "INTERVENED" : "pass");
-            }
+            co_await sleep_us(5000);  /* 5ms 轮询节拍（消息驱动 → 固定周期） */
         }
         LOG_INFO("safety_control", "safety gate stopped");
     }
