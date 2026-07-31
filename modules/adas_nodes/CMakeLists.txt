@@ -395,8 +395,9 @@ if(ENABLE_FAST_LIO2)
     message(STATUS "slam_node: HAVE_FAST_LIO2 enabled (占位实现，需填充真实 ESKF 调用)")
 endif()
 
-add_executable(test_ekf_slam test_ekf_slam.c ekf_slam.c)
-target_link_libraries(test_ekf_slam ${NODE_LINK_LIBS} m)
+# test_ekf_slam / test_ekf_fusion 已移至主项目 CMakeLists.txt 注册（enable_testing
+# + add_test，纳入标准 ctest 门禁）。此子项目不 enable_testing()，此前的 add_executable
+# 只编译不进门禁，形同虚设，故删除。
 
 # stereo_camera_node: 双目摄像头驱动节点（OAK-D left+depth → StereoFrame → sensor/stereo）
 # 真车视觉感知入口，为 perception 提供 RGB+深度输入。默认 dry-run 占位（生成模拟左图
