@@ -165,7 +165,11 @@ struct BehaviorContext {
                                      * 防止远距离时目标速度被抬到超速 */
 
     /* ── 变道/跟车决策阈值（全部可热调） ── */
-    double blocked_range_mult{8.0};     /* blocked 检测距离 = max(min_m, desired_gap * mult) */
+    double blocked_range_mult{3.5};     /* blocked 检测距离 = max(min_m, desired_gap * mult)
+                                         * 8.0 时 15m/s 下 blocked_range≈220m——前车还在
+                                         * 119m 外就判定"堵车"并变道（实测启动 2s 即变道，
+                                         * 之后长期滞留外侧道错过红绿灯）。3.5 时 ≈96m，
+                                         * 配合 min_gap≈41m，变道发生在合理接近窗口。 */
     double blocked_range_min{30.0};     /* blocked 检测最小距离 (m) */
     double follow_hysteresis{1.3};      /* FOLLOW→CRUISE 退出滞环倍数（进入紧退出松） */
     double lane_change_timeout_s{8.0};  /* 变道超时 (s)，超时回退 CRUISE */
@@ -571,6 +575,18 @@ protected:
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
             bool worthwhile = blocked && (best_gap > min_gap);
 
+            /* ── D: 行为决策 debug 日志（每 10 帧，复盘跟车/追尾过程） ── */
+            if (g.seq % 10 == 0) {
+                LOG_INFO("behavior",
+                    "[BEH] seq=%u best_gap=%.1f lead_speed=%.1f follow_speed=%.1f "
+                    "desired_gap=%.1f blocked=%d worthwhile=%d committed_lane=%d "
+                    "target_lane=%d rel_speed=%.1f obs=%d state=%s",
+                    g.seq, best_gap, lead_speed, follow_speed,
+                    desired_gap, (int)blocked, (int)worthwhile, g.committed_lane_idx,
+                    g.target_lane_idx, rel_speed, g.obs_count,
+                    beh_state_str(statem_current(&g.sm)));
+            }
+
             /* ── 左右车道评估 ──
              * 关键约束：禁止变道到对向车道！
              *
@@ -704,6 +720,18 @@ protected:
                                  "blocked gap=%.1f/%.1f lead=%.1fm/s → FOLLOW id=%u v=%.1f (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
+                    } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0) {
+                        /* 超车完成归位：巡航且未被堵时，若内侧道（idx-1，same_side
+                         * 已保证非对向）前方 gap 充足，变回内侧道巡航。
+                         * 之前没有归位机制——超车后长期滞留外侧道，而红绿灯
+                         * 只管辖 y_lane=-1.75 的内侧道，导致红灯不停车。
+                         * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。 */
+                        ev = BEH_EV_OVERTAKE_LEFT;
+                        new_target_lane = current_idx - 1;
+                        new_target_speed = g.cfg_cruise_speed;
+                        snprintf(reason, sizeof(reason),
+                                 "merge back: outer lane%d -> lane%d (left_gap=%.1f) → LEFT_CHANGE",
+                                 current_idx, current_idx - 1, left_gap);
                     } else {
                         /* 正常巡航：恢复到巡航速度基准。
                          * 如果从 FOLLOW 退回 CRUISE，target_speed 可能被降低到
