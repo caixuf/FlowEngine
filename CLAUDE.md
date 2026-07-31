@@ -432,6 +432,9 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | behavior planner 一直不进 FOLLOW | `worthwhile = blocked && (best_gap < min_gap)` 是反逻辑——等 gap 小于 15.6m 才觉得"值得超车"。高速 8m/s 接近速度下只剩 ~2s，变道来不及。修复：改为 `best_gap > min_gap`，阈值提至 base=25m，mult=2.0 | `behavior_planner_node.cpp:516` |
 | 管道检查 topics 列表缺 perception/obstacles | `monitor_node.c` 的 `TopicStats tstats[16]` 只能装 16 个 topic，第 17 个静默丢弃。扩到 64 | `monitor_node.c:647` |
 | HTTP 返回 JSON 在 64KB 被截断 | `monitor_server.c` 的 `MONITOR_HTTP_BUF_SIZE 65536` 不够装含 samples 的完整拓扑 JSON。扩到 131072 (128KB) | `monitor_server.c:46` |
+| 转向灯左右颠倒（变道打右灯亮左边/打左灯亮右边） | 车辆模型所有 `*_L` 件放在 z=+0.82（THREE 右手系车头朝 +X 时 +z=几何右），`*_R` 在 z=-0.82；前端 `_setVehicleLights` 按名字点 FL/RL → 左灯请求点亮几何右灯。修复：gen_models.py 全部 L/R 件 z 互换 + 重生成 gltf + `--validate` 对称性门禁（生成物中心 z 符号必须与名字一致，防复发） | `tools/flowboard/gen_models.py`（L/R 部件 z 号） |
+| 变道减速甚至全刹、超车没意义 | behavior 变道中 P5 分支 `else if (blocked) target_speed = lead_speed`：变道转移首帧 blocked=1 且前车停着（等红灯）→ target=0，后续 blocked=0 帧无分支重置 → 锁死 → planning command_speed=0 → 全刹（实测 spd=10.7→0.0 brk=1.00）。修复：删除该分支，防追尾改由 planning TTC + safety_control 近场 TTC 兜底 | `behavior_planner_node.cpp` 变道分支 |
+| 超车/归位后立刻在红灯前刹停（无效变道） | 归位/超车决策不看目标车道前方红绿灯，切回内侧道（灯只管辖 y_lane=-1.75）即刹停。修复：behavior 订阅 road/traffic_lights，`lane_ahead_stop_light()` 检查目标车道前方 60m 内非绿灯则不归位/不变入 | `behavior_planner_node.cpp` `lane_ahead_stop_light` |
 
 ## 最新 tag
 
