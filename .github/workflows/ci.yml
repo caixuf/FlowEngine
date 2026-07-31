@@ -244,6 +244,9 @@ jobs:
       # ── 全量 JS 门禁（与 npm run vis:check:all 一致，作者本地同命令） ──
       - name: Run vis smoke tests (vis:check:all)
         run: npm run vis:check:all
+      # ── 3D 模型门禁：L/R 对称性 + 完整性（2026-07 转向灯左右标反在此拦截）──
+      - name: Validate 3D models (gen_models --validate)
+        run: python3 tools/flowboard/gen_models.py --validate
 
   # ── Nightly suite: debug + ubsan + coverage + stress + stability + benchmark ──
   # These jobs are excluded from per-PR runs to keep pull-request CI fast.
