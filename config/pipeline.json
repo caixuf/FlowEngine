@@ -227,7 +227,7 @@
           "topic": "control/raw_cmd",
           "type": "ControlRaw",
           "qos": {
-            "depth": 1,
+            "depth": 8,
             "policy": "drop_oldest",
             "reliability": "best_effort",
             "deadline_ms": 100
@@ -249,7 +249,7 @@
           "topic": "control/cmd",
           "type": "ControlCmd",
           "qos": {
-            "depth": 1,
+            "depth": 8,
             "policy": "drop_oldest",
             "reliability": "best_effort",
             "deadline_ms": 50

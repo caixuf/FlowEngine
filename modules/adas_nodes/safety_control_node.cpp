@@ -549,10 +549,11 @@ private:
         uint8_t buf[32];
         size_t len = sizeof(buf);
         ControlCmd_serialize(&bin, buf, &len);
-        /* 反压检测：下游订阅者处理不过来时跳过本帧发布 */
-        if (!message_bus_topic_is_full(bus(), "control/cmd")) {
-            transport_publish(transport_, "control/cmd", buf, (uint32_t)len);
-        }
+        /* 无条件发布：QoS depth+drop_oldest 兜底，确保最新指令必达。
+         * 原反压跳过（topic_is_full 时丢弃本帧）配合 control/cmd 的 depth=1
+         * QoS，会在 dispatch 瞬时抖动时持续跳过 → flowsim 断流 → FSAFE/MRM
+         * 永久停车（2026-07-31 复现：safety #61 后 flowsim cb 永停）。 */
+        transport_publish(transport_, "control/cmd", buf, (uint32_t)len);
 
         /* Text format for logging/backward compat */
         char out[320];

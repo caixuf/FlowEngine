@@ -474,11 +474,9 @@ protected:
                 uint8_t raw_buf[64];
                 size_t  raw_len = sizeof(raw_buf);
                 ControlRaw_serialize(&raw, raw_buf, &raw_len);
-                /* 反压检测：下游 safety_control 处理不过来时跳过本帧发布 */
-                if (!message_bus_topic_is_full(bus(), TOPIC_CONTROL_RAW_CMD)) {
-                    transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
-                                      raw_buf, (uint32_t)raw_len);
-                }
+                /* 无条件发布：与正常路径一致，depth+drop_oldest 兜底而非跳过 */
+                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
+                                  raw_buf, (uint32_t)raw_len);
 
                 char cmd_text[256];
                 snprintf(cmd_text, sizeof(cmd_text),
@@ -810,11 +808,12 @@ protected:
             uint8_t raw_buf[64];
             size_t  raw_len = sizeof(raw_buf);
             ControlRaw_serialize(&raw, raw_buf, &raw_len);
-            /* 反压检测：下游 safety_control 处理不过来时跳过本帧发布 */
-            if (!message_bus_topic_is_full(bus(), TOPIC_CONTROL_RAW_CMD)) {
-                transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
-                                  raw_buf, (uint32_t)raw_len);
-            }
+            /* 无条件发布：QoS depth+drop_oldest 兜底，确保最新指令必达。
+             * 原反压跳过（topic_is_full 时丢弃本帧）配合 control/raw_cmd 的
+             * depth=1 QoS，会在 dispatch 瞬时抖动时持续跳过 → safety 收不到
+             * raw_cmd → 1s 超时 L3 → MRM 永久停车（2026-07-31 断流事故）。 */
+            transport_publish(transport_, TOPIC_CONTROL_RAW_CMD,
+                              raw_buf, (uint32_t)raw_len);
 
             /* Also publish text format for backward compat (monitor/logging) */
             char cmd_text[256];
