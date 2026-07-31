@@ -42,6 +42,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "tiny_mlp.h"
+#include "onnx_backend.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -91,7 +92,9 @@ struct InferenceContext {
     ReflectiveStateMachine sm{};
 
     TinyMLP         model{};
-    pthread_mutex_t model_mutex{};  /* 保护 model 的并发读写 */
+    OnnxBackend     onnx{};          /* 可选 ONNX 后端（未加载时 loaded=0） */
+    bool            use_onnx{false}; /* true=前向走 ONNX，false=走 tiny-MLP */
+    pthread_mutex_t model_mutex{};  /* 保护 model/onnx 的并发读写 */
     char    model_path[256]{};
     int     control_mode{CTRL_MODE_SHADOW};  /* enum CtrlMode */
 
@@ -442,10 +445,16 @@ static void run_inference(double* out_speed, double* out_d,
     *out_conf = 0.0;
     *out_kv = 0.0; *out_kp = 0.0; *out_kd = 0.0; *out_yd = 0.0;
 
-    if (g.model.loaded) {
+    /* 选定当前活跃后端：ONNX（若启用且已加载）否则 tiny-MLP。
+     * 两后端共享同一套输入维度语义（in_dim ∈ {4,16,80,115}），故特征组装
+     * 逻辑完全复用，只有「加载判定 / 取维度 / 前向调用」三处按后端分派。 */
+    bool active_loaded = g.use_onnx ? (g.onnx.loaded != 0) : (g.model.loaded != 0);
+    int  active_in_dim = g.use_onnx ? g.onnx.in_dim : g.model.in_dim;
+
+    if (active_loaded) {
         float x[TINY_MLP_MAX_IN] = {0};
 
-        if (g.model.in_dim >= 115 && g.frame_count >= TEMPORAL_WINDOW) {
+        if (active_in_dim >= 115 && g.frame_count >= TEMPORAL_WINDOW) {
             /* v3: 时序滑窗 5×23 = 115 维 */
             int idx = 0;
             for (int w = 0; w < TEMPORAL_WINDOW; w++) {
@@ -454,7 +463,7 @@ static void run_inference(double* out_speed, double* out_d,
                     x[idx++] = g.frame_buf[fi][d];
                 }
             }
-        } else if (g.model.in_dim >= 80 && g.frame_count >= TEMPORAL_WINDOW) {
+        } else if (active_in_dim >= 80 && g.frame_count >= TEMPORAL_WINDOW) {
             /* v2: 时序滑窗 5×16 = 80 维 */
             int idx = 0;
             for (int w = 0; w < TEMPORAL_WINDOW; w++) {
@@ -463,7 +472,7 @@ static void run_inference(double* out_speed, double* out_d,
                     x[idx++] = g.frame_buf[fi][d];
                 }
             }
-        } else if (g.model.in_dim >= 16) {
+        } else if (active_in_dim >= 16) {
             /* v2: 单帧 16 维 */
             build_frame(x, V2_DIM);
         } else {
@@ -474,7 +483,8 @@ static void run_inference(double* out_speed, double* out_d,
             x[3] = (float)g.ego_yaw_rate;
         }
 
-        int n = tiny_mlp_forward(&g.model, x, y);
+        int n = g.use_onnx ? onnx_backend_forward(&g.onnx, x, y)
+                           : tiny_mlp_forward(&g.model, x, y);
         if (n >= 9) {
             /* direct_ctrl + 控制调参输出 */
             *out_throttle = y[0];
@@ -625,7 +635,8 @@ protected:
             double shadow_delta = g.has_planning
                 ? (pred_speed - g.planning_target_speed) : 0.0;
 
-            const char* model_name = g.model.loaded ? "tiny-mlp" : "heuristic";
+            const char* model_name = g.use_onnx ? (g.onnx.loaded ? "onnx" : "heuristic")
+                                                 : (g.model.loaded ? "tiny-mlp" : "heuristic");
 
             /* 所有模式下都发布 inference/trajectory 供监控 */
             {
@@ -916,6 +927,7 @@ static void inference_cleanup(void) {
         g.running = false;
     }
     g.task.reset();
+    onnx_backend_free(&g.onnx);
     pthread_mutex_destroy(&g.model_mutex);
     statem_cleanup(&g.sm);
     LOG_INFO("inference", "cleanup done (reloads=%d)", g.reload_count);
