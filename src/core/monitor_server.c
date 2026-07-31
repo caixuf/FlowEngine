@@ -264,12 +264,16 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     SSE_APPEND("\"bus\":{\"published\":%lu,\"delivered\":%lu,\"dropped\":%lu},",
         (unsigned long)pub, (unsigned long)del, (unsigned long)drop);
 
-    /* transport / scheduler / latency (static/placeholder) */
+    /* transport / scheduler / latency
+     * 注意：这是 pipeline 停止时的本地兜底路径，没有 Scheduler 句柄，
+     * 也不聚合分位延迟。只报真实可得的量（local_pub、avg 延迟），
+     * 其余不编造：scheduler.mode 报 "unknown"（而非写死 CHOREO——现在
+     * mode 可配置，写死即撒谎），分位延迟省略字段。 */
     SSE_APPEND("\"transport\":{\"local_pub\":%lu,\"remote_pub\":0},",
         (unsigned long)pub);
     uint64_t avg_latency = lat_count > 0 ? lat_total / lat_count : 0;
-    SSE_APPEND("\"scheduler\":{\"tasks\":0,\"mode\":\"CHOREO\"},"
-        "\"latency\":{\"avg_us\":%lu,\"p50_us\":0,\"p99_us\":0},",
+    SSE_APPEND("\"scheduler\":{\"tasks\":0,\"mode\":\"unknown\"},"
+        "\"latency\":{\"avg_us\":%lu},",
         (unsigned long)avg_latency);
 
     /* topics (local + remote) */
@@ -334,15 +338,15 @@ static void build_sse_json(MonitorServer* ms, char* buf, size_t sz) {
     }
     pthread_mutex_unlock(&ms->remote_mutex);
 
-    /* Close topics, add placeholder metrics, close metrics + top-level */
+    /* Close topics + close metrics + top-level.
+     * pipeline 停止时无真实场景数据 —— 发空场景（前端显示"无数据"），
+     * 而不是编造一条 2000m 高架路网（会渲染成一条根本不存在的路）。 */
     SSE_APPEND("],"
         "\"sysmon\":{},"
         "\"vehicle\":{},"
         "\"scene\":{\"entities\":[],"
         "\"ego\":{\"x\":0,\"y\":0,\"heading\":0,\"speed\":0},"
-        "\"road_network\":{\"edges\":[{\"id\":0,\"type\":\"viaduct_highway\","
-        "\"lanes\":4,\"lane_width\":3.5,\"length\":2000,"
-        "\"nodes\":[[0,7,0],[2000,7,0]]}]}}}");
+        "\"road_network\":{\"edges\":[]}}}");
 #undef SSE_APPEND
 }
 
