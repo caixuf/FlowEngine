@@ -330,6 +330,24 @@ static void dispatch_message(MessageBus* bus, const Message* msg) {
             snap[snap_count++] = (CbSnap){ s->callback, s->user_data, s };
         }
     }
+    /* 2026-07-31 断流诊断：control/cmd 每 200 条打印一次订阅者画像——
+     * 确认 dispatch 是否分发给 flowsim（回调指针对比）。 */
+    if (msg->type == MSG_TYPE_PUBLISH &&
+        strcmp(msg->topic, "control/cmd") == 0) {
+        static uint64_t s_cmd_diag = 0;
+        if (++s_cmd_diag % 200 == 1) {
+            char who[128] = "";
+            for (int i = 0; i < snap_count && i < 6; i++) {
+                char tmp[24];
+                snprintf(tmp, sizeof tmp, " %s%p", i > 0 ? "," : "",
+                         (void*)snap[i].cb);
+                strncat(who, tmp, sizeof who - strlen(who) - 1);
+            }
+            LOG_WARN("message_bus", "[CMD_DIAG] control/cmd dispatch #%llu: "
+                     "%d subscribers (cb:%s)", (unsigned long long)s_cmd_diag,
+                     snap_count, who);
+        }
+    }
     pthread_mutex_unlock(&bus->sub_mutex);
 
     for (int i = 0; i < snap_count; i++) {
@@ -719,6 +737,13 @@ int message_bus_subscribe(MessageBus* bus, const char* topic,
     /* No free slot found — allocate a new one */
     if (!e) {
         if (bus->sub_count >= MSG_BUS_MAX_SUBSCRIBERS) {
+            /* 2026-07-31 safety_control 协程挂起事故候选：订阅表 32 槽满时
+             * 静默失败（WhenAnyBusAwaitableT::await_suspend 不检查返回值），
+             * 节点收不到消息且无任何日志。此处打 WARN 暴露。 */
+            LOG_WARN("message_bus", "SUB_OVERFLOW: topic '%s' cb=%p ud=%p — subscriber table "
+                     "full (%d/%d), subscription silently dropped!",
+                     topic, (void*)callback, user_data,
+                     bus->sub_count, MSG_BUS_MAX_SUBSCRIBERS);
             pthread_mutex_unlock(&bus->sub_mutex);
             return ERR_OVERFLOW;
         }
@@ -1075,6 +1100,32 @@ int message_bus_topic_is_full(MessageBus* bus, const char* topic) {
     }
     pthread_mutex_unlock(&bus->topic_mutex);
     return -1;  /* topic not found */
+}
+
+/* ── 主动读取：按 topic 窥视最新一条消息（非阻塞，不消费） ──────
+ * 2026-07-31：flowsim 的 select_for + transport 回调在 control/cmd 高频
+ * （发布频率 >> 消费频率）下曾双双断流 15s，内置巡航接管导致追尾。
+ * 本接口给高频关键指令一个不依赖被动唤醒的主动通道：
+ *   - 扫描队列复制最后一条匹配 topic 的消息（depth=1 drop_oldest 下即最新）
+ *   - 只读不消费：广播订阅回调仍由 dispatch 线程正常分发，不破坏语义
+ *   - 消费者重复解析同一条消息是幂等的（指令值不变），用于刷新新鲜度
+ * @return 0=取到, ERR_NOT_FOUND=队列中无该 topic 消息
+ */
+int message_bus_peek_latest(MessageBus* bus, const char* topic, Message* out) {
+    if (!bus || !topic || !out) return ERR_INVALID_PARAM;
+    pthread_mutex_lock(&bus->queue.mutex);
+    int found_idx = -1;
+    for (uint32_t i = 0; i < bus->queue.count; i++) {
+        uint32_t idx = (bus->queue.tail + i) % MSG_BUS_QUEUE_SIZE;
+        if (strcmp(bus->queue.msgs[idx].topic, topic) == 0) found_idx = (int)i;
+    }
+    if (found_idx < 0) {
+        pthread_mutex_unlock(&bus->queue.mutex);
+        return ERR_NOT_FOUND;
+    }
+    *out = bus->queue.msgs[(bus->queue.tail + (uint32_t)found_idx) % MSG_BUS_QUEUE_SIZE];
+    pthread_mutex_unlock(&bus->queue.mutex);
+    return 0;
 }
 
 int message_bus_list_topics(MessageBus* bus, char topics[][64], int max) {

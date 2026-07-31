@@ -134,6 +134,7 @@ struct ControlContext {
     /* 死锁恢复状态 */
     double stuck_timer{0};          /* 近乎静止的累计时间 (秒) */
     double speed_zero_timer{0};     /* 全域速度死锁: 无论 y 位置, 速度持续为0的累计时间 (秒) */
+    double mrm_stall_us{0};         /* MRM 停稳累计时长 (us)，停稳 3s 自动恢复降级 */
 
     uint32_t cycle{0};
 
@@ -149,7 +150,7 @@ struct ControlContext {
      * 回调将其存为 ref_path。Stanley 横向控制用最近点的 (y, h, kappa) 替代
      * curve_* 单段直线参考，让 ego 能跟随多 edge + fork 路网（如匝道分叉）。
      * 不再独立订阅 road/geometry 或 road/ref_path。 */
-    struct RefPt { double x, y, h, kappa, rs; };
+    struct RefPt { double x, y, h, kappa, rs, l; };  /* l = Frenet 横向偏移 */
     std::vector<RefPt> ref_path;
     uint64_t last_ref_path_us{0};
     pthread_mutex_t ref_path_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -186,7 +187,7 @@ static double steer_limit_for_speed(double speed_mps, double max_lateral_accel_m
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     /* cJSON parsing (fusion/localization now publishes cJSON) */
     {
@@ -218,7 +219,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 /* ── vehicle/state 订阅 — 用 flowsim 真值覆盖 ego 位置 ── */
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -238,7 +239,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 static void on_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || msg->data_size == 0) return;
+    if (!msg || msg->data_size == 0) return;
 
     Trajectory traj;
     memset(&traj, 0, sizeof(traj));
@@ -283,8 +284,8 @@ static void on_trajectory(const Message* msg, void* user_data) {
      * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
      * 增大，避免一次性跳到 3.5m 误差导致横向过冲冲出路沿。
      * 轨迹点间距 100ms，0.5s = 第 5 个点。 */
-    int d_idx = 0;
-    for (int i = 0; i < n_pts; i++) {
+    uint32_t d_idx = 0;
+    for (uint32_t i = 0; i < n_pts; i++) {
         if ((double)traj.points[i].t_rel_us >= 500000.0) {  /* 0.5s */
             d_idx = i;
             break;
@@ -308,10 +309,12 @@ static void on_trajectory(const Message* msg, void* user_data) {
         rp.h = (double)traj.points[i].heading;
         rp.kappa = (double)traj.points[i].kappa;
         rp.rs = (double)traj.points[i].s;
+        rp.l = (double)traj.points[i].l;
         g.ref_path.push_back(rp);
     }
     pthread_mutex_unlock(&g.ref_path_mtx);
 
+    g.last_ref_path_us = clock_now_us();  /* query_ref_at 陈旧检查依赖此时间戳 */
     g.has_planning = 1;
     g.last_planning_us = clock_now_us();
 }
@@ -355,7 +358,14 @@ static bool query_ref_at(double ego_x, double ego_y,
         pthread_mutex_unlock(&g.ref_path_mtx);
         return false;
     }
-    out_y     = best->y;
+    /* 返回道路中心 y（= 轨迹点 y - 横向偏移 d 沿法线投影）。
+     * 轨迹点 y = road_center_y + d * cos(theta)，
+     * 所以 road_center_y = y - d * cos(theta) = y - l * cos(h)。
+     *
+     * 旧实现直接返回 best->y（含偏移），导致：
+     *   cruise_lane_y = (road_center_y + d) + lane_d = 双重计算偏移
+     *   → lat_error 随 ego 偏移正反馈发散 → 车飘到 y=-135m */
+    out_y     = best->y - best->l * cos(best->h);
     out_h     = best->h;
     out_kappa = best->kappa;
     pthread_mutex_unlock(&g.ref_path_mtx);
@@ -421,9 +431,11 @@ protected:
                         fb_road_heading = g.ego_heading;
                     }
                 }
-                /* 无 planning 时保持当前横向位置，不自推目标车道 */
+                /* 无 planning 时保持当前车道（road_center + lane_d），非自推目标车道。
+                 * fb_road_c 是道路中心（0），lane_d 是上次轨迹的横向偏移（如 -5.25）。
+                 * 旧实现用 fb_road_c 做目标 → 车被拉向道路中心而非当前车道。 */
                 double fb_target_y = (g.has_fusion && g.ref_path.size() > 0)
-                                     ? fb_road_c
+                                     ? fb_road_c + g.lane_d
                                      : g.ego_y;
                 if (g.has_fusion && g.ref_path.size() > 0) {
                     g.road_center_y = fb_road_c;
@@ -526,55 +538,56 @@ protected:
                 g.speed_zero_timer = 0.0;
             }
 
-            /* ── 纵向控制：PID 跟踪 planning 下发的目标速度 ──
-             * P5 修复：原 `boost_target = fmax(g.target_speed, g.cfg_cruise_speed)`
-             * 把 planning 在 FOLLOW 状态下下发的 target_speed=lead_speed（如 7.0）
-             * 抬高到 cfg_cruise_speed（12.0），导致 ego 永远不肯减速到低于巡航速度
-             * → 与慢速前车追尾。原意是"无 planning 输入时用巡航速度兜底"，但条件
-             * 写错：has_target_speed=1 时也应尊重 planning 的 FOLLOW 降速指令。
+            /* ── 纵向控制：Apollo 原则 —— control 是纯轨迹跟随器 ──
+             * 速度唯一来源是 planning 轨迹末点 v（g.target_speed）。
+             * control 不做速度决策：没有 cfg_cruise_speed 覆盖、没有 boost、没有 overspeed 降档。
              *
-             * 三分支：
-             *   - planning 显式 target_speed≈0 → 红灯/stop 停车，acc_target=0
-             *   - planning 下发 target_speed>0 → 巡航或 FOLLOW，用 planning 值
-             *   - planning 未启动（has_target_speed=0）→ cfg_cruise_speed 兜底 */
-            double boost_target;
-            if (g.has_target_speed && g.target_speed < 0.1) {
-                boost_target = 0.0;  /* 红灯停车 */
-            } else if (g.has_target_speed) {
-                boost_target = g.target_speed;  /* planning 下发速度（含 FOLLOW 跟车降速） */
+             * 无轨迹时（has_planning=0）acc_target=0 → 匀减速停车。
+             * 这里的 has_planning 检查在上方 DATA_TIMEOUT 分支已 continue，
+             * 所以走到这里时 has_planning 必为 1。但保险起见仍做检查。 */
+            double acc_target;
+            if (g.has_planning && g.has_target_speed) {
+                acc_target = g.target_speed;  /* 纯轨迹跟随 */
             } else {
-                boost_target = g.cfg_cruise_speed;  /* 无 planning 输入时用巡航速度兜底 */
+                acc_target = 0.0;  /* 无轨迹 → 停车 */
             }
-            double acc_target = boost_target;
-            /* 局部拷贝 target_speed 防回调线程覆盖（race condition） */
-            double tl_ts = g.target_speed;
-            int    tl_ht = g.has_target_speed;
-            /* 红灯停车时清 PID 积分：trajectory 显式 target_speed≈0 时清除积分
-             * 抗 windup，避免巡航阶段累积的正向积分导致减速响应延迟数秒。 */
-            if (tl_ht && tl_ts < 0.01 && g.integral > 0) {
-                g.integral = 0;
-            }
-
-            /* 上限夹紧：acc_target 不超过 cfg_cruise_speed（防止 planning 误下发超速值） */
-            if (acc_target > g.cfg_cruise_speed) acc_target = g.cfg_cruise_speed;
-            /* 超速降档：当前速度超过巡航+1时，把目标降到巡航-1（但仍允许 FOLLOW
-             * 更低的目标速度——只降不升，避免覆盖 FOLLOW 的 7.0 m/s）。
-             * P5 修复：原 `acc_target = g.cfg_cruise_speed - 1.0` 无条件赋值，
-             * 会把 FOLLOW 的 7.0 抬到 11.0，导致跟车降速失效。 */
-            if (g.current_speed > g.cfg_cruise_speed + 1.0 &&
-                acc_target > g.cfg_cruise_speed - 1.0) {
-                acc_target = g.cfg_cruise_speed - 1.0;
-            }
-
-            /* ── 红绿灯停车强制 override：planning 显式 target_speed≈0 时，置 acc_target=0 ── */
-            if (tl_ht && tl_ts < 0.1) {
-                acc_target = 0.0;
+            /* 停车指令时清 PID 积分，抗 windup */
+            if (acc_target < 0.01 && g.integral > 0) {
                 g.integral = 0;
             }
 
             /* 横向目标：直接使用 trajectory 提供的 lane_d（planning 负责车道决定）。
              * 无变道场景下, cruise_lane_y = road_center_y + lane_d 即为目标车道中心。 */
             double effective_target_y = cruise_lane_y;
+
+            /* §11.2 MRM 前置：降级停车必须在 PID 之前生效。
+             * 原实现在 PID 之后（line 688）覆盖 acc_target——throttle/brake
+             * 已按旧目标算出（err=+4 → thr=0.57 油门），停车指令形同虚设
+             * （2026-07-31 幽灵停车实证：MRM 下 thr=0.57/1.00 全油门）。
+             * 停稳 3s 自动恢复：degrade 只升不降（degrade_clear 无调用者），
+             * MRM 触发后永不恢复 → 永久停车（实测 5s+ 幽灵停车）。 */
+            {
+                DegradeState* ds = degrade_global_state();
+                if (ds->degrade_level >= DEGRADE_L2) {
+                    g.target_speed = 0.0;
+                    acc_target = 0.0;
+                    g.integral = 0;
+                    if (g.current_speed < 0.5) {
+                        g.mrm_stall_us += CONTROL_DT_S * 1e6;
+                        if (g.mrm_stall_us > 3000000.0) {
+                            degrade_clear();
+                            g.mrm_stall_us = 0;
+                            LOG_WARN("control",
+                                     "MRM auto-recover: stalled 3s at spd=%.1f — degrade cleared",
+                                     g.current_speed);
+                        }
+                    } else {
+                        g.mrm_stall_us = 0;
+                    }
+                } else {
+                    g.mrm_stall_us = 0;
+                }
+            }
 
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
@@ -699,14 +712,10 @@ protected:
                 }
             }
 
-            /* §11.2 降级阶梯 */
+            /* §11.2 降级阶梯（MRM 目标已在前置块处理，此处仅标记模式） */
             {
                 DegradeState* ds = degrade_global_state();
                 if (ds->degrade_level >= DEGRADE_L2) {
-                    /* MRM: 车道内减速停车 */
-                    g.target_speed = 0.0;
-                    acc_target = 0.0;
-                    g.integral = 0;
                     mode = "MRM";
                 }
                 /* L1: 禁变道——planning 的 overtake_state 会被忽略，control 只巡航 */
@@ -726,31 +735,29 @@ protected:
 
             /* ── Safety overrides ── */
 
-            /* 接近路沿增强拉回：|y|>4.5 时 steer_limit=0.165（低于评估器
-             * 0.17 饱和阈值），但拉回力矩 ≈8.8 m/s² 足矣对抗 v_lat=3 的
-             * 残余过冲，避免 ROAD_GUARD 触发后全力刹车。 */
-            double y_from_center = fabs(g.ego_y - road_c);
-            if (y_from_center > 4.5) {
+            /* 目标车道中心 = 道路中心 + 横向偏移（lane_d 来自 trajectory 前视点）。
+             * road_c 现在是真正的道路中心 y（已减去横向偏移），不再含 d 分量。 */
+            double target_lane_center = road_c + g.lane_d;
+
+            /* 接近路沿增强拉回：偏离目标车道中心 >4.5 时限制 steer 幅度，
+             * 避免大 steer 冲出路沿。旧实现用 |ego_y - road_c|，对 4 车道
+             * 外车道（y=±5.25）永远 >4.5 → steer 被永久限幅。 */
+            double y_from_target = fabs(g.ego_y - target_lane_center);
+            if (y_from_target > 4.5) {
                 const double near_edge_limit = 0.165;
                 if (steer >  near_edge_limit) steer =  near_edge_limit;
                 if (steer < -near_edge_limit) steer = -near_edge_limit;
                 g.prev_steer = steer;
             }
 
-            /* 超速限幅 */
-            if (g.current_speed > g.cfg_cruise_speed + 1.0) {
-                throttle = 0.0;
-                double overspeed_brake = (g.current_speed - g.cfg_cruise_speed - 1.0) / 5.0;
-                if (overspeed_brake > brake) brake = overspeed_brake;
-                if (brake > 1.0) brake = 1.0;
-                g.integral = 0.0;
-                mode = "SPEED_LIMIT";
-            }
+            /* 超速保护已移除：planning 负责不超速（command_speed ≤ cfg_max_speed），
+             * safety_control 层有 TTC 限幅。control 是纯轨迹跟随器，不做速度决策。
+             * 原超速限幅用 cfg_cruise_speed 做阈值，但 control 不应有自己的巡航速度。 */
 
             /* 全域速度死锁恢复 */
             if (g.speed_zero_timer > SPEED_ZERO_RECOVER_S &&
-                fabs(g.ego_y - road_c) <= ROAD_GUARD_THRESHOLD_M &&
-                g.target_speed > 1.0) {
+                y_from_target <= ROAD_GUARD_THRESHOLD_M &&
+                g.has_planning && g.target_speed > 1.0) {
                 throttle = 0.15;
                 brake    = 0.0;
                 mode     = "SPEED_ZERO_RECOVERY";
@@ -759,8 +766,10 @@ protected:
                          g.ego_y, g.ego_x, g.ego_y, g.target_speed);
             }
 
-            /* ROAD_GUARD：车辆偏离道路中心过远时强制回正 */
-            if (fabs(g.ego_y - road_c) > ROAD_GUARD_THRESHOLD_M) {
+            /* ROAD_GUARD：车辆偏离目标车道中心过远时强制回正。
+             * road_c 现在是道路中心 y（不含横向偏移），目标车道中心 = road_c + lane_d。
+             * 旧实现检查 |ego_y - road_c|，对 4 车道外车道（y=±5.25）永远触发。 */
+            if (y_from_target > ROAD_GUARD_THRESHOLD_M) {
                 double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
                 steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
                 if (g.current_speed < 2.5) {
@@ -830,6 +839,37 @@ protected:
                                   (const uint8_t*)cte_s, (uint32_t)strlen(cte_s) + 1);
                 free(cte_s);
                 cJSON_Delete(cte_root);
+            }
+
+            /* 发布 control/debug（全链路横向调试，每10帧一次≈2Hz） */
+            if (g.cycle % 10 == 0) {
+                cJSON* dbg = cJSON_CreateObject();
+                cJSON_AddNumberToObject(dbg, "seq", g.cycle);
+                cJSON_AddNumberToObject(dbg, "ego_x", g.ego_x);
+                cJSON_AddNumberToObject(dbg, "ego_y", g.ego_y);
+                cJSON_AddNumberToObject(dbg, "ego_heading", g.ego_heading);
+                cJSON_AddNumberToObject(dbg, "speed", g.current_speed);
+                cJSON_AddNumberToObject(dbg, "target_speed", acc_target);
+                cJSON_AddNumberToObject(dbg, "lane_d", g.lane_d);
+                cJSON_AddNumberToObject(dbg, "road_center_y", g.road_center_y);
+                cJSON_AddNumberToObject(dbg, "target_y", effective_target_y);
+                cJSON_AddNumberToObject(dbg, "lat_error", lat_error);
+                cJSON_AddNumberToObject(dbg, "steer", steer);
+                cJSON_AddNumberToObject(dbg, "throttle", throttle);
+                cJSON_AddNumberToObject(dbg, "brake", brake);
+                cJSON_AddStringToObject(dbg, "mode", mode);
+                cJSON_AddBoolToObject(dbg, "hazard", hazard);
+                cJSON_AddBoolToObject(dbg, "mpc_used", mpc_used);
+                cJSON_AddNumberToObject(dbg, "ref_road_heading", ref_road_heading);
+                cJSON_AddNumberToObject(dbg, "y_from_target", y_from_target);
+                cJSON_AddNumberToObject(dbg, "has_planning", g.has_planning ? 1.0 : 0.0);
+                double lookahead_dist = fmax(5.0, g.current_speed * g.lat_lookahead_gain);
+                cJSON_AddNumberToObject(dbg, "lookahead_dist", lookahead_dist);
+                char* dbg_s = cJSON_PrintUnformatted(dbg);
+                transport_publish(transport_, TOPIC_CONTROL_DEBUG,
+                                  (const uint8_t*)dbg_s, (uint32_t)strlen(dbg_s) + 1);
+                free(dbg_s);
+                cJSON_Delete(dbg);
             }
 
             /* LDW 车道偏离预警：|cte| 超阈值且速度足够高时告警（带冷却期防刷屏） */
@@ -1051,6 +1091,9 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
     transport_advertise(transport, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID);
+    transport_advertise(transport, TOPIC_CONTROL_DEBUG, 0u);  /* JSON text */
+    transport_advertise(transport, TOPIC_CONTROL_CTE, 0u);    /* JSON text */
+    transport_advertise(transport, TOPIC_CONTROL_LDW, 0u);    /* JSON text */
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
@@ -1058,6 +1101,7 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);
+    discovery_advertise(discovery, TOPIC_CONTROL_DEBUG, 0u, CAP_PUBLISHER, 2.0);
 
     g.task = std::make_unique<ControlTask>(bus, transport);
 
@@ -1118,6 +1162,7 @@ NodePlugin s_plugin = {
     control_stop,
     control_cleanup,
     control_health,
+    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
 };
 
 } // namespace

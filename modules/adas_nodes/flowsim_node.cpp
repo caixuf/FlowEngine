@@ -223,14 +223,19 @@ static std::string convert_scenario_to_xodr(const std::string& scenario_path) {
         struct stat st;
         if (stat(tool.c_str(), &st) != 0) continue;
 
-        /* 构造命令：python3 <tool> <scenario> -o <xodr> */
+        /* 构造命令：python3 <tool> <scenario> -o <xodr>
+         * stderr 落到 /tmp/flowsim_xodr_err.log，失败时读回并打印根因
+         * （直接 >/dev/null 会把 python traceback 吞掉，无从排查）。 */
+        const char* err_log = "/tmp/flowsim_xodr_err.log";
         std::string cmd = "python3 \"";
         cmd += tool;
         cmd += "\" \"";
         cmd += scenario_path;
         cmd += "\" -o \"";
         cmd += xodr_path;
-        cmd += "\" >/dev/null 2>&1";
+        cmd += "\" >/dev/null 2>\"";
+        cmd += err_log;
+        cmd += "\"";
         int rc = system(cmd.c_str());
         if (rc == 0 && stat(xodr_path.c_str(), &st) == 0 && st.st_size > 0) {
             LOG_INFO("flowsim", "json_to_xodr: %s → %s (via %s)",
@@ -238,6 +243,16 @@ static std::string convert_scenario_to_xodr(const std::string& scenario_path) {
             return xodr_path;
         }
         LOG_WARN("flowsim", "json_to_xodr failed (rc=%d) via %s", rc, tool.c_str());
+        if (rc != 0) {
+            FILE* ef = std::fopen(err_log, "r");
+            if (ef) {
+                char line[256];
+                while (std::fgets(line, sizeof line, ef)) {
+                    LOG_WARN("flowsim", "json_to_xodr: %s", line); /* 含换行，仅作诊断 */
+                }
+                std::fclose(ef);
+            }
+        }
     }
 
     LOG_WARN("flowsim", "json_to_xodr: no working tool found, esmini road network disabled");
@@ -1051,7 +1066,16 @@ static void publish_sim_collision(const flowsim::Entity& a, const flowsim::Entit
     cJSON* col = cJSON_CreateObject();
     cJSON_AddNumberToObject(col, "ego_x", a.x);
     cJSON_AddNumberToObject(col, "ego_y", a.y);
+    cJSON_AddNumberToObject(col, "ego_heading", a.heading);
+    cJSON_AddNumberToObject(col, "ego_speed", a.speed);
     cJSON_AddNumberToObject(col, "obs_id", b.id);
+    /* NPC 现场数据：位置/速度/航向，复盘时无需推演 */
+    cJSON_AddNumberToObject(col, "obs_x", b.x);
+    cJSON_AddNumberToObject(col, "obs_y", b.y);
+    cJSON_AddNumberToObject(col, "obs_heading", b.heading);
+    cJSON_AddNumberToObject(col, "obs_vx", b.vx);
+    cJSON_AddNumberToObject(col, "obs_vy", b.vy);
+    cJSON_AddNumberToObject(col, "obs_speed", b.speed);
     cJSON_AddNumberToObject(col, "overlap_x",
         (a.length + b.length) * 0.5 - fabs(a.x - b.x));
     cJSON_AddNumberToObject(col, "overlap_y",
@@ -1118,63 +1142,73 @@ protected:
 
         flowsim::Entity& ego = g.pool[0];
 
-        while (!should_stop()) {
-            /* 50ms tick：select_for 等待 control/cmd 或超时（20Hz 节拍）。
-             * stop() 触发 cancel_token 立即唤醒，无需外发消息。 */
-            auto res = co_await select_for(bus(), {TOPIC_CONTROL_CMD}, FLOWSIM_DT_US);
-            if (should_stop()) break;
+        /* 常驻订阅桥：订阅生命周期=节点，替代 WhenAnyBusAwaitableT
+         * （select_for）的反复订阅/退订——该适配器多次循环后消息与超时
+         * fire 双失效（2026-07-31 safety/flowsim 均复现永久挂起，
+         * control/cmd 断流 → 内置巡航追尾）。桥的回调只覆盖单槽
+         * （depth=1 drop_oldest 语义），协程每 tick try_take 取走。 */
+        BusQueueBridge cmd_bridge(bus(), {TOPIC_CONTROL_CMD});
 
-            /* 直接从 select_for 返回的消息中解析控制指令，不再依赖
-             * transport 层回调更新 atomics（两者订阅同一个 bus，但
-             * 回调触发时序不可靠，这里直接用消息体更鲁棒）。 */
+        while (!should_stop()) {
             bool use_internal_cruise = true;
-            if (res.ok() && res->data_size > 0) {
-                /* 二进制 ControlCmd 路径 */
-                ControlCmd bin;
-                if (ControlCmd_deserialize(&bin,
-                        (const uint8_t*)res->data, res->data_size) == 0) {
-                    g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
-                    g.ego_brake.store(bin.brake, std::memory_order_relaxed);
-                    g.ego_steer.store(bin.steering, std::memory_order_relaxed);
-                    g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
-                    g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
-                    g.last_control_cmd_us.store(clock_now_us(),
-                        std::memory_order_relaxed);
+
+            /* 每 tick：桥取最新控制指令（若有）并解析到 atomics。
+             * 固定 50ms 周期（sleep_us），不再依赖消息唤醒——即使
+             * 消息迟到/丢失，主循环仍以 20Hz 稳定推进。
+             * 解析成功即置 use_internal_cruise=false（直接路径，不依赖
+             * 陈旧检查——仿真时钟同 tick 内 now==last）。 */
+            {
+                Message take_msg;
+                if (cmd_bridge.try_take(TOPIC_CONTROL_CMD, &take_msg) &&
+                    take_msg.data_size > 0) {
                     use_internal_cruise = false;
-                } else {
-                    /* JSON fallback */
-                    cJSON* root = cJSON_Parse((const char*)res->data);
-                    if (root) {
-                        cJSON* j;
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
-                            && cJSON_IsNumber(j))
-                            g.ego_throttle.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "brake"))
-                            && cJSON_IsNumber(j))
-                            g.ego_brake.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        if ((j = cJSON_GetObjectItemCaseSensitive(root, "steer"))
-                            && cJSON_IsNumber(j))
-                            g.ego_steer.store(j->valuedouble,
-                                std::memory_order_relaxed);
-                        cJSON_Delete(root);
+                    /* 二进制 ControlCmd 路径 */
+                    ControlCmd bin;
+                    if (ControlCmd_deserialize(&bin,
+                            (const uint8_t*)take_msg.data, take_msg.data_size) == 0) {
+                        g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
+                        g.ego_brake.store(bin.brake, std::memory_order_relaxed);
+                        g.ego_steer.store(bin.steering, std::memory_order_relaxed);
+                        g.ego_turn_signal.store(bin.turn_signal, std::memory_order_relaxed);
+                        g.ego_hazard.store(bin.hazard, std::memory_order_relaxed);
                         g.last_control_cmd_us.store(clock_now_us(),
                             std::memory_order_relaxed);
-                        use_internal_cruise = false;
+                    } else {
+                        /* JSON fallback */
+                        cJSON* root = cJSON_Parse((const char*)take_msg.data);
+                        if (root) {
+                            cJSON* j;
+                            if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
+                                && cJSON_IsNumber(j))
+                                g.ego_throttle.store(j->valuedouble,
+                                    std::memory_order_relaxed);
+                            if ((j = cJSON_GetObjectItemCaseSensitive(root, "brake"))
+                                && cJSON_IsNumber(j))
+                                g.ego_brake.store(j->valuedouble,
+                                    std::memory_order_relaxed);
+                            if ((j = cJSON_GetObjectItemCaseSensitive(root, "steer"))
+                                && cJSON_IsNumber(j))
+                                g.ego_steer.store(j->valuedouble,
+                                    std::memory_order_relaxed);
+                            cJSON_Delete(root);
+                            g.last_control_cmd_us.store(clock_now_us(),
+                                std::memory_order_relaxed);
+                        }
                     }
                 }
             }
 
-            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航 */
+            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航。
+             * 注意 now >= last（非严格大于）：仿真时钟按 tick 推进，
+             * 本 tick 刚收到指令时 now == last，严格大于会把"刚收到"误判
+             * 为"从未收到"→ 内置巡航恒运行（2026-07-31 定位：STALE_DBG
+             * now=10000000 last=10000000 diff=0）。 */
             if (use_internal_cruise) {
                 uint64_t now = clock_now_us();
                 uint64_t last = g.last_control_cmd_us.load(
                     std::memory_order_relaxed);
-                if (last > 0 && now > last
+                if (last > 0 && now >= last
                     && now - last < CONTROL_STALE_TIMEOUT_US) {
-                    /* 消息在 select_for 订阅间隙到达，但 transport 回调
-                     * 已更新 atomics — 仍可信且可用。 */
                     use_internal_cruise = false;
                 }
             }
@@ -1182,10 +1216,41 @@ protected:
                     std::memory_order_relaxed) == 0) {
                 ; /* 冷启动：尚无任何控制指令，用内置巡航起步 */
             }
+            /* 判定诊断：打印 use_internal_cruise 的原始依据（每 200 cycle） */
+            if (g.cycle % 200 == 0) {
+                uint64_t last_dbg = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                double age_dbg = last_dbg > 0
+                    ? (double)(clock_now_us() - last_dbg) / 1000.0 : -1.0;
+                LOG_WARN("flowsim", "[CRUISE_DBG] use_internal_cruise=%d last_age=%.0fms "
+                         "(timeout=%dus)", use_internal_cruise ? 1 : 0, age_dbg,
+                         CONTROL_STALE_TIMEOUT_US);
+            }
 
-            /* ── Step 1: ego 动力学 ── */
+            /* ── Step 1: ego 动力学 ──
+             * 失效安全：控制指令陈旧（断流 >500ms）时停车而非内置巡航——
+             * 内置巡航用油门维持速度，会把"失去控制"伪装成"正常巡航"，
+             * 15.1 直冲前车追尾（2026-07-31 事故链：select_for/transport
+             * 回调在 control/cmd 高频下间歇断流，三通道全断 30s+）。
+             * Apollo 原则：控制丢失 → 减速停车，不允许继续前进。 */
             if (use_internal_cruise) {
-                internal_cruise_control(ego);
+                uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                uint64_t now  = clock_now_us();
+                if (last > 0 && now > last &&
+                    now - last >= CONTROL_STALE_TIMEOUT_US) {
+                    /* 曾收到过控制指令但已陈旧 → 失效安全停车 */
+                    ego.throttle = 0.0;
+                    ego.brake    = 1.0;
+                    ego.steer    = 0.0;
+                    if (g.cycle % 100 == 0) {
+                        LOG_WARN("flowsim",
+                                 "[FSAFE] control cmd stale %.0fms — fail-safe stop "
+                                 "(was cruise fallback: throttle ramp)",
+                                 (double)(now - last) / 1000.0);
+                    }
+                } else {
+                    /* 冷启动（从未收到指令）或短暂间隙 → 内置巡航起步 */
+                    internal_cruise_control(ego);
+                }
             } else {
                 ego.throttle = g.ego_throttle.load(std::memory_order_relaxed);
                 ego.brake    = g.ego_brake.load(std::memory_order_relaxed);
@@ -1425,11 +1490,32 @@ protected:
             flowsim::publish_scene_frame(g.transport, g.pool, g.scene_pub_cfg,
                                          sim_time_us, g.cycle);
 
+            /* 固定 20Hz 节拍：原 select_for 的消息/超时唤醒由 BusQueueBridge
+             * + 固定周期取代——主循环不依赖消息到达即可稳定推进。 */
+            co_await sleep_us(FLOWSIM_DT_US);
+
             g.cycle++;
             if (g.cycle % 100 == 0) {
-                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f npc=%d",
+                uint64_t last_cmd = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                double cmd_age_ms = last_cmd > 0
+                    ? (double)(clock_now_us() - last_cmd) / 1000.0 : -1.0;
+                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f thr=%.2f brk=%.2f st=%.3f npc=%d cruise=%d cmd_age=%.0fms bridge_cb=%llu",
                          g.cycle, ego.x, ego.y, ego.speed,
-                         g.pool.active_count() - 1);
+                         ego.throttle, ego.brake, ego.steer,
+                         g.pool.active_count() - 1, use_internal_cruise ? 1 : 0,
+                         cmd_age_ms,
+                         (unsigned long long)BusQueueBridge::g_cb_count.load(
+                             std::memory_order_relaxed));
+            }
+            /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 5 帧打一次，
+             * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。 */
+            if (ego.speed > 2.0 && ego.brake > 0.5 && g.cycle % 5 == 0) {
+                LOG_WARN("flowsim", "[BRK] cyc=%u spd=%.2f thr=%.2f brk=%.2f last_cmd_us_age=%.0fms",
+                         g.cycle, ego.speed, ego.throttle, ego.brake,
+                         g.last_control_cmd_us.load(std::memory_order_relaxed) > 0
+                             ? (double)(clock_now_us() - g.last_control_cmd_us.load(
+                                   std::memory_order_relaxed)) / 1000.0
+                             : -1.0);
             }
 
             /* ── 仿真基础层：每帧 digest + invariant 检查 ──
@@ -1623,6 +1709,15 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
             } else {
                 LOG_WARN("flowsim", "esmini load failed for %s — NPC AI falls back to lateral distance",
                          xodr.c_str());
+                /* 离线排查指引：逐段验证链路（对齐 pipeline_check.py 的离线哲学）。
+                 * 1) 手动生成 xodr 看报错：python3 tools/json_to_xodr.py <scenario> -o /tmp/t.xodr
+                 * 2) 离线自检：cd build/modules/adas_nodes && ctest -R road_network
+                 * 3) 预构建库格式：file lib/libesminiRMLib.so 必须是 ELF（Mach-O 交叉提交会晦涩失败） */
+                LOG_WARN("flowsim",
+                         "esmini 排查: 1) 手动转 xodr: python3 tools/json_to_xodr.py %s -o /tmp/t.xodr"
+                         "  2) 离线自检: ctest -R road_network (build/modules/adas_nodes)"
+                         "  3) 库格式: file lib/libesminiRMLib.so 应为 ELF",
+                         g.scenario_file);
             }
         }
     }
@@ -1769,6 +1864,7 @@ NodePlugin s_plugin = {
     flowsim_stop,
     flowsim_cleanup,
     flowsim_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace

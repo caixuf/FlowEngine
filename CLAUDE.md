@@ -37,10 +37,10 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `modules/adas_nodes/safety_control_node.cpp` | FlowCoro 协程安全控制（TTC/横向交叉/行人防护） |
 | `tools/flowboard/index.html` | 前端仪表盘（3D+2D+图表+D3 拓扑，ES modules） |
 | `tools/foxglove_bridge.py` | Foxglove Studio WebSocket 桥接 |
-| `tools/demo_evaluator.py` | 回归评估器：采样 JSON 并自动评分（碰撞/偏航/停滞/频率） |
+| `ci/evaluators/demo_evaluator.py` | 回归评估器：采样 JSON 并自动评分（碰撞/偏航/停滞/频率） |
 | `tools/pipeline_check.py` | 离线管道完整性检查：不启动 demo，秒级验证 9 类 32 项指标 |
 | `tools/quick_verify.py` | 交互式调参验证工具：实时仪表盘 + 即时 eval 评分 |
-| `tests/test_param_regression.py` | 参数回归对比：保存 baseline，改参后自动检测退化 |
+| `ci/evaluators/test_param_regression.py` | 参数回归对比：保存 baseline，改参后自动检测退化 |
 | `scripts/demo.sh` | 一键启动脚本 |
 | `src/flow_launcher.c` | 配置驱动启动器（读取 pipeline.json，dlopen 加载插件节点） |
 | `src/flowctl.c` | CLI 工具（list/inspect/dashboard/param/bag 等子命令） |
@@ -84,13 +84,13 @@ bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 
 ```bash
 # 每次改动 pipeline 链路上的节点后，跑评估器
-python3 tools/demo_evaluator.py --duration 45 --interval 0.5
+python3 ci/evaluators/demo_evaluator.py --duration 45 --interval 0.5
 
 # 秒级离线检查（不启动 demo）
 python3 tools/pipeline_check.py
 
 # 仅分析当前数据，不重新启动 demo
-python3 tools/demo_evaluator.py --no-run
+python3 ci/evaluators/demo_evaluator.py --no-run
 ```
 
 评估器采样 `/tmp/flow_topology.json`，自动检查：拓扑完整性、topic 频率、碰撞、路沿偏离、停滞、变道次数、偏航抖动、NPC 瞬移。WARN 是已知问题可忽略，FAIL 必须修复。
@@ -172,7 +172,7 @@ flowctl param set control.mpc_r_ddelta 2.0      # 下一帧生效，不用重启
    （漏了这步，注册了也改不动，只能重启）
 
 - ❌ **禁止** 为了试一个值去改代码常量重新编译
-- ✅ 整段 run 的聚合指标 A/B（avg_speed / flip_rate）用 `tools/auto_tune_mpc.py` 或 `tools/scenario_regression.py`，
+- ✅ 整段 run 的聚合指标 A/B（avg_speed / flip_rate）用 `tools/auto_tune_mpc.py` 或 `ci/evaluators/scenario_regression.py`，
   它每个取值重启一次是必需的 —— 要可比就得从 x=0 起跑干净的 run
 
 ### 节点线程 → `node_pump()`

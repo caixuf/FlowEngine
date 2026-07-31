@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 BASELINE_FILE = ROOT / ".param_baseline.json"
 JSON_FILE = Path("/tmp/flow_topology.json")
 FLOWCTL = ROOT / "build" / "bin" / "flowctl"

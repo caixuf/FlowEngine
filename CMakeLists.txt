@@ -532,7 +532,7 @@ target_link_libraries(benchmark_coro flowengine_core flowcoro_headers flowcoro_n
 target_compile_definitions(benchmark_coro PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程集成层正确性测试程序 ──────────────────────────────
-add_executable(coro_correctness_test test/coro_correctness_test.cpp)
+add_executable(coro_correctness_test tests/coro_correctness_test.cpp)
 target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers flowcoro_net)
 target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
@@ -763,13 +763,13 @@ else()
 endif()
 
 add_test(NAME e2e_training_tools
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_e2e_training_tools.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ci/evaluators/test_e2e_training_tools.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 set_tests_properties(e2e_training_tools PROPERTIES TIMEOUT 30)
 
 add_test(NAME demo_evaluator_tools
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_demo_evaluator.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ci/evaluators/test_demo_evaluator.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 set_tests_properties(demo_evaluator_tools PROPERTIES TIMEOUT 10)

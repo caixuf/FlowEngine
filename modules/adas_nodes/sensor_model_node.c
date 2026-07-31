@@ -112,7 +112,7 @@ static int obstacle_in_fov(double rx, double ry, double max_range_m, double fov_
 
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;

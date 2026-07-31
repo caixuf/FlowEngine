@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]  # ci/evaluators/ → 项目根
 DEFAULT_JSON = Path("/tmp/flow_topology.json")
 LAUNCHER_STDERR = Path("/tmp/flow_launcher_stderr.txt")
 PIPELINE_JSON = ROOT / "config" / "pipeline.json"
@@ -866,6 +866,16 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if not samples:
         return ["no topology samples collected"], warnings, {}
 
+    # ── E: 从场景配置读取限速（NPC 速度 spike 门禁联动） ──
+    # speed_limit 来自场景的 road_network.edges[0].speed_limit（m/s）
+    speed_limit = 22.0  # 默认限速（直路场景 typical 值）
+    if scenario:
+        edges = scenario.get("road_network", {}).get("edges", [])
+        if edges:
+            sl = edges[0].get("speed_limit", 0.0)
+            if sl and sl > 0:
+                speed_limit = float(sl)
+
     last = samples[-1]
     series = [sample_metrics(s, road) for s in samples]
     speeds = [m["speed"] for m in series]
@@ -1265,8 +1275,8 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         warnings.append(
             f"npc motion spike: max_speed={max_npc_speed:.1f} m/s, max_lateral={max_npc_lateral_speed:.1f} m/s"
         )
-    elif max_npc_speed > 45.0:
-        warnings.append(f"npc respawn jump: max_speed={max_npc_speed:.1f} m/s, max_lateral={max_npc_lateral_speed:.1f} m/s")
+    elif max_npc_speed > speed_limit * 1.5:
+        warnings.append(f"npc respawn jump: max_speed={max_npc_speed:.1f} m/s ({speed_limit*1.5:.0f}=1.5×speed_limit={speed_limit:.0f} m/s), max_lateral={max_npc_lateral_speed:.1f} m/s")
 
     drops = sum(int(t.get("drop", 0) or 0) for t in topics.values())
     total_pub = sum(int(t.get("pub", 0) or 0) for t in topics.values())
@@ -1570,6 +1580,7 @@ def main() -> int:
 
                     samples.append({
                         "timestamp": float(r.get("t", data.get("timestamp", 0))),
+                        "t_demo": float(r.get("t", 0)) / 1_000_000.0,  # C: 归一化到 demo 启动后秒
                         "metrics": {
                             "scene": {
                                 "ego": ego,
@@ -1643,12 +1654,42 @@ def main() -> int:
 
     result = "FAIL" if failures else "PASS"
     if args.json_out:
+        # ── B: NPC 轨迹补全（每帧 NPC 列表，复盘追尾无需推演） ──
+        # 从 samples 中提取每帧的 entities 真值（flowsim 发布，含所有活跃 NPC）
+        npc_trajectories: dict[int, list[dict]] = {}
+        for s in samples:
+            ts = float(s.get("timestamp", 0.0) or 0.0)
+            for ent in s.get("metrics", {}).get("scene", {}).get("entities", []):
+                etype = str(ent.get("type", "")).lower()
+                if etype in ("car", "suv", "truck", "pedestrian", "bicycle"):
+                    eid = int(ent.get("id", -1))
+                    if eid < 0:
+                        continue
+                    if eid not in npc_trajectories:
+                        npc_trajectories[eid] = []
+                    npc_trajectories[eid].append({
+                        "t": ts,
+                        "x": float(ent.get("x", 0.0) or 0.0),
+                        "y": float(ent.get("y", 0.0) or 0.0),
+                        "speed": float(ent.get("speed", 0.0) or 0.0),
+                    })
+
+        # ── C: 时间轴对齐 ──
+        # 首帧采样时刻 t0，所有样本输出 t_demo = t - t0（归一化到 demo 启动后秒）
+        if samples:
+            t0 = float(samples[0].get("timestamp", 0.0) or 0.0)
+            for s in samples:
+                s["t_demo"] = (float(s.get("timestamp", 0.0) or 0.0) - t0) / 1_000_000.0 \
+                    if t0 > 0 else 0.0
+
         payload = {
             "scenario": summary.get("scenario"),
             "result": result,
             "failures": failures,
             "warnings": warnings,
             "summary": summary,
+            "samples": samples,  # 全量 ego 轨迹采样(t/x/y/heading/speed/steer)，供离线故事/事故分析
+            "npc_trajectories": {str(eid): pts for eid, pts in npc_trajectories.items()},  # B: NPC 轨迹
         }
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",

@@ -137,7 +137,8 @@ struct BehaviorContext {
 
     /* 变道目标 */
     int    target_lane_idx{-1};
-    double target_speed{10.0};
+    double target_speed{10.0};      /* 当前目标速度（FOLLOW会降低，CRUISE应恢复） */
+    double cfg_cruise_speed{15.0};  /* 巡航速度基准（永不被FOLLOW降低，CRUISE恢复用） */
     uint32_t follow_obs_id{0};
 
     /* 超车参数 */
@@ -164,7 +165,11 @@ struct BehaviorContext {
                                      * 防止远距离时目标速度被抬到超速 */
 
     /* ── 变道/跟车决策阈值（全部可热调） ── */
-    double blocked_range_mult{8.0};     /* blocked 检测距离 = max(min_m, desired_gap * mult) */
+    double blocked_range_mult{3.5};     /* blocked 检测距离 = max(min_m, desired_gap * mult)
+                                         * 8.0 时 15m/s 下 blocked_range≈220m——前车还在
+                                         * 119m 外就判定"堵车"并变道（实测启动 2s 即变道，
+                                         * 之后长期滞留外侧道错过红绿灯）。3.5 时 ≈96m，
+                                         * 配合 min_gap≈41m，变道发生在合理接近窗口。 */
     double blocked_range_min{30.0};     /* blocked 检测最小距离 (m) */
     double follow_hysteresis{1.3};      /* FOLLOW→CRUISE 退出滞环倍数（进入紧退出松） */
     double lane_change_timeout_s{8.0};  /* 变道超时 (s)，超时回退 CRUISE */
@@ -242,7 +247,7 @@ static void beh_debug_hook(void* task, StateId from, EventId event,
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     /* vehicle/state 近期到达时不覆盖：它是 flowsim 真值，优先于 EKF 估计。
@@ -269,7 +274,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 /* ── vehicle/state 订阅 ── 用 flowsim 真值覆盖 ego 位置 */
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -292,7 +297,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
  * 填充的 raw 数据作为回退，避免 tracker 偶发空帧清空障碍物导致 FOLLOW 丢失。 */
 static void on_tracked_objects(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
 
@@ -370,7 +375,7 @@ static void on_tracked_objects(const Message* msg, void* user_data) {
  * FOLLOW，表现为"全速冲向前车直到追尾"。 */
 static void on_raw_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     ObstacleList obs_list;
     if (ObstacleList_deserialize(&obs_list, (const uint8_t*)msg->data, msg->data_size) != 0)
@@ -420,7 +425,7 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
 
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* item;
@@ -452,6 +457,7 @@ protected:
             }
 
             /* 参数热重载（三处之三）：漏了这步，注册了也改不动，只能重启。 */
+            g.cfg_cruise_speed          = param_get_float("behavior.cruise_speed");
             g.acc_standoff              = param_get_float("behavior.acc_standoff");
             g.acc_time_headway          = param_get_float("behavior.acc_time_headway");
             g.acc_k_gap                 = param_get_float("behavior.acc_k_gap");
@@ -475,26 +481,39 @@ protected:
             g.state_timer += 0.05;
             if (g.cooldown > 0.0) g.cooldown -= 0.05;
 
-            /* ── 当前车道索引：每帧从 ego_y 重算（带滞环） ──
+            /* ── 当前车道索引：每帧从 ego_y 重算（变道进行中由变道完成检测接管） ──
              *
-             * 原实现只在 `committed_lane_idx == 0 && seq < 10` 时算一次，
-             * 之后仅在变道完成时更新。ego 横向一漂，committed_lane_idx 就
-             * 与实际车道脱节，而前车筛选按它做精确匹配 → 前车周期性"消失"
-             * → best_gap=1e9 → blocked=false → LOST_LEAD 退出 FOLLOW。
-             * 实测 FOLLOW 进出只隔 150ms，ACC 从未连续作用过，ego 全速接近
-             * 前车直到 gap=-3.15m。**追尾的主因是这个，不是 ACC 律本身。**
+             * 关键修复：变道进行中（LEFT_CHANGE/RIGHT_CHANGE），
+             * 不能用 ego_y 四舍五入重算 committed_lane_idx——否则：
+             *   1. 第810行检测到接近目标车道设 committed_lane_idx=target
+             *   2. 下一帧第499行立刻用 ego_y 重算覆盖回去（变道中超调时可能还在两车道之间）
+             *   3. 第729行 committed_lane_idx==target_lane_idx 永远不成立 → TIMEOUT
              *
-             * 滞环：只有偏离当前车道中心超过 (半车道 + LANE_HYST_M) 才换
-             * 索引，避免在车道线上抖动时索引来回跳。变道进行中不重算
-             * （由变道完成逻辑接管），否则会与 target_lane_idx 打架。 */
-            // 逐帧重算车道索引，不依赖滞环。原滞环在 fusion 偶发错误帧时
-            // 会把 committed_lane_idx 锁死在错误值，导致永远看不到前车。
+             * 修复：变道进行中先检测"是否已进入目标车道"（阈值取半车道0.875m，比0.15m合理），
+             * 若已进入则锁定 committed_lane_idx=target，不再重算；否则用重算值但不锁定。*/
+            int recalc_idx;
             {
                 double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
                 int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
                 if (idx < 0) idx = 0;
                 if (idx >= lc) idx = lc - 1;
-                g.committed_lane_idx = idx;
+                recalc_idx = idx;
+            }
+
+            StateId cur_sm = statem_current(&g.sm);
+            bool in_lane_change = (cur_sm == BEH_ST_LEFT_CHANGE || cur_sm == BEH_ST_RIGHT_CHANGE);
+            if (in_lane_change && g.target_lane_idx >= 0) {
+                double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
+                double dist_to_target = fabs(g.ego_y - target_lane_y);
+                /* 进入目标车道中心半个车道宽度内(1.75/2≈0.875m)即判定变道完成 */
+                if (dist_to_target < lw * 0.3) {
+                    g.committed_lane_idx = g.target_lane_idx;
+                } else {
+                    /* 变道中但未到位：用重算值但不锁定（供前车检测使用） */
+                    g.committed_lane_idx = recalc_idx;
+                }
+            } else {
+                g.committed_lane_idx = recalc_idx;
             }
 
             int current_idx = g.committed_lane_idx;
@@ -534,11 +553,10 @@ protected:
                 if (gap_err < -g.acc_gap_err_clamp) gap_err = -g.acc_gap_err_clamp;
                 follow_speed = lead_speed + g.acc_k_gap * gap_err;
                 if (follow_speed < 0.0) follow_speed = 0.0;
-                /* 上限用巡航速度而非 g.target_speed —— 后者在 FOLLOW 中已被降低，
-                 * 用它做上限会形成死锁：target_speed 降→follow_speed 被压更低→
-                 * target_speed 再降→…→0。用原始巡航速度做上限即可。 */
-                double cruise_cap = g.target_speed > 0 ? g.target_speed : 15.0;
-                if (follow_speed > cruise_cap) follow_speed = cruise_cap;
+                /* 上限用巡航速度基准 cfg_cruise_speed，不用 g.target_speed ——
+                 * 后者在 FOLLOW 中已被降低，用它做上限会死锁：
+                 * target_speed 降→follow_speed 被压更低→target_speed 再降→…→0 */
+                if (follow_speed > g.cfg_cruise_speed) follow_speed = g.cfg_cruise_speed;
             }
 
             /* ── 超车判定 ──
@@ -556,6 +574,18 @@ protected:
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
             bool worthwhile = blocked && (best_gap > min_gap);
+
+            /* ── D: 行为决策 debug 日志（每 10 帧，复盘跟车/追尾过程） ── */
+            if (g.seq % 10 == 0) {
+                LOG_INFO("behavior",
+                    "[BEH] seq=%u best_gap=%.1f lead_speed=%.1f follow_speed=%.1f "
+                    "desired_gap=%.1f blocked=%d worthwhile=%d committed_lane=%d "
+                    "target_lane=%d rel_speed=%.1f obs=%d state=%s",
+                    g.seq, best_gap, lead_speed, follow_speed,
+                    desired_gap, (int)blocked, (int)worthwhile, g.committed_lane_idx,
+                    g.target_lane_idx, rel_speed, g.obs_count,
+                    beh_state_str(statem_current(&g.sm)));
+            }
 
             /* ── 左右车道评估 ──
              * 关键约束：禁止变道到对向车道！
@@ -690,11 +720,33 @@ protected:
                                  "blocked gap=%.1f/%.1f lead=%.1fm/s → FOLLOW id=%u v=%.1f (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
+                    } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0) {
+                        /* 超车完成归位：巡航且未被堵时，若内侧道（idx-1，same_side
+                         * 已保证非对向）前方 gap 充足，变回内侧道巡航。
+                         * 之前没有归位机制——超车后长期滞留外侧道，而红绿灯
+                         * 只管辖 y_lane=-1.75 的内侧道，导致红灯不停车。
+                         * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。 */
+                        ev = BEH_EV_OVERTAKE_LEFT;
+                        new_target_lane = current_idx - 1;
+                        new_target_speed = g.cfg_cruise_speed;
+                        snprintf(reason, sizeof(reason),
+                                 "merge back: outer lane%d -> lane%d (left_gap=%.1f) → LEFT_CHANGE",
+                                 current_idx, current_idx - 1, left_gap);
+                    } else {
+                        /* 正常巡航：恢复到巡航速度基准。
+                         * 如果从 FOLLOW 退回 CRUISE，target_speed 可能被降低到
+                         * 3.8 等，不恢复就会一直低速行驶 + planning 不消费
+                         * behavior 的 target_speed（只在 FOLLOW 时消费）。 */
+                        new_target_speed = g.cfg_cruise_speed;
                     }
                 } else if (cur == BEH_ST_FOLLOW) {
                     if (!blocked) {
                         ev = BEH_EV_LOST_LEAD;
                         new_follow_id = 0;
+                        /* 退出 FOLLOW 时恢复巡航速度，否则 target_speed 残留
+                         * FOLLOW 的低值，CRUISE 空窗期 planning 不消费
+                         * behavior 速度 → 车速卡在低值不加速。 */
+                        new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason),
                                  "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
                     } else if (worthwhile && adj_idx >= 0 && g.cooldown <= 0.0) {
@@ -719,11 +771,13 @@ protected:
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_s;
+                        new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason), "lane change complete → CRUISE (cooldown=%.1fs)", g.lane_change_cooldown_s);
                     } else if (g.state_timer > g.lane_change_timeout_s) {
                         ev = BEH_EV_TIMEOUT;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_timeout_s;
+                        new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=%.1fs)", g.state_timer, g.lane_change_cooldown_timeout_s);
                         LOG_WARN("behavior", "lane change timeout (state=%s, target_lane=%d, current=%d, timer=%.1f)",
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
@@ -792,14 +846,6 @@ protected:
                 g.state_timer = old_timer;
             }
 
-            /* ── 车道追踪：检测变道完成 ── */
-            if ((g.state == BEH_LEFT_CHANGE || g.state == BEH_RIGHT_CHANGE) && g.target_lane_idx >= 0) {
-                double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
-                if (fabs(g.ego_y - target_lane_y) < 0.15) {
-                    g.committed_lane_idx = g.target_lane_idx;
-                }
-            }
-
             /* ── 发布 Behavior ── */
             Behavior beh;
             memset(&beh, 0, sizeof(beh));
@@ -846,11 +892,23 @@ protected:
                     cJSON_AddNumberToObject(root, "speed", g.ego_v);
                     cJSON_AddNumberToObject(root, "target_speed", g.target_speed);
                     cJSON_AddNumberToObject(root, "cooldown", g.cooldown);
+                    cJSON_AddNumberToObject(root, "state_timer", g.state_timer);
                     cJSON_AddNumberToObject(root, "elapsed_ms", (double)elapsed_ms);
                     cJSON_AddNumberToObject(root, "obs_count", g.obs_count);
                     cJSON_AddNumberToObject(root, "ego_x", g.ego_x);
                     cJSON_AddNumberToObject(root, "ego_y", g.ego_y);
                     cJSON_AddNumberToObject(root, "ego_heading", g.ego_heading);
+                    cJSON_AddNumberToObject(root, "lane_count", lc);
+                    cJSON_AddNumberToObject(root, "lane_width", lw);
+                    /* 横向变道调试：目标车道中心y + 到目标的距离 */
+                    if (g.target_lane_idx >= 0) {
+                        double tgt_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
+                        cJSON_AddNumberToObject(root, "target_lane_y", tgt_y);
+                        cJSON_AddNumberToObject(root, "dist_to_target_lane", fabs(g.ego_y - tgt_y));
+                    }
+                    double cur_lane_y = lane_center_y(g.committed_lane_idx, lc, lw, 0.0, 0.0);
+                    cJSON_AddNumberToObject(root, "current_lane_y", cur_lane_y);
+                    cJSON_AddNumberToObject(root, "cte", g.ego_y - cur_lane_y);
                     /* 跟车关键变量 */
                     cJSON_AddNumberToObject(root, "best_gap", best_gap < 1e8 ? best_gap : -1.0);
                     cJSON_AddNumberToObject(root, "lead_speed", lead_speed);
@@ -971,6 +1029,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     g.committed_lane_idx = 0;
     g.target_lane_idx = -1;
     g.target_speed = 10.0;
+    g.cfg_cruise_speed = 15.0;  /* 默认巡航速度，可被 config 覆盖 */
     g.follow_obs_id = 0;
     g.lane_count = 2;
     g.lane_width = 3.5;
@@ -989,8 +1048,10 @@ static int behavior_init(MessageBus* bus, Transport* transport,
         cJSON* p = cJSON_Parse(params_json);
         if (p) {
             cJSON* j;
-            if ((j = cJSON_GetObjectItemCaseSensitive(p, "target_speed")) && cJSON_IsNumber(j))
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "target_speed")) && cJSON_IsNumber(j)) {
                 g.target_speed = j->valuedouble;
+                g.cfg_cruise_speed = j->valuedouble;  /* config 设置 target_speed 时同步巡航基准 */
+            }
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_base")) && cJSON_IsNumber(j))
                 g.min_overtake_gap_base = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "min_overtake_gap_cap")) && cJSON_IsNumber(j))
@@ -1010,6 +1071,8 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     /* ── 参数注册（默认值用 g.<字段>，即上面解析后的值，不用硬编码字面量，
      *    否则会把 params_json 解析到的值盖掉）。逐帧 param_get_float 重读
      *    见 BehaviorTask::run()，三处都通才能 `flowctl param set` 生效。 */
+    param_register_float("behavior.cruise_speed",          g.cfg_cruise_speed,     1.0, 50.0,
+                         "巡航目标速度 m/s（速度决策唯一来源，control 不再有 cruise_speed）");
     param_register_float("behavior.acc_standoff",      g.acc_standoff,      0.5, 20.0,
                          "ACC 静止安全余量 (m)");
     param_register_float("behavior.acc_time_headway",  g.acc_time_headway,  0.5, 4.0,
@@ -1100,6 +1163,7 @@ NodePlugin s_plugin = {
     behavior_stop,
     behavior_cleanup,
     behavior_health,
+    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
 };
 
 } // namespace

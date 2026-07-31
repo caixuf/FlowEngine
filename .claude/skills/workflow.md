@@ -88,12 +88,12 @@ python3 tools/quick_verify.py --duration 120
 # 交互终端: set/eval 实时调参看效果
 
 # 2. 参数回归对比（前后各跑一次）
-python3 tests/test_param_regression.py --save-baseline
+python3 ci/evaluators/test_param_regression.py --save-baseline
 # 改参数后...
-python3 tests/test_param_regression.py
+python3 ci/evaluators/test_param_regression.py
 
 # 3. 全量回归门禁
-python3 tools/demo_evaluator.py --duration 45
+python3 ci/evaluators/demo_evaluator.py --duration 45
 ```
 
 各工具对比：

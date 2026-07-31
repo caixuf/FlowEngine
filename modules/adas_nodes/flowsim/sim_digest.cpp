@@ -20,6 +20,7 @@ namespace flowsim {
 
 StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
                                   const EntityPool& pool) {
+    (void)route;
     StaticDigest sd;
     if (!roads.loaded()) return sd;
 
@@ -764,8 +765,10 @@ std::string render_ascii_overhead(const StaticDigest& sd, const DynamicDigest& d
     auto to_grid = [&](double wx, double wy, int& gx, int& gy) {
         gx = 1 + (int)((wx - min_x) * scale);
         gy = 1 + (int)((wy - min_y) * scale);
-        if (gx < 0) gx = 0; if (gx >= width_chars) gx = width_chars - 1;
-        if (gy < 0) gy = 0; if (gy >= height_chars) gy = height_chars - 1;
+        if (gx < 0) gx = 0;
+        if (gx >= width_chars) gx = width_chars - 1;
+        if (gy < 0) gy = 0;
+        if (gy >= height_chars) gy = height_chars - 1;
     };
 
     std::vector<std::vector<char>> grid(height_chars, std::vector<char>(width_chars, ' '));

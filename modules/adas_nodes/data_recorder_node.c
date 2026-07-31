@@ -77,7 +77,7 @@ static struct {
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
@@ -99,7 +99,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
@@ -114,7 +114,7 @@ static void on_planning(const Message* msg, void* user_data) {
 
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     ObstacleList obs;
     if (ObstacleList_deserialize(&obs, (const uint8_t*)msg->data, msg->data_size) == 0) {
         g.obstacles = obs;
@@ -125,7 +125,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
 static void on_control(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     ControlCmd cmd;
     if (ControlCmd_deserialize(&cmd, (const uint8_t*)msg->data, msg->data_size) == 0) {
         g.control = cmd;
@@ -136,7 +136,7 @@ static void on_control(const Message* msg, void* user_data) {
 /* ── v3: 红绿灯状态回调 ─────────────────────────────────────── */
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* lights = cJSON_GetObjectItem(root, "lights");
@@ -170,7 +170,7 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 /* ── v3: 道路几何回调 ───────────────────────────────────────── */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;

@@ -8,13 +8,13 @@ those numbers against a saved *baseline* so that a code change that quietly
 degrades behaviour shows up as a regression.
 
     # Run the full suite and print a matrix report
-    python3 tools/scenario_regression.py
+    python3 ci/evaluators/scenario_regression.py
 
     # Record the current results as the regression baseline
-    python3 tools/scenario_regression.py --update-baseline
+    python3 ci/evaluators/scenario_regression.py --update-baseline
 
     # Run and compare against the saved baseline (fail on regression)
-    python3 tools/scenario_regression.py --baseline
+    python3 ci/evaluators/scenario_regression.py --baseline
 
 Exit code is 0 only when every scenario PASSes and (when --baseline is given)
 no numeric regression exceeds the suite tolerances.
@@ -36,8 +36,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-EVALUATOR = ROOT / "tools" / "demo_evaluator.py"
+ROOT = Path(__file__).resolve().parents[2]  # ci/evaluators/ → 项目根
+EVALUATOR = ROOT / "ci" / "evaluators" / "demo_evaluator.py"
 DEFAULT_SUITE = ROOT / "scenarios" / "suite.json"
 DEFAULT_RESULTS_DIR = Path("/tmp/flow_regression")
 DEFAULT_BASELINE_DIR = ROOT / "tests" / "baseline"

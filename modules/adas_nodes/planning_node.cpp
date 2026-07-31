@@ -134,6 +134,14 @@ struct PlanningContext {
     int8_t obs_lane_id[kMaxObs]{};  /* 感知计算的车道归属（从 perception/obstacles 提取） */
     uint8_t obs_type[kMaxObs]{};    /* 障碍物类型：OBJ_TYPE_VEHICLE / PEDESTRIAN / CYCLIST */
     float   obs_confidence[kMaxObs]{}; /* 置信度 */
+
+    /* 真值障碍物缓存（vehicle/state 的 oidN/oxN/oyN/ovN，flowsim 上帝视角）。
+     * 仅用于 TTC 安全兜底——感知链（perception/obstacles）漏检/停更时，
+     * 本车道前车物理 gap 仍有依据可限速。主决策（变道/跟车）仍走感知链。 */
+    static constexpr int kMaxTruthObs = 64;
+    double truth_obs_x[kMaxTruthObs]{}, truth_obs_y[kMaxTruthObs]{};
+    double truth_obs_vx[kMaxTruthObs]{};
+    int    truth_obs_count{0};
     volatile int has_vstate{0};
 
     /* 配置参数 */
@@ -340,7 +348,7 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     /* cJSON parsing (fusion/localization now publishes cJSON) */
     const char* d = (const char*)msg->data;
@@ -369,7 +377,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 /* ── vehicle/state 订阅 — 用 flowsim 真值覆盖 ego 位置 ── */
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -383,6 +391,31 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_heading = j->valuedouble;
     g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
+
+    /* 真值障碍物缓存（vehicle/state 的 oidN/oxN/oyN/ovN/ovyN）。
+     * 仅用于 TTC 安全兜底——感知链（perception/obstacles）漏检/停更时，
+     * 本车道前车物理 gap 仍有依据可限速，杜绝"FOLLOW 状态巡航速度追尾"
+     * （2026-07 实测 entity6 追尾：TTC 感知链 0 次触发）。 */
+    j = cJSON_GetObjectItem(root, "n_obs");
+    if (cJSON_IsNumber(j)) {
+        int n = (int)j->valuedouble;
+        if (n > g.kMaxTruthObs) n = g.kMaxTruthObs;
+        g.truth_obs_count = 0;
+        for (int i = 0; i < n; i++) {
+            char key[20];
+            snprintf(key, sizeof key, "ox%d", i);
+            cJSON* jx = cJSON_GetObjectItem(root, key);
+            snprintf(key, sizeof key, "oy%d", i);
+            cJSON* jy = cJSON_GetObjectItem(root, key);
+            snprintf(key, sizeof key, "ov%d", i);
+            cJSON* jv = cJSON_GetObjectItem(root, key);
+            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) continue;
+            g.truth_obs_x[i] = jx->valuedouble;
+            g.truth_obs_y[i] = jy->valuedouble;
+            g.truth_obs_vx[i] = cJSON_IsNumber(jv) ? jv->valuedouble : 0.0;
+            g.truth_obs_count++;
+        }
+    }
     cJSON_Delete(root);
 }
 
@@ -390,7 +423,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 static void on_perception_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     ObstacleList list;
     if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
@@ -424,24 +457,34 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
  * NOA route steps 仍从场景文件读取（planning 独有需求）。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
+    static int rg_count = 0;
+    if (rg_count++ < 5 || rg_count % 50 == 0)
+        LOG_INFO("planning", "[RG] recv road/geometry #%d size=%zu: %.80s", rg_count, (size_t)msg->data_size, d);
     cJSON* root = cJSON_Parse(d);
     if (root) {
         cJSON* item;
         if ((item = cJSON_GetObjectItem(root, "curve_start_x")))  g.curve_start_x = item->valuedouble;
         if ((item = cJSON_GetObjectItem(root, "curve_length_m"))) g.curve_length_m = item->valuedouble;
         if ((item = cJSON_GetObjectItem(root, "curve_offset_m"))) g.curve_offset_m = item->valuedouble;
-        if ((item = cJSON_GetObjectItem(root, "lane_count")))     g.lane_count = item->valueint;
+        if ((item = cJSON_GetObjectItem(root, "lane_count"))) {
+            int new_lc = item->valueint;
+            if (new_lc != g.lane_count)
+                LOG_WARN("planning", "[RG] lane_count UPDATE %d -> %d", g.lane_count, new_lc);
+            g.lane_count = new_lc;
+        }
         if ((item = cJSON_GetObjectItem(root, "lane_width")))     g.lane_width = item->valuedouble;
         cJSON_Delete(root);
+    } else {
+        LOG_WARN("planning", "[RG] cJSON_Parse FAILED");
     }
 }
 
 /* ── planning/behavior 订阅 — 接收行为规划指令 ──────────── */
 static void on_planning_behavior(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     Behavior beh;
     if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0) {
         static int desfail_count = 0;
@@ -474,7 +517,7 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
  * 同时考虑相对速度：前车比 ego 慢则 gap 会缩小，用 TTC 加权 min_gap。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     if (g.route_type != ROUTE_MERGE) {
         /* 非 merge 状态无需每帧解析 entities（省 CPU） */
         g.has_scene_frame = 1;
@@ -525,7 +568,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
  * 缓存到 g.tl_x/tl_y_lane/tl_state，供 Frenet 障碍物注入逻辑读取。 */
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
@@ -762,33 +805,23 @@ protected:
                          g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
             }
 
-            /* NOA 路线步骤可能指定目标速度（如出口匝道减速、stop_at_red 停车），覆盖纯粹的巡航速度。
-             * 叠加关系：route_target_speed >= 0 时作为最终目标（含 0=停车），-1=未设置用默认 target_speed。
-             * 旧实现用 > 0.0 判断，导致 target_speed=0（停车）被当作"未设置"回退到巡航速度，
-             * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
-            double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
-
-            /* ── Behavior planner 跟车/停车/让行速度覆盖 ──
-             * behavior_planner 在 FOLLOW 状态下发送 target_speed = lead_speed，
-             * STOP/YIELD 状态发送 target_speed = 0。规划层必须消费此值，
-             * 否则 FOLLOW 时仍按巡航速度行驶 → 追尾。
+            /* ── 速度决策：behavior 是唯一来源（Apollo 原则）──
+             * behavior_planner 拥有速度决策权：
+             *   - CRUISE → cfg_cruise_speed（如 15.0）
+             *   - FOLLOW → lead_speed 或 CTG 计算速度
+             *   - STOP/YIELD/EMERGENCY → 0
+             *   - LEFT_CHANGE/RIGHT_CHANGE → 变道速度
              *
-             * P5 修复：LEFT_CHANGE/RIGHT_CHANGE 期间也需消费 beh.target_speed。
-             * 变道需要 3-5s 完成，期间 ego 仍在原车道、前方有慢速 NPC。behavior
-             * 在变道未完成且 blocked 时下发 target_speed=lead_speed，若 planning
-             * 不消费此值，会回退到巡航速度 → 追尾。仅当 beh_speed < command_speed
-             * 时才覆盖（不抬升速度，只降速防追尾）。 */
-            if (g.has_behavior) {
-                float beh_speed = g.current_behavior.target_speed;
-                int8_t beh_cmd = g.current_behavior.command;
-                if (beh_cmd == BEH_FOLLOW && beh_speed >= 0.0f && beh_speed < command_speed) {
-                    command_speed = (double)beh_speed;
-                } else if ((beh_cmd == BEH_LEFT_CHANGE || beh_cmd == BEH_RIGHT_CHANGE) &&
-                           beh_speed >= 0.0f && beh_speed < command_speed) {
-                    command_speed = (double)beh_speed;
-                } else if (beh_cmd == BEH_STOP || beh_cmd == BEH_YIELD || beh_cmd == BEH_EMERGENCY) {
-                    command_speed = 0.0;
-                }
+             * planning 无条件消费 behavior 的 target_speed，不再只在 < command_speed 时覆盖。
+             * 无 behavior 时回退到 scenario 默认 target_speed。
+             * NOA route_target_speed 优先级最高（匝道限速/stop_at_red）。 */
+            double command_speed;
+            if (g.route_target_speed >= 0.0) {
+                command_speed = g.route_target_speed;  /* NOA 路线步骤显式指定 */
+            } else if (g.has_behavior && g.current_behavior.target_speed >= 0.0f) {
+                command_speed = (double)g.current_behavior.target_speed;  /* behavior 决策 */
+            } else {
+                command_speed = g.target_speed;  /* scenario 默认 */
             }
 
         /* DBG: 打印 behavior 覆盖后的 command_speed */
@@ -849,6 +882,60 @@ protected:
                         LOG_INFO("planning",
                                  "NOA merge wait gap front=%.0f rear=%.0f (need f>=%.0f r>=%.0f) follow=%.1f",
                                  gf, gr, min_front, min_rear, command_speed);
+                    }
+                }
+            }
+
+            /* ── 常规跟车 TTC 兜底 ─────────────────────────────
+             * 与 NOA merge 的 (gap-5)/3 同一模式，但作用于常规巡航/跟车链：
+             * 无论 behavior 是否正确下发 follow_speed（2026-07 实测追尾 id 11
+             * 时 FOLLOW 状态速度保持 15.1 巡航值——感知抖动/状态翻转空窗），
+             * 本车道前车物理 gap 逼近时按 3s TTC 强制限速，杜绝巡航速度追尾。
+             * 用 planning 自己的感知障碍物（perception/obstacles），与
+             * behavior 的 tracked_objects 独立，形成第二道防线。
+             * 横向归属：按 ego 当前实际位置量化车道（变道中跨线时取本车道
+             * 前车，保守方向——变道完成前仍视原车道前车为危险源）。 */
+            if (g.has_vstate && g.lane_count >= 1) {
+                double lane_w = g.lane_width;
+                double lc_f = (-g.ego_y) / lane_w + (g.lane_count - 1) * 0.5;
+                int cur_lane = (int)(lc_f >= 0.0 ? lc_f + 0.5 : lc_f - 0.5);
+                if (cur_lane < 0) cur_lane = 0;
+                if (cur_lane >= g.lane_count) cur_lane = g.lane_count - 1;
+                double lane_center = lane_center_y(cur_lane, g.lane_count, lane_w);
+                double min_gap = 1e9;
+                int gap_src = 0;  /* 0=none 1=perception 2=truth */
+                for (int i = 0; i < g.kMaxObs; i++) {
+                    double dx = g.obs_x[i] - g.ego_x;
+                    if (dx <= 0.0 || dx > 80.0) continue;
+                    if (g.obs_vx[i] < -2.0) continue;  /* 对向车不走此限速 */
+                    if (std::fabs(g.obs_y[i] - lane_center) > lane_w * 0.75) continue;
+                    if (dx < min_gap) { min_gap = dx; gap_src = 1; }
+                }
+                /* 真值兜底：感知链未提供本车道前车（漏检/停更）时，
+                 * 用 flowsim 真值障碍物计算 gap——安全兜底不依赖感知链。 */
+                if (min_gap >= 1e8) {
+                    for (int i = 0; i < g.truth_obs_count; i++) {
+                        double dx = g.truth_obs_x[i] - g.ego_x;
+                        if (dx <= 0.0 || dx > 80.0) continue;
+                        if (g.truth_obs_vx[i] < -2.0) continue;
+                        if (std::fabs(g.truth_obs_y[i] - lane_center) > lane_w * 0.75) continue;
+                        if (dx < min_gap) { min_gap = dx; gap_src = 2; }
+                    }
+                }
+                if (min_gap < 80.0 && min_gap > 0.0) {
+                    /* 4s TTC：gap=65m 起开始压制（(65-5)/4=15≈巡航），
+                     * 比 3s 版提前 15m 介入。2026-07 追尾复盘：3s 版在
+                     * gap 23.5m 才压到 6.2 m/s，全刹制动距离 21m 加上
+                     * 决策→执行延迟（~0.5s≈7.5m），物理上刹不住。 */
+                    double ttc_follow = (min_gap - 5.0) / 4.0;
+                    if (ttc_follow < 0.0) ttc_follow = 0.0;
+                    if (ttc_follow < command_speed) {
+                        if (g.plan_count % 10 == 0) {
+                            LOG_WARN("planning", "TTC follow: gap=%.1f (src=%s) -> %.1f m/s (was %.1f)",
+                                     min_gap, gap_src == 2 ? "truth" : "percept", ttc_follow,
+                                     command_speed);
+                        }
+                        command_speed = ttc_follow;
                     }
                 }
             }
@@ -1182,19 +1269,16 @@ protected:
                     }
                 }
             } else {
-                /* 无有效路径时发布单点轨迹（failsafe 速度）
-                 * 用 ego 当前位置作为轨迹点，不能用 (0,0) ——
-                 * 否则 control 的 Stanley 拿到 ref_path=[(0,0)] 会产生
-                 * 巨大 CTE → 疯狂转向 → 撞墙/逆行。 */
-                double failsafe = command_speed;
-                if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
-                if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
+                /* 规划失败 → 停车（Apollo 原则：不能规划就停）
+                 * 用 ego 当前位置 + v=0，control PID 会匀减速到 0。
+                 * 不用 (0,0) ——否则 Stanley 疯狂转向。
+                 * 不用 command_speed——planning 失败时不应继续按目标速度行驶。 */
                 n_pts = 1;
                 points[0].t_rel_us = 0;
                 points[0].x = (float)g.ego_x;
                 points[0].y = (float)g.ego_y;
                 points[0].heading = (float)g.ego_heading;
-                points[0].v = (float)failsafe;
+                points[0].v = 0.0f;  /* 停车 */
             }
 
             /* ── 发布二进制 Trajectory ── */
@@ -1265,6 +1349,42 @@ protected:
                 LOG_WARN("planning", "[DBG pub] #%d cmd_speed=%.2f pts[0].v=%.2f spd_out[0]=%.2f n_wp=%d beh_cmd=%d",
                          g.plan_count, command_speed, (double)points[0].v, spd_out[0], n_wp,
                          g.has_behavior ? (int)g.current_behavior.command : -1);
+            }
+
+            /* 发布 planning/debug（全链路横向调试，每10帧≈2Hz） */
+            if (g.plan_count % 10 == 0) {
+                double dbg_rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+                cJSON* dbg = cJSON_CreateObject();
+                cJSON_AddNumberToObject(dbg, "seq", g.plan_count);
+                cJSON_AddNumberToObject(dbg, "ego_x", g.ego_x);
+                cJSON_AddNumberToObject(dbg, "ego_y", g.ego_y);
+                cJSON_AddNumberToObject(dbg, "ego_v", g.ego_v);
+                cJSON_AddNumberToObject(dbg, "road_center_y", dbg_rc_y);
+                cJSON_AddNumberToObject(dbg, "ego_d", g.ego_y - dbg_rc_y);
+                cJSON_AddNumberToObject(dbg, "target_lane_offset", g.target_lane_offset);
+                cJSON_AddNumberToObject(dbg, "command_speed", command_speed);
+                cJSON_AddNumberToObject(dbg, "n_wp", n_wp);
+                cJSON_AddNumberToObject(dbg, "traj_valid", traj.valid ? 1.0 : 0.0);
+                cJSON_AddNumberToObject(dbg, "n_lanes", g.lane_count);
+                cJSON_AddNumberToObject(dbg, "lane_width", g.lane_width);
+                if (g.has_behavior) {
+                    cJSON_AddNumberToObject(dbg, "beh_cmd", (double)g.current_behavior.command);
+                    cJSON_AddNumberToObject(dbg, "beh_target_lane", (double)g.current_behavior.target_lane_idx);
+                    cJSON_AddNumberToObject(dbg, "beh_target_speed", (double)g.current_behavior.target_speed);
+                }
+                /* 轨迹前视点和末点的 d 值（横向偏移），用于验证变道轨迹 */
+                if (n_wp > 0) {
+                    int la_idx = n_wp / 2;  /* 前视点（轨迹中点） */
+                    cJSON_AddNumberToObject(dbg, "d_start", d_out[0]);
+                    cJSON_AddNumberToObject(dbg, "d_lookahead", d_out[la_idx]);
+                    cJSON_AddNumberToObject(dbg, "d_end", d_out[n_wp - 1]);
+                    cJSON_AddNumberToObject(dbg, "v_end", spd_out[n_wp - 1]);
+                }
+                char* dbg_s = cJSON_PrintUnformatted(dbg);
+                transport_publish(transport_, TOPIC_PLANNING_DEBUG,
+                                  (const uint8_t*)dbg_s, (uint32_t)strlen(dbg_s) + 1);
+                free(dbg_s);
+                cJSON_Delete(dbg);
             }
             /* 缓存轨迹用于拼接 */
             g.prev_traj_stamp_us = clock_now_us();
@@ -1525,6 +1645,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_BEHAVIOR, on_planning_behavior, nullptr);
     transport_advertise(transport, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du);
+    transport_advertise(transport, TOPIC_PLANNING_DEBUG, 0u);  /* JSON text */
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u,
                         CAP_SUBSCRIBER, 0);
@@ -1540,6 +1661,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);
+    discovery_advertise(discovery, TOPIC_PLANNING_DEBUG, 0u, CAP_PUBLISHER, 2.0);
 
     /* 初始化反射式状态机 */
     statem_init(&g.sm, nullptr, SM_STATE_INITIALIZED, "planning");
@@ -1607,6 +1729,7 @@ NodePlugin s_plugin = {
     planning_stop,
     planning_cleanup,
     planning_health,
+    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
 };
 
 } // namespace

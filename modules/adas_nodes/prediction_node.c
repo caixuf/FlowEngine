@@ -73,7 +73,7 @@ static struct {
 /* ── Callback: perception/tracked_objects ────────────────────── */
 static void on_tracked_objects(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     /* Deep-copy the JSON string for thread-safe access */
     char* copy = strdup((const char*)msg->data);
@@ -89,7 +89,7 @@ static void on_tracked_objects(const Message* msg, void* user_data) {
 /* ── Callback: fusion/localization ───────────────────────────── */
 static void on_localization(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
@@ -238,7 +238,7 @@ static int prediction_execute(TaskBase* task) {
             if (cJSON_IsBool(j) && cJSON_IsTrue(j)) continue;
 
             double obj_x = 0, obj_y = 0, obj_vx = 0, obj_vy = 0;
-            double track_age = 0, obj_confidence = 0;
+            double track_age = 0;
             int    object_id = 0;
 
             j = cJSON_GetObjectItemCaseSensitive(obj, "id");
@@ -258,9 +258,6 @@ static int prediction_execute(TaskBase* task) {
 
             j = cJSON_GetObjectItemCaseSensitive(obj, "track_age");
             if (cJSON_IsNumber(j)) track_age = j->valuedouble;
-
-            j = cJSON_GetObjectItemCaseSensitive(obj, "confidence");
-            if (cJSON_IsNumber(j)) obj_confidence = j->valuedouble;
 
             /* Compute prediction confidence:
              * base * track_age_factor (saturates at CONF_AGE_MAX) */

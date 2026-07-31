@@ -702,6 +702,7 @@ NodePlugin s_plugin = {
     fusion_stop,
     fusion_cleanup,
     nullptr,  /* health_check */
+    nullptr,  /* taskbase */
 };
 
 } // namespace

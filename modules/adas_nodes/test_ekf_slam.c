@@ -92,6 +92,7 @@ static int g_failures = 0;
 } while (0)
 
 int main(int argc, char** argv) {
+    (void)argc; (void)argv;
     srand(42);
 
     const int NUM_SAMPLES = 1000;

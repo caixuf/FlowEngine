@@ -133,7 +133,7 @@ static int obstacle_in_fov(double rx, double ry, double max_range_m, double fov_
 
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -202,7 +202,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
  * sensor/lidar → perception 数据依赖。 */
 static void on_sensor_lidar(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     /* 直接走 _msg_cast_impl：C++ 编译器会优先匹配 serializer.h 的 msg_cast 模板
      * (要求 T::TYPE_ID 形式)，故按 fusion_node.cpp 的写法显式调用底层实现。 */
     const LidarFrame* f = (const LidarFrame*)_msg_cast_impl(msg, LIDARFRAME_TYPE_ID, sizeof(LidarFrame), "LidarFrame");
@@ -215,7 +215,7 @@ static void on_sensor_lidar(const Message* msg, void* user_data) {
 /* ── road/geometry 订阅 — 获取车道参数（用于 lane_id 赋值） ──── */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -389,7 +389,6 @@ protected:
                     /* lane_id：车体系 cx/cy → 世界系 y → 车道索引 */
                     {
                         double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
-                        double wx = g.ego_x + cb->cx * ch - cb->cy * sh;
                         double wy = g.ego_y + cb->cx * sh + cb->cy * ch;
                         int lc = g.has_road_geometry ? g.lane_count : 2;
                         double lw = g.has_road_geometry ? g.lane_width : 3.5;
@@ -578,6 +577,7 @@ NodePlugin s_plugin = {
     perception_stop,
     perception_cleanup,
     perception_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace

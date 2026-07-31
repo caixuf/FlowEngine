@@ -140,7 +140,7 @@ static struct {
 /* ── 订阅回调：收到 sensor/stereo ─────────────────────────── */
 static void on_stereo(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || !g.enabled) return;
+    if (!msg || !g.enabled) return;
 
     StereoFrame frame;
     if (StereoFrame_deserialize(&frame, (const uint8_t*)msg->data, msg->data_size) != 0) {
@@ -168,7 +168,7 @@ static int depth_to_points_3d(const StereoFrame* frame, Point3D* points, int max
     int dw = TV_DEPTH_W;
     int dh = frame->depth_count / dw;
     if (dh <= 0) dh = TV_DEPTH_H;
-    if (frame->depth_count < dw * dh) dh = frame->depth_count / dw;
+    if (frame->depth_count < (uint32_t)(dw * dh)) dh = frame->depth_count / dw;
 
     double h_fov_rad = (frame->fov_deg > 0.1 ? (double)frame->fov_deg : 65.0) * M_PI / 180.0;
     double v_fov_rad = (g.v_fov_deg > 0.1 ? g.v_fov_deg : 50.0) * M_PI / 180.0;

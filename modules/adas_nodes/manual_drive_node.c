@@ -57,7 +57,9 @@
 #define MANUAL_STEER_RATE     2.0f   /* steering 升/回中率 (rad/s) */
 #define MANUAL_STEER_MAX      0.25f  /* 物理层钳位 (rad) */
 #define MANUAL_DT             (1.0f / (float)MANUAL_TICK_HZ)
+#ifndef CONTROLCMD_TYPE_ID
 #define CONTROLCMD_TYPE_ID    0x2D95C6D2u
+#endif
 
 /* ── 节点状态 ─────────────────────────────────────────────── */
 

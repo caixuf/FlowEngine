@@ -343,6 +343,16 @@ int message_bus_topic_pending(MessageBus* bus, const char* topic);
 int message_bus_topic_is_full(MessageBus* bus, const char* topic);
 
 /**
+ * 主动读取：按 topic 窥视最新一条消息（非阻塞，不消费队列）。
+ * 高频关键指令（control/cmd）的消费者可用此接口做不依赖订阅唤醒的
+ * 兜底通道——select_for/transport 回调在发布频率远高于消费频率时
+ * 可能出现唤醒丢失（2026-07-31 追尾事故实证：15s 断流）。
+ * 只读不消费：广播订阅回调仍由 dispatch 线程正常分发；重复解析幂等。
+ * @return 0=取到, ERR_NOT_FOUND=队列中无该 topic 消息
+ */
+int message_bus_peek_latest(MessageBus* bus, const char* topic, Message* out);
+
+/**
  * 列出总线上所有活跃 topic。
  * @param topics 输出缓冲区（每个 64 字节）
  * @param max    最多返回数量

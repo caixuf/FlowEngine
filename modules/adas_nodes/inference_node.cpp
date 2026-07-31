@@ -154,7 +154,7 @@ InferenceContext g;
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
@@ -175,7 +175,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     /* 二进制 Trajectory 反序列化（已从 JSON 迁移到二进制） */
     Trajectory traj;
     if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) == 0) {
@@ -190,7 +190,7 @@ static void on_planning(const Message* msg, void* user_data) {
 
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     /* 尝试二进制反序列化 */
     {
@@ -252,7 +252,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
 static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     /* 二进制反序列化 */
     {
@@ -288,7 +288,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
  */
 static void on_model_ota_active(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "reload");
@@ -302,7 +302,7 @@ static void on_model_ota_active(const Message* msg, void* user_data) {
 
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* lights = cJSON_GetObjectItem(root, "lights");
@@ -350,7 +350,7 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -565,7 +565,7 @@ static void run_inference(double* out_speed, double* out_d,
 static void build_control_raw(double pred_speed, double pred_d,
                               double pred_throttle, double pred_brake,
                               double pred_steer, double pred_lc, double pred_conf,
-                              uint8_t* buf, size_t* len, char* mode_tag) {
+                              uint8_t* buf, size_t* len, const char* mode_tag) {
     (void)pred_lc; (void)pred_conf;
     double throttle = pred_throttle, brake = pred_brake, steer = pred_steer;
 
@@ -1005,6 +1005,7 @@ NodePlugin s_plugin = {
     inference_stop,
     inference_cleanup,
     inference_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace
