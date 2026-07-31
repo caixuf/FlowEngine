@@ -227,6 +227,16 @@ void serializer_swap32(uint8_t* v);
 void serializer_swap64(uint8_t* v);
 
 /**
+ * 以小端为规范线格式（wire format）拷贝一个标量。
+ * 小端主机上退化为纯 memcpy（字节输出与旧行为完全一致），大端主机上写出后交换。
+ * n 为标量字节数 (1/2/4/8)；1 字节或非标量 n 不交换。
+ *   store_le: 主机序 → 小端线格式（序列化）
+ *   load_le : 小端线格式 → 主机序（反序列化）
+ */
+void serializer_store_le(uint8_t* dst, const void* src, size_t n);
+void serializer_load_le(void* dst, const uint8_t* src, size_t n);
+
+/**
  * 如果需要（平台不匹配）进行结构体的端到端字节序交换。
  * 假定数据按 field_marker 标记的字节序存储。
  * 如果当前平台字节序与 field_marker 一致，则什么也不做。

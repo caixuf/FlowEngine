@@ -654,16 +654,15 @@ class CodeGenerator:
                 elif f.is_enum:
                     lines.append(f"    if (buf) buf[{offset}] = (int8_t)src->{access};")
                 elif is_float_type(f.idl_type) and f.idl_type == 'float64':
-                    lines.append(f"    if (buf) memcpy(buf + {offset}, &src->{access}, 8);")
-                    # TODO: endian swap for cross-platform
+                    lines.append(f"    if (buf) serializer_store_le(buf + {offset}, &src->{access}, 8);")
                 elif f.idl_type == 'float':
-                    lines.append(f"    if (buf) memcpy(buf + {offset}, &src->{access}, 4);")
+                    lines.append(f"    if (buf) serializer_store_le(buf + {offset}, &src->{access}, 4);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int16', 'uint16'):
-                    lines.append(f"    if (buf) memcpy(buf + {offset}, &src->{access}, 2);")
+                    lines.append(f"    if (buf) serializer_store_le(buf + {offset}, &src->{access}, 2);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int32', 'uint32'):
-                    lines.append(f"    if (buf) memcpy(buf + {offset}, &src->{access}, 4);")
+                    lines.append(f"    if (buf) serializer_store_le(buf + {offset}, &src->{access}, 4);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int64', 'uint64'):
-                    lines.append(f"    if (buf) memcpy(buf + {offset}, &src->{access}, 8);")
+                    lines.append(f"    if (buf) serializer_store_le(buf + {offset}, &src->{access}, 8);")
                 else:
                     lines.append(f"    if (buf) buf[{offset}] = (uint8_t)src->{access};")
                 offset += elem_size
@@ -697,15 +696,15 @@ class CodeGenerator:
                 elif f.is_enum:
                     lines.append(f"    dst->{access} = ({f.c_type})((int8_t)buf[{offset}]);")
                 elif is_float_type(f.idl_type) and f.idl_type == 'float64':
-                    lines.append(f"    memcpy(&dst->{access}, buf + {offset}, 8);")
+                    lines.append(f"    serializer_load_le(&dst->{access}, buf + {offset}, 8);")
                 elif f.idl_type == 'float':
-                    lines.append(f"    memcpy(&dst->{access}, buf + {offset}, 4);")
+                    lines.append(f"    serializer_load_le(&dst->{access}, buf + {offset}, 4);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int16', 'uint16'):
-                    lines.append(f"    memcpy(&dst->{access}, buf + {offset}, 2);")
+                    lines.append(f"    serializer_load_le(&dst->{access}, buf + {offset}, 2);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int32', 'uint32'):
-                    lines.append(f"    memcpy(&dst->{access}, buf + {offset}, 4);")
+                    lines.append(f"    serializer_load_le(&dst->{access}, buf + {offset}, 4);")
                 elif is_integer_type(f.idl_type) and f.idl_type in ('int64', 'uint64'):
-                    lines.append(f"    memcpy(&dst->{access}, buf + {offset}, 8);")
+                    lines.append(f"    serializer_load_le(&dst->{access}, buf + {offset}, 8);")
                 else:
                     lines.append(f"    dst->{access} = ({f.c_type})buf[{offset}];")
                 offset += elem_size

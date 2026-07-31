@@ -49,6 +49,26 @@ void serializer_swap64(uint8_t* v) {
     t = v[3]; v[3] = v[4]; v[4] = t;
 }
 
+/* 按元素大小原地交换（1 字节无需处理）。 */
+static void swap_by_size(uint8_t* p, size_t n) {
+    switch (n) {
+        case 2: serializer_swap16(p); break;
+        case 4: serializer_swap32(p); break;
+        case 8: serializer_swap64(p); break;
+        default: break;  /* 1 字节或聚合类型：调用方逐字段处理 */
+    }
+}
+
+void serializer_store_le(uint8_t* dst, const void* src, size_t n) {
+    memcpy(dst, src, n);
+    if (serializer_is_big_endian()) swap_by_size(dst, n);  /* LE 主机：纯 memcpy */
+}
+
+void serializer_load_le(void* dst, const uint8_t* src, size_t n) {
+    memcpy(dst, src, n);
+    if (serializer_is_big_endian()) swap_by_size((uint8_t*)dst, n);  /* LE 主机：纯 memcpy */
+}
+
 void serializer_ensure_endian(void* data, size_t size,
                               uint8_t endian_marker, EndianSwapFunc swap_func) {
     (void)size;
