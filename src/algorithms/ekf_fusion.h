@@ -131,9 +131,12 @@ void ekf_fusion_get_state(const EkfFusion* ekf,
 void ekf_fusion_get_covariance_diag(const EkfFusion* ekf, double diag[EKF_STATE_DIM]);
 
 /**
- * 重置 EKF（状态保持，协方差恢复到初始值）。
+ * 重置 EKF（协方差恢复到初始值；位置锚定到调用方提供的量测种子，不归零）。
+ * @param seed_x, seed_y  位置种子——应传最近一次可用的位置量测（如 lidar 自车
+ *                        真值 / SLAM Pose2D）。归零会导致 χ² 门拒绝后续真测量、
+ *                        EKF 永远无法重新收敛（2026-07-31 断流修复后暴露的死循环）。
  */
-void ekf_fusion_reset(EkfFusion* ekf);
+void ekf_fusion_reset(EkfFusion* ekf, double seed_x, double seed_y);
 
 #ifdef __cplusplus
 }

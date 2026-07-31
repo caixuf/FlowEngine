@@ -170,14 +170,17 @@ protected:
              * A4 修复：不要把状态估计当观测喂回；全维 pose 与 GPS heading
              * 更新互斥（同周期二选一），避免 heading 被更新两次导致 cov_hh
              * 塌太快、滤波器过自信。 */
+            double pos_used_x = g.fused_x, pos_used_y = g.fused_y;  /* 重置种子默认：最后融合位置 */
             if (pose && pose->converged) {
                 double pose_cov = (double)pose->cov_xx + (double)pose->cov_yy;
                 if (pose_cov < 100.0) {
                     /* 只用 SLAM 位置；速度/航向交给 GPS（如有）或 predict 传播 */
+                    pos_used_x = pose->x; pos_used_y = pose->y;
                     ekf_fusion_update_lidar(ekf_, (double)pose->x, (double)pose->y, nullptr);
                 }
             } else {
                 /* 仿真路径：LiDAR 位置真值 + GPS 速度/航向 */
+                pos_used_x = lidar->x; pos_used_y = lidar->y;
                 ekf_fusion_update_lidar(ekf_, (double)lidar->x, (double)lidar->y, nullptr);
             }
 
@@ -198,8 +201,11 @@ protected:
 
             /* EKF 发散恢复 */
             if (ekf_->diverged && g.fused_count % 10 == 0) {
-                LOG_WARN("fusion", "EKF diverged (trace=%.0f) — resetting", diag[0]+diag[1]);
-                ekf_fusion_reset(ekf_);
+                LOG_WARN("fusion", "EKF diverged (trace=%.0f) — resetting to (%.1f,%.1f)",
+                         diag[0]+diag[1], pos_used_x, pos_used_y);
+                /* 用刚处理的位置量测做种子：归零会让 χ² 门拒绝后续真测量、
+                 * EKF 永远无法重新收敛（2026-07-31 死循环：fusion 卡 x≈0 真车 x≈530） */
+                ekf_fusion_reset(ekf_, pos_used_x, pos_used_y);
             }
 
             /* ── 发布融合结果 (cJSON + 世界坐标) ── */

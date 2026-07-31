@@ -451,15 +451,17 @@ void ekf_fusion_get_covariance_diag(const EkfFusion* ekf, double diag[EKF_STATE_
         diag[i] = ekf->P[i*5 + i];
 }
 
-void ekf_fusion_reset(EkfFusion* ekf) {
-    /* 保存速度 (x[2]) 和航向 (x[3])，仅复位位置和偏航角速度。
-     * 原代码 memset 清零全部状态，导致 velocity=5→0、heading=真实值→0，
-     * 使得 predict 步毫无进展（v=0 时 x/y 停止传播），且 heading=0 的
-     * 假设与真值偏差 ~0rad 反而让 χ² gating 继续拒绝 lidar 测量——
-     * 双向恶化，EKF 永远无法收敛（§7.2.3 bug 复盘）。 */
+void ekf_fusion_reset(EkfFusion* ekf, double seed_x, double seed_y) {
+    /* 保存速度 (x[2]) 和航向 (x[3])；位置锚定到调用方传入的量测种子而非归零。
+     * 归零 + 重初始化协方差(σ=10m)会让下一个真测量（如 lidar 自车真值，可能
+     * 已前进数百米）变成大 outlier 被 χ² 门拒绝 → 滤波器永远无法重新收敛，
+     * 反复发散→重置→死循环（2026-07-31 实测：EKF trace=325 每秒重发，fusion
+     * 位置卡在 x≈0 而真车在 x≈530，下游 tracker/safety 障碍坐标全乱 → 假刹车）。 */
     double saved_v = ekf->x[2];
     double saved_h = ekf->x[3];
     memset(ekf->x, 0, sizeof(ekf->x));
+    ekf->x[0] = seed_x;
+    ekf->x[1] = seed_y;
     ekf->x[2] = (saved_v > 0.0 && saved_v < 100.0) ? saved_v : 5.0;
     ekf->x[3] = saved_h;
 
