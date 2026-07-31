@@ -16,6 +16,7 @@ using flowsim::MAX_ENTITIES;
 using flowsim::NpcState;
 using flowsim::apply_vehicle_defaults;
 using flowsim::step_bicycle;
+using flowsim::step_bicycle_dynamic;
 using flowsim::step_pedestrian;
 
 static int failures = 0;
@@ -65,6 +66,12 @@ static void test_vehicle_defaults() {
     CHECK(approx(trk.length, 8.0), "truck length 8.0");
     CHECK(approx(trk.mass, 8000.0), "truck mass 8000");
     CHECK(trk.mass > car.mass, "truck heavier than car");
+
+    // 动力学参数（physics_model=dynamic 才用；默认 0 会让动力学积分崩，必须被填上）
+    CHECK(car.tire_stiffness_f > 0.0, "car tire_stiffness_f set");
+    CHECK(car.tire_stiffness_r > 0.0, "car tire_stiffness_r set");
+    CHECK(car.yaw_inertia > 0.0, "car yaw_inertia set");
+    CHECK(trk.yaw_inertia > car.yaw_inertia, "truck higher yaw inertia than car");
 }
 
 static void test_bicycle_straight() {
@@ -126,6 +133,93 @@ static void test_bicycle_turn() {
     CHECK(e.y > 0.5, "lateral displacement > 0.5m");
 }
 
+static void test_dynamic_straight() {
+    std::printf("--- dynamic straight line (no drift) ---\n");
+    Entity e;
+    e.type = EntityType::Car;
+    apply_vehicle_defaults(e);
+    e.x = 0; e.y = 0; e.heading = 0; e.speed = 15.0;  // 高速直行
+
+    double dt = 0.05;
+    for (int i = 0; i < 100; ++i) {  // 5 秒，无转向
+        step_bicycle_dynamic(e, dt, 0.0, 0.0, 0.0);
+    }
+    std::printf("  after 5s: x=%.2f y=%.4f v_y=%.5f yaw_rate=%.5f heading=%.5f\n",
+                e.x, e.y, e.v_y_body, e.yaw_rate, e.heading);
+    CHECK(approx(e.v_y_body, 0.0, 1e-3), "no lateral velocity (v_y≈0)");
+    CHECK(approx(e.yaw_rate, 0.0, 1e-3), "no yaw rate (steer=0)");
+    CHECK(approx(e.y, 0.0, 0.05), "no lateral drift (y≈0)");
+    CHECK(e.x > 60.0, "moved forward (drag only, ~13.x m/s avg)");
+}
+
+static void test_dynamic_turn() {
+    std::printf("--- dynamic steady-state turn ---\n");
+    Entity e;
+    e.type = EntityType::Car;
+    apply_vehicle_defaults(e);
+    e.x = 0; e.y = 0; e.heading = 0; e.speed = 15.0;
+
+    double dt = 0.05;
+    double yaw_prev = 0.0;
+    // 恒定转向 0.05 rad，跑 4 秒到稳态（throttle 维持车速抵消阻力）
+    for (int i = 0; i < 80; ++i) {
+        step_bicycle_dynamic(e, dt, 0.15, 0.0, 0.05);
+        if (i == 60) yaw_prev = e.yaw_rate;  // 3.0s 快照
+    }
+    double yaw_ss = e.yaw_rate;  // 4.0s
+    std::printf("  steady: v=%.2f yaw_rate=%.4f (3s=%.4f) heading=%.3f y=%.2f\n",
+                e.speed, yaw_ss, yaw_prev, e.heading, e.y);
+    // 正 steer → 正 yaw_rate → heading/y 增大（与运动学符号一致）
+    CHECK(yaw_ss > 0.05, "positive steer -> positive yaw_rate");
+    CHECK(e.heading > 0.1 && e.y > 0.5, "vehicle turned toward +y");
+    // 收敛：末秒 yaw_rate 变化很小（未发散、未极限环）
+    CHECK(approx(yaw_ss, yaw_prev, 0.02), "yaw_rate converged to steady state");
+    // 不足转向：动力学稳态 yaw 低于运动学预测 v/L·tan(steer)
+    double yaw_kin = (e.speed / e.wheelbase) * std::tan(0.05);
+    CHECK(yaw_ss < yaw_kin, "understeer: dynamic yaw < kinematic prediction");
+}
+
+static void test_dynamic_highspeed_bounded() {
+    std::printf("--- dynamic high-speed large steer (bounded, no NaN) ---\n");
+    Entity e;
+    e.type = EntityType::Car;
+    apply_vehicle_defaults(e);
+    e.x = 0; e.y = 0; e.heading = 0; e.speed = 30.0;
+
+    double dt = 0.05;
+    for (int i = 0; i < 120; ++i) {  // 6 秒大转角
+        step_bicycle_dynamic(e, dt, 0.2, 0.0, 0.2);
+    }
+    std::printf("  after 6s: speed=%.2f yaw_rate=%.4f x=%.1f y=%.1f\n",
+                e.speed, e.yaw_rate, e.x, e.y);
+    CHECK(!std::isnan(e.x) && !std::isnan(e.y), "position finite (no NaN)");
+    CHECK(!std::isnan(e.yaw_rate) && !std::isnan(e.v_y_body), "state finite (no NaN)");
+    CHECK(std::fabs(e.yaw_rate) < 2.0, "yaw_rate bounded (<2 rad/s)");
+    // 阻力限速终端 √(0.2·5000/0.4)=50 m/s，<60 即证明未发散（非发散到数千 m/s）
+    CHECK(e.speed < 60.0, "speed bounded (near drag-terminal ~50 m/s)");
+}
+
+static void test_dynamic_lowspeed_degrade() {
+    std::printf("--- dynamic low-speed degrades to kinematic ---\n");
+    // 低速下动力学应退化运动学：两条轨迹逐帧一致
+    Entity ed, ek;
+    ed.type = ek.type = EntityType::Car;
+    apply_vehicle_defaults(ed);
+    apply_vehicle_defaults(ek);
+    ed.speed = ek.speed = 2.0;  // < LOW_SPEED_MS(5.0)
+
+    double dt = 0.05;
+    for (int i = 0; i < 40; ++i) {
+        step_bicycle_dynamic(ed, dt, 0.2, 0.0, 0.1);
+        step_bicycle(ek, dt, 0.2, 0.0, 0.1);
+    }
+    std::printf("  dyn:(x=%.3f y=%.3f h=%.4f)  kin:(x=%.3f y=%.3f h=%.4f)\n",
+                ed.x, ed.y, ed.heading, ek.x, ek.y, ek.heading);
+    CHECK(approx(ed.x, ek.x, 1e-6), "low-speed x matches kinematic");
+    CHECK(approx(ed.y, ek.y, 1e-6), "low-speed y matches kinematic");
+    CHECK(approx(ed.heading, ek.heading, 1e-6), "low-speed heading matches kinematic");
+}
+
 static void test_pedestrian() {
     std::printf("--- pedestrian ---\n");
     Entity p;
@@ -143,6 +237,10 @@ int main() {
     test_bicycle_straight();
     test_bicycle_braking();
     test_bicycle_turn();
+    test_dynamic_straight();
+    test_dynamic_turn();
+    test_dynamic_highspeed_bounded();
+    test_dynamic_lowspeed_degrade();
     test_pedestrian();
     std::printf("=== %d failures ===\n", failures);
     return failures == 0 ? 0 : 1;
