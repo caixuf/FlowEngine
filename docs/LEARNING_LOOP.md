@@ -405,7 +405,7 @@ python3 tools/modelctl.py ota status
 | 3 | `learner_node` 车端增量微调 | 持续学习 / on-device SGD / 资源受限调度 | ✅ 已实现 |
 | 4 | 模型 OTA + 版本管理 | Discovery + Transport 灰度发布 / 回滚 / A-B 对比 | ✅ 已实现 |
 | 5 | **端到端 v3** | 59 维特征 / 多隐层 MLP / 5 维输出 / 时序窗口 / 感知统计 / 场景上下文 | ✅ 已实现 |
-| — | 推理内核升级 | 把 `tiny_mlp_forward()` 替换为 ONNX Runtime / TensorRT，契约不变 | 待实现 |
+| — | 推理内核升级 | 把 `tiny_mlp_forward()` 做成可切换后端：新增 ONNX Runtime 后端，契约不变 | ✅ 已实现（ONNX；TensorRT 不做） |
 
 > v3 已全面上线，默认使用 59 维特征、多隐层 MLP、5 维输出（throttle/brake/steer/lane_change/confidence）。
 
@@ -413,5 +413,20 @@ python3 tools/modelctl.py ota status
 
 - `train.py` 用纯 Python 手写反向传播，目的是让「训练→部署」闭环**在任何环境都能跑通**。
   生产环境建议改用 PyTorch 训练并导出 ONNX，只要最终产物遵循同一数据 / 权重契约即可。
+
+### ONNX 推理后端（可选）
+
+`inference_node` 的「前向计算」是可切换后端：默认 **tiny-MLP**（纯 C，零依赖），
+可选 **ONNX Runtime**。按 `model_path` 后缀自动选：`.onnx` → ONNX，`.txt` → tiny-MLP。
+
+- **编译**：`cmake -DENABLE_ONNX=ON ...`（需系统装有 onnxruntime）。未开启或找不到
+  onnxruntime 时 `onnx_backend` 编成降级桩，运行时遇 `.onnx` 自动回退 tiny-MLP/heuristic，
+  链路永不中断。契约见 `modules/adas_nodes/onnx_backend.h`。
+- **导出**：`python3 tools/train_e2e/export_onnx.py --model <model.txt> --output <model.onnx>`
+  把 tiny-MLP 权重导成**数值等价**的 ONNX 图（归一化/反归一化折进图，喂同一份原始特征）。
+  导出需 `pip install onnx numpy`；运行时推理只需 onnxruntime。
+- **等价性门禁**：`tests/test_e2e_training_tools.py::test_onnx_export_parity_with_tiny_mlp`
+  对同一批输入断言 `onnx_forward` 与 `tiny_mlp_forward` 逐元素 |Δ|<1e-3（缺 onnx/ort 时 skip）。
+- **不做 TensorRT**：NVIDIA 专有、CI 无法通用覆盖，故仅提供 ONNX 一条可移植路径。
 - 车端算力有限，建议从小模型 / 端到端小网络起步；把工程闭环跑通比追求模型规模更有价值。
 - 学习模型的任何输出，都必须经过 `safety_control_node` 的安全校验后才允许下发执行。
