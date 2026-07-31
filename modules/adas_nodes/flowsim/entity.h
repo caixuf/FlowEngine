@@ -97,10 +97,11 @@ struct Entity {
      * 读取者。max_brake 仍保留（scene_events.cpp:147 用于刹车距离估算）。 */
     double max_brake{4.0};         /**< m/s² */
 
-    /* ── 动力学模型预留字段（physics_model=dynamic 时启用）──
+    /* ── 动力学模型字段（physics_model=dynamic 时启用，见 physics.cpp
+     *    integrate_lateral_dynamics / apply_vehicle_defaults）──
      * 运动学模式下这些字段为 0，不影响现有逻辑。
-     * 动力学模式实现时需填充：轮胎侧偏力 → 车身侧偏角 → heading 积分。
-     * 参考：Pacejka 魔术公式 / 简化刷子模型，见 docs/CALIBRATION_GUIDE.md。 */
+     * 动力学模式：轮胎侧偏力 F_yf/F_yr → 车身侧偏角 v_y_body → yaw_rate → heading 积分。
+     * 线性轮胎模型（F_y=Cα·α），标定边界见 docs/CALIBRATION_GUIDE.md。 */
     double v_x_body{0};            /**< 车体系纵向速度 (m/s) */
     double v_y_body{0};            /**< 车体系横向速度 (m/s) */
     double yaw_rate{0};            /**< 偏航角速度 (rad/s) */
