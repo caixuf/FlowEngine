@@ -26,6 +26,8 @@
  */
 
 #include <math.h>
+#include <string.h>
+#include <cjson/cJSON.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -97,6 +99,52 @@ static inline const char* traffic_light_state_str(TrafficLightState s) {
         case TL_RED:    return "red";
         default:        return "green";
     }
+}
+
+/* ── road/traffic_lights topic 共享解析 ──────────────────────────
+ * flowsim 把灯序列化为 {"lights":[{x,y_lane,state},...]}，
+ * planning/behavior/inference/data_recorder 等多个节点消费同一份
+ * topic。2026-07 起每个节点手写一份 cJSON 循环解析——schema 一改
+ * 就要同步 N 处，漏一处就静默漂移。统一在此解析成 TrafficLightCache，
+ * 消费端只读缓存。state 字符串与 traffic_light_state_str() 对应：
+ * "red"→TL_RED、"yellow"→TL_YELLOW、其余→TL_GREEN。 */
+#define TL_CACHE_MAX 16
+
+typedef struct {
+    double x[TL_CACHE_MAX];        /* 停止线 x（m） */
+    double y_lane[TL_CACHE_MAX];   /* 管辖车道中心 y（m） */
+    int    state[TL_CACHE_MAX];    /* TrafficLightState */
+    int    count;                  /* 灯数量 */
+    int    valid;                  /* 收到过非空 lights 数组 */
+} TrafficLightCache;
+
+static inline void traffic_lights_parse(const char* json, TrafficLightCache* c) {
+    if (!c) return;
+    memset(c, 0, sizeof(*c));
+    c->valid = 0;
+    if (!json) return;
+    cJSON* root = cJSON_Parse(json);
+    if (!root) return;
+    cJSON* lights = cJSON_GetObjectItemCaseSensitive(root, "lights");
+    if (lights && cJSON_IsArray(lights)) {
+        cJSON* light;
+        cJSON_ArrayForEach(light, lights) {
+            if (c->count >= TL_CACHE_MAX) break;
+            cJSON* item;
+            c->x[c->count]      = 0.0;
+            c->y_lane[c->count] = -1.75;
+            c->state[c->count]  = TL_GREEN;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "x")))       c->x[c->count]      = item->valuedouble;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "y_lane")))  c->y_lane[c->count] = item->valuedouble;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "state")) && cJSON_IsString(item)) {
+                if (strcmp(item->valuestring, "red") == 0)       c->state[c->count] = TL_RED;
+                else if (strcmp(item->valuestring, "yellow") == 0) c->state[c->count] = TL_YELLOW;
+            }
+            c->count++;
+        }
+        c->valid = (c->count > 0) ? 1 : 0;
+    }
+    cJSON_Delete(root);
 }
 
 #ifdef __cplusplus

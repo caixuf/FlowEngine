@@ -160,10 +160,11 @@ struct PlanningContext {
     double lane_width{3.5};     /* 从 road/geometry 订阅获取 */
 
     /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，flowsim_node 发布）。
+     * 解析统一走 include/traffic_light.h 的 traffic_lights_parse()（TL_CACHE_MAX
+     * 即该头定义的 16），此处只存消费视图。
      * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
      * 红灯/黄灯时注入一面跨车道宽度的静止"墙"，绿灯时不注入——
      * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
-#define TL_CACHE_MAX 16
     double tl_x[TL_CACHE_MAX];         /* 停止线 x（世界坐标） */
     double tl_y_lane[TL_CACHE_MAX];    /* 灯所在车道 y */
     int    tl_state[TL_CACHE_MAX];     /* 0=green 1=yellow 2=red */
@@ -569,37 +570,14 @@ static void on_scene_frame(const Message* msg, void* user_data) {
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
-    const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
-    if (root) {
-        cJSON* lights = cJSON_GetObjectItem(root, "lights");
-        if (lights && cJSON_IsArray(lights)) {
-            int n = 0;
-            cJSON* light;
-            cJSON_ArrayForEach(light, lights) {
-                if (n >= TL_CACHE_MAX) break;
-                cJSON* item;
-                g.tl_x[n] = 0.0;
-                g.tl_y_lane[n] = -1.75;
-                g.tl_state[n] = 0; /* default green */
-                if ((item = cJSON_GetObjectItem(light, "x")))       g.tl_x[n] = item->valuedouble;
-                if ((item = cJSON_GetObjectItem(light, "y_lane")))  g.tl_y_lane[n] = item->valuedouble;
-                if ((item = cJSON_GetObjectItem(light, "state")) && cJSON_IsString(item)) {
-                    if (strcmp(item->valuestring, "red") == 0)    g.tl_state[n] = 2;
-                    else if (strcmp(item->valuestring, "yellow") == 0) g.tl_state[n] = 1;
-                }
-                n++;
-            }
-            g.tl_count = n;
-            g.has_traffic_lights = (n > 0) ? 1 : 0;
-        } else {
-            g.tl_count = 0;
-            g.has_traffic_lights = 0;
-        }
-        cJSON_Delete(root);
-    } else {
-        g.tl_count = 0;
-        g.has_traffic_lights = 0;
+    TrafficLightCache c;
+    traffic_lights_parse((const char*)msg->data, &c);
+    g.tl_count = c.count;
+    g.has_traffic_lights = c.valid;
+    for (int i = 0; i < c.count; i++) {
+        g.tl_x[i]      = c.x[i];
+        g.tl_y_lane[i] = c.y_lane[i];
+        g.tl_state[i]  = c.state[i];
     }
 }
 

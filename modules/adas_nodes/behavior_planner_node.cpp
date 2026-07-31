@@ -20,6 +20,7 @@
 #include "coroutine_task.h"
 #include "adas_msgs_gen.h"
 #include "road_geometry.h"
+#include "traffic_light.h"
 #include "state_machine.h"
 #include "param_registry.h"
 #undef LOG_TRACE
@@ -89,7 +90,7 @@ static const TransitionRule BEH_TRANSITIONS[] = {
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
 #define BEH_MAX_OBS 128
-#define BEH_TL_MAX 16
+/* TL_CACHE_MAX 来自 traffic_light.h（共享红绿灯解析），不在此重复定义 */
 
 struct BehaviorContext {
     Transport*        transport{nullptr};
@@ -125,12 +126,13 @@ struct BehaviorContext {
     double lane_width{3.5};
     volatile int has_road_geometry{0};
 
-    /* 红绿灯缓存（从 road/traffic_lights JSON 解析，归位决策用）。
-     * 归位（超车后切回内侧道）前要确认目标车道前方没有红灯，
-     * 否则切回去立刻停在灯前——2026-07-31 实跑：RIGHT 超车后
+    /* 红绿灯缓存（road/traffic_lights 解析走 traffic_light.h 的共享
+     * traffic_lights_parse()，此处只存消费视图，TL_CACHE_MAX 即该头
+     * 定义的 16）。归位（超车后切回内侧道）前要确认目标车道前方没有
+     * 红灯，否则切回去立刻停在灯前——2026-07-31 实跑：RIGHT 超车后
      * CRUISE 归位回 lane2，距 x=350 红灯仅 ~15m，当场刹停。 */
-    double tl_x[BEH_TL_MAX]{}, tl_y_lane[BEH_TL_MAX]{};
-    int    tl_state[BEH_TL_MAX]{};  /* 0=green 1=yellow 2=red */
+    double tl_x[TL_CACHE_MAX]{}, tl_y_lane[TL_CACHE_MAX]{};
+    int    tl_state[TL_CACHE_MAX]{};  /* 0=green 1=yellow 2=red */
     int    tl_count{0};
     volatile int has_traffic_lights{0};
 
@@ -445,37 +447,21 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
-/* ── road/traffic_lights 订阅 — 缓存红绿灯位置/状态，供归位决策 ── */
+/* ── road/traffic_lights 订阅 — 缓存红绿灯位置/状态，供归位决策 ──
+ * JSON 解析统一走 traffic_light.h 的 traffic_lights_parse()（共享），
+ * 本节点只把缓存拷进自己的 tl_* 消费视图。 */
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
-    cJSON* lights = cJSON_GetObjectItem(root, "lights");
-    if (lights && cJSON_IsArray(lights)) {
-        int n = 0;
-        cJSON* light;
-        cJSON_ArrayForEach(light, lights) {
-            if (n >= BEH_TL_MAX) break;
-            cJSON* item;
-            g.tl_x[n] = 0.0;
-            g.tl_y_lane[n] = -1.75;
-            g.tl_state[n] = 0; /* default green */
-            if ((item = cJSON_GetObjectItem(light, "x")))       g.tl_x[n] = item->valuedouble;
-            if ((item = cJSON_GetObjectItem(light, "y_lane")))  g.tl_y_lane[n] = item->valuedouble;
-            if ((item = cJSON_GetObjectItem(light, "state")) && cJSON_IsString(item)) {
-                if (strcmp(item->valuestring, "red") == 0)       g.tl_state[n] = 2;
-                else if (strcmp(item->valuestring, "yellow") == 0) g.tl_state[n] = 1;
-            }
-            n++;
-        }
-        g.tl_count = n;
-        g.has_traffic_lights = (n > 0) ? 1 : 0;
-    } else {
-        g.tl_count = 0;
-        g.has_traffic_lights = 0;
+    TrafficLightCache c;
+    traffic_lights_parse((const char*)msg->data, &c);
+    g.tl_count = c.count;
+    g.has_traffic_lights = c.valid;
+    for (int i = 0; i < c.count; i++) {
+        g.tl_x[i]      = c.x[i];
+        g.tl_y_lane[i] = c.y_lane[i];
+        g.tl_state[i]  = c.state[i];
     }
-    cJSON_Delete(root);
 }
 
 /* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。 */

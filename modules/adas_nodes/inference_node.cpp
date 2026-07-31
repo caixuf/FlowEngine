@@ -43,6 +43,7 @@
 #include "logger.h"
 #include "tiny_mlp.h"
 #include "onnx_backend.h"
+#include "traffic_light.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -303,37 +304,32 @@ static void on_model_ota_active(const Message* msg, void* user_data) {
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
-    cJSON* lights = cJSON_GetObjectItem(root, "lights");
-    if (!cJSON_IsArray(lights)) { cJSON_Delete(root); return; }
+    /* JSON 解析统一走 traffic_light.h 的共享 traffic_lights_parse() */
+    TrafficLightCache c;
+    traffic_lights_parse((const char*)msg->data, &c);
 
-    /* 找最近的红灯 */
+    /* 找最近的红灯（语义与旧实现一致：红>黄>绿，忽略后方灯） */
     double nearest_red = 1e9;
     int has_red = 0;
-    cJSON* light;
-    cJSON_ArrayForEach(light, lights) {
-        cJSON* s = cJSON_GetObjectItem(light, "state");
-        cJSON* x = cJSON_GetObjectItem(light, "x");
-        if (!cJSON_IsString(s) || !cJSON_IsNumber(x)) continue;
-        double dist = x->valuedouble - g.ego_x;
+    for (int i = 0; i < c.count; i++) {
+        double dist = c.x[i] - g.ego_x;
         if (dist < 0) continue;  /* 后方灯忽略 */
-        const char* state = s->valuestring;
-        if (strcmp(state, "red") == 0) {
+        if (c.state[i] == TL_RED) {
             if (dist < nearest_red) {
                 nearest_red = dist;
                 has_red = 1;
             }
-        } else if (strcmp(state, "yellow") == 0) {
+        } else if (c.state[i] == TL_YELLOW) {
             /* 黄灯也视为减速信号，但优先级低于红灯 */
             if (!has_red && dist < nearest_red) {
                 nearest_red = dist;
             }
-        }
-        /* 绿灯：只记录第一个 */
-        if (!has_red && g.tl_state < 0.0 && strcmp(state, "green") == 0) {
-            g.tl_state = 0.0;
-            g.tl_distance = dist;
+        } else {
+            /* 绿灯：只记录第一个 */
+            if (!has_red && g.tl_state < 0.0) {
+                g.tl_state = 0.0;
+                g.tl_distance = dist;
+            }
         }
     }
     if (has_red) {
@@ -343,7 +339,6 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
         g.tl_state = 0.0;  /* 有灯但都是绿灯 */
     }
     g.has_scene = 1;
-    cJSON_Delete(root);
 }
 
 /* ── v3: 道路几何回调 ───────────────────────────────────────── */
