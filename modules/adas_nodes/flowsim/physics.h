@@ -1,15 +1,13 @@
 /**
- * physics.h — 车辆动力学（自行车模型）
+ * physics.h — 车辆动力学（自行车模型，运动学 + 动力学两版）
  *
- * 从 sim_world_node.c 的 vehicle_tick() 提取的自行车模型积分：
- *   - 纵向：驱动力 - 制动力 - 空气阻力 → 加速度 → 速度
- *   - 横向：方向盘转角 → 航向变化 → x/y 位置更新
+ * 纵向（两版共用）：驱动力 - 制动力 - 空气阻力 → 加速度 → 速度。
  *
- * 自行车模型假设：
- *   - 车辆是刚体，前后轮在同一平面
- *   - 前轮转向角度 = steer，后轮不转
- *   - 无侧滑（低速近似）
- *   - 适用于 <30 m/s 的乘用车仿真
+ * 横向两版：
+ *   - step_bicycle（默认）——运动学：steer → 航向变化 → x/y。无侧滑假设，
+ *     前后轮同平面刚体、后轮不转，适用于常规乘用车仿真。
+ *   - step_bicycle_dynamic（opt-in）——线性轮胎二自由度：侧向速度 + 横摆角速度
+ *     积分，低速退化运动学。边界见该函数注释与 docs/CALIBRATION_GUIDE.md。
  *
  * 参数默认值对应一辆中型轿车（mass=1500kg, wheelbase=2.7m）。
  */
@@ -35,19 +33,26 @@ namespace flowsim {
 void step_bicycle(Entity& e, double dt, double throttle, double brake, double steer);
 
 /**
- * 动力学自行车模型积分（预留接口，默认未实现）。
+ * 动力学自行车模型积分（线性轮胎二自由度，opt-in）。
  *
  * 与运动学模型的区别：
- *   - 保留 step_bicycle 的纵向力计算（drive/brake/drag）
- *   - 横向用轮胎侧偏力 + 转动惯量积分 heading，不做 heading 重置
- *   - 侧偏角 = steer - atan2(v_y_body + a*yaw_rate, v_x_body)
- *   - 需要 tire_stiffness_f/r、yaw_inertia 等字段已初始化
+ *   - 复用 step_bicycle 的纵向力（drive/brake/drag）与执行器滞后
+ *   - 横向解侧向速度 v_y_body + 横摆角速度 yaw_rate，heading 由模型自主积分
+ *     （不做道路切线重置，故 flowsim_node 的 is_dynamic 分支跳过 heading 重置）
+ *   - 滑移角 α_f=steer−atan2(v_y+a·r, v_x)、α_r=−atan2(v_y−b·r, v_x)
+ *   - 线性轮胎 F_y=Cα·α；用到 apply_vehicle_defaults 设的 tire_stiffness_f/r、yaw_inertia
  *
- * 当前实现：降级到 step_bicycle + LOG_WARN 一次。
- * 启用方式：pipeline.json 中 flowsim 节点的 params 加 "physics_model":"dynamic"
- *          并设置 tire_stiffness_f/r、yaw_inertia 等参数。
+ * 三条已知边界（详见 docs/CALIBRATION_GUIDE.md）：
+ *   1. 线性轮胎——滑移角饱和于 ±0.12rad，超出不再增长（近似摩擦极限），
+ *      故极限工况的过弯不精确，但保证有界不发散。
+ *   2. 低速退化——v_x<5m/s 转调 step_bicycle（前向欧拉在高刚度低速发散 +
+ *      低速轮胎滑移可忽略）。故起步/堵车段与运动学等价。
+ *   3. 与现有 MPC 存在模型失配——控制器基于运动学假设整定，动力学下过弯
+ *      横向误差可能变大。故默认关闭，仅作仿真保真度选项，验收标准是
+ *      「稳定不发散 + invariant 通过」而非「控制精度优于运动学」。
  *
- * 详见 docs/CALIBRATION_GUIDE.md。
+ * 启用方式：pipeline.json 中 flowsim 节点 params 加 "physics_model":"dynamic"
+ *          （tire_stiffness_f/r、yaw_inertia 由 apply_vehicle_defaults 按车型预置）。
  */
 void step_bicycle_dynamic(Entity& e, double dt, double throttle, double brake, double steer);
 

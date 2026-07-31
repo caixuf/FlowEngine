@@ -19,12 +19,13 @@
 
 | 特性 | 运动学模型（当前） | 动力学模型 |
 |------|-------------------|-----------|
-| heading 来源 | 自行车模型积分（自由演化） | 轮胎侧偏力积分 |
-| 侧偏角 | 假设为 0 | 有（由轮胎模型计算） |
-| 转向不足/过度 | 不体现 | 可体现 |
-| 参数数量 | 少（wheelbase + PID + Stanley） | 多（+ 轮胎刚度 + 转动惯量 + 松弛长度） |
+| heading 来源 | 自行车模型积分（自由演化） | 横摆角速度积分（轮胎侧偏力驱动） |
+| 侧偏角 | 假设为 0 | 有（线性轮胎 + 滑移角饱和） |
+| 转向不足/过度 | 不体现 | 可体现（等前后刚度 + 质心偏前 → 不足转向） |
+| 参数数量 | 少（wheelbase + PID + Stanley） | 多（+ 轮胎刚度 Cα + 转动惯量 Iz） |
 | 标定难度 | 低 | 高 |
-| 适用场景 | 直道、高速公路巡航 | 急弯、极限工况 |
+| 适用场景 | 直道、高速公路巡航 | 中等过弯（极限工况因线性轮胎饱和而不精确） |
+| 状态 | **默认** | opt-in（`physics_model=dynamic`） |
 
 **当前项目使用运动学模型**，heading 由 `heading += steer * v / L * dt` 每帧自由积分，不强制重置为道路切线。这使得车辆能在变道/超车时自然累积横向偏移。高速公路巡航场景下，运动学模型是轨迹追踪验证的合理简化。
 
@@ -41,13 +42,22 @@
 ```
 
 - `"kinematic"`：运动学自行车模型，heading 自由积分。稳定、可预测。
-- `"dynamic"`：调用 `step_bicycle_dynamic()` 桩函数，当前降级到 kinematic 并打印一次 LOG_WARN。未来实现时，heading 由轮胎侧偏力积分自主演化。
+- `"dynamic"`：调用 `step_bicycle_dynamic()`，**线性轮胎二自由度完整实现**（不是桩）。
+  heading 由横摆角速度积分自主演化，`tire_stiffness_f/r`、`yaw_inertia` 由
+  `apply_vehicle_defaults()` 按车型预置。
 
-**实现动力学模型前需要准备：**
-1. 在 `entity.h` 的预留字段中填入 `tire_stiffness_f/r`、`yaw_inertia` 等参数
-2. 在 `physics.cpp` 的 `step_bicycle_dynamic()` 中实现轮胎模型（Pacejka 魔术公式 / 简化刷子模型）
-3. 重新标定所有横向控制参数（`lat_kp`、`lat_kd_heading`、`yaw_damping`）
-4. 在 `control_node.cpp` 中增加动力学模式专用的控制参数分支
+**三条已知边界（启用前必读）：**
+1. **线性轮胎**——滑移角饱和于 ±0.12 rad（近似摩擦极限），极限过弯不精确但保证有界不发散。
+   要非线性轮胎（Pacejka 魔术公式）需另做，不在本轮。
+2. **低速退化**——`v_x < 5 m/s` 转调运动学（前向欧拉在高刚度低速发散 + 低速滑移可忽略），
+   故起步/堵车段与运动学逐帧等价。
+3. **与现有 MPC 模型失配**——控制器基于运动学假设整定，动力学下过弯横向误差可能变大。
+   故默认关闭，验收标准是「稳定不发散 + invariant 通过」而非「控制精度优于运动学」。
+   要动力学下的高精度控制，需重新整定 `lat_kp`/`lat_kd_heading`/`yaw_damping`（另做）。
+
+> 方程、每车型默认参数（Car/SUV/Truck 的 Cα、Iz）、验证命令详见
+> [physics.h](../modules/adas_nodes/flowsim/physics.h) 的 `step_bicycle_dynamic` 注释
+> 与 `flowsim/physics.cpp` 的 `integrate_lateral_dynamics`。
 
 ---
 
