@@ -1,8 +1,12 @@
-// Unit test for FlowRoadNetwork (Phase 1.2 验收).
+// Unit test for FlowRoadNetwork (Phase 1.2 验收，2026-07 改为场景无关 invariant)。
 // 验证：加载、道路查询、frenet↔world 转换、限速、车道宽度。
+// 断言不绑定具体场景（旧版硬编码 zhongkai_road_full 的数字，场景已删除导致
+// 测试游离在 CMake 外无法运行）——对任意合法 xodr 验证通用不变式：
+//   load 成功、路数 > 0、路长 > 0、车道数 ≥ 1、车道宽 ∈ [2.5,4.0]m、
+//   限速 ∈ (0,30]m/s、frenet↔world 往返误差 < 0.1m、越界 road 拒绝。
 //
 // 用法：./test_road_network <scene.xodr>
-// 期望场景：zhongkai_road_full.xodr（含多段道路，含直道+弯道+路口）
+// 由 CMake fixture 生成 xodr 后自动运行（见 modules/adas_nodes/CMakeLists.txt）。
 
 #include "flowsim/road_network.h"
 
@@ -32,64 +36,74 @@ static bool approx(double a, double b, double eps = 0.01) {
 }
 
 int main(int argc, char** argv) {
-    const char* xodr = argc > 1 ? argv[1] : "/tmp/test_highway.xodr";
+    const char* xodr = argc > 1 ? argv[1] : "/tmp/flowsim_straight_road.xodr";
     std::printf("=== FlowRoadNetwork test on %s ===\n", xodr);
 
     FlowRoadNetwork net;
     CHECK(net.load(xodr), "load xodr");
     CHECK(net.loaded(), "loaded() == true");
-    CHECK(net.road_count() == 2, "road_count == 2 (urban + curve)");
 
-    // 道路 0：直道 200m，2 个可行驶车道
-    RoadInfo r0;
-    CHECK(net.road_info(0, r0), "road_info[0]");
-    CHECK(r0.length == 200.0, "road[0] length == 200");
-    CHECK(r0.drivable_lanes == 2, "road[0] drivable_lanes == 2");
+    const int roads = net.road_count();
+    std::printf("  road_count = %d\n", roads);
+    CHECK(roads >= 1, "road_count >= 1");
 
-    // 道路 1：弯道 120m
-    RoadInfo r1;
-    CHECK(net.road_info(1, r1), "road_info[1]");
-    CHECK(r1.length == 120.0, "road[1] length == 120");
+    // 逐条道路：长度 > 0、车道数 ≥ 1
+    for (int r = 0; r < roads; ++r) {
+        RoadInfo ri;
+        CHECK(net.road_info(r, ri), "road_info()");
+        char msg[96];
+        std::snprintf(msg, sizeof msg, "road[%d].length > 0", r);
+        CHECK(ri.length > 0.0, msg);
+        std::snprintf(msg, sizeof msg, "road[%d].drivable_lanes >= 1", r);
+        CHECK(ri.drivable_lanes >= 1, msg);
+    }
 
-    // frenet_to_world: road 0, lane -1, s=50, offset=0
-    // 期望：x=50（沿 +x 走 50m），y=-1.75（右车道中心），h=0（直道）
-    WorldPos w;
-    CHECK(net.frenet_to_world(0, -1, 50.0, 0.0, w), "frenet_to_world road0/lane-1/s50");
-    std::printf("  → x=%.3f y=%.3f h=%.3f\n", w.x, w.y, w.h);
-    CHECK(approx(w.x, 50.0), "x ≈ 50");
-    CHECK(approx(w.y, -1.75), "y ≈ -1.75 (right lane center)");
-    CHECK(approx(w.h, 0.0), "h ≈ 0 (straight road)");
+    // 通用不变式（对齐 CLAUDE.md 静态 digest）：
+    // 车道宽 ∈ [2.5, 4.0]m、限速 ∈ (0, 30]m/s、frenet↔world 往返 < 0.1m
+    const int road = 0;
+    RoadInfo ri0;
+    net.road_info(road, ri0);
+    const double road_len = ri0.length;
+    const int lanes = net.drivable_lane_count(road, 0.0);
+    std::printf("  road[0] drivable lanes (both sides) = %d\n", lanes);
+    CHECK(lanes >= 1, "road[0] has >= 1 drivable lane");
+    // 右行驶方向车道 id 为负；drivable_lane_count 统计两侧总数，
+    // 故从 -1 逐条探测，width <= 0 即该侧车道枚举完毕（对向在 +1..）。
+    for (int i = 1;; ++i) {
+        const int lane_id = -i;
+        const double s = std::min(50.0, road_len / 2.0);
+        double lw = net.lane_width(road, lane_id, s);
+        if (lw <= 0.0) {
+            std::printf("  right side lanes: %d\n", i - 1);
+            break;
+        }
+        char msg[96];
+        std::snprintf(msg, sizeof msg, "lane %d width %.3f in [2.5,4.0]m", lane_id, lw);
+        CHECK(lw >= 2.5 && lw <= 4.0, msg);
 
-    // lane -2: 右数第二车道，中心 t=-5.25
-    WorldPos w2;
-    CHECK(net.frenet_to_world(0, -2, 10.0, 0.0, w2), "frenet_to_world lane-2/s10");
-    std::printf("  → x=%.3f y=%.3f\n", w2.x, w2.y);
-    CHECK(approx(w2.x, 10.0), "lane-2 x ≈ 10");
-    CHECK(approx(w2.y, -5.25), "y ≈ -5.25 (lane -2 center)");
+        double sl = net.speed_limit(road, lane_id, s);
+        std::snprintf(msg, sizeof msg, "lane %d speed_limit %.3f in (0,30]", lane_id, sl);
+        CHECK(sl > 0.0 && sl <= 30.0, msg);
 
-    // Roundtrip: frenet → world → frenet
-    FrenetPos f;
-    CHECK(net.world_to_frenet(w.x, w.y, f), "world_to_frenet roundtrip");
-    std::printf("  → road=%d lane=%d s=%.3f offset=%.3f\n", f.road_id, f.lane_id, f.s, f.offset);
-    CHECK(f.road_id == 0, "roundtrip road == 0");
-    CHECK(f.lane_id == -1, "roundtrip lane == -1");
-    CHECK(approx(f.s, 50.0, 0.1), "roundtrip s ≈ 50");
-    CHECK(approx(f.offset, 0.0, 0.1), "roundtrip offset ≈ 0");
+        // 车道中心往返：frenet(s, 0) → world → frenet，应回到同路同车道、|Δs|<0.1、|offset|<0.1
+        WorldPos w;
+        CHECK(net.frenet_to_world(road, lane_id, s, 0.0, w), "frenet_to_world at lane center");
+        FrenetPos f;
+        CHECK(net.world_to_frenet(w.x, w.y, f), "world_to_frenet roundtrip");
+        std::snprintf(msg, sizeof msg, "lane %d roundtrip: road=%d lane=%d s=%.3f off=%.3f",
+                      lane_id, f.road_id, f.lane_id, f.s, f.offset);
+        std::printf("  %s\n", msg);
+        CHECK(f.road_id == road, "roundtrip same road");
+        CHECK(f.lane_id == lane_id, "roundtrip same lane");
+        CHECK(approx(f.s, s, 0.1), "roundtrip |Δs| < 0.1");
+        CHECK(approx(f.offset, 0.0, 0.1), "roundtrip |Δoffset| < 0.1");
+    }
 
-    // lane_width: lane -1 宽 3.5m
-    double lw = net.lane_width(0, -1, 10.0);
-    std::printf("  lane_width(0,-1,10) = %.3f\n", lw);
-    CHECK(approx(lw, 3.5), "lane -1 width ≈ 3.5");
-
-    // speed_limit: 应该返回 xodr 里写的 13.89 m/s (50 km/h)
-    double sl = net.speed_limit(0, -1, 10.0);
-    std::printf("  speed_limit(0,-1,10) = %.3f\n", sl);
-    CHECK(approx(sl, 13.89, 0.1), "speed_limit ≈ 13.89");
-
-    // 弯道段位置：road 1, s=60（弯道中点），h 应该非零（弯道有曲率）
+    // 车道中心应在道路另一侧相邻车道外（sanity：-1 车道中心 y < 0）
     WorldPos wc;
-    CHECK(net.frenet_to_world(1, -1, 60.0, 0.0, wc), "frenet_to_world on curve");
-    std::printf("  curve → x=%.3f y=%.3f h=%.4f\n", wc.x, wc.y, wc.h);
+    if (net.frenet_to_world(road, -1, 10.0, 0.0, wc)) {
+        CHECK(wc.y < 0.0, "lane -1 center is on -y side (right-hand driving)");
+    }
 
     // 越界检查：不存在的 road_id
     WorldPos wbad;

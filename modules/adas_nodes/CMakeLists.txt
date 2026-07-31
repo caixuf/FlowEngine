@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(flowengine_nodes C CXX)
+enable_testing()
 
 # ── 节点插件独立 cmake 子项目 ───────────────────────────────────
 #
@@ -214,17 +215,56 @@ target_link_libraries(sensor_model ${NODE_LINK_LIBS})
 # ~50-200μs，同步 resume 会阻塞消息总线分发线程，故改用线程池 resume。
 # 链接 esminiRMLib（C API，ABI 稳定）做道路网络 Frenet↔World 转换。
 # 优先用预构建库（lib/），其次用子模块构建产物（third_party/esmini/build/）。
+# 预构建库按平台存放：Linux = lib/libesminiRMLib.so（ELF），macOS = lib/libesminiRMLib.dylib（Mach-O）。
+# find_library 按平台自动匹配后缀（Linux → .so，macOS → .dylib），两个文件可并存。
 set(ESMINI_ROOT "${FLOW_ROOT}/third_party/esmini")
 # 头文件搜索路径：子模块 → 本地预构建 include（CI 无子模块时走第二条）
 set(ESMINI_RMLIB_INCLUDE
     "${ESMINI_ROOT}/EnvironmentSimulator/Libraries/esminiRMLib"
     "${FLOW_ROOT}/include"
 )
-find_library(ESMINI_RMLIB
-    NAMES esminiRMLib
-    HINTS "${FLOW_ROOT}/lib"                                    # 预构建（CI 优先）
-          "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"  # 子模块构建
-)
+if(APPLE)
+    # macOS：预构建为 Mach-O .dylib，显式优先 .dylib，避免误命中 Linux 的 .so
+    find_library(ESMINI_RMLIB
+        NAMES esminiRMLib.dylib esminiRMLib
+        HINTS "${FLOW_ROOT}/lib"                                    # 预构建（CI 优先）
+              "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"  # 子模块构建
+    )
+else()
+    find_library(ESMINI_RMLIB
+        NAMES esminiRMLib
+        HINTS "${FLOW_ROOT}/lib"                                    # 预构建（CI 优先）
+              "${ESMINI_ROOT}/build/EnvironmentSimulator/Libraries/esminiRMLib"  # 子模块构建
+    )
+endif()
+# ── 预构建库平台格式门禁 ─────────────────────────────────────────
+# 0ca4c09 曾把 macOS 构建的 Mach-O 直接覆盖 lib/libesminiRMLib.so（Linux ELF），
+# 导致 Linux 链接全部失败且报错晦涩（"file format not recognized"）。
+# 这里 configure 期用 `file` 校验格式：Linux 必须 ELF、macOS 必须 Mach-O，
+# 交叉提交二进制立即 FATAL_ERROR 并附恢复指引（对齐 Apollo：构建产物按平台
+# 强绑定校验，绝不交叉使用）。
+if(ESMINI_RMLIB)
+    find_program(_ESMINI_FILE_TOOL file)
+    if(_ESMINI_FILE_TOOL)
+        execute_process(COMMAND ${_ESMINI_FILE_TOOL} "${ESMINI_RMLIB}"
+            OUTPUT_VARIABLE _esmini_file_out ERROR_QUIET)
+        if(APPLE)
+            if(NOT _esmini_file_out MATCHES "Mach-O")
+                message(FATAL_ERROR
+                    "esminiRMLib at ${ESMINI_RMLIB} is NOT Mach-O (macOS 需要 Mach-O).\n"
+                    "  若被 Linux ELF 误覆盖，请在 macOS 上重新构建 libesminiRMLib.dylib。")
+            endif()
+        else()
+            if(NOT _esmini_file_out MATCHES "ELF")
+                message(FATAL_ERROR
+                    "esminiRMLib at ${ESMINI_RMLIB} is NOT ELF (Linux 需要 ELF).\n"
+                    "  若被 macOS 构建误覆盖：git checkout bd69f4a -- lib/libesminiRMLib.so\n"
+                    "  恢复真实 Linux 库后重新 configure。")
+            endif()
+        endif()
+        message(STATUS "flowsim_node: esminiRMLib format OK (${_esmini_file_out})")
+    endif()
+endif()
 add_library(flowsim_node SHARED
     flowsim_node.cpp
     flowsim/road_network.cpp
@@ -250,6 +290,37 @@ if(ESMINI_RMLIB)
 else()
     target_link_libraries(flowsim_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
     message(WARNING "flowsim_node: esminiRMLib NOT found — road_network.cpp will fail to link")
+endif()
+
+# ── 离线 esmini 链路自检（挂 ctest）───────────────────────────
+# test_road_network 是场景无关的 invariant 测试：json_to_xodr.py 把场景 JSON 转成
+# xodr，再用真实预构建 esminiRMLib 验证 load/路数/车道宽/frenet↔world 往返。
+# 不启动 demo、秒级完成（对齐 pipeline_check.py 的离线哲学）。
+# 曾因硬编码已删除场景的断言而无法运行，2026-07 改为通用不变式。
+if(ESMINI_RMLIB)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    add_executable(test_road_network
+        flowsim/test_road_network.cpp
+        flowsim/road_network.cpp
+        flowsim/road_position.cpp
+    )
+    target_include_directories(test_road_network PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${ESMINI_RMLIB_INCLUDE}
+    )
+    target_link_libraries(test_road_network ${ESMINI_RMLIB})
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME gen_esmini_xodr
+            COMMAND ${Python3_EXECUTABLE} ${FLOW_ROOT}/tools/json_to_xodr.py
+                    ${FLOW_ROOT}/scenarios/straight_road.json
+                    -o ${CMAKE_CURRENT_BINARY_DIR}/straight_road.xodr
+        )
+        set_tests_properties(gen_esmini_xodr PROPERTIES FIXTURES_SETUP XODR)
+        add_test(NAME flowsim_road_network
+            COMMAND test_road_network ${CMAKE_CURRENT_BINARY_DIR}/straight_road.xodr
+        )
+        set_tests_properties(flowsim_road_network PROPERTIES FIXTURES_REQUIRED XODR)
+    endif()
 endif()
 
 # planning_node: Frenet 轨迹规划 (FlowCoro 协程版)

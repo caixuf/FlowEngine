@@ -141,3 +141,4 @@ build_*/
 
 # 预构建第三方库（CI 环境无子模块时使用）
 !lib/libesminiRMLib.so
+!lib/libesminiRMLib.dylib
