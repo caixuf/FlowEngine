@@ -9,7 +9,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 设置编译选项
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -fcoroutines -D_GNU_SOURCE")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+# -fcoroutines 是 GCC 专属开关;Clang(含 Apple clang)的 C++20 协程随 -std=c++20
+# 自动启用,传 -fcoroutines 会报 "unknown argument"。故仅对 GNU 编译器追加。
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fcoroutines")
+endif()
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
@@ -55,9 +60,31 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # 包含目录
 include_directories(include)
 
+# ── macOS 跨平台兼容层 ───────────────────────────────────────────────────────
+# 在 APPLE 平台全局强制包含 include/platform_compat.h(-include),把 Linux/macOS
+# 的 pthread 差异(线程命名签名、robust mutex)透明抹平,调用点零改动。
+# 所有兼容内容都在 __APPLE__ 守卫内,Linux 上此选项不生效、行为零变化。
+if(APPLE)
+    add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
+    # epoll/eventfd 平替：把 include/compat 抢在系统头之前,让 flowcoro/net 的
+    # `#include <sys/epoll.h>` / `<sys/eventfd.h>` 命中 kqueue/self-pipe 实现。
+    # 必须在 add_subdirectory(flowcoro) 之前,子目录才继承此包含路径。
+    include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/compat)
+endif()
+
+# 「忽略目标文件里的未解析符号」链接选项 —— GNU ld 与 Apple ld64 语法不同。
+# 用途:flow_launcher/flow_node_host/flow_bag 链接静态 flowengine_core 时,允许
+# 存在 dlopen 加载的节点 .so 才会提供的符号(以及 frenet/eigen 可选符号)。
+if(APPLE)
+    set(FLOW_IGNORE_UNDEF_LINKOPT -Wl,-undefined,dynamic_lookup)
+else()
+    set(FLOW_IGNORE_UNDEF_LINKOPT -Wl,--unresolved-symbols=ignore-in-object-files)
+endif()
+
 # 查找依赖库
 find_package(Threads REQUIRED)
-find_package(PkgConfig REQUIRED)
+# PkgConfig 非强制:macOS 无 Homebrew 时可能缺失,缺失时 cjson 走 FetchContent 兜底。
+find_package(PkgConfig)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # =============================================================================
@@ -94,7 +121,10 @@ add_custom_target(msg_codegen DEPENDS ${GEN_HEADERS})
 include(FetchContent)
 
 # 查找cjson库 — 优先使用系统版本，否则从源码构建
-pkg_check_modules(CJSON libcjson)
+# PKG_CONFIG_FOUND 为假时(如 macOS 无 pkg-config)跳过探测,直接走 FetchContent。
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(CJSON libcjson)
+endif()
 if(NOT CJSON_FOUND)
     message(STATUS "libcjson not found via pkg-config — building from source via FetchContent")
     FetchContent_Declare(
@@ -106,6 +136,10 @@ if(NOT CJSON_FOUND)
     set(ENABLE_CJSON_TEST   OFF CACHE BOOL "" FORCE)
     set(ENABLE_CJSON_UTILS  OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
+    # cJSON v1.7.17 的 CMakeLists 声明 cmake_minimum_required(VERSION 2.8.x)，
+    # CMake 4.x 已移除对 < 3.5 的兼容会直接报错。用此变量放宽下限，让上游
+    # 老项目按 3.5 策略配置通过（仅影响 FetchContent 子项目，不改本项目行为）。
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
     FetchContent_MakeAvailable(cjson)
     # config_manager.c uses <cjson/cJSON.h> (the system install layout).
     # When bundling, create a cjson/ subdirectory so the same include path works.
@@ -159,6 +193,20 @@ if(NOT _FLOWCORO_FOUND_LOCAL)
     )
     FetchContent_MakeAvailable(flowcoro)
 endif()
+
+# flowcoro 的 CMakeLists 用 `CACHE ... FORCE` 往全局塞了 GNU/x86 专属的构建标志
+# (-march=native -flto=auto -Wl,--as-needed -Wl,-O1),这些在 Apple clang/ld64 下
+# 要么非法(--as-needed)要么无意义。FORCE 会泄漏到本工程所有目标,故在 flowcoro
+# 之后、本工程目标定义之前,于 APPLE 平台把它们复位为 Apple 安全值。Linux 不进
+# 此分支,flowcoro 原有优化标志完全保留、行为零变化。
+if(APPLE)
+    set(CMAKE_C_FLAGS_RELEASE        "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+    set(CMAKE_CXX_FLAGS_RELEASE      "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "" CACHE STRING "" FORCE)
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "" CACHE STRING "" FORCE)
+    set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "" CACHE STRING "" FORCE)
+endif()
+
 # flowcoro main 新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
 # 纯 C 节点 / FFI 宿主可直接 #include <flowcoro/c_api.h> 调用
 # flowcoro_pool_create / flowcoro_pool_submit / flowcoro_task_wait /
@@ -367,8 +415,12 @@ target_link_libraries(flowctl flowengine_core scheduler_cpp)
 add_dependencies(flowctl msg_codegen)
 
 # 性能基准测试程序
-add_executable(benchmark src/benchmark.c)
-target_link_libraries(benchmark flowengine_core m)
+# macOS 排除:benchmark.c 用无名信号量 sem_init(macOS 已废弃,运行时返回 -1)
+# 且依赖 Linux CPU 亲和性。纯性能工具,不在 demo 链路,APPLE 下不构建。
+if(NOT APPLE)
+    add_executable(benchmark src/benchmark.c)
+    target_link_libraries(benchmark flowengine_core m)
+endif()
 
 # 消息总线可执行程序
 add_executable(flow_bus src/bus_demo.c)
@@ -376,12 +428,13 @@ target_link_libraries(flow_bus flowengine_core m)
 
 # ── Step 1: IPC 跨进程通道 ───────────────────────────────
 add_executable(flow_ipc src/ipc_demo.c)
-target_link_libraries(flow_ipc flowengine_core rt)
+# librt 仅 Linux 存在;macOS 的 shm_open/clock 等在 libSystem 中,无需 -lrt。
+target_link_libraries(flow_ipc flowengine_core $<$<NOT:$<PLATFORM_ID:Darwin>>:rt>)
 
 # ── Step 3: Bag 录制回放（含 Step 5 统一时钟）────────────
 add_executable(flow_bag src/bag_demo.c)
 target_link_libraries(flow_bag flowengine_core m)
-target_link_options(flow_bag PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+target_link_options(flow_bag PRIVATE ${FLOW_IGNORE_UNDEF_LINKOPT})
 
 # ── Step 3b: Bag 检查工具 ────────────────────────────────
 add_executable(bag_check tools/bag_check.c)
@@ -476,22 +529,34 @@ target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 # 读 config/pipeline.json → 按顺序 fork+exec 各节点进程
 # 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
 add_executable(flow_launcher src/flow_launcher.c)
-# --whole-archive: 强制拉入 cJSON 全部符号（否则链接器丢弃未直接引用的 .o）
 # scheduler_cpp: 提供 net_transport_unbridge_topic 等 C++ 符号
-target_link_libraries(flow_launcher
-    flowengine_core scheduler_cpp m dl
-    -Wl,--whole-archive ${CJSON_LIBRARIES} -Wl,--no-whole-archive)
-# --export-dynamic: 让主程序导出 cJSON 等符号，使 dlopen 加载的 .so 能解析它们
-target_link_options(flow_launcher PRIVATE
-    -Wl,--export-dynamic
-    -Wl,--unresolved-symbols=ignore-in-object-files)
+if(APPLE)
+    # macOS 两级命名空间:节点 .so 各自静态链接 cJSON/core(见 modules CMake),
+    # 无需 launcher 导出符号;plugin->init(bus,transport,...) 以指针传入总线,
+    # 各 .so 的符号副本互不干扰,核心 pub/sub 走同一 bus 指针。故普通链接
+    # cJSON 即可,dynamic_lookup 兜底 frenet/eigen 等可选未解析符号。
+    # Apple ld64 无 --whole-archive/--export-dynamic 语法。
+    target_link_libraries(flow_launcher
+        flowengine_core scheduler_cpp m ${CMAKE_DL_LIBS} ${CJSON_LIBRARIES})
+    target_link_options(flow_launcher PRIVATE -Wl,-undefined,dynamic_lookup)
+else()
+    # --whole-archive: 强制拉入 cJSON 全部符号（否则链接器丢弃未直接引用的 .o）
+    target_link_libraries(flow_launcher
+        flowengine_core scheduler_cpp m ${CMAKE_DL_LIBS}
+        -Wl,--whole-archive ${CJSON_LIBRARIES} -Wl,--no-whole-archive)
+    # --export-dynamic: 让主程序导出 cJSON 等符号，使 dlopen 加载的 .so 能解析它们
+    target_link_options(flow_launcher PRIVATE
+        -Wl,--export-dynamic
+        ${FLOW_IGNORE_UNDEF_LINKOPT})
+endif()
 
 # ── Node Host: 单节点插件宿主进程 ──
 # 多进程模式的正确载体: 每个进程 dlopen 一个 NodePlugin .so, 走 IPC 桥接。
 # 让「进程模式」与「线程/dlopen 模式」复用同一份节点 .so。
 add_executable(flow_node_host src/flow_node_host.c)
-target_link_libraries(flow_node_host flowengine_core m dl)
-target_link_options(flow_node_host PRIVATE -Wl,--unresolved-symbols=ignore-in-object-files)
+target_link_libraries(flow_node_host flowengine_core m ${CMAKE_DL_LIBS})
+# FLOW_IGNORE_UNDEF_LINKOPT: Linux=--unresolved-symbols=ignore, macOS=-undefined,dynamic_lookup
+target_link_options(flow_node_host PRIVATE ${FLOW_IGNORE_UNDEF_LINKOPT})
 
 # ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
 # 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。
@@ -512,9 +577,13 @@ set_target_properties(flow_mcap_replay PROPERTIES LINKER_LANGUAGE CXX)
 add_executable(flow_nuscenes_demo src/nuscenes_demo.c)
 target_link_libraries(flow_nuscenes_demo flowengine_core m)
 # 安装规则
-install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark benchmark_coro coro_correctness_test
+# benchmark(无名信号量)仅 Linux 构建,故从通用 install 列表拆出、条件安装。
+install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
+if(NOT APPLE)
+    install(TARGETS benchmark RUNTIME DESTINATION bin)
+endif()
 
 install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
@@ -686,8 +755,12 @@ message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
-# 创建开发者友好的别名
-add_custom_target(dev DEPENDS flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+# 创建开发者友好的别名（benchmark 仅 Linux 构建，APPLE 下从依赖列表剔除）
+if(APPLE)
+    add_custom_target(dev DEPENDS flow_bus flow_coro benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+else()
+    add_custom_target(dev DEPENDS flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+endif()
 
 # CPack配置（用于创建安装包）
 set(CPACK_PACKAGE_NAME "FlowEngine")

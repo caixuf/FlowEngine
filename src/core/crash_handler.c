@@ -8,18 +8,47 @@
  */
 
 #define _GNU_SOURCE
+/* macOS 把 ucontext_t/mcontext 归为 X/Open 已废弃例程，<ucontext.h> 要求先
+ * 定义 _XOPEN_SOURCE 才暴露；须在任何系统头之前定义。Linux 上 _GNU_SOURCE
+ * 已隐含 X/Open，无需重复。 */
+#if defined(__APPLE__)
+#if !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+/* _XOPEN_SOURCE 会把 macOS 头切到严格 POSIX,隐藏 Darwin 扩展
+ * (pthread_threadid_np / pthread_getname_np);_DARWIN_C_SOURCE 重新暴露。 */
+#if !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+#endif
 #include "crash_handler.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <execinfo.h>
 #include <ucontext.h>
+#if !defined(__APPLE__)
 #include <sys/syscall.h>
+#endif
 
 #define BT_DEPTH 64
+
+/* ── 线程 ID（跨平台） ────────────────────────────────────────
+ * Linux 用 syscall(SYS_gettid) 取内核线程 ID；macOS 无 SYS_gettid，
+ * 用 pthread_threadid_np() 取 64 位系统线程 ID。 */
+static long flow_gettid(void) {
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    return (long)tid;
+#else
+    return (long)syscall(SYS_gettid);
+#endif
+}
 
 /* ── 信号名映射 ──────────────────────────────────────────── */
 
@@ -36,7 +65,34 @@ static const char* sig_name(int sig) {
 
 /* ── 寄存器 dump (x86_64 / ARM64) ────────────────────────── */
 
-#if defined(__x86_64__)
+#if defined(__APPLE__)
+/* macOS 的 ucontext_t.uc_mcontext 是指针，寄存器布局为 __darwin_mcontext64
+ * (__ss=通用寄存器, __es=异常状态)，与 glibc 的 gregs[]/regs[] 完全不同。
+ * Apple 分支放最前，任意 Apple 架构都走这里，不落入下面的 glibc 分支。 */
+static void dump_regs(ucontext_t* uc) {
+#if defined(__aarch64__)
+    const _STRUCT_MCONTEXT64* mc = (const _STRUCT_MCONTEXT64*)uc->uc_mcontext;
+    fprintf(stderr, "  x0=0x%016llx x1=0x%016llx x2=0x%016llx x3=0x%016llx\n",
+            (unsigned long long)mc->__ss.__x[0], (unsigned long long)mc->__ss.__x[1],
+            (unsigned long long)mc->__ss.__x[2], (unsigned long long)mc->__ss.__x[3]);
+    fprintf(stderr, "  fp=0x%016llx lr=0x%016llx sp=0x%016llx pc=0x%016llx\n",
+            (unsigned long long)mc->__ss.__fp, (unsigned long long)mc->__ss.__lr,
+            (unsigned long long)mc->__ss.__sp, (unsigned long long)mc->__ss.__pc);
+    fprintf(stderr, "  far=0x%016llx\n", (unsigned long long)mc->__es.__far);
+#elif defined(__x86_64__)
+    const _STRUCT_MCONTEXT64* mc = (const _STRUCT_MCONTEXT64*)uc->uc_mcontext;
+    fprintf(stderr, "  rax=0x%016llx rbx=0x%016llx rcx=0x%016llx rdx=0x%016llx\n",
+            (unsigned long long)mc->__ss.__rax, (unsigned long long)mc->__ss.__rbx,
+            (unsigned long long)mc->__ss.__rcx, (unsigned long long)mc->__ss.__rdx);
+    fprintf(stderr, "  rsi=0x%016llx rdi=0x%016llx rbp=0x%016llx rsp=0x%016llx\n",
+            (unsigned long long)mc->__ss.__rsi, (unsigned long long)mc->__ss.__rdi,
+            (unsigned long long)mc->__ss.__rbp, (unsigned long long)mc->__ss.__rsp);
+    fprintf(stderr, "  rip=0x%016llx\n", (unsigned long long)mc->__ss.__rip);
+#else
+    (void)uc;
+#endif
+}
+#elif defined(__x86_64__)
 static void dump_regs(ucontext_t* uc) {
     fprintf(stderr, "  rax=0x%016lx rbx=0x%016lx rcx=0x%016lx rdx=0x%016lx\n",
             uc->uc_mcontext.gregs[REG_RAX], uc->uc_mcontext.gregs[REG_RBX],
@@ -77,7 +133,7 @@ static void dump_thread_info(void) {
     pthread_getname_np(pthread_self(), tname, sizeof(tname));
     fprintf(stderr, "  thread=%s tid=%ld pid=%d\n",
             tname[0] ? tname : "(unnamed)",
-            (long)syscall(SYS_gettid), getpid());
+            flow_gettid(), getpid());
 }
 
 /* ── 符号解析（使用 addr2line 获得精确文件名+行号） ──────── */
@@ -184,7 +240,7 @@ void crash_handler_print_backtrace(void) {
     tname[0] = '\0';
     pthread_getname_np(pthread_self(), tname, sizeof(tname));
     fprintf(stderr, "[crash_handler] manual backtrace (thread=%s tid=%ld):\n",
-            tname[0] ? tname : "?", (long)syscall(SYS_gettid));
+            tname[0] ? tname : "?", flow_gettid());
 
     void* bt[BT_DEPTH];
     int n = backtrace(bt, BT_DEPTH);

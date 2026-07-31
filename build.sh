@@ -6,6 +6,10 @@
 BUILD_DIR="build"
 INSTALL_PREFIX="/usr/local"
 
+# CPU 核数：Linux 用 nproc，macOS 无 nproc 用 sysctl，都缺则退回 4。
+NPROC="$( (command -v nproc >/dev/null 2>&1 && nproc) \
+          || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,11 +58,15 @@ build_project() {
     create_build_dir
     cd $BUILD_DIR
     
+    # 仅 Linux 强制 gcc；macOS 无 gcc，用系统默认 Apple clang
+    # （C++20 协程 -std=c++20 原生支持，无需 -fcoroutines）。
+    local cc_arg=""
+    [ "$(uname -s)" = "Linux" ] && cc_arg="-DCMAKE_C_COMPILER=gcc"
     cmake .. \
         -DCMAKE_BUILD_TYPE=$build_type \
         -DCMAKE_INSTALL_PREFIX=$INSTALL_PREFIX \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        -DCMAKE_C_COMPILER=gcc
+        $cc_arg
     
     if [ $? -ne 0 ]; then
         print_error "CMake配置失败"
@@ -68,7 +76,7 @@ build_project() {
     print_info "构建项目..."
     local warn_log
     warn_log="$(mktemp)"
-    make -j$(nproc) 2> >(grep -i "warning:" > "$warn_log" || true)
+    make -j"$NPROC" 2> >(grep -i "warning:" > "$warn_log" || true)
     local make_rc=$?
 
     if [ $make_rc -ne 0 ]; then
@@ -180,16 +188,13 @@ check_dependencies() {
         exit 1
     fi
     
-    # 检查pkg-config
+    # 检查pkg-config（缺失时 CMake 会跳过系统 cJSON 探测，自动走 FetchContent
+    # 从源码构建，故非致命 —— 降级为警告，不阻断构建）
     if ! command -v pkg-config &> /dev/null; then
-        print_error "pkg-config未安装，请先安装pkg-config"
-        exit 1
-    fi
-    
-    # 检查libcjson
-    if ! pkg-config --exists libcjson; then
-        print_error "libcjson未安装，请先安装libcjson-dev"
-        exit 1
+        print_warning "pkg-config未安装：将跳过系统库探测，cJSON 自动从源码 FetchContent 构建。"
+    # 检查libcjson（同上：缺失时 CMake FetchContent 兜底，非致命）
+    elif ! pkg-config --exists libcjson; then
+        print_warning "libcjson未安装：将自动从源码 FetchContent 构建（无需手动安装）。"
     fi
 
     # 检查Eigen3（可选，但缺失时 planning 节点会静默退化为"只保持车道、永不变道/

@@ -48,6 +48,7 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `src/core/param_registry.c` | 参数系统（int/float/bool/string，范围校验，hot-reload） |
 | `src/core/param_bridge.c` | 参数跨进程通道（AF_UNIX，`flowctl param set` 边跑边调） |
 | `src/core/scenario_loader.c` | 场景 JSON 加载器（actor 定义 + ego 配置） |
+| `include/platform_compat.h` | 跨平台兼容层（macOS⇄Linux，CMake force-include，仅 APPLE 生效）：pthread 命名签名、robust mutex、condvar 时钟降级 |
 | `modules/adas_nodes/flowsim/physics.cpp` | 运动学自行车模型；dynamics 桩（未实现，降级到运动学） |
 | `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 动力学桩字段，运行时未使用） |
 | `scenarios/straight_road.json` | 直道场景（默认，唯一） |
@@ -69,6 +70,12 @@ sim_world → sensor_model → perception → fusion → planning → control �
 bash scripts/demo.sh [duration]          # 启动演示
 bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 ```
+
+> **平台：** Linux（主力/CI）与 macOS 原生均可 `bash scripts/demo.sh` 跑通。
+> 平台差异由兼容层 `include/platform_compat.h`（force-include，仅 APPLE 生效）
+> + CMake `if(APPLE)` 分支收口，**所有改动都在 `#ifdef __APPLE__` / `if(APPLE)`
+> 内，Linux 行为零变化**。macOS 弱化项（仅影响非默认路径）：`--multi` robust-mutex
+> 崩溃自愈降级、benchmark 不构建、CAN/I2C dry-run、无线程 CPU 亲和 —— 详见 README。
 
 仪表盘: `http://localhost:8800`
 3D 桥接: `ws://localhost:8765`

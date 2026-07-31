@@ -9,6 +9,7 @@
 
 #define _GNU_SOURCE
 #include "node_plugin.h"
+#include "scheduler.h"       /* scheduler_task_count() — clang 视隐式声明为错误 */
 #include "sysmonitor.h"
 #include "flow_registry.h"
 #include "topic_registry.h"

@@ -10,9 +10,28 @@
  */
 
 #include "degrade_ladder.h"
-#include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
+
+/* ── 原子读写(跨编译器) ─────────────────────────────────────────────────
+ * GCC 与 Clang 对 C11 <stdatomic.h> 的 atomic_load/atomic_store 处理不同:
+ * GCC 展开为通用 __atomic_load/__atomic_store 内建,接受普通 volatile 标量;
+ * Clang 展开为 __c11_atomic_* 内建,严格要求操作数是 _Atomic 限定类型,否则
+ * 直接编译报错。本模块的共享状态字段是 volatile(且 degrade_ladder.h 被 extern
+ * "C" 的 C++ TU 复用,无法把字段改成 C 专属的 _Atomic 关键字)。
+ *
+ * 故统一改用两编译器共有的 __atomic_* 内建(通用形式,支持含 double 在内的
+ * 任意标量、且接受非 _Atomic 的 volatile 指针)。这正是 GCC stdatomic 宏在
+ * Linux 上原本展开成的东西,codegen 与原路径一致,Linux 行为零变化。
+ * __typeof__ 与语句表达式 ({...}) 为 GCC/Clang 共有扩展。 */
+/* 临时量类型用 `*(ptr) + 0`:算术提升会去掉 volatile 限定,得到纯值类型,
+ * 避免把 volatile 指针传给 __atomic_* 的非 volatile 输出/输入形参而告警。 */
+#define FLOW_ATOMIC_STORE(ptr, val)                                       \
+    do { __typeof__(*(ptr) + 0) _v = (val);                               \
+         __atomic_store((ptr), &_v, __ATOMIC_SEQ_CST); } while (0)
+#define FLOW_ATOMIC_LOAD(ptr)                                             \
+    ({ __typeof__(*(ptr) + 0) _r;                                         \
+       __atomic_load((ptr), &_r, __ATOMIC_SEQ_CST); _r; })
 
 /* ══════════════════════════════════════════════════════════ */
 /*  全局状态                                                     */
@@ -52,29 +71,29 @@ DegradeState* degrade_global_state(void) {
 void degrade_set_level(int level, int reason) {
     /* 不降级（方向错误，L0 是最高） */
     if (level < DEGRADE_L0 || level > DEGRADE_L3) return;
-    atomic_store(&g_degrade.degrade_level, level);
-    atomic_store(&g_degrade.degrade_reason, reason);
-    atomic_store(&g_degrade.degrade_timestamp_ms, 0); /* 由调用方填充 */
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_level, level);
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_reason, reason);
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_timestamp_ms, 0); /* 由调用方填充 */
 
     /* 根据等级和原因设置 L1 参数 */
     if (level >= DEGRADE_L1) {
-        atomic_store(&g_degrade.l1_disable_lane_change, 1);
+        FLOW_ATOMIC_STORE(&g_degrade.l1_disable_lane_change, 1);
     }
     if (level >= DEGRADE_L2) {
-        atomic_store(&g_degrade.l1_speed_limit, 3.0);  /* 3 m/s crawl */
+        FLOW_ATOMIC_STORE(&g_degrade.l1_speed_limit, 3.0);  /* 3 m/s crawl */
     }
     if (level >= DEGRADE_L3) {
-        atomic_store(&g_degrade.l1_speed_limit, 0.0);  /* 立即停 */
+        FLOW_ATOMIC_STORE(&g_degrade.l1_speed_limit, 0.0);  /* 立即停 */
     }
 }
 
 void degrade_clear(void) {
-    atomic_store(&g_degrade.degrade_level, 0);
-    atomic_store(&g_degrade.degrade_reason, 0);
-    atomic_store(&g_degrade.degrade_timestamp_ms, 0);
-    atomic_store(&g_degrade.l1_disable_lane_change, 0);
-    atomic_store(&g_degrade.l1_speed_limit, 0.0);
-    atomic_store(&g_degrade.l1_safety_margin, 1.0);
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_level, 0);
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_reason, 0);
+    FLOW_ATOMIC_STORE(&g_degrade.degrade_timestamp_ms, 0);
+    FLOW_ATOMIC_STORE(&g_degrade.l1_disable_lane_change, 0);
+    FLOW_ATOMIC_STORE(&g_degrade.l1_speed_limit, 0.0);
+    FLOW_ATOMIC_STORE(&g_degrade.l1_safety_margin, 1.0);
 
     /* 清 supervisor 心跳记录 */
     for (int i = 0; i < g_supervisor.node_count; i++)
@@ -86,11 +105,11 @@ void degrade_clear(void) {
 /* ══════════════════════════════════════════════════════════ */
 
 DegradeAction degrade_layer_action(void) {
-    int level  = (int)atomic_load(&g_degrade.degrade_level);
-    int reason = (int)atomic_load(&g_degrade.degrade_reason);
-    double speed_limit = (double)atomic_load(&g_degrade.l1_speed_limit);
-    double safety_margin = (double)atomic_load(&g_degrade.l1_safety_margin);
-    int disable_lc = (int)atomic_load(&g_degrade.l1_disable_lane_change);
+    int level  = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_level);
+    int reason = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_reason);
+    double speed_limit = (double)FLOW_ATOMIC_LOAD(&g_degrade.l1_speed_limit);
+    double safety_margin = (double)FLOW_ATOMIC_LOAD(&g_degrade.l1_safety_margin);
+    int disable_lc = (int)FLOW_ATOMIC_LOAD(&g_degrade.l1_disable_lane_change);
 
     DegradeAction act;
     memset(&act, 0, sizeof(act));
@@ -179,7 +198,7 @@ void degrade_supervisor_tick(int64_t now_ms) {
     }
 
     /* 当前等级 */
-    int current = (int)atomic_load(&g_degrade.degrade_level);
+    int current = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_level);
 
     /* 递进策略 */
     if (timeout_1s_count >= 2) {
@@ -218,8 +237,8 @@ void degrade_supervisor_tick(int64_t now_ms) {
 int degrade_supervisor_summary(char* buf, int buf_size) {
     if (!buf || buf_size <= 0) return -1;
 
-    int level  = (int)atomic_load(&g_degrade.degrade_level);
-    int reason = (int)atomic_load(&g_degrade.degrade_reason);
+    int level  = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_level);
+    int reason = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_reason);
     const char* reason_str = "none";
     switch (reason) {
         case DEGRADE_REASON_PLANNING_TO:  reason_str = "planning_timeout"; break;

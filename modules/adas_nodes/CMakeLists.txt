@@ -80,7 +80,17 @@ endif()
 # 与 __atomic_store；C++ 节点 .so 与用 atomic 的节点在 dlopen RTLD_NOW 时会失败。
 # 让每个节点 .so 自带这两个库依赖（--as-needed 会自动过滤未实际引用的库，
 # 故 C 节点 .so 不会引入额外运行时依赖）。
-set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread stdc++ atomic)
+# macOS: clang 用 libc++ 而非 libstdc++，原子操作为编译器内建、无独立 libatomic，
+# 故这两个库名不存在，替换为 c++（libc++）。
+if(APPLE)
+    set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread c++)
+    # 各节点 target_link_libraries 里额外重申的 C++/atomic 运行时:macOS 用 libc++,
+    # 无独立 libatomic(原子为编译器内建),故为 c++;Linux 保持 stdc++ atomic 不变。
+    set(NODE_CXX_RT c++)
+else()
+    set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread stdc++ atomic)
+    set(NODE_CXX_RT stdc++ atomic)
+endif()
 
 # ── cJSON ─────────────────────────────────────────────────────
 # libflowengine_core.a 是静态库，包含 scenario_loader.o，其中引用了 cJSON 符号。
@@ -138,6 +148,29 @@ endif()
 # 目标，故在此显式补充（值用 FlowEngine 根目录，日志文件落在根目录下）。
 add_compile_definitions(PROJECT_SOURCE_DIR="${FLOW_ROOT}")
 
+# macOS 跨平台兼容层：全局 force-include，统一 pthread_setname_np 签名、robust
+# mutex 降级等平台差异（详见 include/platform_compat.h）。仅 APPLE 生效，
+# Linux 完全透明。第三方（cJSON/Eigen/flowcoro）不调用这些符号，无副作用。
+if(APPLE)
+    add_compile_options(-include ${FLOW_ROOT}/include/platform_compat.h)
+    # 节点 .so 是被 flow_launcher / flow_node_host 用 dlopen 加载的插件,宿主进程
+    # 已链接 flowengine_core。两处差异需要对齐 Linux 的"扁平命名空间"语义:
+    #
+    #  (1) 未定义符号(如 monitor_server 的 zlib deflate)—— Linux dlopen 在加载时
+    #      从宿主解析;macOS 两级命名空间默认链接期就报 undefined。
+    #  (2) 单例全局状态 —— 每个节点 .so 都静态链入了 libflowengine_core.a,于是各自
+    #      带了一份 flow_registry 的 g_tasks[]、param_registry 等全局。Linux 扁平命名
+    #      空间下所有引用都绑定到宿主可执行文件里的那一份(符号插入/interposition),
+    #      故注册表跨"宿主 + 各插件"共享同一实例;macOS 两级命名空间则各用各的副本,
+    #      导致 flow_launcher 往宿主副本注册任务、monitor_node 却读自己那份空的 ——
+    #      仪表盘/pipeline_check 里 registry.tasks 恒为空。
+    #
+    # -flat_namespace 让插件的符号解析改用扁平命名空间:同名符号跨所有已加载映像
+    # 解析,先加载者(宿主可执行文件)胜出,与 Linux 完全一致;-undefined
+    # dynamic_lookup 处理 (1) 的未定义符号推迟到 dlopen 解析。二者仅 APPLE 生效。
+    add_link_options(-Wl,-flat_namespace -Wl,-undefined,dynamic_lookup)
+endif()
+
 # 输出目录: 与主项目的 build/lib 保持一致，方便 flow_launcher 查找
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 
@@ -151,7 +184,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 add_library(fusion_node SHARED fusion_node.cpp)
 target_compile_definitions(fusion_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(fusion_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(fusion_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(fusion_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # perception_node: DBSCAN 感知 + 传感器仿真 (FlowCoro 协程版)
 # 采用 FlowCoroTask（线程池 resume）：DBSCAN 点云聚类为重计算，同步 resume 会阻塞
@@ -159,14 +192,14 @@ target_link_libraries(fusion_node ${NODE_LINK_LIBS} stdc++ atomic)
 add_library(perception_node SHARED perception_node.cpp)
 target_compile_definitions(perception_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(perception_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(perception_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(perception_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # behavior_planner_node: 行为规划节点 (FlowCoro 协程版)
 # 消费感知语义输出，运行巡航/跟车/变道状态机，发布 planning/behavior。
 add_library(behavior_planner_node SHARED behavior_planner_node.cpp)
 target_compile_definitions(behavior_planner_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(behavior_planner_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(behavior_planner_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(behavior_planner_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # sensor_model_node: 噪声/FOV/遮挡传感器模型
 add_library(sensor_model SHARED sensor_model_node.c)
@@ -212,10 +245,10 @@ target_include_directories(flowsim_node PRIVATE
     ${ESMINI_RMLIB_INCLUDE}
 )
 if(ESMINI_RMLIB)
-    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} stdc++ atomic ${ESMINI_RMLIB})
+    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} ${NODE_CXX_RT} ${ESMINI_RMLIB})
     message(STATUS "flowsim_node: esminiRMLib found at ${ESMINI_RMLIB}")
 else()
-    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} stdc++ atomic)
+    target_link_libraries(flowsim_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
     message(WARNING "flowsim_node: esminiRMLib NOT found — road_network.cpp will fail to link")
 endif()
 
@@ -235,7 +268,7 @@ target_compile_definitions(planning_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(planning_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_link_libraries(planning_node ${NODE_LINK_LIBS}
-        ${FRENET_BRIDGE} ${FRENET_PLANNER} stdc++ atomic)
+        ${FRENET_BRIDGE} ${FRENET_PLANNER} ${NODE_CXX_RT})
     target_include_directories(planning_node PRIVATE
         ${FLOW_ROOT}/third_party/frenet_planner/src
         ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
@@ -243,7 +276,7 @@ if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_compile_definitions(planning_node PRIVATE HAVE_FRENET)
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")
 else()
-    target_link_libraries(planning_node ${NODE_LINK_LIBS} stdc++ atomic)
+    target_link_libraries(planning_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
     message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
@@ -274,7 +307,7 @@ target_link_libraries(monitor_node ${NODE_LINK_LIBS})
 add_library(inference_node SHARED inference_node.cpp)
 target_compile_definitions(inference_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(inference_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(inference_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(inference_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # data_recorder_node: 训练样本采集（模仿学习 JSONL）
 add_library(data_recorder_node SHARED data_recorder_node.c)
@@ -409,7 +442,7 @@ target_link_libraries(actuator_pwm_node ${NODE_LINK_LIBS})
 add_library(perception_fusion_node SHARED perception_fusion_node.cpp)
 target_compile_definitions(perception_fusion_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(perception_fusion_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
-target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS} stdc++ atomic)
+target_link_libraries(perception_fusion_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # traversability_node: 可通行区域检测节点（StereoFrame 深度图 → 3D 反投影 → 地面分割 → 占用栅格）
 # 订阅 stereo_camera_node 发布的 sensor/stereo，把 80×60 深度图反投影成带 Z 高度的 3D 点云
@@ -446,6 +479,20 @@ target_link_libraries(prediction_node ${NODE_LINK_LIBS} m)
 # scene_assembler_node: Aggregate all perception into unified EnvironmentModel
 add_library(scene_assembler_node SHARED scene_assembler_node.c)
 target_link_libraries(scene_assembler_node ${NODE_LINK_LIBS})
+
+# ── macOS 插件后缀强制 .so ─────────────────────────────────────
+# macOS 上 SHARED 库默认后缀为 .dylib，但 pipeline.json 与 flow_launcher 均按
+# build/lib/libXXX_node.so 硬编码查找。dlopen 对后缀无要求（按路径加载即可），
+# 故统一把本目录所有 SHARED 目标的后缀强制成 .so，让路径与 Linux 完全一致。
+if(APPLE)
+    get_property(_flow_node_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_t ${_flow_node_targets})
+        get_target_property(_ty ${_t} TYPE)
+        if(_ty STREQUAL "SHARED_LIBRARY")
+            set_target_properties(${_t} PROPERTIES SUFFIX ".so")
+        endif()
+    endforeach()
+endif()
 
 # ── 安装 ──────────────────────────────────────────────────────
 install(TARGETS fusion_node perception_node sensor_model flowsim_node planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
