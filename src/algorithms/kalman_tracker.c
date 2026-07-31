@@ -158,18 +158,27 @@ static double mahalanobis_dist(const KTrack* t, const KTrackDetection* d,
 static double hungarian_solve(double cost[HUNGARIAN_MAX][HUNGARIAN_MAX],
                                int n_rows, int n_cols,
                                int assignment[HUNGARIAN_MAX]) {
+    /* 防御性夹取:cost 矩阵与下列工作数组按 HUNGARIAN_MAX 维护,n_rows/n_cols
+     * 绝不能超过它,否则 1-indexed 访问越界写栈(见下)。 */
+    if (n_rows > HUNGARIAN_MAX) n_rows = HUNGARIAN_MAX;
+    if (n_cols > HUNGARIAN_MAX) n_cols = HUNGARIAN_MAX;
+
+    /* 本实现是 1-indexed 匈牙利算法:下标从 1 取到 n(=n_rows/n_cols)。当 n 恰好
+     * 等于 HUNGARIAN_MAX 时,minv[n]/used[n]/u[i0]/v[j] 等会访问下标 == HUNGARIAN_MAX,
+     * 即"数组尾后一格"。故工作数组必须多留 1 格(HUNGARIAN_MAX + 1),否则 n==32
+     * 时越界写栈,在 Linux 上侥幸落在栈填充里不崩、在 macOS 上直接 SIGSEGV。 */
     /* 初始化: 每行减行最小值 */
-    double u[HUNGARIAN_MAX] = {0};
-    double v[HUNGARIAN_MAX] = {0};
-    int    p[HUNGARIAN_MAX]  = {0};  /* p[j] = 匹配到列 j 的行 */
-    int    way[HUNGARIAN_MAX] = {0};
+    double u[HUNGARIAN_MAX + 1] = {0};
+    double v[HUNGARIAN_MAX + 1] = {0};
+    int    p[HUNGARIAN_MAX + 1]  = {0};  /* p[j] = 匹配到列 j 的行 */
+    int    way[HUNGARIAN_MAX + 1] = {0};
 
     for (int i = 1; i <= n_rows; i++) {
         p[0] = i;
         int j0 = 0;
-        double minv[HUNGARIAN_MAX];
+        double minv[HUNGARIAN_MAX + 1];
         for (int j = 0; j <= n_cols; j++) minv[j] = 1e12;
-        int used[HUNGARIAN_MAX] = {0};
+        int used[HUNGARIAN_MAX + 1] = {0};
 
         do {
             used[j0] = 1;
@@ -254,7 +263,11 @@ void ktracker_predict(KalmanTracker* kt) {
 
 void ktracker_associate_and_update(KalmanTracker* kt,
                                     const KTrackDetection* dets, int n_dets) {
-    if (n_dets > KTRACKER_MAX_DETS) n_dets = KTRACKER_MAX_DETS;
+    /* 关联代价矩阵与匈牙利求解器都是 HUNGARIAN_MAX 维,且轨迹总数上限
+     * KTRACKER_MAX_TRACKS == HUNGARIAN_MAX,故单帧参与关联的检测数也夹到
+     * HUNGARIAN_MAX —— 超出部分本就无法再生成新轨迹(轨迹已满)。夹到 128
+     * (KTRACKER_MAX_DETS) 是不够的:cost[32][32] 会被 n_dets>32 越界写。 */
+    if (n_dets > HUNGARIAN_MAX) n_dets = HUNGARIAN_MAX;
 
     /* ── Step 1: 构建关联代价矩阵 ── */
     int n_trk = kt->n_tracks;

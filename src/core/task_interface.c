@@ -156,7 +156,12 @@ int task_start(TaskBase* task) {
         /* If SCHED_FIFO fails (e.g., no root), silently fall back to SCHED_OTHER */
     }
 
-    /* Apply CPU affinity if mask is set */
+    /* Apply CPU affinity if mask is set.
+     * Linux-only: cpu_set_t / CPU_SET / pthread_attr_setaffinity_np 均为 GNU/Linux
+     * 扩展。macOS 不提供用户态线程 CPU 亲和性 API(thread_policy_set 的 affinity
+     * tag 仅为调度提示,Apple Silicon 上直接忽略),故非 Linux 平台跳过绑定 ——
+     * pin_cpu 被静默忽略,不影响功能正确性,仅少一层调度亲和优化。 */
+#ifdef __linux__
     if (task->config.cpu_affinity_mask != 0) {
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
@@ -167,6 +172,7 @@ int task_start(TaskBase* task) {
         }
         pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
     }
+#endif
 
     int ret = pthread_create(&task->thread, &attr, task_thread_fn, task);
     pthread_attr_destroy(&attr);

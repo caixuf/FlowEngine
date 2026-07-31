@@ -245,22 +245,45 @@ docker run --rm flowengine demo 30  # 30 秒演示
 
 ## 从源码构建
 
+**平台支持：** Linux（Ubuntu，主力/CI）与 **macOS 原生**（Apple Silicon / Intel）。
+两者共用同一套源码，平台差异由兼容层 `include/platform_compat.h` 与 CMake 的
+`if(APPLE)` 分支收口，Linux 行为零变化。
+
 | 依赖 | 版本 |
 |-------------|---------|
-| GCC | 11+（C++20 协程）|
+| 编译器 | Linux: GCC 11+（`-fcoroutines`）／macOS: Apple clang（`-std=c++20` 原生协程，无需 `-fcoroutines`）|
 | CMake | 3.16+ |
-| libcjson | 任意版本（`apt install libcjson-dev`）|
-| libeigen3 | 3.3+（`apt install libeigen3-dev`）—— **Frenet 规划器必需**（变道/超车）；缺失时 `planning_node` 会静默回退到仅车道保持 |
+| libcjson | 任意版本（Linux `apt install libcjson-dev`；缺失时自动 FetchContent 源码构建，**macOS 无需手动安装**）|
+| libeigen3 | 3.3+（Linux `apt install libeigen3-dev`；缺失时自动 git 拉取）—— **Frenet 规划器必需**（变道/超车）；缺失时 `planning_node` 会静默回退到仅车道保持 |
 | Python | 3.8+（代码生成与仪表盘）|
 | libprotobuf-c（可选）| 用于 protobuf 支持 |
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake --build build -j$(nproc)   # macOS 用 -j$(sysctl -n hw.ncpu)
 
-# 或一键构建
+# 或一键构建（脚本自动探测核数与编译器，Linux/macOS 通用）
 bash build.sh release
 ```
+
+### macOS 快速开始
+
+无需 Docker，原生跑通：
+
+```bash
+# 依赖仅需 cmake（cjson/eigen 会自动 FetchContent，无需 Homebrew）
+brew install cmake              # 可选：若系统已装可跳过
+
+bash scripts/demo.sh           # 一键构建 + 运行 + 打开浏览器
+# 浏览器手动打开 http://localhost:8800（脚本也会用 `open` 自动打开）
+```
+
+> **macOS 已知限制**（均只影响非默认路径，默认单进程 dlopen demo 功能完全对齐）：
+> - `--multi` 多进程模式的 robust-mutex 崩溃自愈降级为普通 mutex（macOS 无
+>   `PTHREAD_MUTEX_ROBUST`；单机 demo 不触发该路径，共享状态另有 seq 号自愈）；
+> - `benchmark` 二进制不构建（macOS 无名信号量 `sem_init` 已废弃）；
+> - CAN/I2C 执行器走 dry-run（`<linux/can.h>`/`<linux/i2c-dev.h>` 为 Linux 专属）；
+> - 无线程 CPU 亲和性绑定（macOS 无用户态线程 affinity API，`pin_cpu` 被静默忽略）。
 
 ### 安装
 

@@ -10,6 +10,7 @@
  */
 
 #include "ltv_mpc.h"
+#include <stdlib.h>   /* calloc/free — glibc 经其它头间接引入，macOS libc 不会，需显式包含 */
 #include <string.h>
 #include <math.h>
 #include <stdio.h>

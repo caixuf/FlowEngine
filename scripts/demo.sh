@@ -15,6 +15,11 @@
 # =============================================================================
 set -e
 
+# ── 跨平台可移植性 ────────────────────────────────────────────
+# CPU 核数：Linux 用 nproc，macOS 无 nproc 用 sysctl，都缺则退回 4。
+NPROC="$( (command -v nproc >/dev/null 2>&1 && nproc) \
+          || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"
+
 # 默认场景：200m 高架+国道复合场景，单 ego 无 NPC（基础设施验证）
 # 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
 DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
@@ -24,7 +29,12 @@ DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
   pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
 sleep 1
 for port in 8800 8765; do
-  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
+  # Linux 优先 ss；macOS 无 ss（也无 /proc）用 lsof 找监听该端口的进程。
+  if command -v ss >/dev/null 2>&1; then
+    pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP 'pid=\K\d+' | head -1)
+  else
+    pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | head -1)
+  fi
   [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
 done
 sleep 0.5
@@ -84,7 +94,12 @@ if [ -z "$SCENARIO" ]; then
   SCENARIO="$DEFAULT_SCENARIO"
 fi
 if [ -n "$SCENARIO" ]; then
-  PIPELINE_TMP=$(mktemp /tmp/pipeline_XXXX.json)
+  # mktemp 模板差异:GNU 接受 XXXX 后带后缀,BSD(macOS)只认结尾的 X(否则
+  # 原样建出 "pipeline_XXXX.json" 并残留、阻塞下次 mkstemp)。用 -t + 结尾 X 的
+  # 可移植写法先建无后缀临时文件,再改名加 .json —— 两平台一致。
+  PIPELINE_TMP="$(mktemp /tmp/pipeline_XXXXXX)" || { echo "  ✗ mktemp failed"; exit 1; }
+  mv "$PIPELINE_TMP" "$PIPELINE_TMP.json"
+  PIPELINE_TMP="$PIPELINE_TMP.json"
   trap 'cleanup_pipeline_tmp' EXIT
   SCENARIO_ABS="$([ -f "$SCENARIO" ] && echo "$(cd "$(dirname "$SCENARIO")" && pwd)/$(basename "$SCENARIO")" || echo "$SCENARIO")"
   sed 's|\\"scenario_file\\": \\"[^\\"]*\\"|\\"scenario_file\\": \\"'$SCENARIO_ABS'\\"|g' "$PIPELINE_ORIG" > "$PIPELINE_TMP"
@@ -158,13 +173,17 @@ echo ""
 echo "───[1/5] Building..."
 if [ ! -f "$LAUNCHER_BIN" ]; then
   echo "  First build, this may take a moment..."
-  cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc > /dev/null 2>&1
+  # 仅 Linux 强制 gcc（项目在 Ubuntu/CI 上以 gcc 为准）；macOS 无 gcc，用系统
+  # 默认 Apple clang（C++20 协程 -std=c++20 原生支持，无需 -fcoroutines）。
+  CC_ARG=""
+  [ "$(uname -s)" = "Linux" ] && CC_ARG="-DCMAKE_C_COMPILER=gcc"
+  cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release $CC_ARG > /dev/null 2>&1
 fi
 set -o pipefail  # scoped to this build block only — restored via `set +o pipefail`
                  # below once both `cmake --build ... | tail -1` calls are done, so
                  # a build failure surfaces (pipeline exit = cmake's, not tail's)
                  # without changing pipe-failure semantics for the rest of the script.
-if ! cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host flowmond -j$(nproc) 2>&1 | tail -1; then
+if ! cmake --build "$BUILD_DIR" --target flow_launcher flow_node_host flowmond -j"$NPROC" 2>&1 | tail -1; then
   echo "  ✗ Build failed for flow_launcher/flow_node_host/flowmond — re-run without the trailing"
   echo "    'tail -1' filter (cmake --build \"$BUILD_DIR\" --target flow_launcher flow_node_host flowmond) to see the full error."
   exit 1
@@ -189,7 +208,7 @@ if [ -n "$ADAS_CFG_EXTRA_WARN" ]; then
   echo "  ⚠ Node plugin CMake configuration reported warnings/errors:"
   echo "$ADAS_CFG_EXTRA_WARN" | sed 's/^/    /'
 fi
-if ! cmake --build "$BUILD_DIR/modules/adas_nodes" -j$(nproc) 2>&1 | tail -1; then
+if ! cmake --build "$BUILD_DIR/modules/adas_nodes" -j"$NPROC" 2>&1 | tail -1; then
   echo "  ✗ Build failed for node plugins — re-run without the trailing 'tail -1' filter"
   echo "    (cmake --build \"$BUILD_DIR/modules/adas_nodes\") to see the full error."
   exit 1
@@ -387,11 +406,11 @@ while true; do
       sed -n "${START_LINE},${CURRENT_LC}p" "$BEH_LOG" 2>/dev/null | while IFS= read -r line; do
         # 高亮：[BEH] 用青色，[SM] 用黄色
         if echo "$line" | grep -q '\[BEH\]'; then
-          echo -e "\n  \033[36m$(echo "$line" | grep -oP '\[BEH\].*' || echo "$line")\033[0m"
+          echo -e "\n  \033[36m$(echo "$line" | grep -oE '\[BEH\].*' || echo "$line")\033[0m"
         elif echo "$line" | grep -q '\[SM\]'; then
-          echo -e "\n  \033[33m$(echo "$line" | grep -oP '\[SM\].*' || echo "$line")\033[0m"
+          echo -e "\n  \033[33m$(echo "$line" | grep -oE '\[SM\].*' || echo "$line")\033[0m"
         elif echo "$line" | grep -q '\[INV\]'; then
-          echo -e "\n  \033[31m$(echo "$line" | grep -oP '\[INV\].*' || echo "$line")\033[0m"
+          echo -e "\n  \033[31m$(echo "$line" | grep -oE '\[INV\].*' || echo "$line")\033[0m"
         fi
       done
       BEH_LINECOUNT=$CURRENT_LC
@@ -427,11 +446,12 @@ echo ""
 echo "═══ Pipeline Summary ═══"
 
 # Extract stats from launcher stderr
-# Build node plugins if stderr log is available
-FUSED=$(grep -a "EKF" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
-CTRL=$(grep -a "control.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
-PLAN=$(grep -a "planning.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oP "#\K\d+" | tail -1 || echo "0")
-SPEED=$(grep -a "flowsim.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oP "speed=\K[0-9.]+" || echo "?")
+# 用 grep -oE(BSD/GNU 通用)替代 grep -oP(\K 属 PCRE,macOS BSD grep 不支持):
+# 先抓 "#123" 整体,再用 tr/cut 剥掉前缀,等价于原 \K 的"仅取后半段"。
+FUSED=$(grep -a "EKF" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+CTRL=$(grep -a "control.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+PLAN=$(grep -a "planning.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+SPEED=$(grep -a "flowsim.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oE "speed=[0-9.]+" | head -1 | cut -d= -f2 || echo "?")
 
 echo "  Simulation : $SPEED m/s final speed"
 echo "  Fusion     : $FUSED EKF frames"
