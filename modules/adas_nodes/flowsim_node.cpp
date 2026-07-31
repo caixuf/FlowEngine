@@ -1216,14 +1216,24 @@ protected:
                     std::memory_order_relaxed) == 0) {
                 ; /* 冷启动：尚无任何控制指令，用内置巡航起步 */
             }
-            /* 判定诊断：打印 use_internal_cruise 的原始依据（每 200 cycle） */
-            if (g.cycle % 200 == 0) {
-                uint64_t last_dbg = g.last_control_cmd_us.load(std::memory_order_relaxed);
-                double age_dbg = last_dbg > 0
-                    ? (double)(clock_now_us() - last_dbg) / 1000.0 : -1.0;
-                LOG_WARN("flowsim", "[CRUISE_DBG] use_internal_cruise=%d last_age=%.0fms "
-                         "(timeout=%dus)", use_internal_cruise ? 1 : 0, age_dbg,
-                         CONTROL_STALE_TIMEOUT_US);
+            /* 桥自愈：指令陈旧（>500ms）且桥回调停滞 → 重建订阅。
+             * 启动早期多节点并发订阅存在随机竞争窗口，桥回调可能永久
+             * 停滞（实测同代码 45s/60s run 正常、120s run 启动即断）。
+             * 重建把"永久断流"降级为"短暂停滞"，配合 FSAFE 停车不撞。 */
+            if (g.cycle % 100 == 0) {
+                uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                uint64_t now  = clock_now_us();
+                if (last > 0 && now > last &&
+                    now - last >= CONTROL_STALE_TIMEOUT_US &&
+                    use_internal_cruise) {
+                    cmd_bridge.reconnect();
+                    LOG_WARN("flowsim",
+                             "[BRIDGE_RECONNECT] control/cmd stale %.0fms — resubscribed "
+                             "(cb=%llu take=%llu)",
+                             (double)(now - last) / 1000.0,
+                             (unsigned long long)cmd_bridge.cb_count,
+                             (unsigned long long)cmd_bridge.take_count);
+                }
             }
 
             /* ── Step 1: ego 动力学 ──
@@ -1461,13 +1471,16 @@ protected:
                 uint64_t last_cmd = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 double cmd_age_ms = last_cmd > 0
                     ? (double)(clock_now_us() - last_cmd) / 1000.0 : -1.0;
-                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f thr=%.2f brk=%.2f st=%.3f npc=%d cruise=%d cmd_age=%.0fms bridge_cb=%llu",
+                TopicStats cmd_stats;
+                int sc = message_bus_get_topic_stats(bus(), TOPIC_CONTROL_CMD, &cmd_stats);
+                LOG_INFO("flowsim", "#%u ego(%.1f,%.1f) spd=%.1f thr=%.2f brk=%.2f st=%.3f npc=%d cruise=%d cmd_age=%.0fms cb=%llu take=%llu subs=%d",
                          g.cycle, ego.x, ego.y, ego.speed,
                          ego.throttle, ego.brake, ego.steer,
                          g.pool.active_count() - 1, use_internal_cruise ? 1 : 0,
                          cmd_age_ms,
-                         (unsigned long long)BusQueueBridge::g_cb_count.load(
-                             std::memory_order_relaxed));
+                         (unsigned long long)cmd_bridge.cb_count,
+                         (unsigned long long)cmd_bridge.take_count,
+                         sc == 0 ? (int)cmd_stats.subscriber_count : -1);
             }
             /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 5 帧打一次，
              * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。 */

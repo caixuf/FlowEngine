@@ -616,10 +616,31 @@ public:
             if (t == topic && slot.has) {
                 *out = slot.msg;
                 slot.has = false;
+                take_count++;
                 return true;
             }
         }
         return false;
+    }
+
+    /* 本实例诊断计数（断流排查：区分"回调未被调"与"回调被调但未生效"） */
+    uint64_t cb_count{0};
+    uint64_t take_count{0};
+
+    /* 重建订阅（自愈）：启动早期多节点并发订阅时存在随机竞争窗口，
+     * 桥回调可能永久停滞（2026-07-31 实测：同代码 45s/60s run 正常、
+     * 120s run 启动即断，cb=5 后永久停）。调用方检测到停滞（指令陈旧）
+     * 时重建，把"永久断流"降级为"短暂停滞"。 */
+    void reconnect() {
+        for (auto& [t, slot] : slots_) {
+            (void)slot;
+            message_bus_unsubscribe_ex(bus_, t.c_str(),
+                                       &BusQueueBridge::on_message, this);
+            message_bus_subscribe(bus_, t.c_str(),
+                                  &BusQueueBridge::on_message, this);
+        }
+        cb_count = 0;
+        take_count = 0;
     }
     /* 取走任意 topic 的最新消息（多 topic 等待语义） */
     bool try_take_any(std::string* topic_out, Message* out) {
@@ -639,6 +660,7 @@ private:
     static void on_message(const Message* msg, void* user_data) {
         g_cb_count.fetch_add(1, std::memory_order_relaxed);
         auto* self = static_cast<BusQueueBridge*>(user_data);
+        self->cb_count++;
         std::lock_guard<std::mutex> lk(self->mtx_);
         for (auto& [t, slot] : self->slots_) {
             if (t == msg->topic) {
