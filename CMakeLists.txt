@@ -738,6 +738,30 @@ target_link_libraries(test_ekf_slam m)
 add_test(NAME ekf_slam_tests COMMAND test_ekf_slam)
 set_tests_properties(ekf_slam_tests PROPERTIES TIMEOUT 10)
 
+# flowsim 实体池 + 自行车模型（运动学 + 动力学）单元测试。此前是孤儿文件，
+# 未在任何 CMakeLists 注册。Entity 内嵌 RoadPosition（移动赋值/析构在
+# road_position.cpp 中经 esminiRMLib 实现），故需与 flowsim_node 相同链接 esminiRMLib。
+find_library(ESMINI_RMLIB_TEST
+    NAMES esminiRMLib
+    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/lib"
+          "${CMAKE_CURRENT_SOURCE_DIR}/third_party/esmini/build/EnvironmentSimulator/Libraries/esminiRMLib"
+)
+if(ESMINI_RMLIB_TEST)
+    add_executable(test_entity_physics
+        modules/adas_nodes/flowsim/test_entity_physics.cpp
+        modules/adas_nodes/flowsim/physics.cpp
+        modules/adas_nodes/flowsim/road_position.cpp)
+    target_include_directories(test_entity_physics PRIVATE
+        modules/adas_nodes
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/esmini/EnvironmentSimulator/Libraries/esminiRMLib
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(test_entity_physics m ${ESMINI_RMLIB_TEST})
+    add_test(NAME entity_physics_tests COMMAND test_entity_physics)
+    set_tests_properties(entity_physics_tests PROPERTIES TIMEOUT 10)
+else()
+    message(WARNING "test_entity_physics: esminiRMLib NOT found — physics unit test not registered")
+endif()
+
 add_test(NAME e2e_training_tools
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ci/evaluators/test_e2e_training_tools.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
