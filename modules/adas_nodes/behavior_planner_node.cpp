@@ -772,9 +772,15 @@ protected:
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
                     } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0 &&
-                               !lane_ahead_stop_light(current_idx - 1, lc, lw)) {
+                               !lane_ahead_stop_light(current_idx - 1, lc, lw) &&
+                               (left_gap >= 1e8 ||
+                                left_lead_v >= g.cfg_cruise_speed * 0.7)) {
                         /* 超车完成归位：巡航且未被堵时，若内侧道（idx-1，same_side
                          * 已保证非对向）前方 gap 充足，变回内侧道巡航。
+                         * 加"目标车道可用"条件：要么空旷（无前车），要么前车速度
+                         * ≥ 0.7×巡航——否则切回去立刻又被慢车堵 → 再变道再归位，
+                         * 2026-07-31 用户反馈的"纠结变道"（变过去变回来再变过去
+                         * 再超）120s 必现 3 个来回。目标车道慢时留在快车道巡航。
                          * 之前没有归位机制——超车后长期滞留外侧道，而红绿灯
                          * 只管辖 y_lane=-1.75 的内侧道，导致红灯不停车。
                          * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。
