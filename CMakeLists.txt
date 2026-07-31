@@ -711,6 +711,22 @@ target_include_directories(test_adas_nodes_logic PRIVATE ${GEN_DIR})
 add_test(NAME adas_nodes_logic_tests COMMAND test_adas_nodes_logic)
 set_tests_properties(adas_nodes_logic_tests PROPERTIES TIMEOUT 10)
 
+# ── EKF 融合 / EKF-SLAM 纯 C 单元测试 ──
+# 这两个测试文件此前存在却未进门禁：test_ekf_slam 只在 adas_nodes 子项目里有
+# add_executable 而无 add_test（且子项目不 enable_testing()、不被标准 ctest 覆盖）；
+# test_ekf_fusion 零引用。二者纯 C、仅依赖各自算法源 + libm，直接在主项目门禁里注册。
+add_executable(test_ekf_fusion modules/adas_nodes/test_ekf_fusion.c src/algorithms/ekf_fusion.c)
+target_include_directories(test_ekf_fusion PRIVATE src/algorithms)
+target_link_libraries(test_ekf_fusion m)
+add_test(NAME ekf_fusion_tests COMMAND test_ekf_fusion)
+set_tests_properties(ekf_fusion_tests PROPERTIES TIMEOUT 10)
+
+add_executable(test_ekf_slam modules/adas_nodes/test_ekf_slam.c modules/adas_nodes/ekf_slam.c)
+target_include_directories(test_ekf_slam PRIVATE modules/adas_nodes)
+target_link_libraries(test_ekf_slam m)
+add_test(NAME ekf_slam_tests COMMAND test_ekf_slam)
+set_tests_properties(ekf_slam_tests PROPERTIES TIMEOUT 10)
+
 add_test(NAME e2e_training_tools
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ci/evaluators/test_e2e_training_tools.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
