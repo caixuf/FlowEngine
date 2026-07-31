@@ -340,7 +340,7 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     /* cJSON parsing (fusion/localization now publishes cJSON) */
     const char* d = (const char*)msg->data;
@@ -369,7 +369,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 /* ── vehicle/state 订阅 — 用 flowsim 真值覆盖 ego 位置 ── */
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* j;
@@ -390,7 +390,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 
 static void on_perception_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     ObstacleList list;
     if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
@@ -424,7 +424,7 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
  * NOA route steps 仍从场景文件读取（planning 独有需求）。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
@@ -441,7 +441,7 @@ static void on_road_geometry(const Message* msg, void* user_data) {
 /* ── planning/behavior 订阅 — 接收行为规划指令 ──────────── */
 static void on_planning_behavior(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     Behavior beh;
     if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0) {
         static int desfail_count = 0;
@@ -474,7 +474,7 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
  * 同时考虑相对速度：前车比 ego 慢则 gap 会缩小，用 TTC 加权 min_gap。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     if (g.route_type != ROUTE_MERGE) {
         /* 非 merge 状态无需每帧解析 entities（省 CPU） */
         g.has_scene_frame = 1;
@@ -525,7 +525,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
  * 缓存到 g.tl_x/tl_y_lane/tl_state，供 Frenet 障碍物注入逻辑读取。 */
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
@@ -762,33 +762,23 @@ protected:
                          g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
             }
 
-            /* NOA 路线步骤可能指定目标速度（如出口匝道减速、stop_at_red 停车），覆盖纯粹的巡航速度。
-             * 叠加关系：route_target_speed >= 0 时作为最终目标（含 0=停车），-1=未设置用默认 target_speed。
-             * 旧实现用 > 0.0 判断，导致 target_speed=0（停车）被当作"未设置"回退到巡航速度，
-             * stop_at_red 步骤失效（CI evaluator red_light_violation 根因之一）。 */
-            double command_speed = (g.route_target_speed >= 0.0) ? g.route_target_speed : g.target_speed;
-
-            /* ── Behavior planner 跟车/停车/让行速度覆盖 ──
-             * behavior_planner 在 FOLLOW 状态下发送 target_speed = lead_speed，
-             * STOP/YIELD 状态发送 target_speed = 0。规划层必须消费此值，
-             * 否则 FOLLOW 时仍按巡航速度行驶 → 追尾。
+            /* ── 速度决策：behavior 是唯一来源（Apollo 原则）──
+             * behavior_planner 拥有速度决策权：
+             *   - CRUISE → cfg_cruise_speed（如 15.0）
+             *   - FOLLOW → lead_speed 或 CTG 计算速度
+             *   - STOP/YIELD/EMERGENCY → 0
+             *   - LEFT_CHANGE/RIGHT_CHANGE → 变道速度
              *
-             * P5 修复：LEFT_CHANGE/RIGHT_CHANGE 期间也需消费 beh.target_speed。
-             * 变道需要 3-5s 完成，期间 ego 仍在原车道、前方有慢速 NPC。behavior
-             * 在变道未完成且 blocked 时下发 target_speed=lead_speed，若 planning
-             * 不消费此值，会回退到巡航速度 → 追尾。仅当 beh_speed < command_speed
-             * 时才覆盖（不抬升速度，只降速防追尾）。 */
-            if (g.has_behavior) {
-                float beh_speed = g.current_behavior.target_speed;
-                int8_t beh_cmd = g.current_behavior.command;
-                if (beh_cmd == BEH_FOLLOW && beh_speed >= 0.0f && beh_speed < command_speed) {
-                    command_speed = (double)beh_speed;
-                } else if ((beh_cmd == BEH_LEFT_CHANGE || beh_cmd == BEH_RIGHT_CHANGE) &&
-                           beh_speed >= 0.0f && beh_speed < command_speed) {
-                    command_speed = (double)beh_speed;
-                } else if (beh_cmd == BEH_STOP || beh_cmd == BEH_YIELD || beh_cmd == BEH_EMERGENCY) {
-                    command_speed = 0.0;
-                }
+             * planning 无条件消费 behavior 的 target_speed，不再只在 < command_speed 时覆盖。
+             * 无 behavior 时回退到 scenario 默认 target_speed。
+             * NOA route_target_speed 优先级最高（匝道限速/stop_at_red）。 */
+            double command_speed;
+            if (g.route_target_speed >= 0.0) {
+                command_speed = g.route_target_speed;  /* NOA 路线步骤显式指定 */
+            } else if (g.has_behavior && g.current_behavior.target_speed >= 0.0f) {
+                command_speed = (double)g.current_behavior.target_speed;  /* behavior 决策 */
+            } else {
+                command_speed = g.target_speed;  /* scenario 默认 */
             }
 
         /* DBG: 打印 behavior 覆盖后的 command_speed */
@@ -1182,19 +1172,16 @@ protected:
                     }
                 }
             } else {
-                /* 无有效路径时发布单点轨迹（failsafe 速度）
-                 * 用 ego 当前位置作为轨迹点，不能用 (0,0) ——
-                 * 否则 control 的 Stanley 拿到 ref_path=[(0,0)] 会产生
-                 * 巨大 CTE → 疯狂转向 → 撞墙/逆行。 */
-                double failsafe = command_speed;
-                if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
-                if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
+                /* 规划失败 → 停车（Apollo 原则：不能规划就停）
+                 * 用 ego 当前位置 + v=0，control PID 会匀减速到 0。
+                 * 不用 (0,0) ——否则 Stanley 疯狂转向。
+                 * 不用 command_speed——planning 失败时不应继续按目标速度行驶。 */
                 n_pts = 1;
                 points[0].t_rel_us = 0;
                 points[0].x = (float)g.ego_x;
                 points[0].y = (float)g.ego_y;
                 points[0].heading = (float)g.ego_heading;
-                points[0].v = (float)failsafe;
+                points[0].v = 0.0f;  /* 停车 */
             }
 
             /* ── 发布二进制 Trajectory ── */
@@ -1602,6 +1589,7 @@ NodePlugin s_plugin = {
     planning_stop,
     planning_cleanup,
     planning_health,
+    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
 };
 
 } // namespace

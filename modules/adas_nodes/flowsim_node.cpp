@@ -1731,6 +1731,7 @@ NodePlugin s_plugin = {
     flowsim_stop,
     flowsim_cleanup,
     flowsim_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace

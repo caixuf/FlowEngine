@@ -404,6 +404,7 @@ NodePlugin s_plugin = {
     fusion_stop,
     fusion_cleanup,
     fusion_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace

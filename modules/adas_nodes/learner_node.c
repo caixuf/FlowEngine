@@ -107,7 +107,7 @@ static struct {
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
@@ -127,7 +127,7 @@ static void on_fusion(const Message* msg, void* user_data) {
 
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
@@ -145,7 +145,7 @@ static void on_planning(const Message* msg, void* user_data) {
 
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     ObstacleList list;
     if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) == 0) {
         int n = list.count > 2 ? 2 : list.count;
@@ -185,7 +185,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
 static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     ControlCmd cmd;
     if (ControlCmd_deserialize(&cmd, (const uint8_t*)msg->data, msg->data_size) == 0) {
         g.ctrl_brake = cmd.brake;

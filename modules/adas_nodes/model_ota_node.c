@@ -231,7 +231,7 @@ static int copy_file(const char* src, const char* dst) {
     FILE* fi = fopen(src, "rb");
     if (!fi) return -1;
     /* 写到临时文件，再原子重命名 */
-    char tmp[OTA_PATH_LEN];
+    char tmp[OTA_PATH_LEN + 8];
     snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
     FILE* fo = fopen(tmp, "wb");
     if (!fo) { fclose(fi); return -1; }
@@ -429,6 +429,7 @@ static void handle_cmd(const char* json) {
         g.ab_ratio   = ratio;
         if (mb_path[0] != '\0') {
             strncpy(g.model_b_path, mb_path, OTA_PATH_LEN - 1);
+            g.model_b_path[OTA_PATH_LEN - 1] = '\0';
             g.model_b_loaded = (tiny_mlp_load(&g.model_b, mb_path) == 0) ? 1 : 0;
             if (!g.model_b_loaded)
                 LOG_WARN("model_ota", "ab_test: failed to load model_b: %s", mb_path);
@@ -459,13 +460,13 @@ static void handle_cmd(const char* json) {
 
 static void on_ota_cmd(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     handle_cmd((const char*)msg->data);
 }
 
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     /* fusion/localization now publishes cJSON */
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
@@ -695,6 +696,7 @@ static int ota_init(MessageBus* bus, Transport* transport,
         OtaVersion* v = &g.versions[0];
         strncpy(v->id, "initial", OTA_ID_LEN - 1);
         strncpy(v->path, g.runtime_model_path, OTA_PATH_LEN - 1);
+        v->path[OTA_PATH_LEN - 1] = '\0';
         v->loaded_at = (long)time(NULL);
         v->active    = 1;
         g.version_count = 1;

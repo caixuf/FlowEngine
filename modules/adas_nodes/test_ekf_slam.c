@@ -86,6 +86,7 @@ static float compute_rmse(float* estimates, float* ground_truth, int num_samples
 }
 
 int main(int argc, char** argv) {
+    (void)argc; (void)argv;
     srand(42);
 
     const int NUM_SAMPLES = 1000;

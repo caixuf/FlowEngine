@@ -234,6 +234,7 @@ NodePlugin s_plugin = {
     .stop          = flowmond_stop,
     .cleanup       = flowmond_cleanup,
     .health        = flowmond_health,
+    .taskbase      = nullptr,
 };
 
 extern "C" NodePlugin* node_get_plugin(void) { return &s_plugin; }

@@ -159,7 +159,7 @@ ControlCmd parse_control_cmd(const Message& msg) {
 }
 
 void on_fusion(const Message* msg, void*) {
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     pthread_mutex_lock(&g.state_mutex);
@@ -178,7 +178,7 @@ void on_fusion(const Message* msg, void*) {
 }
 
 void on_perception_obstacles(const Message* msg, void*) {
-    if (!msg || !msg->data) return;
+    if (!msg) return;
     ObstacleList list;
     if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0)
         return;
@@ -343,7 +343,6 @@ protected:
     Task run() override {
         uint32_t cycle = 0;
         uint64_t last_msg_us = clock_now_us();
-        bool last_has_state = false;
 
         LOG_INFO("safety_control", "safety gate started (synchronous resume)");
         while (!should_stop()) {
@@ -394,7 +393,6 @@ private:
 
         /* §11.2 降级触发 */
         {
-            static int degrade_counter = 0;
             if (!has_state) {
                 /* 传感器融合丢失 → L1 降级 */
                 degrade_set_level(DEGRADE_L1, DEGRADE_REASON_FUSION_TO);
@@ -679,6 +677,7 @@ NodePlugin s_plugin = {
     safety_stop,
     safety_cleanup,
     safety_health,
+    nullptr,  /* taskbase: 旧路径自管线程 */
 };
 
 } // namespace

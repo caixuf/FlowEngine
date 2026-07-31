@@ -315,7 +315,7 @@ static void apply_control_cmd(const ControlCmd* cmd) {
 /* ── 订阅回调：收到 control/cmd ────────────────────────────── */
 static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || !g.enabled) return;
+    if (!msg || !g.enabled) return;
 
     /* 二进制反序列化 ControlCmd */
     ControlCmd cmd;

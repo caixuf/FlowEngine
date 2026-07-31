@@ -119,9 +119,13 @@ def sample_json() -> dict | None:
         return None
 
 
-def compute_cte(y: float, lane_count: int = 2,
+def compute_cte(y: float, lane_count: int = 4,
                 lane_width: float = 3.5, road_c: float = 0.0) -> float:
-    """cross-track error 相对最近车道中心。"""
+    """cross-track error 相对最近车道中心。
+
+    默认 4 车道（与 straight_road.json 一致）。2 车道假设已过时，
+    会导致 lane 3（y=-5.25）的 CTE 算成 3.5m 而非 ~0m。
+    """
     offset = (road_c - y) / lane_width + (lane_count - 1) * 0.5
     idx = max(0, min(lane_count - 1, int(round(offset))))
     lcy = road_c - (idx - (lane_count - 1) * 0.5) * lane_width

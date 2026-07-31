@@ -234,7 +234,7 @@
           }
         }
       ],
-      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 12.0, \"lat_kp\": 0.5, \"lat_kd_heading\": 3.5, \"yaw_damping\": 0.28, \"k_v_lat\": 0.5, \"k_vy\": 0.35, \"k_vy_damp\": 1.2, \"mpc_horizon\": 0, \"scenario_file\": \"scenarios/straight_road.json\"}"
+      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 15.0, \"lat_kp\": 0.6, \"lat_kd_heading\": 1.5, \"yaw_damping\": 0.35, \"k_v_lat\": 0.22, \"k_vy\": 0.4, \"k_vy_damp\": 0.4, \"mpc_horizon\": 0, \"scenario_file\": \"scenarios/straight_road.json\"}"
     },
     {
       "name": "safety_control",

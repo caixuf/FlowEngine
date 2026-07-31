@@ -387,7 +387,15 @@ static int slam_execute(TaskBase* task) {
 }
 
 static const TaskInterface slam_vtable = {
-    .execute = slam_execute,
+    .initialize    = nullptr,
+    .execute       = slam_execute,
+    .cleanup       = nullptr,
+    .pause         = nullptr,
+    .resume        = nullptr,
+    .handle_signal = nullptr,
+    .health_check  = nullptr,
+    .get_status    = nullptr,
+    .on_message    = nullptr,
 };
 
 static const char* s_inputs[]  = { "sensor/lidar", "sensor/imu", NULL };

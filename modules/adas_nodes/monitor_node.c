@@ -7,12 +7,15 @@
  * NodePlugin 接口，编译为 libmonitor_node.so。
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "node_plugin.h"
 #include "scheduler.h"       /* scheduler_task_count() — clang 视隐式声明为错误 */
 #include "sysmonitor.h"
 #include "flow_registry.h"
 #include "topic_registry.h"
+#include "scheduler.h"   /* scheduler_task_count 原型（否则隐式声明） */
 #include "logger.h"
 #include "stats_bridge.h"
 #include "dashboard_bridge.h"
@@ -164,7 +167,7 @@ static struct {
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
     g.last_perception_us = clock_now_us();
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     size_t copy = msg->data_size < sizeof(g.latest_obstacles_json) - 1
                   ? msg->data_size : sizeof(g.latest_obstacles_json) - 1;
     memcpy(g.latest_obstacles_json, msg->data, copy);
@@ -174,7 +177,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     size_t copy = msg->data_size < sizeof(g.latest_vehicle_state) - 1
                   ? msg->data_size : sizeof(g.latest_vehicle_state) - 1;
     memcpy(g.latest_vehicle_state, msg->data, copy);
@@ -187,7 +190,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
 /* 收集其他节点的自描述广播 */
 static void on_node_info(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || g.node_info_count >= MAX_TOPO_NODES) return;
+    if (!msg || g.node_info_count >= MAX_TOPO_NODES) return;
     size_t copy = msg->data_size < sizeof(g.node_info_json[0]) - 3
                   ? msg->data_size : sizeof(g.node_info_json[0]) - 3;
     memcpy(g.node_info_json[g.node_info_count], msg->data, copy);
@@ -255,7 +258,7 @@ static void on_remote_stats(const Message* msg, void* user_data) {
  * cJSON_Parse 仅作为旧版 JSON 回退路径保留。 */
 static void on_planning_trajectory(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     g.last_planning_us = clock_now_us();
 
     /* driver_mode 从 behavior/state 获取，不再依赖 trajectory 尾部文本 */
@@ -315,7 +318,7 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
  * 替代此前从 vehicle/state 间接读取 road_curve_sx/len/off 的方式。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
@@ -338,7 +341,7 @@ static void on_road_geometry(const Message* msg, void* user_data) {
  * （vehicle/state 仅承载前 16 个 obstacle，不足以覆盖 NOA 场景）。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (!root) return;
@@ -441,7 +444,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
 
 static void on_fusion_latency(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     /* Try binary deserialization (serializer path) */
     {
@@ -469,7 +472,7 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
 /* §11.1: CTE 监控回调 — 从 control/cte JSON topic 解析横向跟踪误差 */
 static void on_control_cte(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (root) {
@@ -482,7 +485,7 @@ static void on_control_cte(const Message* msg, void* user_data) {
 /* ── behavior/state 订阅 — 缓存行为规划状态 ── */
 static void on_behavior_state(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     size_t copy = msg->data_size;
     if (copy >= sizeof(g.behavior_state_json)) copy = sizeof(g.behavior_state_json) - 1;
     memcpy(g.behavior_state_json, msg->data, copy);
@@ -681,7 +684,12 @@ static void export_dashboard_json(void) {
     TopicStats tstats[64];
     int nt = g.bus ? message_bus_get_all_topic_stats(g.bus, tstats, 64) : 0;
     for (int ti = 0; ti < nt && merged_n < 64; ti++) {
-        snprintf(merged[merged_n].topic, sizeof(merged[merged_n].topic), "%s", tstats[ti].topic);
+        /* 显式定长拷贝：merged[].topic 与 tstats[].topic 均 char[64]。snprintf 的
+         * "%s" 触发 -Wformat-truncation 误报（GCC 无法证明源串有界），改用 strnlen+
+         * memcpy 显式定界，语义等价且无告警。 */
+        size_t tl = strnlen(tstats[ti].topic, sizeof(merged[merged_n].topic) - 1);
+        memcpy(merged[merged_n].topic, tstats[ti].topic, tl);
+        merged[merged_n].topic[tl] = '\0';
         merged[merged_n].pub  = tstats[ti].publish_count;
         merged[merged_n].del  = tstats[ti].deliver_count;
         merged[merged_n].drop = tstats[ti].drop_count;
@@ -1051,8 +1059,9 @@ static void export_dashboard_json(void) {
     char* json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
-    /* 写入 state_file（foxglove_bridge.py / 文件桥接回退消费） */
-    char tmp_path[512];
+    /* 写入 state_file（foxglove_bridge.py / 文件桥接回退消费）。
+     * 缓冲区需容纳 state_file[512] + ".tmp" 后缀 + '\0'，故取 520。 */
+    char tmp_path[520];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g.state_file);
     FILE* jf = fopen(tmp_path, "w");
     if (jf) {

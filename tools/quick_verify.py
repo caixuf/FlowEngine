@@ -55,8 +55,9 @@ SOCK_FILE = Path("/tmp/flow_param.sock")
 
 # 已知可热调参数列表（用于 params 命令和 reset 时恢复 baseline）
 TUNABLE_PARAMS = {
-    # ── Control（横向/纵向控制） ──
-    "control.cruise_speed":         (20.0,  "巡航目标速度 m/s"),
+    # ── Behavior（行为决策——速度决策唯一来源） ──
+    "behavior.cruise_speed":        (15.0,  "巡航目标速度 m/s（Apollo原则：behavior决策速度）"),
+    # ── Control（横向控制——纯轨迹跟随器，不做速度决策） ──
     "control.pid_kp":               (0.5,   "纵向PID P增益"),
     "control.pid_ki":               (0.05,  "纵向PID I增益"),
     "control.pid_kd":               (0.2,   "纵向PID D增益"),
@@ -599,7 +600,7 @@ def wait_for_flowctl(timeout: float = 45) -> bool:
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         if SOCK_FILE.exists():
-            ok, _ = flowctl("param", "get", "control.cruise_speed")
+            ok, _ = flowctl("param", "get", "behavior.cruise_speed")
             if ok:
                 return True
         time.sleep(0.5)

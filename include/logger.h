@@ -119,6 +119,17 @@ void log_write(const char* module, LogLevel level,
  *   以及具体的 task 名
  */
 
+/* 防御性 undef：flowcoro 的 coroutine_task.h 会定义另一套 LOG_* 宏
+ * (签名不同：无 module 参数)。本头是项目唯一规范 logger，包含时清掉
+ * flowcoro 的同名宏，避免 -Wmacro-redefined 警告并确保 module 参数版生效。
+ * LogLevel 枚举值 (LOG_TRACE 等) 不受 #undef 影响（#undef 只作用于宏）。 */
+#undef LOG_TRACE
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARN
+#undef LOG_ERROR
+#undef LOG_FATAL
+
 #define LOG_TRACE(module, fmt, ...) \
     log_write(module, LOG_TRACE, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
 

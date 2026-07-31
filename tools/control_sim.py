@@ -41,8 +41,11 @@ STEER_LIMIT_MAX  = 0.16    # 最大转向限幅 rad
 ROAD_GUARD_Y     = 4.5     # 路沿保护阈值 m
 
 # 变道参数
-LANE_WIDTH       = 3.75    # 车道宽度 m
+LANE_WIDTH       = 3.5     # 车道宽度 m（与 C 代码 4 车道场景一致）
+N_LANES          = 4       # 车道数
 LC_TRIGGER_TIME  = 3.0     # 变道触发时间 s
+# ROAD_GUARD：偏离目标车道中心超过此值 → 强制回正（匹配修复后的 C 代码）
+ROAD_GUARD_THRESHOLD = 3.0  # m
 
 
 # ══════════════════════════════════════════════════════════════
@@ -316,6 +319,230 @@ class VehicleState:
 
 
 # ══════════════════════════════════════════════════════════════
+#  规划层仿真（planning_node → trajectory）
+# ══════════════════════════════════════════════════════════════
+
+def lane_center_y(lane_idx, n_lanes=N_LANES, lane_w=LANE_WIDTH):
+    """车道中心 y（与 C 代码 lane_center_y 公式一致）。
+    0=最左, N-1=最右。4 车道: lane 0→+5.25, 1→+1.75, 2→-1.75, 3→-5.25"""
+    return -(lane_idx - (n_lanes - 1) / 2.0) * lane_w
+
+class TrajectoryPoint:
+    __slots__ = ('x', 'y', 's', 'l', 'heading', 'kappa', 'v')
+    def __init__(self, x=0, y=0, s=0, l=0, heading=0, kappa=0, v=0):
+        self.x, self.y = x, y
+        self.s, self.l = s, l       # Frenet (s=纵向, l=横向偏移)
+        self.heading, self.kappa, self.v = heading, kappa, v
+
+class PlanningLayer:
+    """模拟 planning_node 的轨迹生成逻辑。
+
+    核心逻辑（与 C 代码一致）：
+    1. ego_d = ego_y - road_center_y (当前横向偏移)
+    2. d_out[i] = ego_d * (1-t) + target_lane_offset * t (线性插值到目标车道)
+    3. frenet_to_cartesian: x=s, y=road_center + d*cos(theta), heading=theta, kappa=0
+    4. 前视点(0.5s)的 l 字段供 control 的 lane_d 使用
+
+    road_center_y = 0（直道），target_lane_offset = 目标车道 y - road_center_y
+    """
+    def __init__(self, n_points=10, horizon_m=50.0):
+        self.n_points = n_points
+        self.horizon = horizon_m
+
+    def generate(self, ego_x, ego_y, ego_v, target_lane_offset, command_speed):
+        """生成轨迹点列表。"""
+        ego_d = ego_y  # road_center = 0
+        pts = []
+        for i in range(self.n_points):
+            t = i / (self.n_points - 1) if self.n_points > 1 else 0.0
+            s = ego_x + self.horizon * t
+            d = ego_d * (1.0 - t) + target_lane_offset * t
+            # frenet_to_cartesian（直道：theta=0, cos=1, sin=0）
+            x = s
+            y = d  # road_center(=0) + d * cos(0)
+            heading = 0.0
+            kappa = 0.0
+            v = command_speed
+            pts.append(TrajectoryPoint(x, y, s, d, heading, kappa, v))
+        return pts
+
+
+# ══════════════════════════════════════════════════════════════
+#  控制层仿真（control_node — 修复后的 road_center 逻辑）
+# ══════════════════════════════════════════════════════════════
+
+class ControlLayer:
+    """模拟 control_node 的轨迹消费 + 横向控制。
+
+    修复点（与 C 代码同步）：
+    1. road_center_y = trajectory_y - l * cos(heading)（减去横向偏移，得到真正道路中心）
+    2. target_lane_center = road_center_y + lane_d（目标车道中心）
+    3. ROAD_GUARD 检查 |ego_y - target_lane_center| > 阈值（非 |ego_y - road_center|）
+    4. lat_error = ego_y - target_lane_center
+    """
+    def __init__(self, params=None):
+        self.params = params or StanleyParams()
+        self.ref_path = []
+        self.prev_steer = 0.0
+        self.lane_d = 0.0          # 前视点横向偏移（从 trajectory 提取）
+        self.road_center_y = 0.0   # 道路中心 y（修复后 = traj_y - l*cos(h)）
+        self.target_speed = 0.0
+
+    def on_trajectory(self, traj_points):
+        """存储轨迹并提取前视点信息（匹配 on_trajectory 回调）。"""
+        self.ref_path = traj_points
+        if not traj_points:
+            return
+        # 前视点：0.5s 后的位置（索引 = 0.5s / DT = 10 → 取第 10 个点或最后一个）
+        lookahead_idx = min(int(0.5 / DT), len(traj_points) - 1)
+        self.lane_d = traj_points[lookahead_idx].l
+        self.target_speed = traj_points[-1].v
+
+    def compute_steer(self, ego_x, ego_y, ego_v, ego_heading, ego_yaw_rate):
+        """计算转向角（匹配修复后的 control_node 逻辑）。"""
+        if not self.ref_path:
+            return 0.0
+
+        # 找最近轨迹点
+        best_d2 = 1e9
+        best = None
+        for p in self.ref_path:
+            d2 = (p.x - ego_x)**2 + (p.y - ego_y)**2
+            if d2 < best_d2:
+                best_d2 = d2
+                best = p
+        if not best or best_d2 > 25.0:  # >5m 偏离
+            return 0.0
+
+        # 修复核心：road_center = traj_y - l * cos(heading)
+        # 旧 bug：直接用 best.y（含偏移）→ cruise_lane_y 双重计算 → 发散
+        self.road_center_y = best.y - best.l * math.cos(best.heading)
+
+        # 目标车道中心 = 道路中心 + 前视点横向偏移
+        target_lane_center = self.road_center_y + self.lane_d
+
+        # 横向误差（修复后：相对目标车道中心，非道路中心）
+        lat_error = target_lane_center - ego_y  # Stanley 约定
+        heading_error = ego_heading - best.heading
+
+        # Stanley 控制
+        steer = stanley_control(lat_error, heading_error, ego_yaw_rate,
+                                ego_v, best.kappa, self.prev_steer, self.params)
+
+        # ROAD_GUARD（修复后：检查偏离目标车道，非道路中心）
+        y_from_target = abs(ego_y - target_lane_center)
+        if y_from_target > ROAD_GUARD_THRESHOLD:
+            # 强制回正
+            limit = steer_limit_for_speed(ego_v, 2.4)
+            steer = limit if lat_error > 0 else -limit
+
+        self.prev_steer = steer
+        return steer
+
+
+# ══════════════════════════════════════════════════════════════
+#  闭环仿真（planning → control → vehicle dynamics）
+# ══════════════════════════════════════════════════════════════
+
+def run_closed_loop(stanley_params=None, target_lane=2, do_lane_change=False,
+                    target_speed=CRUISE_SPEED, duration=SIM_DURATION,
+                    initial_y=None, initial_v=5.0, start_lane=2):
+    """planning→control 闭环仿真。
+
+    与 run_simulation 的区别：
+    - planning 层生成完整轨迹（d_out blending），非直接设 target_y
+    - control 层从轨迹提取 road_center/lane_d（模拟修复后的逻辑）
+    - 测试完整 planning→control 数据通路
+
+    变道场景：t < LC_TRIGGER_TIME 保持在 start_lane，之后切到 target_lane。
+    """
+    if stanley_params is None:
+        stanley_params = StanleyParams()
+
+    final_offset = lane_center_y(target_lane)
+    start_offset = lane_center_y(start_lane)
+    if initial_y is None:
+        initial_y = start_offset  # 从起始车道出发
+
+    ego = VehicleState(x0=0.0, y0=initial_y, v0=initial_v, heading0=0.0)
+    planner = PlanningLayer()
+    controller = ControlLayer(stanley_params)
+
+    result = SimResult()
+    lc_time = None
+    current_target = start_offset  # 当前目标车道偏移
+
+    n_steps = int(duration / DT)
+    for step in range(n_steps):
+        t = step * DT
+
+        # 变道触发：t >= LC_TRIGGER_TIME 后切换目标车道
+        if do_lane_change and t >= LC_TRIGGER_TIME and lc_time is None:
+            lc_time = t
+            current_target = final_offset
+
+        # 速度控制
+        speed_error = target_speed - ego.v
+        throttle = min(speed_error / 10.0, 0.5) if speed_error > 0 else 0.0
+        brake = min(-speed_error / 10.0, 0.3) if speed_error < 0 else 0.0
+
+        # planning 生成轨迹（目标 = current_target）
+        traj = planner.generate(ego.x, ego.y, ego.v, current_target, target_speed)
+
+        # control 消费轨迹
+        controller.on_trajectory(traj)
+        steer_cmd = controller.compute_steer(ego.x, ego.y, ego.v, ego.heading, ego.yaw_rate)
+
+        # 记录
+        target_y = current_target
+        lat_error = target_y - ego.y
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.lat_error.append(lat_error)
+        result.target_y.append(target_y)
+        if abs(steer_cmd) > result.max_steer:
+            result.max_steer = abs(steer_cmd)
+
+        # 飞出路面检测（4 车道半宽 = 7m）
+        if abs(ego.y) > N_LANES * LANE_WIDTH / 2 + 1.0:
+            result.collided = True
+            break
+
+        # 积分
+        ego.step(steer_cmd, throttle, brake)
+
+    # 统计
+    if not result.collided:
+        tail_start = max(0, len(result.lat_error) - int(2.0/DT))
+        tail_err = [abs(e) for e in result.lat_error[tail_start:]]
+        result.steady_state_error = sum(tail_err) / len(tail_err) if tail_err else 999
+
+        if do_lane_change and lc_time is not None:
+            settle_threshold = 0.3
+            settled_idx = None
+            for i in range(len(result.t)):
+                if result.t[i] < lc_time: continue
+                if all(abs(result.lat_error[j]) < settle_threshold
+                       for j in range(i, len(result.lat_error))):
+                    settled_idx = i
+                    break
+            if settled_idx is not None:
+                result.settling_time = result.t[settled_idx] - lc_time
+            min_y = min(result.y[settled_idx:]) if settled_idx else min(result.y)
+            result.overshoot = abs(min_y - final_offset)
+
+        tail_steer = result.steer[tail_start:]
+        steer_amp = max(tail_steer) - min(tail_steer) if tail_steer else 999
+        result.stable = steer_amp < 0.02 and result.steady_state_error < 0.1
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
 #  仿真运行
 # ══════════════════════════════════════════════════════════════
 
@@ -567,6 +794,78 @@ def tune_lane_change():
         print("  ⚠️  未找到能完成变道的稳定参数")
 
 
+def tune_joint():
+    """联合调参：planning→control 闭环，直道(lane 2) + 变道(lane 2→3)，15 m/s。
+
+    评分 = 直道稳态误差*3 + 变道调节时间 + 变道超调*5 + 转向振幅*10
+    只保留两个场景都稳定且不碰撞的参数。
+    """
+    print("\n" + "="*60)
+    print("  联合调参: planning→control 闭环 (直道+变道, 15 m/s, 4车道)")
+    print("="*60)
+    best = None
+    best_score = 1e9
+    n_tried = 0
+    n_valid = 0
+
+    for lat_kp in [0.3, 0.4, 0.5, 0.6]:
+        for lat_kd_h in [1.5, 2.0, 2.5, 3.0]:
+            for yaw_damp in [0.2, 0.28, 0.35]:
+                for k_vy in [0.2, 0.3, 0.4]:
+                    for k_vy_damp in [0.4, 0.6, 0.8]:
+                        n_tried += 1
+                        p = StanleyParams()
+                        p.lat_kp = lat_kp
+                        p.lat_kd_heading = lat_kd_h
+                        p.yaw_damping = yaw_damp
+                        p.k_vy = k_vy
+                        p.k_vy_damp = k_vy_damp
+
+                        # 场景1: 直道 lane 2 (y=-1.75), 带初始偏移
+                        r1 = run_closed_loop(p, target_lane=2, do_lane_change=False,
+                                             target_speed=15.0, duration=10.0,
+                                             initial_y=-1.0)  # 从 y=-1 开始（偏离 lane 2）
+                        if r1.collided or not r1.stable:
+                            continue
+
+                        # 场景2: 变道 lane 2→3 (y=-1.75→-5.25)
+                        r2 = run_closed_loop(p, target_lane=3, do_lane_change=True,
+                                             target_speed=15.0, duration=15.0,
+                                             initial_y=lane_center_y(2))  # 从 lane 2 出发
+                        if r2.collided or not r2.stable or r2.settling_time is None:
+                            continue
+
+                        n_valid += 1
+                        steer_amp = max(r1.steer[-40:]) - min(r1.steer[-40:])
+                        score = (r1.steady_state_error * 3 +
+                                 r2.settling_time +
+                                 r2.overshoot * 5 +
+                                 steer_amp * 10)
+                        if score < best_score:
+                            best_score = score
+                            best = (lat_kp, lat_kd_h, yaw_damp, k_vy, k_vy_damp, r1, r2)
+
+    print(f"\n  尝试参数组合: {n_tried}, 有效(两场景均稳定): {n_valid}")
+    if best:
+        lat_kp, lat_kd_h, yaw_damp, k_vy, k_vy_damp, r1, r2 = best
+        print(f"\n  ✅ 最优联合参数:")
+        print(f"     lat_kp={lat_kp}, lat_kd_heading={lat_kd_h}, yaw_damping={yaw_damp}")
+        print(f"     k_vy={k_vy}, k_vy_damp={k_vy_damp}")
+        print(f"\n  直道 (lane 2, 15 m/s):")
+        print(f"     稳态误差={r1.steady_state_error:.4f}m, 最大转向={math.degrees(r1.max_steer):.1f}°")
+        print(f"\n  变道 (lane 2→3, 15 m/s):")
+        print(f"     调节时间={r2.settling_time:.2f}s, 超调={r2.overshoot:.2f}m, 最大转向={math.degrees(r2.max_steer):.1f}°")
+        print(f"\n  综合评分: {best_score:.3f} (越低越好)")
+        print(f"\n  flowctl 固化命令:")
+        print(f"     flowctl param set control.lat_kp {lat_kp}")
+        print(f"     flowctl param set control.lat_kd_heading {lat_kd_h}")
+        print(f"     flowctl param set control.yaw_damping {yaw_damp}")
+        print(f"     flowctl param set control.k_vy {k_vy}")
+        print(f"     flowctl param set control.k_vy_damp {k_vy_damp}")
+    else:
+        print("  ⚠️  未找到两场景均稳定的参数")
+
+
 # ══════════════════════════════════════════════════════════════
 #  主入口
 # ══════════════════════════════════════════════════════════════
@@ -576,8 +875,14 @@ def main():
     parser = argparse.ArgumentParser(description="FlowEngine 横向控制仿真验证工具")
     parser.add_argument("--lc", action="store_true", help="变道场景")
     parser.add_argument("--mpc", action="store_true", help="启用LTV-MPC（默认Stanley）")
-    parser.add_argument("--tune", action="store_true", help="扫描Stanley最优参数")
+    parser.add_argument("--tune", action="store_true", help="扫描Stanley最优参数（纯控制层）")
+    parser.add_argument("--tune-joint", action="store_true",
+                        help="联合调参: planning→control 闭环（直道+变道）")
     parser.add_argument("--tune-mpc", action="store_true", help="扫描LTV-MPC最优参数")
+    parser.add_argument("--plan", action="store_true",
+                        help="使用 planning→control 闭环仿真（非直接设 target_y）")
+    parser.add_argument("--lane", type=int, default=2,
+                        help=f"目标车道 0~{N_LANES-1}（默认2）")
     parser.add_argument("--speed", type=float, default=CRUISE_SPEED, help=f"巡航速度 (默认{CRUISE_SPEED}m/s)")
     parser.add_argument("--duration", type=float, default=SIM_DURATION, help="仿真时长")
     parser.add_argument("--csv", type=str, default=None, help="输出CSV文件路径")
@@ -590,19 +895,34 @@ def main():
         tune_lane_change()
         return
 
+    if args.tune_joint:
+        tune_joint()
+        return
+
     if args.tune_mpc:
         print("MPC参数扫描功能待实现（当前默认参数q_y=10,q_psi=20,r=0.5因C代码直接加未乘dt有单位问题）")
         return
 
-    # 默认单次仿真
-    mode_str = []
-    mode_str.append("LTV-MPC" if args.mpc else "改进版Stanley")
-    mode_str.append("变道" if args.lc else "直道保持")
-    label = f"{mode_str[0]} @ {args.speed:.0f}m/s — {mode_str[1]}"
+    # 单次仿真
+    if args.plan:
+        # planning→control 闭环模式
+        mode_str = f"planning→control 闭环 @ {args.speed:.0f}m/s"
+        mode_str += f" — 变道→lane{args.lane}" if args.lc else " — 直道保持"
+        result = run_closed_loop(stanley_params=StanleyParams(),
+                                 target_lane=args.lane,
+                                 do_lane_change=args.lc,
+                                 target_speed=args.speed,
+                                 duration=args.duration)
+    else:
+        # 纯控制层模式（原逻辑）
+        mode_str = []
+        mode_str.append("LTV-MPC" if args.mpc else "改进版Stanley")
+        mode_str.append("变道" if args.lc else "直道保持")
+        mode_str = f"{mode_str[0]} @ {args.speed:.0f}m/s — {mode_str[1]}"
+        result = run_simulation(use_mpc=args.mpc, do_lane_change=args.lc,
+                               target_speed=args.speed, duration=args.duration)
 
-    result = run_simulation(use_mpc=args.mpc, do_lane_change=args.lc,
-                           target_speed=args.speed, duration=args.duration)
-    print_result(result, label)
+    print_result(result, mode_str)
 
     if args.csv:
         write_csv(result, args.csv)

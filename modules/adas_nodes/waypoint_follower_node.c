@@ -210,7 +210,7 @@ static int load_waypoints(const char* path) {
 /* ── fusion/localization 订阅回调 ─────────────────────────── */
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     /* cJSON parsing (fusion/localization now publishes cJSON) */
     cJSON* root = cJSON_Parse((const char*)msg->data);
@@ -239,7 +239,7 @@ static void on_fusion(const Message* msg, void* user_data) {
  */
 static void on_obstacles(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     ObstacleList list;
     if (ObstacleList_deserialize(&list, (const uint8_t*)msg->data, msg->data_size) != 0) {
@@ -269,7 +269,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
  */
 static void on_traversability(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data) return;
+    if (!msg) return;
 
     cJSON* root = cJSON_Parse((const char*)msg->data);
     double near_obs = -1.0, cor_w = 0.0;
@@ -334,21 +334,15 @@ static int pure_pursuit_step(double ego_x, double ego_y, double ego_heading,
     }
 
     /* 2. 找前瞻点：从当前航点向前找距离 ≥ lookahead 的航点 */
-    double target_x = g.wpx[g.wp_current];
-    double target_y = g.wpy[g.wp_current];
-    double accum = 0.0;
     int lookahead_idx = g.wp_current;
     for (int k = g.wp_current; k < g.wp_count; k++) {
         double dx = g.wpx[k] - ego_x;
         double dy = g.wpy[k] - ego_y;
         double d = sqrt(dx * dx + dy * dy);
         if (d >= g.lookahead_m) {
-            target_x = g.wpx[k];
-            target_y = g.wpy[k];
             lookahead_idx = k;
             break;
         }
-        accum = d;
     }
     /* 到达终点（非 loop） */
     if (lookahead_idx == g.wp_current && !g.loop) {
@@ -456,10 +450,10 @@ static int wp_execute(TaskBase* task) {
         }
 
         /* 拷贝自车状态（避免长时间持锁） */
-        double ego_x, ego_y, ego_v, ego_heading;
+        double ego_x, ego_y, ego_heading;
         pthread_mutex_lock(&g.lock);
         ego_x = g.ego_x; ego_y = g.ego_y;
-        ego_v = g.ego_v; ego_heading = g.ego_heading;
+        ego_heading = g.ego_heading;
         pthread_mutex_unlock(&g.lock);
 
         /* Pure Pursuit 计算 */
