@@ -610,4 +610,4 @@ NodePlugin s_plugin = {
     .taskbase      = &g.taskbase,
 };
 
-NodePlugin* node_get_plugin(void) { return &s_plugin; }
+extern "C" NodePlugin* node_get_plugin(void) { return &s_plugin; }
