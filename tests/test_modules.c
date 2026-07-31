@@ -184,6 +184,40 @@ static void test_serialize_roundtrip(void) {
     PASS();
 }
 
+/* 用生成的 _serialize/_deserialize 验证：往返无损 + 线格式恒为小端（跨主机） */
+static void test_gen_serialize_roundtrip(void) {
+    TEST("generated GpsData serialize/deserialize roundtrip");
+    GpsData orig = {
+        .latitude     = 37.7749,
+        .longitude    = -122.4194,
+        .speed_mps    = 12.5f,
+        .heading_deg  = 88.25f,
+        .accuracy_m   = 1.5f,
+        .timestamp_us = 0x0102030405060708ULL,  /* 每字节唯一，便于校验字节序 */
+    };
+
+    uint8_t buf[256];
+    size_t sz = 0;
+    ASSERT(GpsData_serialize(&orig, buf, &sz) == 0, "serialize failed");
+    ASSERT(sz > 0 && sz <= sizeof(buf), "bad serialized size");
+
+    GpsData restored;
+    ASSERT(GpsData_deserialize(&restored, buf, sz) == 0, "deserialize failed");
+
+    ASSERT(fabs(restored.latitude  - orig.latitude)  < 1e-9, "latitude mismatch");
+    ASSERT(fabs(restored.longitude - orig.longitude) < 1e-9, "longitude mismatch");
+    ASSERT(fabsf(restored.speed_mps   - orig.speed_mps)   < 1e-6f, "speed mismatch");
+    ASSERT(fabsf(restored.heading_deg - orig.heading_deg) < 1e-6f, "heading mismatch");
+    ASSERT(restored.timestamp_us == orig.timestamp_us, "timestamp mismatch");
+
+    /* 线格式规范 = 小端：timestamp_us 打包在 offset 28，LSB 必在低地址。
+     * 这个断言在小端与大端主机上都必须成立（大端主机序列化时已交换）。 */
+    ASSERT(buf[28] == 0x08, "wire not little-endian (LSB)");
+    ASSERT(buf[35] == 0x01, "wire not little-endian (MSB)");
+
+    PASS();
+}
+
 static void test_msg_cast(void) {
     TEST("msg_cast with matching size");
     Message msg;
@@ -1256,6 +1290,7 @@ int main(void) {
     test_schema_metadata();
     test_schema_compat();
     test_serialize_roundtrip();
+    test_gen_serialize_roundtrip();
     test_msg_cast();
     test_endian_detection();
 
