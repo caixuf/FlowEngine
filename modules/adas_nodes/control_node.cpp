@@ -248,7 +248,10 @@ static void on_trajectory(const Message* msg, void* user_data) {
         degrade_set_level(DEGRADE_L1, DEGRADE_REASON_PLANNING_TO);
         return;
     }
-    if (n_pts > 1) {
+    /* 全零检查：n_pts >= 1 时都查。旧代码只查 n_pts > 1，导致单点
+     * (0,0) 轨迹绕过检查 → Stanley 拿到 ref_path=[(0,0)] → 巨大 CTE
+     * → 疯狂转向。 */
+    {
         int all_zero = 1;
         for (uint32_t i = 0; i < n_pts; i++) {
             if (fabs((double)traj.points[i].x) > 0.001 ||

@@ -1126,12 +1126,18 @@ protected:
                     }
                 }
             } else {
-                /* 无有效路径时发布单点轨迹（failsafe 速度） */
+                /* 无有效路径时发布单点轨迹（failsafe 速度）
+                 * 用 ego 当前位置作为轨迹点，不能用 (0,0) ——
+                 * 否则 control 的 Stanley 拿到 ref_path=[(0,0)] 会产生
+                 * 巨大 CTE → 疯狂转向 → 撞墙/逆行。 */
                 double failsafe = command_speed;
                 if (failsafe > g.ego_v + 1.0) failsafe = g.ego_v + 1.0;
                 if (failsafe > g.cfg_max_speed) failsafe = g.cfg_max_speed;
                 n_pts = 1;
                 points[0].t_rel_us = 0;
+                points[0].x = (float)g.ego_x;
+                points[0].y = (float)g.ego_y;
+                points[0].heading = (float)g.ego_heading;
                 points[0].v = (float)failsafe;
             }
 

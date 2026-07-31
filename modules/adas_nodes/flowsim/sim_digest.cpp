@@ -543,14 +543,21 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
                     double ldx_n = ldx / lnorm;
                     double ldy_n = ldy / lnorm;
                     double dot_lane = fwd_x * ldx_n + fwd_y * ldy_n;
-                    /* dot_lane 应为正（与车道方向一致）。旧代码用 fabs
-                     * 导致对向来车（dot≈-1）也通过，掩盖方向 bug。 */
-                    if (dot_lane < std::cos(M_PI / 4.0)) {  // < cos(45°) = 方向不一致
+                    /* route_dir > 0: 顺行车，dot_lane 应 > cos(45)
+                     * route_dir < 0: 对向来车，dot_lane 应 < -cos(45)（朝向相反=正确）
+                     * 旧代码不区分 route_dir，对向来车恒判 FAIL。 */
+                    bool dir_ok;
+                    if (a.route_dir < 0) {
+                        dir_ok = (dot_lane < -std::cos(M_PI / 4.0));
+                    } else {
+                        dir_ok = (dot_lane > std::cos(M_PI / 4.0));
+                    }
+                    if (!dir_ok) {
                         r.failed++;
                         char buf[256];
                         snprintf(buf, sizeof(buf),
-                            "  FAIL %s: dot(forward,lane)=%.3f < cos(45)=%.3f (与车道方向不一致)\n",
-                            tag, dot_lane, std::cos(M_PI / 4.0));
+                            "  FAIL %s: dot(forward,lane)=%.3f route_dir=%d (与车道方向不一致)\n",
+                            tag, dot_lane, a.route_dir);
                         r.details += buf;
                     } else {
                         r.passed++;

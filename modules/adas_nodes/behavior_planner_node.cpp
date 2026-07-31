@@ -521,7 +521,11 @@ protected:
                 if (gap_err < -g.acc_gap_err_clamp) gap_err = -g.acc_gap_err_clamp;
                 follow_speed = lead_speed + g.acc_k_gap * gap_err;
                 if (follow_speed < 0.0) follow_speed = 0.0;
-                if (follow_speed > g.target_speed) follow_speed = g.target_speed;
+                /* 上限用巡航速度而非 g.target_speed —— 后者在 FOLLOW 中已被降低，
+                 * 用它做上限会形成死锁：target_speed 降→follow_speed 被压更低→
+                 * target_speed 再降→…→0。用原始巡航速度做上限即可。 */
+                double cruise_cap = g.target_speed > 0 ? g.target_speed : 15.0;
+                if (follow_speed > cruise_cap) follow_speed = cruise_cap;
             }
 
             /* ── 超车判定 ──
