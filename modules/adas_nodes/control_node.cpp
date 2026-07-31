@@ -122,6 +122,7 @@ struct ControlContext {
     volatile int has_fusion{0};
     volatile int has_planning{0};
     uint64_t last_fusion_us{0};    /* monotonic timestamp of last fusion message */
+    uint64_t last_vstate_us{0};    /* monotonic timestamp of last vehicle/state message */
     uint64_t last_planning_us{0};  /* monotonic timestamp of last planning message */
 
     /* LDW 车道偏离预警 */
@@ -191,17 +192,22 @@ static void on_fusion(const Message* msg, void* user_data) {
     {
         cJSON* root = cJSON_Parse((const char*)msg->data);
         if (root) {
-            cJSON* j;
-            j = cJSON_GetObjectItemCaseSensitive(root, "v");
-            if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "x");
-            if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "y");
-            if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "heading");
-            if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
-            j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
-            if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+            /* vehicle/state 近期到达时不覆盖（同 behavior/planning 的修复） */
+            uint64_t now = clock_now_us();
+            bool vstate_recent = (g.last_vstate_us != 0 && now - g.last_vstate_us < 200000ULL);
+            if (!vstate_recent) {
+                cJSON* j;
+                j = cJSON_GetObjectItemCaseSensitive(root, "v");
+                if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
+                j = cJSON_GetObjectItemCaseSensitive(root, "x");
+                if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
+                j = cJSON_GetObjectItemCaseSensitive(root, "y");
+                if (cJSON_IsNumber(j)) g.ego_y = j->valuedouble;
+                j = cJSON_GetObjectItemCaseSensitive(root, "heading");
+                if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+                j = cJSON_GetObjectItemCaseSensitive(root, "yaw_rate");
+                if (cJSON_IsNumber(j)) g.ego_yaw_rate = j->valuedouble;
+            }
             cJSON_Delete(root);
         }
         g.has_fusion = 1;
@@ -224,6 +230,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
     j = cJSON_GetObjectItemCaseSensitive(root, "hdg");
     if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+    g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
     g.last_fusion_us = clock_now_us();
     cJSON_Delete(root);
@@ -267,17 +274,28 @@ static void on_trajectory(const Message* msg, void* user_data) {
         }
     }
 
-    /* 使用第一个点获取 target_speed 和 lane_d */
     /* 目标速度取轨迹末点：规划器可生成从当前速度到目标速度的减速轨迹，
      * 取首点 (=当前速度) 会让控制器永远不减速 → 追尾前车。
      * 取末点 (=规划期内的期望速度) 让控制器跟随减速/加速意图。 */
     g.target_speed = (double)traj.points[n_pts - 1].v;
     g.has_target_speed = 1;
-    g.lane_d = (double)traj.points[0].l;
-    /* DEBUG: 临时打印收到的轨迹首点速度 */
+    /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
+     * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
+     * 增大，避免一次性跳到 3.5m 误差导致横向过冲冲出路沿。
+     * 轨迹点间距 100ms，0.5s = 第 5 个点。 */
+    int d_idx = 0;
+    for (int i = 0; i < n_pts; i++) {
+        if ((double)traj.points[i].t_rel_us >= 500000.0) {  /* 0.5s */
+            d_idx = i;
+            break;
+        }
+    }
+    if (d_idx >= n_pts) d_idx = n_pts - 1;
+    g.lane_d = (double)traj.points[d_idx].l;
     if (g.cycle > 900 && g.cycle < 1000) {
-        LOG_WARN("control", "[DBG traj] cycle=%d pts=%d v0=%.2f l0=%.2f valid=%d",
-                 g.cycle, n_pts, (double)traj.points[0].v, (double)traj.points[0].l, traj.valid);
+        LOG_WARN("control", "[DBG traj] cycle=%d pts=%d v_last=%.2f d_la=%.2f valid=%d",
+                 g.cycle, n_pts, (double)traj.points[n_pts - 1].v,
+                 (double)traj.points[d_idx].l, traj.valid);
     }
 
     /* 存储路径点供 Stanley 横向控制使用 */
@@ -560,6 +578,11 @@ protected:
 
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
+            if (g.cycle % 100 == 0 || fabs(lat_error) > 0.5) {
+                LOG_WARN("control", "[DBG_LAT] cyc=%d lane_d=%.2f rc_y=%.2f tgt_y=%.2f ego_y=%.2f lat_err=%.2f spd=%.1f",
+                         g.cycle, g.lane_d, g.road_center_y, effective_target_y, g.ego_y,
+                         lat_error, g.current_speed);
+            }
             double throttle = 0, brake = 0, steer = 0;
             const char* mode = "NONE";
 

@@ -119,9 +119,12 @@ struct PlanningContext {
     int           plan_count{0};
     double        target_speed{0.0};
 
-    /* 从 fusion/localization 解析的最新状态 */
+    /* 从 fusion/localization 或 vehicle/state 解析的最新状态。
+     * vehicle/state（flowsim 真值）优先于 fusion/localization（EKF 估计），
+     * 当 vehicle/state 近期到达时 on_fusion 不覆盖，避免 EKF 发散污染 ego 状态。 */
     double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0};
     volatile int has_fusion{0};
+    uint64_t last_vstate_us{0};
 
     /* 从 vehicle/state 解析的障碍物位置（世界坐标） */
     /* 容量与 perception 发布的 ObstacleList.obstacles[128] 对齐（adas_msgs_gen.h
@@ -343,15 +346,20 @@ static void on_fusion(const Message* msg, void* user_data) {
     const char* d = (const char*)msg->data;
     cJSON* root = cJSON_Parse(d);
     if (root) {
-        cJSON* item;
-        item = cJSON_GetObjectItem(root, "x");
-        if (cJSON_IsNumber(item))       g.ego_x = item->valuedouble;
-        item = cJSON_GetObjectItem(root, "y");
-        if (cJSON_IsNumber(item))       g.ego_y = item->valuedouble;
-        item = cJSON_GetObjectItem(root, "v");
-        if (cJSON_IsNumber(item))       g.ego_v = item->valuedouble;
-        item = cJSON_GetObjectItem(root, "heading");
-        if (cJSON_IsNumber(item))       g.ego_heading = item->valuedouble;
+        /* vehicle/state 近期到达时不覆盖（同 behavior_planner 的修复） */
+        uint64_t now = clock_now_us();
+        bool vstate_recent = (g.last_vstate_us != 0 && now - g.last_vstate_us < 200000ULL);
+        if (!vstate_recent) {
+            cJSON* item;
+            item = cJSON_GetObjectItem(root, "x");
+            if (cJSON_IsNumber(item))       g.ego_x = item->valuedouble;
+            item = cJSON_GetObjectItem(root, "y");
+            if (cJSON_IsNumber(item))       g.ego_y = item->valuedouble;
+            item = cJSON_GetObjectItem(root, "v");
+            if (cJSON_IsNumber(item))       g.ego_v = item->valuedouble;
+            item = cJSON_GetObjectItem(root, "heading");
+            if (cJSON_IsNumber(item))       g.ego_heading = item->valuedouble;
+        }
         cJSON_Delete(root);
     }
     g.has_fusion = 1;
@@ -373,6 +381,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_v = j->valuedouble;
     if ((j = cJSON_GetObjectItem(root, "hdg")) && cJSON_IsNumber(j))
         g.ego_heading = j->valuedouble;
+    g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
     cJSON_Delete(root);
 }
@@ -434,12 +443,21 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || !msg->data) return;
     Behavior beh;
-    if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0)
+    if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0) {
+        static int desfail_count = 0;
+        if (desfail_count++ < 3)
+            LOG_WARN("planning", "[DBG_BEH] deserialize FAILED size=%zu", (size_t)msg->data_size);
         return;
+    }
     g.current_behavior = beh;
     g.overtake_state = (beh.command == BEH_LEFT_CHANGE) ? 1 :
                        (beh.command == BEH_RIGHT_CHANGE) ? 2 : 0;
     g.has_behavior = 1;
+    static int beh_recv_count = 0;
+    if (beh_recv_count++ % 50 == 0 || beh.command == BEH_RIGHT_CHANGE || beh.command == BEH_LEFT_CHANGE) {
+        LOG_WARN("planning", "[DBG_BEH] recv cmd=%d tgt_lane=%d tgt_spd=%.1f has_beh=%d",
+                 (int)beh.command, (int)beh.target_lane_idx, (double)beh.target_speed, g.has_behavior);
+    }
 }
 
 /* ── scene/frame 订阅回调（NOA Phase 6 merge 闭环） ─────────── */
@@ -975,15 +993,31 @@ protected:
                              g.lane_count, g.lane_width);
                 }
 
-                /* 更新 target_lane_offset */
+                /* 更新 target_lane_offset
+                 * 变道中：目标 = behavior 下发的目标车道中心
+                 * 巡航/跟车：目标 = ego 当前最近车道中心（而非道路中心 y=0）。
+                 *   变道 COMPLETED 后 ego 可能还未到新车道中心（如 y=-3.5），
+                 *   若 target_lane_offset=0（道路中心），Frenet 会保持当前 y 不动，
+                 *   ego 卡在两车道之间。改为跟踪最近车道中心，让 ego 继续归位。 */
+                double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
                 if (g.has_behavior && g.current_behavior.target_lane_idx >= 0 &&
                     g.current_behavior.target_lane_idx < n_lanes &&
                     (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
-                    double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
                     double target_lane_y = lane_center_y(g.current_behavior.target_lane_idx, n_lanes, lane_w);
                     g.target_lane_offset = target_lane_y - rc_y;
                 } else {
-                    g.target_lane_offset = 0.0;
+                    /* 巡航/跟车：计算 ego 当前最近车道，目标其中心 */
+                    double off = (-g.ego_y) / lane_w + (n_lanes - 1) * 0.5;
+                    int cur_lane = (int)(off >= 0.0 ? off + 0.5 : off - 0.5);
+                    if (cur_lane < 0) cur_lane = 0;
+                    if (cur_lane >= n_lanes) cur_lane = n_lanes - 1;
+                    double cur_lane_y = lane_center_y(cur_lane, n_lanes, lane_w);
+                    g.target_lane_offset = cur_lane_y - rc_y;
+                }
+                if (g.plan_count % 100 == 0 || (g.has_behavior && g.target_lane_offset != 0.0)) {
+                    LOG_WARN("planning", "[DBG_LC] pc=%d has_beh=%d cmd=%d tgt_lane=%d n_lanes=%d offset=%.2f ego_y=%.2f",
+                            g.plan_count, g.has_behavior, (int)g.current_behavior.command,
+                            (int)g.current_behavior.target_lane_idx, n_lanes, g.target_lane_offset, g.ego_y);
                 }
             }
 
@@ -1003,6 +1037,23 @@ protected:
                     g.ego_x, ego_d, g.ego_v,
                     command_speed,
                     s_out, d_out, spd_out, 50);
+                if (n_wp < 3) {
+                    /* Frenet 规划失败（参考路径未设/障碍物阻塞/求解失败）→ 简单路径兜底 */
+                    static int frenet_fail_logged = 0;
+                    if (!frenet_fail_logged) {
+                        LOG_WARN("planning", "frenet_plan returned n_wp=%d (path_set=%d) — using fallback",
+                                 n_wp, g.frenet ? 1 : 0);
+                        frenet_fail_logged = 1;
+                    }
+                    double horizon = 50.0;
+                    int n = 10;
+                    for (int i = 0; i < n; i++) {
+                        s_out[i] = g.ego_x + horizon * (double)i / (double)(n - 1);
+                        d_out[i] = ego_d;  /* 保持当前横向位置 */
+                        spd_out[i] = command_speed;
+                    }
+                    n_wp = n;
+                }
             }
 #else
             /* Fallback: 生成简单的车道保持 + 恒速轨迹 */
@@ -1029,13 +1080,18 @@ protected:
                 }
             }
 
-            /* 变道时偏移 Frenet 轨迹（控制层只跟轨迹，不自己决策） */
-            if (g.target_lane_offset != 0.0 && n_wp > 0) {
+            /* 变道/车道保持时偏移 Frenet 轨迹（控制层只跟轨迹，不自己决策）。
+             * target_lane_offset 现在始终非零（巡航时 = 当前车道中心），
+             * 用线性渐变让轨迹从当前 d 平滑过渡到 target_lane_offset。
+             * 100% 线性渐变（全轨迹长度）比 30% 阶跃更平滑：
+             *   - 30% 渐变时，0.5s 前视点（index 5/10）已过渐变区，看到全量
+             *     target_offset → lat_err 跳变 3.5m → 横向过冲冲出路沿。
+             *   - 线性渐变时，0.5s 前视点只看到 56% 的 target_offset，
+             *     lat_err 从 0 线性增大到目标值，控制器平滑跟进。 */
+            if (n_wp > 0) {
                 for (int i = 0; i < n_wp; i++) {
                     double t = (double)i / (double)(n_wp - 1);
-                    /* 轨迹前 10% 逐渐偏移，后 90% 保持目标偏移 */
-                    double alpha = (t < 0.1) ? (t / 0.1) : 1.0;
-                    d_out[i] = d_out[i] * (1.0 - alpha) + g.target_lane_offset * alpha;
+                    d_out[i] = d_out[i] * (1.0 - t) + g.target_lane_offset * t;
                 }
             }
 
@@ -1102,7 +1158,7 @@ protected:
                     }
                 }
                 for (int i = 0; i < n_wp && n_pts < 64; i++) {
-                    points[n_pts].t_rel_us = (uint32_t)(i * 100);  /* 100ms per point (10Hz trajectory) */
+                    points[n_pts].t_rel_us = (uint32_t)(i * 100000);  /* 100ms per point (10Hz trajectory), in µs */
                     points[n_pts].x = 0.0f;   /* 占位，下面 Frenet→Cartesian 回填 */
                     points[n_pts].y = 0.0f;
                     points[n_pts].s = (float)s_out[i];

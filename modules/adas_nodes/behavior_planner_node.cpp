@@ -101,10 +101,14 @@ struct BehaviorContext {
     /* 发布帧计数 */
     uint32_t seq{0};
 
-    /* ego 状态（从 fusion/localization JSON 解析） */
+    /* ego 状态（从 fusion/localization 或 vehicle/state JSON 解析）。
+     * vehicle/state 是 flowsim 真值，优先级高于 fusion/localization（EKF 估计）。
+     * 当 vehicle/state 近期到达（<200ms）时，on_fusion 不覆盖 ego 状态，
+     * 避免 EKF 发散时用错误值覆盖真值。 */
     double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0};
     volatile int has_fusion{0};
     uint64_t last_fusion_us{0};
+    uint64_t last_vstate_us{0};
 
     /* 障碍物缓存（从 perception/obstacles 反序列化，世界坐标） */
     double obs_x[BEH_MAX_OBS]{}, obs_y[BEH_MAX_OBS]{};
@@ -241,16 +245,24 @@ static void on_fusion(const Message* msg, void* user_data) {
     if (!msg || !msg->data) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
-    cJSON* j;
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
-        g.ego_x = j->valuedouble;
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
-        g.ego_y = j->valuedouble;
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "v")) && cJSON_IsNumber(j))
-        g.ego_v = j->valuedouble;
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "heading")) && cJSON_IsNumber(j))
-        g.ego_heading = j->valuedouble;
-    g.last_fusion_us = clock_now_us();
+    /* vehicle/state 近期到达时不覆盖：它是 flowsim 真值，优先于 EKF 估计。
+     * EKF 发散时会发布错误的 ego_y/v（如 y=0.01 v=20.94），若覆盖 vehicle/state
+     * 的正确值（y=-1.75 v=15.1），会导致车道判定错误 → find_lead 找错车道
+     * → 漏检正前方前车 → 不减速 → 追尾。 */
+    uint64_t now = clock_now_us();
+    bool vstate_recent = (g.last_vstate_us != 0 && now - g.last_vstate_us < 200000ULL);
+    if (!vstate_recent) {
+        cJSON* j;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, "x")) && cJSON_IsNumber(j))
+            g.ego_x = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, "y")) && cJSON_IsNumber(j))
+            g.ego_y = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, "v")) && cJSON_IsNumber(j))
+            g.ego_v = j->valuedouble;
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, "heading")) && cJSON_IsNumber(j))
+            g.ego_heading = j->valuedouble;
+    }
+    g.last_fusion_us = now;
     g.has_fusion = 1;
     cJSON_Delete(root);
 }
@@ -269,6 +281,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_v = j->valuedouble;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "hdg")) && cJSON_IsNumber(j))
         g.ego_heading = j->valuedouble;
+    g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
     cJSON_Delete(root);
 }
