@@ -235,6 +235,74 @@ void ekf_slam_update(EkfSlam* ekf, float obs_x, float obs_y, float obs_heading) 
     memcpy(ekf->P.data, P_new, sizeof(ekf->P.data));
 }
 
+void ekf_slam_update_pos(EkfSlam* ekf, float obs_x, float obs_y) {
+    if (!ekf->initialized) return;
+
+    /* 仅位置观测 z=[x,y]，H 取状态前两维（2×5）。
+     * 复用 mat_* 工具，与 3 维观测同一套卡尔曼公式，只是维度降到 2。 */
+    float H[10] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f, 0.0f
+    };
+    float H_trans[10];
+    mat_transpose(H_trans, H, 2, EKF_STATE_DIM);   /* 5×2 */
+
+    float PHt[10];
+    mat_mul(PHt, ekf->P.data, H_trans, EKF_STATE_DIM, 2, EKF_STATE_DIM);  /* 5×2 */
+
+    float HPH[4];
+    mat_mul(HPH, H, PHt, 2, 2, EKF_STATE_DIM);     /* 2×2 */
+
+    float r = ekf->measurement_noise;
+    float S[4];
+    S[0] = HPH[0] + r * r; S[1] = HPH[1];
+    S[2] = HPH[2];         S[3] = HPH[3] + r * r;
+
+    float det = S[0] * S[3] - S[1] * S[2];
+    float S_inv[4];
+    if (fabsf(det) > 1e-10f) {
+        float inv_det = 1.0f / det;
+        S_inv[0] =  S[3] * inv_det; S_inv[1] = -S[1] * inv_det;
+        S_inv[2] = -S[2] * inv_det; S_inv[3] =  S[0] * inv_det;
+    } else {
+        S_inv[0] = 1.0f; S_inv[1] = 0.0f;
+        S_inv[2] = 0.0f; S_inv[3] = 1.0f;
+    }
+
+    float K[10];   /* 5×2 */
+    mat_mul(K, PHt, S_inv, EKF_STATE_DIM, 2, 2);
+
+    float y[2] = {
+        obs_x - ekf->x.x,
+        obs_y - ekf->x.y
+    };
+
+    ekf->x.x       += K[0] * y[0] + K[1] * y[1];
+    ekf->x.y       += K[2] * y[0] + K[3] * y[1];
+    ekf->x.heading += K[4] * y[0] + K[5] * y[1];
+    ekf->x.v       += K[6] * y[0] + K[7] * y[1];
+    ekf->x.omega   += K[8] * y[0] + K[9] * y[1];
+
+    while (ekf->x.heading > (float)M_PI) ekf->x.heading -= 2.0f * (float)M_PI;
+    while (ekf->x.heading < -(float)M_PI) ekf->x.heading += 2.0f * (float)M_PI;
+
+    /* P = (I − K·H)·P，H 只有前两列非零 → KH 仅前两列由 K 填充 */
+    float KH[EKF_COV_DIM];
+    mat_mul(KH, K, H, EKF_STATE_DIM, EKF_STATE_DIM, 2);
+
+    float I_KH[EKF_COV_DIM];
+    for (int i = 0; i < EKF_STATE_DIM; i++) {
+        for (int j = 0; j < EKF_STATE_DIM; j++) {
+            float ident = (i == j) ? 1.0f : 0.0f;
+            I_KH[i * EKF_STATE_DIM + j] = ident - KH[i * EKF_STATE_DIM + j];
+        }
+    }
+
+    float P_new[EKF_COV_DIM];
+    mat_mul(P_new, I_KH, ekf->P.data, EKF_STATE_DIM, EKF_STATE_DIM, EKF_STATE_DIM);
+    memcpy(ekf->P.data, P_new, sizeof(ekf->P.data));
+}
+
 void ekf_slam_get_pose(const EkfSlam* ekf, float* x, float* y, float* heading,
                        float* cov_xx, float* cov_yy, float* cov_hh) {
     if (!ekf->initialized) {
