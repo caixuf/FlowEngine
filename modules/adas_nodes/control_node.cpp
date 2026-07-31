@@ -134,6 +134,7 @@ struct ControlContext {
     /* 死锁恢复状态 */
     double stuck_timer{0};          /* 近乎静止的累计时间 (秒) */
     double speed_zero_timer{0};     /* 全域速度死锁: 无论 y 位置, 速度持续为0的累计时间 (秒) */
+    double mrm_stall_us{0};         /* MRM 停稳累计时长 (us)，停稳 3s 自动恢复降级 */
 
     uint32_t cycle{0};
 
@@ -559,6 +560,35 @@ protected:
              * 无变道场景下, cruise_lane_y = road_center_y + lane_d 即为目标车道中心。 */
             double effective_target_y = cruise_lane_y;
 
+            /* §11.2 MRM 前置：降级停车必须在 PID 之前生效。
+             * 原实现在 PID 之后（line 688）覆盖 acc_target——throttle/brake
+             * 已按旧目标算出（err=+4 → thr=0.57 油门），停车指令形同虚设
+             * （2026-07-31 幽灵停车实证：MRM 下 thr=0.57/1.00 全油门）。
+             * 停稳 3s 自动恢复：degrade 只升不降（degrade_clear 无调用者），
+             * MRM 触发后永不恢复 → 永久停车（实测 5s+ 幽灵停车）。 */
+            {
+                DegradeState* ds = degrade_global_state();
+                if (ds->degrade_level >= DEGRADE_L2) {
+                    g.target_speed = 0.0;
+                    acc_target = 0.0;
+                    g.integral = 0;
+                    if (g.current_speed < 0.5) {
+                        g.mrm_stall_us += CONTROL_DT_S * 1e6;
+                        if (g.mrm_stall_us > 3000000.0) {
+                            degrade_clear();
+                            g.mrm_stall_us = 0;
+                            LOG_WARN("control",
+                                     "MRM auto-recover: stalled 3s at spd=%.1f — degrade cleared",
+                                     g.current_speed);
+                        }
+                    } else {
+                        g.mrm_stall_us = 0;
+                    }
+                } else {
+                    g.mrm_stall_us = 0;
+                }
+            }
+
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
             if (g.cycle % 100 == 0 || fabs(lat_error) > 0.5) {
@@ -682,14 +712,10 @@ protected:
                 }
             }
 
-            /* §11.2 降级阶梯 */
+            /* §11.2 降级阶梯（MRM 目标已在前置块处理，此处仅标记模式） */
             {
                 DegradeState* ds = degrade_global_state();
                 if (ds->degrade_level >= DEGRADE_L2) {
-                    /* MRM: 车道内减速停车 */
-                    g.target_speed = 0.0;
-                    acc_target = 0.0;
-                    g.integral = 0;
                     mode = "MRM";
                 }
                 /* L1: 禁变道——planning 的 overtake_state 会被忽略，control 只巡航 */
@@ -837,7 +863,8 @@ protected:
                 cJSON_AddNumberToObject(dbg, "ref_road_heading", ref_road_heading);
                 cJSON_AddNumberToObject(dbg, "y_from_target", y_from_target);
                 cJSON_AddNumberToObject(dbg, "has_planning", g.has_planning ? 1.0 : 0.0);
-                cJSON_AddNumberToObject(dbg, "lookahead_idx", g.lookahead_idx);
+                double lookahead_dist = fmax(5.0, g.current_speed * g.lat_lookahead_gain);
+                cJSON_AddNumberToObject(dbg, "lookahead_dist", lookahead_dist);
                 char* dbg_s = cJSON_PrintUnformatted(dbg);
                 transport_publish(transport_, TOPIC_CONTROL_DEBUG,
                                   (const uint8_t*)dbg_s, (uint32_t)strlen(dbg_s) + 1);
