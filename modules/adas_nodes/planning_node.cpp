@@ -947,16 +947,21 @@ protected:
                 int oncoming = 0;
                 double min_clearance_left  = 1e9;  /* 左侧最近障碍横向距离 */
                 double min_clearance_right = 1e9;  /* 右侧最近障碍横向距离 */
+                /* 会车横向判定上限：相邻车道范围内才算迎头，2+ 车道外的
+                 * 对向车不是直接威胁。多车道高速上 ego 在 lane3、对向车在
+                 * lane0（横向 10.5m）时，旧逻辑 |dy|>2.0 也触发让行，把
+                 * 巡航压到 0.4× 刹停——2026-07-31 实跑。 */
+                double oncoming_dy_max = (g.lane_width > 1.0 ? g.lane_width : 3.5) * 1.5;
 
                 for (int i = 0; i < g.kMaxObs; i++) {
                     double dx = g.obs_x[i] - g.ego_x;
                     if (dx < -10.0 || dx > 80.0) continue;
                     double dy = g.obs_y[i] - g.ego_y;  /* 相对 ego 的横向偏移 */
 
-                    /* 会车检测: 对向车道 (|dy| > 2.0m, 双侧),
+                    /* 会车检测: 对向车道且横向相邻 (2.0 < |dy| ≤ 1.5×路宽),
                      * 迎面驶来 (vx < -2 m/s), 前方 60m 内 */
-                    if (std::fabs(dy) > 2.0 && dx > 0.0 && dx < 60.0 &&
-                        g.obs_vx[i] < -2.0) {
+                    if (std::fabs(dy) > 2.0 && std::fabs(dy) <= oncoming_dy_max &&
+                        dx > 0.0 && dx < 60.0 && g.obs_vx[i] < -2.0) {
                         oncoming = 1;
                     }
 

@@ -285,8 +285,14 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
 }
 
 /* Phase 5: 对向来车 TTC.
- * 检查对向车道 (dy > 2.0m) 是否有迎面驶来的车辆 (obs_v < -2 m/s)。
- * head-on closing speed = ego_speed + |obs_v|, 比同向 closing speed 大得多。 */
+ * 检查相邻对向车道 (2.0 < |dy| ≤ 6.0m) 是否有迎面驶来的车辆 (obs_v < -2 m/s)。
+ * head-on closing speed = ego_speed + |obs_v|, 比同向 closing speed 大得多。
+ *
+ * |dy| 上界 6.0m ≈ 1.5×标准车道宽：只把**相邻车道**的对向车当迎头威胁。
+ * 旧逻辑 |dy|>2.0 把对向任意车道都算上，多车道高速上 ego 在 lane3、对向车
+ * 在 lane0（横向 10.5m，中间隔两条车道）也触发 → 巡航被压到 0.5~1.0 全刹
+ * （2026-07-31 实跑：合并回 lane2 途中遇 2 车道外对向车刹停到 0）。 */
+static constexpr double kOncomingAdjacentDyMax = 6.0;
 double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
     double best_ttc = 1e9;
     double best_dx = 0.0;
@@ -294,8 +300,9 @@ double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = state.obs_y[i] - state.y;
-        /* 对向车道: |dy| > 2.0m (双侧车道), 前方 60m */
-        if (dx < 0.0 || dx > 60.0 || std::fabs(dy) < 2.0) continue;
+        /* 相邻对向车道: 2.0 < |dy| ≤ 6.0m, 前方 60m */
+        if (dx < 0.0 || dx > 60.0 || std::fabs(dy) < 2.0 ||
+            std::fabs(dy) > kOncomingAdjacentDyMax) continue;
         /* 迎面驶来: obs_v < -2 m/s */
         if (state.obs_v[i] > -2.0) continue;
 
