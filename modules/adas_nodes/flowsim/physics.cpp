@@ -89,6 +89,10 @@ void apply_vehicle_defaults(Entity& e) {
     e.steer_tau = 0.15;
     e.steer_rate_max = 0.6;
 
+    /* 动力学模型参数（physics_model=dynamic 时才被读取；运动学模式无视）：
+     *   tire_stiffness_{f,r} —— 每轴等效侧偏刚度 (N/rad)，线性轮胎 F_y = Cα·α
+     *   yaw_inertia          —— 绕 Z 轴转动惯量 Iz (kg·m²)
+     * 量级取自乘用车/SUV/卡车典型标定值（见 docs/CALIBRATION_GUIDE.md）。 */
     switch (e.type) {
         case EntityType::Truck:
             e.length = 8.0;  e.width = 2.4;
@@ -96,6 +100,9 @@ void apply_vehicle_defaults(Entity& e) {
             e.mass = 8000.0;
             e.drag_coeff = 0.6;
             e.max_brake = 3.0;
+            e.tire_stiffness_f = 180000.0;
+            e.tire_stiffness_r = 180000.0;
+            e.yaw_inertia = 25000.0;
             break;
         case EntityType::SUV:
             e.length = 4.8;  e.width = 2.0;
@@ -103,6 +110,9 @@ void apply_vehicle_defaults(Entity& e) {
             e.mass = 1800.0;
             e.drag_coeff = 0.45;
             e.max_brake = 4.0;
+            e.tire_stiffness_f = 90000.0;
+            e.tire_stiffness_r = 90000.0;
+            e.yaw_inertia = 3200.0;
             break;
         case EntityType::Car:
         case EntityType::Ego:
@@ -112,6 +122,9 @@ void apply_vehicle_defaults(Entity& e) {
             e.mass = 1500.0;
             e.drag_coeff = 0.4;
             e.max_brake = 4.0;
+            e.tire_stiffness_f = 80000.0;
+            e.tire_stiffness_r = 80000.0;
+            e.yaw_inertia = 2250.0;
             break;
     }
 }
