@@ -146,6 +146,16 @@ static EntityId find_follower_in_lane(const Entity& npc, double lane_offset,
 
 /* ── MOBIL 辅助：计算 IDM 加速度（给定前车和间距） ──
  * 无前车时返回 target_vx 对应的自由巡航加速度。 */
+/* 标准 IDM 自由流加速项：a_max·(1 − (v/v0)^4)。
+ * 旧实现 min(a_max,(v0−v)/0.5) 在 v0<v 时返回未标定的大负加速度（如 v=10、
+ * v0=5 → −10 m/s²），且无 lead 分支在 v>v0 时干脆返回 0 从不减速。标准项在
+ * v<v0 平滑趋近 a_max、v>v0 平滑给出减速。v0<=0（目标停车）给全力减速避免除零。 */
+static double idm_free_accel(double v, double v0, double accel_rate) {
+    if (v0 <= 0.01) return -accel_rate;
+    double r = v / v0;
+    return accel_rate * (1.0 - r * r * r * r);
+}
+
 static double mobil_idm_accel(const Entity& vehicle, double gap, double target_v,
                               const Entity* lead, const NpcAiConfig& cfg) {
     double v = vehicle.speed;
@@ -153,14 +163,12 @@ static double mobil_idm_accel(const Entity& vehicle, double gap, double target_v
         double safe_gap = cfg.idm_safe_gap_base + v * cfg.idm_safe_gap_time;
         double gap_err = gap - safe_gap;
         if (gap_err > 0) {
-            return std::min(cfg.accel_rate, (target_v - v) / 0.5);  // 巡航加速
+            return idm_free_accel(v, target_v, cfg.accel_rate);  // 自由流：标准 IDM
         }
         return -cfg.follow_decel_factor * std::exp(-gap_err / 2.0);
     }
-    // 自由巡航：向 target_v 加速
-    double dv = target_v - v;
-    if (dv > 0) return std::min(cfg.accel_rate, dv / 0.5);
-    return 0.0;
+    // 自由巡航：向 target_v 收敛（标准 IDM 自由流项）
+    return idm_free_accel(v, target_v, cfg.accel_rate);
 }
 
 /* ── MOBIL 变道代价函数 ──
@@ -534,10 +542,9 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
      *
      * 保留完整 MOBIL 实现作为参考，便于未来重新启用（如 NOA 高密度
      * 车流场景）。重新启用步骤：
-     *   1. 把下方 #if 0 改回 #if 1
-     *   2. 修复 mobil_idm_accel 的简化 bug（std::min 在 target_v<v 时
-     *      返回负加速度，应改用标准 IDM (1-(v/v0)^4) 项）
-     *   3. 验证 lane_change_timer 冷却期间 target_offset 平滑插值无抖动
+     *   1. 把配置 enable_mobil 置 true（当前默认 false，即下方运行时门）
+     *   2. 验证 lane_change_timer 冷却期间 target_offset 平滑插值无抖动
+     * 注：mobil_idm_accel 的自由流加速项已修为标准 IDM (1−(v/v0)^4)。
      * ────────────────────────────────────────────────────────────── */
     if (cfg.enable_mobil) {
         // 仲裁门禁：存在更高优先级的横向控制时跳过
