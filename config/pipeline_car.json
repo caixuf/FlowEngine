@@ -66,7 +66,7 @@
           }
         }
       ],
-      "params": "{\"enable\":1,\"publish_hz\":20,\"dry_run\":0,\"use_lidar\":1,\"use_imu\":1,\"algo\":\"dead_reckon\",\"initial_x\":0.0,\"initial_y\":0.0,\"initial_heading\":0.0}"
+      "params": "{\"enable\":1,\"publish_hz\":20,\"dry_run\":0,\"use_lidar\":1,\"use_imu\":1,\"algo\":\"ekf_slam\",\"initial_x\":0.0,\"initial_y\":0.0,\"initial_heading\":0.0,\"heading_obs_min_disp\":0.4}"
     },
     {
       "name": "stereo_camera",

@@ -87,6 +87,7 @@ static struct {
     float  initial_x;
     float  initial_y;
     float  initial_heading;
+    float  heading_obs_min_disp;   /* 位移 > 此阈值(m) 才用 course-over-ground 反推航向观测 */
     char   algo[32];
 
     float  pose_x;
@@ -100,6 +101,9 @@ static struct {
     LidarFrame last_lidar;
     uint64_t   last_lidar_us;
     int        have_lidar;
+    float      last_obs_x;         /* 上一次用于航向反推的 lidar 观测位置 */
+    float      last_obs_y;
+    int        have_last_obs;
     ImuData    last_imu;
     uint64_t   last_imu_us;
     int        have_imu;
@@ -165,16 +169,11 @@ static void on_imu(const Message* msg, void* user_data) {
     uint64_t now = clock_now_us();
 
     pthread_mutex_lock(&g.lock);
-    /* Bug 修复：原 on_imu 在回调里直接 `g.pose_heading += imu.gyro_z * dt`
-     * 做 dead reckoning，绕过 EKF。导致：
-     *   1. 双状态维护——EKF 内部维护 heading，slam_node 也维护 g.pose_heading
-     *   2. 循环自证——slam_update_ekf_slam 用 g.pose_heading（dead-reckoned）
-     *      作为 obs_heading 喂回 ekf_slam_update，"用自己算出来的状态观测自己"
-     *      EKF 量测更新完全失效
-     *
-     * 修复：on_imu 只缓存 IMU 数据，不写 g.pose_heading。状态真值唯一由
-     * EKF 拥有，slam_update_ekf_slam 内 ekf_slam_predict/ekf_slam_get_pose
-     * 负责更新 g.pose_heading。 */
+    /* on_imu 只缓存 IMU 数据，不写 g.pose_heading。状态真值唯一由 EKF 拥有，
+     * slam_update_ekf_slam 内 ekf_slam_predict/ekf_slam_get_pose 负责更新
+     * g.pose_heading。（原实现在此直接 dead-reckon heading 绕过 EKF，且把这个
+     * dead-reckoned heading 当观测喂回——自证、量测更新失效，已连同 slam_update
+     * 的 course-over-ground 航向观测一并修复。） */
     g.last_imu    = imu;
     g.last_imu_us = now;
     g.have_imu    = 1;
@@ -236,24 +235,36 @@ static void slam_update_ekf_slam(Pose2D* pose) {
     }
 
     if (g.have_lidar) {
-        /* obs_heading 来源说明（与 on_imu 修复配套）：
+        /* 航向观测：course-over-ground（航迹方向反推）。
          *
-         * 当前实现用 g.pose_heading 作为 obs_heading 喂回 EKF。由于 on_imu
-         * 已不再做 dead reckoning（不再绕过 EKF 写 g.pose_heading），g.pose_heading
-         * 的值来自上一次 ekf_slam_get_pose 的输出，即 EKF 自己的 heading 估计。
+         * 单点伪 lidar 无法 scan-match，唯一诚实的独立航向观测是从连续两帧
+         * lidar 位置反推航迹方向 atan2(Δy,Δx)。位移足够大（> heading_obs_min_disp）
+         * 时用带航向的 3 维观测，否则退到仅位置 2 维观测——不再把 EKF 自己的
+         * heading 喂回当观测（那等价于无航向校正）。
          *
-         * 这导致 heading 残差 y[2] = obs_heading - ekf->x.heading ≈ 0，
-         * 等价于"无航向观测"——EKF 的 heading 完全由 predict 步的 IMU 积分驱动，
-         * 没有 update 步的航向校正。位置 (x,y) 仍由 lidar.x/y 观测正常更新。
-         *
-         * TODO: 当接入真实航向观测源（双天线 GPS heading / LiDAR scan-matching
-         * 相对航向 / FAST-LIO2 ESKF）时，把这里的 obs_heading 替换为独立观测值，
-         * EKF 才能真正收敛 heading 误差。
-         *
-         * 现状等价于"位置 EKF + 航向 dead reckoning"的混合模式，比纯 dead reckoning
-         * 好（位置会被 lidar 观测校正），但仍非完整 EKF-SLAM。 */
-        ekf_slam_update(&g.ekf_slam_state,
-                        g.last_lidar.x, g.last_lidar.y, g.pose_heading);
+         * 边界：低速/静止位移不足，无独立航向观测，heading 由 predict 的 IMU
+         * 陀螺积分驱动（fall back 到位置-only + IMU 航向），是单点伪 lidar 的
+         * 物理上限，见 docs/CALIBRATION_GUIDE.md。 */
+        float ox = g.last_lidar.x, oy = g.last_lidar.y;
+        if (g.have_last_obs) {
+            float dx = ox - g.last_obs_x;
+            float dy = oy - g.last_obs_y;
+            float disp = sqrtf(dx * dx + dy * dy);
+            if (disp > g.heading_obs_min_disp) {
+                float obs_heading = atan2f(dy, dx);
+                ekf_slam_update(&g.ekf_slam_state, ox, oy, obs_heading);
+                g.last_obs_x = ox;
+                g.last_obs_y = oy;
+            } else {
+                ekf_slam_update_pos(&g.ekf_slam_state, ox, oy);
+                /* 位移不足不刷新 last_obs：累积到超过阈值再算航向，避免噪声主导 Δ */
+            }
+        } else {
+            ekf_slam_update_pos(&g.ekf_slam_state, ox, oy);
+            g.last_obs_x = ox;
+            g.last_obs_y = oy;
+            g.have_last_obs = 1;
+        }
     }
 
     ekf_slam_get_pose(&g.ekf_slam_state,
@@ -420,6 +431,7 @@ static int slam_init(MessageBus* bus, Transport* transport,
     g.initial_x       = 0.0f;
     g.initial_y       = 0.0f;
     g.initial_heading = 0.0f;
+    g.heading_obs_min_disp = 0.4f;
     snprintf(g.algo, sizeof(g.algo), "dead_reckon");
 
     if (params_json) {
@@ -450,6 +462,9 @@ static int slam_init(MessageBus* bus, Transport* transport,
             g.initial_heading = (float)0.0;
             if ((j = cJSON_GetObjectItem(root, "initial_heading")) && cJSON_IsNumber(j))
                 g.initial_heading = (float)j->valuedouble;
+            g.heading_obs_min_disp = 0.4f;
+            if ((j = cJSON_GetObjectItem(root, "heading_obs_min_disp")) && cJSON_IsNumber(j))
+                g.heading_obs_min_disp = (float)j->valuedouble;
             snprintf(g.algo, sizeof(g.algo), "%s", "dead_reckon");
             if ((j = cJSON_GetObjectItem(root, "algo")) && cJSON_IsString(j))
                 snprintf(g.algo, sizeof(g.algo), "%s", j->valuestring);
