@@ -400,9 +400,11 @@ int main(int argc, char** argv) {
             }
         }
 
-        /* 从配置加载 QoS 并应用到 message_bus */
+        /* 从配置加载 QoS 与调度器模式并应用 */
+        int cfg_sched_mode = SCHEDULER_MODE_CHOREO;  /* 无配置时保持历史默认 */
         LauncherConfig* qos_cfg = config_load(config_path);
         if (qos_cfg) {
+            cfg_sched_mode = qos_cfg->scheduler.mode;  /* 0=classic 1=choreo */
             int qos_count = 0;
             for (int i = 0; i < qos_cfg->process_count; i++) {
                 ProcessConfig* pc = &qos_cfg->processes[i];
@@ -434,7 +436,9 @@ int main(int argc, char** argv) {
         Transport*        transport = transport_create(bus, discovery, TRANSPORT_LOCAL);
         transport_start(transport);
         SchedulerConfig   scfg      = SCHEDULER_CONFIG_DEFAULT;
-        scfg.mode                  = SCHEDULER_MODE_CHOREO;
+        scfg.mode                  = (SchedulerMode)cfg_sched_mode;  /* 读配置，不再写死 */
+        LOG_INFO("launcher", "scheduler mode: %s",
+                 scfg.mode == SCHEDULER_MODE_CHOREO ? "choreo" : "classic");
         Scheduler*        scheduler = scheduler_create(&scfg);
         scheduler_set_choreo_bus(scheduler, bus);
         scheduler_start(scheduler);

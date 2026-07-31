@@ -144,7 +144,9 @@ int main(int argc, char** argv) {
     transport_start(transport);
 
     SchedulerConfig scfg = SCHEDULER_CONFIG_DEFAULT;
-    scfg.mode = SCHEDULER_MODE_CHOREO;
+    scfg.mode = (SchedulerMode)cfg->scheduler.mode;  /* 读配置，不再写死 0=classic 1=choreo */
+    LOG_INFO("node_host", "scheduler mode: %s",
+             scfg.mode == SCHEDULER_MODE_CHOREO ? "choreo" : "classic");
     Scheduler* scheduler = scheduler_create(&scfg);
     scheduler_set_choreo_bus(scheduler, bus);
     scheduler_start(scheduler);
