@@ -42,6 +42,10 @@ void ekf_slam_predict(EkfSlam* ekf, float accel_x, float gyro_z, uint64_t curren
 
 void ekf_slam_update(EkfSlam* ekf, float obs_x, float obs_y, float obs_heading);
 
+/* 仅位置观测（2×2）：位移不足以可靠反推航迹方向时用它，只修正 x/y，
+ * heading/v/omega 靠 predict 的运动学耦合间接更新（不硬喂假航向）。 */
+void ekf_slam_update_pos(EkfSlam* ekf, float obs_x, float obs_y);
+
 void ekf_slam_get_pose(const EkfSlam* ekf, float* x, float* y, float* heading,
                        float* cov_xx, float* cov_yy, float* cov_hh);
 
