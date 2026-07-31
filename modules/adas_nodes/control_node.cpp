@@ -118,6 +118,7 @@ struct ControlContext {
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
     double road_center_y{0};   /* 当前帧目标道路中心 y（来自 trajectory 第一个点，供 fallback 使用） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
+    int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
 
     volatile int has_fusion{0};
     volatile int has_planning{0};
@@ -235,6 +236,18 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     g.has_fusion = 1;
     g.last_fusion_us = clock_now_us();
     cJSON_Delete(root);
+}
+
+/* planning/behavior 订阅：读 Behavior.command（BehaviorCommand enum），
+ * 用于转向灯指令。behavior_planner_node 每 50ms 发布一次类型化消息，
+ * 比 behavior/state 监控 JSON（0.5s）响应快、无字符串耦合、无双线程
+ * 撕裂读（char 缓冲 strcmp → int8 enum 原子读）。 */
+static void on_planning_behavior(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || msg->data_size == 0) return;
+    Behavior beh;
+    if (Behavior_deserialize(&beh, (const uint8_t*)msg->data, msg->data_size) != 0) return;
+    g.beh_command = beh.command;
 }
 
 static void on_trajectory(const Message* msg, void* user_data) {
@@ -785,6 +798,14 @@ protected:
             /* 转向灯 / 双闪指令 */
             uint8_t turn_signal = 0;
             bool    hazard      = false;
+            /* 变道打灯：LEFT_CHANGE/RIGHT_CHANGE → 左/右转向灯。
+             * （原实现 turn_signal 恒 0，变道不打灯——2026-07-31 用户反馈。
+             * 命令取自 planning/behavior 类型化消息的 command enum。） */
+            if (g.beh_command == BEH_LEFT_CHANGE) {
+                turn_signal = 1;  /* 左灯 */
+            } else if (g.beh_command == BEH_RIGHT_CHANGE) {
+                turn_signal = 2;  /* 右灯 */
+            }
             /* 紧急制动时开双闪（ROAD_GUARD / collision recovery） */
             if (strcmp(mode, "ROAD_GUARD") == 0 && brake > 0.6) {
                 hazard = true;
@@ -935,7 +956,7 @@ void* control_thread(void*) {
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY, nullptr };
+static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY, TOPIC_PLANNING_BEHAVIOR, nullptr };
 static const char* s_outputs[] = { TOPIC_CONTROL_RAW_CMD, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
@@ -1089,6 +1110,7 @@ static int control_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, nullptr);
     transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_TRAJECTORY, on_trajectory, nullptr);
+    transport_subscribe(transport, TOPIC_PLANNING_BEHAVIOR, on_planning_behavior, nullptr);  /* 转向灯意图 */
     transport_advertise(transport, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID);
     transport_advertise(transport, TOPIC_CONTROL_DEBUG, 0u);  /* JSON text */
     transport_advertise(transport, TOPIC_CONTROL_CTE, 0u);    /* JSON text */
@@ -1098,6 +1120,8 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_PLANNING_BEHAVIOR, 0u,
+                        CAP_SUBSCRIBER, 0);  /* 转向灯意图 */
     discovery_advertise(discovery, TOPIC_CONTROL_RAW_CMD, CONTROLRAW_TYPE_ID,
                         CAP_PUBLISHER, 100.0);
     discovery_advertise(discovery, TOPIC_CONTROL_DEBUG, 0u, CAP_PUBLISHER, 2.0);

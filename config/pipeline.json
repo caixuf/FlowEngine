@@ -174,7 +174,8 @@
       "subscribe": [
         "fusion/localization",
         "perception/tracked_objects",
-        "road/geometry"
+        "road/geometry",
+        "road/traffic_lights"
       ],
       "publish": [
         {
@@ -220,7 +221,8 @@
       "subscribe": [
         "fusion/localization",
         "planning/trajectory",
-        "road/ref_path"
+        "road/ref_path",
+        "planning/behavior"
       ],
       "publish": [
         {

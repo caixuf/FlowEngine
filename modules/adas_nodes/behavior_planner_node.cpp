@@ -89,6 +89,7 @@ static const TransitionRule BEH_TRANSITIONS[] = {
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
 #define BEH_MAX_OBS 128
+#define BEH_TL_MAX 16
 
 struct BehaviorContext {
     Transport*        transport{nullptr};
@@ -123,6 +124,15 @@ struct BehaviorContext {
     int    lane_count{2};
     double lane_width{3.5};
     volatile int has_road_geometry{0};
+
+    /* 红绿灯缓存（从 road/traffic_lights JSON 解析，归位决策用）。
+     * 归位（超车后切回内侧道）前要确认目标车道前方没有红灯，
+     * 否则切回去立刻停在灯前——2026-07-31 实跑：RIGHT 超车后
+     * CRUISE 归位回 lane2，距 x=350 红灯仅 ~15m，当场刹停。 */
+    double tl_x[BEH_TL_MAX]{}, tl_y_lane[BEH_TL_MAX]{};
+    int    tl_state[BEH_TL_MAX]{};  /* 0=green 1=yellow 2=red */
+    int    tl_count{0};
+    volatile int has_traffic_lights{0};
 
     /* ── 行为状态机状态 ── */
     int    state{0};        /* BehaviorCommand enum (镜像 sm.current) */
@@ -435,6 +445,60 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
+/* ── road/traffic_lights 订阅 — 缓存红绿灯位置/状态，供归位决策 ── */
+static void on_traffic_lights(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) { g.tl_count = 0; g.has_traffic_lights = 0; return; }
+    cJSON* lights = cJSON_GetObjectItem(root, "lights");
+    if (lights && cJSON_IsArray(lights)) {
+        int n = 0;
+        cJSON* light;
+        cJSON_ArrayForEach(light, lights) {
+            if (n >= BEH_TL_MAX) break;
+            cJSON* item;
+            g.tl_x[n] = 0.0;
+            g.tl_y_lane[n] = -1.75;
+            g.tl_state[n] = 0; /* default green */
+            if ((item = cJSON_GetObjectItem(light, "x")))       g.tl_x[n] = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(light, "y_lane")))  g.tl_y_lane[n] = item->valuedouble;
+            if ((item = cJSON_GetObjectItem(light, "state")) && cJSON_IsString(item)) {
+                if (strcmp(item->valuestring, "red") == 0)       g.tl_state[n] = 2;
+                else if (strcmp(item->valuestring, "yellow") == 0) g.tl_state[n] = 1;
+            }
+            n++;
+        }
+        g.tl_count = n;
+        g.has_traffic_lights = (n > 0) ? 1 : 0;
+    } else {
+        g.tl_count = 0;
+        g.has_traffic_lights = 0;
+    }
+    cJSON_Delete(root);
+}
+
+/* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。 */
+static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
+    if (!g.has_traffic_lights || g.tl_count <= 0) return false;
+    double lane_c = lane_center_y(lane_idx, lc, lw, 0.0, 0.0);
+    double v = g.ego_v; if (v < 0.0) v = 0.0;
+    /* 刹车距离 base = v²/8 + 3（≈4m/s² 减速度 + 3m 余量），与 planning_node
+     * 红灯 override（brake_dist = v*v/8 + 3，floor 5m）同源，此处再加 20m
+     * 余量、下限 60m：距红灯 60m 内都算"马上要停"，归位回去毫无意义。
+     * 若改 base 公式，planning_node.cpp 的红灯 override 需同步。 */
+    double stop_range = v * v / 8.0 + 3.0 + 20.0;
+    if (stop_range < 60.0) stop_range = 60.0;
+    for (int i = 0; i < g.tl_count; i++) {
+        if (g.tl_state[i] == 0) continue;  /* 绿灯 */
+        if (fabs(g.tl_y_lane[i] - lane_c) > lw * 0.5) continue;  /* 只查目标车道 */
+        double dx = g.tl_x[i] - g.ego_x;
+        if (dx <= 0.0 || dx > stop_range) continue;
+        return true;
+    }
+    return false;
+}
+
 /* ── 协程任务 ──────────────────────────────────────────── */
 
 class BehaviorTask : public CoroutineTask {
@@ -703,7 +767,8 @@ protected:
             {
                 StateId cur = statem_current(&g.sm);
                 if (cur == BEH_ST_CRUISE) {
-                    if (worthwhile && adj_idx >= 0) {
+                    if (worthwhile && adj_idx >= 0 &&
+                        !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
                         new_target_speed = fmax(adj_speed, g.ego_v);
@@ -720,12 +785,18 @@ protected:
                                  "blocked gap=%.1f/%.1f lead=%.1fm/s → FOLLOW id=%u v=%.1f (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
-                    } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0) {
+                    } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0 &&
+                               !lane_ahead_stop_light(current_idx - 1, lc, lw)) {
                         /* 超车完成归位：巡航且未被堵时，若内侧道（idx-1，same_side
                          * 已保证非对向）前方 gap 充足，变回内侧道巡航。
                          * 之前没有归位机制——超车后长期滞留外侧道，而红绿灯
                          * 只管辖 y_lane=-1.75 的内侧道，导致红灯不停车。
-                         * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。 */
+                         * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。
+                         *
+                         * 2026-07-31：加 lane_ahead_stop_light 条件——归位前
+                         * 确认目标车道前方 60m 内没有红灯/黄灯。否则切回 lane2
+                         * 立刻停在灯前（实跑：距 x=350 红灯 ~15m 切回即刹停），
+                         * 归位变成无效变道。目标车道有灯时留在外侧道继续巡航。 */
                         ev = BEH_EV_OVERTAKE_LEFT;
                         new_target_lane = current_idx - 1;
                         new_target_speed = g.cfg_cruise_speed;
@@ -749,7 +820,8 @@ protected:
                         new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason),
                                  "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
-                    } else if (worthwhile && adj_idx >= 0 && g.cooldown <= 0.0) {
+                    } else if (worthwhile && adj_idx >= 0 && g.cooldown <= 0.0 &&
+                               !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
                         new_target_speed = fmax(adj_speed, g.ego_v);
@@ -767,6 +839,18 @@ protected:
                         new_follow_id = lead_id;
                     }
                 } else if (cur == BEH_ST_LEFT_CHANGE || cur == BEH_ST_RIGHT_CHANGE) {
+                    /* 变道进行中：target_speed 保持进入时的超车速度
+                     * (fmax(adj_speed, ego_v))，不跟车限速。
+                     *
+                     * P5 修复（变道中每帧 target=lead_speed 防追尾）2026-07-31 删除——
+                     * 实测它是"减速变道"根因且会锁死：变道转移首帧 blocked=1、
+                     * lead_speed=0（前车停着等红灯）→ target 被设成 0；后续
+                     * blocked=0 的帧无分支重置 → 锁死，planning command_speed=0
+                     * → 全刹（demo 实测 spd=10.7→0.0 brk=1.00），超车失去意义。
+                     * 防追尾改由下层兜底：planning 常规 TTC（gap<~45m 起按
+                     * (gap-5)/4 限速）+ safety_control 近场 TTC（gap 逼近 20m
+                     * 内全刹）。变道横向位移 ~3s 内完成，纵向闭合由 TTC 分层
+                     * 接管，不需要 behavior 在变道中强制跟车。 */
                     if (g.committed_lane_idx == g.target_lane_idx) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
@@ -781,20 +865,8 @@ protected:
                         snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=%.1fs)", g.state_timer, g.lane_change_cooldown_timeout_s);
                         LOG_WARN("behavior", "lane change timeout (state=%s, target_lane=%d, current=%d, timer=%.1f)",
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
-                    } else if (blocked) {
-                        /* P5 修复：变道进行中但仍在前车后方 → 保持跟车速度防追尾。
-                         *
-                         * 问题：原实现 LEFT_CHANGE/RIGHT_CHANGE 期间不更新 target_speed，
-                         * 保持进入时的 fmax(adj_speed, ego_v)≈ego_v（14.4 m/s）。但变道
-                         * 需要 3-5s 才能完成（planning 横向位移），期间 ego 仍在原车道，
-                         * 前方 NPC 仅 7 m/s → 5s 内位移差 35m，必然追尾。
-                         *
-                         * 修复：变道未完成（committed_lane_idx != target_lane_idx）时，
-                         * 若本车道仍有前车（blocked），target_speed = lead_speed（跟车速度）。
-                         * 变道完成进入新车道后才由 COMPLETED 转移到 CRUISE 释放速度。 */
-                        new_target_speed = lead_speed;
-                        new_follow_id = lead_id;
                     }
+                    /* 变道进行中且未超时：不覆盖 target_speed，保持进入时的超车速度 */
                 }
             }
 
@@ -1003,6 +1075,7 @@ static const char* s_inputs[]  = {
     TOPIC_PERCEPTION_TRACKED_OBJECTS,
     TOPIC_PERCEPTION_OBSTACLES,
     TOPIC_ROAD_GEOMETRY,
+    TOPIC_ROAD_TRAFFIC_LIGHTS,
     nullptr
 };
 static const char* s_outputs[] = {
@@ -1105,10 +1178,12 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_PERCEPTION_TRACKED_OBJECTS,  on_tracked_objects,    nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES,        on_raw_obstacles,      nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY,               on_road_geometry,      nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS,         on_traffic_lights,     nullptr);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION,       0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_PERCEPTION_TRACKED_OBJECTS, 0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY,             0x80AD5C12u, CAP_SUBSCRIBER,  0);
+    discovery_advertise(discovery, TOPIC_ROAD_TRAFFIC_LIGHTS,       0x7E5C0FFEu, CAP_SUBSCRIBER,  0);  /* 归位决策 */
     discovery_advertise(discovery, TOPIC_PLANNING_BEHAVIOR,    BEHAVIOR_TYPE_ID, CAP_PUBLISHER, 20.0);
     discovery_advertise(discovery, "behavior/state",            0u, CAP_PUBLISHER, 0.4);  /* 每 2.5s */
 
