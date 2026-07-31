@@ -1073,7 +1073,7 @@ protected:
              * Frenet 只决定横向路径（s, d），纵向速度全由 command_speed 确定。
              * 从当前速度线性过渡到目标速度，保证轨迹末点 100% 跟踪行为指令。 */
             if (n_wp > 2) {
-                double v0 = spd_out[0];
+                double v0 = g.ego_v;  /* 用车子实际速度，不是 Frenet 首点（可能已被设为目标速度） */
                 for (int i = 0; i < n_wp; i++) {
                     double t = (double)i / (double)(n_wp - 1);
                     spd_out[i] = v0 * (1.0 - t) + command_speed * t;
