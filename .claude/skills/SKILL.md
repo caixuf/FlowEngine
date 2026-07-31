@@ -8,6 +8,7 @@
 |-------|------|----------|
 | **workflow** | `workflow.md` | 任何开发任务的完整流程：设计→执行→测试→迭代→清理→文档 |
 | **verify** | `verify.md` | 改动 pipeline 链路节点后，跑 demo_evaluator 端到端验证 |
+| **debugging** | `debugging.md` | 行为异常排查（转向灯反/该停不停/该走不走/刹停到 0/改代码现象不变）：分层探针 + 值传播验证 + 状态锁死 + 缓存层检查 |
 
 
 ## 编码规范（在 CLAUDE.md 和 workflow skill 中）

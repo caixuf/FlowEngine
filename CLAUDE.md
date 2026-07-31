@@ -5,6 +5,10 @@
 > **开发流程：** 设计 → 执行 → 测试 → 迭代 → 清理 → 文档。详见 `.claude/skills/SKILL.md`（入口路由）。
 > 改完代码后必跑：`/verify` → `/code-review` → `/simplify` → commit → 更新文档。
 >
+> **行为异常排查**（转向灯反/该停不停/该走不走/刹停到 0/改代码现象不变）→
+> 先看 `.claude/skills/debugging.md`（分层探针 + 值传播验证 + 状态锁死 + 缓存层检查，
+> 2026-07 修 8 个连环 bug 的方法论），别凭直觉猜层。
+>
 > **重构类改动** commit body 必含 `Removed:` 段（详见 `.claude/skills/workflow.md` 第七节），纯新增/fix/docs 可省略。
 
 ## 架构
