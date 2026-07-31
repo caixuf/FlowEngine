@@ -549,9 +549,11 @@ static int wp_init(MessageBus* bus, Transport* transport,
     pthread_mutex_init(&g.lock, NULL);
 
     /* ⚠️ 本节点与 planning_node 共用 planning/trajectory topic，
-     * pipeline 中二者只能选一，同时加载会导致 control 收到两个来源的轨迹。 */
-    LOG_WARN("waypoint_follower", "DEPRECATED: publishes planning/trajectory — "
-             "do NOT load planning_node in the same pipeline");
+     * pipeline 中二者只能选一，同时加载会导致 control 收到两个来源的轨迹。
+     * 注意：这不是 deprecated —— 它是 RC 小车 pipeline（pipeline_car.json）
+     * 的正选轻量规划器，与 planning_node 分属不同平台，互不取代。 */
+    LOG_WARN("waypoint_follower", "publishes planning/trajectory (RC-car variant) — "
+             "mutually exclusive with planning_node; do NOT load both in one pipeline");
 
     /* 默认参数 */
     snprintf(g.waypoints_file, sizeof(g.waypoints_file), "/tmp/waypoints.json");
