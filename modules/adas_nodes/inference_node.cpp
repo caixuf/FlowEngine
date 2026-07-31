@@ -418,6 +418,24 @@ static void push_frame(void) {
     if (g.frame_count < TEMPORAL_WINDOW) g.frame_count++;
 }
 
+/* ── 后端选择辅助 ────────────────────────────────────────────── */
+
+/* model_path 是否以给定后缀结尾（大小写不敏感）。 */
+static bool path_has_suffix(const char* path, const char* suffix) {
+    size_t lp = strlen(path), ls = strlen(suffix);
+    if (ls > lp) return false;
+    return strcasecmp(path + lp - ls, suffix) == 0;
+}
+
+/* 输入/输出维度是否落在推理链路支持集内（与 run_inference 的分支一致）。
+ * in ∈ {4,16,80,115}（单帧 v1/v2 或 5 帧时序 v2/v3），out ∈ {1,2,4,5,9}。 */
+static bool dims_supported(int in_dim, int out_dim) {
+    bool in_ok  = (in_dim == 4 || in_dim == 16 || in_dim == 80 || in_dim == 115);
+    bool out_ok = (out_dim == 1 || out_dim == 2 || out_dim == 4 ||
+                   out_dim == 5 || out_dim == 9);
+    return in_ok && out_ok;
+}
+
 /* ── 推理核心 ────────────────────────────────────────────────── */
 
 /*
@@ -604,15 +622,32 @@ protected:
             if (g.reload_flag) {
                 g.reload_flag = 0;
                 pthread_mutex_lock(&g.model_mutex);
-                TinyMLP new_model;
-                if (tiny_mlp_load(&new_model, g.model_path) == 0) {
-                    g.model = new_model;
-                    g.reload_count++;
-                    LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
-                             g.reload_count, g.model_path,
-                             g.model.in_dim, g.model.hid_dim, g.model.out_dim);
+                if (path_has_suffix(g.model_path, ".onnx")) {
+                    OnnxBackend nb{};
+                    if (onnx_backend_load(&nb, g.model_path) == 0 &&
+                        dims_supported(nb.in_dim, nb.out_dim)) {
+                        onnx_backend_free(&g.onnx);
+                        g.onnx = nb;
+                        g.use_onnx = true;
+                        g.reload_count++;
+                        LOG_INFO("inference", "OTA hot-reload #%d ONNX from %s (in=%d out=%d)",
+                                 g.reload_count, g.model_path, g.onnx.in_dim, g.onnx.out_dim);
+                    } else {
+                        onnx_backend_free(&nb);
+                        LOG_WARN("inference", "OTA ONNX hot-reload failed/维度错: %s", g.model_path);
+                    }
                 } else {
-                    LOG_WARN("inference", "OTA hot-reload failed: %s", g.model_path);
+                    TinyMLP new_model;
+                    if (tiny_mlp_load(&new_model, g.model_path) == 0) {
+                        g.model = new_model;
+                        g.use_onnx = false;
+                        g.reload_count++;
+                        LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
+                                 g.reload_count, g.model_path,
+                                 g.model.in_dim, g.model.hid_dim, g.model.out_dim);
+                    } else {
+                        LOG_WARN("inference", "OTA hot-reload failed: %s", g.model_path);
+                    }
                 }
                 pthread_mutex_unlock(&g.model_mutex);
             }
@@ -855,8 +890,28 @@ static int inference_init(MessageBus* bus, Transport* transport,
 
     pthread_mutex_init(&g.model_mutex, nullptr);
 
-    /* 尝试加载训练好的模型 */
-    if (tiny_mlp_load(&g.model, g.model_path) == 0) {
+    /* 按 model_path 后缀选后端：.onnx → ONNX Runtime，其余（.txt）→ tiny-MLP。
+     * 加载后校验 in/out 维度∈支持集，不符则拒绝并降级：ONNX 失败/维度错/未编译
+     * → 回退 tiny-MLP（此时 .onnx 路径对 tiny_mlp_load 必然失败 → heuristic），
+     * 保证「模型跑进 pipeline」这条链路永远可运行。 */
+    g.use_onnx = false;
+    if (path_has_suffix(g.model_path, ".onnx")) {
+        if (onnx_backend_load(&g.onnx, g.model_path) == 0 &&
+            dims_supported(g.onnx.in_dim, g.onnx.out_dim)) {
+            g.use_onnx = true;
+            LOG_INFO("inference", "ONNX model loaded from %s (in=%d out=%d)",
+                     g.model_path, g.onnx.in_dim, g.onnx.out_dim);
+        } else {
+            if (g.onnx.loaded)
+                LOG_WARN("inference", "ONNX %s 维度不支持 (in=%d out=%d)，降级 tiny-MLP",
+                         g.model_path, g.onnx.in_dim, g.onnx.out_dim);
+            else
+                LOG_WARN("inference", "ONNX 加载失败/未编译 %s，降级 tiny-MLP/heuristic",
+                         g.model_path);
+            onnx_backend_free(&g.onnx);
+            g.model.loaded = (tiny_mlp_load(&g.model, g.model_path) == 0) ? 1 : 0;
+        }
+    } else if (tiny_mlp_load(&g.model, g.model_path) == 0) {
         LOG_INFO("inference", "model loaded from %s (in=%d hid=%d out=%d)",
                  g.model_path, g.model.in_dim, g.model.hid_dim, g.model.out_dim);
     } else {
@@ -866,8 +921,9 @@ static int inference_init(MessageBus* bus, Transport* transport,
                  g.model_path);
     }
 
-    /* 根据模型输入维度自动选择帧维度 */
-    g.frame_dim = (g.model.in_dim >= 115) ? V3_DIM : V2_DIM;
+    /* 根据活跃后端的输入维度自动选择帧维度 */
+    int active_in = g.use_onnx ? g.onnx.in_dim : g.model.in_dim;
+    g.frame_dim = (active_in >= 115) ? V3_DIM : V2_DIM;
 
     transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
     transport_subscribe(transport, "planning/trajectory", on_planning, nullptr);
