@@ -1224,6 +1224,19 @@ protected:
                          * 用 brake_dist + 20m 大余量补 fusion 定位滞后，
                          * 见 control_node.cpp boost_target 注释。 */
                         command_speed = 0.0;
+                        /* 2026-07-31 修复：spd_out 在此前已按旧 command_speed 生成，
+                         * 只改 command_speed 进不了轨迹（points[].v 读的是 spd_out），
+                         * control 拿到的还是巡航速度 → 直接闯红灯（实测红灯前
+                         * 只从 12 缓到 6.2 就冲过去）。必须同步重建 spd_out：
+                         * 当前速度 → 0 的减速斜坡，轨迹末点归零 control 才刹停。 */
+                        if (n_wp > 2) {
+                            double v0 = g.ego_v;
+                            if (v0 < 0.0) v0 = 0.0;
+                            for (int i = 0; i < n_wp; i++) {
+                                double t = (double)i / (double)(n_wp - 1);
+                                spd_out[i] = v0 * (1.0 - t);  /* command_speed=0 → 斜坡到 0 */
+                            }
+                        }
                         break;
                     }
                 }
