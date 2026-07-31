@@ -22,22 +22,18 @@
  *   协方差传播: 完整 5×5 状态转移矩阵 + 过程噪声 Q
  *   量测更新: 支持位置/航向观测校正（LiDAR 特征或仿真真值）
  *
- * ── 集成 FAST-LIO2（LiDAR+IMU 紧耦合）步骤 ──
- *   1. git clone https://github.com/hku-mars/FAST_LIO.git
- *      cd FAST_LIO && mkdir build && cd build
- *      cmake .. && make -j          # 产出 libfast_lio2.a
- *   2. 在本文件顶部 #include "IKFoM_toolkit/esekfom/esekfom.hpp"
- *      在 slam_update() 里替换默认 dead reckoning：
- *        a. esekfom::init()                  初始化误差状态卡尔曼滤波
- *        b. 把 last_lidar 点云喂给 process() 做点云配准
- *        c. 把 last_imu 喂给 predict() 做状态预测
- *        d. 取 esekfom 状态填到 Pose2D (x/y/heading + 协方差)
- *   3. CMakeLists.txt 增加：
- *        find_package(PCL REQUIRED)
- *        find_package(Eigen3 REQUIRED)
- *        find_package(Sophus REQUIRED)
- *        target_link_libraries(slam_node ${NODE_LINK_LIBS}
- *            fast_lio2 PCL::PCL Eigen3::Eigen Sophus::Sophus)
+ * ── FAST-LIO2（LiDAR+IMU 紧耦合）：未实现，且当前数据契约无法实现 ──
+ *   FAST-LIO2 的配准前端要求**真实点云**（每帧上千点做 scan-to-map）。本项目
+ *   sensor/lidar 的 LidarFrame (msg/adas_msgs.msg) 是**单点带噪伪传感器**
+ *   {x,y,z,intensity}，不是点云——喂不进 FAST-LIO2。故 algo="fast_lio2" 一律
+ *   被 fast_lio2_init() 拒绝并降级 dead_reckon（不静默假装在跑 LIO）。
+ *
+ *   接入真实 FAST-LIO2 的**前置里程碑**（不在本轮范围）：
+ *     1. 消息契约重构：把单点 LidarFrame 扩成真实点云 topic（变长点数组），
+ *        sensor_model_node 产出真实/仿真点云，而非单点伪传感器。
+ *     2. 完成 (1) 后再 git clone hku-mars/FAST_LIO、link PCL/Eigen/Sophus，
+ *        在 HAVE_FAST_LIO2 块里用 esekfom 做点云配准 + IMU 预测，填 Pose2D。
+ *   在 (1) 之前，任何"git clone 即可接"的说法都是错的——没有点云输入。
  *
  * ── 也可作为纯里程计节点 ──
  *   source=POSE_SOURCE_ODOMETRY(3) 时，下游 fusion_node 把本节点输出当作
@@ -186,31 +182,22 @@ static void slam_update_dead_reckon(Pose2D* pose);
 
 #ifdef HAVE_FAST_LIO2
 
-typedef struct {
-    int placeholder;
-} FastLio2State;
-
-static FastLio2State g_fast_lio2;
-
+/* FAST-LIO2 后端：诚实占位——未实现，且当前数据契约无法实现。
+ *
+ * FAST-LIO2 是 LiDAR-IMU 紧耦合 ESKF，输入必须是**真实点云**（每帧上千点，
+ * 用于 scan-to-map 配准）。但本项目 sensor/lidar 的 LidarFrame
+ * (msg/adas_msgs.msg) 是**单点带噪伪传感器** {x,y,z,intensity}，不是点云，
+ * 喂不进配准前端。
+ *
+ * 因此 fast_lio2_init() 明确拒绝（返回 -1），slam_init 据此显式降级到
+ * dead_reckon 并打醒目 WARN——绝不静默假装在跑 LIO（原实现 slam_update_fast_lio2
+ * 偷偷跑 dead reckoning 却标称 fast_lio2，已删除）。真正接入 FAST-LIO2 需先做
+ * 一次消息契约重构（把单点 LidarFrame 扩成点云 topic），属独立里程碑，不在本轮。 */
 static int fast_lio2_init(void) {
-    memset(&g_fast_lio2, 0, sizeof(g_fast_lio2));
-    LOG_INFO("slam", "FAST-LIO2 backend initialized (占位实现，需替换为真实 ESKF 调用)");
-    return 0;
-}
-
-static void fast_lio2_cleanup(void) {
-    memset(&g_fast_lio2, 0, sizeof(g_fast_lio2));
-}
-
-static void slam_update_fast_lio2(Pose2D* pose) {
-    (void)pose;
-    static int warned = 0;
-    if (!warned) {
-        LOG_WARN("slam", "FAST-LIO2 占位实现：slam_update_fast_lio2() 未填充真实 ESKF 调用，"
-                 "本帧降级到 dead reckoning。请按 slam_node.cpp 文件头注释替换实现。");
-        warned = 1;
-    }
-    slam_update_dead_reckon(pose);
+    LOG_WARN("slam", "FAST-LIO2 未实现且当前无法实现：sensor/lidar 的 LidarFrame 是单点"
+             "伪传感器（非点云），无法做 scan-matching 配准。需先把 LidarFrame 扩成真实"
+             "点云契约（独立里程碑）。拒绝启用，降级 dead_reckon。");
+    return -1;
 }
 
 #endif
@@ -330,12 +317,8 @@ static void slam_update_dead_reckon(Pose2D* pose) {
 }
 
 static void slam_update(Pose2D* pose) {
-#ifdef HAVE_FAST_LIO2
-    if (strcmp(g.algo, "fast_lio2") == 0) {
-        slam_update_fast_lio2(pose);
-        return;
-    }
-#endif
+    /* 注：algo 永远不会是 "fast_lio2"——fast_lio2_init() 恒拒绝，slam_init 已
+     * 把它降级为 dead_reckon（见该函数 + HAVE_FAST_LIO2 块注释）。 */
     if (strcmp(g.algo, "ekf_slam") == 0) {
         slam_update_ekf_slam(pose);
         return;
@@ -470,17 +453,12 @@ static int slam_init(MessageBus* bus, Transport* transport,
         LOG_INFO("slam", "EKF-SLAM 后端已启用（5维状态估计器：x,y,heading,v,omega）");
     } else if (strcmp(g.algo, "fast_lio2") == 0) {
 #ifdef HAVE_FAST_LIO2
-        if (fast_lio2_init() != 0) {
-            LOG_WARN("slam", "FAST-LIO2 init 失败，降级到 dead_reckon");
-            snprintf(g.algo, sizeof(g.algo), "dead_reckon");
-        } else {
-            LOG_INFO("slam", "FAST-LIO2 后端已启用（占位实现，需填充真实 ESKF 调用）");
-        }
+        fast_lio2_init();   /* 恒返回 -1：LidarFrame 是单点非点云，无法配准 */
 #else
-        LOG_WARN("slam", "algo='fast_lio2' 未编译：需 cmake -DENABLE_FAST_LIO2=ON "
-                 "(并预装 PCL/Eigen/Sophus + libfast_lio2.a)。降级到 dead_reckon。");
-        snprintf(g.algo, sizeof(g.algo), "dead_reckon");
+        LOG_WARN("slam", "algo='fast_lio2' 未编译：需 cmake -DENABLE_FAST_LIO2=ON。"
+                 "（注：即便编译，当前 LidarFrame 单点契约也无法真正运行 LIO，见文件头）");
 #endif
+        snprintf(g.algo, sizeof(g.algo), "dead_reckon");
     } else if (strcmp(g.algo, "lio_sam") == 0) {
         LOG_WARN("slam", "algo='lio_sam' 暂未提供编译开关，降级到 dead_reckon。");
         snprintf(g.algo, sizeof(g.algo), "dead_reckon");
@@ -575,11 +553,6 @@ static void slam_cleanup(void) {
     if (strcmp(g.algo, "ekf_slam") == 0) {
         ekf_slam_cleanup_impl();
     }
-#ifdef HAVE_FAST_LIO2
-    if (strcmp(g.algo, "fast_lio2") == 0) {
-        fast_lio2_cleanup();
-    }
-#endif
     LOG_INFO("slam", "cleanup: poses=%lu lidar_frames=%lu imu_samples=%lu",
              (unsigned long)g.poses_published,
              (unsigned long)g.lidar_frames_received,

@@ -367,7 +367,7 @@ target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 # 为 GPS 丢失场景（室内/隧道）提供定位。支持三种算法模式：
 #   - dead_reckon: 默认简易里程计（陀螺仪积分 heading，加速度计积分速度）
 #   - ekf_slam:   轻量 EKF-SLAM（5维状态估计器，内置实现，无需外部依赖）
-#   - fast_lio2:  FAST-LIO2 紧耦合（需外部依赖，占位实现）
+#   - fast_lio2:  FAST-LIO2 紧耦合（未实现：当前 LidarFrame 单点非点云，一律拒绝降级）
 # 无传感器时自动降级为 dry-run（生成圆形轨迹模拟位姿）。
 # 编译依赖: adas_msgs_gen.h (LidarFrame/ImuData/Pose2D 序列化)，随构建生成。
 #
@@ -375,11 +375,10 @@ target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 # 状态向量: [x, y, heading, v, omega]，完整协方差传播与量测更新。
 #
 # ENABLE_FAST_LIO2 开关：cmake -DENABLE_FAST_LIO2=ON ...
-# 启用后 slam_node 会定义 HAVE_FAST_LIO2 宏，支持 algo=fast_lio2 路由。
-# 用户需：1. 安装 PCL/Eigen/Sophus + libfast_lio2.a
-#        2. 在下面 ENABLE_FAST_LIO2 块里取消注释 find_package + target_link_libraries
-#        3. 在 slam_update_fast_lio2() / fast_lio2_init() 里填真实 ESKF 调用
-# 完整步骤见 docs/HARDWARE_DEPLOYMENT.md "FAST-LIO2 集成" 章节。
+# 启用后 slam_node 定义 HAVE_FAST_LIO2 宏。但**即便开启也无法真正运行 FAST-LIO2**：
+# 当前 sensor/lidar 的 LidarFrame 是单点伪传感器（非点云），fast_lio2_init() 一律
+# 拒绝并降级 dead_reckon（见 slam_node.cpp 文件头 + HAVE_FAST_LIO2 块注释）。
+# 前置里程碑（不在本轮）：先把 LidarFrame 扩成真实点云 topic，才谈得上接 FAST_LIO。
 option(ENABLE_FAST_LIO2 "Enable FAST-LIO2 SLAM backend (requires PCL/Eigen/Sophus + libfast_lio2.a)" OFF)
 add_library(slam_node SHARED slam_node.cpp ekf_slam.c)
 target_link_libraries(slam_node ${NODE_LINK_LIBS} stdc++)
@@ -392,7 +391,7 @@ if(ENABLE_FAST_LIO2)
     # find_library(FAST_LIO2_LIB NAMES fast_lio2 HINTS /usr/local/lib)
     # target_link_libraries(slam_node ${NODE_LINK_LIBS} stdc++
     #     ${PCL_LIBRARIES} Eigen3::Eigen Sophus::Sophus ${FAST_LIO2_LIB})
-    message(STATUS "slam_node: HAVE_FAST_LIO2 enabled (占位实现，需填充真实 ESKF 调用)")
+    message(STATUS "slam_node: HAVE_FAST_LIO2 enabled (仍未实现：LidarFrame 单点非点云，运行时拒绝降级 dead_reckon)")
 endif()
 
 # test_ekf_slam / test_ekf_fusion 已移至主项目 CMakeLists.txt 注册（enable_testing
