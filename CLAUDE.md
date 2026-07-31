@@ -86,18 +86,24 @@ bash scripts/demo.sh --no-browser 15     # 不打开浏览器
 
 ## 验证
 
+> **架构思想（上百 commit 沉淀）**：每个节点发布 debug JSON topic →
+> monitor 聚合到唯一公共数据源 `/tmp/flow_topology.json` → 仪表盘 / 评估器 /
+> trace_incident / flowctl 全部消费同一份数据，**黑盒评分 + 分层验证 + 门禁
+> 有效性自检**。完整方法论见 `.claude/skills/verification.md`。
+
 ```bash
-# 每次改动 pipeline 链路上的节点后，跑评估器
-python3 ci/evaluators/demo_evaluator.py --duration 45 --interval 0.5
-
-# 秒级离线检查（不启动 demo）
-python3 tools/pipeline_check.py
-
-# 仅分析当前数据，不重新启动 demo
-python3 ci/evaluators/demo_evaluator.py --no-run
+# 分层验证阶梯（改完按此走）：
+python3 tools/pipeline_check.py                      # L0 秒级离线：管道断没断
+python3 ci/evaluators/demo_evaluator.py --duration 45 --interval 0.5  # L1 45s 行为回归
+python3 ci/evaluators/scenario_regression.py --baseline               # L1.5 场景矩阵（改前 --update-baseline）
+python3 ci/evaluators/test_param_regression.py                        # L2 调参 A/B（改前 --save-baseline）
+python3 tools/quick_verify.py                       # L3 交互热调参（set/eval）
+python3 tools/auto_tune_mpc.py                      # L3 自动扫参/自标定
+python3 tools/trace_incident.py                     # 事故逐层追溯（碰撞/出路沿复盘）
 ```
 
 评估器采样 `/tmp/flow_topology.json`，自动检查：拓扑完整性、topic 频率、碰撞、路沿偏离、停滞、变道次数、偏航抖动、NPC 瞬移。WARN 是已知问题可忽略，FAIL 必须修复。
+门禁有效性由 liveness gate（死信号 FAIL）+ require（无法判定≠通过）+ test_evaluator_gate.py（门禁自测）兜底——**门禁抓不住已知故障 = 它的 PASS 不可信**。
 
 ## 编码规范（统一 API — 2026-07 重构后强制执行）
 

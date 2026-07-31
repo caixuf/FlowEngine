@@ -13,7 +13,14 @@ bug 的真实会话（转向灯反 → 变道全刹 → 归位遇红灯 → 会�
 ## 核心原则：先复现 → 分层 → 逐层实证，别猜
 
 现象出现在"最终效果层"，但根因可能在任何一层。**不要凭直觉判断哪层错**，
-用探针逐层确认后再动手。FlowEngine 典型链路（按数据流向）：
+用探针逐层确认后再动手。
+
+> **先看 `verification.md`**：FlowEngine 每层本来就有 debug JSON topic +
+> monitor 聚合的 `/tmp/flow_topology.json` + trace_incident 事故追溯——
+> 很多"现象"直接用现有观测手段就能看到，不需要加探针。只有现有观测
+> 覆盖不到的值才加临时探针。
+
+FlowEngine 典型链路（按数据流向）：
 
 ```
 behavior 决策 → planning 轨迹(command_speed→spd_out→points[].v)
