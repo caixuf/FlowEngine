@@ -111,6 +111,18 @@ static void integrate_lateral_dynamics(Entity& e, double dt) {
 
     e.v_y_body += vy_dot * dt;
     e.yaw_rate += r_dot  * dt;
+
+    /* 稳定性护栏：线性轮胎 + 滑移角硬饱和下，高速持续转向时 v_y 经陀螺项
+     * −vx·r 正反馈而发散（2026-07 PR #72 实测：≥20 m/s 持续转向必然发散，
+     * v_y_body 可涨到 5×10⁴ m/s，推翻"有界不发散"承诺）。施加物理上界：
+     *   - 滑移约束  |v_y| ≤ vx·tan(slip_max)·1.5（正常工况远低于此）
+     *   - 摩擦圆近似 |r| ≤ μ·g/vx（μ≈0.8），横向加速度 ≤ 0.8g
+     * 只在失控/极端输入时钳位，不影响正常操控。 */
+    const double max_vy = std::fabs(vx) * std::tan(SLIP_ANGLE_MAX) * 1.5;
+    if (std::fabs(e.v_y_body) > max_vy) e.v_y_body = std::copysign(max_vy, e.v_y_body);
+    const double max_r = (0.8 * 9.81) / std::max(vx, 1.0);
+    if (std::fabs(e.yaw_rate) > max_r) e.yaw_rate = std::copysign(max_r, e.yaw_rate);
+
     e.heading  += e.yaw_rate * dt;
     normalize_heading(e);
 
@@ -132,8 +144,13 @@ void step_bicycle_dynamic(Entity& e, double dt, double throttle, double brake, d
         return;
     }
 
-    // 纵向车速积分（车体系纵向 = 标量车速）
-    e.v_x_body = e.speed + longitudinal_accel(e, throttle, brake, e.speed) * dt;
+    // 纵向车速积分：用 v_x_body 自身而非总速 e.speed —— 侧向速度持续存在时
+    // 用总速标量回灌会让 v_y² 项每帧注入纵向速度（自泵，实测 30 m/s 纯减速
+    // 下 v_x 反而增长），此处改自身体积分，纵向/横向解耦。
+    // 入口同步：实体可能直接以高速进入 dynamic（首帧 v_x_body 未初始化=0），
+    // 此时从 e.speed 取纵向分量（假定初始侧向≈0），避免从 0 起步。
+    if (e.v_x_body <= 0.0 && e.speed > 0.0) e.v_x_body = e.speed;
+    e.v_x_body += longitudinal_accel(e, throttle, brake, e.v_x_body) * dt;
     if (e.v_x_body < 0.0) e.v_x_body = 0.0;
 
     update_steer(e, steer, dt);

@@ -38,7 +38,8 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
  * 与运动学模型的区别：
  *   - 复用 step_bicycle 的纵向力（drive/brake/drag）与执行器滞后
  *   - 横向解侧向速度 v_y_body + 横摆角速度 yaw_rate，heading 由模型自主积分
- *     （不做道路切线重置，故 flowsim_node 的 is_dynamic 分支跳过 heading 重置）
+ *     （与运动学一样都不做道路切线重置——flowsim_node 的 is_dynamic 分支对
+ *     两模式一视同仁，只做 heading 归一化；区别在于本模型 v_y/r 是显式状态）
  *   - 滑移角 α_f=steer−atan2(v_y+a·r, v_x)、α_r=−atan2(v_y−b·r, v_x)
  *   - 线性轮胎 F_y=Cα·α；用到 apply_vehicle_defaults 设的 tire_stiffness_f/r、yaw_inertia
  *

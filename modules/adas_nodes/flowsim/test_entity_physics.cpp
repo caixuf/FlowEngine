@@ -187,14 +187,19 @@ static void test_dynamic_highspeed_bounded() {
     e.x = 0; e.y = 0; e.heading = 0; e.speed = 30.0;
 
     double dt = 0.05;
-    for (int i = 0; i < 120; ++i) {  // 6 秒大转角
+    // 120 秒持续大转向：修复前 ≥25s 即发散（v_y_body→5×10⁴、speed→5×10³，
+    // 2026-07 PR #72 实测 30 m/s steer=0.2 约 25s、steer=0.05 约 42s 发散）。
+    // 拉长到 120s 让回归必现；稳定性护栏把状态钳在物理界内。
+    for (int i = 0; i < 2400; ++i) {
         step_bicycle_dynamic(e, dt, 0.2, 0.0, 0.2);
     }
-    std::printf("  after 6s: speed=%.2f yaw_rate=%.4f x=%.1f y=%.1f\n",
-                e.speed, e.yaw_rate, e.x, e.y);
+    std::printf("  after 120s: speed=%.2f yaw_rate=%.4f v_y=%.2f x=%.1f y=%.1f\n",
+                e.speed, e.yaw_rate, e.v_y_body, e.x, e.y);
     CHECK(!std::isnan(e.x) && !std::isnan(e.y), "position finite (no NaN)");
     CHECK(!std::isnan(e.yaw_rate) && !std::isnan(e.v_y_body), "state finite (no NaN)");
     CHECK(std::fabs(e.yaw_rate) < 2.0, "yaw_rate bounded (<2 rad/s)");
+    // 摩擦圆护栏：|v_y| ≤ vx·tan(slip_max)·1.5 → 30 m/s 时 ≈ 5.4 m/s
+    CHECK(std::fabs(e.v_y_body) < 60.0, "v_y_body bounded (slip guard)");
     // 阻力限速终端 √(0.2·5000/0.4)=50 m/s，<60 即证明未发散（非发散到数千 m/s）
     CHECK(e.speed < 60.0, "speed bounded (near drag-terminal ~50 m/s)");
 }

@@ -1299,13 +1299,12 @@ protected:
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
              *
-             * 运动学模式（physics_model=kinematic）：heading 每帧被
-             * road_pos.world() 重置为道路切线方向。运动学模型下控制回路
-             * 靠 cte_term + heading_term + 低通滤波 + dead zone 已足够稳定。
-             * 强行保留 bicycle model heading 会导致自由积分漂移 → 斜行。
-             *
-             * 动力学模式（physics_model=dynamic）：跳过 heading 重置，
-             * 由 step_bicycle_dynamic 的轮胎侧偏力积分自主演化 heading。
+             * 两个模式都自由积分 heading（不做道路切线重置）：
+             *   运动学模式由 step_bicycle 的自行车模型积分 heading，稳定性来自
+             *     sin(dh) 负反馈闭环 + control 的 cte_term/heading_term/低通/死区
+             *     （旧版曾每帧重置到道路切线，已改为不重置，见下方 is_dynamic
+             *     分支只做归一化）；
+             *   动力学模式由 step_bicycle_dynamic 的轮胎侧偏力积分自主演化 heading。
              *
              * 横向位移由 delta_lat 独立控制（与 heading 解耦）：
              *   delta_lat = speed * dt * tan(steer) * gain
