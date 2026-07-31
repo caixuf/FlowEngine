@@ -159,7 +159,7 @@ sudo udevadm control --reload-rules
 | MCP2515 SPI-CAN 扩展板 | ¥30 | 树莓派 GPIO SPI 接线，需 dtoverlay 配置 |
 | USB-CAN 适配器 | ¥100-300 | 即插即用，无需接线 |
 
-CAN 总线两端必须各接 **120Ω 终端电阻**，否则 BUS-OFF。详见 [skills/15_socketcan_actuator.md](../skills/15_socketcan_actuator.md)。
+CAN 总线两端必须各接 **120Ω 终端电阻**，否则 BUS-OFF。详见 [docs/tutorials/15_socketcan_actuator.md](tutorials/15_socketcan_actuator.md)。
 
 > CAN 接口对应 `actuator` 节点（真车高速 NOA）。RC 小车 L2 用下面的 PWM 方案，走 `actuator_pwm` 节点，无需 CAN。
 
@@ -608,7 +608,7 @@ cmake --build build/modules/adas_nodes --target slam_node
 
 ## 参考
 
-- [skills/15_socketcan_actuator.md](../skills/15_socketcan_actuator.md) — SocketCAN + actuator_node 深度教程（NOA 真车）
+- [docs/tutorials/15_socketcan_actuator.md](tutorials/15_socketcan_actuator.md) — SocketCAN + actuator_node 深度教程（NOA 真车）
 - [config/pipeline_car.json](../config/pipeline_car.json) — 真车配置模板（默认 L2 RC，可切 NOA）
 - [tools/waypoint_record.py](../tools/waypoint_record.py) — GPS 航点录制工具（NMEA → JSON）
 - [tools/waypoint_player.py](../tools/waypoint_player.py) — 航点查看/重采样工具（ASCII 路径图）

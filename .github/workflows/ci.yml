@@ -61,7 +61,7 @@ jobs:
         run: |
           set -e
           if grep -rnE 'clock_gettime[[:space:]]*\([[:space:]]*CLOCK_MONOTONIC' modules/ ; then
-            echo "::error::Forbidden: modules/ must use clock_now_us() from clock_service.h, not clock_gettime(CLOCK_MONOTONIC). See skills/06_clock_service.md."
+            echo "::error::Forbidden: modules/ must use clock_now_us() from clock_service.h, not clock_gettime(CLOCK_MONOTONIC). See docs/tutorials/06_clock_service.md."
             exit 1
           fi
           echo "✓ modules/ uses clock_now_us() exclusively"

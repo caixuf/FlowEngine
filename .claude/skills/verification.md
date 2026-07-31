@@ -1,3 +1,8 @@
+---
+name: verification
+description: FlowEngine 验证与可观测性架构：分层验证阶梯（pipeline_check→demo_evaluator→scenario_regression→param_regression→quick_verify/auto_tune）、debug topic→monitor→topology 数据流、liveness/require 门禁、trace_incident 事故追溯、flowctl 热调参。
+---
+
 # Verification — FlowEngine 验证与可观测性架构
 
 本项目的核心架构思想（上百个 commit 沉淀）：**每个节点都可观测，验证全部
@@ -109,4 +114,4 @@ python3 tools/trace_incident.py
   `ci/evaluators/scenario_regression.py`、`ci/evaluators/test_param_regression.py`、
   `tools/quick_verify.py`、`tools/auto_tune_mpc.py`、`tools/trace_incident.py`
 - 门禁自测：`ci/evaluators/test_evaluator_gate.py`
-- 教程：`skills/12_demo_evaluator.md`（评估器设计 + 4 个深层故障模式）
+- 教程：`docs/tutorials/12_demo_evaluator.md`（评估器设计 + 4 个深层故障模式）

@@ -7,7 +7,7 @@
 | 维度 | 现状 | 证据 |
 |------|------|------|
 | 训练脚本 | 已收敛到 2 份 | `tools/train_demo_model.py`（顶层入口）、`tools/train_e2e/train.py`（canonical）；`tools/train/train.py` 已删除 |
-| 学习闭环文档 | 已收敛到 2 份 | `docs/LEARNING_LOOP.md`、`skills/13_e2e_learning_loop.md`；`docs/E2E_LEARNING_V3_PLAN.md` 已删除 |
+| 学习闭环文档 | 已收敛到 2 份 | `docs/LEARNING_LOOP.md`、`docs/tutorials/13_e2e_learning_loop.md`；`docs/E2E_LEARNING_V3_PLAN.md` 已删除 |
 | CLAUDE.md 漂移 | 索引写 `.c` 实际 `.cpp` | line 49 `inference_node.c` → 实际 `inference_node.cpp`（已确认） |
 | 3D 可视化 | 已收敛到 `vis/`（成功案例） | 4 代→1 代，依赖 `tools/flowboard/js/vis/main.js` choke point |
 | 场景文件 | 已清到 2 份 | 删 16 份 + zhongkai_road_full.json 等 |
@@ -28,9 +28,9 @@
 - 位于"测试→迭代→清理→文档"末尾，无 gate 拦
 - **commit 第七节 (line 88-98) 无 Removed 必填字段**
 
-### 2.3 skills/13_e2e_learning_loop.md（[file:///home/caixuf/code/FlowEngine/skills/13_e2e_learning_loop.md](file:///home/caixuf/code/FlowEngine/skills/13_e2e_learning_loop.md)）
+### 2.3 docs/tutorials/13_e2e_learning_loop.md（[file:///home/caixuf/code/FlowEngine/docs/tutorials/13_e2e_learning_loop.md](file:///home/caixuf/code/FlowEngine/docs/tutorials/13_e2e_learning_loop.md)）
 - 13 号 skill 描述学习闭环，未提 `/simplify` 联动
-- **整个 skills/ 目录无 `SKILL.md` 索引文件**（Glob 找不到）
+- **整个 docs/tutorials/ 目录无索引文件**
 
 ### 2.4 训练脚本分布（已清理）
 ```
@@ -120,7 +120,7 @@ tools/train/train.py                  # 已删除（deprecated，被 train_e2e/t
 +  refactor 类若只有 `Co-Authored` 而无 `Removed` → 打回。
 ```
 
-### 3.3 [skills/13_e2e_learning_loop.md](file:///home/caixuf/code/FlowEngine/skills/13_e2e_learning_loop.md) — 增「canonical 入口」声明
+### 3.3 [docs/tutorials/13_e2e_learning_loop.md](file:///home/caixuf/code/FlowEngine/docs/tutorials/13_e2e_learning_loop.md) — 增「canonical 入口」声明
 
 改动位置：第 17-26 行「核心路径」表之后插入：
 
@@ -154,7 +154,7 @@ tools/train/train.py                  # 已删除（deprecated，被 train_e2e/t
 
 | 步 | 内容 | 工时 | 风险 |
 |----|------|------|------|
-| 1 | 3 个文件改动（CLAUDE.md / workflow.md / skills/13） | 30min | 0 — 加规则不改代码 |
+| 1 | 3 个文件改动（CLAUDE.md / workflow.md / docs/tutorials/13） | 30min | 0 — 加规则不改代码 |
 | 2 | 2 个 train 脚本加 @deprecated 注释 | 5min | 0 — 不删 |
 | 3 | 提交纪律 PR（含 Removed: 段） | 5min | 0 — 用自己的规范演示 |
 | 4 | （不在本计划）单独 PR 物理删 train.py / train_demo_model.py + E2E_LEARNING_V3_PLAN.md 归档 | 后续 | 中 — 需确认无 pipeline 引用 |
@@ -187,7 +187,7 @@ Removed:
 - [ ] CLAUDE.md 关键文件表 `inference_node.c` 漂移已修
 - [ ] workflow.md 第五节「清理」已升级为产出 `Removed:` 段
 - [ ] CLAUDE.md 「违反以上规范的代码不会被合并」前一节已加「重构/替代 → 同一 commit 删旧」
-- [ ] skills/13 明确声明 canonical 入口表
+- [ ] docs/tutorials/13 明确声明 canonical 入口表
 - [ ] `tools/train/train.py` 和 `tools/train_demo_model.py` 文件头有 `@deprecated superseded-by=... remove-by=2026-08-21`
 
 ### 5.4 未来 lint 脚本（不在本计划范围）
@@ -213,7 +213,7 @@ Removed:
 | 强制 `Removed:` 段让非重构 commit 也被卡 | 低 | 中 | 明确写"feat/fix/chore/docs/test 可省略" |
 | `@deprecated remove-by` 被 agent 故意漏写 | 中 | 低 | 给 30 天宽限期，lint 脚本只 warn 不 fail（下一 PR） |
 | 删旧被激进执行、误删正在用的文件 | 中 | 高 | 本计划**不**删任何文件，只标 @deprecated；删除留独立 PR |
-| 其他文档（LEARNING_LOOP.md）漂移本计划未处理 | 中 | 低 | 在 skills/13 增 canonical 入口表是软约束；下一 PR 集中处理 |
+| 其他文档（LEARNING_LOOP.md）漂移本计划未处理 | 中 | 低 | 在 docs/tutorials/13 增 canonical 入口表是软约束；下一 PR 集中处理 |
 
 ## 八、决策待确认
 
@@ -222,4 +222,4 @@ Removed:
 如有要调整的：
 - `remove-by` 日期用 `2026-08-21`（今天 7-21 + 30 天）OK 吗？
 - CLAUDE.md 关键文件表 line 49 改 `.c → .cpp` 同意吗？还是要我做更全的扫描（其它行可能也有漂移）？
-- skills/13 的 canonical 表是放在第 17 行后还是新加一节"## Canonical 入口"？
+- docs/tutorials/13 的 canonical 表是放在第 17 行后还是新加一节"## Canonical 入口"？

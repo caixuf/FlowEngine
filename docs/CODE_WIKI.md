@@ -633,4 +633,4 @@ steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 | [CALIBRATION_GUIDE.md](file:///workspace/docs/CALIBRATION_GUIDE.md) | 标定指南（含 k_vy 等） |
 | [REAL_VEHICLE_ROADMAP.md](file:///workspace/docs/REAL_VEHICLE_ROADMAP.md) | 真车部署待办 |
 | [LEARNING_LOOP.md](file:///workspace/docs/LEARNING_LOOP.md) | 车端学习闭环 |
-| `skills/` 目录 | 17 篇深度教程（OOP in C、插件、消息总线、IPC、协程、Fusion 等） |
+| `docs/tutorials/` 目录 | 17 篇深度教程（OOP in C、插件、消息总线、IPC、协程、Fusion 等） |

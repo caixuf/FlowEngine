@@ -171,7 +171,7 @@ def load_scenario_criteria_from_pipeline() -> tuple[dict, str | None, bool, dict
 
     ``has_noa_route`` is True when the scenario defines a non-empty ``route``
     list, meaning the driving-mode state machine is expected to reach NOA
-    and actively change lanes per the navigation route (see skills/08_state_machine.md).
+    and actively change lanes per the navigation route (see docs/tutorials/08_state_machine.md).
 
     ``road`` is the scenario's optional "road" object (curve_start_x/
     curve_length_m/curve_offset_m), or None for straight-road scenarios —
@@ -1036,7 +1036,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     # ── NOA (导航领航辅助) 功能校验 ──
     # 场景定义了 route[] 时，模式层状态机预期能升级到 NOA 并按导航路线主动变道
-    # (见 skills/08_state_machine.md)。仅靠拓扑/频率检查发现不了"模式没升级"或
+    # (见 docs/tutorials/08_state_machine.md)。仅靠拓扑/频率检查发现不了"模式没升级"或
     # "route_lane 从未被消费"这类功能性回归，因此单独校验驾驶模式序列。
     driver_modes_seen = sorted({m["driver_mode"].split(":")[0] for m in series if m["driver_mode"]})
     reached_noa = "NOA" in driver_modes_seen

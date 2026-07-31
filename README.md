@@ -445,23 +445,23 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 
 | Skill | 主题 |
 |-------|-------|
-| [01 — OOP in C](skills/01_oop_in_c.md) | C 语言面向对象编程 |
-| [02 — Plugin System](skills/02_plugin_system.md) | dlopen 插件架构设计 |
-| [03 — Message Bus](skills/03_message_bus.md) | 零拷贝 Pub/Sub 总线 |
-| [04 — IPC Channel](skills/04_ipc_channel.md) | POSIX SHM 进程间通信 |
-| [05 — Bag Recording](skills/05_bag_recording.md) | Bag v2 录制与回放 |
-| [06 — Clock Service](skills/06_clock_service.md) | 时钟服务与时间管理 |
-| [07 — Serializer](skills/07_serializer.md) | IDL 代码生成与序列化 |
-| [08 — State Machine](skills/08_state_machine.md) | 反射式状态机 |
-| [09 — Discovery](skills/09_discovery.md) | UDP 服务发现 |
-| [10 — Fusion](skills/10_fusion.md) | EKF 传感器融合 |
-| [11 — Coroutine](skills/11_coroutine.md) | C++20 协程调度 |
-| [12 — Demo Evaluator](skills/12_demo_evaluator.md) | 回归评估器设计 |
-| [13 — E2E Learning Loop](skills/13_e2e_learning_loop.md) | 车端学习闭环 |
-| [14 — Dead Reckoning](skills/14_dead_reckoning.md) | 前端航位推算 |
-| [15 — SocketCAN Actuator](skills/15_socketcan_actuator.md) | SocketCAN 执行器 |
-| [16 — FlowSim Scenario Design](skills/16_flowsim_scenario_design.md) | 仿真场景设计 |
-| [17 — Vis Module Designer](skills/17_vis_module_designer.md) | vis 模块设计（Layer + ViewRegistry 插件化）|
+| [01 — OOP in C](docs/tutorials/01_oop_in_c.md) | C 语言面向对象编程 |
+| [02 — Plugin System](docs/tutorials/02_plugin_system.md) | dlopen 插件架构设计 |
+| [03 — Message Bus](docs/tutorials/03_message_bus.md) | 零拷贝 Pub/Sub 总线 |
+| [04 — IPC Channel](docs/tutorials/04_ipc_channel.md) | POSIX SHM 进程间通信 |
+| [05 — Bag Recording](docs/tutorials/05_bag_recording.md) | Bag v2 录制与回放 |
+| [06 — Clock Service](docs/tutorials/06_clock_service.md) | 时钟服务与时间管理 |
+| [07 — Serializer](docs/tutorials/07_serializer.md) | IDL 代码生成与序列化 |
+| [08 — State Machine](docs/tutorials/08_state_machine.md) | 反射式状态机 |
+| [09 — Discovery](docs/tutorials/09_discovery.md) | UDP 服务发现 |
+| [10 — Fusion](docs/tutorials/10_fusion.md) | EKF 传感器融合 |
+| [11 — Coroutine](docs/tutorials/11_coroutine.md) | C++20 协程调度 |
+| [12 — Demo Evaluator](docs/tutorials/12_demo_evaluator.md) | 回归评估器设计 |
+| [13 — E2E Learning Loop](docs/tutorials/13_e2e_learning_loop.md) | 车端学习闭环 |
+| [14 — Dead Reckoning](docs/tutorials/14_dead_reckoning.md) | 前端航位推算 |
+| [15 — SocketCAN Actuator](docs/tutorials/15_socketcan_actuator.md) | SocketCAN 执行器 |
+| [16 — FlowSim Scenario Design](docs/tutorials/16_flowsim_scenario_design.md) | 仿真场景设计 |
+| [17 — Vis Module Designer](docs/tutorials/17_vis_module_designer.md) | vis 模块设计（Layer + ViewRegistry 插件化）|
 
 ---
 

@@ -1,4 +1,9 @@
-# Verify — FlowEngine Demo Evaluator
+---
+name: verify-e2e
+description: 改动 pipeline 链路节点或调参后，运行 demo_evaluator 端到端回归验证并解读结果（评估器采样 /tmp/flow_topology.json 自动评分）。
+---
+
+# Verify E2E — FlowEngine Demo Evaluator
 
 Run the automated regression evaluator against the FlowEngine demo pipeline
 and interpret results.

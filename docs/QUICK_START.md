@@ -109,7 +109,7 @@ target_link_libraries(my_plugin flowengine_core)
 ## 步骤 5：C++20 协程任务（进阶）
 
 参考 `src/plugins/flowcoro_task.cpp`、`src/coro_bus_demo.cpp` 与
-深入讲解 [`skills/11_coroutine.md`](../skills/11_coroutine.md)：
+深入讲解 [`docs/tutorials/11_coroutine.md`](tutorials/11_coroutine.md)：
 
 ```cpp
 #include "coroutine_task.h"

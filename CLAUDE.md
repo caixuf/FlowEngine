@@ -2,7 +2,7 @@
 
 轻量级自动驾驶中间件，核心是一个 Pub/Sub 消息总线 + 调度器 + 传输层。
 
-> **开发流程：** 设计 → 执行 → 测试 → 迭代 → 清理 → 文档。详见 `.claude/skills/SKILL.md`（入口路由）。
+> **开发流程：** 设计 → 执行 → 测试 → 迭代 → 清理 → 文档。详见 `.claude/skills/README.md`（入口路由）。
 > 改完代码后必跑：`/verify` → `/code-review` → `/simplify` → commit → 更新文档。
 >
 > **行为异常排查**（转向灯反/该停不停/该走不走/刹停到 0/改代码现象不变）→
@@ -64,9 +64,9 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `tools/modelctl.py` | artifact 管理（list / inspect / diff / promote / ota） |
 | `docs/LEARNING_LOOP.md` | 车端学习闭环架构 |
 
-> 深入教程见 `skills/` 目录（16 篇，覆盖 OOP in C、插件系统、消息总线、IPC、Bag、Clock、
+> 深入教程见 `docs/tutorials/` 目录（17 篇，覆盖 OOP in C、插件系统、消息总线、IPC、Bag、Clock、
 > Serializer、State Machine、Discovery、Fusion、Coroutine、Demo Evaluator、E2E Learning Loop、
-> Dead Reckoning、SocketCAN Actuator、FlowSim 场景设计）。
+> Dead Reckoning、SocketCAN Actuator、FlowSim 场景设计、vis 模块设计）。
 
 ## 运行
 
@@ -448,6 +448,7 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 多车道高速上遇对向车刹停到 0（会车让行过度保守） | planning 会车让行 + safety_control 对向 TTC 都用 `\|dy\|>2.0` 判"对向车"，把对向**任意车道**（含 2+ 车道外，横向 10.5m）都当迎头威胁 → 巡航压到 0.4×~1.0 全刹。修复：两者都加横向相邻上界（planning `1.5×路宽`、safety `6.0m`），只把相邻车道的对向车当真威胁 | `planning_node.cpp` 会车让行 / `safety_control_node.cpp` `min_oncoming_ttc` |
 | 改了模型/JS 但浏览器还显示旧效果（转向灯仍反） | `monitor_server.c` 把 `/tools/flowboard/models/*` 标 `Cache-Control: immutable`（1 年），模型文件改后浏览器永远用旧缓存不重拉。修复：models/ 改 `no-cache` + 前端模型 URL 加 `?v=` 缓存破坏版本号（改了模型就 bump） | `src/core/monitor_server.c` `cache_control_for_path` / `tools/flowboard/js/models.js` 模型 URL |
 | 红灯不停直接闯（planning override 设 0 无效） | planning 红灯 override 在 `spd_out` 生成**之后**才设 `command_speed=0`，但轨迹 `points[].v` 读的是旧 `spd_out`（`spd_out = v0*(1-t)+command_speed*t` 已按巡航速度算完）→ control 拿到的还是巡航速度。一直被"跟停红灯前停着的车"掩盖。修复：override 触发时**同步重建 spd_out**（当前速度→0 减速斜坡），轨迹末点归零 control 才真正刹停 | `planning_node.cpp` 红灯 override（~line 1209） |
+| 变道纠结：超车后立刻归位回慢车道、再超再归位（必现） | 归位只查目标车道 gap（空/远），不查目标车道**车速**——超车到快车道后切回慢车道，立刻又被慢车堵、再变道再归位，120s 必现 3 个来回。修复：归位加"目标车道可用"条件——空旷（无前车）或前车速度 ≥ 0.7×巡航才归位，否则留在快车道巡航 | `behavior_planner_node.cpp` 归位分支（~line 774） |
 
 ## 最新 tag
 

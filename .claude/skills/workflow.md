@@ -1,3 +1,8 @@
+---
+name: workflow
+description: FlowEngine 完整开发流程（设计→执行→测试→迭代→清理→文档）。任何开发任务开始前先读本 skill。
+---
+
 # Workflow — FlowEngine 开发工作流
 
 完整开发流程：设计 → 执行 → 测试 → 迭代 → 清理 → 文档。
