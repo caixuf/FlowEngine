@@ -1332,11 +1332,8 @@ protected:
                  * lat_error → 回打 → heading 收回来，闭环自洽。 */
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 if (dist > 0.0) {
-                    if (!ego.road_pos.advance(dist, M_PI)) {
-                        if (g.cycle % 100 == 0) {
-                            LOG_WARN("flowsim", "ego road_pos.advance failed (dist=%.2f)", dist);
-                        }
-                    } else {
+                    bool advanced = ego.road_pos.advance(dist, M_PI);
+                    if (advanced) {
                         flowsim::FrenetPos fp_cur;
                         if (ego.road_pos.frenet(fp_cur)) {
                             flowsim::WorldPos wp;
@@ -1371,6 +1368,47 @@ protected:
                             ego.lane_id = fp.lane_id;
                             ego.s = fp.s;
                             ego.offset = fp.offset;
+                        }
+                    }
+                    /* ── 路尾软冻结 ──────────────────────────────────────────
+                     * 判据必须是「位置到了路尾」而非「本帧位移小」——后者会在起步/
+                     * 低速/红灯停车等正常慢速帧误判，把速度锁死在 0。用权威信号：
+                     * frenet s 抵达当前道路长度（esmini 在路网边界 clamp s、
+                     * RM_PositionMoveForward 仍返回 rc>=0）；advance() 真失败(false)
+                     * 亦视为到头。此判据与车速解耦，中途任何慢速都不触发。
+                     *
+                     * 到头后不能直接把 speed 归零：ego 可能仍以巡航速冲上边界
+                     * （behavior/planning 不感知路尾），瞬时归零 → accel invariant
+                     * FAIL(运动学不可行)。改为按 ≤ accel 下界的物理减速率把速度收敛到 0。
+                     * 减速期间位置被边界钉死、无法跟随 vel·dt，与 recycle 同类
+                     * （位置被外部约束，非控制 bug）——标记 last_teleport_cycle
+                     * 豁免 Δpos 瞬移检查。两条时序 invariant 由此同时满足。 */
+                    constexpr double END_MARGIN_M = 1.0;
+                    constexpr double END_DECEL    = 6.0;  /* m/s²，安全落在 accel 下界 -8 内 */
+                    double road_len = -1.0;
+                    for (int ri = 0, rn = g.roads.road_count(); ri < rn; ++ri) {
+                        flowsim::RoadInfo rinfo;
+                        if (g.roads.road_info(ri, rinfo) &&
+                            (int)rinfo.id == ego.road_id) {
+                            road_len = rinfo.length;
+                            break;
+                        }
+                    }
+                    bool at_road_end = !advanced ||
+                        (road_len > 0.0 && ego.s >= road_len - END_MARGIN_M);
+                    if (at_road_end) {
+                        double dv = END_DECEL * FLOWSIM_DT_SEC;
+                        ego.speed = std::max(0.0, ego.speed - dv);
+                        ego.vx = ego.speed * std::cos(ego.heading);
+                        ego.vy = ego.speed * std::sin(ego.heading);
+                        if (is_dynamic) {
+                            ego.v_x_body = std::max(0.0, ego.v_x_body - dv);
+                            ego.v_y_body = 0.0;
+                            ego.yaw_rate = 0.0;
+                        }
+                        ego.last_teleport_cycle = g.cycle;  /* 位置被边界钉住，豁免瞬移检查 */
+                        if (g.cycle % 100 == 0) {
+                            LOG_WARN("flowsim", "ego reached route end, decelerating to hold (v=%.1f)", ego.speed);
                         }
                     }
                 }
