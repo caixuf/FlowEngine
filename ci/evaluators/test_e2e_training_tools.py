@@ -590,6 +590,84 @@ class E2ETrainingToolsTest(unittest.TestCase):
             manifest = json.loads((models_dir / "tuned_torch" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["training"]["init_from"], str(models_dir / "base_torch"))
 
+    def test_onnx_export_parity_with_tiny_mlp(self):
+        """export_onnx.py 导出的 .onnx 与 tiny_mlp_forward 数值等价 (|Δ|<1e-3)。
+
+        依赖 onnx + numpy + onnxruntime；缺任一即 skip（本机/CI 未预装 ORT 时不失败，
+        与 ENABLE_ONNX 默认关、运行时降级 tiny-MLP 的策略一致）。
+        """
+        try:
+            import numpy as np  # noqa: F401
+            import onnx  # noqa: F401
+            import onnxruntime as ort
+        except ImportError as e:
+            self.skipTest(f"onnx/onnxruntime/numpy 未安装，跳过 ONNX parity: {e}")
+
+        import math
+        sys.path.insert(0, str(ROOT / "tools/train_e2e"))
+        from export_onnx import parse_tiny_mlp, build_onnx
+
+        # 手写一个 in=4 / hidden=[3] / out=2 的 tiny-MLP，带非平凡归一化。
+        def fmt(vals):
+            return " ".join(f"{v:.8f}" for v in vals)
+
+        w1 = [0.10, -0.20, 0.30, -0.05,   # 隐元0
+              0.02, 0.40, -0.15, 0.25,    # 隐元1
+              -0.30, 0.12, 0.08, -0.22]   # 隐元2
+        b1 = [0.01, -0.02, 0.03]
+        w2 = [0.5, -0.4, 0.2,   # 输出0
+              -0.1, 0.3, 0.6]   # 输出1
+        b2 = [0.05, -0.05]
+        norm_mean = [10.0, -1.0, 0.0, 0.0]
+        norm_scale = [5.0, 2.0, 1.0, 0.5]
+        out_mean = [8.0, 0.0]
+        out_scale = [3.0, 1.5]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            model_txt = work / "model.txt"
+            model_txt.write_text(
+                "# flowengine-tinymlp v2 (parity test)\n"
+                "in 4\nhidden 3\nout 2\n"
+                f"norm_mean {fmt(norm_mean)}\n"
+                f"norm_scale {fmt(norm_scale)}\n"
+                f"out_mean {fmt(out_mean)}\n"
+                f"out_scale {fmt(out_scale)}\n"
+                f"w1 {fmt(w1)}\nb1 {fmt(b1)}\n"
+                f"w2 {fmt(w2)}\nb2 {fmt(b2)}\n",
+                encoding="utf-8",
+            )
+
+            onnx_path = work / "model.onnx"
+            build_onnx(parse_tiny_mlp(model_txt), onnx_path)
+            self.assertTrue(onnx_path.exists())
+
+            # 参考：tiny_mlp.h::tiny_mlp_forward 的纯 Python 复刻（norm→tanh 层→gemm→denorm）
+            def tiny_mlp_ref(x):
+                xn = [(x[i] - norm_mean[i]) / (norm_scale[i] or 1.0) for i in range(4)]
+                h = []
+                for j in range(3):
+                    acc = b1[j] + sum(w1[j * 4 + i] * xn[i] for i in range(4))
+                    h.append(math.tanh(acc))
+                y = []
+                for k in range(2):
+                    acc = b2[k] + sum(w2[k * 3 + j] * h[j] for j in range(3))
+                    y.append(acc * out_scale[k] + out_mean[k])
+                return y
+
+            sess = ort.InferenceSession(str(onnx_path),
+                                        providers=["CPUExecutionProvider"])
+            in_name = sess.get_inputs()[0].name
+            for x in ([12.0, -0.5, 0.1, 0.2],
+                      [8.0, -2.0, -0.3, 0.0],
+                      [15.0, 1.0, 0.05, -0.1]):
+                ref = tiny_mlp_ref(x)
+                got = sess.run(None, {in_name: np.array([x], dtype=np.float32)})[0][0]
+                for k in range(2):
+                    self.assertLess(abs(float(got[k]) - ref[k]), 1e-3,
+                                    f"onnx vs tiny_mlp mismatch @out{k}: "
+                                    f"{got[k]} vs {ref[k]} (x={x})")
+
 
 if __name__ == "__main__":
     unittest.main()
