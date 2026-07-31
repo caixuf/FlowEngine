@@ -420,15 +420,16 @@ static char* gzip_compress(const char* body, int body_len, int* out_len) {
 
 /* 路径分级缓存策略：
  *   /tools/flowboard/vendor/*    → 三方库永不变 → immutable
- *   /tools/flowboard/models/*    → glTF 模型永不变 → immutable
  *   /tools/d3.v7.min.js          → 永不变 → immutable
  *   /index.html, /js/*, /css/*   → 开发热更新 → no-cache
  *   /api/*                       → 实时数据 → no-cache
+ *   /tools/flowboard/models/*    → 开发期会重新生成（gen_models.py 改模型
+ *     后必须让浏览器重拉）→ no-cache。2026-07-31 曾标 immutable 导致模型
+ *     左右修复后用户浏览器一直用旧的缓存模型、转向灯仍反。
  */
 static const char* cache_control_for_path(const char* path) {
     if (!path) return "no-cache";
     if (strstr(path, "/vendor/") ||
-        strstr(path, "/models/") ||
         strstr(path, "d3.v7.min.js") ||
         strstr(path, "three.min.js")) {
         return "public, max-age=31536000, immutable";

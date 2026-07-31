@@ -156,7 +156,9 @@ export function initModelCache() {
       var name = MODEL_NAMES[i];
       _cache[name] = null;
       loader.load(
-        '/tools/flowboard/models/' + name + '.gltf',
+        // ?v= 缓存破坏：models/ 曾以 immutable 提供，模型左右修复后浏览器
+        // 一直用旧缓存。改了模型就 bump 这个版本号（服务端已改 no-cache）。
+        '/tools/flowboard/models/' + name + '.gltf?v=20260731',
         function(n) { return function(g) { onModelLoaded(n, g); }; }(name),
         undefined,
         function(n) { return function(e) { onModelError(n, e); }; }(name)

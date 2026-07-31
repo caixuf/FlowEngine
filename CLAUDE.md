@@ -436,6 +436,7 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 变道减速甚至全刹、超车没意义 | behavior 变道中 P5 分支 `else if (blocked) target_speed = lead_speed`：变道转移首帧 blocked=1 且前车停着（等红灯）→ target=0，后续 blocked=0 帧无分支重置 → 锁死 → planning command_speed=0 → 全刹（实测 spd=10.7→0.0 brk=1.00）。修复：删除该分支，防追尾改由 planning TTC + safety_control 近场 TTC 兜底 | `behavior_planner_node.cpp` 变道分支 |
 | 超车/归位后立刻在红灯前刹停（无效变道） | 归位/超车决策不看目标车道前方红绿灯，切回内侧道（灯只管辖 y_lane=-1.75）即刹停。修复：behavior 订阅 road/traffic_lights，`lane_ahead_stop_light()` 检查目标车道前方 60m 内非绿灯则不归位/不变入 | `behavior_planner_node.cpp` `lane_ahead_stop_light` |
 | 多车道高速上遇对向车刹停到 0（会车让行过度保守） | planning 会车让行 + safety_control 对向 TTC 都用 `\|dy\|>2.0` 判"对向车"，把对向**任意车道**（含 2+ 车道外，横向 10.5m）都当迎头威胁 → 巡航压到 0.4×~1.0 全刹。修复：两者都加横向相邻上界（planning `1.5×路宽`、safety `6.0m`），只把相邻车道的对向车当真威胁 | `planning_node.cpp` 会车让行 / `safety_control_node.cpp` `min_oncoming_ttc` |
+| 改了模型/JS 但浏览器还显示旧效果（转向灯仍反） | `monitor_server.c` 把 `/tools/flowboard/models/*` 标 `Cache-Control: immutable`（1 年），模型文件改后浏览器永远用旧缓存不重拉。修复：models/ 改 `no-cache` + 前端模型 URL 加 `?v=` 缓存破坏版本号（改了模型就 bump） | `src/core/monitor_server.c` `cache_control_for_path` / `tools/flowboard/js/models.js` 模型 URL |
 
 ## 最新 tag
 
