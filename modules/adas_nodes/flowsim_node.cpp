@@ -1670,7 +1670,7 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                 strncpy(g.physics_model, j->valuestring, sizeof(g.physics_model) - 1);
                 if (strcmp(g.physics_model, "dynamic") == 0) {
                     LOG_INFO("flowsim", "physics_model=dynamic selected "
-                             "(not yet implemented, falling back to kinematic)");
+                             "(线性轮胎二自由度；<5m/s 退化运动学，见 CALIBRATION_GUIDE.md)");
                 }
             }
             cJSON_Delete(p);
