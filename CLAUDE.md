@@ -336,10 +336,10 @@ npm run vis:check
 
 | 门禁 | 覆盖率 | 抓什么 |
 |------|--------|--------|
-| `vis_module_load.test.mjs` | 26/27 模块 (main.js 除外) | 语法错、顶层 ReferenceError、import 路径 |
-| `eslint no-undef` | 全部 27 模块 | 未定义变量引用（如 `VIADUCT_VIS_LENGTH` 未导入） |
-| `eslint no-unused-vars` | 全部 27 模块 | 定义了但未调用的函数（如 `followEgo` 漏调） |
-| `vis_render_tick.test.mjs` | director + 9 view | tickAnimation 运行时抛错、store 数据完整性 |
+| `vis_module_load.test.mjs` | 29/30 模块 (main.js 除外) | 语法错、顶层 ReferenceError、import 路径 |
+| `eslint no-undef` | 全部 30 模块 | 未定义变量引用（如 `VIADUCT_VIS_LENGTH` 未导入） |
+| `eslint no-unused-vars` | 全部 30 模块 | 定义了但未调用的函数（如 `followEgo` 漏调） |
+| `vis_render_tick.test.mjs` | director + 14 view | tickAnimation 运行时抛错、store 数据完整性 |
 
 ### 与 C 侧门禁的对称性
 
@@ -548,7 +548,7 @@ tools/flowboard/js/vis/
 ├── main.js           — 入口
 ├── core/             — 核心渲染框架（SceneDirector, CameraRig, Lighting, Constants, Layer, Renderer, SkyEnv, ViewRegistry, AssetFactory, DeadReckon）
 ├── director/         — 场景导演（SceneDirector, FrameValidator）
-├── view/             — 3D 视图（VehicleView, RoadView, GroundView, ViaductView, BarrierView, TreeView, TrafficLightView, ETCGateView, StreetlightView, ConnectorView, VehicleLights）
+├── view/             — 3D 视图（VehicleView, RoadView, GroundView, ViaductView, BarrierView, TreeView, TrafficLightView, ETCGateView, StreetlightView, ConnectorView, VehicleLights, EffectView, TrajectoryView）
 ├── math/             — 坐标/几何工具（Coord.js — 唯一事实源, Curve, GeometryMerge, RoadHeight）
 └── store/            — 场景状态（SceneStore）
 ```
