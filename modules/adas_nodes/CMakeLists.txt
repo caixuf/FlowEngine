@@ -205,6 +205,11 @@ target_compile_definitions(behavior_planner_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(behavior_planner_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 target_link_libraries(behavior_planner_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
+# navigation_node: 导航路线节点（场景 route[] -> navigation/path）。
+# planning_node 只消费 navigation/path，不再自行读取 scenario route。
+add_library(navigation_node SHARED navigation_node.c)
+target_link_libraries(navigation_node ${NODE_LINK_LIBS})
+
 # sensor_model_node: 噪声/FOV/遮挡传感器模型
 add_library(sensor_model SHARED sensor_model_node.c)
 target_link_libraries(sensor_model ${NODE_LINK_LIBS})

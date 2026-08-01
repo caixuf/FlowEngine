@@ -68,11 +68,11 @@ struct PlanningContext {
     int      highway_ready{0};       /* ego_v 持续高于阈值一段时间 -> 视为高速工况 */
     double   highway_speed_timer{0.0};
 
-    /* 从场景文件加载的导航路线（可选, 仅当 params 提供 scenario_file 时有效） */
-    char              scenario_file[256]{};
-    ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS];
-    int               route_count{0};
-    int               route_next_idx{0};    /* 下一条待触发的路线指令 */
+    /* 导航状态（由 navigation_node 发布 navigation/path 驱动） */
+    int               route_count{0};       /* 导航总步骤数（来自 route_status） */
+    int               route_next_idx{0};    /* 下一条待触发步骤索引（来自 route_status/route_step） */
+    volatile int      has_navigation{0};
+    uint64_t          last_nav_us{0};
     /* 当前路线要求的目标车道索引。
      * 语义：-1=无目标（保持当前车道），0..N-1=目标车道索引（0=最左, N-1=最右）。
      * 旧约定（{-1=左, 0=无, +1=右}）已废弃，但 scenario JSON 中的旧值仍可通过
@@ -204,7 +204,7 @@ PlanningContext g;
  *   NA  -> ACC : 定位与车辆状态均已上线
  *   ACC -> CP  : 定位持续有效（车道居中所需的姿态/位置可信）
  *   CP  -> NP  : 达到并保持高速工况（导航加速辅助的 ODD 之一）
- *   NP  -> NOA : 已加载导航路线（等效 HD 地图/路线规划可用）
+ *   NP  -> NOA : navigation/path 已上线（等效 HD 地图/路线规划可用）
  * 其余转移（降级/故障/退出）默认放行。
  */
 static bool mode_transition_guard(void* task, StateId from, EventId event, StateId to) {
@@ -217,12 +217,12 @@ static bool mode_transition_guard(void* task, StateId from, EventId event, State
         switch (to_mode) {
             case SM_MODE_CP:  return g.has_fusion != 0;
             case SM_MODE_NP:
-                /* 已加载导航路线时放行 NP（路线步骤本身定义驾驶策略，
+                /* 导航链路在线时放行 NP（路线步骤本身定义驾驶策略，
                  * 不应被 highway_ready 卡住——城市段也有路线指令如减速/
-                 * 过红绿灯/匝道汇入）。无路线时仍保持高速工况守卫。 */
-                if (g.route_count > 0) return true;
+                 * 过红绿灯/匝道汇入）。导航未上线时仍保持高速工况守卫。 */
+                if (g.has_navigation) return true;
                 return g.highway_ready != 0;
-            case SM_MODE_NOA: return g.route_count > 0;
+            case SM_MODE_NOA: return g.has_navigation != 0;
             default: return true;
         }
     }
@@ -446,7 +446,7 @@ static void on_perception_obstacles(const Message* msg, void* user_data) {
 /* ── road/geometry 订阅回调（Phase 2 统一道路几何） ─────────── */
 /* 从 flowsim_node 发布的 road/geometry topic 获取弯道参数，
  * 替代此前从 scenario_load() 读取弯道的冗余方式。
- * NOA route steps 仍从场景文件读取（planning 独有需求）。 */
+ * NOA route steps 由 navigation_node 在 navigation/path 下发。 */
 static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
@@ -493,6 +493,105 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
         LOG_WARN("planning", "[DBG_BEH] recv cmd=%d tgt_lane=%d tgt_spd=%.1f has_beh=%d",
                  (int)beh.command, (int)beh.target_lane_idx, (double)beh.target_speed, g.has_behavior);
     }
+}
+
+/* ── navigation/path 订阅回调（单轨导航驱动） ─────────────── */
+/* 消息格式：
+ *   route_status: {"type":"route_status","route_count":N,"next_idx":k}
+ *   route_step  : {"type":"route_step","step_type":"lane_change|branch_select|merge", ...}
+ */
+static void on_navigation_path(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+
+    cJSON* jtype = cJSON_GetObjectItemCaseSensitive(root, "type");
+    if (!cJSON_IsString(jtype) || !jtype->valuestring) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    g.last_nav_us = clock_now_us();
+
+    if (strcmp(jtype->valuestring, "route_status") == 0) {
+        cJSON* jcount = cJSON_GetObjectItemCaseSensitive(root, "route_count");
+        cJSON* jnext = cJSON_GetObjectItemCaseSensitive(root, "next_idx");
+        if (cJSON_IsNumber(jcount)) g.route_count = (int)jcount->valuedouble;
+        if (cJSON_IsNumber(jnext)) g.route_next_idx = (int)jnext->valuedouble;
+        g.has_navigation = (g.route_count > 0) ? 1 : 0;
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(jtype->valuestring, "route_step") != 0) {
+        cJSON_Delete(root);
+        return;
+    }
+
+    RouteStepType step_type = ROUTE_LANE_CHANGE;
+    int target_lane = -1;
+    double target_speed = -1.0;
+    int branch_id = -1;
+    int step_index = -1;
+    double ego_x = g.ego_x;
+
+    cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "step_type");
+    if (cJSON_IsString(j) && j->valuestring) {
+        if (strcmp(j->valuestring, "branch_select") == 0) step_type = ROUTE_BRANCH_SELECT;
+        else if (strcmp(j->valuestring, "merge") == 0)    step_type = ROUTE_MERGE;
+    }
+    j = cJSON_GetObjectItemCaseSensitive(root, "target_lane");
+    if (cJSON_IsNumber(j)) target_lane = (int)j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
+    if (cJSON_IsNumber(j)) target_speed = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "branch_id");
+    if (cJSON_IsNumber(j)) branch_id = (int)j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "step_index");
+    if (cJSON_IsNumber(j)) step_index = (int)j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "ego_x");
+    if (cJSON_IsNumber(j)) ego_x = j->valuedouble;
+    j = cJSON_GetObjectItemCaseSensitive(root, "route_count");
+    if (cJSON_IsNumber(j)) g.route_count = (int)j->valuedouble;
+    g.has_navigation = (g.route_count > 0) ? 1 : 0;
+    if (step_index >= 0) g.route_next_idx = step_index + 1;
+
+    g.route_type = step_type;
+    switch (step_type) {
+        case ROUTE_BRANCH_SELECT: {
+            int lane = (target_lane != 0) ? target_lane : -1;
+            g.route_target_lane = lane;
+            g.current_branch_id = branch_id;
+            g.route_target_speed = (target_speed > 0.0) ? target_speed : -1.0;
+            update_reference_path(g.ego_x - 5.0);
+            LOG_INFO("planning", "NAV branch_select #%d @x=%.0f -> branch_id=%d lane=%d",
+                     step_index, ego_x, branch_id, lane);
+            break;
+        }
+        case ROUTE_MERGE: {
+            int lane = (target_lane != 0) ? target_lane : 1;
+            g.route_target_lane = lane;
+            g.merge_hold_lane = lane;
+            g.merge_state = 1;
+            g.current_branch_id = -1;
+            g.route_target_speed = (target_speed > 0.0) ? target_speed : g.cfg_max_speed;
+            LOG_INFO("planning", "NAV merge #%d @x=%.0f -> lane=%d speed=%.1f wait_gap",
+                     step_index, ego_x, lane, g.route_target_speed);
+            break;
+        }
+        case ROUTE_LANE_CHANGE:
+        default:
+            g.route_target_lane = target_lane;
+            g.current_branch_id = -1;
+            if (target_speed >= 0.0) g.route_target_speed = target_speed;
+            else                     g.route_target_speed = -1.0;
+            LOG_INFO("planning", "NAV lane_change #%d @x=%.0f -> lane=%d speed=%.1f",
+                     step_index, ego_x, target_lane, g.route_target_speed);
+            break;
+    }
+
+    cJSON_Delete(root);
 }
 
 /* ── scene/frame 订阅回调（NOA Phase 6 merge 闭环） ─────────── */
@@ -659,113 +758,7 @@ protected:
                 g.mode_last_check_us = now_us;
             }
 
-            /* ── 路线驱动的主动变道（仅 NOA 生效）：不依赖障碍物，由导航路线
-             * 提前决定车道，是 NOA 区别于被动跟车/超车（LCC/NP）的核心行为。
-             * route_target_lane 一经触发即持续下发，直到下一条路线指令覆盖它，
-             * 供 control 节点在其既有安全变道状态机上执行（rear/front gap 检查）。
-             * 若路线步骤指定了 target_speed，则同时调整巡航速度（用于出口匝道减速等）。
-             *
-             * NOA Phase 3.2/3.3: 按 step->type 分发：
-             *   lane_change   — 同路段变道（原行为），设 target_lane + target_speed
-             *   branch_select — 路口分叉选路，记录 branch_id，触发参考路径刷新，
-             *                   target_lane 缺省 -1（靠右准备出匝道，符合 json_to_xodr
-             *                   默认右匝道方向）
-             *   merge         — 加速车道汇入，强制 target_speed（加速目标）+ target_lane
-             *                   （汇入后车道方向），control 节点据此做 gap 检查 + 加速 */
-            if (SM_MODE_OF(statem_current(&g.mode_sm)) == SM_MODE_NOA &&
-                g.route_next_idx < g.route_count &&
-                g.ego_x >= g.route[g.route_next_idx].trigger_x) {
-                const ScenarioRouteStep* step = &g.route[g.route_next_idx];
-                g.route_type = step->type;
-
-                switch (step->type) {
-                case ROUTE_BRANCH_SELECT: {
-                    /* 分叉选路：选中 branch_id 指定的 connecting_road。
-                     * target_lane 缺省 -1（右匝道方向，新模型用 lane_count-1 表示"最右"，
-                     * 但 planning 不知 lane_count，直接透传 -1，control 收到时按
-                     * "无目标"处理，让 ego 沿道路中心行驶直到下一条路线步骤）。
-                     * 场景显式指定的 target_lane（无论新旧语义）直接透传。 */
-                    int lane = (step->target_lane != 0) ? step->target_lane : -1;
-                    g.route_target_lane = lane;
-                    g.current_branch_id = step->branch_id;
-                    if (step->target_speed > 0.0) g.route_target_speed = step->target_speed;
-                    else                          g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
-                    /* 触发参考路径刷新：branch_select 后 ego 进入新的 connecting_road，
-                     * 参考路径需重新基于新路段几何构建（fallback 模式下沿用 curve_*
-                     * 单段几何，HAVE_FRENET 模式下应切到 branch_id 对应道路采样）。 */
-                    update_reference_path(g.ego_x - 5.0);
-                    LOG_INFO("planning",
-                             "NOA branch_select #%d @x=%.0f -> branch_id=%d lane=%d (%s)",
-                             g.route_next_idx, g.ego_x, step->branch_id, lane,
-                             step->label[0] ? step->label : "-");
-                    break;
-                }
-                case ROUTE_MERGE: {
-                    /* 加速车道汇入：强制 target_speed（加速到主路速度）+ target_lane
-                     * （汇入后车道方向）。control 节点在 merge 状态下做 gap 检查 +
-                     * 加速 + 横向汇入。target_lane 缺省 +1（旧语义"右"，新模型下
-                     * control 会把 +1 当作旧值并按 lane_count 映射到 idx=0=最左，
-                     * 符合"汇入主路左侧"的实际语义）。
-                     *
-                     * NOA Phase 6 merge 闭环：进入 merge 后先置 state=1（等 gap），
-                     * 主循环根据 scene/frame 的主线来车 gap 决策何时下发并入。
-                     * gap 不足期间 route_target_lane 暂存到 merge_hold_lane 并置 -1
-                     * （不下发变道），control 保持当前车道跟车巡航。 */
-                    int lane = (step->target_lane != 0) ? step->target_lane : 1;
-                    g.route_target_lane = lane;
-                    g.merge_hold_lane = lane;       /* 暂存，gap 充足时恢复 */
-                    g.merge_state = 1;              /* 进入等 gap 状态 */
-                    g.current_branch_id = -1;
-                    if (step->target_speed > 0.0) {
-                        g.route_target_speed = step->target_speed;
-                        LOG_INFO("planning",
-                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s wait_gap (%s)",
-                                 g.route_next_idx, g.ego_x, lane, step->target_speed,
-                                 step->label[0] ? step->label : "-");
-                    } else {
-                        /* merge 必须有 target_speed（加速目标），缺省用 cfg_max_speed */
-                        g.route_target_speed = g.cfg_max_speed;
-                        LOG_INFO("planning",
-                                 "NOA merge #%d @x=%.0f -> lane=%d accel to %.1f m/s wait_gap (default, %s)",
-                                 g.route_next_idx, g.ego_x, lane, g.cfg_max_speed,
-                                 step->label[0] ? step->label : "-");
-                    }
-                    break;
-                }
-                case ROUTE_LANE_CHANGE:
-                default: {
-                    /* 普通变道：原行为，设 target_lane + target_speed。
-                     * step->target_lane 直接透传给 control，由 control 按 lane_count
-                     * 做兼容映射（旧 ±1 → 新 0..N-1）。 */
-                    g.route_target_lane = step->target_lane;
-                    g.current_branch_id = -1;
-                    if (step->target_speed > 0.0) {
-                        g.route_target_speed = step->target_speed;
-                        LOG_INFO("planning",
-                                 "NOA route step #%d triggered @x=%.0f -> lane=%d speed=%.1f (%s)",
-                                 g.route_next_idx, g.ego_x, step->target_lane, step->target_speed,
-                                 step->label[0] ? step->label : "-");
-                    } else if (step->target_speed == 0.0) {
-                        /* 显式 target_speed=0 表示停车（如 stop_at_red），不再是"未设置"。
-                         * 旧实现用 0.0 表示未设置，与停车语义冲突，导致 stop_at_red
-                         * 步骤的 command_speed 回退到默认巡航速度，ego 不停车。 */
-                        g.route_target_speed = 0.0;
-                        LOG_INFO("planning",
-                                 "NOA route step #%d triggered @x=%.0f -> lane=%d STOP (target_speed=0) (%s)",
-                                 g.route_next_idx, g.ego_x, step->target_lane,
-                                 step->label[0] ? step->label : "-");
-                    } else {
-                        g.route_target_speed = -1.0;  /* -1 = 未设置，不改速度 */
-                        LOG_INFO("planning",
-                                 "NOA route step #%d triggered @x=%.0f -> lane=%d (%s)",
-                                 g.route_next_idx, g.ego_x, step->target_lane,
-                                 step->label[0] ? step->label : "-");
-                    }
-                    break;
-                }
-                }
-                g.route_next_idx++;
-            }
+            /* 路线触发由 navigation_node 完成；planning 只消费 navigation/path。 */
 
             if (g.ego_x > g.ref_path_start_x + g.cfg_ref_path_length * 0.8) {
                 double new_start = g.ego_x - 50.0;
@@ -1545,7 +1538,6 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.cfg_highway_speed_mps = 13.0;  /* 未提供 highway_speed_mps 参数时的兜底默认值，
                                         需低于当前场景实际巡航速度才能触发 NP 升级；
                                         pipeline.json 会显式覆盖为更贴近实际场景的值。 */
-    g.scenario_file[0] = '\0';
 
     if (params_json) {
         cJSON* root = cJSON_Parse(params_json);
@@ -1561,37 +1553,12 @@ static int planning_init(MessageBus* bus, Transport* transport,
                 g.cfg_ref_path_length = item->valuedouble;
             if ((item = cJSON_GetObjectItem(root, "highway_speed_mps")))
                 g.cfg_highway_speed_mps = item->valuedouble;
-            if ((item = cJSON_GetObjectItem(root, "scenario_file")) && cJSON_IsString(item)) {
-                size_t len = strlen(item->valuestring);
-                if (len >= sizeof(g.scenario_file)) len = sizeof(g.scenario_file) - 1;
-                memcpy(g.scenario_file, item->valuestring, len);
-                g.scenario_file[len] = '\0';
-            }
             cJSON_Delete(root);
         }
     }
 
     g.target_speed = g.cfg_target_speed;
     g.route_target_speed = -1.0;  /* -1=未设置 */
-
-    /* 从场景文件加载导航路线（可选）：NOA 主动变道所需的"路线/地图"数据来源。
-     * Phase 2: 弯道几何不再从此处读取，改由 road/geometry topic 获取（flowsim_node 发布）。
-     * 此处仅加载 NOA route steps。 */
-    if (g.scenario_file[0] != '\0') {
-        ScenarioConfig* sc = scenario_load(g.scenario_file);
-        if (sc) {
-            g.route_count = sc->route_count;
-            /* sc 由 calloc 分配，未用槽位已清零；这里按实际 route_count 精确
-             * 拷贝，避免依赖 calloc 的清零语义。 */
-            memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
-            scenario_free(sc);
-            LOG_INFO("planning", "loaded %d NOA route step(s) from '%s'",
-                     g.route_count, g.scenario_file);
-        } else {
-            LOG_WARN("planning", "scenario_file '%s' not loadable — NOA route disabled",
-                     g.scenario_file);
-        }
-    }
 
     /* Frenet 规划器 */
 #ifdef HAVE_FRENET
@@ -1617,6 +1584,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_BEHAVIOR, on_planning_behavior, nullptr);
+    transport_subscribe(transport, TOPIC_NAVIGATION_PATH, on_navigation_path, nullptr);
     transport_advertise(transport, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du);
     transport_advertise(transport, TOPIC_PLANNING_DEBUG, 0u);  /* JSON text */
 
@@ -1631,6 +1599,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, TOPIC_SCENE_FRAME,         0x5CF12A60u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_BEHAVIOR,   0u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_NAVIGATION_PATH,     0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_PLANNING_TRAJECTORY, 0x3A7B1C2Du,
                         CAP_PUBLISHER, 10.0);

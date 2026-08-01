@@ -45,6 +45,7 @@
 
 /* ── Planning topics ────────────────────────────────────────── */
 
+#define TOPIC_NAVIGATION_PATH         "navigation/path"
 #define TOPIC_PLANNING_TRAJECTORY       "planning/trajectory"
 #define TOPIC_PLANNING_BEHAVIOR         "planning/behavior"
 #define TOPIC_PLANNING_REFERENCE_LINE   "planning/reference_line"
@@ -142,7 +143,11 @@
  *
  * TOPIC_FUSION_LOCALIZATION:
  *   PRODUCERS: fusion_node
- *   CONSUMERS: planning_node, control_node, safety_control_node, inference_node, data_recorder_node, learner_node, model_ota_node [pipeline]
+ *   CONSUMERS: planning_node, control_node, safety_control_node, inference_node, data_recorder_node, learner_node, model_ota_node, navigation_node [pipeline]
+ *
+ * TOPIC_NAVIGATION_PATH:
+ *   PRODUCERS: navigation_node
+ *   CONSUMERS: planning_node
  *
  * TOPIC_FUSION_LATENCY:
  *   PRODUCERS: fusion_node

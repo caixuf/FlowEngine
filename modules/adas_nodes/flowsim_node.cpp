@@ -1387,29 +1387,9 @@ protected:
                     }
                     bool at_road_end = !advanced ||
                         (road_len > 0.0 && ego.s >= road_len - END_MARGIN_M);
-                    if (at_road_end) {
-                        /* 掉头：relocate 到起点 (s=0)，保持当前车道和速度 */
-                        if (ego.road_pos.relocate(g.roads, 0, ego.lane_id, 0.0, 0.0)) {
-                            ego.speed = std::max(ego.speed, 5.0);
-                            ego.last_teleport_cycle = g.cycle;
-                            flowsim::WorldPos wp;
-                            if (ego.road_pos.world(wp)) {
-                                ego.x = wp.x;
-                                ego.y = wp.y;
-                                ego.heading = wp.h;
-                            }
-                            flowsim::FrenetPos fp;
-                            if (ego.road_pos.frenet(fp)) {
-                                ego.road_id = fp.road_id;
-                                ego.lane_id = fp.lane_id;
-                                ego.s = fp.s;
-                                ego.offset = fp.offset;
-                            }
-                            if (g.cycle % 50 == 0) {
-                                LOG_WARN("flowsim", "ego U-turn loop: relocated to start (v=%.1f, lane=%d)",
-                                         ego.speed, ego.lane_id);
-                            }
-                        }
+                    if (at_road_end && g.cycle % 50 == 0) {
+                        LOG_WARN("flowsim", "ego reached road end (road_id=%d s=%.1f/%.1f), waiting navigation/planning",
+                                 ego.road_id, ego.s, road_len);
                     }
                 }
             }
