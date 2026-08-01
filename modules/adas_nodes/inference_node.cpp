@@ -44,6 +44,7 @@
 #include "tiny_mlp.h"
 #include "onnx_backend.h"
 #include "traffic_light.h"
+#include "clock_service.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -144,6 +145,13 @@ struct InferenceContext {
 
     int infer_count{0};
     int reload_count{0};
+
+    /* 影子 sidecar: 聚合 |shadow_delta| 统计，供 evaluator / promote 门禁消费 */
+    char   sidecar_path[256]{};    /* 空串 = 不写 */
+    double shadow_abs_sum{0};      /* Σ|delta| */
+    double shadow_sq_sum{0};       /* Σ delta² */
+    long   shadow_n{0};            /* 有 planning 参照的样本数 */
+    uint64_t sidecar_last_us{0};   /* 上次落盘时间（限频 1Hz） */
 
     /* 协程任务 */
     std::unique_ptr<class InferenceTask> task;
@@ -433,6 +441,53 @@ static bool dims_supported(int in_dim, int out_dim) {
     return in_ok && out_ok;
 }
 
+/* ── 影子 sidecar 落盘 ───────────────────────────────────────── */
+
+/*
+ * 把最新 shadow_delta + 累计 |delta| 统计原子写到 g.sidecar_path。
+ * 与 tools/train_e2e/torch_sidecar.py 输出对称（demo_evaluator._load_shadow_delta
+ * 读 "shadow_delta" 字段）；额外的聚合字段供 modelctl promote 门禁消费：
+ *   shadow_speed_mae  = mean(|pred_speed - planning_target_speed|)
+ *   shadow_speed_rmse = sqrt(mean(delta²))
+ * 限频 1Hz，tmp+rename 原子替换，避免读端撕裂。
+ */
+static void write_shadow_sidecar(double shadow_delta, double pred_speed,
+                                 const char* model_name) {
+    if (!g.sidecar_path[0]) return;
+    uint64_t now = clock_now_realtime_us();
+    if (g.sidecar_last_us && now - g.sidecar_last_us < 1000000ULL) return;
+    g.sidecar_last_us = now;
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "source", "inference_node");
+    cJSON_AddStringToObject(root, "model", model_name);
+    cJSON_AddStringToObject(root, "model_path", g.model_path);
+    cJSON_AddNumberToObject(root, "t_unix", (double)now / 1e6);
+    cJSON_AddNumberToObject(root, "infer_count", g.infer_count);
+    cJSON_AddNumberToObject(root, "pred_speed", pred_speed);
+    cJSON_AddNumberToObject(root, "planning_speed", g.planning_target_speed);
+    cJSON_AddNumberToObject(root, "shadow_delta", shadow_delta);
+    if (g.shadow_n > 0) {
+        cJSON_AddNumberToObject(root, "shadow_n", (double)g.shadow_n);
+        cJSON_AddNumberToObject(root, "shadow_speed_mae", g.shadow_abs_sum / (double)g.shadow_n);
+        cJSON_AddNumberToObject(root, "shadow_speed_rmse", sqrt(g.shadow_sq_sum / (double)g.shadow_n));
+    }
+    char* s = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!s) return;
+
+    char tmp_path[280];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", g.sidecar_path);
+    FILE* f = fopen(tmp_path, "w");
+    if (f) {
+        fputs(s, f);
+        fputc('\n', f);
+        fclose(f);
+        if (rename(tmp_path, g.sidecar_path) != 0) unlink(tmp_path);
+    }
+    free(s);
+}
+
 /* ── 推理核心 ────────────────────────────────────────────────── */
 
 /*
@@ -677,9 +732,15 @@ protected:
             /* 影子对比: 与 planning 输出的目标速度差 */
             double shadow_delta = g.has_planning
                 ? (pred_speed - g.planning_target_speed) : 0.0;
+            if (g.has_planning) {
+                g.shadow_abs_sum += fabs(shadow_delta);
+                g.shadow_sq_sum  += shadow_delta * shadow_delta;
+                g.shadow_n++;
+            }
 
             const char* model_name = g.use_onnx ? (g.onnx.loaded ? "onnx" : "heuristic")
                                                  : (g.model.loaded ? "tiny-mlp" : "heuristic");
+            write_shadow_sidecar(shadow_delta, pred_speed, model_name);
 
             /* 所有模式下都发布 inference/trajectory 供监控 */
             {
@@ -866,6 +927,11 @@ static int inference_init(MessageBus* bus, Transport* transport,
 
     g.infer_count = 0;
     g.reload_count = 0;
+    g.sidecar_path[0] = '\0';
+    g.shadow_abs_sum = 0.0;
+    g.shadow_sq_sum = 0.0;
+    g.shadow_n = 0;
+    g.sidecar_last_us = 0;
 
     /* 默认参数 */
     g.cfg_max_speed    = 20.0;
@@ -891,6 +957,13 @@ static int inference_init(MessageBus* bus, Transport* transport,
                     g.control_mode = CTRL_MODE_PLAN_ASSIST;
                 else if (strcmp(j->valuestring, "direct_ctrl") == 0)
                     g.control_mode = CTRL_MODE_DIRECT;
+            }
+            /* 影子 sidecar 输出路径（供 demo_evaluator / modelctl promote 门禁）。
+             * 未配置时按后端自动决定（真实模型才写，heuristic 不写，见下）。 */
+            j = cJSON_GetObjectItemCaseSensitive(p, "shadow_sidecar_path");
+            if (cJSON_IsString(j) && j->valuestring) {
+                strncpy(g.sidecar_path, j->valuestring, sizeof(g.sidecar_path) - 1);
+                g.sidecar_path[sizeof(g.sidecar_path) - 1] = '\0';
             }
             cJSON_Delete(p);
         }
@@ -932,6 +1005,12 @@ static int inference_init(MessageBus* bus, Transport* transport,
     /* 根据活跃后端的输入维度自动选择帧维度 */
     int active_in = g.use_onnx ? g.onnx.in_dim : g.model.in_dim;
     g.frame_dim = (active_in >= 115) ? V3_DIM : V2_DIM;
+
+    /* sidecar 默认策略：加载了真实模型才写（heuristic 的 delta 不该进 shadow 门禁）。
+     * evaluator 的 SHADOW_INFERENCE_FILES 已包含 /tmp/flow_tiny_inference.json。 */
+    if (!g.sidecar_path[0] && (g.use_onnx ? g.onnx.loaded : g.model.loaded)) {
+        strncpy(g.sidecar_path, "/tmp/flow_tiny_inference.json", sizeof(g.sidecar_path) - 1);
+    }
 
     transport_subscribe(transport, "fusion/localization", on_fusion, nullptr);
     transport_subscribe(transport, "planning/trajectory", on_planning, nullptr);

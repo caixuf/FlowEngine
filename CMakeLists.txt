@@ -589,7 +589,7 @@ add_executable(flow_nuscenes_demo src/nuscenes_demo.c)
 target_link_libraries(flow_nuscenes_demo flowengine_core m)
 # 安装规则
 # benchmark(无名信号量)仅 Linux 构建,故从通用 install 列表拆出、条件安装。
-install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_mcap_replay flow_nuscenes_demo benchmark_coro coro_correctness_test
+install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_launcher flow_node_host flow_mcap_replay flow_nuscenes_demo benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
 if(NOT APPLE)
@@ -600,9 +600,28 @@ install(TARGETS flowengine_core
     ARCHIVE DESTINATION lib
 )
 
+# ── ADAS 节点插件（全装） ───────────────────────────────────
+file(GLOB ADAS_NODE_LIBS "${CMAKE_BINARY_DIR}/lib/lib*_node.so" "${CMAKE_BINARY_DIR}/lib/lib*_node.dylib")
+if(ADAS_NODE_LIBS)
+    install(FILES ${ADAS_NODE_LIBS}
+        DESTINATION lib/flowengine/plugins
+    )
+endif()
+
 install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task
     LIBRARY DESTINATION lib/flowengine/plugins
 )
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/libesminiRMLib.so")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/lib/libesminiRMLib.so"
+        DESTINATION lib
+    )
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/libesminiRMLib.dylib")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/lib/libesminiRMLib.dylib"
+        DESTINATION lib
+    )
+endif()
 
 install(DIRECTORY include/
     DESTINATION include/flowengine
@@ -619,11 +638,64 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/flowengine.pc"
     DESTINATION lib/pkgconfig
 )
 
+# ── Python Tools ────────────────────────────────────────────
+install(PROGRAMS
+    tools/train_demo_model.py
+    tools/modelctl.py
+    tools/learning_loop.py
+    tools/foxglove_bridge.py
+    tools/pipeline_check.py
+    tools/quick_verify.py
+    tools/trace_incident.py
+    DESTINATION share/flowengine/tools
+)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/train_e2e")
+    install(DIRECTORY tools/train_e2e/
+        DESTINATION share/flowengine/tools/train_e2e
+        FILES_MATCHING PATTERN "*.py"
+    )
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dataset")
+    install(DIRECTORY tools/dataset/
+        DESTINATION share/flowengine/tools/dataset
+        FILES_MATCHING PATTERN "*.py"
+    )
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ci/evaluators")
+    install(DIRECTORY ci/evaluators/
+        DESTINATION share/flowengine/evaluators
+        FILES_MATCHING PATTERN "*.py"
+    )
+endif()
+
 # ── Scripts ─────────────────────────────────────────────────
 install(PROGRAMS
     scripts/demo.sh
+    scripts/quickstart.sh
     scripts/stress_test.sh
     DESTINATION share/flowengine/scripts
+)
+
+install(PROGRAMS scripts/quickstart.sh
+    DESTINATION .
+)
+
+install(DIRECTORY config/
+    DESTINATION share/flowengine/config
+    FILES_MATCHING PATTERN "*.json"
+)
+
+install(DIRECTORY scenarios/
+    DESTINATION share/flowengine/scenarios
+    FILES_MATCHING PATTERN "*.json"
+)
+
+install(DIRECTORY tools/flowboard/
+    DESTINATION share/flowengine/flowboard
+)
+
+install(PROGRAMS tools/foxglove_bridge.py
+    DESTINATION share/flowengine/tools
 )
 
 # 创建配置文件

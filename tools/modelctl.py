@@ -245,10 +245,89 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if not source.exists():
         raise SystemExit(f"error: model file not found: {source}")
 
+    # ── 晋级门禁（Phase 2.2）──
+    gate_errors = promote_gate(artifact_dir, force=getattr(args, "force", False))
+    if gate_errors:
+        for err in gate_errors:
+            print(f"  GATE FAIL: {err}", file=sys.stderr)
+        raise SystemExit(
+            "error: promote rejected by gate. Run "
+            f"`python3 tools/learning_loop.py --eval-only {artifact_dir.name}` "
+            "to refresh shadow_eval.json, or use --force to override (not recommended)."
+        )
+
     runtime_model.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, runtime_model)
     print(f"promoted {source} -> {runtime_model}")
     return 0
+
+
+# ─────────────────────────────────────────────────────────────
+#  Promote 门禁 (Phase 2.2)
+# ─────────────────────────────────────────────────────────────
+
+# 影子推理 vs planning 的速度偏差上限 (m/s)。与 demo_evaluator.SHADOW_DELTA_WARN
+# 对齐：整段 run 的 MAE 超过 WARN 阈值说明模型系统性偏离规则控制，不该进 runtime。
+PROMOTE_SHADOW_MAE_MAX = 2.0
+# 影子评估最少样本数：少于此数说明 sidecar 几乎没跑起来，评估不可信。
+PROMOTE_SHADOW_MIN_N = 50
+# shadow_eval.json 最大年龄（秒）：过旧的评估结论不能为当前代码/场景背书。
+PROMOTE_SHADOW_MAX_AGE_S = 7 * 24 * 3600
+# 场景矩阵 baseline 目录（scenario_regression.py --update-baseline 生成）。
+SCENARIO_BASELINE_DIR = ROOT / "tests" / "baseline"
+
+
+def promote_gate(artifact_dir: Path, force: bool = False) -> list[str]:
+    """晋级门禁：无法判定 ≠ 通过（require 语义，与 evaluator 门禁哲学一致）。
+
+    返回拒绝原因列表；空列表 = 放行。--force 只打印警告不拦截。
+    """
+    errors: list[str] = []
+
+    shadow_path = artifact_dir / "shadow_eval.json"
+    if not shadow_path.exists():
+        errors.append(
+            f"missing {shadow_path.name} — 未做影子评估。先跑 tools/learning_loop.py"
+        )
+    else:
+        try:
+            shadow = json.loads(shadow_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            shadow = None
+        if not isinstance(shadow, dict):
+            errors.append(f"invalid {shadow_path.name}")
+        else:
+            age = time.time() - float(shadow.get("created_unix_ms", 0)) / 1000.0
+            if age > PROMOTE_SHADOW_MAX_AGE_S:
+                errors.append(
+                    f"shadow_eval.json 已过期 ({age / 86400.0:.1f} 天前) — 重新评估"
+                )
+            if shadow.get("evaluator_result") != "PASS":
+                errors.append(
+                    f"影子评估 evaluator 结果 = {shadow.get('evaluator_result')!r} (要求 PASS)"
+                )
+            mae = shadow.get("shadow_speed_mae")
+            if mae is None:
+                errors.append("shadow_speed_mae 缺失 — sidecar 未生成，模型没真正跑过影子")
+            elif float(mae) > PROMOTE_SHADOW_MAE_MAX:
+                errors.append(
+                    f"shadow_speed_mae={float(mae):.2f} m/s 超阈值 {PROMOTE_SHADOW_MAE_MAX:.1f}"
+                )
+            n = shadow.get("shadow_n")
+            if n is not None and int(n) < PROMOTE_SHADOW_MIN_N:
+                errors.append(f"shadow_n={n} < {PROMOTE_SHADOW_MIN_N}，评估样本太少不可信")
+
+    # 场景矩阵不退化 hook：baseline 存在才启用（Phase 1 交付后自动生效）。
+    # baseline 缺失时明示跳过而不是静默通过——但不算拒绝理由（该门禁归 CI）。
+    if not SCENARIO_BASELINE_DIR.is_dir() or not any(SCENARIO_BASELINE_DIR.glob("*.json")):
+        print("  gate note: 场景矩阵 baseline 缺失 (tests/baseline/)，跳过该检查 "
+              "(先 `python3 ci/evaluators/scenario_regression.py --update-baseline`)")
+
+    if errors and force:
+        for err in errors:
+            print(f"  GATE OVERRIDDEN (--force): {err}", file=sys.stderr)
+        return []
+    return errors
 
 
 # ─────────────────────────────────────────────────────────────
@@ -579,6 +658,8 @@ def main() -> int:
     promote_parser = sub.add_parser("promote", help="Promote a tiny-MLP artifact to the C runtime model")
     promote_parser.add_argument("artifact", nargs="?", help="Artifact name or directory (required unless --json)")
     promote_parser.add_argument("--runtime-model", default=str(DEFAULT_RUNTIME_MODEL))
+    promote_parser.add_argument("--force", action="store_true",
+                                help="Override promote gate failures (not recommended)")
     promote_parser.add_argument("--json", action="store_true",
                                 help="Read params from stdin as JSON (for HTTP bridge)")
     promote_parser.set_defaults(func=cmd_promote)

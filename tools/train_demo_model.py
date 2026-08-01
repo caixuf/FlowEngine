@@ -37,6 +37,34 @@ def ensure_samples(input_path: Path, run_demo: int | None) -> None:
         raise SystemExit(f"error: sample file is empty: {input_path}")
 
 
+def write_tiny_manifest(model_dir: Path, input_path: Path, scenario: str,
+                        epochs: int | None, hidden: int | None) -> None:
+    import json
+    import time as _time
+    manifest = {
+        "artifact_version": "flowengine.e2e_artifact.v1",
+        "created_unix_ms": int(_time.time() * 1000),
+        "model_format": "flowengine-tinymlp-v2",
+        "model_path": "model.txt",
+        "backend": "tiny_mlp",
+        "input_schema": {"features": "80-dim temporal (5x16)"},
+        "output_schema": {"labels": ["throttle", "brake", "steer", "lane_change", "confidence"]},
+        "dataset": {
+            "path": str(input_path),
+            "schema_version": "jsonl-raw",
+            "sample_count": sum(1 for _ in input_path.open()),
+            "scenario": scenario,
+        },
+        "training": {
+            "epochs": epochs or 300,
+            "hidden": hidden or 32,
+        },
+    }
+    (model_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a FlowEngine model from current demo recorder samples")
     parser.add_argument("--input", default=str(DEFAULT_INPUT), help="Recorder JSONL path")
@@ -77,31 +105,7 @@ def main() -> int:
             train_cmd.extend(["--hidden", str(args.hidden)])
         run_command(train_cmd)
 
-        # Write a minimal manifest so modelctl.py can find the artifact.
-        import json
-        import time as _time
-        manifest = {
-            "artifact_version": "flowengine.e2e_artifact.v1",
-            "created_unix_ms": int(_time.time() * 1000),
-            "model_format": "flowengine-tinymlp-v2",
-            "model_path": "model.txt",
-            "backend": "tiny_mlp",
-            "input_schema": {"features": "80-dim temporal (5x16)"},
-            "output_schema": {"labels": ["throttle", "brake", "steer", "lane_change", "confidence"]},
-            "dataset": {
-                "path": str(input_path),
-                "schema_version": "jsonl-raw",
-                "sample_count": sum(1 for _ in open(input_path)),
-                "scenario": args.scenario,
-            },
-            "training": {
-                "epochs": args.epochs or 300,
-                "hidden": args.hidden or 32,
-            },
-        }
-        (model_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        write_tiny_manifest(model_dir, input_path, args.scenario, args.epochs, args.hidden)
 
         print("\nFlowEngine temporal training recipe complete")
         print(f"  model:   {model_dir}")
@@ -148,6 +152,8 @@ def main() -> int:
     if args.init_from:
         train_cmd.extend(["--init-from", str(args.init_from)])
     run_command(train_cmd)
+    if backend == "tiny":
+        write_tiny_manifest(model_dir, input_path, args.scenario, args.epochs, args.hidden)
 
     print("\nFlowEngine training recipe complete")
     print(f"  dataset: {dataset_dir}")

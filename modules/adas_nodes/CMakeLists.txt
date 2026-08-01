@@ -594,7 +594,41 @@ if(APPLE)
 endif()
 
 # ── 安装 ──────────────────────────────────────────────────────
-install(TARGETS fusion_node perception_node sensor_model flowsim_node planning_node control_node safety_control_node monitor_node inference_node data_recorder_node learner_node model_ota_node flowmond_node actuator_node lidar_driver_node gps_driver_node imu_driver_node slam_node stereo_camera_node waypoint_follower_node stereo_vision_node actuator_pwm_node perception_fusion_node traversability_node lane_detection_node traffic_light_recognition_node object_tracker_node prediction_node scene_assembler_node
-        LIBRARY DESTINATION ${FLOWENGINE_BUILD}/lib)
+set(FLOWENGINE_NODE_PLUGIN_TARGETS
+    fusion_node
+    perception_node
+    behavior_planner_node
+    sensor_model
+    flowsim_node
+    planning_node
+    control_node
+    safety_control_node
+    monitor_node
+    inference_node
+    data_recorder_node
+    learner_node
+    model_ota_node
+    flowmond_node
+    actuator_node
+    manual_drive_node
+    lidar_driver_node
+    gps_driver_node
+    imu_driver_node
+    slam_node
+    stereo_camera_node
+    waypoint_follower_node
+    stereo_vision_node
+    actuator_pwm_node
+    perception_fusion_node
+    traversability_node
+    lane_detection_node
+    traffic_light_recognition_node
+    object_tracker_node
+    prediction_node
+    scene_assembler_node
+)
 
-message(STATUS "Node plugins will be installed to: ${FLOWENGINE_BUILD}/lib")
+install(TARGETS ${FLOWENGINE_NODE_PLUGIN_TARGETS}
+        LIBRARY DESTINATION lib/flowengine/plugins)
+
+message(STATUS "Node plugins will be installed to: lib/flowengine/plugins")

@@ -84,7 +84,9 @@ fi
 if [ "$MANUAL_MODE" = true ]; then
   PIPELINE_ORIG="$ROOT/config/pipeline_manual.json"
 else
-  PIPELINE_ORIG="$ROOT/config/pipeline.json"
+  # FLOW_PIPELINE 允许外部注入自定义 pipeline（如 learning_loop.py 换 inference
+  # model_path 做影子评估），scenario patch 以它为基底而不是覆盖它。
+  PIPELINE_ORIG="${FLOW_PIPELINE:-$ROOT/config/pipeline.json}"
 fi
 PIPELINE_TMP=""
 cleanup_pipeline_tmp() {
