@@ -6,6 +6,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -446,6 +447,19 @@ class E2ETrainingToolsTest(unittest.TestCase):
                         "model_format": "flowengine-tinymlp-v3",
                         "model_path": "model.txt",
                         "dataset": {"sample_count": 12, "scenario": "unit"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (artifact / "shadow_eval.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "flowengine.shadow_eval.v1",
+                        "created_unix_ms": int(time.time() * 1000),
+                        "evaluator_result": "PASS",
+                        "shadow_speed_mae": 1.2,
+                        "shadow_n": 120,
                     }
                 )
                 + "\n",
