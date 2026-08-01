@@ -15,7 +15,7 @@ Layer 树 (vis/core/Layer.js — Qt 对象树 + 错误隔离)
   ├── env     (ground, viaduct)
   ├── road    (road, streetlight, barrier, connector, tree)
   ├── agent   (vehicle)
-  └── infra   (trafficLight, etcGate, mapOverlay)
+  └── infra   (trafficLight, etcGate)
     ↓
 View Modules (vis/view/*.js)         ← 你要写的模块在这里
   ↓

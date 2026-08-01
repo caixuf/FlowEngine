@@ -39,8 +39,7 @@
                               │  ├── road  (road, streetlight,      │
                               │  │         barrier, connector)       │
                               │  ├── agent (vehicle)                 │
-                              │  ├── infra (trafficLight, etcGate)   │
-                              │  └── root  (mapOverlay, 小地图+HUD)  │
+                              │  └── infra (trafficLight, etcGate)   │
                               └──────────────┬───────────────────────┘
                                              │
                                              ▼
@@ -310,12 +309,10 @@ tools/flowboard/js/
     │   ├── ViewRegistry.js   # View 插件注册 + 工厂实例化 + safeCall
     │   ├── AssetFactory.js   # 共享几何体/材质工厂（getBox/getCylinder/...）
     │   ├── DeadReckon.js     # 死推算引擎（帧率无关指数平滑）
-    │   ├── ParticleFX.js     # 粒子系统（尾气/尘土，500 粒子池 + Points）
     │   ├── Renderer.js       # WebGL 渲染器 + Composer 管理（perfTier 分档）
     │   ├── CameraRig.js      # 6 种相机模式（chase/top/driver/front/map/orbit）
     │   ├── Lighting.js       # 太阳光 + 半球光 + 阴影管理
-    │   ├── SkyEnv.js         # 天空穹顶 + 雨粒子 + 天气系统
-    │   └── AudioEngine.js    # Web Audio API 音效合成（引擎/刹车/转向灯，零外部资产）
+    │   └── SkyEnv.js         # 天空穹顶 + 雨粒子 + 天气系统
     ├── math/                 # 数学工具（坐标/曲线/几何合并）
     │   ├── Coord.js          # ENU↔THREE 坐标映射（worldToThree/headingToRotationY）
     │   ├── Curve.js          # 道路曲线采样（sampleEdgeNodes，内部做 ENU→THREE 交换）
@@ -327,8 +324,8 @@ tools/flowboard/js/
     │   └── FrameValidator.js # 纯函数 validateFrame（零 THREE 依赖，可单测）
     └── view/                 # View 模块（插件式，每个独立）
         ├── RoadView.js       # 路面 ribbon + 车道线（静态 build）
-        ├── GroundView.js     # 程序化草地纹理（静态 build，Phase 0.3 升级）
-        ├── VehicleView.js    # 车辆（动态 update，含车灯闪烁/车轮滚动/LOD 三级）
+        ├── GroundView.js     # 草地地面（静态 build）
+        ├── VehicleView.js    # 车辆（动态 update，含车灯闪烁/车轮滚动）
         ├── ConnectorView.js  # 路口连接段（静态 build）
         ├── TrafficLightView.js # 红绿灯（动态 update，emissive 切换）
         ├── ETCGateView.js    # ETC 门架（动态 update，boom 抬杆）
@@ -336,7 +333,6 @@ tools/flowboard/js/
         ├── StreetlightView.js # 路灯（InstancedMesh 静态 build）
         ├── BarrierView.js    # 护栏（InstancedMesh 静态 build）
         ├── TreeView.js       # 树（InstancedMesh 静态 build）
-        ├── MapOverlayView.js # 小地图 + HUD 叠加层（Canvas 2D，Phase 3 新增）
         └── VehicleLights.js  # 纯函数：车灯位掩码 → 状态（零 THREE 依赖）
 ```
 

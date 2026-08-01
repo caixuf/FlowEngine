@@ -9,8 +9,7 @@
  *            closeNPCDetail, setPerfTier } from './vis/main.js';
  */
 
-import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo, disposeComposer } from './core/Renderer.js';
-import { createAudioEngine } from './core/AudioEngine.js';
+import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo } from './core/Renderer.js';
 import { createCameraRig } from './core/CameraRig.js';
 import { createLighting, updateSunShadow } from './core/Lighting.js';
 import { createSkyEnv } from './core/SkyEnv.js';
@@ -26,7 +25,6 @@ let _cameraRig = null;
 let _lights = null;
 let _skyEnv = null;
 let _director = null;
-let _audioEngine = null;
 let _ready = false;
 let _lastTopoData = null;
 
@@ -78,16 +76,6 @@ export function init3DScene(canvas) {
     _skyEnv.setCamera(_cameraRig.camera);
     _director = createSceneDirector(_scene);
     _director.init();
-    /* 音效引擎（浏览器 autoplay 政策：首次交互后才有声音） */
-    _audioEngine = createAudioEngine();
-    /* 用户交互后 resume AudioContext */
-    const _resumeAudio = () => {
-      _audioEngine.resume();
-      window.removeEventListener('click', _resumeAudio);
-      window.removeEventListener('touchstart', _resumeAudio);
-    };
-    window.addEventListener('click', _resumeAudio);
-    window.addEventListener('touchstart', _resumeAudio);
     /* 烘焙 PMREM 环境贴图：把当前 scene（天空色 + hemisphere 灯光渐变）
      * 烘成预滤波 mipmap 环境贴图，赋给 scene.environment。
      * 低金属度车漆（metalness=0.15）+ clearcoat 清漆层依赖 envMap
@@ -199,14 +187,6 @@ function _startRenderLoop() {
       // agent 层 (vehicle) + infra 层 (trafficLight, etcGate) 都由它驱动，
       // 不再单独调 _director.getVehicleView().update(store, now)。
       _director.tickAnimation(now);
-
-      // 音效：每帧从 store 读 ego 状态驱动
-      if (_audioEngine) {
-        const ego = store.ego;
-        if (ego) {
-          _audioEngine.tick(ego.speed || 0, ego.throttle || 0, ego.brake || 0, ego.lights || 0);
-        }
-      }
 
       // 太阳阴影相机跟随 ego（小 frustum 罩住主车周围）
       updateSunShadow(_lights, store.ego);
@@ -429,44 +409,21 @@ export function resetMapView() {
   resetCamera();
 }
 
-/** 重建 Composer（从 low 切回 medium/high 时用） */
-function _recreateComposer() {
-  if (!_renderer || !_scene || !_cameraRig) return;
-  try {
-    _composer = createComposer(_renderer, _scene, _cameraRig.camera);
-  } catch (e) {
-    console.warn('[vis] Composer recreation failed:', e.message);
-    _composer = null;
-  }
-}
-
-/** 设置性能档位
- *  low:   跳过 Composer（GTAO/Bloom/SMAA），pixelRatio=1，无阴影
- *  medium: 开启 Composer，pixelRatio=1.5，PCFSoft 阴影
- *  high:  开启 Composer，pixelRatio=min(devicePixelRatio, 2)，全特效
- */
+/** 设置性能档位 */
 export function setPerfTier(tier) {
   if (!_director) return;
   _director.getStore().perfTier = tier;
+  // 性能档位影响：low=关阴影, medium=降像素比, high=全开
   if (_renderer) {
     if (tier === 'low') {
-      // 释放 Composer GPU 资源，直接渲染
-      if (_composer) {
-        disposeComposer(_composer);
-        _composer = null;
-      }
       _renderer.shadowMap.enabled = false;
       _renderer.setPixelRatio(1);
     } else if (tier === 'medium') {
-      if (!_composer) _recreateComposer();
       _renderer.shadowMap.enabled = true;
-      _renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       _renderer.setPixelRatio(1.5);
     } else {
-      if (!_composer) _recreateComposer();
       _renderer.shadowMap.enabled = true;
-      _renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-      _renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      _renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     }
   }
 }

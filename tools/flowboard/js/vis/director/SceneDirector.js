@@ -19,7 +19,6 @@ import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
 import { createTreeView } from '../view/TreeView.js';
-import { createMapOverlayView } from '../view/MapOverlayView.js';
 import {
   tickDeadReckon, _dr,
   updateEntityDeadReckon, tickEntityDeadReckon, getEntitySmooth,
@@ -27,7 +26,6 @@ import {
 } from '../core/DeadReckon.js';
 import * as ViewRegistry from '../core/ViewRegistry.js';
 import { createLayer } from '../core/Layer.js';
-import { createParticleFX } from '../core/ParticleFX.js';
 // Step 5 重构：纯函数 validateFrame 抽到 FrameValidator.js，
 // 零 THREE 依赖，便于 tests/vis_director_validation.test.mjs 直接 import。
 import { validateFrame } from './FrameValidator.js';
@@ -59,14 +57,9 @@ ViewRegistry.register('viaduct',     createViaductView);
 ViewRegistry.register('streetlight',  createStreetlightView);
 ViewRegistry.register('barrier',      createBarrierView);
 ViewRegistry.register('tree',         createTreeView);
-ViewRegistry.register('mapOverlay',   createMapOverlayView);
 
 export function createSceneDirector(scene) {
   const store = createSceneStore();
-  /* 粒子系统 */
-  const particleFX = createParticleFX(scene);
-  scene.userData.particleFX = particleFX;
-  let _lastTickMs = 0;
   /* 实例化所有已注册 View。instantiateAll 内部已有 try/catch，
    * 工厂本身抛错不会炸整个 director。 */
   ViewRegistry.instantiateAll(scene);
@@ -107,9 +100,6 @@ export function createSceneDirector(scene) {
       if (v) layer.addView(v);
     }
   }
-  /* 全屏叠加层（小地图 + HUD）挂到 root 层，每帧随 rootLayer.update 刷新 */
-  const ov = ViewRegistry.get('mapOverlay');
-  if (ov) rootLayer.addView(ov);
 
   /* 已 warn 过的字段 key 集合，避免 20Hz × N 字段刷屏。
    * key 形如 'ego.x' / 'entities[3].heading' / 'road_network.edges' */
@@ -307,12 +297,6 @@ export function createSceneDirector(scene) {
    * @param {number} now 当前 performance.now() 毫秒（传给 view.update 需要 simTime）
    */
   function tickAnimation(now) {
-    // 粒子系统 dt 计算
-    if (_lastTickMs === 0) _lastTickMs = now;
-    const dt = Math.min((now - _lastTickMs) / 1000, 0.05);  // 秒，clamp 防跳帧
-    _lastTickMs = now;
-    particleFX.tick(dt);
-
     tickDeadReckon();
     if (store.ego && _dr.init) {
       const egoZ = store.ego.z;
