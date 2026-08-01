@@ -11,6 +11,7 @@
 | **verify-e2e** | `verify-e2e.md` | 改动 pipeline 链路节点或调参后，跑 demo_evaluator 端到端回归验证 |
 | **verification** | `verification.md` | 理解/使用本项目的验证与可观测性架构：分层验证阶梯、debug topic→monitor→topology 数据流、liveness/require 门禁、trace_incident、flowctl 热调参 |
 | **debugging** | `debugging.md` | 行为异常排查（转向灯反/该停不停/该走不走/刹停到 0/改代码现象不变）：分层探针 + 值传播验证 + 状态锁死 + 缓存层检查；先看 verification.md 理解有哪些现成观测手段 |
+| **py-sim-first** | `py-sim-first.md` | 算法模块升级的 Python 仿真先行流程。任何控制/规划/感知/行为决策类改动，**必须先 Python 仿真验证再移植到 C++**。包含 6 场景（curve/emergency/stop_go/obstacle/merge/cutin）+ 参数扫描 + 掉头仿真 + 移植 checklist |
 
 ## 改动后必跑流程
 

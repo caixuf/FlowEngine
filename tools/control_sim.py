@@ -299,12 +299,22 @@ class VehicleState:
         self.steer = 0.0
 
     def step(self, steer_cmd, throttle, brake, dt=DT):
-        """运动学自行车模型积分（与flowsim一致）"""
-        if brake > 0:
+        """运动学自行车模型积分（与flowsim一致，支持倒车）"""
+        # 注意：UTurn 时 steer 可能超过 0.25（C 代码限制），
+        # 因为三把方向掉头/单把 U-turn 需要更大的转向角才能在有限路宽内完成
+        # C 代码 physics.cpp 的 0.25 限幅在 U-turn 场景下需要临时放宽
+
+        if throttle < 0:
+            # 倒车：负油门（三把方向掉头用）
+            # 匹配 C 代码 physics.cpp: drive_force = throttle * 5000, mass=1500
+            # accel = throttle * 5000 / 1500 = throttle * 3.33
+            self.v += throttle * 3.33 * dt
+            if self.v < -4.0: self.v = -4.0  # 匹配 C 代码物理限制
+        elif brake > 0:
             self.v -= brake * 8.0 * dt
             if self.v < 0: self.v = 0
         elif throttle > 0:
-            self.v += throttle * 3.0 * dt
+            self.v += throttle * 3.33 * dt
             if self.v > CRUISE_SPEED + 2: self.v = CRUISE_SPEED + 2
 
         self.steer = steer_cmd
@@ -867,6 +877,1119 @@ def tune_joint():
 
 
 # ══════════════════════════════════════════════════════════════
+#  三把方向掉头仿真（纯 Python 验证，与 C 代码 flowsim_node.cpp 一致）
+# ══════════════════════════════════════════════════════════════
+
+class UturnParams:
+    """掉头可调参数
+
+    mode='single': 单把匀速 U-turn（仅 phase0 生效，走恒定 steer 的圆弧）
+    mode='three_point': 三把方向掉头（所有 phase 生效）
+    """
+    def __init__(self, mode='single'):
+        self.mode = mode
+        # 通用参数
+        self.init_speed = 5.0         # 掉头前速度 m/s
+
+        # Phase 0: 前进转向（单把 U-turn 用这个就够了）
+        self.phase0_steer = 0.60      # rad (单把 U-turn 需要 0.6+)
+        self.phase0_throttle = 0.0    # 0=匀速
+        self.phase0_duration = 2.5    # s
+
+        # 三把方向专用参数
+        # Phase 1: 先刹车再倒车反打方向
+        self.phase1_brake = 1.0       # 刹车力度(0~1)
+        self.phase1_steer = -0.60     # rad (倒车方向)
+        self.phase1_reverse_throttle = -0.7
+        self.phase1_reverse_duration = 0.0  # 0=关闭三把方向模式
+
+        # Phase 2: 前进回正
+        self.phase2_steer = 0.0
+        self.phase2_throttle = 0.0
+        self.phase2_duration = 0.0
+
+
+class UturnResult:
+    def __init__(self):
+        self.t = []
+        self.x = []
+        self.y = []
+        self.v = []
+        self.heading = []
+        self.steer = []
+        self.final_heading = 0.0
+        self.final_y = 0.0
+        self.final_x = 0.0
+        self.heading_error = 999.0  # 目标 heading 偏差（目标 π）
+        self.lane_error = 999.0     # 目标车道偏差（目标 opposite lane y）
+        self.success = False
+        self.min_dist_to_center = 999.0  # 过程中离道路中心最近距离（评估是否压线）
+
+    def print_phases(self, params):
+        print(f"  Phase 0: steer={params.phase0_steer:.2f}rad, "
+              f"throttle={params.phase0_throttle:.2f}, duration={params.phase0_duration:.2f}s")
+        print(f"  Phase 1: brake={params.phase1_brake:.1f} to stop, "
+              f"then steer={params.phase1_steer:.2f}rad, "
+              f"reverse_throttle={params.phase1_reverse_throttle:.2f}, "
+              f"reverse_duration={params.phase1_reverse_duration:.2f}s")
+        print(f"  Phase 2: steer={params.phase2_steer:.2f}rad, "
+              f"throttle={params.phase2_throttle:.2f}, duration={params.phase2_duration:.2f}s")
+
+
+def run_uturn_simulation(params=None, start_lane_y=-1.75):
+    """纯 Python 掉头仿真
+
+    mode='single'（默认）: 单把匀速 U-turn
+      只用 phase0，走恒定 steer 的圆弧。适合参数扫描找最优转向角。
+
+    mode='three_point': 三把方向掉头
+      Phase 0: 前进左打 → 车头摆入对向车道
+      Phase 1: 先刹车停稳，再倒车右打 → 车尾摆正完成掉头
+      Phase 2: 前进回正，进入对向车道
+
+    输入：
+      start_lane_y: 起始车道 y（默认 -1.75 = 前进车道）
+
+    输出：
+      UturnResult：含轨迹 + 最终 heading/y 偏差
+    """
+    if params is None:
+        params = UturnParams()
+
+    ego = VehicleState(x0=0.0, y0=start_lane_y, v0=params.init_speed, heading0=0.0)
+    result = UturnResult()
+
+    target_y = -start_lane_y  # 对向车道中心 y
+
+    if params.mode == 'single':
+        # ── 单把匀速 U-turn ──
+        n_steps = int(params.phase0_duration / DT)
+        for _ in range(n_steps):
+            result.t.append(len(result.t) * DT)
+            result.x.append(ego.x)
+            result.y.append(ego.y)
+            result.v.append(ego.v)
+            result.heading.append(ego.heading)
+            result.steer.append(params.phase0_steer)
+            ego.step(params.phase0_steer, params.phase0_throttle, 0.0, dt=DT)
+    else:
+        # ── 三把方向掉头 ──
+        # Phase 0: 前进左打
+        n_steps0 = int(params.phase0_duration / DT)
+        for _ in range(n_steps0):
+            result.t.append(len(result.t) * DT)
+            result.x.append(ego.x)
+            result.y.append(ego.y)
+            result.v.append(ego.v)
+            result.heading.append(ego.heading)
+            result.steer.append(params.phase0_steer)
+            ego.step(params.phase0_steer, params.phase0_throttle, 0.0, dt=DT)
+
+        # Phase 1a: 刹车停稳（steer 保持）
+        while ego.v > 0.1:
+            result.t.append(len(result.t) * DT)
+            result.x.append(ego.x)
+            result.y.append(ego.y)
+            result.v.append(ego.v)
+            result.heading.append(ego.heading)
+            result.steer.append(params.phase1_steer)
+            ego.step(params.phase1_steer, 0.0, params.phase1_brake, dt=DT)
+
+        # Phase 1b: 倒车反打方向
+        if params.phase1_reverse_duration > 0:
+            n_steps1b = int(params.phase1_reverse_duration / DT)
+            for _ in range(n_steps1b):
+                result.t.append(len(result.t) * DT)
+                result.x.append(ego.x)
+                result.y.append(ego.y)
+                result.v.append(ego.v)
+                result.heading.append(ego.heading)
+                result.steer.append(params.phase1_steer)
+                ego.step(params.phase1_steer, params.phase1_reverse_throttle, 0.0, dt=DT)
+
+        # Phase 2: 前进回正
+        if params.phase2_duration > 0:
+            n_steps2 = int(params.phase2_duration / DT)
+            for _ in range(n_steps2):
+                result.t.append(len(result.t) * DT)
+                result.x.append(ego.x)
+                result.y.append(ego.y)
+                result.v.append(ego.v)
+                result.heading.append(ego.heading)
+                result.steer.append(params.phase2_steer)
+                ego.step(params.phase2_steer, params.phase2_throttle, 0.0, dt=DT)
+
+    # 评估
+    result.final_heading = ego.heading
+    result.final_y = ego.y
+    result.final_x = ego.x
+    # 目标：heading ≈ π（180° 掉头），y ≈ -start_lane_y（对向车道）
+    target_heading = math.pi
+    # 正确归一化到 [-π, π] 再取 abs
+    he = ego.heading - target_heading
+    while he >  math.pi: he -= 2.0 * math.pi
+    while he < -math.pi: he += 2.0 * math.pi
+    result.heading_error = abs(he)
+    result.lane_error = abs(ego.y - target_y)
+    # 判据：heading 偏差 < 1.0 rad + 车在路面上（未飞出）
+    # 注意：lane_error 是到对向车道中心 y=1.75 的距离，但车只要在路面上就算成功
+    result.success = (result.heading_error < 1.0 and abs(ego.y) < 7.0)
+
+    return result
+
+
+def print_uturn_result(result, params, label="", start_lane_y=-1.75):
+    target_y = -start_lane_y
+    print(f"\n{'='*60}")
+    print(f"  {label}")
+    print(f"{'='*60}")
+    result.print_phases(params)
+    print(f"  最终位置:         x={result.final_x:.1f}m, y={result.final_y:.2f}m")
+    print(f"  最终 heading:     {result.final_heading:.2f} rad ({math.degrees(result.final_heading):.1f}°)")
+    print(f"  heading 偏差:     {result.heading_error:.2f} rad (目标 π={math.pi:.2f})")
+    print(f"  车道偏差:         {result.lane_error:.2f} m (目标 y={target_y:.2f})")
+    status = "PASS" if result.success else "FAIL"
+    print(f"  状态:             {status}")
+
+
+def tune_uturn():
+    """扫描单把 U-turn 参数，找最优组合"""
+    print("\n" + "=" * 60)
+    print("  单把 U-turn 参数扫描")
+    print("=" * 60)
+    print("  运动学自行车模型: yaw_rate = v/L * tan(steer)")
+    print(f"  轴距 L={WHEELBASE}m, 路宽 14m (4车道)")
+    print("  目标: heading=π(180°), 对向车道 y≈1.75")
+    print("=" * 60)
+
+    best = None
+    best_practical = None
+    best_score = 1e9
+    best_practical_score = 1e9
+    n_tried = 0
+    n_valid = 0
+
+    # steer 需要足够大才能在路宽内完成 U-turn
+    # R = L/tan(steer), y_final = -1.75 + 2*R
+    for steer_deg in range(25, 56, 1):  # 25°~55°
+        steer = math.radians(steer_deg)
+        for init_v in [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0]:
+            yaw_rate = init_v / WHEELBASE * math.tan(steer)
+            if yaw_rate < 0.01: continue
+            t_needed = math.pi / yaw_rate
+            duration = t_needed * 1.1
+
+            for throttle in [0.0]:
+                n_tried += 1
+                p = UturnParams(mode='single')
+                p.phase0_steer = steer
+                p.phase0_duration = duration
+                p.phase0_throttle = throttle
+                p.init_speed = init_v
+                r = run_uturn_simulation(p, start_lane_y=-1.75)
+                if not r.success: continue
+                n_valid += 1
+
+                R = WHEELBASE / math.tan(steer)
+                lat_accel = init_v * init_v / R
+                # 综合评分：heading精度 + 车道偏差 + 横向加速度(尽量小)
+                score = (r.heading_error * 8.0
+                         + r.lane_error * 2.0
+                         + (lat_accel / 9.81) * 2.0)  # 以g为单位惩罚
+
+                # 找最佳整体
+                if score < best_score:
+                    best_score = score
+                    best = (steer_deg, init_v, lat_accel, duration, r)
+
+                # 找最佳实用参数 (lat_accel < 0.6g)
+                if lat_accel < 0.6 * 9.81:
+                    practical_score = (r.heading_error * 8.0 + r.lane_error * 2.0 + (lat_accel / 9.81) * 1.0)
+                    if practical_score < best_practical_score:
+                        best_practical_score = practical_score
+                        best_practical = (steer_deg, init_v, lat_accel, duration, r)
+
+    print(f"\n  尝试: {n_tried}, 有效: {n_valid}")
+
+    # 显示最佳整体
+    if best:
+        sd, v, la, dur, r = best
+        R = WHEELBASE / math.tan(math.radians(sd))
+        print(f"\n  {'='*50}")
+        print(f"  🏆 最佳整体 (评分={best_score:.2f})")
+        print(f"  {'='*50}")
+        print(f"  转向角:  {sd}° ({math.radians(sd):.2f}rad)")
+        print(f"  速度:    {v:.0f} m/s, 持续时间: {dur:.2f}s")
+        print(f"  半径:    {R:.2f}m, 横向加速度: {la/9.81:.2f}g")
+        print(f"  heading: {r.final_heading:.2f}rad ({math.degrees(r.final_heading):.0f}°)")
+        print(f"  h_err={r.heading_error:.2f}rad, l_err={r.lane_error:.2f}m, dx={r.final_x:.1f}m")
+
+    # 显示最佳实用参数
+    if best_practical:
+        sd, v, la, dur, r = best_practical
+        R = WHEELBASE / math.tan(math.radians(sd))
+        print(f"\n  {'='*50}")
+        print(f"  ✅ 最佳实用参数 (lat<0.6g, 评分={best_practical_score:.2f})")
+        print(f"  {'='*50}")
+        print(f"  转向角:      {sd}° ({math.radians(sd):.2f}rad)")
+        print(f"  初始速度:    {v:.0f} m/s")
+        print(f"  持续时间:    {dur:.2f}s")
+        print(f"  转向半径:    {R:.2f}m")
+        print(f"  横向加速度:  {la/9.81:.2f}g ({la:.1f} m/s²)")
+        print(f"  ─────────────────────────────")
+        print(f"  最终位置:    x={r.final_x:.1f}m, y={r.final_y:.2f}m")
+        print(f"  最终 heading:{r.final_heading:.2f}rad ({math.degrees(r.final_heading):.0f}°)")
+        print(f"  heading 偏差:{r.heading_error:.2f}rad (目标 π={math.pi:.2f})")
+        print(f"  车道偏差:    {r.lane_error:.2f}m (目标 y=1.75)")
+        print(f"  ─────────────────────────────")
+        print(f"  推荐 C 代码配置:")
+        print(f"     steer={math.radians(sd):.2f} (需临时放宽物理限幅)")
+        print(f"     init_speed={v:.0f}")
+        print(f"     duration={dur:.2f}s")
+        print(f"     throttle=0.0 (匀速)")
+    else:
+        if best:
+            print("\n  ⚠️  无 lat<0.6g 的实用参数，建议增大 steer 上限")
+        else:
+            print("\n  ⚠️  未找到任何有效参数")
+
+
+# ══════════════════════════════════════════════════════════════
+#  场景全集 — 6 种上路操作（纯 Python 验证，给 C++ 上能力做支撑）
+# ══════════════════════════════════════════════════════════════
+#  场景 1: curve     — 曲线跟随（弯道保持）
+#  场景 2: emergency — 紧急制动（前方障碍物急刹）
+#  场景 3: stop_go   — 跟停再起步（前车停→走，ACC 跟车）
+#  场景 4: obstacle  — 障碍物避让（变道绕行）
+#  场景 5: merge     — 匝道汇入（加速车道汇入主路）
+#  场景 6: cutin     — 加塞处理（旁车突然切入本车道）
+# ══════════════════════════════════════════════════════════════
+
+class ScenarioResult:
+    """场景仿真结果"""
+    def __init__(self):
+        self.t = []
+        self.x = []
+        self.y = []
+        self.v = []
+        self.heading = []
+        self.steer = []
+        self.throttle = []
+        self.brake = []
+        self.success = False
+        self.collision = False
+        self.off_road = False
+        self.score = 0.0
+        self.summary = ""
+
+    def print_trajectory(self, stride=10):
+        print(f"  轨迹 (每{stride*DT:.1f}s):")
+        for i in range(0, len(self.t), stride):
+            yaw_deg = math.degrees(self.heading[i]) if i < len(self.heading) else 0
+            print(f"    t={self.t[i]:.1f}s: x={self.x[i]:.1f}, y={self.y[i]:.2f}, "
+                  f"h={yaw_deg:.0f}°, v={self.v[i]:.2f}m/s, steer={self.steer[i]:.2f}rad")
+
+
+# ── 弯道模型 ─────────────────────────────────────────────────
+
+class CurvedRoad:
+    """弯道道路模型
+
+    支持常量曲率弯道。道路中心线参数方程：
+      heading(s) = s * kappa
+      x(s) = integral(cos(heading(s))) ds ≈ sin(s*kappa)/kappa
+      y(s) = integral(sin(heading(s))) ds ≈ (1 - cos(s*kappa))/kappa
+
+    对于 kappa=0（直道），退化到直道模型。
+    """
+    def __init__(self, kappa=0.0, length=500.0):
+        self.kappa = kappa       # 曲率 (1/m)，正=右弯
+        self.length = length     # 道路长度 m
+
+    def center_heading_at(self, s):
+        """道路中心线在 s 处的航向角"""
+        return s * self.kappa
+
+    def center_pos_at(self, s):
+        """道路中心线在 s 处的 (x, y)"""
+        if abs(self.kappa) < 1e-9:
+            return (s, 0.0)
+        return (math.sin(s * self.kappa) / self.kappa,
+                (1.0 - math.cos(s * self.kappa)) / self.kappa)
+
+    def lane_center_y(self, lane_idx, n_lanes=N_LANES, lane_w=LANE_WIDTH):
+        """车道中心 y（垂直道路方向），与 lane_center_y 函数一致"""
+        return -(lane_idx - (n_lanes - 1) / 2.0) * lane_w
+
+
+# ── 纵向控制器（ACC + 紧急制动） ─────────────────────────────
+
+class LongitudinalController:
+    """纵向控制器：ACC 跟车 + 紧急制动
+
+    模式：
+      - cruise: 保持目标速度
+      - follow: 保持安全跟车距离（IDM 风格）
+      - brake: 紧急制动
+    """
+    def __init__(self, target_speed=CRUISE_SPEED, time_gap=1.5, min_gap=5.0):
+        self.target_speed = target_speed
+        self.time_gap = time_gap       # 时距 s
+        self.min_gap = min_gap         # 最小间距 m
+        self.max_accel = 2.0           # 最大加速度 m/s²
+        self.max_brake = 5.0           # 最大制动减速度 m/s²
+
+    def compute(self, ego_v, lead_dist=None, lead_v=None, lead_accel=None):
+        """计算 throttle/brake
+
+        输入：
+          ego_v: 自车速度 m/s
+          lead_dist: 与前车距离 m（None=无前车）
+          lead_v: 前车速度 m/s
+        输出：
+          (throttle, brake)
+        """
+        if lead_dist is not None and lead_dist < self.min_gap:
+            # 跟车距离过小 → 紧急制动
+            brake = min(self.max_brake, (self.min_gap - lead_dist) * 2.0 + 0.3)
+            return (0.0, min(brake, 1.0))
+
+        if lead_dist is not None and lead_v is not None:
+            # ACC 跟车模式：保持安全间距
+            desired_gap = self.min_gap + ego_v * self.time_gap
+            gap_error = lead_dist - desired_gap  # 正=间距太大
+
+            if gap_error < -1.0:
+                # 间距太小 → 减速
+                brake = min(self.max_brake, -gap_error * 0.5 + max(0, (ego_v - lead_v)) * 0.3)
+                return (0.0, min(brake, 1.0))
+            elif gap_error > 2.0 and ego_v < self.target_speed:
+                # 间距大且没到目标速度 → 加速
+                throttle = min(self.max_accel, gap_error * 0.2 + (self.target_speed - ego_v) * 0.05)
+                return (min(throttle, 0.5), 0.0)
+
+        # 巡航模式：保持目标速度
+        speed_error = self.target_speed - ego_v
+        if speed_error > 0.5:
+            throttle = min(self.max_accel, speed_error * 0.1)
+            return (min(throttle, 0.5), 0.0)
+        elif speed_error < -0.5:
+            brake = min(self.max_brake, -speed_error * 0.1)
+            return (0.0, min(brake, 0.3))
+        return (0.0, 0.0)
+
+
+# ── 场景 1: 曲线跟随（Curve following） ─────────────────────
+
+def run_curve_scenario(kappa=0.005, target_speed=12.0, duration=15.0, use_mpc=False,
+                       stanley_params=None):
+    """弯道保持仿真
+
+    道路常曲率弯道（kappa=0.005 ≈ R=200m），自车沿车道中心行驶。
+    测试 Stanley/MPC 在弯道上的 heading 跟踪精度和横向偏差。
+
+    横向偏移计算：对于常曲率弯道，道路中心线是半径为 R=1/kappa 的圆弧。
+    自车到道路中心的距离 = |自车到圆心距离 - R|，此为正确横向偏移量。
+
+    输入：
+      kappa: 道路曲率 (1/m)，正=右弯
+      target_speed: 目标速度 m/s
+      duration: 仿真时长 s
+      use_mpc: 使用 MPC 而非 Stanley
+      stanley_params: 自定义 Stanley 参数（None=默认）
+
+    输出：
+      ScenarioResult
+    """
+    road = CurvedRoad(kappa=kappa, length=target_speed * duration)
+    ego = VehicleState(x0=0.0, y0=0.0, v0=target_speed, heading0=0.0)
+    result = ScenarioResult()
+
+    lane_ctrl = stanley_params if stanley_params else StanleyParams()
+    lon_ctrl = LongitudinalController(target_speed=target_speed)
+
+    n_steps = int(duration / DT)
+    prev_steer = 0.0
+
+    # 弯道圆心（右弯时圆心在 x=0, y=R）
+    R = 1.0 / kappa if abs(kappa) > 1e-9 else float('inf')
+    circle_cy = R if abs(kappa) > 1e-9 else 0.0  # 右弯圆心 y=R
+
+    for step in range(n_steps):
+        t = step * DT
+        s = ego.x  # 近似纵向距离（仅用于计算参考 heading）
+
+        # 道路参考线
+        ref_heading = road.center_heading_at(s)
+        cx, cy = road.center_pos_at(s)
+
+        # 横向误差：自车到道路中心线的正确距离
+        # 对于常曲率弯道，用圆心距离法
+        if abs(kappa) > 1e-9:
+            # 自车到圆心的距离
+            dc = math.sqrt(ego.x * ego.x + (ego.y - circle_cy) * (ego.y - circle_cy))
+            lateral_offset = dc - R  # 正=在圆弧外侧
+            # 道路中心 y 在最近点处的 y
+            # 最近点在圆心到自车的方向上
+            if dc > 1e-9:
+                nearest_cy = circle_cy + R * (ego.y - circle_cy) / dc
+            else:
+                nearest_cy = circle_cy
+            lat_error = nearest_cy - ego.y  # Stanley 约定：目标在右侧为正
+            # 正确参考 heading：最近点处的切线方向（右弯时切线方向向下）
+            # 圆上点 (x, y) 的切线方向向量 = (-(y-cy), x) 归一化
+            if dc > 1e-9:
+                nx = ego.x / dc
+                ny = (ego.y - circle_cy) / dc
+                # 切线方向（右弯顺时针）：(-ny, nx)
+                nearest_heading = math.atan2(nx, -ny)  # atan2(tangent_y, tangent_x)
+            else:
+                nearest_heading = 0.0
+        else:
+            lat_error = cy - ego.y
+            nearest_heading = ref_heading
+
+        heading_error = ego.heading - nearest_heading
+
+        # 控制
+        if use_mpc:
+            mpc = LtvMpcSolver()
+            mpc.set_state(lat_error, heading_error, prev_steer, ego.v)
+            N = 20
+            v_ref = [target_speed] * N
+            k_ref = [kappa] * N
+            mpc.set_reference(v_ref, k_ref, N)
+            steer_cmd, _ = mpc.solve()
+            if steer_cmd is None:
+                steer_cmd = 0.0
+        else:
+            steer_cmd = stanley_control(lat_error, heading_error, ego.yaw_rate,
+                                        ego.v, kappa, prev_steer, lane_ctrl)
+
+        prev_steer = steer_cmd
+
+        # 纵向控制
+        throttle, brake = lon_ctrl.compute(ego.v)
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        # 积分
+        ego.step(steer_cmd, throttle, brake)
+
+        # 飞出路面检测（用圆心距离法计算正确横向偏移）
+        if abs(kappa) > 1e-9:
+            dc = math.sqrt(ego.x * ego.x + (ego.y - circle_cy) * (ego.y - circle_cy))
+            lateral_offset = abs(dc - R)
+        else:
+            lateral_offset = abs(ego.y)
+        if lateral_offset > N_LANES * LANE_WIDTH / 2 + 1.0:
+            result.off_road = True
+            break
+
+    # 评估（用圆心距离法计算正确横向偏移）
+    tail_n = max(1, n_steps // 2)
+    tail_h_list = []
+    tail_y_list = []
+    for i in range(tail_n, len(result.t)):
+        # 正确计算 heading 误差
+        if abs(kappa) > 1e-9:
+            dc = math.sqrt(result.x[i] * result.x[i] + (result.y[i] - circle_cy) * (result.y[i] - circle_cy))
+            if dc > 1e-9:
+                nx = result.x[i] / dc
+                ny = (result.y[i] - circle_cy) / dc
+                nearest_heading = math.atan2(nx, -ny)
+            else:
+                nearest_heading = 0.0
+            # 横向偏移
+            lo = abs(dc - R)
+        else:
+            nearest_heading = 0.0
+            lo = abs(result.y[i])
+        he = abs(result.heading[i] - nearest_heading)
+        while he > math.pi: he -= 2.0 * math.pi
+        while he < -math.pi: he += 2.0 * math.pi
+        tail_h_list.append(abs(he))
+        tail_y_list.append(lo)
+
+    avg_heading_err = sum(tail_h_list) / len(tail_h_list) if tail_h_list else 999
+    avg_lat_err = sum(tail_y_list) / len(tail_y_list) if tail_y_list else 999
+
+    result.success = (avg_heading_err < 0.08 and avg_lat_err < 0.5 and not result.off_road)
+    result.score = avg_heading_err * 10 + avg_lat_err * 2
+    result.summary = (f"curve(kappa={kappa:.4f}, R={R:.0f}m) @ {target_speed:.0f}m/s: "
+                      f"avg_heading_err={avg_heading_err:.4f}rad, "
+                      f"avg_lat_err={avg_lat_err:.2f}m")
+    return result
+
+
+# ── 场景 2: 紧急制动（Emergency braking） ───────────────────
+
+def run_emergency_brake_scenario(init_speed=15.0, obstacle_dist=50.0, duration=8.0):
+    """紧急制动仿真
+
+    自车巡航中，前方 obstacle_dist 处出现静止障碍物。
+    自车必须紧急制动以避免碰撞。
+
+    输入：
+      init_speed: 初始速度 m/s
+      obstacle_dist: 障碍物初始距离 m
+      duration: 仿真时长 s
+
+    输出：
+      ScenarioResult
+    """
+    ego = VehicleState(x0=0.0, y0=0.0, v0=init_speed, heading0=0.0)
+    obs_x = obstacle_dist  # 障碍物 x 位置
+    result = ScenarioResult()
+
+    lon_ctrl = LongitudinalController(target_speed=init_speed, time_gap=0.5, min_gap=1.0)
+
+    n_steps = int(duration / DT)
+    prev_steer = 0.0
+
+    for step in range(n_steps):
+        t = step * DT
+        dist_to_obs = obs_x - ego.x
+
+        if dist_to_obs < 0:
+            result.collision = True
+            break
+
+        # 紧急制动：当 TTC < 3s 或距离 < 20m 时全力刹车
+        if dist_to_obs < 20.0 or (ego.v > 0.5 and dist_to_obs / ego.v < 3.0):
+            brake = min(1.0, 0.3 + (20.0 - dist_to_obs) / 20.0 * 0.7)
+            throttle = 0.0
+        else:
+            throttle, brake = lon_ctrl.compute(ego.v)
+
+        # 直道保持（无横向控制需求）
+        steer_cmd = 0.0
+        prev_steer = steer_cmd
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        ego.step(steer_cmd, throttle, brake)
+
+    # 评估
+    stop_dist = result.x[-1] if result.x else 0
+    min_dist = max(0, obstacle_dist - stop_dist)
+    stop_time = result.t[-1] if result.t else duration
+
+    result.success = (not result.collision and min_dist > 0.1)
+    result.score = min_dist * 0.5 + stop_time * 0.1
+    result.summary = (f"emergency_brake(v0={init_speed:.0f}m/s, obs={obstacle_dist:.0f}m): "
+                      f"stop_dist={stop_dist:.1f}m, clearance={min_dist:.1f}m, "
+                      f"stop_time={stop_time:.1f}s, speed_final={result.v[-1]:.1f}m/s")
+    return result
+
+
+# ── 场景 3: 跟停再起步（Stop-and-go） ───────────────────────
+
+class LeadVehicle:
+    """前车模型（可配置速度曲线）"""
+    def __init__(self, x0=50.0, v0=10.0):
+        self.x = x0
+        self.v = v0
+        self.initial_x = x0
+
+    def step(self, dt, t):
+        """按时间步进速度曲线
+
+        速度曲线：
+          t < 3s:   v = 10 m/s (巡航)
+          3s ≤ t < 8s:  v = 10 → 0 (刹车到停)
+          8s ≤ t < 13s: v = 0 (停)
+          13s ≤ t:  v = 0 → 10 (加速)
+        """
+        if t < 3.0:
+            self.v = 10.0
+        elif t < 8.0:
+            self.v = 10.0 * (1.0 - (t - 3.0) / 5.0)
+        elif t < 13.0:
+            self.v = 0.0
+        else:
+            self.v = min(10.0, (t - 13.0) * 2.0)
+        self.x += self.v * dt
+
+
+def run_stop_go_scenario(init_speed=10.0, initial_gap=30.0, duration=20.0):
+    """跟停再起步仿真
+
+    前车经历：巡航 → 刹车停车 → 静止 → 加速起步。
+    自车 ACC 跟车，不能追尾，停车后能自动起步。
+
+    输入：
+      init_speed: 初始速度 m/s
+      initial_gap: 初始跟车距离 m
+      duration: 仿真时长 s
+
+    输出：
+      ScenarioResult
+    """
+    ego = VehicleState(x0=0.0, y0=0.0, v0=init_speed, heading0=0.0)
+    lead = LeadVehicle(x0=initial_gap, v0=init_speed)
+    result = ScenarioResult()
+
+    lon_ctrl = LongitudinalController(target_speed=init_speed)
+    prev_steer = 0.0
+
+    n_steps = int(duration / DT)
+
+    for step in range(n_steps):
+        t = step * DT
+
+        # 前车步进
+        lead.step(DT, t)
+        lead_dist = lead.x - ego.x
+
+        if lead_dist < 0:
+            result.collision = True
+            result.summary = f"COLLISION at t={t:.1f}s (gap={lead_dist:.2f}m)"
+            break
+
+        # 纵向控制（ACC 跟车）
+        throttle, brake = lon_ctrl.compute(ego.v, lead_dist, lead.v)
+
+        # 横向控制（直道保持）
+        steer_cmd = 0.0
+        prev_steer = steer_cmd
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        ego.step(steer_cmd, throttle, brake)
+
+    # 评估
+    if not result.collision:
+        gaps = [lead.x - result.x[i] for i in range(len(result.t))]
+        min_gap = min(gaps) if gaps else 999
+        # 最后 3s 是否在跟车
+        tail_gaps = gaps[-int(3.0 / DT):] if len(gaps) > int(3.0 / DT) else gaps
+        final_gap = sum(tail_gaps) / len(tail_gaps) if tail_gaps else 999
+
+        result.success = (min_gap > 1.0 and final_gap < 60.0)
+        result.score = min_gap * 0.5 + abs(final_gap - 30.0) * 0.2
+        result.summary = (f"stop_go(v0={init_speed:.0f}m/s, gap0={initial_gap:.0f}m): "
+                          f"min_gap={min_gap:.1f}m, final_gap={final_gap:.1f}m, "
+                          f"final_speed={result.v[-1]:.1f}m/s")
+    return result
+
+
+# ── 场景 4: 障碍物避让（Obstacle avoidance） ─────────────────
+
+def run_obstacle_avoid_scenario(init_speed=12.0, obs_x=60.0, obs_width=2.0,
+                                 duration=10.0, target_lane=1):
+    """障碍物避让仿真
+
+    自车巡航中，前方车道内有静止障碍物。
+    自车需要变道绕行，然后回到原车道。
+
+    输入：
+      init_speed: 初始速度 m/s
+      obs_x: 障碍物 x 位置 m
+      obs_width: 障碍物宽度 m
+      duration: 仿真时长 s
+      target_lane: 避让目标车道（0=最左）
+
+    输出：
+      ScenarioResult
+    """
+    start_lane = 2  # 自车起始车道（索引 2 = y=-1.75）
+    start_y = lane_center_y(start_lane)
+    target_y = lane_center_y(target_lane)
+
+    ego = VehicleState(x0=0.0, y0=start_y, v0=init_speed, heading0=0.0)
+    result = ScenarioResult()
+
+    planner = PlanningLayer()
+    controller = ControlLayer(StanleyParams())
+    lon_ctrl = LongitudinalController(target_speed=init_speed)
+    prev_steer = 0.0
+
+    n_steps = int(duration / DT)
+    lc_triggered = False
+    lc_return_triggered = False
+    current_target = start_y
+
+    for step in range(n_steps):
+        t = step * DT
+        s = ego.x
+
+        # 决策：接近障碍物时变道绕行
+        if not lc_triggered and s > obs_x - 30.0:
+            lc_triggered = True
+            current_target = target_y  # 切换到目标车道
+
+        # 决策：绕过障碍物后回到原车道
+        if lc_triggered and not lc_return_triggered and s > obs_x + 20.0:
+            if abs(ego.y - target_y) < 0.5:  # 确认已在目标车道
+                lc_return_triggered = True
+                current_target = start_y
+
+        # 障碍物碰撞检测
+        if abs(ego.y - lane_center_y(start_lane)) < obs_width / 2 + 1.0:
+            if obs_x - 2.0 < ego.x < obs_x + 2.0:
+                result.collision = True
+                result.summary = f"COLLISION with obstacle at t={t:.1f}s"
+                break
+
+        # 纵向控制
+        throttle, brake = lon_ctrl.compute(ego.v)
+
+        # Planning → Control
+        traj = planner.generate(ego.x, ego.y, ego.v, current_target, init_speed)
+        controller.on_trajectory(traj)
+        steer_cmd = controller.compute_steer(ego.x, ego.y, ego.v, ego.heading, ego.yaw_rate)
+        prev_steer = steer_cmd
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        ego.step(steer_cmd, throttle, brake)
+
+        if abs(ego.y) > N_LANES * LANE_WIDTH / 2 + 1.0:
+            result.off_road = True
+            break
+
+    # 评估
+    if not result.collision:
+        # 是否成功绕过障碍物
+        passed_obs = result.x[-1] > obs_x + 10.0
+        # 最终是否回到原车道附近
+        final_y_err = abs(ego.y - start_y)
+        max_lat = max(abs(y) for y in result.y) if result.y else 0
+
+        result.success = (passed_obs and final_y_err < 1.5 and not result.off_road)
+        result.score = final_y_err * 0.5 + max_lat * 0.1
+        result.summary = (f"obstacle_avoid(v0={init_speed:.0f}m/s, obs_x={obs_x:.0f}m): "
+                          f"passed={passed_obs}, final_y_err={final_y_err:.2f}m, "
+                          f"max|y|={max_lat:.2f}m")
+    return result
+
+
+# ── 场景 5: 匝道汇入（Merge） ────────────────────────────────
+
+def run_merge_scenario(init_speed=8.0, target_speed=15.0, merge_x=50.0,
+                        merge_lane=1, duration=15.0):
+    """匝道汇入仿真
+
+    自车在加速车道（起始 y=-5.25m = lane 3），
+    需要在 merge_x 之前加速到 target_speed 并汇入主路。
+
+    输入：
+      init_speed: 初始速度 m/s（匝道速度）
+      target_speed: 目标速度 m/s（主路速度）
+      merge_x: 汇入点 x 位置 m
+      merge_lane: 汇入目标车道索引
+      duration: 仿真时长 s
+
+    输出：
+      ScenarioResult
+    """
+    start_y = lane_center_y(3)  # 加速车道
+    target_y = lane_center_y(merge_lane)
+
+    ego = VehicleState(x0=0.0, y0=start_y, v0=init_speed, heading0=0.0)
+    result = ScenarioResult()
+
+    planner = PlanningLayer()
+    controller = ControlLayer(StanleyParams())
+    lon_ctrl = LongitudinalController(target_speed=target_speed)
+
+    n_steps = int(duration / DT)
+    merge_started = False
+    current_target = start_y
+
+    for step in range(n_steps):
+        t = step * DT
+        s = ego.x
+
+        # 决策：在汇入点附近开始变道汇入
+        if not merge_started and s > merge_x - 20.0:
+            merge_started = True
+            current_target = target_y
+
+        # 纵向控制（加速到目标速度）
+        throttle, brake = lon_ctrl.compute(ego.v)
+
+        # Planning → Control
+        traj = planner.generate(ego.x, ego.y, ego.v, current_target, target_speed)
+        controller.on_trajectory(traj)
+        steer_cmd = controller.compute_steer(ego.x, ego.y, ego.v, ego.heading, ego.yaw_rate)
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        ego.step(steer_cmd, throttle, brake)
+
+        if abs(ego.y) > N_LANES * LANE_WIDTH / 2 + 1.0:
+            result.off_road = True
+            break
+
+    # 评估
+    speed_at_merge = result.v[min(len(result.v)-1, int((merge_x / max(ego.x, 1)) * len(result.v)))] if result.v else 0
+    final_y_err = abs(ego.y - target_y)
+    speed_at_end = result.v[-1] if result.v else 0
+
+    result.success = (final_y_err < 1.0 and speed_at_end >= target_speed * 0.8
+                      and not result.off_road)
+    result.score = final_y_err * 0.5 + max(0, target_speed - speed_at_end) * 0.3
+    result.summary = (f"merge(v0={init_speed:.0f}→{target_speed:.0f}m/s, merge_x={merge_x:.0f}m): "
+                      f"speed_at_merge={speed_at_merge:.1f}m/s, "
+                      f"final_y_err={final_y_err:.2f}m, "
+                      f"final_speed={speed_at_end:.1f}m/s")
+    return result
+
+
+# ── 场景 6: 加塞处理（Cut-in） ──────────────────────────────
+
+def run_cutin_scenario(init_speed=12.0, cutin_speed=10.0, cutin_x=30.0,
+                        duration=12.0):
+    """加塞仿真
+
+    自车巡航中，右前方旁车突然向左变道切入本车道。
+    自车需要减速让行，保持安全距离。
+
+    输入：
+      init_speed: 自车初始速度 m/s
+      cutin_speed: 加塞车速度 m/s
+      cutin_x: 加塞发生的 x 位置 m
+      duration: 仿真时长 s
+
+    输出：
+      ScenarioResult
+    """
+    ego_y = lane_center_y(2)    # 自车在 lane 2 (y=-1.75)
+    cutin_y0 = lane_center_y(3) # 加塞车从 lane 3 (y=-5.25) 切过来
+
+    ego = VehicleState(x0=0.0, y0=ego_y, v0=init_speed, heading0=0.0)
+    # 加塞车：初始在右侧车道，前方
+    cutin = VehicleState(x0=cutin_x, y0=cutin_y0, v0=cutin_speed, heading0=0.0)
+    result = ScenarioResult()
+
+    planner = PlanningLayer()
+    controller = ControlLayer(StanleyParams())
+    lon_ctrl = LongitudinalController(target_speed=init_speed)
+
+    n_steps = int(duration / DT)
+    cutin_active = False
+    cutin_lat_progress = 0.0
+    cutin_duration = 2.0  # 加塞过程持续 2s
+    prev_steer = 0.0
+
+    for step in range(n_steps):
+        t = step * DT
+
+        # 加塞车运动：t=2s 时开始切过来
+        if t >= 2.0 and not cutin_active:
+            cutin_active = True
+            cutin_lat_progress = 0.0
+
+        if cutin_active:
+            cutin_lat_progress += DT / cutin_duration
+            if cutin_lat_progress > 1.0:
+                cutin_lat_progress = 1.0
+            # 横向插值：从 lane 3 到 lane 2
+            cutin.y = cutin_y0 + (ego_y - cutin_y0) * cutin_lat_progress
+            # 纵向：保持速度
+            cutin.x += cutin.v * DT
+
+        # 自车：检测加塞车是否在本车道前方
+        same_lane = abs(ego.y - cutin.y) < 1.0
+        lead_dist = cutin.x - ego.x if same_lane else None
+        lead_v = cutin.v if same_lane else None
+
+        # 纵向控制：加塞时让行
+        if same_lane and lead_dist is not None and lead_dist < 25.0:
+            throttle, brake = lon_ctrl.compute(ego.v, lead_dist, lead_v)
+        else:
+            throttle, brake = lon_ctrl.compute(ego.v)
+
+        # 横向控制：直道保持
+        traj = planner.generate(ego.x, ego.y, ego.v, ego_y, init_speed)
+        controller.on_trajectory(traj)
+        steer_cmd = controller.compute_steer(ego.x, ego.y, ego.v, ego.heading, ego.yaw_rate)
+        prev_steer = steer_cmd
+
+        result.t.append(t)
+        result.x.append(ego.x)
+        result.y.append(ego.y)
+        result.v.append(ego.v)
+        result.heading.append(ego.heading)
+        result.steer.append(steer_cmd)
+        result.throttle.append(throttle)
+        result.brake.append(brake)
+
+        ego.step(steer_cmd, throttle, brake)
+
+        # 碰撞检测
+        if same_lane and lead_dist is not None and lead_dist < 0:
+            result.collision = True
+            result.summary = f"COLLISION with cutin vehicle at t={t:.1f}s"
+            break
+
+        if abs(ego.y) > N_LANES * LANE_WIDTH / 2 + 1.0:
+            result.off_road = True
+            break
+
+    # 评估
+    if not result.collision:
+        final_gap = cutin.x - ego.x if cutin_active else 999
+        min_gap = 999
+        for i in range(len(result.t)):
+            if cutin_active:
+                g = cutin.x - result.x[i]
+                if g < min_gap: min_gap = g
+        min_gap = max(min_gap, 0)
+
+        result.success = (not result.collision and min_gap > 1.0 and not result.off_road)
+        result.score = min_gap * 0.5
+        result.summary = (f"cutin(v0={init_speed:.0f}m/s, cutin_v={cutin_speed:.0f}m/s): "
+                          f"min_gap={min_gap:.1f}m, final_gap={final_gap:.1f}m, "
+                          f"final_speed={result.v[-1]:.1f}m/s")
+    return result
+
+
+# ── 场景调参扫描 ─────────────────────────────────────────────
+
+def tune_curve():
+    """扫描曲线跟随最优参数"""
+    print("\n" + "=" * 60)
+    print("  曲线跟随参数扫描 (kappa=0.005, R=200m)")
+    print("=" * 60)
+
+    best_score = 1e9
+    best = None
+    n_valid = 0
+
+    for kp in [0.3, 0.5, 0.8, 1.0, 1.2, 1.5]:
+        for kd_h in [1.0, 2.0, 3.0, 4.0, 5.0]:
+            for yd in [0.2, 0.28, 0.35, 0.5]:
+                for speed in [8.0, 12.0, 15.0]:
+                    p = StanleyParams()
+                    p.lat_kp = kp
+                    p.lat_kd_heading = kd_h
+                    p.yaw_damping = yd
+                    r = run_curve_scenario(kappa=0.005, target_speed=speed,
+                                           duration=12.0, stanley_params=p)
+                    if not r.success: continue
+                    n_valid += 1
+                    score = r.score
+                    if score < best_score:
+                        best_score = score
+                        best = (kp, kd_h, yd, speed, r)
+
+    print(f"  有效: {n_valid}")
+    if best:
+        kp, kd_h, yd, sp, r = best
+        print(f"  最佳: kp={kp}, kd_heading={kd_h}, yaw_damp={yd} @ {sp:.0f}m/s")
+        print(f"  score={best_score:.2f}, {r.summary}")
+
+
+def tune_emergency():
+    """扫描紧急制动参数"""
+    print("\n" + "=" * 60)
+    print("  紧急制动参数扫描")
+    print("=" * 60)
+
+    for v0 in [10.0, 15.0, 20.0]:
+        for obs_d in [30.0, 50.0, 80.0]:
+            r = run_emergency_brake_scenario(init_speed=v0, obstacle_dist=obs_d)
+            status = "PASS" if r.success else "FAIL"
+            print(f"  v0={v0:.0f}m/s, obs={obs_d:.0f}m → {status}: {r.summary}")
+
+
+def tune_stop_go():
+    """扫描跟停再起步参数"""
+    print("\n" + "=" * 60)
+    print("  跟停再起步参数扫描")
+    print("=" * 60)
+    for gap in [20.0, 30.0, 40.0]:
+        for v0 in [8.0, 10.0, 12.0]:
+            r = run_stop_go_scenario(init_speed=v0, initial_gap=gap)
+            status = "PASS" if r.success else "FAIL"
+            print(f"  gap={gap:.0f}m, v0={v0:.0f}m/s → {status}: {r.summary}")
+
+
+def tune_merge():
+    """扫描匝道汇入参数"""
+    print("\n" + "=" * 60)
+    print("  匝道汇入参数扫描")
+    print("=" * 60)
+    for init_v in [5.0, 8.0, 10.0]:
+        for target_v in [12.0, 15.0, 18.0]:
+            for merge_x in [30.0, 50.0, 80.0]:
+                r = run_merge_scenario(init_speed=init_v, target_speed=target_v,
+                                       merge_x=merge_x)
+                status = "PASS" if r.success else "FAIL"
+                print(f"  v0={init_v:.0f}→{target_v:.0f}m/s, merge_x={merge_x:.0f}m → {status}: {r.summary}")
+
+
+def tune_cutin():
+    """扫描加塞处理参数"""
+    print("\n" + "=" * 60)
+    print("  加塞处理参数扫描")
+    print("=" * 60)
+    for init_v in [10.0, 12.0, 15.0]:
+        for cutin_v in [8.0, 10.0, 12.0]:
+            for cutin_x in [20.0, 30.0, 50.0]:
+                r = run_cutin_scenario(init_speed=init_v, cutin_speed=cutin_v,
+                                       cutin_x=cutin_x)
+                status = "PASS" if r.success else "FAIL"
+                print(f"  v0={init_v:.0f}m/s, cutin_v={cutin_v:.0f}m/s, cutin_x={cutin_x:.0f}m → {status}: {r.summary}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  场景打印辅助
+# ══════════════════════════════════════════════════════════════
+
+def print_scene_result(result, label):
+    """打印场景结果"""
+    print(f"\n  {'='*50}")
+    status_icon = "PASS" if result.success else "FAIL"
+    print(f"  [{status_icon}] {label}")
+    print(f"  {'='*50}")
+    if result.collision:
+        print(f"  ❌ 碰撞!")
+    elif result.off_road:
+        print(f"  ❌ 冲出路面!")
+    print(f"  {result.summary}")
+    result.print_trajectory(stride=100)
+
+
+# ══════════════════════════════════════════════════════════════
 #  主入口
 # ══════════════════════════════════════════════════════════════
 
@@ -885,10 +2008,118 @@ def main():
                         help=f"目标车道 0~{N_LANES-1}（默认2）")
     parser.add_argument("--speed", type=float, default=CRUISE_SPEED, help=f"巡航速度 (默认{CRUISE_SPEED}m/s)")
     parser.add_argument("--duration", type=float, default=SIM_DURATION, help="仿真时长")
+    parser.add_argument("--uturn", action="store_true", help="三把方向掉头仿真（纯 Python 验证）")
+    parser.add_argument("--tune-uturn", action="store_true", help="扫描三把方向掉头最优参数")
     parser.add_argument("--csv", type=str, default=None, help="输出CSV文件路径")
+
+    # ── 6 种上路操作场景 ──
+    parser.add_argument("--scene-curve", action="store_true", help="场景1: 曲线跟随（弯道保持）")
+    parser.add_argument("--scene-emergency", action="store_true", help="场景2: 紧急制动")
+    parser.add_argument("--scene-stop-go", action="store_true", help="场景3: 跟停再起步")
+    parser.add_argument("--scene-obstacle", action="store_true", help="场景4: 障碍物避让")
+    parser.add_argument("--scene-merge", action="store_true", help="场景5: 匝道汇入")
+    parser.add_argument("--scene-cutin", action="store_true", help="场景6: 加塞处理")
+    parser.add_argument("--run-all", action="store_true", help="全量执行所有6个场景")
+    # 场景调参
+    parser.add_argument("--tune-curve", action="store_true", help="扫描曲线跟随最优参数")
+    parser.add_argument("--tune-emergency", action="store_true", help="扫描紧急制动参数")
+    parser.add_argument("--tune-stop-go", action="store_true", help="扫描跟停再起步参数")
+    parser.add_argument("--tune-merge", action="store_true", help="扫描匝道汇入参数")
+    parser.add_argument("--tune-cutin", action="store_true", help="扫描加塞处理参数")
     args = parser.parse_args()
 
     CRUISE_SPEED = args.speed
+
+    # ── 场景调参入口 ──
+    if args.tune_curve:
+        tune_curve()
+        return
+    if args.tune_emergency:
+        tune_emergency()
+        return
+    if args.tune_stop_go:
+        tune_stop_go()
+        return
+    if args.tune_merge:
+        tune_merge()
+        return
+    if args.tune_cutin:
+        tune_cutin()
+        return
+
+    # ── 全量场景执行 ──
+    if args.run_all:
+        print("\n" + "=" * 60)
+        print("  场景全集 — 6 种上路操作全量验证")
+        print("=" * 60)
+        results = []
+
+        print("\n  ── 场景 1: 曲线跟随 ──")
+        r1 = run_curve_scenario(kappa=0.005, target_speed=12.0, duration=15.0)
+        print_scene_result(r1, "曲线跟随 (kappa=0.005, R=200m, 12m/s)")
+        results.append(("curve", r1))
+
+        print("\n  ── 场景 2: 紧急制动 ──")
+        r2 = run_emergency_brake_scenario(init_speed=15.0, obstacle_dist=50.0)
+        print_scene_result(r2, "紧急制动 (v0=15m/s, 障碍物=50m)")
+        results.append(("emergency", r2))
+
+        print("\n  ── 场景 3: 跟停再起步 ──")
+        r3 = run_stop_go_scenario(init_speed=10.0, initial_gap=30.0, duration=20.0)
+        print_scene_result(r3, "跟停再起步 (v0=10m/s, gap=30m)")
+        results.append(("stop_go", r3))
+
+        print("\n  ── 场景 4: 障碍物避让 ──")
+        r4 = run_obstacle_avoid_scenario(init_speed=12.0, obs_x=60.0)
+        print_scene_result(r4, "障碍物避让 (v0=12m/s, obs_x=60m)")
+        results.append(("obstacle", r4))
+
+        print("\n  ── 场景 5: 匝道汇入 ──")
+        r5 = run_merge_scenario(init_speed=8.0, target_speed=15.0, merge_x=50.0)
+        print_scene_result(r5, "匝道汇入 (8→15m/s, merge_x=50m)")
+        results.append(("merge", r5))
+
+        print("\n  ── 场景 6: 加塞处理 ──")
+        r6 = run_cutin_scenario(init_speed=12.0, cutin_speed=10.0, cutin_x=30.0)
+        print_scene_result(r6, "加塞处理 (v0=12m/s, cutin_v=10m/s, cutin_x=30m)")
+        results.append(("cutin", r6))
+
+        # 汇总
+        pass_count = sum(1 for _, r in results if r.success)
+        fail_count = sum(1 for _, r in results if not r.success)
+        print(f"\n  {'='*50}")
+        print(f"  场景全集汇总: {pass_count}/{len(results)} PASS, {fail_count}/{len(results)} FAIL")
+        print(f"  {'='*50}")
+        for name, r in results:
+            icon = "PASS" if r.success else "FAIL"
+            print(f"    [{icon}] {name}: {r.summary}")
+        return
+
+    # ── 单场景执行 ──
+    if args.scene_curve:
+        r = run_curve_scenario(kappa=0.005, target_speed=args.speed, duration=args.duration)
+        print_scene_result(r, f"曲线跟随 @ {args.speed:.0f}m/s")
+        return
+    if args.scene_emergency:
+        r = run_emergency_brake_scenario(init_speed=args.speed, obstacle_dist=50.0, duration=args.duration)
+        print_scene_result(r, f"紧急制动 @ {args.speed:.0f}m/s")
+        return
+    if args.scene_stop_go:
+        r = run_stop_go_scenario(init_speed=min(args.speed, 10.0), initial_gap=30.0, duration=args.duration)
+        print_scene_result(r, f"跟停再起步 @ {args.speed:.0f}m/s")
+        return
+    if args.scene_obstacle:
+        r = run_obstacle_avoid_scenario(init_speed=args.speed)
+        print_scene_result(r, f"障碍物避让 @ {args.speed:.0f}m/s")
+        return
+    if args.scene_merge:
+        r = run_merge_scenario(init_speed=min(args.speed, 8.0), target_speed=args.speed)
+        print_scene_result(r, f"匝道汇入 → {args.speed:.0f}m/s")
+        return
+    if args.scene_cutin:
+        r = run_cutin_scenario(init_speed=args.speed)
+        print_scene_result(r, f"加塞处理 @ {args.speed:.0f}m/s")
+        return
 
     if args.tune:
         tune_straight()
@@ -901,6 +2132,36 @@ def main():
 
     if args.tune_mpc:
         print("MPC参数扫描功能待实现（当前默认参数q_y=10,q_psi=20,r=0.5因C代码直接加未乘dt有单位问题）")
+        return
+
+    if args.tune_uturn:
+        tune_uturn()
+        return
+
+    if args.uturn:
+        # 默认三把方向掉头，参数匹配 C 代码 flowsim_node.cpp
+        # 宽路打一圈多（~0.50rad），配合倒车调整
+        p = UturnParams(mode='three_point')
+        p.phase0_steer = 0.50
+        p.phase0_throttle = 0.22
+        p.phase0_duration = 2.0
+        p.phase1_steer = -0.55
+        p.phase1_reverse_throttle = -0.35
+        p.phase1_reverse_duration = 3.0
+        p.phase2_steer = 0.10
+        p.phase2_throttle = 0.24
+        p.phase2_duration = 0.5
+        p.init_speed = 4.0
+        r = run_uturn_simulation(p, start_lane_y=-1.75)
+        print_uturn_result(r, p, "三把方向掉头（C代码匹配参数）", start_lane_y=-1.75)
+        if args.csv:
+            with open(args.csv, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['t', 'x', 'y', 'v', 'heading', 'steer'])
+                for i in range(len(r.t)):
+                    w.writerow([f"{r.t[i]:.3f}", f"{r.x[i]:.3f}", f"{r.y[i]:.3f}",
+                                f"{r.v[i]:.2f}", f"{r.heading[i]:.4f}", f"{r.steer[i]:.4f}"])
+            print(f"\n  CSV written to: {args.csv}")
         return
 
     # 单次仿真
