@@ -9,7 +9,7 @@
  * 所有坐标使用 worldToThree 映射，零魔法数。
  */
 
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, forwardENU, tangentToNormal } from '../math/Coord.js';
 
 // ── 角标框几何体（共享，每帧更新位置） ──
 const CORNER_LEN = 0.8;  // 角标臂长（米）
@@ -176,35 +176,36 @@ function _updateBrackets(ego, entities, count, positions) {
     const halfW = (ent.width || 2.0) / 2;
     const H = 1.5;
     const cl = Math.min(0.8, Math.min(halfL, halfW) * 0.3);
-    const rotY = -ent.heading;
-    const cosA = Math.cos(rotY);
-    const sinA = Math.sin(rotY);
     const [cx, cy, cz] = worldToThree(ent.x, ent.y, (ent.z || 0) + H / 2);
 
-    // 局部 4 个上角点（车体朝前 +X）
+    // Coord 纯函数：车头朝向 → 前向/侧向单位向量（ENU 坐标系）
+    const [fx, fz] = forwardENU(ent.heading);     // 前向向量
+    const [sx, sz] = tangentToNormal(fx, fz);    // 侧向向量（垂直于前向）
+
+    // 局部 4 个上角点（车体朝前 +X，朝左 +Y）
     const localTops = [
-      [-halfL,  halfW,  H],  // 后左
-      [ halfL,  halfW,  H],  // 前左
-      [ halfL, -halfW,  H],  // 前右
-      [-halfL, -halfW,  H],  // 后右
+      [-halfL,  halfW],  // 后左
+      [ halfL,  halfW],  // 前左
+      [ halfL, -halfW],  // 前右
+      [-halfL, -halfW],  // 后右
     ];
     // 每个角：垂直向下 cl，水平向里 cl → 共 2 条线段
     let idx = 0;
-    for (const [lx, ly, lz] of localTops) {
-      // 角点 THREE 世界坐标
-      const wx = cx + lx * cosA - ly * sinA;
-      const wy = cy + lz;
-      const wz = cz + lx * sinA + ly * cosA;
+    for (const [lx, ly] of localTops) {
+      // 角点 ENU 世界坐标 = 中心 + 前向分量 + 侧向分量
+      const wx = cx + lx * fx + ly * sx;
+      const wy = cy + H;
+      const wz = cz + lx * fz + ly * sz;
       // 垂直向下
       positions[bi + idx++] = wx; positions[bi + idx++] = wy; positions[bi + idx++] = wz;
       positions[bi + idx++] = wx; positions[bi + idx++] = wy - cl; positions[bi + idx++] = wz;
-      // 水平向里（沿 -lx, -ly 方向）
+      // 水平向里（沿 -lx, -ly 方向的单位向量）
       const inDir = Math.sqrt(lx * lx + ly * ly) || 1;
-      const inX = -lx / inDir * cl;
-      const inY = -ly / inDir * cl;
-      const hwx = wx + inX * cosA - inY * sinA;
+      const inLx = -lx / inDir;
+      const inLy = -ly / inDir;
+      const hwx = wx + inLx * fx * cl + inLy * sx * cl;
       const hwy = wy;
-      const hwz = wz + inX * sinA + inY * cosA;
+      const hwz = wz + inLx * fz * cl + inLy * sz * cl;
       positions[bi + idx++] = wx; positions[bi + idx++] = wy; positions[bi + idx++] = wz;
       positions[bi + idx++] = hwx; positions[bi + idx++] = hwy; positions[bi + idx++] = hwz;
     }
@@ -261,23 +262,26 @@ function _updateSweep(ego, frame, positions, edgePositions) {
   const R = SWEEP_RADIUS;
 
   // 扇形顶点：原点 + 弧顶点
+  // Coord 纯函数：角度 t → 前向单位向量 [fx, fz]，然后乘以半径 R
   positions[0] = ex;
   positions[1] = ey;
   positions[2] = ez;
   for (let i = 0; i <= SWEEP_SEGMENTS; i++) {
     const t = sweepStart + (sweepEnd - sweepStart) * (i / SWEEP_SEGMENTS);
-    positions[(i + 1) * 3 + 0] = ex + Math.cos(t) * R;
+    const [fx, fz] = forwardENU(t);  // Coord.js 纯函数
+    positions[(i + 1) * 3 + 0] = ex + fx * R;
     positions[(i + 1) * 3 + 1] = ey;
-    positions[(i + 1) * 3 + 2] = ez + Math.sin(t) * R;
+    positions[(i + 1) * 3 + 2] = ez + fz * R;
   }
 
   // 前沿线（原点 → 弧终点）
   edgePositions[0] = ex;
   edgePositions[1] = ey;
   edgePositions[2] = ez;
-  edgePositions[3] = ex + Math.cos(sweepEnd) * R;
+  const [fxEnd, fzEnd] = forwardENU(sweepEnd);  // Coord.js 纯函数
+  edgePositions[3] = ex + fxEnd * R;
   edgePositions[4] = ey;
-  edgePositions[5] = ez + Math.sin(sweepEnd) * R;
+  edgePositions[5] = ez + fzEnd * R;
 }
 
 // 不再使用模块级帧计数器——使用闭包内 _frame
