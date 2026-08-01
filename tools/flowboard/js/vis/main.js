@@ -170,6 +170,34 @@ function _initResizeObserver(canvas) {
 /** 渲染循环 */
 let _frameCount = 0;
 let _lastRenderErr = null;
+let _perfFpsTimes = [];
+let _perfOverlayVisible = false;
+
+/** 更新性能悬浮窗 */
+function _updatePerfOverlay() {
+  const fpsEl = document.getElementById('perf-fps');
+  const callsEl = document.getElementById('perf-calls');
+  const trisEl = document.getElementById('perf-tris');
+  if (!fpsEl || !callsEl || !trisEl) return;
+
+  const now = performance.now();
+  _perfFpsTimes.push(now);
+  _perfFpsTimes = _perfFpsTimes.filter(t => now - t < 1000);
+  const fps = _perfFpsTimes.length;
+
+  let calls = '?', tris = '?';
+  if (_renderer) {
+    const info = _renderer.info;
+    if (info && info.render) {
+      calls = info.render.calls || 0;
+      tris = info.render.triangles || 0;
+    }
+  }
+  fpsEl.textContent = fps + ' FPS';
+  callsEl.textContent = calls + ' draws';
+  trisEl.textContent = (tris >= 1000 ? (tris / 1000).toFixed(1) + 'k' : tris) + ' tris';
+}
+
 function _startRenderLoop() {
   function loop() {
     requestAnimationFrame(loop);
@@ -198,6 +226,11 @@ function _startRenderLoop() {
 
       renderFrame(_renderer, _composer, _scene, _cameraRig.camera);
       _frameCount++;
+
+      // 性能悬浮窗（每帧更新，但只在可见时计 FPS）
+      if (_perfOverlayVisible) {
+        _updatePerfOverlay();
+      }
     } catch (err) {
       console.error('[vis] render loop error:', err);
       _lastRenderErr = err;
@@ -436,4 +469,17 @@ export function setDebugCam(mode) {
 /** 关闭 NPC 详情面板（占位，Phase 3 实现） */
 export function closeNPCDetail() {
   // Phase 3 VehicleView 实现 NPC 详情面板后补全
+}
+
+/** 切换性能悬浮窗 */
+export function togglePerfOverlay() {
+  _perfOverlayVisible = !_perfOverlayVisible;
+  const el = document.getElementById('perf-overlay');
+  if (el) {
+    el.style.display = _perfOverlayVisible ? '' : 'none';
+  }
+  if (_perfOverlayVisible) {
+    _perfFpsTimes = [];
+  }
+  return _perfOverlayVisible;
 }

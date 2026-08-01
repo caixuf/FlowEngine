@@ -14,8 +14,8 @@ Layer 树 (vis/core/Layer.js — Qt 对象树 + 错误隔离)
   root
   ├── env     (ground, viaduct)
   ├── road    (road, streetlight, barrier, connector, tree)
-  ├── agent   (vehicle)
-  └── infra   (trafficLight, etcGate)
+  ├── agent   (vehicle, label, perception)
+  └── infra   (trafficLight, etcGate, mapOverlay)
     ↓
 View Modules (vis/view/*.js)         ← 你要写的模块在这里
   ↓
@@ -327,6 +327,9 @@ const headMat = createEmissiveMaterial(0xfff4d6, 1.0); // 独立（每帧改 int
 | ConnectorView | `vis/view/ConnectorView.js` | 复杂 | 自动派生（无 entity，扫 edge 元数据） |
 | ETCGateView | `vis/view/ETCGateView.js` | 复杂 | 多部件组装 + 动态 boom 抬起 |
 | VehicleLights | `vis/view/VehicleLights.js` | 简单 | 车灯位掩码解析工具模块（非 View，被 VehicleView 调用） |
+| LabelView | `vis/view/LabelView.js` | 简单 | Sprite 文字标签，跟随 entity 显示 speed + ai_state |
+| PerceptionView | `vis/view/PerceptionView.js` | 中等 | 3D 角标框 + 检测射线 + 雷达扫描，LineSegments 批量 draw call |
+| MapOverlayView | `vis/view/MapOverlayView.js` | 中等 | Canvas 2D 小地图 + HUD 叠加层 |
 
 ## 10. 待设计模块清单（候选）
 

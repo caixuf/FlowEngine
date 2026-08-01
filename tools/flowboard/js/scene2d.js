@@ -232,6 +232,61 @@ export function draw2D() {
     ctx.setLineDash([]);
   }
 
+  // ── Radar sweep animation ──
+  var radarAngle = (_2d.frame * 0.02) % (Math.PI * 2);
+  ctx.save();
+  ctx.translate(carX, carY);
+  // Radar sweep arc (half-circle forward, scanning)
+  var sweepStart = -Math.PI * 0.75 + radarAngle * 0.3;
+  var sweepEnd = sweepStart + Math.PI * 0.5;
+  var sweepGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 80 * s);
+  sweepGrad.addColorStop(0, 'rgba(0,255,136,0.12)');
+  sweepGrad.addColorStop(0.6, 'rgba(0,255,136,0.04)');
+  sweepGrad.addColorStop(1, 'rgba(0,255,136,0)');
+  ctx.fillStyle = sweepGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.arc(0, 0, 80 * s, sweepStart, sweepEnd);
+  ctx.closePath();
+  ctx.fill();
+  // Sweep leading edge
+  ctx.strokeStyle = 'rgba(0,255,136,0.35)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(sweepEnd) * 80 * s, Math.sin(sweepEnd) * 80 * s);
+  ctx.stroke();
+  ctx.restore();
+
+  // ── Sensor FOV cones ──
+  ctx.save();
+  ctx.translate(carX, carY);
+  ctx.rotate(-e.heading);
+  // Front camera/LiDAR FOV
+  var fovGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 60 * s);
+  fovGrad.addColorStop(0, 'rgba(0,200,255,0.06)');
+  fovGrad.addColorStop(1, 'rgba(0,200,255,0)');
+  ctx.fillStyle = fovGrad;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.arc(0, 0, 60 * s, -Math.PI * 0.3, Math.PI * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  // FOV edge lines
+  ctx.strokeStyle = 'rgba(0,200,255,0.12)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(-Math.PI * 0.3) * 60 * s, Math.sin(-Math.PI * 0.3) * 60 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(Math.PI * 0.3) * 60 * s, Math.sin(Math.PI * 0.3) * 60 * s);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
   // ── LiDAR point cloud ──
   var scn = (_topoData.metrics || {}).scene;
   if (scn && scn.lidar && scn.lidar.length) {
@@ -250,7 +305,32 @@ export function draw2D() {
     });
   }
 
-  // ── Obstacles (ADAS-HMI bounding-box style) ──
+  // ── Detection rays: ego → each obstacle ──
+  if (scn && scn.obstacles && scn.obstacles.length) {
+    scn.obstacles.forEach(function (o) {
+      var dtx = carX - (o.y || 0) * s, dty = carY - (o.x || 0) * s;
+      var dist = Math.sqrt((o.x || 0) * (o.x || 0) + (o.y || 0) * (o.y || 0));
+      if (dist < 2 || dist > 100) return;
+      // Gradient ray: cyan near ego → green at target
+      var rayGrad = ctx.createLinearGradient(carX, carY, dtx, dty);
+      rayGrad.addColorStop(0, 'rgba(0,255,136,0)');
+      rayGrad.addColorStop(0.4, 'rgba(0,255,136,0.04)');
+      rayGrad.addColorStop(0.8, 'rgba(0,255,136,0.10)');
+      rayGrad.addColorStop(1, 'rgba(0,255,136,0.20)');
+      ctx.strokeStyle = rayGrad;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 6]);
+      ctx.lineDashOffset = -_2d.frame * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(carX, carY);
+      ctx.lineTo(dtx, dty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+    });
+  }
+
+  // ── Obstacles (ADAS-HMI perception-style corner brackets) ──
   if (!_obsTargets2d) _obsTargets2d = [];
   if (!_obsVelBuf) _obsVelBuf = [];
   var _dtNow = performance.now() / 1000;
@@ -290,45 +370,77 @@ export function draw2D() {
       var dist = Math.sqrt((o.x || 0) * (o.x || 0) + (o.y || 0) * (o.y || 0));
       // Don't draw if directly on top of ego
       if (dist < 2) return;
+      var hw = Wd / 2, hl = L / 2;
+      var cornerLen = Math.min(8, Math.min(Wd, L) * 0.3);
       ctx.save();
       ctx.translate(cur.x, cur.y);
-      // Drop shadow
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(-Wd / 2 + 2, -L / 2 + 2, Wd, L);
-      // Fill (semi-transparent, type color)
-      ctx.fillStyle = 'rgba(' + hexToRgb(col) + ',0.13)';
-      ctx.fillRect(-Wd / 2, -L / 2, Wd, L);
-      // Bright outline (solid)
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([]);
-      ctx.strokeRect(-Wd / 2, -L / 2, Wd, L);
-      // Front indicator bar (shows heading direction)
-      ctx.fillStyle = col;
+      // Perception-style corner brackets (green, techy)
+      var bracketColor = o.type === 'pedestrian' ? '#44ee88' :
+                         o.type === 'truck' ? '#ff4422' : '#00ff88';
+      // Glow behind bracket
+      ctx.shadowColor = bracketColor;
+      ctx.shadowBlur = 6;
+      ctx.strokeStyle = bracketColor;
+      ctx.lineWidth = 2;
       ctx.globalAlpha = 0.9;
-      ctx.fillRect(-Wd / 2, -L / 2, Wd, 3);
+      // Top-left corner
+      ctx.beginPath();
+      ctx.moveTo(-hw, -hl + cornerLen);
+      ctx.lineTo(-hw, -hl);
+      ctx.lineTo(-hw + cornerLen, -hl);
+      ctx.stroke();
+      // Top-right corner
+      ctx.beginPath();
+      ctx.moveTo(hw - cornerLen, -hl);
+      ctx.lineTo(hw, -hl);
+      ctx.lineTo(hw, -hl + cornerLen);
+      ctx.stroke();
+      // Bottom-left corner
+      ctx.beginPath();
+      ctx.moveTo(-hw, hl - cornerLen);
+      ctx.lineTo(-hw, hl);
+      ctx.lineTo(-hw + cornerLen, hl);
+      ctx.stroke();
+      // Bottom-right corner
+      ctx.beginPath();
+      ctx.moveTo(hw - cornerLen, hl);
+      ctx.lineTo(hw, hl);
+      ctx.lineTo(hw, hl - cornerLen);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
       ctx.globalAlpha = 1;
-      // Type label (centered)
-      ctx.fillStyle = col;
-      ctx.font = "bold 8px 'JetBrains Mono',monospace";
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(lbl, 0, 0);
-      // Distance label (below box)
-      ctx.fillStyle = 'rgba(200,200,200,0.55)';
+      // Fill (very subtle, perception-style)
+      ctx.fillStyle = 'rgba(0,255,136,0.05)';
+      ctx.fillRect(-hw, -hl, Wd, L);
+      // Front indicator (green, pulsing)
+      var pulse = 0.5 + Math.sin(_2d.frame * 0.08 + i) * 0.3;
+      ctx.fillStyle = bracketColor;
+      ctx.globalAlpha = 0.6 * pulse;
+      ctx.fillRect(-hw, -hl, Wd, 2.5);
+      ctx.globalAlpha = 1;
+      // Type label with perception-style confidence placeholder
+      ctx.fillStyle = bracketColor;
+      ctx.font = "bold 9px 'JetBrains Mono',monospace";
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(lbl, -hw + 2, -hl - 3);
+      // Distance label
+      ctx.fillStyle = 'rgba(0,255,136,0.5)';
       ctx.font = "8px 'JetBrains Mono',monospace";
-      ctx.fillText(dist.toFixed(0) + 'm', 0, L / 2 + 8);
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(dist.toFixed(0) + 'm', hw - 2, hl + 3);
       // Velocity arrow (relative motion vs ego)
       var rv = Math.sqrt(relVx * relVx + relVy * relVy);
       if (rv > 0.5) {
         var arA = Math.atan2(-relVy, relVx);
         var arLen = Math.min(rv * s * 0.3, L * 0.7);
-        ctx.strokeStyle = col;
+        ctx.strokeStyle = bracketColor;
         ctx.lineWidth = 1.5;
-        ctx.globalAlpha = 0.7;
+        ctx.globalAlpha = 0.5;
         ctx.beginPath();
-        ctx.moveTo(0, -L / 2 - 2);
-        ctx.lineTo(Math.cos(arA) * arLen, -L / 2 - 2 - Math.sin(arA) * arLen);
+        ctx.moveTo(0, -hl - 2);
+        ctx.lineTo(Math.cos(arA) * arLen, -hl - 2 - Math.sin(arA) * arLen);
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
@@ -336,23 +448,43 @@ export function draw2D() {
     });
   } else {
     // Static demo obstacles when no live data
-    [{ x: 20, y: -1.75, col: '#ff9944', lbl: 'CAR' }, { x: 40, y: 1.75, col: '#ff4422', lbl: 'CAR' }, { x: 30, y: 8, col: '#44ee88', lbl: 'PED' }].forEach(function (p) {
+    [{ x: 20, y: -1.75, col: '#00ff88', lbl: 'CAR' }, { x: 40, y: 1.75, col: '#00ff88', lbl: 'CAR' }, { x: 30, y: 8, col: '#44ee88', lbl: 'PED' }].forEach(function (p) {
       var bx = carX - p.y * s, by = carY - p.x * s;
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(bx - 13 + 2, by - 9 + 2, 26, 18);
-      ctx.fillStyle = 'rgba(' + hexToRgb(p.col) + ',0.12)';
-      ctx.fillRect(bx - 13, by - 9, 26, 18);
+      var hw = 13, hl = 9, cl = 5;
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.shadowColor = p.col;
+      ctx.shadowBlur = 5;
       ctx.strokeStyle = p.col;
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(bx - 13, by - 9, 26, 18);
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(-hw, -hl + cl); ctx.lineTo(-hw, -hl); ctx.lineTo(-hw + cl, -hl);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(hw - cl, -hl); ctx.lineTo(hw, -hl); ctx.lineTo(hw, -hl + cl);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-hw, hl - cl); ctx.lineTo(-hw, hl); ctx.lineTo(-hw + cl, hl);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(hw - cl, hl); ctx.lineTo(hw, hl); ctx.lineTo(hw, hl - cl);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(0,255,136,0.04)';
+      ctx.fillRect(-hw, -hl, hw * 2, hl * 2);
       ctx.fillStyle = p.col;
-      ctx.font = "bold 8px 'JetBrains Mono',monospace";
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(p.lbl, bx, by);
-      ctx.fillStyle = 'rgba(200,200,200,0.45)';
-      ctx.font = '8px monospace';
-      ctx.fillText(Math.round(Math.sqrt(p.x * p.x + p.y * p.y)) + 'm', bx, by + 14);
+      ctx.font = "bold 9px 'JetBrains Mono',monospace";
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(p.lbl, -hw + 2, -hl - 2);
+      ctx.fillStyle = 'rgba(0,255,136,0.5)';
+      ctx.font = "8px 'JetBrains Mono',monospace";
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'top';
+      ctx.fillText(Math.round(Math.sqrt(p.x * p.x + p.y * p.y)) + 'm', hw - 2, hl + 2);
+      ctx.restore();
     });
   }
 

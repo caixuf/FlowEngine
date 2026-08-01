@@ -316,32 +316,41 @@ export function createVehicleView(scene, renderer, modelCache) {
       group.add(w);
     });
 
-    // 注入方向盘（fallback 车辆同样需要可见的转向反馈）
-    group.add(_createSteeringWheel());
+    // 注入方向盘（fallback 车辆同样需要可见的转向反馈，行人跳过）
+    if (type !== 'pedestrian') {
+      group.add(_createSteeringWheel());
+    }
 
     group.name = 'fallback_' + type + '_' + id;
     return group;
   }
 
-  /** 从 glTF 创建车辆。
+  /** 从 glTF 创建车辆/行人。
    *  getModel() 返回的已经是 THREE.Group（非 loader 原始 {scene}），
-   *  直接对其 clone，不要走 .scene 否则抛 TypeError 导致永远回退 fallback。 */
-  function _createGltfVehicle(gltf, id) {
+   *  直接对其 clone，不要走 .scene 否则抛 TypeError 导致永远回退 fallback。
+   *  行人只显示躯干+头+腿，不注入方向盘/车漆/车轮动画。 */
+  function _createGltfVehicle(gltf, id, type) {
     const scene = gltf.clone(true);
     scene.name = 'gltf_' + id;
     // clone() 不深拷贝 userData 引用，重建 wheel/light 引用
     _relinkWheelUserData(scene);
+    if (type === 'pedestrian') {
+      // 行人：无车漆、无方向盘、无灯光节点
+      return scene;
+    }
     // 应用车漆升级
     _applyCarPaintToScene(scene, _envMap);
-    // 注入方向盘（glTF 模型未自带 steering_wheel mesh）
+    // 注入方向盘（glTF 车辆模型未自带 steering_wheel mesh）
     scene.add(_createSteeringWheel());
     return scene;
   }
 
-  /** 每帧更新 glTF 车辆：前轴转向 + 车轮旋转 + 灯光 */
-  function _updateGltfVehicle(entry, v, dt) {
+  /** 每帧更新 glTF 车辆/行人：前轴转向 + 车轮旋转 + 灯光 */
+  function _updateGltfVehicle(entry, v, dt, type) {
     const vis = _getVisGroup(entry);
     if (!vis) return;
+    // 行人：无方向盘/车轮/灯光动画
+    if (type === 'pedestrian') return;
     const speed_mps = v ? v.speed_mps : 0;
 
     // 前轴转向：glTF 模型 axle_front（含 wheel_FL/wheel_FR）整体绕 Y 旋转。
@@ -406,7 +415,7 @@ export function createVehicleView(scene, renderer, modelCache) {
         entry.group = null;
       }
       entry.modelData = gltf;
-      entry.group = _createGltfVehicle(gltf, id);
+      entry.group = _createGltfVehicle(gltf, id, type);
       vehicleGroup.add(entry.group);
 
       // glTF 模型自带灯节点（turnsignal_/brakelight_/headlight_），
@@ -517,16 +526,18 @@ export function createVehicleView(scene, renderer, modelCache) {
     }
 
     // 4. 每帧动画：前轴转向 + 车轮旋转 + 灯光
-    const animateVehicle = (id) => {
+    const animateVehicle = (id, type) => {
       const entry = vehicleMap.get(id);
       if (!entry) return;
       const v = (id === 'ego') ? store.ego
                : entities.find(e => e && e.id === id);
       if (!v) return;
 
-      // glTF 车辆动画（前轴转向 + 车轮旋转 + 方向盘）
+      // glTF 动画（行人跳过方向盘/车轮/灯光）
       if (entry.modelData) {
-        _updateGltfVehicle(entry, v, dt);
+        _updateGltfVehicle(entry, v, dt, type);
+        // 行人灯光不处理
+        if (type === 'pedestrian') return;
       } else {
         // 程序化 fallback 前轴转向（加死区滤波，避免直路巡航时微动）
         const vis = _getVisGroup(entry);
@@ -552,9 +563,9 @@ export function createVehicleView(scene, renderer, modelCache) {
       }
     };
 
-    animateVehicle('ego');
+    animateVehicle('ego', 'su7');
     for (const ent of entities) {
-      if (ent && ent.id) animateVehicle(ent.id);
+      if (ent && ent.id) animateVehicle(ent.id, ent.type);
     }
   }
 

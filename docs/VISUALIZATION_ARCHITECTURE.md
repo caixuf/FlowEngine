@@ -38,8 +38,8 @@
                               │  ├── env   (ground, viaduct)         │
                               │  ├── road  (road, streetlight,      │
                               │  │         barrier, connector)       │
-                              │  ├── agent (vehicle)                 │
-                              │  └── infra (trafficLight, etcGate)   │
+                              │  ├── agent (vehicle, label, perception)│
+                │  └── infra (trafficLight, etcGate)   │
                               └──────────────┬───────────────────────┘
                                              │
                                              ▼
@@ -333,7 +333,10 @@ tools/flowboard/js/
         ├── StreetlightView.js # 路灯（InstancedMesh 静态 build）
         ├── BarrierView.js    # 护栏（InstancedMesh 静态 build）
         ├── TreeView.js       # 树（InstancedMesh 静态 build）
-        └── VehicleLights.js  # 纯函数：车灯位掩码 → 状态（零 THREE 依赖）
+        ├── VehicleLights.js  # 纯函数：车灯位掩码 → 状态（零 THREE 依赖）
+        ├── LabelView.js      # 实体标签（动态 update，CSS2D-style Sprite 文字标签）
+        ├── PerceptionView.js # 感知标注覆盖层（3D 角标框 + 检测射线 + 雷达扫描）
+        └── MapOverlayView.js # 小地图 + HUD 叠加层（Canvas 2D）
 ```
 
 ### SceneStore — 单一数据契约
@@ -403,15 +406,17 @@ function tickAnimation(now) {
 3. **递归 dispose** — 父 dispose 自动递归子层（深度优先，孙先销毁），
    view 若有 `dispose()` 则调，否则退化为 `clear()`。幂等。
 
-SceneDirector 构造时建 4-Layer 树，所有 10 个 View 都挂到对应层：
+SceneDirector 构造时建 4-Layer 树，所有 12 个 View 都挂到对应层：
 
 ```
 root
 ├── env     (ground, viaduct)                      — 环境层
 ├── road    (road, streetlight, barrier, connector) — 道路层
-├── agent   (vehicle)                              — 智能体层
-└── infra   (trafficLight, etcGate)                — 路侧设施层
+├── agent   (vehicle, label, perception)           — 智能体层（含 NPC 标签 + 感知标注）
+└── infra   (trafficLight, etcGate, mapOverlay)    — 路侧设施层 + 叠加层
 ```
+
+**13 个 View 实例**：10 个静态（road/ground/connector/streetlight/barrier/viaduct/tree）+ 3 个动态（vehicle/trafficLight/etcGate）+ 2 个覆盖层（label/perception）+ 1 个 HUD 层（mapOverlay）
 
 **关键 API**：
 - `build(ctx)` / `update(store, now)` / `clear()` — 递归调用所有后代
@@ -686,3 +691,55 @@ HTML inline `onclick` 全部改走 `window.flowboard.X()`，集中式重命名�
 - `vis_view_registry.test.mjs` (37) — ViewRegistry 插件注册
 - `vis_vehicle_lights.test.mjs` (18) — 车灯位掩码
 - `vis_geometry.test.mjs` (5) — 坐标映射 + 顶点法线
+
+---
+
+## 第六部分：感知标注覆盖层（2D + 3D 对称，Phase 5 — 已落地）
+
+2D 和 3D 视图共享同一套感知标注风格，数据源一致（`store.entities`），视觉风格统一为绿色调 `#00ff88`。
+
+### 2D 感知标注（`scene2d.js`）
+
+```
+2D 俯视图叠加层：
+├── 雷达扫描扇形     — 半透明绿色扇形，从 ego 向前扫描，前沿线跟随动画旋转
+├── 传感器 FOV 锥体  — 浅蓝色锥形覆盖区，带虚线边缘（前方摄像头/LiDAR 覆盖范围）
+├── 检测射线         — 从 ego 到每个目标的虚线，绿色渐变（近淡→远亮），虚线流动动画
+└── 感知角标框       — 替换原来朴素的简单矩形框：
+    ├─ 四角绿色 bracket（带 shadowBlur 辉光）
+    ├─ 前方脉动指示条（每个实体独立相位）
+    ├─ 左上角 TYPE 标签
+    ├─ 右下角 距离标签（单位 m）
+    └─ 相对速度箭头（相对 ego 运动方向）
+```
+
+**实现细节**：
+- 角标框使用 `ctx.shadowColor` + `shadowBlur` 实现辉光效果，不额外消耗 draw call
+- 脉动指示条使用 `0.5 + sin(frame * 0.08 + i) * 0.3` 独立相位，避免所有实体同步闪烁
+- 检测射线使用 `lineDashOffset` 动画实现流动效果
+- 雷达扫描使用 `RadialGradient` 渐变填充，降低视觉侵入性
+
+### 3D 感知覆盖层（`PerceptionView.js`）
+
+```
+3D 场景覆盖层（注册到 agent 层，每帧更新）：
+├── 角标框           — 用 THREE.LineSegments 单 draw call 渲染所有实体
+│   ├─ 4 个 L 形 bracket 包围每个实体（随朝向旋转）
+│   ├─ 绿色 #00ff88，带行内辉光
+│   ├─ 距离过滤（< 100m 显示，> 100m 隐藏）
+│   └─ 最大跟踪 32 实体
+├── 检测射线         — 从 ego 到每个实体的线段
+│   ├─ vertexColors 渐变：近端淡绿 → 远端亮绿
+│   ├─ 透明度 0.3，depthTest: false（始终可见）
+│   └─ 与 2D 同一数据源（store.entities）
+└── 雷达扫描扇形     — 扇形网格 + 前沿线
+    ├─ 半径 80m，32 段分割
+    ├─ 每帧旋转，与 2D 扫描同相位
+    └─ 透明度 0.06（低视觉侵入性）
+```
+
+**关键实现细节**：
+- 所有几何体使用 `BufferGeometry` + `BufferAttribute`，每帧更新 position 而不重建
+- `setDrawRange` 控制可见顶点数，避免空实体浪费 draw call
+- 角标框 4 个角 × 每个角 2 条线段（竖 + 横）= 8 条线段 × 2 端点 = 16 顶点/实体
+- 检测射线使用 `vertexColors` 材质，一次 draw call 包含多条射线

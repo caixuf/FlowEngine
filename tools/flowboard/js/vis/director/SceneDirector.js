@@ -19,6 +19,8 @@ import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
 import { createTreeView } from '../view/TreeView.js';
+import { createLabelView } from '../view/LabelView.js';
+import { createPerceptionView } from '../view/PerceptionView.js';
 import {
   tickDeadReckon, _dr,
   updateEntityDeadReckon, tickEntityDeadReckon, getEntitySmooth,
@@ -57,6 +59,8 @@ ViewRegistry.register('viaduct',     createViaductView);
 ViewRegistry.register('streetlight',  createStreetlightView);
 ViewRegistry.register('barrier',      createBarrierView);
 ViewRegistry.register('tree',         createTreeView);
+ViewRegistry.register('label',        createLabelView);
+ViewRegistry.register('perception',   createPerceptionView);
 
 export function createSceneDirector(scene) {
   const store = createSceneStore();
@@ -91,7 +95,7 @@ export function createSceneDirector(scene) {
   for (const [layerName, viewNames] of [
     ['env',   ['ground', 'viaduct']],
     ['road',  ['road', 'streetlight', 'barrier', 'connector', 'tree']],
-    ['agent', ['vehicle']],
+    ['agent', ['vehicle', 'label', 'perception']],
     ['infra', ['trafficLight', 'etcGate']],
   ]) {
     const layer = rootLayer.findDescendant(layerName);

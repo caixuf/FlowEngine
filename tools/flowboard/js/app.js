@@ -2,7 +2,7 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, resetMapView, closeNPCDetail, setPerfTier } from './vis/main.js';
+import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, resetMapView, closeNPCDetail, setPerfTier, togglePerfOverlay } from './vis/main.js';
 import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
 import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
 import { safeCall, reportDiag, clearDiag, _auditSceneMaterials } from './utils.js';
@@ -61,6 +61,12 @@ var chartTopic = '';
 var workspaceMode = 'observe';
 var connectRetries = 0;
 var lastNodeNames = '';
+
+// ── 性能节流：低频 DOM 更新时间戳 ──
+var _lastTableUpdateMs = 0;   // updateTopicStats / updateProcessTopics 上次更新时间
+var _lastChartUpdateMs = 0;   // updateCharts 上次更新时间
+var _TABLE_THROTTLE_MS = 1000; // 表格最多 1Hz
+var _CHART_THROTTLE_MS = 1000; // 图表最多 1Hz
 
 // SSE / data freshness state
 var _lastDataTime = 0;          // 上次收到数据的时间戳（performance.now()）
@@ -648,19 +654,42 @@ function updateAll() {
   // Phase 4.9: push topoData into the per-module stores first so each renderer
   // (scene2d, scene3d, charts) reads from its own module-scoped var.
   setTopoData(topoData);
+
+  const now = performance.now();
+  // ── 工作区可见性门控 ──
+  // 当前不在 observe 工作区时跳过 3D/2D（节省 GPU；rAF 循环仍跑但 update3D 不喂数据）
+  const in3D = workspaceMode === 'observe';
+  // 当前不在 analyze 工作区时跳过图表/拓扑表格（避免隐藏 DOM 全量 paint）
+  const inAnalyze = workspaceMode === 'analyze';
+
   safeCall('metrics', updateMetrics);
   safeCall('frames', updateFrames);
-  safeCall('topicStats', updateTopicStats);
-  safeCall('processTopics', updateProcessTopics);
-  // Feed dead reckoning FIRST so update3D reads fresh _dr.lastX/Z for
-  // obstacle / LiDAR world-anchoring without a one-frame lag.
-  safeCall('deadreckon', sync2DTarget);
-  safeCall('scene3d', function () { update3D(topoData); });
+
+  // 表格（topicStats / processTopics）：节流 1Hz，且只在 analyze 工作区更新
+  if (inAnalyze && now - _lastTableUpdateMs >= _TABLE_THROTTLE_MS) {
+    _lastTableUpdateMs = now;
+    safeCall('topicStats', updateTopicStats);
+    safeCall('processTopics', updateProcessTopics);
+  }
+
+  if (in3D) {
+    // Feed dead reckoning FIRST so update3D reads fresh _dr.lastX/Z for
+    // obstacle / LiDAR world-anchoring without a one-frame lag.
+    safeCall('deadreckon', sync2DTarget);
+    safeCall('scene3d', function () { update3D(topoData); });
+  }
+
   safeCall('topology', function() {
     var nn = (topoData.nodes||[]).map(function(n){ return n.name; }).sort().join(',');
     if (nn !== lastNodeNames) { lastNodeNames = nn; updateTopo(topoData); }
   });
-  safeCall('charts', updateCharts);
+
+  // 图表：节流 1Hz（D3 重绘开销大，500ms 数据帧更新 2 次没有意义）
+  if (now - _lastChartUpdateMs >= _CHART_THROTTLE_MS) {
+    _lastChartUpdateMs = now;
+    safeCall('charts', updateCharts);
+  }
+
   safeCall('counters', function() {
     document.getElementById('node-n').textContent = (topoData.nodes||[]).length;
     document.getElementById('frame-n').textContent = frameCount;
@@ -1379,6 +1408,91 @@ function initAll() {
     }
   }, 1000);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Keyboard shortcuts
+// ═══════════════════════════════════════════════════════════════
+
+const _CAMERA_SHORTCUTS = {
+  '1': 'chase', '2': 'top', '3': 'driver', '4': 'front', '5': 'map', '6': 'orbit',
+};
+const _TOGGLE_OBSERVE = new Set(['g', 't', 'l']);
+
+document.addEventListener('keydown', function(ev) {
+  // 不拦截输入框内的快捷键
+  const tag = ev.target && ev.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+  const key = ev.key.toLowerCase();
+
+  // 1-6 切换视角
+  if (key in _CAMERA_SHORTCUTS) {
+    ev.preventDefault();
+    const mode = _CAMERA_SHORTCUTS[key];
+    setCameraMode(mode);
+    // 同步按钮 active 状态
+    const btn = document.querySelector(`[data-cam="${mode}"]`);
+    if (btn) {
+      document.querySelectorAll('#cam-mode-btns .toggle-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+    }
+    return;
+  }
+
+  // g — 切换地面显示
+  if (key === 'g') {
+    ev.preventDefault();
+    const rg = window.__vis && window.__vis.roadGroup;
+    if (rg) { rg.visible = !rg.visible; }
+    return;
+  }
+
+  // t — 切换交通灯显示
+  if (key === 't') {
+    ev.preventDefault();
+    // 交通灯 group 在 infra 层，toggle 其可见性
+    if (window.__vis && window.__vis.director) {
+      const infraLayer = window.__vis.director.getLayer('infra');
+      if (infraLayer) {
+        infraLayer.visible = !infraLayer.visible;
+      }
+    }
+    return;
+  }
+
+  // l — 切换标签显示
+  if (key === 'l') {
+    ev.preventDefault();
+    if (window.__vis && window.__vis.director) {
+      const agentLayer = window.__vis.director.getLayer('agent');
+      if (agentLayer) {
+        agentLayer.visible = !agentLayer.visible;
+      }
+    }
+    return;
+  }
+
+  // p — 切换性能悬浮窗
+  if (key === 'p') {
+    ev.preventDefault();
+    togglePerfOverlay();
+    return;
+  }
+
+  // f — 全屏
+  if (key === 'f') {
+    ev.preventDefault();
+    const el = document.getElementById('scene3d-card') || document.getElementById('scene3d');
+    if (el) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        el.requestFullscreen();
+      }
+    }
+    return;
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════
 // Single namespace export — only `window.flowboard` is added to the
