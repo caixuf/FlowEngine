@@ -17,6 +17,7 @@
 #include "node_plugin.h"
 #include "topic_registry.h"
 #include "scenario_loader.h"
+#include "scenario_router.h"
 #include "clock_service.h"
 #include "logger.h"
 #include <cjson/cJSON.h>
@@ -26,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 #define NAV_DEFAULT_RATE_HZ 10.0
 
@@ -37,11 +39,22 @@ static struct {
 
     pthread_mutex_t mu;
     double ego_x;
+    double ego_y;
     int has_fusion;
 
     ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS];
     int route_count;
     int next_idx;
+    int lane_count;
+    double lane_width;
+    double road_length_m;
+    RouterGraph lane_graph;
+    int graph_ready;
+
+    int active_goal_lane;
+    double active_goal_speed;
+    int last_hop_target_lane;
+    uint64_t last_hop_pub_us;
     uint32_t seq;
 
     double rate_hz;
@@ -74,18 +87,25 @@ static void publish_route_status(void) {
     cJSON_Delete(root);
 }
 
-static void publish_route_step(const ScenarioRouteStep* step, int step_index, double ego_x) {
+static void publish_route_step_fields(RouteStepType type,
+                                      int target_lane,
+                                      double target_speed,
+                                      int branch_id,
+                                      double trigger_x,
+                                      int step_index,
+                                      double ego_x,
+                                      const char* label) {
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "route_step");
     cJSON_AddNumberToObject(root, "step_index", step_index);
     cJSON_AddNumberToObject(root, "route_count", g.route_count);
-    cJSON_AddStringToObject(root, "step_type", step_type_to_str(step->type));
-    cJSON_AddNumberToObject(root, "trigger_x", step->trigger_x);
+    cJSON_AddStringToObject(root, "step_type", step_type_to_str(type));
+    cJSON_AddNumberToObject(root, "trigger_x", trigger_x);
     cJSON_AddNumberToObject(root, "ego_x", ego_x);
-    cJSON_AddNumberToObject(root, "target_lane", step->target_lane);
-    cJSON_AddNumberToObject(root, "target_speed", step->target_speed);
-    cJSON_AddNumberToObject(root, "branch_id", step->branch_id);
-    if (step->label[0] != '\0') cJSON_AddStringToObject(root, "label", step->label);
+    cJSON_AddNumberToObject(root, "target_lane", target_lane);
+    cJSON_AddNumberToObject(root, "target_speed", target_speed);
+    cJSON_AddNumberToObject(root, "branch_id", branch_id);
+    if (label && label[0] != '\0') cJSON_AddStringToObject(root, "label", label);
     cJSON_AddNumberToObject(root, "seq", (double)g.seq++);
     cJSON_AddNumberToObject(root, "timestamp_us", (double)clock_now_us());
     char* s = cJSON_PrintUnformatted(root);
@@ -96,15 +116,79 @@ static void publish_route_step(const ScenarioRouteStep* step, int step_index, do
     cJSON_Delete(root);
 }
 
+static double lane_center_y(int lane_idx) {
+    return ((double)(g.lane_count - 1) * 0.5 - (double)lane_idx) * g.lane_width;
+}
+
+static int lane_idx_from_y(double y) {
+    if (g.lane_count <= 0 || g.lane_width <= 0.0) return -1;
+    int best = 0;
+    double best_abs = fabs(y - lane_center_y(0));
+    for (int i = 1; i < g.lane_count; ++i) {
+        double d = fabs(y - lane_center_y(i));
+        if (d < best_abs) { best_abs = d; best = i; }
+    }
+    return best;
+}
+
+static int resolve_target_lane(int raw_target_lane, int current_lane) {
+    if (g.lane_count <= 0) return -1;
+    if (raw_target_lane >= 0 && raw_target_lane < g.lane_count) return raw_target_lane;
+    if (raw_target_lane == -1) {
+        int t = current_lane - 1;
+        if (t < 0) t = 0;
+        return t;
+    }
+    if (raw_target_lane == 1) {
+        int t = current_lane + 1;
+        if (t >= g.lane_count) t = g.lane_count - 1;
+        return t;
+    }
+    return -1;
+}
+
+static void maybe_publish_next_lane_hop(double ego_x, double ego_y) {
+    if (!g.graph_ready || g.active_goal_lane < 0) return;
+
+    int current_lane = lane_idx_from_y(ego_y);
+    if (current_lane < 0) return;
+    if (current_lane == g.active_goal_lane) {
+        g.active_goal_lane = -1;
+        g.active_goal_speed = -1.0;
+        g.last_hop_target_lane = -1;
+        return;
+    }
+
+    RouterPath p;
+    if (router_astar(&g.lane_graph, current_lane, g.active_goal_lane, &p) != 0 || p.count < 2) {
+        return;
+    }
+
+    int next_lane = p.lane_ids[1];
+    uint64_t now_us = clock_now_us();
+    if (next_lane == g.last_hop_target_lane && now_us - g.last_hop_pub_us < 1500000ULL) {
+        return;
+    }
+
+    double hop_speed = (next_lane == g.active_goal_lane) ? g.active_goal_speed : -1.0;
+    publish_route_step_fields(ROUTE_LANE_CHANGE, next_lane, hop_speed, -1, ego_x,
+                              g.next_idx > 0 ? g.next_idx - 1 : 0, ego_x, "astar_lane_hop");
+    LOG_INFO("navigation", "A* hop lane %d -> %d (goal=%d)", current_lane, next_lane, g.active_goal_lane);
+    g.last_hop_target_lane = next_lane;
+    g.last_hop_pub_us = now_us;
+}
+
 static void on_fusion(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     cJSON* jx = cJSON_GetObjectItemCaseSensitive(root, "x");
+    cJSON* jy = cJSON_GetObjectItemCaseSensitive(root, "y");
     if (cJSON_IsNumber(jx)) {
         pthread_mutex_lock(&g.mu);
         g.ego_x = jx->valuedouble;
+        if (cJSON_IsNumber(jy)) g.ego_y = jy->valuedouble;
         g.has_fusion = 1;
         pthread_mutex_unlock(&g.mu);
     }
@@ -118,21 +202,39 @@ static int navigation_execute(TaskBase* task) {
         if (task->should_stop) break;
 
         double ego_x = 0.0;
+        double ego_y = 0.0;
         int has_fusion = 0;
         pthread_mutex_lock(&g.mu);
         ego_x = g.ego_x;
+        ego_y = g.ego_y;
         has_fusion = g.has_fusion;
         pthread_mutex_unlock(&g.mu);
 
         if (has_fusion && g.route_count > 0) {
             while (g.next_idx < g.route_count && ego_x >= g.route[g.next_idx].trigger_x) {
                 const ScenarioRouteStep* step = &g.route[g.next_idx];
-                publish_route_step(step, g.next_idx, ego_x);
+                int current_lane = lane_idx_from_y(ego_y);
+                int target_lane = step->target_lane;
+                if (step->type == ROUTE_LANE_CHANGE && current_lane >= 0) {
+                    int resolved = resolve_target_lane(step->target_lane, current_lane);
+                    if (resolved >= 0) target_lane = resolved;
+                }
+                publish_route_step_fields(step->type, target_lane, step->target_speed,
+                                          step->branch_id, step->trigger_x,
+                                          g.next_idx, ego_x, step->label);
                 LOG_INFO("navigation", "route step #%d triggered @x=%.1f type=%s lane=%d speed=%.1f",
                          g.next_idx, ego_x, step_type_to_str(step->type),
-                         step->target_lane, step->target_speed);
+                         target_lane, step->target_speed);
+                if (step->type == ROUTE_LANE_CHANGE && target_lane >= 0) {
+                    g.active_goal_lane = target_lane;
+                    g.active_goal_speed = step->target_speed;
+                }
                 g.next_idx++;
             }
+        }
+
+        if (has_fusion && g.active_goal_lane >= 0) {
+            maybe_publish_next_lane_hop(ego_x, ego_y);
         }
 
         uint64_t now_us = clock_now_us();
@@ -196,8 +298,26 @@ static int navigation_init(MessageBus* bus, Transport* transport,
         } else {
             g.route_count = sc->route_count;
             memcpy(g.route, sc->route, sizeof(ScenarioRouteStep) * (size_t)g.route_count);
+            g.lane_count = sc->road.lanes > 0 ? sc->road.lanes : 2;
+            g.lane_width = sc->road.lane_width > 0.0 ? sc->road.lane_width : 3.5;
+            g.ego_y = sc->ego.y;
+            g.road_length_m = 3000.0;
+            if (sc->duration_s > 0.0) (void)0;
+            if (g.lane_count > 0) {
+                router_graph_init(&g.lane_graph);
+                for (int i = 0; i < g.lane_count; ++i) {
+                    router_add_lane(&g.lane_graph, i, 0.0, g.road_length_m, i, 0, 22.0);
+                }
+                router_build_topology(&g.lane_graph, 8.0);
+                g.graph_ready = 1;
+            }
             scenario_free(sc);
-            LOG_INFO("navigation", "loaded %d route step(s) from '%s'", g.route_count, g.scenario_file);
+            g.active_goal_lane = -1;
+            g.active_goal_speed = -1.0;
+            g.last_hop_target_lane = -1;
+            g.last_hop_pub_us = 0;
+            LOG_INFO("navigation", "loaded %d route step(s) from '%s' lanes=%d lane_width=%.2f",
+                     g.route_count, g.scenario_file, g.lane_count, g.lane_width);
         }
     }
 
