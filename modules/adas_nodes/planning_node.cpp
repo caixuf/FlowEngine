@@ -1336,10 +1336,16 @@ protected:
             if (g.plan_count % 10 == 0) {
                 double dbg_rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
                 cJSON* dbg = cJSON_CreateObject();
+                char mode_buf[32] = {0};
+                statem_format_hierarchical(statem_current(&g.mode_sm), mode_buf, sizeof(mode_buf));
                 cJSON_AddNumberToObject(dbg, "seq", g.plan_count);
                 cJSON_AddNumberToObject(dbg, "ego_x", g.ego_x);
                 cJSON_AddNumberToObject(dbg, "ego_y", g.ego_y);
                 cJSON_AddNumberToObject(dbg, "ego_v", g.ego_v);
+                cJSON_AddStringToObject(dbg, "driver_mode", mode_buf[0] ? mode_buf : "NA:READY");
+                cJSON_AddNumberToObject(dbg, "route_lane", g.route_target_lane);
+                cJSON_AddNumberToObject(dbg, "route_count", g.route_count);
+                cJSON_AddNumberToObject(dbg, "route_next_idx", g.route_next_idx);
                 cJSON_AddNumberToObject(dbg, "road_center_y", dbg_rc_y);
                 cJSON_AddNumberToObject(dbg, "ego_d", g.ego_y - dbg_rc_y);
                 cJSON_AddNumberToObject(dbg, "target_lane_offset", g.target_lane_offset);
@@ -1474,7 +1480,16 @@ EXPORT_COROUTINE_TASK(PlanningTask, planning)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
-static const char* s_inputs[]  = { TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_TRAFFIC_LIGHTS, TOPIC_SCENE_FRAME, TOPIC_PLANNING_BEHAVIOR, nullptr };
+static const char* s_inputs[]  = {
+    TOPIC_FUSION_LOCALIZATION,
+    TOPIC_PERCEPTION_OBSTACLES,
+    TOPIC_ROAD_GEOMETRY,
+    TOPIC_ROAD_TRAFFIC_LIGHTS,
+    TOPIC_SCENE_FRAME,
+    TOPIC_PLANNING_BEHAVIOR,
+    TOPIC_NAVIGATION_PATH,
+    nullptr
+};
 static const char* s_outputs[] = { TOPIC_PLANNING_TRAJECTORY, nullptr };
 
 extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */

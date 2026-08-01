@@ -514,6 +514,18 @@ static void on_planning_debug(const Message* msg, void* user_data) {
     if (copy >= sizeof(g.planning_debug_json)) copy = sizeof(g.planning_debug_json) - 1;
     memcpy(g.planning_debug_json, msg->data, copy);
     g.planning_debug_json[copy] = '\0';
+
+    cJSON* pd = cJSON_Parse(g.planning_debug_json);
+    if (!pd) return;
+    cJSON* item = cJSON_GetObjectItemCaseSensitive(pd, "driver_mode");
+    if (cJSON_IsString(item) && item->valuestring) {
+        snprintf(g.driver_mode, sizeof(g.driver_mode), "%s", item->valuestring);
+    }
+    item = cJSON_GetObjectItemCaseSensitive(pd, "route_lane");
+    if (cJSON_IsNumber(item)) {
+        g.route_lane = (int)item->valuedouble;
+    }
+    cJSON_Delete(pd);
 }
 
 /* JSON 标量提取辅助（json_extract_double / json_extract_int / json_extract_string）

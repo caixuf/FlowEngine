@@ -54,6 +54,7 @@
     "min_avg_speed_mps": 5.0
   },
   "route": [
+    {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 12.0, "label": "enter_noa_route"},
     {"trigger_x": 2600.0, "type": "lane_change", "target_lane": -1, "target_speed": 10.0, "label": "prepare_terminal_slowdown"},
     {"trigger_x": 2850.0, "type": "lane_change", "target_lane": -1, "target_speed": 4.0, "label": "approach_end_zone"},
     {"trigger_x": 2970.0, "type": "lane_change", "target_lane": -1, "target_speed": 0.0, "label": "stop_before_road_end"}
