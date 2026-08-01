@@ -529,6 +529,7 @@ frame: THREE  | up: +Y | 单位: m | ENU→THREE: [x, z, -y] | ego_centered: tru
 | 改了模型/JS 但浏览器还显示旧效果（转向灯仍反） | `monitor_server.c` 把 `/tools/flowboard/models/*` 标 `Cache-Control: immutable`（1 年），模型文件改后浏览器永远用旧缓存不重拉。修复：models/ 改 `no-cache` + 前端模型 URL 加 `?v=` 缓存破坏版本号（改了模型就 bump） | `src/core/monitor_server.c` `cache_control_for_path` / `tools/flowboard/js/models.js` 模型 URL |
 | 红灯不停直接闯（planning override 设 0 无效） | planning 红灯 override 在 `spd_out` 生成**之后**才设 `command_speed=0`，但轨迹 `points[].v` 读的是旧 `spd_out`（`spd_out = v0*(1-t)+command_speed*t` 已按巡航速度算完）→ control 拿到的还是巡航速度。一直被"跟停红灯前停着的车"掩盖。修复：override 触发时**同步重建 spd_out**（当前速度→0 减速斜坡），轨迹末点归零 control 才真正刹停 | `planning_node.cpp` 红灯 override（~line 1209） |
 | 变道纠结：超车后立刻归位回慢车道、再超再归位（必现） | 归位只查目标车道 gap（空/远），不查目标车道**车速**——超车到快车道后切回慢车道，立刻又被慢车堵、再变道再归位，120s 必现 3 个来回。修复：归位加"目标车道可用"条件——空旷（无前车）或前车速度 ≥ 0.7×巡航才归位，否则留在快车道巡航 | `behavior_planner_node.cpp` 归位分支（~line 774） |
+| 右转/支路场景 control 跟踪坏轨迹（偏出路沿） | flowsim ref_path 用 lane centerline（含当前车道偏移）→ planning 再加 target_lane_offset → 双重偏移。修复：ref_path 优先用 route centerline（d=0=道路中心），planning 用 project_to_reference_path 把 ego 投影到 map_ref 参考线 Frenet 弧长，control 直接取 trajectory 前视点的全局 y 替代 road_center + lane_d 混拼 | `flowsim_node.cpp` publish_ref_path / `planning_node.cpp` project_to_reference_path / `control_node.cpp` target_path_y |
 
 ## 最新 tag
 

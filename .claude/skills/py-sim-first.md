@@ -174,7 +174,23 @@ tools/control_sim.py
 
 ## 五、常见故障排查
 
-### 5.1 Python 仿真 PASS 但 C++ 不工作
+### 5.1 参考路径链路不一致（最常见故障）
+
+**现象**：右转/支路场景下 control 跟踪偏出路沿的坏轨迹，但单测各节点都正常。
+
+**根因**：flowsim→planning→control 参考路径不一致：
+1. flowsim `publish_ref_path` 用 lane centerline（含当前车道偏移）→ `ref_path` 已经偏离道路中心
+2. planning 在偏移的 ref_path 上再叠加 `target_lane_offset` → 双重偏移
+3. control 忠实跟踪这条已经偏出路沿的坏轨迹
+
+**修复**：
+- `publish_ref_path` 优先用 route centerline（d=0=道路中心），lane centerline 仅作 fallback
+- `planning_node.cpp` 用 `project_to_reference_path` 把 ego 投影到 map_ref 的 Frenet 弧长坐标系
+- `control_node.cpp` 直接从 trajectory 前视点取 `target_path_y`，替代 `road_center_y + lane_d` 混拼
+
+**排查方法**：在 planning/debug 中对比 `ref_heading`、`ref_x/ref_y`、`ego_d` 和 `target_lane_offset` 的值。
+
+### 5.2 Python 仿真 PASS 但 C++ 不工作
 
 | 排查项 | 方法 |
 |--------|------|
