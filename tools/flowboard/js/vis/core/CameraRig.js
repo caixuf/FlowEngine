@@ -61,7 +61,10 @@ export function createCameraRig(canvas) {
           eg + height,
           ez - Math.sin(eh) * behind
         );
-        camera.lookAt(ex + Math.cos(eh) * 5, eg + 1, ez + Math.sin(eh) * 5);
+        /* lookAt 前向偏移 5m→2m：原来相机看车前 5m 处，车辆出现在画面
+         * 下方偏后；改为 2m 让车辆本身更接近视野中心。
+         * 高度 1→0.8：对应 fallback 车身重心（body.y=0.65，整车~0.7m）*/
+        camera.lookAt(ex + Math.cos(eh) * 2, eg + 0.8, ez + Math.sin(eh) * 2);
         break;
       }
       case 'top': {
