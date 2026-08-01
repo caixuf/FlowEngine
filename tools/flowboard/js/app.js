@@ -2,7 +2,7 @@
 // FlowBoard — Entry Point ES Module
 // ═══════════════════════════════════════════════════════════════
 // Imports from sub-modules
-import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, resetMapView, closeNPCDetail, setPerfTier } from './vis/main.js';
+import { init3DScene, resize3D, update3D, sceneReady, scene3d, setTopoData as setTopoData3D, setDebugCam, setCameraMode, resetCamera, resetMapView, closeNPCDetail, setPerfTier, setAudioMuted, isAudioMuted, setMinimapVisible } from './vis/main.js';
 import { init2D, init2DFallback, draw2D, switchSceneView, _2d as _2dState, setTopoData as setTopoData2D } from './scene2d.js';
 import { initCharts, updateCharts, onChartTopicChange, onChartRangeChange, setTopoData as setTopoDataChart } from './charts.js';
 import { safeCall, reportDiag, clearDiag, _auditSceneMaterials } from './utils.js';
@@ -1403,6 +1403,17 @@ window.flowboard = {
   resetCamera: resetCamera,
   resetMapView: resetMapView,
   setPerfTier: setPerfTier,
+  // 3D 增强开关：音效（默认静音）+ 小地图叠加层
+  toggleAudio: function (btn) {
+    const nowMuted = !isAudioMuted();
+    setAudioMuted(nowMuted);
+    if (btn) { btn.textContent = nowMuted ? '🔇' : '🔊'; btn.classList.toggle('active', !nowMuted); }
+  },
+  toggleMinimap: function (btn) {
+    const on = !(btn && btn.classList.contains('active'));
+    setMinimapVisible(on);
+    if (btn) btn.classList.toggle('active', on);
+  },
   // C.2: NPC detail panel
   closeNPCDetail: closeNPCDetail,
   // export

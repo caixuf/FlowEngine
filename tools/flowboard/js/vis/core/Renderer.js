@@ -3,17 +3,17 @@
  *
  * r160 迁移：
  *   - outputEncoding/sRGBEncoding → outputColorSpace/SRGBColorSpace
- *   - 全 devicePixelRatio（演示画质优先）
- *   - 阴影 4096（超锐）
- *   - EffectComposer: GTAO + Bloom + OutputPass + SMAA
+ *   - pixelRatio 封顶 1.5（初始；perfTier=high 时升到 min(dpr,2)）
+ *   - EffectComposer: Bloom + OutputPass + SMAA（GTAO 仅 high 档，
+ *     大场景下 GTAO 半分辨率 AO 噪点明显、性能开销大）
  */
 
 export function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({
     canvas, antialias: true, powerPreference: 'high-performance'
   });
-  /* 全分辨率：演示画质优先，不压 devicePixelRatio */
-  renderer.setPixelRatio(window.devicePixelRatio);
+  /* 封顶 1.5：4K/Retina 全 dpr 跑全套后处理帧率崩，1.5 观感几乎无差 */
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   /* r152+：outputColorSpace 替代 outputEncoding */
@@ -26,13 +26,15 @@ export function createRenderer(canvas) {
 }
 
 /** 创建后处理 Composer。
- *  r160 后处理管线：RenderPass → GTAOPass → Bloom → OutputPass → SMAA
+ *  管线：RenderPass → [GTAO(仅 opts.gtao)] → Bloom → OutputPass → SMAA
  *
- *  - GTAOPass：地面接触遮蔽 + 立体感（物体"落地"）
- *  - UnrealBloomPass：车灯/路灯/HDRI 高光辉光（阈值 0.8 只让灯发光）
+ *  - GTAOPass：接触遮蔽。默认关——半分辨率 AO 在大开阔场景（路面/草地
+ *    大平面 + 远景）下产生可见噪点涂抹，只在 perfTier=high 时启用
+ *  - UnrealBloomPass：车灯/路灯辉光（threshold 0.85 只让 emissive 表面过阈）
  *  - OutputPass：r16x 新范式，把 ACES tonemap + colorSpace 收到管线末端
- *  - SMAAPass：开 Composer 会丢 MSAA，用 SMAA 补回抗锯齿 */
-export function createComposer(renderer, scene, camera) {
+ *  - SMAAPass：开 Composer 会丢 MSAA，用 SMAA 补回抗锯齿
+ *  @param {object} [opts] { gtao: boolean } */
+export function createComposer(renderer, scene, camera, opts = {}) {
   if (!THREE.EffectComposer) {
     console.warn('[Renderer] EffectComposer unavailable, falling back to direct render');
     return null;
@@ -44,20 +46,22 @@ export function createComposer(renderer, scene, camera) {
   const renderPass = new THREE.RenderPass(scene, camera);
   composer.addPass(renderPass);
 
-  // 2. GTAO — 接触阴影 + 立体感
-  if (THREE.GTAOPass) {
+  // 2. GTAO — 仅 high 档（默认关，见函数头注释）
+  if (opts.gtao && THREE.GTAOPass) {
     const gtao = new THREE.GTAOPass(scene, camera);
     gtao.output = THREE.GTAOPass.OUTPUT.Default;
     composer.addPass(gtao);
   }
 
-  // 3. Bloom — 只让灯/发光体辉光（阈值 0.8 滤掉普通表面）
+  // 3. Bloom — 只让灯/发光体辉光
+  //    strength 0.35（原 0.6 会让白车道线/天空边缘泛雾）
+  //    threshold 0.85（原 1.0 实测车灯 emissive 大多压不过阈，Bloom 形同虚设）
   if (THREE.UnrealBloomPass) {
     const bloom = new THREE.UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.6,   // strength：适中，不让非灯体发糊
-      0.4,   // radius：柔和扩散
-      1.0    // threshold：只让 emissive > 1.0 发光（真车灯），普通表面不过阈
+      0.35,  // strength
+      0.3,   // radius
+      0.85   // threshold
     );
     composer.addPass(bloom);
   }
@@ -78,10 +82,26 @@ export function createComposer(renderer, scene, camera) {
   return composer;
 }
 
-/** 渲染一帧 */
+/** 渲染一帧（支持 perfTier 跳过 Composer） */
 export function renderFrame(renderer, composer, scene, camera) {
   if (composer) composer.render();
   else renderer.render(scene, camera);
+}
+
+/** 销毁 Composer 及其所有 Pass（perfTier=low 时释放 GPU 资源） */
+export function disposeComposer(composer) {
+  if (!composer) return;
+  try {
+    for (let i = composer.passes.length - 1; i >= 0; i--) {
+      const pass = composer.passes[i];
+      if (pass.dispose) pass.dispose();
+    }
+    composer.passes.length = 0;
+    if (composer.renderTarget1) composer.renderTarget1.dispose();
+    if (composer.renderTarget2) composer.renderTarget2.dispose();
+  } catch (e) {
+    console.warn('[Renderer] disposeComposer error:', e.message);
+  }
 }
 
 /** 调整大小 */

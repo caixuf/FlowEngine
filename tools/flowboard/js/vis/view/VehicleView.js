@@ -17,7 +17,7 @@
 import { deriveLightState, LIGHT_TURN_LEFT, LIGHT_TURN_RIGHT, LIGHT_HAZARD, LIGHT_HIGH_BEAM, LIGHT_LOW_BEAM } from './VehicleLights.js';
 import { getStdMaterial } from '../core/AssetFactory.js';
 import { initModelCache, getModel, _setVehicleLights, _relinkWheelUserData } from '../../models.js';
-import { worldToThree, headingToRotationY } from '../math/Coord.js';
+import { worldToThree, headingToRotationY, forwardENU } from '../math/Coord.js';
 
 // ═══════════════════════════════════════════════════════════
 // createVehicleLights — THREE 灯光网格工厂（原在 VehicleLights.js，
@@ -386,46 +386,62 @@ export function createVehicleView(scene, renderer, modelCache) {
 
   // ── 公共 API ──
 
-  /** 添加或更新一辆车 */
-  function updateVehicle(id, vehicleData, type) {
+  /** 添加或更新一辆车（支持 LOD 级别切换） */
+  function updateVehicle(id, vehicleData, type, lodLevel = LOD_NEAR) {
     // 确保 envMap 已生成
     _ensureEnvMap(renderer, scene);
 
     let entry = vehicleMap.get(id);
     if (!entry) {
-      entry = { group: null, lights: null, modelData: null, steerAngle: 0 };
+      entry = { group: null, lights: null, modelData: null, steerAngle: 0, lodLevel: -1 };
       vehicleMap.set(id, entry);
     }
 
-    // 尝试加载 glTF 模型
-    const gltf = getModel(type);
-    if (gltf && !entry.modelData) {
-      // 清除旧 fallback group（避免双重模型叠加）
+    // ── LOD 切换检测 ──
+    if (entry.lodLevel !== lodLevel) {
+      // 当 LOD 级别变化时，重建 group
       if (entry.group) {
-        vehicleGroup.remove(entry.group);
-        entry.group = null;
+        _removeVehicleGroup(entry);
       }
-      entry.modelData = gltf;
-      entry.group = _createGltfVehicle(gltf, id);
-      vehicleGroup.add(entry.group);
-
-      // glTF 模型自带灯节点（turnsignal_/brakelight_/headlight_），
-      // 由 _setVehicleLights 控制 emissive，不需要 PlaneGeometry 方块。
-      entry.lights = null;
-    }
-
-    // 如果没有 group（glTF 加载失败或未就绪），创建 fallback
-    if (!entry.group) {
-      entry.group = _createFallbackVehicle(type, id);
-      vehicleGroup.add(entry.group);
-      entry.lights = createVehicleLights(entry.group);
-      if (entry.lights && entry.lights.group) {
-        entry.group.add(entry.lights.group);
+      // LOD_HIDE: 不创建 group，直接跳过
+      if (lodLevel === LOD_HIDE) {
+        entry.lodLevel = lodLevel;
+        entry.modelData = null;
+        return entry;
       }
+
+      if (lodLevel === LOD_NEAR) {
+        // 近距：优先 glTF，回退程序化 fallback
+        const gltf = getModel(type);
+        if (gltf) {
+          entry.modelData = gltf;
+          entry.group = _createGltfVehicle(gltf, id);
+        }
+        if (!entry.group) {
+          entry.group = _createFallbackVehicle(type, id);
+          entry.lights = createVehicleLights(entry.group);
+          if (entry.lights && entry.lights.group) {
+            entry.group.add(entry.lights.group);
+          }
+        }
+      } else if (lodLevel === LOD_MID) {
+        // 中距：简化 box + 车轮（无 glTF，无灯光）
+        entry.modelData = null;
+        entry.group = _createLOD1Vehicle(type, id);
+      } else {
+        // 远距：纯色 box（无车轮，无阴影）
+        entry.modelData = null;
+        entry.group = _createLOD2Vehicle(type, id);
+      }
+
+      if (entry.group) {
+        vehicleGroup.add(entry.group);
+      }
+      entry.lodLevel = lodLevel;
     }
 
     // 更新位姿（ENU → THREE 坐标映射）
-    if (vehicleData) {
+    if (entry.group && vehicleData) {
       const [tx, ty, tz] = worldToThree(
         vehicleData.x || vehicleData.px || 0,
         vehicleData.y || vehicleData.py || 0,
@@ -434,6 +450,14 @@ export function createVehicleView(scene, renderer, modelCache) {
       entry.group.position.set(tx, ty, tz);
       entry.group.rotation.set(0, headingToRotationY(vehicleData.heading || vehicleData.yaw || 0), 0);
       entry.steerAngle = vehicleData.steer || vehicleData.steerAngle || 0;
+    }
+
+    // LOD_HIDE 的 entry 没有 group，但保留在 map 中（下次切换时重建）
+    if (lodLevel === LOD_HIDE) {
+      if (entry.group) {
+        _removeVehicleGroup(entry);
+      }
+      entry.lodLevel = lodLevel;
     }
 
     return entry;
@@ -445,24 +469,113 @@ export function createVehicleView(scene, renderer, modelCache) {
    * 车轮转向/滚动 + 灯光控制等每帧动画已全部合并到 update() 中。
    * 若需单独驱动动画，直接调 update(store, now) 即可。 */
 
+  // ═══════════════════════════════════════════════════════════
+  // LOD 系统 — 距离分级简化
+  // ═══════════════════════════════════════════════════════════
+
+  const LOD_NEAR = 0;    // < 60m  — 全精度 glTF（或程序化 fallback 含灯光/方向盘）
+  const LOD_MID  = 1;    // 60~150m — 简化双 box + 车轮（无灯光，无方向盘）
+  const LOD_FAR  = 2;    // 150~350m— 纯色 box（无车轮，无细节）
+  const LOD_HIDE = 3;    // > 350m — 隐藏（不渲染）
+
+  /* 阈值放宽（原 30/80/200 在 chase 视角下 40m 处的车就退化成扁盒，观感突变）：
+   * chase 相机常规可视 100m 内保持全模型，切换发生在肉眼难辨细节的距离。 */
+  const LOD_NEAR_MAX = 60;
+  const LOD_MID_MAX  = 150;
+  const LOD_FAR_MAX  = 350;
+
+  /** 根据距离 compute LOD 级别 */
+  function _computeLOD(distToEgo) {
+    if (distToEgo < LOD_NEAR_MAX) return LOD_NEAR;
+    if (distToEgo < LOD_MID_MAX)  return LOD_MID;
+    if (distToEgo < LOD_FAR_MAX)  return LOD_FAR;
+    return LOD_HIDE;
+  }
+
+  /** 创建 LOD1 简化车辆（box 车身 + 4 车轮，glTF 不可用时的中距离替代） */
+  function _createLOD1Vehicle(type, id) {
+    const group = new THREE.Group();
+
+    const COLOR_MAP = {
+      su7: 0x1a5288, sedan: 0x2a6fc4, truck: 0x4a4a4a,
+      suv: 0x2d6b3a, car: 0x2a6fc4,
+    };
+    const bodyColor = COLOR_MAP[type] || 0xcccccc;
+
+    // 车身：下身 + 座舱双 box（原单 box 高 0.5m 像压扁的砖，真车高 ~1.45m）
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: bodyColor, roughness: 0.6, metalness: 0.3,
+    });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.7, 1.8), bodyMat);
+    body.position.y = 0.6;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.55, 1.55), bodyMat);
+    cabin.position.set(-0.2, 1.2, 0);
+    cabin.castShadow = true;
+    group.add(cabin);
+
+    // 车轮：4 个圆柱（比 fallback 小一圈，因为 LOD1 远处看不到细节）
+    const wheelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.22, 8);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+    const wp = [[1.35, 0.32, -0.85], [1.35, 0.32, 0.85],
+                [-1.35, 0.32, -0.85], [-1.35, 0.32, 0.85]];
+    for (const [x, y, z] of wp) {
+      const w = new THREE.Mesh(wheelGeo, wheelMat);
+      w.position.set(x, y, z);
+      w.rotation.x = Math.PI / 2;
+      group.add(w);
+    }
+
+    group.name = 'lod1_' + type + '_' + id;
+    return group;
+  }
+
+  /** 创建 LOD2 极简车辆（纯色 box，无车轮，无细节）
+   *  150~350m 距离几乎只能看到一个小色块在移动。 */
+  function _createLOD2Vehicle(type, id) {
+    const group = new THREE.Group();
+
+    const COLOR_MAP = {
+      su7: 0x1a5288, sedan: 0x2a6fc4, truck: 0x4a4a4a,
+      suv: 0x2d6b3a, car: 0x2a6fc4,
+    };
+    const bodyColor = COLOR_MAP[type] || 0xcccccc;
+
+    const mat = new THREE.MeshBasicMaterial({ color: bodyColor });
+    // 体量按真车（原 0.4m 高扁片在远处像贴地色块）
+    const body = new THREE.Mesh(new THREE.BoxGeometry(4.2, 1.2, 1.7), mat);
+    body.position.y = 0.7;
+    group.add(body);
+
+    group.name = 'lod2_' + type + '_' + id;
+    return group;
+  }
+
+  /** 移除车辆组并释放 GPU 资源 */
+  function _removeVehicleGroup(entry) {
+    if (!entry || !entry.group) return;
+    vehicleGroup.remove(entry.group);
+    entry.group.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) {
+          child.material.forEach(m => m.dispose());
+        } else {
+          child.material.dispose();
+        }
+      }
+    });
+    entry.group = null;
+    entry.lights = null;
+  }
 
   /** 移除车辆 */
   function removeVehicle(id) {
     const entry = vehicleMap.get(id);
     if (!entry) return;
-    if (entry.group) {
-      vehicleGroup.remove(entry.group);
-      entry.group.traverse((child) => {
-        if (child.geometry) child.geometry.dispose();
-        if (child.material) {
-          if (Array.isArray(child.material)) {
-            child.material.forEach(m => m.dispose());
-          } else {
-            child.material.dispose();
-          }
-        }
-      });
-    }
+    _removeVehicleGroup(entry);
     vehicleMap.delete(id);
   }
 
@@ -492,21 +605,60 @@ export function createVehicleView(scene, renderer, modelCache) {
     // 收集所有需要渲染的实体（ego + 其他车辆/NPC）
     const activeIds = new Set();
 
-    // 1. ego 车辆（type 用于选模型：'ego' → su7）
+    // 1. ego 车辆（type 用于选模型：'ego' → su7）— 始终 LOD_NEAR
     if (store.ego) {
       const egoId = 'ego';
       activeIds.add(egoId);
-      updateVehicle(egoId, store.ego, 'su7');
+      updateVehicle(egoId, store.ego, 'su7', LOD_NEAR);
+      // 尾气粒子（ENU 算尾部位置，worldToThree 转 THREE 系再 emit）
+      const pf = scene.userData.particleFX;
+      if (pf && store.ego) {
+        const h = store.ego.heading || 0;
+        const [fx, fy] = forwardENU(h);
+        const rearX = store.ego.x - fx * 2.3;
+        const rearY = store.ego.y - fy * 2.3;
+        const [tx, tyLow, tz] = worldToThree(rearX, rearY, 0);
+        pf.emitExhaust(tx, tyLow + 0.15, tz, store.ego.speed || 0, store.ego.throttle || 0);
+        pf.emitDust(tx, tyLow + 0.05, tz, store.ego.brake || 0);
+      }
     }
 
     // 2. 其他实体（car/truck/suv/pedestrian — 排除红绿灯/ETC/停止线等非车辆）
     const VEHICLE_TYPES = new Set(['car', 'suv', 'truck', 'pedestrian']);
     const entities = store.entities || [];
+    const egoPos = store.ego ? { x: store.ego.x, y: store.ego.y } : null;
+
     for (const ent of entities) {
       if (!ent || !ent.id) continue;
       if (!VEHICLE_TYPES.has(ent.type)) continue;
       activeIds.add(ent.id);
-      updateVehicle(ent.id, ent, ent.type || 'car');
+
+      // 计算 LOD 级别：根据与 ego 的 2D 距离
+      let lodLevel = LOD_NEAR;
+      if (egoPos) {
+        const dx = (ent.x || 0) - egoPos.x;
+        const dy = (ent.y || 0) - egoPos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        lodLevel = _computeLOD(dist);
+      }
+      // LOD_HIDE 的实体不加入 activeIds（让 removeVehicle 走删除逻辑）
+      if (lodLevel === LOD_HIDE) {
+        continue;
+      }
+      activeIds.add(ent.id);
+      updateVehicle(ent.id, ent, ent.type || 'car', lodLevel);
+      // NPC 尾气粒子（仅 LOD_NEAR 可见；同样走 worldToThree 转 THREE 系）
+      if (lodLevel === LOD_NEAR) {
+        const pf = scene.userData.particleFX;
+        if (pf) {
+          const h = ent.heading || 0;
+          const [fx, fy] = forwardENU(h);
+          const rearX = (ent.x || 0) - fx * 2.0;
+          const rearY = (ent.y || 0) - fy * 2.0;
+          const [tx, tyLow, tz] = worldToThree(rearX, rearY, 0);
+          pf.emitExhaust(tx, tyLow + 0.15, tz, ent.speed || 0, ent.throttle || 0);
+        }
+      }
     }
 
     // 3. 删除消失的车辆
