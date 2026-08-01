@@ -13,9 +13,9 @@ Scene Director (vis/director/SceneDirector.js)
 Layer 树 (vis/core/Layer.js — Qt 对象树 + 错误隔离)
   root
   ├── env     (ground, viaduct)
-  ├── road    (road, streetlight, barrier, connector)
+  ├── road    (road, streetlight, barrier, connector, tree)
   ├── agent   (vehicle)
-  └── infra   (trafficLight, etcGate)
+  └── infra   (trafficLight, etcGate, mapOverlay)
     ↓
 View Modules (vis/view/*.js)         ← 你要写的模块在这里
   ↓
