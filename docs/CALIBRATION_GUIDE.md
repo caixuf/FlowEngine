@@ -226,5 +226,4 @@
 - [pipeline.json](../config/pipeline.json) — 仿真默认配置
 - [pipeline_car.json](../config/pipeline_car.json) — 真车 RC 小车配置
 - [HARDWARE_DEPLOYMENT.md](HARDWARE_DEPLOYMENT.md) — 真车硬件部署
-- [REAL_VEHICLE_ROADMAP.md](REAL_VEHICLE_ROADMAP.md) — 真车部署待办清单
 - [control_node.cpp](../modules/adas_nodes/control_node.cpp) — 控制算法实现（含所有参数含义和默认值）

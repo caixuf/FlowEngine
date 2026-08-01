@@ -417,7 +417,6 @@ print('ESC max throttle (2000us)')
 
 - [真车硬件部署指南](HARDWARE_DEPLOYMENT.md) — 架构对比、节点清单
 - [SocketCAN 执行器教程](tutorials/15_socketcan_actuator.md) — CAN 总线升级路线
-- [真车部署待办清单](REAL_VEHICLE_ROADMAP.md) — 剩余缺位项
 - [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) — 仿真模式对照
 - `tools/waypoint_record.py` — 航点录制工具（源码）
 - `tools/waypoint_player.py` — 航点查看/重采样工具
