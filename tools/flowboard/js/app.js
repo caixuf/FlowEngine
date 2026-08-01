@@ -832,40 +832,115 @@ function clearTopicFilter() {
   onFilterChange();
 }
 
+// ── 增量 DOM 更新：键控行缓存，避免全量 innerHTML 重建 ──
+var _tsRowCache = {};   // key = topic name, value = {tr, cells[]}
+var _ptRowCache = {};   // key = node+'|'+topic, value = {tr, cells[]}
+
+function _ensureTable(containerId, headers) {
+  var container = document.getElementById(containerId);
+  if (!container) return null;
+  var table = container.querySelector('table.inc-table');
+  if (!table) {
+    container.innerHTML = '';
+    table = document.createElement('table');
+    table.className = 'inc-table';
+    table.style.cssText = 'width:100%;font-size:10px;border-collapse:collapse';
+    var thead = document.createElement('thead');
+    var hr = document.createElement('tr');
+    hr.style.cssText = 'color:#8b949e;border-bottom:1px solid#21262d';
+    headers.forEach(function(h) {
+      var th = document.createElement('th');
+      th.style.cssText = h.style||'';
+      th.textContent = h.label;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    table.appendChild(document.createElement('tbody'));
+    container.appendChild(table);
+  }
+  return table.querySelector('tbody');
+}
+
 function updateTopicStats() {
   var ts = (topoData.metrics||{}).topics || [];
   ts = ts.filter(function(t) { return topicMatches(t.topic||t.name||''); });
+  var container = document.getElementById('topic-stats');
   if (!ts.length) {
-    document.getElementById('topic-stats').innerHTML = '<span style="color:#484f58">Waiting for per-topic data...</span>';
+    container.innerHTML = '<span style="color:#484f58">Waiting for per-topic data...</span>';
+    _tsRowCache = {};
     return;
   }
-  document.getElementById('topic-stats').innerHTML =
-    '<table style="width:100%;font-size:10px;border-collapse:collapse">'+
-    '<tr style="color:#8b949e;border-bottom:1px solid#21262d">'+
-    '<th style="text-align:left;padding:2px 3px">Topic</th>'+
-    '<th style="text-align:center;padding:2px 3px">QoS</th>'+
-    '<th style="text-align:right;padding:2px 3px">Pub</th>'+
-    '<th style="text-align:right;padding:2px 3px">Del</th>'+
-    '<th style="text-align:right;padding:2px 3px">Drop</th>'+
-    '<th style="text-align:right;padding:2px 3px">Lat</th>'+
-    '<th style="text-align:right;padding:2px 3px">DL</th>'+
-    '<th style="text-align:right;padding:2px 3px">Hz</th></tr>'+
-    ts.map(function(t) {
-      var dropColor = (t.drop||0) > 0 ? 'color:#f85149' : 'color:#3fb950';
-      var dl = (t.deadline_violations||0);
-      var dlColor = dl > 0 ? 'color:#f85149;font-weight:bold' : 'color:#3fb950';
-      var rel = (t.qos_reliability||t.reliability||'best_effort');
-      var relColor = rel === 'reliable' ? 'color:#3fb950' : 'color:#8b949e';
-      return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="var el=document.getElementById(\'topic-filter\');if(el.value===\''+(t.topic||t.name)+'\')el.value=\'\';else el.value=\''+(t.topic||t.name)+'\';onFilterChange()">'+
-        '<td style="padding:2px 3px;color:#58a6ff" title="'+(t.topic||t.name)+'">'+((t.topic||t.name||'?').split('/').pop())+'</td>'+
-        '<td style="text-align:center;padding:2px 3px;font-size:9px;'+relColor+'" title="depth='+(t.qos_depth||'?')+' '+rel+'">'+rel+'</td>'+
-        '<td style="text-align:right;padding:2px 3px">'+(t.pub||0)+'</td>'+
-        '<td style="text-align:right;padding:2px 3px">'+(t.del||0)+'</td>'+
-        '<td style="text-align:right;padding:2px 3px;'+dropColor+'">'+(t.drop||0)+'</td>'+
-        '<td style="text-align:right;padding:2px 3px;color:#d29922" title="p50='+(t.p50_us||'?')+'µs p99='+(t.p99_us||'?')+'µs">'+(t.lat_us||0)+'µs</td>'+
-        '<td style="text-align:right;padding:2px 3px;'+dlColor+'" title="deadline violations">'+(dl>999?'999+':dl)+'</td>'+
-        '<td style="text-align:right;padding:2px 3px">'+(t.freq||0).toFixed(1)+'</td></tr>';
-    }).join('')+'</table>';
+  var tbody = _ensureTable('topic-stats', [
+    {label:'Topic',style:'text-align:left;padding:2px 3px'},
+    {label:'QoS',style:'text-align:center;padding:2px 3px'},
+    {label:'Pub',style:'text-align:right;padding:2px 3px'},
+    {label:'Del',style:'text-align:right;padding:2px 3px'},
+    {label:'Drop',style:'text-align:right;padding:2px 3px'},
+    {label:'Lat',style:'text-align:right;padding:2px 3px'},
+    {label:'DL',style:'text-align:right;padding:2px 3px'},
+    {label:'Hz',style:'text-align:right;padding:2px 3px'}
+  ]);
+  if (!tbody) return;
+
+  var seen = {};
+  ts.forEach(function(t) {
+    var key = t.topic||t.name||'?';
+    seen[key] = true;
+    var drop = t.drop||0;
+    var dl = t.deadline_violations||0;
+    var rel = t.qos_reliability||t.reliability||'best_effort';
+    var freq = (t.freq||0).toFixed(1);
+    var lat = (t.lat_us||0)+'µs';
+    var dlStr = dl>999?'999+':String(dl);
+
+    var cache = _tsRowCache[key];
+    if (!cache) {
+      var tr = document.createElement('tr');
+      tr.style.cssText = 'border-bottom:1px solid#161b22;cursor:pointer';
+      (function(topicKey) {
+        tr.addEventListener('click', function() {
+          var el = document.getElementById('topic-filter');
+          if (el) { el.value = el.value === topicKey ? '' : topicKey; onFilterChange(); }
+        });
+      })(key);
+      var cells = [];
+      for (var i = 0; i < 8; i++) {
+        var td = document.createElement('td');
+        tr.appendChild(td);
+        cells.push(td);
+      }
+      cells[0].style.cssText = 'padding:2px 3px;color:#58a6ff';
+      cells[0].title = key;
+      cells[1].style.cssText = 'text-align:center;padding:2px 3px;font-size:9px';
+      cells[2].style.cssText = 'text-align:right;padding:2px 3px';
+      cells[3].style.cssText = 'text-align:right;padding:2px 3px';
+      cells[4].style.cssText = 'text-align:right;padding:2px 3px';
+      cells[5].style.cssText = 'text-align:right;padding:2px 3px;color:#d29922';
+      cells[6].style.cssText = 'text-align:right;padding:2px 3px';
+      cells[7].style.cssText = 'text-align:right;padding:2px 3px';
+      tbody.appendChild(tr);
+      cache = _tsRowCache[key] = {tr:tr, cells:cells};
+    }
+    var c = cache.cells;
+    c[0].textContent = key.split('/').pop();
+    c[1].textContent = rel;
+    c[1].style.color = rel === 'reliable' ? '#3fb950' : '#8b949e';
+    c[2].textContent = t.pub||0;
+    c[3].textContent = t.del||0;
+    c[4].textContent = drop;
+    c[4].style.color = drop > 0 ? '#f85149' : '#3fb950';
+    c[5].textContent = lat;
+    c[5].title = 'p50='+(t.p50_us||'?')+'µs p99='+(t.p99_us||'?')+'µs';
+    c[6].textContent = dlStr;
+    c[6].style.color = dl > 0 ? '#f85149' : '#3fb950';
+    c[6].style.fontWeight = dl > 0 ? 'bold' : '';
+    c[7].textContent = freq;
+  });
+  // 删除已不存在的行
+  Object.keys(_tsRowCache).forEach(function(k) {
+    if (!seen[k]) { var r = _tsRowCache[k].tr; if (r.parentNode) r.parentNode.removeChild(r); delete _tsRowCache[k]; }
+  });
 }
 
 function updateProcessTopics() {
@@ -873,38 +948,67 @@ function updateProcessTopics() {
   if (!endpoints.length) {
     (topoData.nodes||[]).forEach(function(n) {
       (n.topics||[]).forEach(function(t) {
-        endpoints.push({
-          node: n.name,
-          topic: t.topic||t.name,
-          role: endpointRoleFromCaps(t),
-          type_id: t.type_id||'0x00000000',
-          freq: Number(t.freq||0)
-        });
+        endpoints.push({node:n.name, topic:t.topic||t.name, role:endpointRoleFromCaps(t), type_id:t.type_id||'0x00000000', freq:Number(t.freq||0)});
       });
     });
   }
   if (!endpoints.length) {
     document.getElementById('process-topics').innerHTML = '<span class="muted">Waiting for registry...</span>';
+    _ptRowCache = {};
     return;
   }
-  document.getElementById('process-topics').innerHTML =
-    '<table style="width:100%;font-size:10px;border-collapse:collapse">'+
-    '<tr style="color:#8b949e;border-bottom:1px solid#21262d">'+
-    '<th style="text-align:left;padding:3px 4px">Process</th>'+
-    '<th style="text-align:left;padding:3px 4px">Role</th>'+
-    '<th style="text-align:left;padding:3px 4px">Topic</th>'+
-    '<th style="text-align:left;padding:3px 4px">Type</th>'+
-    '<th style="text-align:right;padding:3px 4px">Freq</th></tr>'+
-    endpoints.sort(function(a,b) {
-      return (a.node||'').localeCompare(b.node||'') || (a.topic||'').localeCompare(b.topic||'');
-    }).map(function(e) {
-      return '<tr style="border-bottom:1px solid#161b22;cursor:pointer" onclick="showNodeDetail(\''+(e.node||'')+'\')">'+
-        '<td style="padding:3px 4px;color:#c9d1d9">'+(e.node||'?')+'</td>'+
-        '<td style="padding:3px 4px"><span class="'+roleClass(e.role||'unknown')+'">'+(e.role||'unknown')+'</span></td>'+
-        '<td style="padding:3px 4px" class="topic-full">'+(e.topic||'?')+'</td>'+
-        '<td style="padding:3px 4px" class="muted mono">'+(e.type_id||'—')+'</td>'+
-        '<td style="text-align:right;padding:3px 4px">'+Number(e.freq||0).toFixed(1)+'Hz</td></tr>';
-    }).join('')+'</table>';
+  var tbody = _ensureTable('process-topics', [
+    {label:'Process',style:'text-align:left;padding:3px 4px'},
+    {label:'Role',style:'text-align:left;padding:3px 4px'},
+    {label:'Topic',style:'text-align:left;padding:3px 4px'},
+    {label:'Type',style:'text-align:left;padding:3px 4px'},
+    {label:'Freq',style:'text-align:right;padding:3px 4px'}
+  ]);
+  if (!tbody) return;
+
+  var seen = {};
+  endpoints.sort(function(a,b) {
+    return (a.node||'').localeCompare(b.node||'') || (a.topic||'').localeCompare(b.topic||'');
+  }).forEach(function(e) {
+    var key = (e.node||'')+'|'+(e.topic||'');
+    seen[key] = true;
+    var freq = Number(e.freq||0).toFixed(1)+'Hz';
+    var role = e.role||'unknown';
+    var cache = _ptRowCache[key];
+    if (!cache) {
+      var tr = document.createElement('tr');
+      tr.style.cssText = 'border-bottom:1px solid#161b22;cursor:pointer';
+      (function(nodeName) {
+        tr.addEventListener('click', function() { showNodeDetail(nodeName); });
+      })(e.node||'');
+      var cells = [];
+      for (var i = 0; i < 5; i++) {
+        var td = document.createElement('td');
+        tr.appendChild(td);
+        cells.push(td);
+      }
+      cells[0].style.cssText = 'padding:3px 4px;color:#c9d1d9';
+      cells[1].style.cssText = 'padding:3px 4px';
+      cells[2].style.cssText = 'padding:3px 4px';
+      cells[2].className = 'topic-full';
+      cells[3].style.cssText = 'padding:3px 4px';
+      cells[3].className = 'muted mono';
+      cells[4].style.cssText = 'text-align:right;padding:3px 4px';
+      var roleSpan = document.createElement('span');
+      cells[1].appendChild(roleSpan);
+      tbody.appendChild(tr);
+      cache = _ptRowCache[key] = {tr:tr, cells:cells, roleSpan:roleSpan};
+    }
+    cache.cells[0].textContent = e.node||'?';
+    cache.roleSpan.className = roleClass(role);
+    cache.roleSpan.textContent = role;
+    cache.cells[2].textContent = e.topic||'?';
+    cache.cells[3].textContent = e.type_id||'—';
+    cache.cells[4].textContent = freq;
+  });
+  Object.keys(_ptRowCache).forEach(function(k) {
+    if (!seen[k]) { var r = _ptRowCache[k].tr; if (r.parentNode) r.parentNode.removeChild(r); delete _ptRowCache[k]; }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -199,8 +199,20 @@ function _updatePerfOverlay() {
 }
 
 function _startRenderLoop() {
-  function loop() {
+  let _lastFrameTime = 0;
+  const _TARGET_FPS_MS = 1000 / 60; // 60fps 目标帧间隔
+
+  function loop(timestamp) {
     requestAnimationFrame(loop);
+    // 标签页隐藏时跳过渲染（节省 GPU）
+    if (document.hidden) return;
+    // observe 工作区不可见时降帧到 10fps（Analyze/Operate 工作区）
+    const isObserve = document.body.getAttribute('data-workspace') !== 'analyze' &&
+                      document.body.getAttribute('data-workspace') !== 'operate';
+    const minInterval = isObserve ? _TARGET_FPS_MS : 100; // 10fps when hidden
+    if (timestamp - _lastFrameTime < minInterval) return;
+    _lastFrameTime = timestamp;
+
     if (!_ready) return;
 
     try {
