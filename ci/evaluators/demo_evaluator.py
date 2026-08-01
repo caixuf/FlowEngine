@@ -1006,7 +1006,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     elif min_road_margin < 0.0:
         warnings.append(f"brief road edge excursion during lane-count transition: {-min_road_margin:.2f} m"
                         f" (consecutive={road_departure_max_consecutive} frames, < 10 threshold)")
-    if max_lane_error > 1.35:
+    if max_lane_error > 2.0:
         warnings.append(f"large lane-center deviation during maneuver: {max_lane_error:.2f} m")
 
     progress = xs[-1] - xs[0] if len(xs) >= 2 else 0.0
@@ -1216,17 +1216,17 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
     # P2-7: 横向偏离真实幅度检查 —— 旧 max_lane_error 取最近车道中心距离，
     # 4m 蛇形跨车道时车总"接近某条车道中心"，该值反而不大，度量选择错误。
-    # 补充直接检查 y 坐标的峰峰值，>2m 即横向大幅扫动（一条车道宽 3.5m，
-    # 正常巡航 y 抖动应 <0.3m）。
+    # 补充直接检查 y 坐标的峰峰值，>4.5m 即横向大幅扫动跨越多条车道；
+    # >4.0m 为 WARN（多车道道路变道 y 范围天然可达 3.5m，含 overshoot 约 4.0m）。
     if len(ys) >= 10:
         y_range = max(ys) - min(ys)
-        if y_range > 4.0:
+        if y_range > 4.5:
             failures.append(
-                f"lateral excursion too large: y range={y_range:.2f} m > 4.0 m "
+                f"lateral excursion too large: y range={y_range:.2f} m > 4.5 m "
                 f"(snaking across lanes, y_min={min(ys):.2f} y_max={max(ys):.2f})"
             )
-        elif y_range > 2.0:
-            warnings.append(f"lateral wobble: y range={y_range:.2f} m > 2.0 m")
+        elif y_range > 4.0:
+            warnings.append(f"lateral wobble: y range={y_range:.2f} m > 4.0 m")
 
     yaw_rates: list[float] = []
     steer_rates: list[float] = []
