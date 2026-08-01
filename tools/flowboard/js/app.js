@@ -56,7 +56,9 @@ var selectedNode = null;
 var reconnectTimer = null;
 var sseRenewTimer = null;
 var trainingPollTimer = null;
+var opsPollTimer = null;
 var chartTopic = '';
+var workspaceMode = 'observe';
 var connectRetries = 0;
 var lastNodeNames = '';
 
@@ -72,6 +74,7 @@ try {
   var saved = JSON.parse(localStorage.getItem('flowboard')||'{}');
   if (saved.url) serverUrl = saved.url;
   if (saved.topic) chartTopic = saved.topic;
+  if (saved.workspace) workspaceMode = saved.workspace;
 } catch(e) {}
 
 // ═══════════════════════════════════════════════════════════════
@@ -161,11 +164,26 @@ function saveState() {
     localStorage.setItem('flowboard', JSON.stringify({
       url: serverUrl,
       topic: chartTopic,
+      workspace: workspaceMode,
       collapsed: Array.from(document.querySelectorAll('.card.collapsed')).map(function(c){
         return c.querySelector('h2').textContent.trim();
       })
     }));
   } catch(e) {}
+}
+
+function switchWorkspace(mode) {
+  if (['observe','analyze','operate'].indexOf(mode) < 0) mode = 'observe';
+  workspaceMode = mode;
+  document.body.setAttribute('data-workspace', mode);
+  var nav = document.getElementById('workspace-nav');
+  if (nav) {
+    nav.querySelectorAll('.ws-btn').forEach(function(btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-ws') === mode);
+    });
+  }
+  if (mode === 'observe') setTimeout(resize3D, 120);
+  saveState();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -775,6 +793,11 @@ function updateFrames() {
 // ═══════════════════════════════════════════════════════════════
 
 function onFilterChange() { saveState(); updateAll(); }
+function clearTopicFilter() {
+  var el = document.getElementById('topic-filter');
+  if (el) el.value = '';
+  onFilterChange();
+}
 
 function updateTopicStats() {
   var ts = (topoData.metrics||{}).topics || [];
@@ -1071,6 +1094,115 @@ async function promoteTrainingModel(name) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Operations modal (bag replay + learning loop)
+// ═══════════════════════════════════════════════════════════════
+
+function _renderOpsJob(idPrefix, job) {
+  var stateEl = document.getElementById(idPrefix + '-state');
+  var logEl = document.getElementById(idPrefix + '-log');
+  if (stateEl) {
+    stateEl.textContent = job && job.running ? ('running (pid '+(job.pid||'?')+')') : 'idle';
+    stateEl.style.color = job && job.running ? '#d29922' : '#58a6ff';
+  }
+  if (logEl) {
+    var lines = (job && job.log_tail) || [];
+    logEl.textContent = lines.length ? lines.join('\n') : ('ops-bag' === idPrefix ? 'No bag replay job yet.' : 'No learning-loop job yet.');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function openOpsModal() {
+  document.getElementById('ops-modal').classList.add('show');
+  refreshOpsStatus();
+  if (!opsPollTimer) opsPollTimer = setInterval(refreshOpsStatus, 1500);
+}
+
+function closeOpsModal() {
+  document.getElementById('ops-modal').classList.remove('show');
+  if (opsPollTimer) { clearInterval(opsPollTimer); opsPollTimer = null; }
+}
+
+function setOpsOutput(text) {
+  var el = document.getElementById('ops-output');
+  if (!el) return;
+  el.textContent = text || '';
+  el.scrollTop = el.scrollHeight;
+}
+
+async function refreshOpsStatus() {
+  try {
+    var r = await fetch(serverUrl + '/api/ops/status');
+    var d = await r.json();
+    if (!d.ok) {
+      setOpsOutput(d.error || 'ops status failed');
+      return;
+    }
+    var jobs = d.jobs || {};
+    _renderOpsJob('ops-bag', jobs.bag_replay || {});
+    _renderOpsJob('ops-learning', jobs.learning_loop || {});
+  } catch(err) {
+    setOpsOutput('ops API offline');
+  }
+}
+
+async function runOpsAction(action, extra) {
+  var payload = Object.assign({ action: action }, extra || {});
+  try {
+    var r = await fetch(serverUrl + '/api/ops/run', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    var d = await r.json();
+    if (!d.ok) {
+      setOpsOutput((d.error || 'operation failed') + (d.output ? '\n' + d.output : ''));
+      toast('操作失败');
+    } else {
+      var msg = d.message || d.output || (action + ' ok');
+      setOpsOutput(msg);
+      toast('操作已提交');
+    }
+    refreshOpsStatus();
+  } catch(err) {
+    setOpsOutput('ops API offline');
+    toast('ops API offline');
+  }
+}
+
+function startBagReplay() {
+  var path = (document.getElementById('ops-bag-path').value || '').trim();
+  runOpsAction('bag_replay_start', { path: path });
+}
+
+function stopBagReplay() {
+  runOpsAction('bag_replay_stop');
+}
+
+function runBagInfo() {
+  var path = (document.getElementById('ops-bag-path').value || '').trim();
+  runOpsAction('bag_info', { path: path });
+}
+
+function startLearningEval() {
+  var model = (document.getElementById('ops-eval-model').value || '').trim();
+  var duration = parseInt((document.getElementById('ops-eval-duration').value || '45').trim(), 10);
+  var promote = !!document.getElementById('ops-eval-promote').checked;
+  runOpsAction('learning_eval_start', { model: model, duration: duration, promote: promote });
+}
+
+function startLearningFull() {
+  var backend = document.getElementById('ops-loop-backend').value;
+  var collect = parseInt((document.getElementById('ops-loop-collect').value || '60').trim(), 10);
+  var name = (document.getElementById('ops-loop-name').value || '').trim();
+  var promote = !!document.getElementById('ops-loop-promote').checked;
+  runOpsAction('learning_full_start', { backend: backend, collect: collect, name: name, promote: promote });
+}
+
+function stopLearningLoop() {
+  runOpsAction('learning_stop');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Dead-reckoning feed + 2D trail sync — runs inside updateAll() on
 // every SSE data tick. This is the SINGLE feed point for the
 // dead-reckoning engine, so it works whether 3D, 2D, or the 2D
@@ -1155,6 +1287,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 function initAll() {
+  switchWorkspace(workspaceMode || 'observe');
   // 1. Initialize D3 topology graph
   initTopo();
 
@@ -1215,6 +1348,7 @@ function initAll() {
   setTimeout(function() {
     doConnect().catch(function() { doSimulate(); });
   }, 100);
+  setTimeout(function() { refreshTrainingStatus(); refreshOpsStatus(); }, 300);
 
   // 7. Background data simulation when not connected
   // P1 demo fallback：此循环仅在 !eventSource（未连接）时运行，等价 demo 模式。
@@ -1253,6 +1387,7 @@ window.flowboard = {
   resetView: resetView,
   // filter
   onFilterChange: onFilterChange,
+  clearTopicFilter: clearTopicFilter,
   // node detail
   showNodeDetail: showNodeDetail,
   closeDetail: closeDetail,
@@ -1281,10 +1416,21 @@ window.flowboard = {
   refreshTrainingStatus: refreshTrainingStatus,
   startTraining: startTraining,
   promoteTrainingModel: promoteTrainingModel,
+  // ops
+  openOpsModal: openOpsModal,
+  closeOpsModal: closeOpsModal,
+  refreshOpsStatus: refreshOpsStatus,
+  startBagReplay: startBagReplay,
+  stopBagReplay: stopBagReplay,
+  runBagInfo: runBagInfo,
+  startLearningEval: startLearningEval,
+  startLearningFull: startLearningFull,
+  stopLearningLoop: stopLearningLoop,
   // diag
   clearDiag: clearDiag,
   // card collapse
   toggleCard: toggleCard,
+  switchWorkspace: switchWorkspace,
   // charts
   onChartTopicChange: function () { /* delegated via charts.js */ },
   onChartRangeChange: function () { /* delegated via charts.js */ },

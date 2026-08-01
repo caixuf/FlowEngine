@@ -212,6 +212,16 @@ python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30
 python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30 --promote
 ```
 
+### FlowBoard 一键操作（可视化入口）
+
+打开 `http://localhost:8800` 后：
+
+1. `🛠 Ops Console` → `Bag 文件` + `回灌 Bag`：直接触发 `flow_bag --replay`
+2. `🛠 Ops Console` → `Eval 模型名` + `跑 Eval-Only`：触发 `learning_loop.py --eval-only`
+3. `🛠 Ops Console` → `跑完整学习闭环`：触发 `learning_loop.py --collect ... --backend ...`
+
+可在同一面板查看 `Bag Log / Learning Loop Log`，并用 `停止回灌/停止学习任务` 中断后台任务。
+
 ### Promote Gate（晋级门禁）
 
 `python3 tools/modelctl.py promote <artifact>` 会先执行门禁检查，默认拒绝不满足条件的模型：

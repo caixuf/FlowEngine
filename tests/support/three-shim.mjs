@@ -19,6 +19,50 @@
 // 递归 Proxy 处理器
 const handler = {
   get(target, prop) {
+    const state = (target.__state ||= Object.create(null));
+    if (Object.prototype.hasOwnProperty.call(state, prop)) {
+      return state[prop];
+    }
+    if (prop === '__state') return state;
+
+    // ── 最小可观测位姿对象：支持 position/rotation/scale.x|y|z + set() ──
+    // 让测试可以断言 mesh/group 的最终数值，而不仅是"不抛错"。
+    if (prop === 'position' || prop === 'rotation' || prop === 'scale') {
+      const vec = {
+        x: 0, y: 0, z: 0,
+        set(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; return this; },
+        clone() { return { ...this, set: this.set, copy: this.copy, clone: this.clone, add: this.add, sub: this.sub, multiplyScalar: this.multiplyScalar, lerp: this.lerp, normalize: this.normalize, length: this.length }; },
+        copy(other) {
+          if (other && typeof other === 'object') {
+            this.x = Number(other.x) || 0;
+            this.y = Number(other.y) || 0;
+            this.z = Number(other.z) || 0;
+          }
+          return this;
+        },
+        add(other) { if (other) { this.x += Number(other.x) || 0; this.y += Number(other.y) || 0; this.z += Number(other.z) || 0; } return this; },
+        sub(other) { if (other) { this.x -= Number(other.x) || 0; this.y -= Number(other.y) || 0; this.z -= Number(other.z) || 0; } return this; },
+        multiplyScalar(s = 1) { const n = Number(s) || 0; this.x *= n; this.y *= n; this.z *= n; return this; },
+        lerp(other, alpha = 0) {
+          const a = Number(alpha) || 0;
+          if (other) {
+            this.x += ((Number(other.x) || 0) - this.x) * a;
+            this.y += ((Number(other.y) || 0) - this.y) * a;
+            this.z += ((Number(other.z) || 0) - this.z) * a;
+          }
+          return this;
+        },
+        length() { return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z); },
+        normalize() {
+          const len = this.length() || 1;
+          this.x /= len; this.y /= len; this.z /= len;
+          return this;
+        },
+      };
+      state[prop] = vec;
+      return vec;
+    }
+
     // ── 类型守卫属性：返回 undefined（falsy），避免触发 isMesh 等分支 ──
     if (prop === 'isMesh' || prop === 'isMaterial' ||
         prop === 'isMeshPhysicalMaterial' || prop === 'isMeshStandardMaterial' ||
@@ -91,6 +135,8 @@ const handler = {
   },
 
   set(target, prop, value) {
+    const state = (target.__state ||= Object.create(null));
+    state[prop] = value;
     return true; // 静默接受任何赋值
   },
 };
@@ -126,6 +172,7 @@ export const Line = THREE;
 export const LineBasicMaterial = THREE;
 export const LineSegments = THREE;
 export const Points = THREE;
+export const PointsMaterial = THREE;
 export const Sprite = THREE;
 export const SpriteMaterial = THREE;
 

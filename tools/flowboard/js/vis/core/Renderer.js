@@ -78,10 +78,26 @@ export function createComposer(renderer, scene, camera) {
   return composer;
 }
 
-/** 渲染一帧 */
+/** 渲染一帧（支持 perfTier 跳过 Composer） */
 export function renderFrame(renderer, composer, scene, camera) {
   if (composer) composer.render();
   else renderer.render(scene, camera);
+}
+
+/** 销毁 Composer 及其所有 Pass（perfTier=low 时释放 GPU 资源） */
+export function disposeComposer(composer) {
+  if (!composer) return;
+  try {
+    for (let i = composer.passes.length - 1; i >= 0; i--) {
+      const pass = composer.passes[i];
+      if (pass.dispose) pass.dispose();
+    }
+    composer.passes.length = 0;
+    if (composer.renderTarget1) composer.renderTarget1.dispose();
+    if (composer.renderTarget2) composer.renderTarget2.dispose();
+  } catch (e) {
+    console.warn('[Renderer] disposeComposer error:', e.message);
+  }
 }
 
 /** 调整大小 */

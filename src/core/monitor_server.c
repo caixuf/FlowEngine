@@ -600,18 +600,30 @@ static void handle_sse(int fd, MonitorServer* ms) {
 
 /* ── POST 请求体读取 ────────────────────────────────────── */
 
-static char* read_post_body(int fd, const char* headers, size_t max_size) {
-    const char* content_len_header = strstr(headers, "Content-Length:");
+static char* read_post_body(int fd, const char* req, ssize_t req_len, size_t max_size) {
+    const char* content_len_header = strstr(req, "Content-Length:");
     if (!content_len_header) return NULL;
 
     int content_len = atoi(content_len_header + 15);
     if (content_len <= 0 || (size_t)content_len > max_size) return NULL;
 
+    const char* body_start = strstr(req, "\r\n\r\n");
+    if (!body_start) return NULL;
+    body_start += 4;
+
     char* body = (char*)malloc(content_len + 1);
     if (!body) return NULL;
 
-    /* Loop to handle partial reads on sockets */
     size_t total = 0;
+    size_t req_used = (size_t)(body_start - req);
+    if (req_len > 0 && (size_t)req_len > req_used) {
+        size_t already = (size_t)req_len - req_used;
+        if (already > (size_t)content_len) already = (size_t)content_len;
+        memcpy(body, body_start, already);
+        total = already;
+    }
+
+    /* Loop to handle partial reads on sockets */
     while (total < (size_t)content_len) {
         ssize_t n = read(fd, body + total, (size_t)content_len - total);
         if (n <= 0) {
@@ -624,16 +636,25 @@ static char* read_post_body(int fd, const char* headers, size_t max_size) {
     return body;
 }
 
-/* ── 执行 modelctl.py 子命令（训练管理的统一入口） ──────────
- *
- * 架构原则: C++ 服务器只做实时数据+静态文件; 训练管理归 modelctl.py CLI。
- * 本函数是两者间的最薄桥接层:
- *   fork → pipe stdin(JSON body) → exec modelctl.py <cmd> --json
- * 不再需要 training_bridge.py 中间层。
- */
+static void resolve_tools_script_path(MonitorServer* ms, const char* script_name,
+                                      char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (ms && ms->html_path[0]) {
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s", ms->html_path);
+        char* slash = strrchr(dir, '/');
+        if (slash) *slash = '\0';
+        slash = strrchr(dir, '/');
+        if (slash) *slash = '\0';
+        snprintf(out, out_sz, "%s/%s", dir, script_name);
+        return;
+    }
+    snprintf(out, out_sz, "tools/%s", script_name);
+}
 
-static void exec_modelctl(int fd, const char* cmd, const char* json_body,
-                          MonitorServer* ms) {
+static void exec_python_tool(int fd, const char* script_name, const char* cmd,
+                             const char* json_body, MonitorServer* ms) {
     int stdin_pipe[2];
     int stdout_pipe[2];
 
@@ -656,7 +677,6 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
     }
 
     if (pid == 0) {
-        /* 子进程: exec modelctl.py <cmd> --json */
         close(stdin_pipe[1]);
         close(stdout_pipe[0]);
         dup2(stdin_pipe[0], STDIN_FILENO);
@@ -665,26 +685,13 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
         close(stdin_pipe[0]);
         close(stdout_pipe[1]);
 
-        /* 从 html_path 推导 tools/ 目录路径 */
         char script[768];
-        if (ms && ms->html_path[0]) {
-            char dir[512];
-            snprintf(dir, sizeof(dir), "%s", ms->html_path);
-            char* slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';
-            slash = strrchr(dir, '/');
-            if (slash) *slash = '\0';
-            snprintf(script, sizeof(script), "%s/modelctl.py", dir);
-        } else {
-            snprintf(script, sizeof(script), "tools/modelctl.py");
-        }
-
+        resolve_tools_script_path(ms, script_name, script, sizeof(script));
         const char* argv[] = {"python3", script, cmd, "--json", NULL};
         execvp("python3", (char* const*)argv);
         _exit(1);
     }
 
-    /* 父进程: 写 stdin → 读 stdout → 发 HTTP 响应 */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
 
@@ -714,6 +721,24 @@ static void exec_modelctl(int fd, const char* cmd, const char* json_body,
                       "{\"ok\":false,\"error\":\"no output\"}");
     }
     close(fd);
+}
+
+/* ── 执行 modelctl.py 子命令（训练管理的统一入口） ──────────
+ *
+ * 架构原则: C++ 服务器只做实时数据+静态文件; 训练管理归 modelctl.py CLI。
+ * 本函数是两者间的最薄桥接层:
+ *   fork → pipe stdin(JSON body) → exec modelctl.py <cmd> --json
+ * 不再需要 training_bridge.py 中间层。
+ */
+
+static void exec_modelctl(int fd, const char* cmd, const char* json_body,
+                          MonitorServer* ms) {
+    exec_python_tool(fd, "modelctl.py", cmd, json_body, ms);
+}
+
+static void exec_opsctl(int fd, const char* cmd, const char* json_body,
+                        MonitorServer* ms) {
+    exec_python_tool(fd, "opsctl.py", cmd, json_body, ms);
 }
 
 /* ── 处理单个连接 ────────────────────────────────────────── */
@@ -781,11 +806,23 @@ static bool dispatch_request(int fd, MonitorServer* ms,
     if (strcmp(method, "POST") == 0) {
         if (strcmp(path, "/api/training/start") == 0 ||
             strcmp(path, "/api/training/promote") == 0) {
-            char* body = read_post_body(fd, req, 8192);
+            char* body = read_post_body(fd, req, req_len, 8192);
             if (body) {
                 const char* cmd = (strcmp(path, "/api/training/start") == 0)
                                   ? "train-start" : "promote";
                 exec_modelctl(fd, cmd, body, ms);
+                free(body);
+            } else {
+                send_response(fd, "400 Bad Request", "application/json",
+                              "{\"ok\":false,\"error\":\"failed to read body\"}");
+                close(fd);
+            }
+            return false;
+        }
+        if (strcmp(path, "/api/ops/run") == 0) {
+            char* body = read_post_body(fd, req, req_len, 16384);
+            if (body) {
+                exec_opsctl(fd, "run", body, ms);
                 free(body);
             } else {
                 send_response(fd, "400 Bad Request", "application/json",
@@ -811,6 +848,10 @@ static bool dispatch_request(int fd, MonitorServer* ms,
     /* GET: /api/training/status → modelctl.py train-status (无 JSON body) */
     if (strcmp(path, "/api/training/status") == 0) {
         exec_modelctl(fd, "train-status", "{}", ms);
+        return false;
+    }
+    if (strcmp(path, "/api/ops/status") == 0) {
+        exec_opsctl(fd, "status", "{}", ms);
         return false;
     }
 
@@ -1215,6 +1256,28 @@ static void* server_thread_fn(void* arg) {
         if (select(ms->listen_fd + 1, &fds, NULL, NULL, &tv) > 0) {
             int client = accept(ms->listen_fd, NULL, NULL);
             if (client < 0) continue;
+
+            /* Hard cap concurrent client handlers (SSE connections can be long-lived).
+             * listen(backlog) is not a concurrency limit, so enforce it explicitly
+             * to avoid unbounded detached-thread growth under connection storms. */
+            bool reject_client = false;
+            pthread_mutex_lock(&ms->client_mutex);
+            if (ms->active_clients >= MONITOR_MAX_CLIENTS) {
+                reject_client = true;
+            }
+            pthread_mutex_unlock(&ms->client_mutex);
+            if (reject_client) {
+                static const char kBusyResp[] =
+                    "HTTP/1.1 503 Service Unavailable\r\n"
+                    "Connection: close\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 22\r\n\r\n"
+                    "too many connections\n";
+                ssize_t wr = write(client, kBusyResp, sizeof(kBusyResp) - 1);
+                (void)wr;
+                close(client);
+                continue;
+            }
 
             /* Handle each connection in its own detached thread so that a
              * long-lived SSE stream (/api/stream) cannot block the accept

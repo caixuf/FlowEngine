@@ -14,6 +14,7 @@
 
 import { createSceneDirector } from '../tools/flowboard/js/vis/director/SceneDirector.js';
 import * as ViewRegistry from '../tools/flowboard/js/vis/core/ViewRegistry.js';
+import { worldToThree, headingToRotationY } from '../tools/flowboard/js/vis/math/Coord.js';
 import { ok, eq, done } from './test-utils.mjs';
 
 console.log('=== vis/ 单帧 tick 冒烟 ===\n');
@@ -135,6 +136,21 @@ function makeMultiLaneFrame() {
     ok('tick 后 store.ego 存在', !!store.ego);
     if (store.ego) {
       ok('ego.x 约为 100', Math.abs(store.ego._simX - 100) < 5);
+
+      const vv = director.getVehicleView();
+      const egoEntry = vv?.getVehicleMap?.().get('ego');
+      ok('车辆视图: ego 已创建', !!egoEntry && !!egoEntry.group);
+      if (egoEntry?.group) {
+        const [wx, wy, wz] = worldToThree(store.ego.x, store.ego.y, store.ego.z);
+        ok('车辆视图: ego.position.x 对齐 worldToThree',
+          Math.abs((egoEntry.group.position.x || 0) - wx) < 1e-6);
+        ok('车辆视图: ego.position.y 对齐 worldToThree',
+          Math.abs((egoEntry.group.position.y || 0) - wy) < 1e-6);
+        ok('车辆视图: ego.position.z 对齐 worldToThree',
+          Math.abs((egoEntry.group.position.z || 0) - wz) < 1e-6);
+        ok('车辆视图: ego.rotation.y 对齐 headingToRotationY',
+          Math.abs((egoEntry.group.rotation.y || 0) - headingToRotationY(store.ego.heading || 0)) < 1e-6);
+      }
     }
     ok('tick 后 store.entities 非空', store.entities && store.entities.length > 0);
   }
@@ -188,6 +204,17 @@ function makeMultiLaneFrame() {
         ok('高架: followEgo 不抛错', false);
       }
     }
+
+    const vv = director.getVehicleView();
+    const egoEntry = vv?.getVehicleMap?.().get('ego');
+    ok('高架: ego 车辆实例存在', !!egoEntry && !!egoEntry.group);
+    if (egoEntry?.group) {
+      const [wx, wy, wz] = worldToThree(store.ego.x, store.ego.y, store.ego.z);
+      ok('高架: ego.position 映射正确',
+        Math.abs((egoEntry.group.position.x || 0) - wx) < 1e-6 &&
+        Math.abs((egoEntry.group.position.y || 0) - wy) < 1e-6 &&
+        Math.abs((egoEntry.group.position.z || 0) - wz) < 1e-6);
+    }
   }
 }
 
@@ -231,6 +258,23 @@ function makeMultiLaneFrame() {
       ok('多车道: NPC1 type=car', store.entities[0].type === 'car');
       ok('多车道: NPC2 type=truck', store.entities[1].type === 'truck');
       ok('多车道: NPC3 type=suv', store.entities[2].type === 'suv');
+    }
+
+    const vv = director.getVehicleView();
+    const vmap = vv?.getVehicleMap?.();
+    ok('多车道: 车辆实例数=4(ego+3 npc)', !!vmap && vmap.size === 4);
+
+    const npc1 = vmap?.get('npc1');
+    ok('多车道: npc1 实例存在', !!npc1 && !!npc1.group);
+    if (npc1?.group) {
+      const e = store.entities.find(x => x.id === 'npc1');
+      const [wx, wy, wz] = worldToThree(e.x, e.y, e.z);
+      ok('多车道: npc1.position 映射正确',
+        Math.abs((npc1.group.position.x || 0) - wx) < 1e-6 &&
+        Math.abs((npc1.group.position.y || 0) - wy) < 1e-6 &&
+        Math.abs((npc1.group.position.z || 0) - wz) < 1e-6);
+      ok('多车道: npc1.rotation.y 映射正确',
+        Math.abs((npc1.group.rotation.y || 0) - headingToRotationY(e.heading || 0)) < 1e-6);
     }
   }
 }

@@ -246,6 +246,11 @@ open http://localhost:8800
 | `/api/topology` | 拓扑 JSON（节点 + 边 + 指标）|
 | `/api/stream` | SSE 实时推送（500 ms 间隔）|
 | `/api/health` | 健康检查 |
+| `/api/training/status` | 学习任务状态与模型列表（modelctl bridge） |
+| `/api/training/start` | 启动训练任务（POST） |
+| `/api/training/promote` | 晋级 tiny 模型到 C runtime（POST） |
+| `/api/ops/status` | Ops Console 任务状态（bag 回灌 / learning_loop） |
+| `/api/ops/run` | Ops Console 操作入口（POST） |
 
 > **绑定地址：** `flowmond` 默认监听 `127.0.0.1`（回环）。如需远程访问，
 > 使用 `flowmond --bind 0.0.0.0`（或设置 `FLOWMOND_BIND_ADDR=0.0.0.0`）。

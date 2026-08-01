@@ -14,13 +14,15 @@
     <div style="font-size:9px;color:#484f58">Live Monitor</div></div>
   </div>
   <span id="conn-dot" class="pill pill-dead" style="align-self:flex-start">● loading...</span>
+  <div class="sidebar-segment" id="quick-actions">
+    <button onclick="flowboard.doConnect()" class="primary" style="flex:1">🔗 Connect</button>
+    <button onclick="flowboard.doSimulate()" style="flex:1">📋 Demo</button>
+  </div>
   <div id="diag-bar" style="display:none;margin-top:4px;padding:4px 6px;border-radius:6px;background:#3a1414;border:1px solid#5c1a1a;color:#f0a0a0;font-size:10px;line-height:1.4;max-height:90px;overflow:auto;cursor:pointer" title="点击清除" onclick="flowboard.clearDiag()"></div>
 
-  <div style="margin-top:4px">
+  <div class="sidebar-segment">
     <input id="url" value="http://localhost:8800" placeholder="Monitor server URL">
     <div style="display:flex;gap:4px;margin-top:4px">
-      <button onclick="flowboard.doConnect()" class="primary" style="flex:1">🔗 Connect</button>
-      <button onclick="flowboard.doSimulate()" style="flex:1">📋 Demo</button>
       <div class="dropdown">
         <button onclick="flowboard.toggleExportMenu()" class="sm" title="Export">⬇</button>
         <div class="dropdown-menu" id="export-menu">
@@ -31,13 +33,20 @@
     </div>
   </div>
 
-  <input id="topic-filter" placeholder="Filter: sensor/lidar,control/cmd" oninput="flowboard.onFilterChange()" style="width:calc(100% - 28px)">
-  <span onclick="document.getElementById('topic-filter').value='';flowboard.onFilterChange()" title="Clear filter" style="cursor:pointer;color:#8b949e;font-size:14px;padding:2px 6px">✕</span>
+  <div class="sidebar-segment">
+    <div style="font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Topic Filter</div>
+    <div class="input-inline">
+      <input id="topic-filter" placeholder="sensor/lidar,control/cmd" oninput="flowboard.onFilterChange()">
+      <button class="sm" onclick="flowboard.clearTopicFilter()" title="Clear filter">✕</button>
+    </div>
+  </div>
 
+  <div class="sidebar-segment">
   <div style="display:flex;gap:4px">
     <button onclick="flowboard.doPause()" id="pause-btn" style="flex:1">⏯ Pause</button>
     <button onclick="flowboard.clearFrames()" style="flex:1">🗑 Clear</button>
     <button onclick="flowboard.resetView()" class="sm" title="Reset view (R)">🔲</button>
+  </div>
   </div>
 
   <div class="card" id="training-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🧠 Training</h2><span class="toggle">▼</span></div>
@@ -47,6 +56,17 @@
       <div style="display:flex;gap:4px;margin-top:8px">
         <button onclick="flowboard.openTrainingModal()" class="primary" style="flex:1">Train</button>
         <button onclick="flowboard.refreshTrainingStatus()" class="sm">↻</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="ops-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>🛠 Ops Console</h2><span class="toggle">▼</span></div>
+    <div class="card-body">
+      <div class="stat-row"><span class="label">Bag 回灌</span><span class="value" id="ops-bag-state" style="font-size:11px">idle</span></div>
+      <div class="stat-row"><span class="label">学习闭环</span><span class="value" id="ops-learning-state" style="font-size:11px">idle</span></div>
+      <div style="display:flex;gap:4px;margin-top:8px">
+        <button onclick="flowboard.openOpsModal()" class="primary" style="flex:1">Operate</button>
+        <button onclick="flowboard.refreshOpsStatus()" class="sm">↻</button>
       </div>
     </div>
   </div>
@@ -103,12 +123,18 @@
 </div>
 
 <div id="main">
-  <div class="row" style="display:flex;gap:12px;flex-shrink:0">
-    <div style="flex:3;min-width:300px">
+  <div id="workspace-nav" class="workspace-nav">
+    <button class="ws-btn active" data-ws="observe" onclick="flowboard.switchWorkspace('observe')">🛰 Observe</button>
+    <button class="ws-btn" data-ws="analyze" onclick="flowboard.switchWorkspace('analyze')">📈 Analyze</button>
+    <button class="ws-btn" data-ws="operate" onclick="flowboard.switchWorkspace('operate')">🛠 Operate</button>
+  </div>
+
+  <div class="row ws-block ws-observe-analyze" style="display:flex;gap:12px;flex-shrink:0">
+    <div class="ws-block ws-observe" style="flex:3;min-width:300px">
       <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#58a6ff"></span>Topology Graph</h2><span class="toggle">▼</span></div>
         <div id="topo"><div id="msg">Press Connect or Demo to load</div></div></div>
     </div>
-    <div style="flex:2;min-width:250px;display:flex;flex-direction:column;gap:12px">
+    <div class="ws-block ws-analyze" style="flex:2;min-width:250px;display:flex;flex-direction:column;gap:12px">
       <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#d29922"></span>Topic QoS</h2><span class="toggle">▼</span></div>
         <div class="card-body" id="topic-stats" style="max-height:200px;overflow-y:auto"><span style="color:#484f58">No data</span></div></div>
       <div class="card" style="flex:1"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Frame Monitor</h2><span class="toggle">▼</span></div>
@@ -116,14 +142,14 @@
     </div>
   </div>
 
-  <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
+  <div class="card ws-block ws-analyze"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#bc8cff"></span>Process / Topic Matrix</h2><span class="toggle">▼</span></div>
     <div id="process-topics" style="max-height:200px;overflow-y:auto"><span style="color:#484f58;padding:10px">No data</span></div></div>
 
-  <div class="card" id="scene3d-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Scene View</h2><div style="display:flex;align-items:center;gap:6px" id="scene-view-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-view="3d" onclick="flowboard.switchSceneView('3d')" style="padding:3px 10px;font-size:10px">3D</button><button class="toggle-btn" data-view="2d" onclick="flowboard.switchSceneView('2d')" style="padding:3px 10px;font-size:10px">2D</button></div><div style="display:flex;align-items:center;gap:3px;margin-left:8px" id="cam-mode-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-cam="chase" onclick="flowboard.setCameraMode('chase');_updateCamBtns(this)" title="追逐视角" style="padding:3px 8px;font-size:10px">Chase</button><button class="toggle-btn" data-cam="top" onclick="flowboard.setCameraMode('top');_updateCamBtns(this)" title="俯视" style="padding:3px 8px;font-size:10px">Top</button><button class="toggle-btn" data-cam="orbit" onclick="flowboard.setCameraMode('orbit');_updateCamBtns(this)" title="自由轨道（拖拽旋转/滚轮缩放）" style="padding:3px 8px;font-size:10px">Orbit</button><button class="toggle-btn" data-cam="driver" onclick="flowboard.setCameraMode('driver');_updateCamBtns(this)" title="驾驶员视角" style="padding:3px 8px;font-size:10px">Driver</button><button class="toggle-btn" data-cam="front" onclick="flowboard.setCameraMode('front');_updateCamBtns(this)" title="前保险杠" style="padding:3px 8px;font-size:10px">Front</button><button class="toggle-btn" data-cam="map" onclick="flowboard.setCameraMode('map');_updateCamBtns(this)" title="鸟瞰地图（拖拽平移/滚轮缩放）" style="padding:3px 8px;font-size:10px">Map</button><button class="toggle-btn" onclick="flowboard.resetMapView()" title="回到 ego（map 模式拖远后用）" style="padding:3px 6px;font-size:10px">⟳</button></div><span class="toggle">▼</span></div>
+  <div class="card ws-block ws-observe" id="scene3d-card"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2><span class="dot" style="background:#3fb950"></span>Scene View</h2><div style="display:flex;align-items:center;gap:6px" id="scene-view-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-view="3d" onclick="flowboard.switchSceneView('3d')" style="padding:3px 10px;font-size:10px">3D</button><button class="toggle-btn" data-view="2d" onclick="flowboard.switchSceneView('2d')" style="padding:3px 10px;font-size:10px">2D</button></div><div style="display:flex;align-items:center;gap:3px;margin-left:8px" id="cam-mode-btns" onclick="event.stopPropagation()"><button class="toggle-btn active" data-cam="chase" onclick="flowboard.setCameraMode('chase');_updateCamBtns(this)" title="追逐视角" style="padding:3px 8px;font-size:10px">Chase</button><button class="toggle-btn" data-cam="top" onclick="flowboard.setCameraMode('top');_updateCamBtns(this)" title="俯视" style="padding:3px 8px;font-size:10px">Top</button><button class="toggle-btn" data-cam="orbit" onclick="flowboard.setCameraMode('orbit');_updateCamBtns(this)" title="自由轨道（拖拽旋转/滚轮缩放）" style="padding:3px 8px;font-size:10px">Orbit</button><button class="toggle-btn" data-cam="driver" onclick="flowboard.setCameraMode('driver');_updateCamBtns(this)" title="驾驶员视角" style="padding:3px 8px;font-size:10px">Driver</button><button class="toggle-btn" data-cam="front" onclick="flowboard.setCameraMode('front');_updateCamBtns(this)" title="前保险杠" style="padding:3px 8px;font-size:10px">Front</button><button class="toggle-btn" data-cam="map" onclick="flowboard.setCameraMode('map');_updateCamBtns(this)" title="鸟瞰地图（拖拽平移/滚轮缩放）" style="padding:3px 8px;font-size:10px">Map</button><button class="toggle-btn" onclick="flowboard.resetMapView()" title="回到 ego（map 模式拖远后用）" style="padding:3px 6px;font-size:10px">⟳</button></div><span class="toggle">▼</span></div>
     <div class="card-body" style="padding:0"><canvas id="scene2d" width="1200" height="800" style="display:none;width:100%;height:100%;background:#0a0d14"></canvas><div id="scene3d" style="width:100%;height:100%;background:#5588aa;position:relative;overflow:hidden"><div id="scene3d-msg" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none;max-width:400px;display:none"></div></div></div>
   </div>
 
-  <div class="card"><div class="card-header" onclick="flowboard.toggleCard(this)">
+  <div class="card ws-block ws-analyze"><div class="card-header" onclick="flowboard.toggleCard(this)">
     <h2 style="gap:12px"><span class="dot" style="background:#d29922"></span>Live Charts <span style="font-weight:400;color:#484f58;text-transform:none;letter-spacing:0;margin-left:4px">— hover for values</span></h2>
     <div style="display:flex;align-items:center;gap:6px">
       <select id="chart-topic" onchange="flowboard.onChartTopicChange()" onclick="event.stopPropagation()" style="background:#0d1117;color:#c9d1d9;border:1px solid#252d3a;padding:3px 8px;border-radius:4px;font-size:10px"><option value="">All Topics</option></select>
@@ -136,6 +162,25 @@
       <div class="chart-box"><canvas id="ch-rate"></canvas><div class="chart-tooltip" id="tt-rate"></div></div>
       <div class="chart-box"><canvas id="ch-lat"></canvas><div class="chart-tooltip" id="tt-lat"></div></div>
       <div class="chart-box"><canvas id="ch-frames"></canvas><div class="chart-tooltip" id="tt-frames"></div></div>
+    </div>
+  </div>
+
+  <div class="card ws-block ws-operate">
+    <div class="card-header"><h2><span class="dot" style="background:#bc8cff"></span>Operations Workspace</h2></div>
+    <div class="card-body">
+      <div class="ops-grid">
+        <div class="ops-tile">
+          <h3>🧠 学习闭环</h3>
+          <p>启动训练、影子评估、自动 promote，查看日志。</p>
+          <button class="primary" onclick="flowboard.openTrainingModal()">打开 Training Console</button>
+        </div>
+        <div class="ops-tile">
+          <h3>🛠 运行操作</h3>
+          <p>Bag 回灌、bag info、eval-only、完整学习流水线。</p>
+          <button class="primary" onclick="flowboard.openOpsModal()">打开 Ops Console</button>
+        </div>
+      </div>
+      <div class="ops-hint">建议流程：先在 Observe 看场景，再切到 Operate 做动作，最后到 Analyze 看指标回归。</div>
     </div>
   </div>
 </div>
@@ -182,6 +227,38 @@
   </div>
 </div>
 
+<div id="ops-modal" class="modal-overlay" onclick="if(event.target===this)flowboard.closeOpsModal()">
+  <div class="modal">
+    <div class="modal-header"><h3>Operations Console</h3><button onclick="flowboard.closeOpsModal()" class="sm" style="color:#f85149">✕</button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-field"><label>Bag 文件</label><input id="ops-bag-path" placeholder="/tmp/demo.bag"></div>
+        <div class="form-field"><label>Eval 模型名</label><input id="ops-eval-model" placeholder="loop_20260801_120000"></div>
+        <div class="form-field"><label>Eval 时长(秒)</label><input id="ops-eval-duration" value="45"></div>
+        <div class="form-field"><label>全流程 backend</label><select id="ops-loop-backend"><option value="tiny">tiny</option><option value="temporal">temporal</option></select></div>
+        <div class="form-field"><label>全流程采集时长(秒)</label><input id="ops-loop-collect" value="60"></div>
+        <div class="form-field"><label>全流程模型名(可选)</label><input id="ops-loop-name" placeholder="loop_custom_name"></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <button onclick="flowboard.startBagReplay()" class="primary">回灌 Bag</button>
+        <button onclick="flowboard.stopBagReplay()">停止回灌</button>
+        <button onclick="flowboard.runBagInfo()">Bag 信息</button>
+        <label class="muted" style="font-size:11px"><input type="checkbox" id="ops-eval-promote" style="width:auto;margin-right:4px">eval-only 后自动 promote</label>
+        <button onclick="flowboard.startLearningEval()" class="primary">跑 Eval-Only</button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <label class="muted" style="font-size:11px"><input type="checkbox" id="ops-loop-promote" style="width:auto;margin-right:4px">全流程后自动 promote</label>
+        <button onclick="flowboard.startLearningFull()" class="primary">跑完整学习闭环</button>
+        <button onclick="flowboard.stopLearningLoop()">停止学习任务</button>
+        <button onclick="flowboard.refreshOpsStatus()">刷新状态</button>
+      </div>
+      <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Bag Log</div><div id="ops-bag-log" class="log-box">No bag replay job yet.</div></div>
+      <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Learning Loop Log</div><div id="ops-learning-log" class="log-box">No learning-loop job yet.</div></div>
+      <div><div style="font-size:10px;color:#8b949e;margin-bottom:4px;text-transform:uppercase;letter-spacing:.3px">Action Output</div><div id="ops-output" class="log-box" style="min-height:90px;max-height:120px">Ready.</div></div>
+    </div>
+  </div>
+</div>
+
 <div id="toast">Copied!</div>
 
 <script type="importmap">
@@ -203,6 +280,6 @@
   }
 </script>
 <script type="module" src="js/bootstrap.js"></script>
-<script type="module" src="js/app.js?v=20260722esm"></script>
+<script type="module" src="js/app.js?v=20260801ops"></script>
 </body>
 </html>

@@ -105,6 +105,12 @@ const completeEdge = validateFrame({
 const schemaWarnings = completeEdge.warnings.filter(w => w.key.startsWith('road_network.edges'));
 check('完整字段 edge → 0 条 schema warning', schemaWarnings.length, 0);
 
+const badRanges = validateFrame({
+  road_network: { edges: [{ id: 2, name: 'bad', type: 'highway', lanes: 2, lane_width: 99, nodes: [[0, 0, 0], [10, 0, 0]], oneway: true, length: -1 }] }
+});
+check('lane_width 超范围 → warning', hasWarningKey(badRanges, 'road_network.edges[0].lane_width'), true);
+check('length<=0 → warning', hasWarningKey(badRanges, 'road_network.edges[0].length'), true);
+
 console.log('\n--- ego 校验 ---');
 const badEgo1 = validateFrame({ ego: 'oops' });
 check('ego 非 object → skipEgo=true', badEgo1.skipEgo, true);
@@ -155,6 +161,10 @@ check('entities 中 ego 元素被跳过，仅 [0] 缺 type 出 warning',
   warningKeys(entWithEgo).filter(k => k.startsWith('entities[')).length, 1);
 check('entities[2] 不出 warning（ego 元素后顺位不变）',
   hasWarningKey(entWithEgo, 'entities[2].type'), false);
+
+const unknownType = validateFrame({ entities: [{ type: 'ufo' }] });
+check('未知实体类型 → warning key=entities[0].type',
+  hasWarningKey(unknownType, 'entities[0].type'), true);
 
 console.log('\n--- 组合：多 warning 一次返回 ---');
 const combined = validateFrame({
