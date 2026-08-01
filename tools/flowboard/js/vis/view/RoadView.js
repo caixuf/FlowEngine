@@ -288,13 +288,12 @@ export function createRoadView(scene) {
       for (const g of dashedLine(spine, -(hw - EDGE_INSET))) whiteGeos.push(g);
 
       // ── 车道分隔 ──
-      // B4 fix: 黄实线只留真对向分界（4+车道），2车道全程白虚线
+      // 黄色虚线中心线：双向对向分界，虚线表示允许越线超车
       for (let k = 1; k < lanes; k++) {
         const d = -hw + k * laneWidth;
         if (lanes >= 4 && k === Math.floor(lanes / 2)) {
-          // 4+ 车道：中央对向分界 → 黄实线
-          const g = solidLine(spine, d);
-          if (g) yellowGeos.push(g);
+          // 中央对向分界 → 黄虚线（允许越线超车）
+          for (const g of dashedLine(spine, d)) yellowGeos.push(g);
         } else {
           // 其他车道分隔 → 白虚线
           for (const g of dashedLine(spine, d)) whiteGeos.push(g);

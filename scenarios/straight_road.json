@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "直路综合场景：密集车流触发变道超车、对向来车、红绿灯停车。平路双向4车道（Y=0），10km 直路。NPC 各守其道不变道。",
+  "description": "直路循环场景：500m 双向 4 车道，ego 到达路尾后自动掉头回到起点无限循环。黄色虚线中心线表示允许越线超车。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
@@ -16,39 +16,26 @@
         "id": 0,
         "type": "highway",
         "name": "straight",
-        "length_m": 10000,
+        "length_m": 500,
         "lanes": 4,
         "lane_width": 3.5,
         "speed_limit": 22.0,
-        "nodes": [[0, 0, 0], [10000, 0, 0]]
+        "nodes": [[0, 0, 0], [500, 0, 0]]
       }
     ]
   },
   "actors": [
-    {"id": 1,  "type": "car",  "x": 200.0,  "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 2,  "type": "car",  "x": 600.0,  "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 3,  "type": "car",  "x": 1000.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 4,  "type": "car",  "x": 1600.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 5,  "type": "car",  "x": 2200.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 11, "type": "car",  "x": 400.0,  "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 12, "type": "car",  "x": 800.0,  "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 13, "type": "car",  "x": 1400.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 14, "type": "car",  "x": 2000.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 15, "type": "car",  "x": 2600.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 41, "type": "car",  "x": 900.0,  "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 42, "type": "pedestrian", "x": 500.0, "y": -12.0, "vx": 0.0, "vy": 0.0, "len": 0.6, "wid": 0.6, "parked": true}
+    {"id": 1,  "type": "car",  "x": 80.0,  "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car",  "x": 180.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 3,  "type": "car",  "x": 300.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 11, "type": "car",  "x": 130.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 12, "type": "car",  "x": 250.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 41, "type": "car",  "x": 350.0, "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 42, "type": "pedestrian", "x": 200.0, "y": -12.0, "vx": 0.0, "vy": 0.0, "len": 0.6, "wid": 0.6, "parked": true}
   ],
   "traffic_lights": [
-    {"id": 0,  "x": 350.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 12.0},
-    {"id": 1,  "x": 1200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 2.5},
-    {"id": 2,  "x": 2200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 5.0},
-    {"id": 3,  "x": 3200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 7.5},
-    {"id": 4,  "x": 4200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 10.0},
-    {"id": 5,  "x": 5200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 12.5},
-    {"id": 6,  "x": 6200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 15.0},
-    {"id": 7,  "x": 7200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 17.5},
-    {"id": 8,  "x": 8200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 20.0},
-    {"id": 9,  "x": 9200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 22.5}
+    {"id": 0,  "x": 120.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 12.0},
+    {"id": 1,  "x": 350.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 5.0}
   ],
   "pass_criteria": {
     "no_collision": true,

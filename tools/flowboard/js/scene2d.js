@@ -182,10 +182,10 @@ export function draw2D() {
     ctx.lineTo(cx + li * rw, H);
     ctx.stroke();
   }
-  // Double center line (yellow)
-  ctx.strokeStyle = '#554422';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([s * 4, s * 1.5]);
+  // Yellow dashed centerline (two-way traffic, passing allowed)
+  ctx.strokeStyle = '#ffd700';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([s * 3, s * 2]);
   ctx.lineDashOffset = scroll;
   ctx.beginPath();
   ctx.moveTo(cx - 3, 0);
