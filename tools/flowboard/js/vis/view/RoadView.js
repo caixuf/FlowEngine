@@ -203,12 +203,47 @@ export function createRoadView(scene) {
       };
     };
     const geos = [];
-    // 修复虚线 bug：从 0 开始按 DASH+GAP 步进，最后一段用 sampleAt 采样而不是直接套 centers
     for (let s = 0; s < total; s += DASH + GAP) {
       const end = Math.min(s + DASH, total);
-      if (end - s < 0.1) continue;  // 跳过过短的残段
-      // 每段虚线用起点+终点两个样点构建 ribbon（保持直线段）
+      if (end - s < 0.1) continue;
       const g = ribbonGeo([sampleAt(s), sampleAt(end)], LINE_W / 2, Y_MARK);
+      if (g) geos.push(g);
+    }
+    return geos;
+  }
+
+  /** 在指定弧长范围 [rangeStart, rangeEnd) 内生成虚线，虚线模式与 dashedLine 一致 */
+  function dashedLineInRange(spine, d, rangeStart, rangeEnd) {
+    const centers = offsetSpine(spine, d);
+    const cum = [0];
+    for (let i = 1; i < centers.length; i++) {
+      const a = centers[i - 1], b = centers[i];
+      cum.push(cum[i - 1] + Math.hypot(b.px - a.px, b.pz - a.pz));
+    }
+    const total = cum[cum.length - 1];
+    const rs = Math.max(0, rangeStart);
+    const re = Math.min(total, rangeEnd);
+    if (rs >= re) return [];
+
+    const sampleAt = (s) => {
+      if (s <= 0) return centers[0];
+      if (s >= total) return centers[centers.length - 1];
+      let i = 1; while (i < cum.length && cum[i] < s) i++;
+      const t = (s - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1);
+      const a = centers[i - 1], b = centers[i];
+      return {
+        px: a.px + (b.px - a.px) * t, py: a.py + (b.py - a.py) * t,
+        pz: a.pz + (b.pz - a.pz) * t, nx: a.nx + (b.nx - a.nx) * t,
+        nz: a.nz + (b.nz - a.nz) * t,
+      };
+    };
+    const geos = [];
+    const pattern = DASH + GAP;
+    let s = Math.floor(rs / pattern) * pattern;
+    for (; s < re; s += pattern) {
+      const end = Math.min(s + DASH, re);
+      if (end - s < 0.1 || end <= rs) continue;
+      const g = ribbonGeo([sampleAt(Math.max(s, rs)), sampleAt(end)], LINE_W / 2, Y_MARK);
       if (g) geos.push(g);
     }
     return geos;
@@ -288,12 +323,34 @@ export function createRoadView(scene) {
       for (const g of dashedLine(spine, -(hw - EDGE_INSET))) whiteGeos.push(g);
 
       // ── 车道分隔 ──
-      // 黄色虚线中心线：双向对向分界，虚线表示允许越线超车
+      // 黄色中心线：双向对向分界，实线为主，两端虚线允许掉头
       for (let k = 1; k < lanes; k++) {
         const d = -hw + k * laneWidth;
         if (lanes >= 4 && k === Math.floor(lanes / 2)) {
-          // 中央对向分界 → 黄虚线（允许越线超车）
-          for (const g of dashedLine(spine, d)) yellowGeos.push(g);
+          // 中央对向分界 → 黄实线为主 + 两端黄虚线（掉头区域）
+          const DASH_ZONE = 50.0;  // 两端各 50m 虚线
+          // 计算 spine 累计弧长
+          const cum = [0];
+          for (let i = 1; i < spine.length; i++) {
+            cum.push(cum[i - 1] + Math.hypot(spine[i].px - spine[i - 1].px, spine[i].pz - spine[i - 1].pz));
+          }
+          const totalLen = cum[cum.length - 1];
+          // 主体实线（DASH_ZONE ~ totalLen - DASH_ZONE）
+          if (totalLen > 2 * DASH_ZONE) {
+            const solidSpine = [];
+            for (let i = 0; i < spine.length; i++) {
+              if (cum[i] >= DASH_ZONE && cum[i] <= totalLen - DASH_ZONE) {
+                solidSpine.push({ ...spine[i] });
+              }
+            }
+            if (solidSpine.length >= 2) {
+              const g = solidLine(solidSpine, d);
+              if (g) yellowGeos.push(g);
+            }
+          }
+          // 两端虚线
+          for (const g of dashedLineInRange(spine, d, 0, DASH_ZONE)) yellowGeos.push(g);
+          for (const g of dashedLineInRange(spine, d, totalLen - DASH_ZONE, totalLen)) yellowGeos.push(g);
         } else {
           // 其他车道分隔 → 白虚线
           for (const g of dashedLine(spine, d)) whiteGeos.push(g);

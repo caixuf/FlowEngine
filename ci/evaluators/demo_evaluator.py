@@ -303,15 +303,15 @@ def load_json(path: Path) -> dict | None:
 
 @contextlib.contextmanager
 def pipeline_scenario_override(scenario_file: str | None):
-    """Temporarily point config/pipeline.json's flowsim (and planning, if present)
-    node(s) at ``scenario_file``.
+    """Temporarily point config/pipeline.json's scenario-aware nodes at ``scenario_file``.
 
     Node ``params`` is a JSON-encoded string; we patch the embedded
     ``scenario_file`` key, yield, then restore the original file byte-for-byte.
     Passing ``None`` is a no-op so callers can use this unconditionally.
-    planning also reading scenario_file lets NOA route-driven lane changes
-    (defined in the scenario's optional "route" array) take effect during
-    evaluator runs, not just flowsim's actor/ego placement.
+    planning and navigation also reading scenario_file lets route-driven
+    lane changes / branch selection use the same scene as flowsim during
+    evaluator runs, instead of mixing actor placement from one scenario
+    with navigation steps from another.
     """
     if not scenario_file:
         yield None
@@ -321,7 +321,7 @@ def pipeline_scenario_override(scenario_file: str | None):
     pipeline = json.loads(original_text)
     patched_nodes = []
     for node in _pipeline_nodes(pipeline):
-        if not isinstance(node, dict) or node.get("name") not in ("flowsim", "planning", "control"):
+        if not isinstance(node, dict) or node.get("name") not in ("flowsim", "planning", "navigation", "control"):
             continue
         params = node.get("params")
         # params may be a JSON string (launcher format) or a plain dict.
@@ -337,11 +337,13 @@ def pipeline_scenario_override(scenario_file: str | None):
 
     if "flowsim" not in patched_nodes:
         raise RuntimeError("flowsim node with params not found in config/pipeline.json")
-    # planning is optional (older pipeline.json layouts may omit scenario_file support),
-    # so only flowsim is required for the override to be considered successful.
     if "planning" not in patched_nodes:
         print("warning: planning node not patched with scenario_file (missing/malformed "
-              "params?) — NOA route-driven lane changes will not be exercised this run",
+              "params?) — route-driven planning will not be exercised this run",
+              file=sys.stderr)
+    if "navigation" not in patched_nodes:
+        print("warning: navigation node not patched with scenario_file (missing/malformed "
+              "params?) — route steps may come from a different scenario this run",
               file=sys.stderr)
 
     try:
@@ -430,6 +432,71 @@ def nearest_lane_error(y: float, lane_width: float = 3.5, lane_count: int = 2, r
     return min(abs(y - c) for c in lane_centers)
 
 
+def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, float] | None:
+    """Return (lane_error, road_edge_margin) from scene.road_network if present.
+
+    The legacy evaluator only mirrored ``road_center_y(x)`` for single-curve
+    scenarios. Multi-edge road-network scenes publish sampled polyline nodes in
+    ``scene.road_network.edges[].nodes``; use the nearest segment's local normal
+    to measure lateral offset against the actual routed road geometry.
+    """
+    road_network = scene.get("road_network")
+    if not isinstance(road_network, dict):
+        return None
+    edges = road_network.get("edges")
+    if not isinstance(edges, list):
+        return None
+
+    best: tuple[float, float, int, float, float] | None = None
+    px = float(x)
+    py = float(y)
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        nodes = edge.get("nodes")
+        if not isinstance(nodes, list) or len(nodes) < 2:
+            continue
+        lane_width = float(edge.get("lane_width", 3.5) or 3.5)
+        lane_count = int(edge.get("lanes", 2) or 2)
+        if lane_width <= 0.0 or lane_count <= 0:
+            continue
+        for i in range(len(nodes) - 1):
+            a = nodes[i]
+            b = nodes[i + 1]
+            if not (isinstance(a, list) and isinstance(b, list) and len(a) >= 2 and len(b) >= 2):
+                continue
+            ax, ay = float(a[0]), float(a[1])
+            bx, by = float(b[0]), float(b[1])
+            dx = bx - ax
+            dy = by - ay
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 <= 1e-9:
+                continue
+            t = ((px - ax) * dx + (py - ay) * dy) / seg_len2
+            t = max(0.0, min(1.0, t))
+            cx = ax + t * dx
+            cy = ay + t * dy
+            seg_len = math.sqrt(seg_len2)
+            nx = -dy / seg_len
+            ny = dx / seg_len
+            signed_offset = (px - cx) * nx + (py - cy) * ny
+            dist = math.hypot(px - cx, py - cy)
+            margin = lane_width * lane_count * 0.5 - abs(signed_offset) - 1.0
+            if (best is None or
+                    margin > best[4] + 1e-9 or
+                    (abs(margin - best[4]) <= 1e-9 and dist < best[0])):
+                best = (dist, signed_offset, lane_count, lane_width, margin)
+
+    if best is None:
+        return None
+
+    _, signed_offset, lane_count, lane_width, margin = best
+    return (
+        nearest_lane_error(signed_offset, lane_width, lane_count, 0.0),
+        margin,
+    )
+
+
 def angle_diff(a: float, b: float) -> float:
     d = a - b
     while d > math.pi:
@@ -457,10 +524,16 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     lane_width = float(lane.get("width", 3.5) or 3.5)
     lane_count = int(lane.get("count", 2) or 2)
 
-    # 弯道时车道中心线偏移（road=None 或禁用弯道时恒为 0，与既有直道场景
-    # 完全等价），lane_error/road_edge_margin 均相对该中心线计算。
+    # 优先按 scene.road_network 的真实 polyline 几何计算横向偏差；旧场景仍回退
+    # 到 road_center_y(x) 的单段弯道镜像，保持既有行为不变。
     center = road_center_y(x, road)
     y_rel = y - center
+    cross_track = _road_network_cross_track(scene, x, y)
+    if cross_track is not None:
+        lane_error, road_edge_margin = cross_track
+    else:
+        lane_error = nearest_lane_error(y_rel, lane_width, lane_count, 0.0)
+        road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
 
     min_forward_gap = math.inf
     min_abs_gap = math.inf
@@ -507,8 +580,8 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "heading": heading,
         "steer": steer,
         "steer_signed": steer_signed,
-        "lane_error": nearest_lane_error(y_rel, lane_width, lane_count, 0.0),
-        "road_edge_margin": lane_width * lane_count * 0.5 - abs(y_rel) - 1.0,
+        "lane_error": lane_error,
+        "road_edge_margin": road_edge_margin,
         "lane_count": lane_count,
         "y_rel": y_rel,
         "min_forward_gap": min_forward_gap,

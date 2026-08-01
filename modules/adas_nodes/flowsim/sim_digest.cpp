@@ -378,6 +378,7 @@ InvariantResult check_static_invariants(const StaticDigest& sd) {
 
 static const double EPS_Z = 0.5;        // 高度容差 (m)
 static const double EPS_LATERAL = 1.0;  // 横向容差 (m)
+static const double EPS_LATERAL_PARKED = 3.0;  // 路侧静止占位车允许停在路缘外一个车位宽
 static const double MAX_SPEED_FACTOR = 1.5;
 
 InvariantResult check_spatial_invariants(const DynamicDigest& d,
@@ -410,13 +411,17 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
             }
         }
 
-        // 2. 横向范围：|lateral_offset| ≤ 半路宽(+裕量)
-        if (std::fabs(a.lateral_offset) > half_w + EPS_LATERAL) {
+        // 2. 横向范围：运动中的 actor 必须留在路面内；静止路侧泊车可位于路缘外一个车位宽
+        double lateral_eps = EPS_LATERAL;
+        if (a.type != 0 && std::fabs(a.speed) < 0.1) {
+            lateral_eps = EPS_LATERAL_PARKED;
+        }
+        if (std::fabs(a.lateral_offset) > half_w + lateral_eps) {
             r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),
                 "  FAIL %s: lateral_offset=%.2f > half_w=%.2f + eps=%.2f (飞出路面)\n",
-                tag, std::fabs(a.lateral_offset), half_w, EPS_LATERAL);
+                tag, std::fabs(a.lateral_offset), half_w, lateral_eps);
             r.details += buf;
         } else {
             r.passed++;

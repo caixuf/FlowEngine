@@ -131,6 +131,8 @@ typedef enum {
 
 typedef struct {
     double        trigger_x;     /**< ego x 越过此值触发（m） */
+    double        trigger_y;     /**< 可选：ego y <= 此值时触发（m，默认未启用） */
+    bool          has_trigger_y; /**< trigger_y 是否有效 */
     RouteStepType type;          /**< 步骤类型（默认 ROUTE_LANE_CHANGE） */
     /* 目标车道。
      * 新语义（N 车道模型）: 0..N-1=目标车道索引（0=最左, N-1=最右），-1=无目标。

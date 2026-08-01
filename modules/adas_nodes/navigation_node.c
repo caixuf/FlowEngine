@@ -46,6 +46,8 @@ static struct {
     int route_count;
     int next_idx;
     int travel_dir;         /* +1: x 递增（东向前进），-1: x 递减（西向回程） */
+    int dir_candidate;
+    int dir_stable_count;
     int has_last_x;
     double last_ego_x;
     int active_step_index;
@@ -152,6 +154,11 @@ static int resolve_target_lane(int raw_target_lane, int current_lane) {
     return -1;
 }
 
+static double route_step_sort_key(const ScenarioRouteStep* step) {
+    if (!step) return 0.0;
+    return step->has_trigger_y ? 1e15 : step->trigger_x;
+}
+
 static void maybe_publish_next_lane_hop(double ego_x, double ego_y) {
     if (!g.graph_ready || g.active_goal_lane < 0) return;
 
@@ -215,7 +222,8 @@ static int navigation_execute(TaskBase* task) {
         has_fusion = g.has_fusion;
         pthread_mutex_unlock(&g.mu);
 
-        /* 方向检测：用 ego_x 差分判断是否完成掉头（东行<->西行）。 */
+        /* 方向检测：用 ego_x 差分判断掉头后的行驶方向。
+         * 三把方向阶段会出现短时倒车，需做连续样本去抖，避免 route 游标抖动重置。 */
         if (has_fusion) {
             if (!g.has_last_x) {
                 g.has_last_x = 1;
@@ -226,19 +234,29 @@ static int navigation_execute(TaskBase* task) {
                 int new_dir = 0;
                 if (dx > 0.20) new_dir = +1;
                 else if (dx < -0.20) new_dir = -1;
-                if (new_dir != 0 && new_dir != g.travel_dir) {
-                    g.travel_dir = new_dir;
-                    g.active_goal_lane = -1;
-                    g.active_goal_speed = -1.0;
-                    g.last_hop_target_lane = -1;
-                    g.active_step_index = -1;
-                    if (g.route_count > 0) {
-                        g.next_idx = (g.travel_dir > 0) ? 0 : (g.route_count - 1);
+                if (new_dir == 0) {
+                    g.dir_stable_count = 0;
+                } else {
+                    if (new_dir != g.dir_candidate) {
+                        g.dir_candidate = new_dir;
+                        g.dir_stable_count = 1;
                     } else {
-                        g.next_idx = 0;
+                        g.dir_stable_count++;
                     }
-                    LOG_INFO("navigation", "travel direction flipped -> %s, reset route cursor to %d",
-                             g.travel_dir > 0 ? "forward(+x)" : "return(-x)", g.next_idx);
+                    if (g.dir_stable_count >= 8 && new_dir != g.travel_dir) {
+                        g.travel_dir = new_dir;
+                        g.active_goal_lane = -1;
+                        g.active_goal_speed = -1.0;
+                        g.last_hop_target_lane = -1;
+                        g.active_step_index = -1;
+                        if (g.route_count > 0) {
+                            g.next_idx = (g.travel_dir > 0) ? 0 : (g.route_count - 1);
+                        } else {
+                            g.next_idx = 0;
+                        }
+                        LOG_INFO("navigation", "travel direction flipped -> %s, reset route cursor to %d",
+                                 g.travel_dir > 0 ? "forward(+x)" : "return(-x)", g.next_idx);
+                    }
                 }
             }
         }
@@ -246,9 +264,14 @@ static int navigation_execute(TaskBase* task) {
         if (has_fusion && g.route_count > 0) {
             while (g.next_idx >= 0 && g.next_idx < g.route_count) {
                 const ScenarioRouteStep* step = &g.route[g.next_idx];
-                int trigger_hit = (g.travel_dir >= 0)
-                    ? (ego_x >= step->trigger_x)
-                    : (ego_x <= step->trigger_x);
+                int trigger_hit;
+                if (step->has_trigger_y) {
+                    trigger_hit = (ego_y <= step->trigger_y);
+                } else {
+                    trigger_hit = (g.travel_dir >= 0)
+                        ? (ego_x >= step->trigger_x)
+                        : (ego_x <= step->trigger_x);
+                }
                 if (!trigger_hit) break;
 
                 int current_lane = lane_idx_from_y(ego_y);
@@ -341,7 +364,7 @@ static int navigation_init(MessageBus* bus, Transport* transport,
             if (g.route_count > 1) {
                 for (int i = 0; i < g.route_count - 1; ++i) {
                     for (int j = i + 1; j < g.route_count; ++j) {
-                        if (g.route[i].trigger_x > g.route[j].trigger_x) {
+                        if (route_step_sort_key(&g.route[i]) > route_step_sort_key(&g.route[j])) {
                             ScenarioRouteStep tmp = g.route[i];
                             g.route[i] = g.route[j];
                             g.route[j] = tmp;
@@ -369,6 +392,8 @@ static int navigation_init(MessageBus* bus, Transport* transport,
             g.last_hop_pub_us = 0;
             g.active_step_index = -1;
             g.travel_dir = +1;
+            g.dir_candidate = +1;
+            g.dir_stable_count = 0;
             g.next_idx = 0;
             LOG_INFO("navigation", "loaded %d route step(s) from '%s' lanes=%d lane_width=%.2f",
                      g.route_count, g.scenario_file, g.lane_count, g.lane_width);

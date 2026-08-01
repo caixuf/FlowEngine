@@ -23,6 +23,8 @@
     {"file": "scenarios/urban_challenge.json",     "duration_s": 60, "enabled": true},
     {"file": "scenarios/multi_light.json",         "duration_s": 60, "enabled": true},
     {"file": "scenarios/dense_npc.json",           "duration_s": 45, "enabled": true},
-    {"file": "scenarios/oncoming.json",            "duration_s": 45, "enabled": true}
+    {"file": "scenarios/oncoming.json",            "duration_s": 45, "enabled": true},
+    {"file": "scenarios/auto_parking.json",        "duration_s": 45, "enabled": false},
+    {"file": "scenarios/right_turn_side_parking.json", "duration_s": 35, "enabled": false}
   ]
 }

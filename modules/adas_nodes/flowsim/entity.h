@@ -114,6 +114,7 @@ struct Entity {
     /* ── 执行器滞后参数（运动学模型也启用，用于 yaw_rate 精确计算）── */
     double steer_tau{0.15};        /**< 转向执行器一阶滞后时间常数 (s)，典型 EPS 0.10-0.20 */
     double steer_rate_max{0.6};    /**< 最大转向速率 (rad/s)，EPS 物理限制 */
+    bool   steer_override{false};  /**< 掉头时临时放宽转向限幅，绕过 0.25rad 硬边界 */
 
     /* ── AI 状态（NPC 车辆 / 场景事件触发器复用）── */
     NpcState   state{NpcState::Cruise};  /**< 统一状态机：NPC 纵向+横向行为；TL/ETC 复用 */

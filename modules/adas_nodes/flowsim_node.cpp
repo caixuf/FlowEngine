@@ -68,7 +68,8 @@ namespace {
 /* control/cmd 陈旧超时：500ms 未收到则回退内置巡航（同 sim_world_node） */
 #define CONTROL_STALE_TIMEOUT_US  500000ULL
 
-/* road/geometry 重发周期：50 cycle ≈ 1s @ 20Hz（同 sim_world_node） */
+/* road/geometry 周期性重发：50 cycle = 2.5s @ 20Hz。
+ * 另：路段/车道数变化时会立即补发，避免 planning/behavior 在新 road 上继续用旧 lane_count。 */
 #define ROAD_GEOMETRY_REPUBLISH_CYCLES 50
 
 /* topic type IDs（与 sim_world_node.c 一致） */
@@ -136,6 +137,8 @@ struct FlowSimContext {
     uint32_t          cycle{0};
     uint64_t          sim_start_us{0};
     bool              roads_loaded{false};
+    int               last_road_geom_road_id{-9999};
+    int               last_road_geom_lane_count{-1};
 
     /* 仿真基础层：静态 digest（几何变更时建一次）+ 上一帧动态 digest（时序 invariant） */
     flowsim::StaticDigest  static_digest;
@@ -151,6 +154,13 @@ struct FlowSimContext {
      * 此时 esmini advance 方向与车辆行驶方向相反，需要用 world_to_frenet
      * 同步 esmini position。当车辆再次回到起点完成循环时重置为 false。 */
     bool                   u_turn_active{false};
+    bool                   uturn_maneuver_active{false};
+    int                    uturn_phase{0};
+    double                 uturn_phase_time_s{0.0};
+    int                    uturn_target_road_id{0};
+    int                    uturn_target_lane{0};
+    double                 uturn_target_s{0.0};
+    int                    uturn_turn_sign{1}; /* +1 左打轮起步，-1 右打轮起步 */
     };
 
 FlowSimContext g;
@@ -905,10 +915,12 @@ static void publish_road_geometry(void) {
      * ego 永远到不了 +5.25 / -5.25 外侧车道，看起来像"逆行"。
      * 这里查询失败时回退 2（向后兼容 2 车道场景）。 */
     int lane_count = 2;
+    int road_id = -1;
     if (g.roads_loaded) {
         const flowsim::Entity& ego = g.pool[0];
         flowsim::FrenetPos ef;
         if (g.roads.world_to_frenet(ego.x, ego.y, ef)) {
+            road_id = ef.road_id;
             int n = g.roads.drivable_lane_count(ef.road_id, ef.s);
             if (n > 0) lane_count = n;
         }
@@ -923,6 +935,21 @@ static void publish_road_geometry(void) {
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
     free(s);
     cJSON_Delete(root);
+    g.last_road_geom_road_id = road_id;
+    g.last_road_geom_lane_count = lane_count;
+}
+
+static bool should_publish_road_geometry_now(void) {
+    if (g.cycle % ROAD_GEOMETRY_REPUBLISH_CYCLES == 0) return true;
+    if (!g.roads_loaded) return false;
+    const flowsim::Entity& ego = g.pool[0];
+    flowsim::FrenetPos ef;
+    if (!g.roads.world_to_frenet(ego.x, ego.y, ef)) return false;
+    int lane_count = g.last_road_geom_lane_count;
+    int n = g.roads.drivable_lane_count(ef.road_id, ef.s);
+    if (n > 0) lane_count = n;
+    return ef.road_id != g.last_road_geom_road_id ||
+           lane_count != g.last_road_geom_lane_count;
 }
 
 /**
@@ -1101,6 +1128,7 @@ static void internal_cruise_control(flowsim::Entity& ego) {
         ego.throttle = 0.1;
         ego.brake = 0.0;
     }
+
     /* 横向：车道保持 — 朝 ego 当前所在车道中心。
      * 旧实现硬编码 -0.5*lane_width（2 车道左车道中心），是 2 车道假设。
      * N 车道模型：用 lane_idx_from_y 量化 ego 当前车道 idx，再算该车道中心 y。
@@ -1124,6 +1152,43 @@ static void internal_cruise_control(flowsim::Entity& ego) {
               + y_err * IH_KP_LAT;
     if (ego.steer > 0.15) ego.steer = 0.15;
     if (ego.steer < -0.15) ego.steer = -0.15;
+}
+
+static void begin_three_point_uturn(flowsim::Entity& ego,
+                                    int target_road_id,
+                                    int target_lane,
+                                    double target_s) {
+    g.uturn_maneuver_active = true;
+    g.uturn_phase = 0;
+    g.uturn_phase_time_s = 0.0;
+    g.uturn_target_road_id = target_road_id;
+    g.uturn_target_lane = target_lane;
+    g.uturn_target_s = target_s;
+    g.uturn_turn_sign = (ego.lane_id < 0) ? +1 : -1;
+    /* 临时放宽转向限幅，允许掉头所需的大转向角（0.40+ rad）。
+     * 掉头完成后在 uturn 状态机终态重置。 */
+    ego.steer_override = true;
+}
+
+static void apply_three_point_uturn_command(flowsim::Entity& ego) {
+    const int sign = g.uturn_turn_sign;
+    switch (g.uturn_phase) {
+        case 0: /* 前进一把：打一圈多方向（~0.50rad），车头驶入对向车道 */
+            ego.throttle = 0.22;
+            ego.brake = 0.0;
+            ego.steer = 0.50 * sign;
+            break;
+        case 1: /* 倒车一把：先刹车停稳，再反打方向倒车，车尾摆正 */
+            ego.throttle = -0.35;
+            ego.brake = 0.0;
+            ego.steer = -0.55 * sign;
+            break;
+        default: /* 前进回正：微调方向进入目标车道 */
+            ego.throttle = 0.24;
+            ego.brake = 0.0;
+            ego.steer = 0.10 * sign;
+            break;
+    }
 }
 
 /* ── 协程主循环 ───────────────────────────────────────────────── */
@@ -1278,6 +1343,10 @@ protected:
                 else if (ts == 2) ego.lights.set_turn_right(true);
                 if (hz)           ego.lights.set_hazard(true);
             }
+            if (g.uturn_maneuver_active) {
+                /* 窄路掉头状态机接管控制：前进一把 + 倒车一把 + 前进回正。 */
+                apply_three_point_uturn_command(ego);
+            }
             /* EPS 转向执行器低通滤波：模拟电动助力转向惯性，
              * 滤掉 20Hz 控制环中 Stanley 控制器的小幅振荡。
              * 时间常数 ~0.1s（alpha=0.33 @ 20Hz 对应 -3dB@~3Hz）。
@@ -1297,6 +1366,45 @@ protected:
                 flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
                                       ego.throttle, ego.brake, ego.steer);
             }
+            if (g.uturn_maneuver_active) {
+                g.uturn_phase_time_s += FLOWSIM_DT_SEC;
+                if (g.uturn_phase == 0 && g.uturn_phase_time_s >= 2.00) {
+                    g.uturn_phase = 1;
+                    g.uturn_phase_time_s = 0.0;
+                } else if (g.uturn_phase == 1 && g.uturn_phase_time_s >= 3.00) {
+                    g.uturn_phase = 2;
+                    g.uturn_phase_time_s = 0.0;
+                } else if (g.uturn_phase == 2 && g.uturn_phase_time_s >= 0.50) {
+                    if (ego.road_pos.relocate(g.roads, g.uturn_target_road_id,
+                                              g.uturn_target_lane,
+                                              g.uturn_target_s, 0.0)) {
+                        ego.last_teleport_cycle = g.cycle;
+                        g.u_turn_active = (g.uturn_target_lane > 0);
+                        flowsim::WorldPos wp;
+                        if (ego.road_pos.world(wp)) {
+                            ego.x = wp.x;
+                            ego.y = wp.y;
+                            ego.heading = wp.h;
+                        }
+                        flowsim::FrenetPos fp;
+                        if (ego.road_pos.frenet(fp)) {
+                            ego.road_id = fp.road_id;
+                            ego.lane_id = fp.lane_id;
+                            ego.s = fp.s;
+                            ego.offset = fp.offset;
+                        }
+                        ego.speed = std::max(std::fabs(ego.speed), 4.0);
+                    } else {
+                        LOG_ERROR("flowsim",
+                                  "ego three-point U-turn finalize failed (road_id=%d lane=%d s=%.1f)",
+                                  g.uturn_target_road_id, g.uturn_target_lane, g.uturn_target_s);
+                    }
+                    g.uturn_maneuver_active = false;
+                    g.uturn_phase = 0;
+                    g.uturn_phase_time_s = 0.0;
+                    ego.steer_override = false;  /* 恢复正常转向限幅 */
+                }
+            }
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
              *
@@ -1313,7 +1421,7 @@ protected:
              *   直路巡航时 steer≈0.02 → delta_lat≈0.012 m/帧 → 过冲可控
              *   变道 steer≈0.10 → delta_lat≈0.060 m/帧 → ~3.5s 完成车道变换 */
             bool is_dynamic = (strcmp(g.physics_model, "dynamic") == 0);
-            if (ego.road_pos.ok()) {
+            if (!g.uturn_maneuver_active && ego.road_pos.ok()) {
                 /* ⚠ 横向位移由 heading 与道路切线的夹角 dh 驱动，不是由 steer 直接驱动。
                  *
                  * 原 bug（3d092ad）：delta_lat = v * dt * tan(steer) 把转角当成了
@@ -1410,6 +1518,16 @@ protected:
                 {
                     constexpr double END_MARGIN_M = 1.0;
                     double road_len = -1.0;
+                    bool road_is_terminal = true;
+                    if (g.route.ok() && g.route.count() > 1) {
+                        const int first_road = g.route.seg(0).road_id;
+                        const int last_road = g.route.seg(g.route.count() - 1).road_id;
+                        if (ego.lane_id < 0) {
+                            road_is_terminal = (ego.road_id == last_road);
+                        } else {
+                            road_is_terminal = (ego.road_id == first_road);
+                        }
+                    }
                     for (int ri = 0, rn = g.roads.road_count(); ri < rn; ++ri) {
                         flowsim::RoadInfo rinfo;
                         if (g.roads.road_info(ri, rinfo) &&
@@ -1426,42 +1544,14 @@ protected:
                         /* 对向车道：起点（s ≈ 0）掉头回到前进车道 */
                         at_road_end = (road_len > 0.0 && ego.s <= END_MARGIN_M);
                     }
-                    if (at_road_end) {
-                        /* 物理掉头：切换到对向车道，保持速度。
-                         * 前进车道→对向车道：车辆在路尾掉头，新的 heading 为 π（西向）。
-                         * 对向车道→前进车道：车辆回到起点，新的 heading 为 0（东向）。
-                         * 对向车道行驶时 esmini advance 方向与车辆行驶方向相反，
-                         * 由主循环中的 world_to_frenet 同步处理。 */
+                    if (at_road_end && road_is_terminal && !g.uturn_maneuver_active) {
+                        /* 路端触发窄路三把方向：先物理转向/倒车，再落到对向车道。 */
                         int opposite_lane = -ego.lane_id;  /* -1→1, 1→-1 */
-                        /* 物理掉头定位：
-                         *  - 前进车道(lane<0)到路尾掉头：保持在路尾物理位置 -> s=road_len
-                         *  - 回程车道(lane>0)到路头掉头：保持在路头物理位置 -> s=0 */
                         double turn_s = (ego.lane_id < 0 && road_len > 0.0) ? road_len : 0.0;
-                        if (ego.road_pos.relocate(g.roads, ego.road_id, opposite_lane, turn_s, 0.0)) {
-                            ego.speed = std::max(ego.speed, 5.0);
-                            ego.last_teleport_cycle = g.cycle;
-                            g.u_turn_active = (opposite_lane > 0);  /* 对向车道激活 world_to_frenet */
-                            flowsim::WorldPos wp;
-                            if (ego.road_pos.world(wp)) {
-                                ego.x = wp.x;
-                                ego.y = wp.y;
-                                ego.heading = wp.h;
-                            }
-                            flowsim::FrenetPos fp;
-                            if (ego.road_pos.frenet(fp)) {
-                                ego.road_id = fp.road_id;
-                                ego.lane_id = fp.lane_id;
-                                ego.s = fp.s;
-                                ego.offset = fp.offset;
-                            }
-                            if (g.cycle % 50 == 0) {
-                                LOG_WARN("flowsim", "ego physical U-turn: switched to lane %d at s=%.1f (v=%.1f, x=%.1f, y=%.1f, h=%.2f)",
-                                         opposite_lane, turn_s, ego.speed, ego.x, ego.y, ego.heading);
-                            }
-                        } else {
-                            LOG_ERROR("flowsim", "ego U-turn relay failed at road_end (road_id=%d s=%.1f/%.1f)",
-                                      ego.road_id, ego.s, road_len);
-                        }
+                        begin_three_point_uturn(ego, ego.road_id, opposite_lane, turn_s);
+                        LOG_WARN("flowsim",
+                                 "ego start three-point U-turn: lane %d -> %d at s=%.1f",
+                                 ego.lane_id, opposite_lane, turn_s);
                     }
                 }
             }
@@ -1540,7 +1630,7 @@ protected:
 
             /* ── Step 7: 发布 ── */
             publish_sim_tick(sim_time_us);
-            if (g.cycle % ROAD_GEOMETRY_REPUBLISH_CYCLES == 0) {
+            if (should_publish_road_geometry_now()) {
                 publish_road_geometry();
             }
             /* road/ref_path：ego 前方参考路径，每 cycle 发布给 control_node Stanley

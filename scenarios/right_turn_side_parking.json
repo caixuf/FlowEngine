@@ -1,0 +1,72 @@
+{
+  "name": "right_turn_side_parking",
+  "description": "直路主干道 + 右转进入双向支路 + 路侧侧方停车位。用于补齐车道线/支路/路侧停车几何覆盖，并为自动泊车链路预留入口。",
+  "random_seed": 73,
+  "duration_s": 35,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 8.0,
+    "target_speed": 10.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "urban",
+        "name": "main_approach",
+        "length_m": 180,
+        "lanes": 2,
+        "lane_width": 3.5,
+        "speed_limit": 13.0,
+        "nodes": [[0, 0, 0], [180, 0, 0]]
+      },
+      {
+        "id": 1,
+        "type": "ramp_curve",
+        "name": "right_turn_link",
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 13.0,
+        "curvature_profile": [
+          {"radius": -28.0, "arc": 22.0},
+          {"radius": -28.0, "arc": 22.0}
+        ]
+      },
+      {
+        "id": 2,
+        "type": "urban",
+        "name": "parking_street",
+        "length_m": 180,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 6.0
+      }
+    ]
+  },
+  "actors": [
+    {"id": 101, "type": "car", "segment_id": 2, "s": 120.0, "l": -5.25, "vx": 0.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 102, "type": "car", "segment_id": 2, "s": 148.0, "l": -5.25, "vx": 0.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 103, "type": "car", "segment_id": 2, "s": 172.0, "l": 5.25,  "vx": 0.0, "vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [],
+  "stop_lines": [
+    {"id": 0, "x": 170.0, "y": -5.25}
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 35.0,
+    "min_avg_speed_mps": 2.0
+  },
+  "route": [
+    {"trigger_x": 60.0, "type": "lane_change", "target_lane": 1, "target_speed": 8.0, "label": "prepare_right_turn_lane"},
+    {"trigger_x": 145.0, "type": "lane_change", "target_lane": 1, "target_speed": 4.0, "label": "enter_parking_street"},
+    {"trigger_y": -54.0, "type": "lane_change", "target_lane": 1, "target_speed": 0.0, "label": "stop_at_side_parking_slot"}
+  ],
+  "scenarios": [],
+  "choreography": {
+    "loop_period_s": 999,
+    "beats": []
+  }
+}

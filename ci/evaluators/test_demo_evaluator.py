@@ -138,6 +138,37 @@ class DemoEvaluatorTest(unittest.TestCase):
         # TTC = 100/1 = 100s，远大于临界 3s，min_ttc_s 应为 100
         self.assertAlmostEqual(result["min_ttc_s"], 100.0, places=2)
 
+    def test_sample_metrics_uses_road_network_polyline_for_curved_roads(self):
+        evaluator = load_evaluator()
+        sample = {
+            "metrics": {
+                "vehicle": {"speed": 3.0, "x": 206.25},
+                "scene": {
+                    "ego": {"x": 206.25, "y": -54.0, "heading": 0.0, "speed": 3.0},
+                    "lane": {"width": 3.5, "count": 2, "center": 0.0},
+                    "obstacles": [],
+                    "road_network": {
+                        "edges": [
+                            {
+                                "id": 2,
+                                "lanes": 2,
+                                "lane_width": 3.5,
+                                "nodes": [
+                                    [208.0, -28.0, 0.0],
+                                    [208.0, -80.0, 0.0],
+                                ],
+                            }
+                        ]
+                    },
+                },
+            }
+        }
+
+        metrics = evaluator.sample_metrics(sample, road=None)
+
+        self.assertLess(metrics["lane_error"], 0.2)
+        self.assertGreater(metrics["road_edge_margin"], 0.7)
+
 
 if __name__ == "__main__":
     unittest.main()

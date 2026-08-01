@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "直路导航场景：3000m 双向 4 车道，ego 按导航与行为规划行驶（无路尾瞬移回起点）。黄色虚线中心线表示允许越线超车。",
+  "description": "直路导航场景：3000m 双向 4 车道，ego 按导航与行为规划行驶（路尾物理掉头到对向车道）。黄色实线中心线为主，两端 50m 黄色虚线允许掉头。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
@@ -8,7 +8,7 @@
     "y": -1.75,
     "heading": 0.0,
     "init_speed": 10.0,
-    "target_speed": 15.0
+    "target_speed": 20.0
   },
   "road_network": {
     "edges": [
@@ -54,10 +54,8 @@
     "min_avg_speed_mps": 5.0
   },
   "route": [
-    {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 12.0, "label": "enter_noa_route"},
-    {"trigger_x": 2600.0, "type": "lane_change", "target_lane": -1, "target_speed": 10.0, "label": "prepare_terminal_slowdown"},
-    {"trigger_x": 2850.0, "type": "lane_change", "target_lane": -1, "target_speed": 4.0, "label": "approach_end_zone"},
-    {"trigger_x": 2970.0, "type": "lane_change", "target_lane": -1, "target_speed": 0.0, "label": "stop_before_road_end"}
+    {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 20.0, "label": "enter_noa_route"},
+    {"trigger_x": 2950.0, "type": "lane_change", "target_lane": -1, "target_speed": 20.0, "label": "prepare_u_turn"}
   ],
   "scenarios": [],
   "choreography": {

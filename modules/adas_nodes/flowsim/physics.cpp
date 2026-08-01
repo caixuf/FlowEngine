@@ -50,8 +50,12 @@ static double longitudinal_accel(const Entity& e, double throttle, double brake,
 
 /* 转向执行器：一阶滞后 (τ≈0.15s EPS) + 速率限幅，写回 e.steer。两模型共用 */
 static void update_steer(Entity& e, double steer_cmd, double dt) {
-    if (steer_cmd >  0.25) steer_cmd =  0.25;
-    if (steer_cmd < -0.25) steer_cmd = -0.25;
+    /* 正常行驶限幅 0.25rad（≈14°），掉头时（steer_override=true）放宽到 0.60rad（≈34°）。
+     * 宽路掉头打一圈多（~0.50rad），窄路窄路打死方向盘（~0.55-0.60rad），
+     * 详见 Python 扫描结果。 */
+    const double steer_limit = e.steer_override ? 0.60 : 0.25;
+    if (steer_cmd >  steer_limit) steer_cmd =  steer_limit;
+    if (steer_cmd < -steer_limit) steer_cmd = -steer_limit;
 
     double alpha = dt / (e.steer_tau + dt);
     double steer_next = e.steer + alpha * (steer_cmd - e.steer);
@@ -70,7 +74,11 @@ static void normalize_heading(Entity& e) {
 
 void step_bicycle(Entity& e, double dt, double throttle, double brake, double steer) {
     e.speed += longitudinal_accel(e, throttle, brake, e.speed) * dt;
-    if (e.speed < 0.0) e.speed = 0.0;
+    /* 倒车只允许显式负油门触发（三把方向掉头相位）。
+     * 普通制动若穿过 0，必须钳回静止，不能误变成持续倒车。 */
+    if (e.speed < 0.0 && throttle >= 0.0) e.speed = 0.0;
+    if (e.speed < -4.0) e.speed = -4.0;
+    if (e.speed >  60.0) e.speed = 60.0;
 
     update_steer(e, steer, dt);
 

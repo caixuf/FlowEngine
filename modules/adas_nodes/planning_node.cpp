@@ -140,7 +140,12 @@ struct PlanningContext {
     double cfg_max_speed{20.0};
     double cfg_max_accel{4.0};
     double cfg_ref_path_length{5000.0};
-    double ref_path_start_x{0.0};
+    double        ref_path_start_x{0.0};
+    double        map_ref_x[128]{};
+    double        map_ref_y[128]{};
+    double        map_ref_s[128]{};
+    int           map_ref_count{0};
+    uint64_t      last_map_ref_us{0};
     double cfg_highway_speed_mps{13.0}; /* CP->NP 升级所需的持续速度阈值 (m/s) */
 
     /* 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道，行为不变） */
@@ -255,6 +260,12 @@ static void check_mode_downgrade(uint64_t now_us) {
 
 static void update_reference_path(double start_x) {
 #ifdef HAVE_FRENET
+    if (g.map_ref_count >= 2 && g.last_map_ref_us != 0 &&
+        clock_now_us() - g.last_map_ref_us < 500000ULL) {
+        frenet_set_reference_path(g.frenet, g.map_ref_x, g.map_ref_y, g.map_ref_count);
+        g.ref_path_start_x = g.ego_x;
+        return;
+    }
     double wx[101], wy[101];
     const int ref_n = 101;
     for (int i = 0; i < ref_n; i++) {
@@ -283,6 +294,35 @@ static void update_reference_path(double start_x) {
 static bool frenet_to_cartesian(double s, double d,
                                 double& out_x, double& out_y,
                                 double& out_heading, double& out_kappa) {
+    if (g.map_ref_count >= 2 && g.last_map_ref_us != 0 &&
+        clock_now_us() - g.last_map_ref_us < 500000ULL) {
+        double total_s = g.map_ref_s[g.map_ref_count - 1];
+        if (total_s <= 1e-6) return false;
+        if (s < 0.0) s = 0.0;
+        if (s > total_s) s = total_s;
+        int idx = 0;
+        while (idx + 1 < g.map_ref_count && g.map_ref_s[idx + 1] < s) idx++;
+        if (idx >= g.map_ref_count - 1) idx = g.map_ref_count - 2;
+        double s0 = g.map_ref_s[idx];
+        double s1 = g.map_ref_s[idx + 1];
+        double frac = (s1 > s0) ? ((s - s0) / (s1 - s0)) : 0.0;
+        if (frac < 0.0) frac = 0.0;
+        if (frac > 1.0) frac = 1.0;
+        double rx0 = g.map_ref_x[idx];
+        double ry0 = g.map_ref_y[idx];
+        double rx1 = g.map_ref_x[idx + 1];
+        double ry1 = g.map_ref_y[idx + 1];
+        double ref_x = rx0 + frac * (rx1 - rx0);
+        double ref_y = ry0 + frac * (ry1 - ry0);
+        double dx = rx1 - rx0;
+        double dy = ry1 - ry0;
+        double theta = atan2(dy, dx);
+        out_x = ref_x - d * sin(theta);
+        out_y = ref_y + d * cos(theta);
+        out_heading = theta;
+        out_kappa = 0.0;
+        return true;
+    }
     const int ref_n = 101;
     double step = g.cfg_ref_path_length / (double)(ref_n - 1);
     double ref_start = g.ref_path_start_x;
@@ -471,6 +511,46 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     } else {
         LOG_WARN("planning", "[RG] cJSON_Parse FAILED");
     }
+}
+
+static void on_road_ref_path(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* points = cJSON_GetObjectItemCaseSensitive(root, "points");
+    if (!cJSON_IsArray(points)) {
+        cJSON_Delete(root);
+        return;
+    }
+    int n = cJSON_GetArraySize(points);
+    if (n > 128) n = 128;
+    int out_n = 0;
+    double accum_s = 0.0;
+    double prev_x = 0.0, prev_y = 0.0;
+    for (int i = 0; i < n; ++i) {
+        cJSON* pt = cJSON_GetArrayItem(points, i);
+        if (!cJSON_IsObject(pt)) continue;
+        cJSON* jx = cJSON_GetObjectItemCaseSensitive(pt, "x");
+        cJSON* jy = cJSON_GetObjectItemCaseSensitive(pt, "y");
+        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) continue;
+        double x = jx->valuedouble;
+        double y = jy->valuedouble;
+        if (out_n > 0) {
+            double dx = x - prev_x;
+            double dy = y - prev_y;
+            accum_s += sqrt(dx * dx + dy * dy);
+        }
+        g.map_ref_x[out_n] = x;
+        g.map_ref_y[out_n] = y;
+        g.map_ref_s[out_n] = accum_s;
+        prev_x = x;
+        prev_y = y;
+        out_n++;
+    }
+    g.map_ref_count = out_n;
+    if (out_n >= 2) g.last_map_ref_us = clock_now_us();
+    cJSON_Delete(root);
 }
 
 /* ── planning/behavior 订阅 — 接收行为规划指令 ──────────── */
@@ -731,7 +811,8 @@ protected:
             /* select_for: 等待 fusion、障碍物或道路几何更新触发规划（消息驱动），
              * 50ms 超时兜底。替代 sleep_us 轮询，降低空等 CPU 占用。 */
             auto r = co_await select_for(bus(),
-                {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, TOPIC_ROAD_GEOMETRY}, 50000);
+                {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES,
+                 TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_REF_PATH}, 50000);
             (void)r;
             if (should_stop()) break;
 
@@ -812,6 +893,21 @@ protected:
                     speed_clamp_warn++;
                 }
                 command_speed = g.cfg_max_speed;
+            }
+
+            /* §5a: 掉头后重置 route_target_speed
+             * flowsim_node 在路尾把 ego 瞬移到 s=0 (x≈5)，但 route_target_speed
+             * 残留上次 route 步骤的值（如 enter_noa_route 的 12.0），导致
+             * command_speed 被锁死在低值，车辆无法加速到巡航速度。
+             * 检测条件：ego_x < 60（第一个 route 步骤 trigger_x），说明已回到起点。 */
+            if (g.ego_x < 60.0 && g.route_target_speed >= 0.0) {
+                static int teleport_warn = 0;
+                if (teleport_warn < 3) {
+                    LOG_WARN("planning", "teleport detected (ego_x=%.1f < 60), resetting route_target_speed %.1f → -1",
+                             g.ego_x, g.route_target_speed);
+                    teleport_warn++;
+                }
+                g.route_target_speed = -1.0;
             }
 
             /* ── NOA Phase 6 merge 闭环：基于 scene/frame 主线来车 gap 决策并入 ──
@@ -1484,6 +1580,7 @@ static const char* s_inputs[]  = {
     TOPIC_FUSION_LOCALIZATION,
     TOPIC_PERCEPTION_OBSTACLES,
     TOPIC_ROAD_GEOMETRY,
+    TOPIC_ROAD_REF_PATH,
     TOPIC_ROAD_TRAFFIC_LIGHTS,
     TOPIC_SCENE_FRAME,
     TOPIC_PLANNING_BEHAVIOR,
@@ -1544,6 +1641,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.curve_length_m  = 0.0;
     g.curve_offset_m  = 0.0;
     g.ref_path_start_x = 0.0;
+    g.map_ref_count = 0;
+    g.last_map_ref_us = 0;
 
     /* 默认参数 */
     g.cfg_target_speed      = 15.0;
@@ -1596,6 +1695,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES, on_perception_obstacles, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY, on_road_geometry, nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_road_ref_path, nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, on_traffic_lights, nullptr);
     transport_subscribe(transport, TOPIC_SCENE_FRAME, on_scene_frame, nullptr);
     transport_subscribe(transport, TOPIC_PLANNING_BEHAVIOR, on_planning_behavior, nullptr);
@@ -1608,6 +1708,8 @@ static int planning_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, OBSTACLELIST_TYPE_ID,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY, 0x80AD5C12u,
+                        CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_ROAD_REF_PATH, 0u,
                         CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_ROAD_TRAFFIC_LIGHTS, 0x7E5C0FFEu,
                         CAP_SUBSCRIBER, 0);

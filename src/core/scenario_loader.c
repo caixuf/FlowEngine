@@ -182,6 +182,11 @@ ScenarioConfig* scenario_load(const char* path) {
             cJSON* j;
             j = cJSON_GetObjectItemCaseSensitive(jr, "trigger_x");
             if (cJSON_IsNumber(j)) r->trigger_x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jr, "trigger_y");
+            if (cJSON_IsNumber(j)) {
+                r->trigger_y = j->valuedouble;
+                r->has_trigger_y = true;
+            }
             j = cJSON_GetObjectItemCaseSensitive(jr, "target_lane");
             if (cJSON_IsNumber(j)) r->target_lane = (int)j->valuedouble;
             j = cJSON_GetObjectItemCaseSensitive(jr, "target_speed");
@@ -553,6 +558,8 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         const ScenarioRouteStep* r = &scenario->route[i];
         cJSON* jr = cJSON_CreateObject();
         cJSON_AddNumberToObject(jr, "trigger_x",   r->trigger_x);
+        if (r->has_trigger_y)
+            cJSON_AddNumberToObject(jr, "trigger_y", r->trigger_y);
         /* NOA Phase 3.1: 序列化 type + branch_id（branch_select 选路用） */
         const char* type_str = "lane_change";
         switch (r->type) {
