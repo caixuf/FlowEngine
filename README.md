@@ -4,8 +4,8 @@
 >
 > **定位：** FlowEngine 是一个*仿真优先、可复现的实验平台*。核心能力——感知、融合、规划、控制、学习——
 > 首先在**仿真内**被运行、观察、测试、回放与评分；通过纯逻辑单测、schema 迁移与统一时间戳语义，
-> 逐步向真车部署演进。当前阶段不追车规量产认证，但已开始整理真车部署 Roadmap
-> （GNSS 纪律时钟、PTP、MCU 安全层等），详见 [docs/REAL_VEHICLE_ROADMAP.md](docs/REAL_VEHICLE_ROADMAP.md)。
+> 逐步向真车部署演进。当前阶段不追车规量产认证，已提供 RC 小车硬件落地清单，
+> 详见 [docs/RC_CAR_HARDWARE_CHECKLIST.md](docs/RC_CAR_HARDWARE_CHECKLIST.md)。
 
 [![CI](https://github.com/caixuf/FlowEngine/actions/workflows/ci.yml/badge.svg)](https://github.com/caixuf/FlowEngine/actions)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -226,6 +226,19 @@ flowctl param get <name>        # 获取参数
 详见 [docs/VIS_MODULE_GUIDE.md](docs/VIS_MODULE_GUIDE.md) 与
 [docs/TROUBLESHOOTING_3D_DASHBOARD.md](docs/TROUBLESHOOTING_3D_DASHBOARD.md)。
 
+FlowBoard 界面按用途分三个工作区（顶部导航切换，记忆上次选择）：
+
+| 工作区 | 内容 | 典型用途 |
+|--------|------|----------|
+| **Observe 观察** | 3D 场景 + 节点拓扑图 | 看车跑得对不对 |
+| **Analyze 分析** | QoS 统计 / 消息矩阵 / 实时图表 | 查频率掉没掉、延迟高不高 |
+| **Operate 操作** | 训练中心 + Ops 控制台 | 点按钮跑学习闭环、回灌 bag |
+
+Ops 控制台（侧栏「Ops Console」或 Operate 工作区进入）支持**免命令行操作**：
+- **Bag 回灌**：选 bag 文件 → 开始回灌 → 实时看日志 → 停止；
+- **学习闭环**：一键「仅影子评估」或「采集→训练→评估」完整闭环；
+- **训练中心**：查看模型列表 / shadow_eval 得分 / 一键晋级 runtime 模型。
+
 ```bash
 # 终端 1：监控守护进程（加载前端，启用 IPC 桥接 + 文件桥接回退）
 ./build/bin/flowmond --html-path tools/flowboard/index.html
@@ -390,10 +403,9 @@ TaskBase* create_task(const TaskConfig* cfg) {
 |------|------|
 | `straight_road.json` | 直路综合场景：10km 平路双向 4 车道（Y=0），含 NPC 慢车/cutin、行人横穿、红绿灯停车，用于验证感知-融合-规划-控制链路与 FlowBoard 3D 渲染 |
 
-更多典型场景（弯道、超车、行人横穿、cut-in、鬼探头、高速出口、无保护路口等）已列入
-[docs/REAL_VEHICLE_ROADMAP.md](docs/REAL_VEHICLE_ROADMAP.md) 可视化/仿真打磨章节，
-将逐步补全。回归基线系统与 `tests/baseline/*.json` 正在建设中，目前使用
-`tools/demo_evaluator.py` 对每次运行做在线评分。
+更多典型场景（弯道、超车、行人横穿、cut-in、鬼探头、高速出口、无保护路口等）将逐步补全。
+场景矩阵回归见 `ci/evaluators/scenario_regression.py`（与基线对比），
+单次运行在线评分见 `ci/evaluators/demo_evaluator.py`。
 
 ---
 
@@ -531,9 +543,9 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [Algorithm Integration](docs/ALGORITHM_INTEGRATION.md) | 算法集成指南 |
 | [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | 仪表盘数据契约 |
 | [FlowBoard Scene Contract](docs/FLOWBOARD_SCENE_CONTRACT.md) | scene 数据契约 |
-| [FloSim Architecture](docs/FLOWSIM_ARCHITECTURE.md) | flowsim 仿真器架构 |
+| [FlowSim 仿真指南](docs/SIMULATION_GUIDE.md) | flowsim 仿真模式对照 |
 | [Hardware Deployment](docs/HARDWARE_DEPLOYMENT.md) | 硬件部署 |
-| [Real Vehicle Roadmap](docs/REAL_VEHICLE_ROADMAP.md) | 真车部署待办（占位/缺位清单）|
+| [RC Car Hardware Checklist](docs/RC_CAR_HARDWARE_CHECKLIST.md) | RC 小车硬件落地清单 |
 | [Learning Loop](docs/LEARNING_LOOP.md) | 仿真内学习闭环 |
 | [Troubleshooting 3D Dashboard](docs/TROUBLESHOOTING_3D_DASHBOARD.md) | 3D 仪表盘故障排查 |
 
