@@ -40,7 +40,6 @@
 #include <unistd.h>
 
 #include <memory>
-#include <atomic>
 #include <vector>
 
 namespace {
@@ -85,9 +84,8 @@ struct ControlContext {
     DiscoveryManager* discovery{nullptr};
     Scheduler*        scheduler{nullptr};
 
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct control_Wrapper* task_wrapper{nullptr};
 
     /* PID 状态 */
     double kp{0}, ki{0}, kd{0};
@@ -162,9 +160,6 @@ struct ControlContext {
      * 默认 R≤60m 触发 ×1.5 提升，可经 params 配置覆盖。 */
     double curve_ff_boost_radius_m{60.0};
     double curve_ff_boost_factor{1.5};
-
-    /* 协程任务 */
-    std::unique_ptr<class ControlTask> task;
 
     /* LTV MPC 控制器（§10 替代已删除的 mpc_controller + LQR） */
     LtvMpcSolver* ltv_mpc{nullptr};
@@ -389,13 +384,14 @@ static bool query_ref_at(double ego_x, double ego_y,
 
 class ControlTask : public CoroutineTask {
 public:
-    ControlTask(MessageBus* bus, Transport* transport)
-        : CoroutineTask(bus), transport_(transport) {}
+    ControlTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport) {
+        transport_ = transport;
+    }
 
 protected:
     Task run() override {
-        pthread_setname_np(pthread_self(), "control");
-
         while (!should_stop()) {
             /* select_for: 等待 fusion 或 planning 消息（消息驱动），
              * 50ms 超时兜底保持 DATA_TIMEOUT fallback 及时性。
@@ -937,22 +933,8 @@ private:
     Transport* transport_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* control_thread(void*) {
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "control");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("control", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 control_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(ControlTask, control)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -964,11 +946,10 @@ extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 static int control_init(MessageBus* bus, Transport* transport,
                         DiscoveryManager* discovery, Scheduler* scheduler,
                         const char* params_json) {
-    /* 清零并重新初始化（atomic/unique_ptr 不可拷贝，逐字段赋值） */
+    /* 清零并重新初始化 */
     g.transport    = transport;
     g.discovery    = discovery;
     g.scheduler    = scheduler;
-    g.should_stop  = false;
 
     g.kp = g.ki = g.kd = 0.0;
     g.integral = 0.0;
@@ -1126,7 +1107,17 @@ static int control_init(MessageBus* bus, Transport* transport,
                         CAP_PUBLISHER, 100.0);
     discovery_advertise(discovery, TOPIC_CONTROL_DEBUG, 0u, CAP_PUBLISHER, 2.0);
 
-    g.task = std::make_unique<ControlTask>(bus, transport);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "control");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = control_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("control", "control_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport);
+    s_plugin.taskbase = control_get_base(g.task_wrapper);
 
     /* LTV MPC 初始化 */
     g.ltv_mpc_cfg = ltv_mpc_default_config();
@@ -1141,30 +1132,29 @@ static int control_init(MessageBus* bus, Transport* transport,
 }
 
 static int control_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, control_thread, nullptr) != 0) {
-        LOG_WARN("control", "pthread_create failed: %s", strerror(errno));
-        return -1;
+    if (!g.task_wrapper) return -1;
+    /* 托管模式：注册到调度器 + 派生工作线程 + 设置 choreo trigger */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("control", "node_start_managed failed: %d", rc);
     }
-    g.running = true;
-    LOG_INFO("control", "started");
-    node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
+    node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("control", "started (managed mode)");
     return 0;
 }
 
 static void control_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        control_stop(&g.task_wrapper->base);
+    }
 }
 
 static void control_cleanup(void) {
-    control_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        control_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     statem_cleanup(&g.sm);
     LOG_INFO("control", "cleanup done");
 }
@@ -1185,7 +1175,7 @@ NodePlugin s_plugin = {
     control_stop,
     control_cleanup,
     control_health,
-    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
+    nullptr,  /* taskbase: 在 init() 中通过 control_create 设置 */
 };
 
 } // namespace

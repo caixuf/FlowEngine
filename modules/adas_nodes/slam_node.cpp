@@ -334,8 +334,6 @@ static void slam_update(Pose2D* pose) {
 }
 
 static int slam_execute(TaskBase* task) {
-    pthread_setname_np(pthread_self(), "slam_node");
-
     long period_ms = 1000L / (g.publish_hz > 0 ? g.publish_hz : 20);
 
     while (!task->should_stop) {

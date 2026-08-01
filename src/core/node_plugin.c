@@ -83,5 +83,18 @@ int node_start_managed(NodePlugin* plugin, Scheduler* sched) {
 
     /* 3) 翻开调度器运行标志（幂等：多个托管节点共享同一调度器，首节点启动） */
     scheduler_start(sched);
+
+    /* 4) 为每个输入 topic 注册 choreo 触发：当消息到达该 topic 时，
+     *    scheduler 的 choreo_trigger_callback 唤醒该任务。
+     *    C 节点已经在 execute() 中自管轮询，但注册后 scheduler 的
+     *    LatencyTracker / RateControl 可监控 topic 数据到达频率。
+     *    C++ 节点后续可通过 scheduler_choreo_wait() 替代 select_for()
+     *    实现真正的数据驱动调度。 */
+    if (plugin->input_topics) {
+        for (int t = 0; plugin->input_topics[t]; t++) {
+            scheduler_choreo_trigger_on(sched, tid, plugin->input_topics[t]);
+        }
+    }
+
     return 0;
 }

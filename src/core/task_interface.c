@@ -49,6 +49,9 @@ typedef struct {
 static void* task_thread_fn(void* arg) {
     TaskBase* task = (TaskBase*)arg;
 
+    /* 设置线程名（调试友好 — 统一由基础设施层收口，各节点无需再手动 setname）*/
+    pthread_setname_np(pthread_self(), task->config.name);
+
     /* initialize */
     if (task->vtable && task->vtable->initialize) {
         int ret = task->vtable->initialize(task);

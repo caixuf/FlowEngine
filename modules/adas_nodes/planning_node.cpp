@@ -42,15 +42,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <stdio.h>
 #include <math.h>
-#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <memory>
-#include <atomic>
 
 namespace {
 
@@ -60,10 +55,6 @@ struct PlanningContext {
     Transport*        transport{nullptr};
     DiscoveryManager* discovery{nullptr};
     Scheduler*        scheduler{nullptr};
-
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
 
     /* 反射式状态机：跟踪生命周期 */
     ReflectiveStateMachine sm{};
@@ -188,8 +179,8 @@ struct PlanningContext {
     Behavior current_behavior{};    /* 最新 behavior 指令 */
     volatile int has_behavior{0};
 
-    /* 协程任务 */
-    std::unique_ptr<class PlanningTask> task;
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct planning_Wrapper* task_wrapper{nullptr};
 };
 
 PlanningContext g;
@@ -585,8 +576,11 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 
 class PlanningTask : public CoroutineTask {
 public:
-    PlanningTask(MessageBus* bus, Transport* transport)
-        : CoroutineTask(bus), transport_(transport) {}
+    PlanningTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport) {
+        transport_ = transport;
+    }
 
     /* 在 Trajectory 上按时间插值。
      * 返回距离 t_rel_us 最近的两个点的线性插值。 */
@@ -629,8 +623,6 @@ public:
 
 protected:
     Task run() override {
-        pthread_setname_np(pthread_self(), "planning");
-
         /* 参考路径: 长直线（左车道中心 y=-1.75）。运行时间较长时，ego 会开出
          * 初始路径范围；接近末端时向前滑动 reference path，避免 Frenet 插值越界
          * 导致 planning 线程挂掉。 */
@@ -1484,22 +1476,8 @@ private:
     Transport* transport_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* planning_thread(void*) {
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "planning");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("planning", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 planning_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(PlanningTask, planning)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -1511,11 +1489,10 @@ extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 static int planning_init(MessageBus* bus, Transport* transport,
                          DiscoveryManager* discovery, Scheduler* scheduler,
                          const char* params_json) {
-    /* 清零并重新初始化（atomic/unique_ptr 不可拷贝，逐字段赋值） */
+    /* 清零并重新初始化 */
     g.transport    = transport;
     g.discovery    = discovery;
     g.scheduler    = scheduler;
-    g.should_stop  = false;
     g.has_fusion   = 0;
     g.has_vstate   = 0;
 
@@ -1667,7 +1644,17 @@ static int planning_init(MessageBus* bus, Transport* transport,
     statem_init(&g.mode_sm, SM_TABLE_MODE_SWITCHING, SM_MODE_NA, "driving_mode");
     statem_set_guard(&g.mode_sm, mode_transition_guard);
 
-    g.task = std::make_unique<PlanningTask>(bus, transport);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "planning");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = planning_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("planning", "planning_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport);
+    s_plugin.taskbase = planning_get_base(g.task_wrapper);
 
     LOG_INFO("planning", "initialized (FlowCoro, target=%.0f m/s, max=%.0f m/s)",
              g.cfg_target_speed, g.cfg_max_speed);
@@ -1675,30 +1662,26 @@ static int planning_init(MessageBus* bus, Transport* transport,
 }
 
 static int planning_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, planning_thread, nullptr) != 0) {
-        LOG_WARN("planning", "pthread_create failed: %s", strerror(errno));
-        return -1;
-    }
-    g.running = true;
-    LOG_INFO("planning", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) LOG_WARN("planning", "node_start_managed failed: %d", rc);
     node_announce_self(g.transport, &s_plugin);  /* start() 时广播: monitor 已订阅 */
+    LOG_INFO("planning", "started (managed mode) [state=%s]", statem_state_name(&g.sm, g.sm.current));
     return 0;
 }
 
 static void planning_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        planning_stop(&g.task_wrapper->base);
+    }
 }
 
 static void planning_cleanup(void) {
-    planning_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        planning_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
 #ifdef HAVE_FRENET
     if (g.frenet) { frenet_destroy(g.frenet); g.frenet = nullptr; }
 #else
@@ -1725,7 +1708,7 @@ NodePlugin s_plugin = {
     planning_stop,
     planning_cleanup,
     planning_health,
-    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
+    nullptr,  /* taskbase: 在 init() 中通过 planning_create 设置 */
 };
 
 } // namespace

@@ -51,7 +51,6 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
-#include <pthread.h>
 #include <unistd.h>
 
 #include "clock_service.h"
@@ -69,11 +68,6 @@ struct FusionContext {
     DiscoveryManager* discovery{nullptr};
     Scheduler*        scheduler{nullptr};
 
-    /* 协程宿主线程 */
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
-
     /* EKF */
     EkfFusion   ekf{};
 
@@ -89,8 +83,8 @@ struct FusionContext {
     /* 延迟统计 — 环形缓冲，128 个样本 */
     LatencyTracker  lat_tracker{};
 
-    /* 协程任务 */
-    std::unique_ptr<class FusionTask> task;
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct fusion_Wrapper* task_wrapper{nullptr};
 };
 
 FusionContext g;
@@ -117,13 +111,19 @@ static void on_pose(const Message* msg, void* user_data) {
 
 class FusionTask : public CoroutineTask {
 public:
-    FusionTask(MessageBus* bus, Transport* transport,
-               MessageBuffer* lidar_buf, MessageBuffer* gps_buf,
-               MessageBuffer* pose_buf,
-               EkfFusion* ekf, LatencyTracker* lat_tracker)
-        : CoroutineTask(bus), transport_(transport),
-          lidar_buf_(lidar_buf), gps_buf_(gps_buf), pose_buf_(pose_buf),
-          ekf_(ekf), lat_tracker_(lat_tracker) {}
+    FusionTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport,
+                    MessageBuffer* lidar_buf, MessageBuffer* gps_buf,
+                    MessageBuffer* pose_buf,
+                    EkfFusion* ekf, LatencyTracker* lat_tracker) {
+        transport_ = transport;
+        lidar_buf_ = lidar_buf;
+        gps_buf_ = gps_buf;
+        pose_buf_ = pose_buf;
+        ekf_ = ekf;
+        lat_tracker_ = lat_tracker;
+    }
 
 protected:
     Task run() override {
@@ -279,23 +279,8 @@ private:
     LatencyTracker* lat_tracker_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* fusion_thread(void*) {
-    pthread_setname_np(pthread_self(), "fusion");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "fusion");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("fusion", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 fusion_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(FusionTask, fusion)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -312,8 +297,6 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     g.transport  = transport;
     g.discovery  = discovery;
     g.scheduler  = scheduler;
-    g.should_stop = false;
-    g.running    = false;
     g.fused_count = 0;
 
     /* EKF: dt=0.05s, 初始状态 [0,0,5,0,0] */
@@ -333,11 +316,6 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, "sensor/lidar", on_lidar, nullptr);
     transport_subscribe(transport, "sensor/gps",   on_gps,   nullptr);
     transport_subscribe(transport, "sensor/pose",  on_pose,  nullptr);
-    /* discovery_advertise 已声明 fusion 订阅 perception/tracked_objects，
-     * 但此处不需要 transport_subscribe — object_tracker_node 发布后直接走
-     * 消息总线，behavior_planner_node 已独立订阅 perception/tracked_objects。
-     * 留空行以保持管道图一致性（pipeline.json 中 fusion→tracked_objects 的
-     * subscribe 声明仅用于发现/拓扑，不产生运行时副作用）。 */
 
     /* Discovery 广告 */
     discovery_advertise(discovery, "sensor/lidar", LIDARFRAME_TYPE_ID, CAP_SUBSCRIBER, 0);
@@ -351,40 +329,50 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, "fusion/localization", LOCALIZATION_TYPE_ID);
     transport_advertise(transport, "fusion/latency",      LATENCYREPORT_TYPE_ID);
 
-    /* 构造协程任务 */
-    g.task = std::make_unique<FusionTask>(bus, transport,
-                                          g.lidar_buf, g.gps_buf, g.pose_buf,
-                                          &g.ekf, &g.lat_tracker);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "fusion");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = fusion_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("fusion", "fusion_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport,
+                                     g.lidar_buf, g.gps_buf, g.pose_buf,
+                                     &g.ekf, &g.lat_tracker);
+    s_plugin.taskbase = fusion_get_base(g.task_wrapper);
 
-    LOG_INFO("fusion", "initialized (FlowCoro, EKF 5D, LiDAR+GPS+SLAM tri-source)");
+    LOG_INFO("fusion", "initialized (FlowCoro, EKF 5D, LiDAR+GPS+SLAM tri-source, managed mode)");
     return 0;
 }
 
 static int fusion_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, fusion_thread, nullptr) != 0) {
-        LOG_WARN("fusion", "failed to create thread");
-        return -1;
+    if (!g.task_wrapper) return -1;
+    /* 托管模式：注册到调度器 + 派生工作线程 + 设置 choreo trigger */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("fusion", "node_start_managed failed: %d", rc);
     }
-    g.running = true;
-    LOG_INFO("fusion", "started");
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("fusion", "started (managed mode)");
     return 0;
 }
 
 static void fusion_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
+    if (g.task_wrapper) {
+        fusion_stop(&g.task_wrapper->base);  /* 宏生成：设 impl->set_stop() */
+    }
 }
 
 static void fusion_cleanup(void) {
-    fusion_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    /* 先销毁包装器（task_start 创建的线程在 execute 返回后自动退出，
+     * fusion_destroy 会 delete impl + free 包装器内存） */
+    if (g.task_wrapper) {
+        fusion_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     if (g.lidar_buf) { message_buffer_destroy(g.lidar_buf); g.lidar_buf = nullptr; }
     if (g.gps_buf)   { message_buffer_destroy(g.gps_buf);   g.gps_buf   = nullptr; }
     if (g.pose_buf)  { message_buffer_destroy(g.pose_buf);  g.pose_buf  = nullptr; }
@@ -402,7 +390,7 @@ NodePlugin s_plugin = {
     NODE_PLUGIN_API_VERSION,
     "fusion",
     "1.0.0",
-    "EKF 5D sensor fusion (LiDAR + GPS + SLAM Pose2D) [FlowCoro]",
+    "EKF 5D sensor fusion (LiDAR + GPS + SLAM Pose2D) [FlowCoro, managed]",
     s_inputs,
     s_outputs,
     fusion_init,
@@ -410,7 +398,7 @@ NodePlugin s_plugin = {
     fusion_stop,
     fusion_cleanup,
     fusion_health,
-    nullptr,  /* taskbase: 旧路径自管线程 */
+    nullptr,  /* taskbase: 在 init() 中通过 fusion_create 设置 */
 };
 
 } // namespace

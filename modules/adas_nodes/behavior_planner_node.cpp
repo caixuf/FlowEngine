@@ -37,11 +37,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-#include <pthread.h>
 #include <unistd.h>
-
-#include <memory>
-#include <atomic>
 
 namespace {
 
@@ -95,10 +91,7 @@ static const TransitionRule BEH_TRANSITIONS[] = {
 struct BehaviorContext {
     Transport*        transport{nullptr};
     DiscoveryManager* discovery{nullptr};
-
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
+    Scheduler*        scheduler{nullptr};
 
     /* 发布帧计数 */
     uint32_t seq{0};
@@ -192,8 +185,8 @@ struct BehaviorContext {
     double rear_safe_time_s{3.0};       /* 后向安全时距 (s) */
     double same_lane_tol_offset{0.6};   /* 车道归属横向容差偏移 (m)，半车道宽 + offset */
 
-    /* 协程 */
-    std::unique_ptr<class BehaviorTask> task;
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct behavior_Wrapper* task_wrapper{nullptr};
 
     /* 调试计数：每 50 帧打印一次全景状态 */
     int dbg_count{0};
@@ -489,8 +482,11 @@ static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
 
 class BehaviorTask : public CoroutineTask {
 public:
-    BehaviorTask(MessageBus* bus, Transport* transport)
-        : CoroutineTask(bus), transport_(transport) {}
+    BehaviorTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport) {
+        transport_ = transport;
+    }
 
 protected:
     Task run() override {
@@ -1042,23 +1038,8 @@ private:
     Transport* transport_;
 };
 
-/* ── 协程宿主线程 ───────────────────────────────────────── */
-
-void* behavior_thread(void*) {
-    pthread_setname_np(pthread_self(), "behavior");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "behavior");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("behavior", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 behavior_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(BehaviorTask, behavior)
 
 /* ── NodePlugin 实现 ───────────────────────────────────── */
 
@@ -1080,7 +1061,7 @@ extern NodePlugin s_plugin;
 static int behavior_init(MessageBus* bus, Transport* transport,
                           DiscoveryManager* discovery, Scheduler* scheduler,
                           const char* params_json) {
-    (void)scheduler;
+    g.scheduler = scheduler;
 
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;
     g.has_fusion = 0;
@@ -1107,7 +1088,6 @@ static int behavior_init(MessageBus* bus, Transport* transport,
 
     g.transport = transport;
     g.discovery = discovery;
-    g.should_stop = false;
 
     if (params_json) {
         cJSON* p = cJSON_Parse(params_json);
@@ -1182,37 +1162,43 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, TOPIC_PLANNING_BEHAVIOR, BEHAVIOR_TYPE_ID);
     transport_advertise(transport, "behavior/state", 0u);  /* JSON text, no type check */
 
-    g.task = std::make_unique<BehaviorTask>(bus, transport);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "behavior");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = behavior_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("behavior", "behavior_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport);
+    s_plugin.taskbase = behavior_get_base(g.task_wrapper);
 
-    LOG_INFO("behavior", "initialized (FlowCoro, target_speed=%.1f m/s)", g.target_speed);
+    LOG_INFO("behavior", "initialized (FlowCoro, target_speed=%.1f m/s, managed mode)", g.target_speed);
     return 0;
 }
 
 static int behavior_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, behavior_thread, nullptr) != 0) {
-        LOG_WARN("behavior", "pthread_create failed: %s", strerror(errno));
-        return -1;
-    }
-    g.running = true;
-    LOG_INFO("behavior", "started");
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) LOG_WARN("behavior", "node_start_managed failed: %d", rc);
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("behavior", "started (managed mode)");
     return 0;
 }
 
 static void behavior_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        behavior_stop(&g.task_wrapper->base);
+    }
 }
 
 static void behavior_cleanup(void) {
-    behavior_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        behavior_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     LOG_INFO("behavior", "cleanup done");
 }
 
@@ -1230,7 +1216,7 @@ NodePlugin s_plugin = {
     behavior_stop,
     behavior_cleanup,
     behavior_health,
-    nullptr,  /* taskbase: 旧路径自管线程，不启用托管模式 */
+    nullptr,  /* taskbase: 在 init() 中通过 behavior_create 设置 */
 };
 
 } // namespace

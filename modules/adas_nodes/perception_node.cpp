@@ -41,13 +41,11 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
-#include <pthread.h>
 #include <unistd.h>
 
 #include "clock_service.h"
 
 #include <cjson/cJSON.h>
-#include <memory>
 
 namespace {
 
@@ -56,10 +54,7 @@ namespace {
 struct PerceptionContext {
     Transport*        transport{nullptr};
     DiscoveryManager* discovery{nullptr};
-
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
+    Scheduler*        scheduler{nullptr};
 
     /* 仿真状态 (通过 vehicle/state topic 更新) */
     double  ego_x{0}, ego_y{0}, ego_heading{0};
@@ -111,8 +106,8 @@ struct PerceptionContext {
     double lid_x{0}, lid_y{0};
     volatile int has_lidar{0};
 
-    /* 协程任务 */
-    std::unique_ptr<class PerceptionTask> task;
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct perception_Wrapper* task_wrapper{nullptr};
 };
 
 PerceptionContext g;
@@ -231,9 +226,12 @@ static void on_road_geometry(const Message* msg, void* user_data) {
 
 class PerceptionTask : public CoroutineTask {
 public:
-    PerceptionTask(MessageBus* bus, Transport* transport, int lidar_rate_hz)
-        : CoroutineTask(bus), transport_(transport),
-          period_us_(1000000L / (lidar_rate_hz > 0 ? lidar_rate_hz : 20)) {}
+    PerceptionTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport, int lidar_rate_hz) {
+        transport_ = transport;
+        period_us_ = 1000000L / (lidar_rate_hz > 0 ? lidar_rate_hz : 20);
+    }
 
 protected:
     Task run() override {
@@ -430,23 +428,8 @@ private:
     long       period_us_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* perception_thread(void*) {
-    pthread_setname_np(pthread_self(), "perception");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "perception");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("perception", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 perception_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(PerceptionTask, perception)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -458,9 +441,7 @@ extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 static int perception_init(MessageBus* bus, Transport* transport,
                            DiscoveryManager* discovery, Scheduler* scheduler,
                            const char* params_json) {
-    (void)scheduler;
-
-    /* 清零并重新初始化（atomic 不可拷贝，逐字段赋值） */
+    /* 清零并重新初始化 */
     g.ego_x = g.ego_y = g.ego_heading = g.ego_speed = 0.0;
     g.n_obs = 0;
     g.frame_id = 0;
@@ -478,7 +459,7 @@ static int perception_init(MessageBus* bus, Transport* transport,
     g.lid_x = g.lid_y = 0.0;
     g.transport    = transport;
     g.discovery    = discovery;
-    g.should_stop  = false;
+    g.scheduler    = scheduler;
 
     /* 解析参数 */
     if (params_json) {
@@ -524,7 +505,17 @@ static int perception_init(MessageBus* bus, Transport* transport,
 
     transport_advertise(transport, "perception/obstacles", OBSTACLELIST_TYPE_ID);
 
-    g.task = std::make_unique<PerceptionTask>(bus, transport, g.lidar_rate_hz);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "perception");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = perception_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("perception", "perception_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport, g.lidar_rate_hz);
+    s_plugin.taskbase = perception_get_base(g.task_wrapper);
 
     LOG_INFO("perception", "initialized (FlowCoro, mode=%s, DBSCAN eps=%.1f, LiDAR %dHz FOV=%.0fdeg range=%.0fm noise=%.2f occ=%d)",
              g.mode == 1 ? "sensor" : "ground_truth",
@@ -534,30 +525,26 @@ static int perception_init(MessageBus* bus, Transport* transport,
 }
 
 static int perception_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, perception_thread, nullptr) != 0) {
-        LOG_WARN("perception", "pthread_create failed: %s", strerror(errno));
-        return -1;
-    }
-    g.running = true;
-    LOG_INFO("perception", "started");
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) LOG_WARN("perception", "node_start_managed failed: %d", rc);
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("perception", "started (managed mode)");
     return 0;
 }
 
 static void perception_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        perception_stop(&g.task_wrapper->base);
+    }
 }
 
 static void perception_cleanup(void) {
-    perception_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        perception_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     LOG_INFO("perception", "cleanup done");
 }
 
@@ -577,7 +564,7 @@ NodePlugin s_plugin = {
     perception_stop,
     perception_cleanup,
     perception_health,
-    nullptr,  /* taskbase: 旧路径自管线程 */
+    nullptr,  /* taskbase: 在 init() 中通过 perception_create 设置 */
 };
 
 } // namespace

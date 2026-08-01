@@ -49,14 +49,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include <stdio.h>
 #include <math.h>
 #include <pthread.h>
 #include <unistd.h>
-
-#include <memory>
-#include <atomic>
 
 namespace {
 
@@ -86,10 +82,6 @@ struct InferenceContext {
     Transport*        transport{nullptr};
     DiscoveryManager* discovery{nullptr};
     Scheduler*        scheduler{nullptr};
-
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
 
     ReflectiveStateMachine sm{};
 
@@ -153,8 +145,8 @@ struct InferenceContext {
     long   shadow_n{0};            /* 有 planning 参照的样本数 */
     uint64_t sidecar_last_us{0};   /* 上次落盘时间（限频 1Hz） */
 
-    /* 协程任务 */
-    std::unique_ptr<class InferenceTask> task;
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct inference_Wrapper* task_wrapper{nullptr};
 };
 
 InferenceContext g;
@@ -657,13 +649,15 @@ static void build_control_raw(double pred_speed, double pred_d,
 
 class InferenceTask : public CoroutineTask {
 public:
-    InferenceTask(MessageBus* bus, Transport* transport, double frequency_hz)
-        : CoroutineTask(bus), transport_(transport),
-          period_us_((long)(1e6 / (frequency_hz > 0.0 ? frequency_hz : 20.0))) {}
+    InferenceTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport, double frequency_hz) {
+        transport_ = transport;
+        period_us_ = (long)(1e6 / (frequency_hz > 0.0 ? frequency_hz : 20.0));
+    }
 
 protected:
     Task run() override {
-        pthread_setname_np(pthread_self(), "inference");
 
         while (!should_stop()) {
             /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */
@@ -846,22 +840,8 @@ private:
     long       period_us_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* inference_thread(void*) {
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "inference");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("inference", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 inference_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(InferenceTask, inference)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -887,11 +867,10 @@ extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾 */
 static int inference_init(MessageBus* bus, Transport* transport,
                           DiscoveryManager* discovery, Scheduler* scheduler,
                           const char* params_json) {
-    /* 清零并重新初始化（atomic/unique_ptr 不可拷贝，逐字段赋值） */
+    /* 清零并重新初始化 */
     g.transport   = transport;
     g.discovery   = discovery;
     g.scheduler   = scheduler;
-    g.should_stop = false;
     g.control_mode = CTRL_MODE_SHADOW;  /* 默认安全模式 */
 
     g.reload_flag = 0;
@@ -1034,7 +1013,17 @@ static int inference_init(MessageBus* bus, Transport* transport,
     statem_init(&g.sm, nullptr, SM_STATE_INITIALIZED, "inference");
     statem_send_event(&g.sm, SM_EVENT_START, nullptr);
 
-    g.task = std::make_unique<InferenceTask>(bus, transport, g.cfg_frequency_hz);
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "inference");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = inference_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("inference", "inference_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport, g.cfg_frequency_hz);
+    s_plugin.taskbase = inference_get_base(g.task_wrapper);
 
     const char* mode_str = "shadow";
     if (g.control_mode == CTRL_MODE_PLAN_ASSIST) mode_str = "plan_assist";
@@ -1047,30 +1036,26 @@ static int inference_init(MessageBus* bus, Transport* transport,
 }
 
 static int inference_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, inference_thread, nullptr) != 0) {
-        LOG_WARN("inference", "pthread_create failed: %s", strerror(errno));
-        return -1;
-    }
-    g.running = true;
-    LOG_INFO("inference", "started [state=%s]", statem_state_name(&g.sm, g.sm.current));
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) LOG_WARN("inference", "node_start_managed failed: %d", rc);
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("inference", "started (managed mode) [state=%s]", statem_state_name(&g.sm, g.sm.current));
     return 0;
 }
 
 static void inference_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        inference_stop(&g.task_wrapper->base);
+    }
 }
 
 static void inference_cleanup(void) {
-    inference_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        inference_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     onnx_backend_free(&g.onnx);
     pthread_mutex_destroy(&g.model_mutex);
     statem_cleanup(&g.sm);
@@ -1093,7 +1078,7 @@ NodePlugin s_plugin = {
     inference_stop,
     inference_cleanup,
     inference_health,
-    nullptr,  /* taskbase: 旧路径自管线程 */
+    nullptr,  /* taskbase: 在 init() 中通过 inference_create 设置 */
 };
 
 } // namespace

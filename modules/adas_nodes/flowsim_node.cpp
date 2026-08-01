@@ -50,11 +50,9 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
-#include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
-#include <memory>
 #include <string>
 #include <vector>
 #include <atomic>
@@ -95,10 +93,8 @@ struct FlowSimContext {
     DiscoveryManager* discovery{nullptr};
     Scheduler*        scheduler{nullptr};
 
-    /* 协程宿主线程 */
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct flowsim_Wrapper* task_wrapper{nullptr};
 
     /* Phase 1 组件 */
     flowsim::FlowRoadNetwork  roads;
@@ -151,9 +147,7 @@ struct FlowSimContext {
      * 旧行为只 LOG_WARN，不影响退出码也不被 evaluator 捕获 → 同类回归漏检。 */
     std::atomic<uint32_t>  invariant_fail_count{0};
 
-    /* 协程任务 */
-    std::unique_ptr<class FlowSimTask> task;
-};
+    };
 
 FlowSimContext g;
 
@@ -1132,8 +1126,11 @@ static void internal_cruise_control(flowsim::Entity& ego) {
 
 class FlowSimTask : public CoroutineTask {
 public:
-    FlowSimTask(MessageBus* bus, Transport* transport)
-        : CoroutineTask(bus), transport_(transport) {}
+    FlowSimTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport) {
+        transport_ = transport;
+    }
 
 protected:
     Task run() override {
@@ -1604,23 +1601,8 @@ private:
     Transport* transport_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────────── */
-
-void* flowsim_thread(void*) {
-    pthread_setname_np(pthread_self(), "flowsim");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "flowsim");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("flowsim", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成）— 必须在 flowsim_init 前展开 ──────── */
+EXPORT_COROUTINE_TASK(FlowSimTask, flowsim)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────────── */
 
@@ -1639,8 +1621,6 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     g.transport  = transport;
     g.discovery  = discovery;
     g.scheduler  = scheduler;
-    g.should_stop = false;
-    g.running    = false;
     g.cycle      = 0;
 
     /* 默认 AI 配置（与 Phase 1 测试一致） */
@@ -1805,8 +1785,14 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
         g.scene_pub_cfg.road_type = g.scenario->road.type;
     }
 
-    /* 构造协程任务 */
-    g.task = std::make_unique<FlowSimTask>(bus, transport);
+    /* 构造协程任务（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "flowsim");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = flowsim_create(&tcfg, bus);
+    if (!g.task_wrapper) return -1;
+    g.task_wrapper->impl->set_params(transport);
+    s_plugin.taskbase = flowsim_get_base(g.task_wrapper);
 
     LOG_INFO("flowsim", "initialized (scenario=%s, actors=%d, traffic_lights=%d, esmini=%s)",
              g.scenario_file[0] ? g.scenario_file : "(default)",
@@ -1817,29 +1803,30 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
 }
 
 static int flowsim_start(void) {
-    if (!g.task) return -1;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, flowsim_thread, nullptr) != 0) {
-        LOG_WARN("flowsim", "failed to create thread");
-        return -1;
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("flowsim", "node_start_managed failed: %d", rc);
     }
-    g.running = true;
-    LOG_INFO("flowsim", "started");
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("flowsim", "started (managed mode)");
     return 0;
 }
 
 static void flowsim_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
+    if (g.task_wrapper) {
+        flowsim_stop(&g.task_wrapper->base);  /* 宏生成：设 impl->set_stop() */
+    }
 }
 
 static void flowsim_cleanup(void) {
-    flowsim_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    /* 先销毁包装器（task_start 创建的线程在 execute 返回后自动退出，
+     * flowsim_destroy 会 delete impl + free 包装器内存） */
+    if (g.task_wrapper) {
+        flowsim_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
+    s_plugin.taskbase = nullptr;
     /* P2-7: invariant 失败汇总 marker。demo_evaluator.py 扫描此 marker
      * 把 invariant 失败升级为 FAIL。demo.sh 实时监控也通过 [INV] 标签
      * 展示失败详情。此处打印汇总（含 total=0 的正常路径，便于确认 invariant
@@ -1847,7 +1834,6 @@ static void flowsim_cleanup(void) {
     uint32_t inv_fails = g.invariant_fail_count.load(std::memory_order_relaxed);
     fprintf(stderr, "[INV] summary total=%u (spatial+motion+temporal)\n", inv_fails);
     fflush(stderr);
-    g.task.reset();
     g.roads.close();
     g.roads_loaded = false;
     if (g.scenario) {
@@ -1876,7 +1862,7 @@ NodePlugin s_plugin = {
     flowsim_stop,
     flowsim_cleanup,
     flowsim_health,
-    nullptr,  /* taskbase: 旧路径自管线程 */
+    nullptr,  /* taskbase: 在 init() 中通过 flowsim_create 设置 */
 };
 
 } // namespace

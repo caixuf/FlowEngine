@@ -21,7 +21,6 @@
 #include <cjson/cJSON.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -83,10 +82,8 @@ struct SafetyContext {
     Transport* transport{nullptr};
     DiscoveryManager* discovery{nullptr};
     Scheduler* scheduler{nullptr};
-    std::unique_ptr<class SafetyControlTask> task;
-    pthread_t thread{};
-    std::atomic<bool> running{false};
-    std::atomic<bool> should_stop{false};
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct safety_control_Wrapper* task_wrapper{nullptr};
     SafetyParams params;
     pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
     VehicleState latest_state;
@@ -343,8 +340,12 @@ double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out
 
 class SafetyControlTask : public CoroutineTask {
 public:
-    SafetyControlTask(MessageBus* bus, Transport* transport, const SafetyParams& params)
-        : CoroutineTask(bus), transport_(transport), params_(params) {}
+    SafetyControlTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport, const SafetyParams& params) {
+        transport_ = transport;
+        params_ = params;
+    }
 
 protected:
     Task run() override {
@@ -577,21 +578,8 @@ private:
     SafetyParams params_;
 };
 
-void* safety_thread(void*) {
-    pthread_setname_np(pthread_self(), "safety_ctrl");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "safety_ctrl");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("safety_control", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成） — 必须在 safety_init 前展开 ─────── */
+EXPORT_COROUTINE_TASK(SafetyControlTask, safety_control)
 
 const char* s_inputs[] = {"control/raw_cmd", TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES, nullptr};
 const char* s_outputs[] = {"control/cmd", nullptr};
@@ -603,8 +591,6 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
     g.transport = transport;
     g.discovery = discovery;
     g.scheduler = scheduler;
-    g.should_stop = false;
-    g.running = false;
     g.params = SafetyParams{};
     g.has_state = false;
 
@@ -638,42 +624,52 @@ int safety_init(MessageBus* bus, Transport* transport, DiscoveryManager* discove
     discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES, OBSTACLELIST_TYPE_ID, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, "control/cmd", CONTROL_CMD_TYPE_ID, CAP_PUBLISHER, 100.0);
 
-    g.task = std::make_unique<SafetyControlTask>(bus, transport, g.params);
-    LOG_INFO("safety_control", "initialized (FlowCoro, max_thr=%.2f max_steer=%.2f)",
+    /* 创建 TaskBase 包装器（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "safety_control");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = safety_control_create(&tcfg, bus);
+    if (!g.task_wrapper) {
+        LOG_ERROR("safety_control", "safety_control_create failed");
+        return -1;
+    }
+    g.task_wrapper->impl->set_params(transport, g.params);
+    s_plugin.taskbase = safety_control_get_base(g.task_wrapper);
+
+    LOG_INFO("safety_control", "initialized (FlowCoro, max_thr=%.2f max_steer=%.2f, managed mode)",
              g.params.max_throttle, g.params.max_steer);
     return 0;
 }
 
 int safety_start() {
-    g.should_stop = false;
-    if (!g.task) return -1;
-    if (pthread_create(&g.thread, nullptr, safety_thread, nullptr) != 0) {
-        LOG_WARN("safety_control", "pthread_create failed: %s", strerror(errno));
-        return -1;
+    if (!g.task_wrapper) return -1;
+    /* 托管模式：注册到调度器 + 派生工作线程 + 设置 choreo trigger */
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("safety_control", "node_start_managed failed: %d", rc);
     }
-    g.running = true;
     node_announce_self(g.transport, &s_plugin);
-    LOG_INFO("safety_control", "started");
+    LOG_INFO("safety_control", "started (managed mode)");
     return 0;
 }
 
 void safety_stop() {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();
+    if (g.task_wrapper) {
+        safety_control_stop(&g.task_wrapper->base);
+    }
 }
 
 void safety_cleanup() {
-    safety_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    if (g.task_wrapper) {
+        safety_control_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     LOG_INFO("safety_control", "cleanup done");
 }
 
 int safety_health() {
-    return g.task && !g.task->should_stop() ? 0 : -1;
+    return g.task_wrapper ? 0 : -1;
 }
 
 NodePlugin s_plugin = {
@@ -688,7 +684,7 @@ NodePlugin s_plugin = {
     safety_stop,
     safety_cleanup,
     safety_health,
-    nullptr,  /* taskbase: 旧路径自管线程 */
+    nullptr,  /* taskbase: 在 init() 中通过 safety_control_create 设置 */
 };
 
 } // namespace

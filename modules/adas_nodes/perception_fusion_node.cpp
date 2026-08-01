@@ -44,15 +44,12 @@
 
 #include <errno.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <atomic>
-#include <memory>
 
 namespace {
 
@@ -79,11 +76,10 @@ typedef struct {
 struct PerceptionFusionContext {
     Transport*        transport{nullptr};
     DiscoveryManager* discovery{nullptr};
+    Scheduler*        scheduler{nullptr};
 
-    /* 协程宿主线程 */
-    pthread_t         thread{};
-    bool              running{false};
-    std::atomic<bool> should_stop{false};
+    /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
+    struct perception_fusion_Wrapper* task_wrapper{nullptr};
 
     /* 两路输入 topic 名（可配） */
     char input_a_topic[64];   /* 默认 perception/obstacles_lidar */
@@ -126,9 +122,7 @@ struct PerceptionFusionContext {
     uint64_t tracks_matched{0};
     uint64_t tracks_killed{0};
 
-    /* 协程任务 */
-    std::unique_ptr<class PerceptionFusionTask> task;
-};
+    };
 
 PerceptionFusionContext g;
 
@@ -420,9 +414,14 @@ static void associate_and_track(const ObstacleList* detections,
 
 class PerceptionFusionTask : public CoroutineTask {
 public:
-    PerceptionFusionTask(MessageBus* bus, Transport* transport,
-                         MessageBuffer* a_buf, MessageBuffer* b_buf)
-        : CoroutineTask(bus), transport_(transport), a_buf_(a_buf), b_buf_(b_buf) {}
+    PerceptionFusionTask(MessageBus* bus) : CoroutineTask(bus) {}
+
+    void set_params(Transport* transport,
+                     MessageBuffer* a_buf, MessageBuffer* b_buf) {
+        transport_ = transport;
+        a_buf_ = a_buf;
+        b_buf_ = b_buf;
+    }
 
 protected:
     Task run() override {
@@ -512,23 +511,8 @@ private:
     MessageBuffer* b_buf_;
 };
 
-/* ── 协程宿主线程 ─────────────────────────────────────────── */
-
-void* fusion_thread(void*) {
-    pthread_setname_np(pthread_self(), "p_fusion");
-    try {
-        flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1 }};
-        g_node_exec = &ex;
-        CoroutineTask& ct = *g.task;
-        ex.spawn(ct.run(), "p_fusion");
-        node_pump(ex, [] { return (bool)g.should_stop; });
-        ex.shutdown();
-        g_node_exec = nullptr;
-    } catch (...) {
-        LOG_ERROR("perception_fusion", "FlowCoro task failed");
-    }
-    return nullptr;
-}
+/* ── TaskBase 包装器（宏生成）— 必须在 fusion_init 前展开 ──────── */
+EXPORT_COROUTINE_TASK(PerceptionFusionTask, perception_fusion)
 
 /* ── NodePlugin 实现 ─────────────────────────────────────── */
 
@@ -541,14 +525,9 @@ extern NodePlugin s_plugin;  /* 前向声明：定义在文件末尾，供 init/
 static int fusion_init(MessageBus* bus, Transport* transport,
                        DiscoveryManager* discovery, Scheduler* scheduler,
                        const char* params_json) {
-    (void)scheduler;
-
-    /* 逐字段重置状态（含 std::atomic<bool>/unique_ptr，不可整体赋值，参照
-     * fusion_node.cpp 同样的字段式重置）。默认值与结构体默认成员初始化一致。 */
     g.transport = transport;
     g.discovery = discovery;
-    g.should_stop = false;
-    g.running    = false;
+    g.scheduler = scheduler;
     snprintf(g.input_a_topic, sizeof(g.input_a_topic), "%s", "perception/obstacles_lidar");
     snprintf(g.input_b_topic, sizeof(g.input_b_topic), "%s", "perception/obstacles_stereo");
     snprintf(g.output_topic,  sizeof(g.output_topic),  "%s", "perception/obstacles");
@@ -634,8 +613,14 @@ static int fusion_init(MessageBus* bus, Transport* transport,
     discovery_advertise(discovery, g.output_topic, OBSTACLELIST_TYPE_ID, CAP_PUBLISHER,
                         (double)g.publish_hz);
 
-    /* 构造协程任务 */
-    g.task = std::make_unique<PerceptionFusionTask>(bus, transport, g.a_buf, g.b_buf);
+    /* 构造协程任务（托管模式） */
+    TaskConfig tcfg = {};
+    snprintf(tcfg.name, sizeof(tcfg.name), "perception_fusion");
+    tcfg.priority = TASK_PRIORITY_NORMAL;
+    g.task_wrapper = perception_fusion_create(&tcfg, bus);
+    if (!g.task_wrapper) return -1;
+    g.task_wrapper->impl->set_params(transport, g.a_buf, g.b_buf);
+    s_plugin.taskbase = perception_fusion_get_base(g.task_wrapper);
 
     LOG_INFO("perception_fusion", "initialized (FlowCoro): a=%s b=%s → out=%s "
              "merge=%.2fm hz=%d max_age=%dms tracking=%s(assoc=%.1fm "
@@ -652,29 +637,30 @@ static int fusion_init(MessageBus* bus, Transport* transport,
 
 static int fusion_start(void) {
     if (!g.enabled) return 0;
-    g.should_stop = false;
-    if (pthread_create(&g.thread, nullptr, fusion_thread, nullptr) != 0) {
-        LOG_WARN("perception_fusion", "failed to create thread: %s", strerror(errno));
-        return -1;
+    if (!g.task_wrapper) return -1;
+    int rc = node_start_managed(&s_plugin, g.scheduler);
+    if (rc != 0) {
+        LOG_WARN("perception_fusion", "node_start_managed failed: %d", rc);
     }
-    g.running = true;
-    LOG_INFO("perception_fusion", "started");
     node_announce_self(g.transport, &s_plugin);
+    LOG_INFO("perception_fusion", "started (managed mode)");
     return 0;
 }
 
 static void fusion_stop(void) {
-    g.should_stop = true;
-    if (g.task) g.task->set_stop();  /* 翻 stop flag；select_for 超时醒来查 should_stop */
+    if (g.task_wrapper) {
+        perception_fusion_stop(&g.task_wrapper->base);  /* 宏生成：设 impl->set_stop() */
+    }
 }
 
 static void fusion_cleanup(void) {
-    fusion_stop();
-    if (g.running) {
-        pthread_join(g.thread, nullptr);
-        g.running = false;
+    /* 先销毁包装器（task_start 创建的线程在 execute 返回后自动退出，
+     * perception_fusion_destroy 会 delete impl + free 包装器内存） */
+    if (g.task_wrapper) {
+        perception_fusion_destroy(g.task_wrapper);
+        g.task_wrapper = nullptr;
     }
-    g.task.reset();
+    s_plugin.taskbase = nullptr;
     if (g.a_buf) { message_buffer_destroy(g.a_buf); g.a_buf = nullptr; }
     if (g.b_buf) { message_buffer_destroy(g.b_buf); g.b_buf = nullptr; }
     LOG_INFO("perception_fusion", "cleanup: in_a=%lu in_b=%lu out=%lu merges=%lu "
@@ -702,7 +688,7 @@ NodePlugin s_plugin = {
     fusion_stop,
     fusion_cleanup,
     nullptr,  /* health_check */
-    nullptr,  /* taskbase */
+    nullptr,  /* taskbase: 在 init() 中通过 perception_fusion_create 设置 */
 };
 
 } // namespace
