@@ -1,0 +1,28 @@
+{
+  "name": "flowengine_v0.2",
+  "description": "FlowEngine v0.2 场景矩阵：故障表中每类高频 bug 至少一个场景兜底（Phase 1.1）。各场景时长覆盖其 choreography 与目标故障被触发的窗口。",
+  "default_duration_s": 45,
+  "baseline_tolerances": {
+    "_comment": "min_ratio=max_abs_increase 两型门禁只查数值回归（current vs baseline），不查绝对通过。跑新 baseline 前确认当前是健康值。",
+    "avg_speed_mps":            {"min_ratio": 0.6},
+    "x_delta_m":                {"min_ratio": 0.6},
+    "max_lane_error_m":         {"max_abs_increase": 0.5},
+    "_min_road_margin_is_a_min": "越小越危险 → min_ratio（当前 < 基线×0.4 = 回归）",
+    "min_road_margin_m":        {"min_ratio": 0.4},
+    "steer_flip_rate_hz":       {"max_abs_increase": 0.5},
+    "steer_rate_rms_per_s":     {"max_abs_increase": 0.5},
+    "yaw_rate_rms_radps":       {"max_abs_increase": 0.2},
+    "green_phase_max_stop_s":   {"max_abs_increase": 2.0},
+    "lane_change_count":        {"max_abs_increase": 4},
+    "stagnation_duration_s":    {"max_abs_increase": 5.0}
+  },
+  "scenarios": [
+    {"file": "scenarios/straight_road.json",       "duration_s": 30, "enabled": true},
+    {"file": "scenarios/curve_road.json",          "duration_s": 60, "enabled": true},
+    {"file": "scenarios/lane_change_traffic.json", "duration_s": 45, "enabled": true},
+    {"file": "scenarios/urban_challenge.json",     "duration_s": 60, "enabled": true},
+    {"file": "scenarios/multi_light.json",         "duration_s": 60, "enabled": true},
+    {"file": "scenarios/dense_npc.json",           "duration_s": 45, "enabled": true},
+    {"file": "scenarios/oncoming.json",            "duration_s": 45, "enabled": true}
+  ]
+}

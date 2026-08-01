@@ -42,6 +42,11 @@ DEFAULT_SUITE = ROOT / "scenarios" / "suite.json"
 DEFAULT_RESULTS_DIR = Path("/tmp/flow_regression")
 DEFAULT_BASELINE_DIR = ROOT / "tests" / "baseline"
 
+# JSON-out payload keys preserved in the slim baseline. compare_summary only reads
+# "summary"; failures/warnings are kept for human inspection of the committed file.
+# Keep in sync with demo_evaluator.main()'s --json-out payload shape.
+BASELINE_KEYS = ("scenario", "result", "failures", "warnings", "summary")
+
 
 def load_json(path: Path) -> dict | None:
     try:
@@ -190,9 +195,14 @@ def main() -> int:
     args.results_dir.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
+    baseline_slims: dict[str, dict] = {}  # key -> slim payload（仅 --update-baseline 填充）
     for entry in scenarios:
         key = scenario_key(entry)
         payload = run_scenario(entry, default_duration, args.interval, args.results_dir)
+        # 结果 payload 已在内存，--update-baseline 直接投影，避免二次读盘解析 28MB JSON。
+        # 用 payload[k] 而非 .get(k)：契约违约（缺 key）必须出声，不能静默写 null baseline。
+        if args.update_baseline:
+            baseline_slims[key] = {k: payload[k] for k in BASELINE_KEYS}
         summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
         failures = payload.get("failures", []) or []
         regressions: list[str] = []
@@ -214,15 +224,17 @@ def main() -> int:
         })
 
     if args.update_baseline:
+        # 只写精简版（BASELINE_KEYS），丢弃 samples / npc_trajectories。
+        # baseline 只被 compare_summary 读 summary，全量 28MB/场景只会让 repo 膨胀、
+        # baseline 失去可读 diff。完整结果仍在 results_dir。slim 在主循环已投影好，
+        # 这里只负责落盘。
         args.baseline_dir.mkdir(parents=True, exist_ok=True)
-        for entry in scenarios:
-            key = scenario_key(entry)
-            src = args.results_dir / f"{key}.json"
-            if src.exists():
-                (args.baseline_dir / f"{key}.json").write_text(
-                    src.read_text(encoding="utf-8"), encoding="utf-8")
-        print(f"\nupdated baseline in {args.baseline_dir} "
-              f"({len(scenarios)} scenarios)")
+        for key, slim in baseline_slims.items():
+            (args.baseline_dir / f"{key}.json").write_text(
+                json.dumps(slim, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+        print(f"\nupdated slim baseline in {args.baseline_dir} "
+              f"({len(baseline_slims)} scenarios)")
         return 0
 
     print_report(rows)

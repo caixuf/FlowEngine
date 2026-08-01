@@ -1,0 +1,47 @@
+{
+  "name": "dense_npc",
+  "description": "密集 NPC 场景：内道 6 辆慢车（vx=7）每 180m、外道 4 辆中速车（vx=11）每 300m。覆盖撞前车 / FOLLOW 不触发 / 变道纠结来回（超车后立刻归位再超）。平路双向 4 车道（Y=0），ego 必须反复超车保持巡航。故障表中『behavior 一直不进 FOLLOW（best_gap<min_gap 反逻辑）』与『归位只查 gap 不查车速 → 超车后立刻归位再超』都靠它拦截。",
+  "random_seed": 137,
+  "duration_s": 0,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 12.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "name": "straight",
+        "length_m": 6000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 22.0,
+        "nodes": [[0, 0, 0], [6000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1,  "type": "car", "x": 120.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car", "x": 300.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 3,  "type": "car", "x": 480.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 4,  "type": "car", "x": 660.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 5,  "type": "car", "x": 840.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 6,  "type": "car", "x": 1020.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 11, "type": "car", "x": 350.0, "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 12, "type": "car", "x": 650.0, "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 13, "type": "car", "x": 950.0, "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 14, "type": "car", "x": 1250.0, "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 75.0,
+    "min_avg_speed_mps": 5.0
+  },
+  "route": [],
+  "scenarios": []
+}

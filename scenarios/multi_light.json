@@ -1,0 +1,48 @@
+{
+  "name": "multi_light",
+  "description": "多红灯场景：连续 3 盏错相红绿灯，覆盖红灯闯行 / 停稳不走闭锁 / 绿灯卡死。平路双向 4 车道（Y=0），ego 沿内道行驶，每盏灯周期 25s 错相。故障表中『红灯 override 设 0 未进轨迹 → 闯红灯』与『停稳后 target=0 自维持闭锁』都靠它拦截。",
+  "random_seed": 137,
+  "duration_s": 0,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 12.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "name": "straight",
+        "length_m": 4000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 22.0,
+        "nodes": [[0, 0, 0], [4000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1, "type": "car", "x": 420.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2, "type": "car", "x": 900.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [
+    {"id": 0, "x": 300.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 0.0},
+    {"id": 1, "x": 650.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 8.0},
+    {"id": 2, "x": 1000.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 16.0}
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "no_red_light_violation": true,
+    "max_duration_s": 75.0,
+    "min_avg_speed_mps": 5.0
+  },
+  "route": [],
+  "scenarios": [],
+  "choreography": {
+    "loop_period_s": 999,
+    "beats": []
+  }
+}

@@ -71,6 +71,28 @@ WARNING_LEAD_FAIL_S = 0.3
 # 门禁用它把"跟车间距够不够"变成随车速伸缩的判据，而不是固定 5m。
 ACC_STANDOFF_M = 5.0
 ACC_TIME_HEADWAY_S = 1.5
+
+# ── 控制层量化门禁（Phase 1.3）：病理性抖动 FAIL 阻断 ──
+# 抓 bang-bang 转向（MPC 每帧翻符号）与 1-2Hz 横向极限环。
+# 健康实测（straight_road 30s，2026-08-01）：yaw_rms≈0.02 rad/s、
+# steer_flip≈0.0/s、steer_rms≈0.02/s。FAIL 阈值取健康值 ~10×，
+# 只拦"每帧翻符号 / 持续高频抖动"这种不可能靠运气过去的现象。
+# 旧实现只有 WARN：bang-bang 时 steer_flip≈9-10/s 也照样 PASS，
+# 于是"修好后没复发"从没人验证过 —— 门禁抓不住已知故障 = 它的 PASS 不可信。
+# WARN 阈值命名成常量，避免与 FAIL 阈值同写一处时漂移。
+YAW_RMS_WARN = 0.35         # rad/s
+YAW_MAX_WARN = 1.2          # rad/s
+HEADING_FLIP_WARN = 1.2     # /s
+HEADING_FLIP_WARN_MIN_YAW = 0.1  # rad/s，flip 佐证下界
+STEER_RATE_RMS_WARN = 0.9   # /s
+STEER_MAX_RATE_WARN = 3.0   # /s
+STEER_FLIP_WARN = 1.0       # /s
+YAW_RMS_FAIL = 0.6          # rad/s
+YAW_MAX_FAIL = 2.0          # rad/s
+HEADING_FLIP_FAIL = 3.0     # /s，且需 yaw_rms>0.2 佐证（弯道上 heading 单调变化不算）
+STEER_RATE_RMS_FAIL = 1.6   # /s
+STEER_MAX_RATE_FAIL = 6.0   # /s
+STEER_FLIP_FAIL = 2.5       # /s
 # 实际最小间距低于期望间距的这个比例 → FAIL。取 0.5 是因为 ACC 有超调是
 # 正常的，但掉到期望值一半以下意味着间距根本没被控制。
 ACC_GAP_FAIL_RATIO = 0.5
@@ -859,7 +881,7 @@ def scenario_actor_layer_counts(scenario: dict | None) -> dict[str, int]:
     return counts
 
 
-def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None, scenario: dict | None = None) -> tuple[list[str], list[str], dict]:
+def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None, scenario_name: str | None = None, expected_edges: list[tuple[str, str, str]] | None = None, has_noa_route: bool = False, road: dict | None = None, traffic_lights: list | None = None, scenario: dict | None = None, expected_duration_s: float | None = None) -> tuple[list[str], list[str], dict]:
     failures: list[str] = []
     warnings: list[str] = []
     criteria = criteria or {}
@@ -888,6 +910,24 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     headings = [m["heading"] for m in series]
     timestamps = [float(s.get("timestamp", 0.0) or 0.0) for s in samples]
     scenario_layer_counts = scenario_actor_layer_counts(scenario)
+
+    # ── run 完整性门禁：截断的 run 不许冒充 PASS ──
+    # 请求跑 N 秒但样本跨度 < 50% → INCONCLUSIVE → FAIL。触发场景：monitor
+    # 写 /tmp/flow_topology.json 中途静默停止（back-to-back demo 瞬态），
+    # 评估器只采到开头几秒。没有这个门禁，截断 run 会：
+    #   1) 行为指标"正常" → 误报 PASS（60s 只测了 8s）；
+    #   2) x_delta 骤降 → 误报对 baseline 的数值回归。
+    # 两者都让"PASS 可信"破产 —— 判定不了就该 FAIL，不是 PASS。
+    # span 复用上面算好的 timestamps（同一时间戳语义，不重复解析）。
+    if expected_duration_s is not None and expected_duration_s > 0 and len(timestamps) >= 5:
+        span = timestamps[-1] - timestamps[0]
+        if span < expected_duration_s * 0.5:
+            failures.append(
+                f"run truncated: sample span {span:.1f}s < 50% of requested "
+                f"{expected_duration_s:.0f}s — demo did not produce data for the "
+                f"full run, result is INCONCLUSIVE (likely monitor JSON writer "
+                f"stopped mid-run)"
+            )
 
     # ── 门禁有效性：量的活性检查 ──────────────────────────────
     # 在任何判据之前跑。一个恒为初值的量意味着上游链路断了，
@@ -1263,11 +1303,27 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     max_npc_speed = max(npc_speed_spikes) if npc_speed_spikes else 0.0
     max_npc_lateral_speed = max(npc_lateral_spikes) if npc_lateral_spikes else 0.0
 
-    if yaw_rate_rms > 0.35 or max_yaw_rate > 1.2 or (heading_flip_rate > 1.2 and yaw_rate_rms > 0.1):
+    if (yaw_rate_rms > YAW_RMS_FAIL or max_yaw_rate > YAW_MAX_FAIL or
+            (heading_flip_rate > HEADING_FLIP_FAIL and yaw_rate_rms > 0.2)):
+        failures.append(
+            f"ego yaw limit cycle: yaw_rms={yaw_rate_rms:.2f} rad/s, max={max_yaw_rate:.2f}, "
+            f"flips={heading_flip_rate:.2f}/s (1-2Hz lateral limit cycle, FAIL > "
+            f"{YAW_RMS_FAIL}/{YAW_MAX_FAIL})"
+        )
+    elif (yaw_rate_rms > YAW_RMS_WARN or max_yaw_rate > YAW_MAX_WARN or
+            (heading_flip_rate > HEADING_FLIP_WARN and yaw_rate_rms > HEADING_FLIP_WARN_MIN_YAW)):
         warnings.append(
             f"ego yaw wobble: yaw_rms={yaw_rate_rms:.2f} rad/s, max={max_yaw_rate:.2f}, flips={heading_flip_rate:.2f}/s"
         )
-    if steer_rate_rms > 0.9 or max_steer_rate > 3.0 or steer_flip_rate > 1.0:
+    if (steer_rate_rms > STEER_RATE_RMS_FAIL or max_steer_rate > STEER_MAX_RATE_FAIL or
+            steer_flip_rate > STEER_FLIP_FAIL):
+        failures.append(
+            f"steer bang-bang oscillation: steer_rate_rms={steer_rate_rms:.2f}/s, "
+            f"max={max_steer_rate:.2f}/s, flips={steer_flip_rate:.2f}/s "
+            f"(control dithering every frame, FAIL > {STEER_FLIP_FAIL}/s)"
+        )
+    elif (steer_rate_rms > STEER_RATE_RMS_WARN or max_steer_rate > STEER_MAX_RATE_WARN or
+            steer_flip_rate > STEER_FLIP_WARN):
         warnings.append(
             f"steer oscillation: steer_rate_rms={steer_rate_rms:.2f}/s, max={max_steer_rate:.2f}/s, flips={steer_flip_rate:.2f}/s"
         )
@@ -1630,7 +1686,7 @@ def main() -> int:
             _scn_path = ROOT / _scn_path
         _scn_dict = load_json(_scn_path)
 
-    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road, traffic_lights=traffic_lights, scenario=_scn_dict)
+    failures, warnings, summary = score(samples, LAUNCHER_STDERR, criteria, scenario_name, has_noa_route=has_noa_route, road=road, traffic_lights=traffic_lights, scenario=_scn_dict, expected_duration_s=duration if not args.no_run else None)
 
     print("\n=== FlowEngine Demo Evaluation ===")
     for key, value in summary.items():

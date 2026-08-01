@@ -17,6 +17,13 @@ FlowEngine 的横向极限环被"修好"过六次而不收敛。2026-07 查明�
   5. 恒定量           kappa≡0（scenario_loader 不解析 road_network）
   6. 场景空跑         直道上跑曲率判据
 
+v0.2 追加（2026-08-01，Phase 1.2，对齐新场景矩阵）：
+  7. 多红灯闯行       ego 红灯期间越过停止线 → 门禁必须 FAIL
+  8. 绿灯卡死         v=0 停在绿灯下 >5s（planning 闭锁）→ 门禁必须 FAIL
+  9. 追尾 gap         min_forward_gap ≤ 0 → 门禁必须 FAIL
+  10. 过度保守刹停     对向会车场景巡航降到 ~1m/s → min_avg_speed FAIL
+  11. 转向 bang-bang   steer 每帧翻符号 → Phase 1.3 FAIL 门禁
+
 运行（两种方式等价）：
   python3 ci/evaluators/test_evaluator_gate.py   # 独立脚本，退出码=失败数
   python3 -m pytest ci/evaluators/test_evaluator_gate.py   # pytest 收集
@@ -159,6 +166,86 @@ def run_all_checks() -> int:
     lead = 51.341
     mismatch = collision and math.isfinite(lead) and lead > 5.0
     check("collision-vs-warning_lead mismatch caught", mismatch)
+
+    # ── v0.2 新场景门禁有效性（Phase 1.2）：每个目标故障注入即红 ──
+    # multi_light（红灯闯行/绿灯卡死）、dense_npc（追尾 gap）、oncoming
+    # （过度保守刹停）、控制层 bang-bang、run 截断。每个用例注入一种已知故障，
+    # 断言对应门禁 FAIL —— 门禁抓不住 = 它的 PASS 不可信。
+    # topic 名复用 demo_evaluator.TOPIC_MIN_FREQ（唯一事实源），避免 set 漂移。
+    _TOPICS = [{"topic": t, "freq": 20.0} for t in de.TOPIC_MIN_FREQ]
+
+    def _mk(x, y, speed, steer, ts, tl_state=None, obstacles=None):
+        ents = [{"id": 0, "type": "tl", "x": 300.0, "state": tl_state}] if tl_state else []
+        return {
+            "timestamp": ts,
+            "metrics": {
+                "topics": _TOPICS,
+                "vehicle": {"speed": speed, "x": x},
+                "scene": {
+                    "ego": {"x": x, "y": y, "speed": speed, "steer": steer, "heading": 0.0},
+                    "lane": {"width": 3.5, "count": 4},
+                    "obstacles": obstacles or [],
+                    "entities": ents,
+                },
+                "driver_mode": "NOA:CRUISE",
+            },
+            "nodes": [],
+        }
+
+    def _score(label, samples, criteria, lights=None, expected_duration_s=None):
+        f, _, _ = de.score(samples, ROOT / "does-not-exist.log", criteria=criteria,
+                           scenario_name=label, expected_edges=[], road=None,
+                           traffic_lights=lights, expected_duration_s=expected_duration_s)
+        return f
+
+    _TL = [{"id": 0, "x": 300.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0}]
+    _ZERO_CRIT = {"min_distance_m": 0.0, "min_avg_speed_mps": 0.0}
+
+    print("\n[13] multi_light — red light running (ego crosses stop line during red)")
+    _red_cross = [_mk(285 + i * 5, -1.75, 12.0, 0.0, i * 0.25,
+                      tl_state=("red" if 285 + i * 5 < 302 else "green")) for i in range(12)]
+    _f = _score("red-cross", _red_cross, {**_ZERO_CRIT, "no_red_light_violation": True}, lights=_TL)
+    check("red-light violation caught", any("red light violation" in x for x in _f))
+
+    print("\n[14] multi_light — green-stall deadlock (v=0 while light green > 5s)")
+    _stall = [_mk(290.0, -1.75, 0.0, 0.0, i * 0.25, tl_state="green") for i in range(60)]
+    _f = _score("green-stall", _stall, {**_ZERO_CRIT, "no_red_light_violation": True}, lights=_TL)
+    check("green-stall deadlock caught", any("stuck during green" in x for x in _f))
+
+    print("\n[15] multi_light — healthy red-light obey must NOT trip the red gate")
+    _obey = [_mk(285 + i * 5, -1.75, 12.0, 0.0, i * 0.25,
+                 tl_state="green") for i in range(12)]
+    _f = _score("red-obey", _obey, {**_ZERO_CRIT, "no_red_light_violation": True}, lights=_TL)
+    check("no false red-light violation on green", not any("red light violation" in x for x in _f))
+
+    print("\n[16] dense_npc — rear-end gap <= 0")
+    _gap = [_mk(10 + i * 10, -1.75, 12.0, 0.0, i * 0.25, obstacles=[
+        {"id": 1, "x": 8.0, "y": 0.0, "len": 4.6, "wid": 2.0},
+        {"id": 2, "x": 2.0, "y": 0.0, "len": 4.6, "wid": 2.0},
+    ]) for i in range(10)]
+    _f = _score("rear-end", _gap, {**_ZERO_CRIT, "no_collision": False})
+    check("min_forward_gap<=0 caught", any("min_forward_gap" in x for x in _f))
+
+    print("\n[17] oncoming — over-conservative brake (avg speed collapses)")
+    _slow = [_mk(10 + i * 2, -1.75, 1.0, 0.0, i * 0.25) for i in range(40)]
+    _f = _score("oncoming-overbrake", _slow, {"min_distance_m": 100.0, "min_avg_speed_mps": 5.0})
+    check("avg-speed collapse caught", any("average speed too low" in x for x in _f))
+
+    print("\n[18] control-layer — bang-bang steer (sign flips every frame) must FAIL")
+    _bang = [_mk(10 + i * 10, -1.75, 12.0 + (i % 2) * 0.5, 0.25 if i % 2 == 0 else -0.25, i * 0.25)
+             for i in range(60)]
+    _f = _score("bang-bang", _bang, _ZERO_CRIT)
+    check("steer bang-bang FAIL", any("steer bang-bang" in x for x in _f))
+
+    print("\n[19] run integrity — truncated run (8s of a 60s demo) must be INCONCLUSIVE")
+    # monitor 写 /tmp/flow_topology.json 中途停止 → 只采到开头几秒。
+    # 没有此门禁，截断 run 会误报 PASS 或触发虚假数值回归。
+    _trunc = [_mk(10 + i * 10, -1.75, 12.0, 0.0, i * 0.25) for i in range(32)]  # span ≈ 7.8s
+    _f = _score("truncated", _trunc, _ZERO_CRIT, expected_duration_s=60.0)
+    check("truncated run caught", any("run truncated" in x for x in _f))
+    _full = [_mk(10 + i * 10, -1.75, 12.0, 0.0, i * 1.0) for i in range(32)]  # span ≈ 31s
+    _f2 = _score("full-run", _full, _ZERO_CRIT, expected_duration_s=30.0)
+    check("full-length run not flagged", not any("run truncated" in x for x in _f2))
 
     print(f"\n{'='*52}")
     print(f"gate self-test: {_passed} passed, {_failed} failed")

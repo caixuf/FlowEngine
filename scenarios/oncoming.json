@@ -1,0 +1,50 @@
+{
+  "name": "oncoming",
+  "description": "对向会车场景：远车道（y=5.25，|dy|=7m>6m）9 辆对向来车每 200m、相邻对向车道（y=1.75，|dy|=3.5m）2 辆。覆盖『planning+safety 把任意车道对向车都当迎头威胁 → 刹停到 0』——健康代码只把相邻车道对向车当真威胁，远车道对向车必须被忽略、不刹停。平路双向 4 车道（Y=0）。",
+  "random_seed": 137,
+  "duration_s": 0,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 12.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "highway",
+        "name": "straight",
+        "length_m": 4000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 22.0,
+        "nodes": [[0, 0, 0], [4000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1,  "type": "car", "x": 400.0,  "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car", "x": 900.0,  "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 10, "type": "car", "x": 600.0,  "y": 1.75,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 11, "type": "car", "x": 1100.0, "y": 1.75,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 21, "type": "car", "x": 300.0,  "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 22, "type": "car", "x": 500.0,  "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 23, "type": "car", "x": 700.0,  "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 24, "type": "car", "x": 900.0,  "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 25, "type": "car", "x": 1100.0, "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 26, "type": "car", "x": 1300.0, "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 27, "type": "car", "x": 1500.0, "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 28, "type": "car", "x": 1700.0, "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 29, "type": "car", "x": 1900.0, "y": 5.25,  "vx": -13.0, "vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [],
+  "pass_criteria": {
+    "no_collision": true,
+    "max_duration_s": 75.0,
+    "min_avg_speed_mps": 5.0
+  },
+  "route": [],
+  "scenarios": []
+}
