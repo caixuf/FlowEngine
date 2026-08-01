@@ -285,6 +285,10 @@ function updateTopo(data) {
 
   // Rebuild SVG
   el.innerHTML = '';
+  // 用容器实际尺寸作为 force 中心——硬编码 (400,200) 只覆盖半宽，右侧空白
+  var cw = el.clientWidth  || 800;
+  var ch = el.clientHeight || 420;
+  var cx = cw / 2, cy = ch / 2;
   var svg = d3.select('#topo').append('svg').attr('width','100%').attr('height','100%');
   var g = svg.append('g');
   var defs = svg.append('defs');
@@ -403,9 +407,9 @@ function updateTopo(data) {
   _topoSim = d3.forceSimulation(ns)
     .force('link', d3.forceLink(links).distance(160))
     .force('charge', d3.forceManyBody().strength(-200))
-    .force('center', d3.forceCenter(400,200).strength(0.15))
-    .force('x', d3.forceX(400).strength(0.03))
-    .force('y', d3.forceY(200).strength(0.03))
+    .force('center', d3.forceCenter(cx, cy).strength(0.15))
+    .force('x', d3.forceX(cx).strength(0.03))
+    .force('y', d3.forceY(cy).strength(0.03))
     .force('collision', d3.forceCollide(50))
     .on('tick', function() {
       linkG.attr('d', function(d) {
@@ -1276,7 +1280,11 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'f' || e.key === 'F') {
     e.preventDefault();
     var svg = document.querySelector('#topo svg');
-    if (svg) d3.select('#topo svg').transition().duration(500).call(d3.zoom().transform, d3.zoomIdentity.translate(400,300).scale(0.8));
+    if (svg) {
+      var el2 = document.getElementById('topo');
+      var tw = el2 ? el2.clientWidth : 800, th = el2 ? el2.clientHeight : 420;
+      d3.select('#topo svg').transition().duration(500).call(d3.zoom().transform, d3.zoomIdentity.translate(tw/2, th/2).scale(0.8));
+    }
   }
   if (e.key === 'Escape') {
     e.preventDefault();
