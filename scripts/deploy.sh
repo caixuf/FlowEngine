@@ -1,106 +1,57 @@
 #!/bin/bash
-# =============================================================================
-# FlowEngine Deploy — 一键部署到目标目录
-#
-# 用法:
-#   bash scripts/deploy.sh /mnt/m              # 部署到嵌入式设备挂载点
-#   bash scripts/deploy.sh /opt/flowengine      # 部署到本地目录
-#   bash scripts/deploy.sh --release /mnt/m     # Release 构建 + 部署
-#   bash scripts/deploy.sh --strip /mnt/m       # 部署并 strip 符号
-#
-# 部署后目标目录结构:
-#   /mnt/m/
-#   ├── bin/           # flowctl, flow_launcher, launcher, ...
-#   ├── lib/           # libflowengine_core.a, plugins/
-#   ├── include/       # 头文件
-#   ├── share/         # scripts, tools
-#   └── flowengine.env # 环境变量（source 即可用）
-# =============================================================================
 set -e
-
 BUILD_TYPE=Release
 STRIP=false
 PREFIX=""
+PACKAGE_MODE=false
 
 for arg in "$@"; do
     case "$arg" in
         --release) BUILD_TYPE=Release ;;
         --debug)   BUILD_TYPE=Debug ;;
         --strip)   STRIP=true ;;
+        --package) PACKAGE_MODE=true ;;
         --*)       echo "Unknown option: $arg"; exit 1 ;;
         *)         PREFIX="$arg" ;;
     esac
 done
 
-if [ -z "$PREFIX" ]; then
+if [ "$PACKAGE_MODE" = false ] && [ -z "$PREFIX" ]; then
     echo "Usage: bash scripts/deploy.sh [--release|--debug] [--strip] <target_dir>"
-    echo ""
-    echo "Examples:"
-    echo "  bash scripts/deploy.sh /mnt/m              # Deploy to mounted device"
-    echo "  bash scripts/deploy.sh /opt/flowengine      # Deploy to local dir"
-    echo "  bash scripts/deploy.sh --strip /mnt/m       # Strip + deploy"
+    echo "   or: bash scripts/deploy.sh --package [--release|--debug|--strip]"
     exit 1
 fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build_deploy"
 
-echo "╔══════════════════════════════════════════╗"
-echo "║  FlowEngine Deploy                       ║"
-echo "║  Target: $PREFIX"
-echo "║  Build:  $BUILD_TYPE"
-echo "╚══════════════════════════════════════════╝"
-echo ""
-
-# ── 1. Build ─────────────────────────────────────────────────
-echo "[1/4] Building ($BUILD_TYPE)..."
-cmake -S "$ROOT" -B "$BUILD_DIR" \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    > /dev/null 2>&1
-cmake --build "$BUILD_DIR" -j$(nproc) 2>/dev/null
-echo "  ✓ Build complete"
-
-# ── 2. Install ───────────────────────────────────────────────
-echo "[2/4] Installing to $PREFIX..."
-rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/include/flowengine" "$PREFIX/share/flowengine" 2>/dev/null || true
-cmake --install "$BUILD_DIR" 2>/dev/null
-echo "  ✓ Installed"
-
-# ── 3. Strip (optional) ──────────────────────────────────────
-if $STRIP; then
-    echo "[3/4] Stripping symbols..."
-    find "$PREFIX/bin" -type f -executable 2>/dev/null | while read f; do
-        strip "$f" 2>/dev/null && echo "  stripped: $(basename $f)" || true
-    done
-    find "$PREFIX/lib" -name "*.so" 2>/dev/null | while read f; do
-        strip --strip-unneeded "$f" 2>/dev/null && echo "  stripped: $(basename $f)" || true
-    done
-else
-    echo "[3/4] Skipping strip (use --strip to reduce size)"
+if [ "$PACKAGE_MODE" = true ]; then
+    VERSION=$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo "dev")
+    TARNAME="flowengine-${VERSION}-linux-x86_64.tar.gz"
+    DIST_DIR="$ROOT/dist"
+    mkdir -p "$DIST_DIR"
+    PREFIX="$(mktemp -d /tmp/flowengine_pkg_XXXXXX)"
 fi
 
-# ── 4. Environment setup ─────────────────────────────────────
-echo "[4/4] Generating environment..."
+echo "[1/4] Building..."
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_INSTALL_PREFIX="$PREFIX" > /dev/null 2>&1
+cmake --build "$BUILD_DIR" -j$(nproc) 2>/dev/null
+echo "[2/4] Installing..."
+cmake --install "$BUILD_DIR" 2>/dev/null
+if $STRIP; then echo "[3/4] Stripping..."; find "$PREFIX/bin" "$PREFIX/lib" -type f -executable -o -name "*.so" | xargs strip 2>/dev/null || true; else echo "[3/4] Skipping strip"; fi
+echo "[4/4] Environment..."
 cat > "$PREFIX/flowengine.env" << EOF
-# FlowEngine environment — source this file to use
-export PATH="$PREFIX/bin:\$PATH"
-export LD_LIBRARY_PATH="$PREFIX/lib:\$LD_LIBRARY_PATH"
-export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:\$PKG_CONFIG_PATH"
+export PATH="$PREFIX/bin:\\/home/caixuf/.npm-global/bin:/home/caixuf/.kimi-code/bin:/home/caixuf/.trae-cn-server/bin/stable-428b3440427a64b51632df94fd7d6611443d246b-debian10/bin/remote-cli:/home/caixuf/.local/bin:/home/caixuf/.npm-global/bin:/home/caixuf/.kimi-code/bin:/home/caixuf/.nvm/versions/node/v24.18.1/bin:/home/caixuf/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:/mnt/c/Users/20247/.trae-cn/tools/trae-gopls/current:/mnt/c/Users/20247/.trae-cn/sdks/workspaces/77977199/versions/node/current:/mnt/c/Users/20247/.trae-cn/sdks/versions/node/current:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/mnt/c/WINDOWS/System32/OpenSSH/:/mnt/c/Qt/Qt5.12.12/5.12.12/mingw73_64/bin:/mnt/c/mingw64/mingw64/bin:/mnt/c/mingw64/mingw64/bin/g++.exe:/mnt/c/Program Files/Microsoft SQL Server/150/Tools/Binn/:/mnt/d/MyCode/MyLib/qpdf 11.6.3/bin:/mnt/c/Qt/Qt6.5.3/6.5.3/msvc2019_64:/mnt/c/Qt/Qt6.5.3/6.5.3/msvc2019_64/bin:/mnt/c/Qt/Qt6.5.3/Tools/CMake_64/bin:/mnt/c/Qt/Qt6.5.3/Tools/QtCreator/bin:/mnt/c/Program Files/Java/jdk-19/bin:/mnt/c/Program Files/Git/cmd:/mnt/d/MyCode/CodeTools:/mnt/c/Program Files/Graphviz/bin:/mnt/c/Program Files/TortoiseGit/bin:/mnt/c/Program Files/Sunshine:/mnt/c/Program Files/Sunshine/tools:/mnt/c/Users/20247/AppData/Local/Microsoft/WindowsApps:/mnt/c/Users/20247/AppData/Local/Programs/Microsoft VS Code/bin:/mnt/c/Qt/6.5.3/mingw_64/bin:/mnt/c/Users/20247/AppData/Local/Programs/Trae CN/resources/app/bin/lib:/snap/bin:/home/caixuf/.trae-cn-server/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+export LD_LIBRARY_PATH="$PREFIX/lib:\"
 export FLOWENGINE_HOME="$PREFIX"
 EOF
 
-# ── Summary ──────────────────────────────────────────────────
-SIZE=$(du -sh "$PREFIX" 2>/dev/null | cut -f1)
-echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║  Deploy Complete                          ║"
-echo "╠══════════════════════════════════════════╣"
-echo "║  Path:  $PREFIX"
-echo "║  Size:  $SIZE"
-echo "║  Files: $(find "$PREFIX" -type f 2>/dev/null | wc -l)"
-echo "╠══════════════════════════════════════════╣"
-echo "║  To use on target:                       ║"
-echo "║    source $PREFIX/flowengine.env          ║"
-echo "║    flowctl version                       ║"
-echo "╚══════════════════════════════════════════╝"
+if [ "$PACKAGE_MODE" = true ]; then
+    cd "$PREFIX/.."
+    tar czf "$DIST_DIR/$TARNAME" "$(basename "$PREFIX")/"
+    rm -rf "$PREFIX"
+    echo "✓ $DIST_DIR/$TARNAME"
+else
+    echo "✓ Deploy to $PREFIX"
+fi
+
