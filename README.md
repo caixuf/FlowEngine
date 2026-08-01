@@ -94,6 +94,25 @@ bash build.sh release
 > **入口：** `flow_launcher config/pipeline.json` 是运行 pipeline 的标准、
 > 配置驱动方式（每个节点都是 `dlopen` 加载的 `.so` 插件）。
 
+### 新手最短路径（复制即可跑）
+
+```bash
+# 1) 跑一次 demo（验证环境）
+bash scripts/demo.sh --no-browser 15
+
+# 2) 一键学习闭环：采集 -> 训练 -> 影子评估
+python3 tools/learning_loop.py --collect 30 --eval-duration 30
+
+# 3) 只重跑影子评估并自动晋级（promote gate）
+python3 tools/learning_loop.py --eval-only <模型目录名> --eval-duration 30 --promote
+
+# 4) 产部署包（用于非开发机）
+bash scripts/deploy.sh --package
+
+# 5) 解包后一键启动（包内脚本）
+bash share/flowengine/scripts/quickstart.sh 15
+```
+
 ---
 
 ## 演示
@@ -399,19 +418,45 @@ FlowEngine 实现了完整的车端学习闭环：
 
 详见 [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md)。
 
+**推荐命令（Phase 2 已打通）：**
+
+```bash
+# 一键：采集 -> 训练 -> 影子评估（结果写 runs/ 和 models/<name>/shadow_eval.json）
+python3 tools/learning_loop.py --collect 30 --eval-duration 30
+
+# 用已有模型只做影子评估（刷新 shadow_eval.json）
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30
+
+# 评估达标后自动晋级到 runtime 模型
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30 --promote
+
+# 查看当前 runtime 与 artifact
+python3 tools/modelctl.py list
+```
+
+门禁规则（`modelctl promote`）：
+1. 必须有 `shadow_eval.json`
+2. `evaluator_result` 必须 `PASS`
+3. `shadow_speed_mae <= 2.0`
+4. `shadow_n >= 50`
+5. 评估年龄 <= 7 天
+
 ---
 
 ## 回归评估器
 
 ```bash
 # 运行演示 + 自动评分：拓扑、碰撞、冲出路面、停滞、yaw 抖动
-python3 tools/demo_evaluator.py --duration 45
+python3 ci/evaluators/demo_evaluator.py --duration 45
 
 # 分析上次运行（不重新启动）
-python3 tools/demo_evaluator.py --no-run
+python3 ci/evaluators/demo_evaluator.py --no-run
 
 # 全场景套件与基线对比
-python3 tools/scenario_regression.py --baseline
+python3 ci/evaluators/scenario_regression.py --baseline
+
+# 秒级离线管道完整性（先跑这个再跑长测）
+python3 tools/pipeline_check.py
 ```
 
 评估器在演示运行期间采样 `/tmp/flow_topology.json` 并检查：

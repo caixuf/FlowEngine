@@ -4,6 +4,27 @@
 > 围绕现有 Pub/Sub 总线扩展一条 **数据采集 → 训练 → 推理** 的闭环，
 > 把「训练」交给成熟框架，把「实时性 / 部署 / 安全兜底」交给 FlowEngine。
 
+## TL;DR（新手先跑这 4 条）
+
+```bash
+# 1) 一键跑闭环：采集 -> 训练 -> 影子评估
+python3 tools/learning_loop.py --collect 30 --eval-duration 30
+
+# 2) 看模型与 runtime 当前状态
+python3 tools/modelctl.py list
+
+# 3) 只重跑影子评估并自动晋级
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30 --promote
+
+# 4) 打部署包并在解包目录一键启动
+bash scripts/deploy.sh --package
+bash share/flowengine/scripts/quickstart.sh 15
+```
+
+常看目录：
+- `runs/loop_<timestamp>/`：每次闭环运行的评估与汇总
+- `models/<name>/`：训练产物（含 `manifest.json`、`model.txt`、`shadow_eval.json`）
+
 ## 为什么不内置大模型训练框架
 
 从零造训练框架是 PyTorch / JAX 量级的工作，与 FlowEngine「轻量级自动驾驶中间件」
@@ -165,6 +186,52 @@ python3 tools/modelctl.py list
 python3 tools/train_demo_model.py --backend tiny --name e2e_tiny_v001
 python3 tools/modelctl.py promote models/e2e_tiny_v001
 bash scripts/demo.sh --no-browser 12
+```
+
+## Phase 2 一键流水线（推荐入口）
+
+`tools/learning_loop.py` 已把 Phase 2 的关键步骤串起来：
+- Stage 0 采集（`demo.sh` + `data_recorder_node`）
+- Stage 1 训练（`train_demo_model.py`）
+- Stage 2 影子评估（`ci/evaluators/demo_evaluator.py` + inference sidecar）
+- Stage 3 晋级（`modelctl promote` gate）
+
+常用命令：
+
+```bash
+# 标准闭环
+python3 tools/learning_loop.py --collect 30 --eval-duration 30
+
+# 跳过采集，使用已有样本
+python3 tools/learning_loop.py --skip-collect --input /tmp/flow_train_samples.jsonl
+
+# 只做影子评估（刷新 models/<name>/shadow_eval.json）
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30
+
+# 影子评估后自动晋级
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30 --promote
+```
+
+### Promote Gate（晋级门禁）
+
+`python3 tools/modelctl.py promote <artifact>` 会先执行门禁检查，默认拒绝不满足条件的模型：
+
+1. 必须存在 `shadow_eval.json`
+2. `evaluator_result == PASS`
+3. `shadow_speed_mae <= 2.0 m/s`
+4. `shadow_n >= 50`
+5. 评估结果年龄不超过 7 天
+
+门禁失败优先重跑：
+
+```bash
+python3 tools/learning_loop.py --eval-only <name_or_dir> --eval-duration 30
+```
+
+确需强制晋级可用 `--force`（不推荐）：
+
+```bash
+python3 tools/modelctl.py promote <artifact> --force
 ```
 
 无采集数据时，可先用合成数据生成一个演示模型：

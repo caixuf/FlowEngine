@@ -22,6 +22,9 @@ get_filename_component(FLOW_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 # 允许外部传入 build 目录（主项目 build）
 if(NOT DEFINED FLOWENGINE_BUILD)
     set(FLOWENGINE_BUILD "${FLOW_ROOT}/build")
+else()
+    # 确保 FLOWENGINE_BUILD 是绝对路径，避免相对路径被 CMake 解析为子项目源目录下的相对路径
+    get_filename_component(FLOWENGINE_BUILD "${FLOWENGINE_BUILD}" ABSOLUTE BASE_DIR "${FLOW_ROOT}")
 endif()
 
 message(STATUS "FlowEngine root:  ${FLOW_ROOT}")

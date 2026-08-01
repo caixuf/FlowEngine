@@ -99,6 +99,35 @@ build_project() {
     print_success "构建完成 ($warn_count 个警告)"
 }
 
+# 构建节点插件（独立 cmake 子项目）
+build_node_plugins() {
+    local build_type="${1:-Release}"
+    local onnx_flag="${2:-}"
+    
+    print_info "构建节点插件 (构建类型: $build_type)..."
+    
+    cmake_args=(
+        -B "$BUILD_DIR/modules/adas_nodes"
+        -S "$(dirname "$0")/modules/adas_nodes"
+        "-DFLOWENGINE_BUILD=$(cd "$(dirname "$0")" && pwd)/$BUILD_DIR"
+    )
+    [ -n "$onnx_flag" ] && cmake_args+=("-DENABLE_ONNX=$onnx_flag")
+    
+    cmake "${cmake_args[@]}"
+    if [ $? -ne 0 ]; then
+        print_error "节点插件 CMake 配置失败"
+        exit 1
+    fi
+    
+    cmake --build "$BUILD_DIR/modules/adas_nodes" -j"$NPROC"
+    if [ $? -ne 0 ]; then
+        print_error "节点插件构建失败"
+        exit 1
+    fi
+    
+    print_success "节点插件构建完成"
+}
+
 # 安装项目
 install_project() {
     if [ ! -d "$BUILD_DIR" ]; then
@@ -209,10 +238,29 @@ check_dependencies() {
         print_warning "建议安装: sudo apt install libeigen3-dev（若已通过自定义路径安装 Eigen3，可忽略此提示）"
     fi
 
+    # 检查 ONNX Runtime（可选，缺失时 inference_node 回退 tiny-MLP，不影响 demo）
+    if [ -n "$ENABLE_ONNX" ] && [ "$ENABLE_ONNX" = "ON" ]; then
+        if [ ! -f /usr/local/include/onnxruntime/onnxruntime_cxx_api.h ] && \
+           [ ! -f /usr/include/onnxruntime/onnxruntime_cxx_api.h ]; then
+            print_warning "ENABLE_ONNX=ON 但未找到 onnxruntime_cxx_api.h"
+            print_warning "运行 bash scripts/install_onnx_runtime.sh 安装，或设置 ENABLE_ONNX= 跳过"
+        fi
+    fi
+
     print_success "所有依赖都已满足"
 }
 
 # 主程序
+# 自动检测 ONNX Runtime（可选，缺失时 inference_node 回退 tiny-MLP，不影响 demo）
+auto_detect_onnx() {
+    if [ -f /usr/local/include/onnxruntime/onnxruntime_cxx_api.h ] || \
+       [ -f /usr/include/onnxruntime/onnxruntime_cxx_api.h ]; then
+        echo "-DENABLE_ONNX=ON"
+    else
+        echo ""
+    fi
+}
+
 main() {
     case $1 in
         clean)
@@ -225,6 +273,12 @@ main() {
         release)
             check_dependencies
             build_project "Release"
+            local onnx_flag="${ENABLE_ONNX:-$(auto_detect_onnx)}"
+            build_node_plugins "Release" "${onnx_flag}"
+            ;;
+        nodes)
+            local onnx_flag="${ENABLE_ONNX:-$(auto_detect_onnx)}"
+            build_node_plugins "Release" "${onnx_flag}"
             ;;
         install)
             install_project

@@ -193,8 +193,15 @@ fi
 # Also build node plugins. They live in a separate CMake project, so the main
 # flow_launcher target does not automatically rebuild them after node source edits.
 echo "  Building node plugins..."
+# 自动检测 ONNX Runtime：头文件存在则启用 ONNX（可选，缺失时回退 tiny-MLP，不影响 demo）
+ONNX_FLAG=""
+if [ -f /usr/local/include/onnxruntime/onnxruntime_cxx_api.h ] || \
+   [ -f /usr/include/onnxruntime/onnxruntime_cxx_api.h ]; then
+    ONNX_FLAG="-DENABLE_ONNX=ON"
+    echo "    ONNX Runtime detected — enabling HAVE_ONNXRUNTIME"
+fi
 ADAS_CFG_LOG=$(cmake -B "$BUILD_DIR/modules/adas_nodes" -S "$ROOT/modules/adas_nodes" \
-  -DFLOWENGINE_BUILD="$BUILD_DIR" 2>&1)
+  -DFLOWENGINE_BUILD="$BUILD_DIR" $ONNX_FLAG 2>&1)
 ADAS_CFG_STATUS=$?
 if [ $ADAS_CFG_STATUS -ne 0 ]; then
   echo "$ADAS_CFG_LOG"

@@ -601,12 +601,14 @@ install(TARGETS flowengine_core
 )
 
 # ── ADAS 节点插件（全装） ───────────────────────────────────
-file(GLOB ADAS_NODE_LIBS "${CMAKE_BINARY_DIR}/lib/lib*_node.so" "${CMAKE_BINARY_DIR}/lib/lib*_node.dylib")
-if(ADAS_NODE_LIBS)
-    install(FILES ${ADAS_NODE_LIBS}
-        DESTINATION lib/flowengine/plugins
-    )
-endif()
+# 不能用 configure-time GLOB：首次配置时节点 .so 还没生成，会导致安装包漏掉插件。
+# 用 install(DIRECTORY ... FILES_MATCHING) 在 install 阶段按模式收集构建产物。
+install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
+    DESTINATION lib/flowengine/plugins
+    FILES_MATCHING
+    PATTERN "lib*_node.so"
+    PATTERN "lib*_node.dylib"
+)
 
 install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task
     LIBRARY DESTINATION lib/flowengine/plugins
