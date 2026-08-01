@@ -958,8 +958,11 @@ static bool should_publish_road_geometry_now(void) {
  * 背景：control_node Stanley 横向控制原本依赖全局单段 curve_*（curve_start_x/
  * curve_length_m/curve_offset_m）算 cte/heading/kappa，road_network 多 edge 场景
  * 下 curve_* 全零 → 参考线退化为 y=0 直线 → ego 过 fork 后沿直线开进空地。
- * 本函数从 esmini 路网采样 ego 前方 N 个参考点（含曲率前馈），发布 JSON 给
- * control_node 替代 curve_* 直线参考。
+ * 本函数发布 **route centerline** 前方 N 个参考点（含曲率前馈），让 planning/
+ * control 对 d=0 的理解统一为"道路中心线"，而不是当前 ego 车道中心。
+ * 旧实现优先用 ego.road_pos.sample_ahead()，它采到的是当前 lane handle 的
+ * 中心线；planning 再叠 target_lane_offset 时会出现双重偏移，右转/支路场景下
+ * control 只会忠实跟踪一条已经偏到路肩上的坏轨迹。
  *
  * 每 cycle 发布（20Hz），与 control_node 控制周期对齐。
  * 无 route / esmini 加载失败时发布空数组（control_node 检测到空数组回退 curve_*）。
@@ -978,35 +981,18 @@ static void publish_ref_path(void) {
          * 控制器在高速段（27m/s）每步 1.35m 也有充足前视距离。 */
         std::vector<flowsim::RefPathPoint> samples;
         int n = 0;
-        /* Phase 2: ego 有 road_pos 时优先用 RoadPosition 采样。
-         *
-         * P5 修复（根因：NPC 协同位移 ~200m）：原实现用 `ego.road_pos.clone()`
-         * 创建临时 handle 采样，sample_ahead 完后 tmp 析构调 RM_DeletePosition。
-         * 每 cycle（20Hz）create+delete 一个 handle 会破坏 esmini 内部 handle
-         * 数组连续性（delete 后数组移位），导致其他 NPC 的 road_pos handle 指向
-         * 错误位置 → 全体 NPC 协同位移 ~200m（= NPC 间距），evaluator 误报
-         * npc teleport FAIL。
-         *
-         * 修复：直接用 ego.road_pos.sample_ahead（推进 handle 状态），采样完后
-         * 用 relocate 把 ego.road_pos 恢复到采样前位置。不 create/delete 任何
-         * handle，不触碰 handle 数组。relocate 仅调 RM_SetLanePosition 重定位
-         * 已有 handle，与 recycle_npc / scene_events 同模式。 */
-        if (ego.road_pos.ok()) {
-            /* 保存采样前 frenet 状态，采样后恢复 */
+        n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
+        /* fallback：route 采样失败时再退回当前车道中心线，避免完全断 ref_path。 */
+        if (n == 0 && ego.road_pos.ok()) {
             flowsim::FrenetPos saved_fp;
             bool has_saved = ego.road_pos.frenet(saved_fp);
             flowsim::Entity& ego_mut = g.pool[0];
             n = ego_mut.road_pos.sample_ahead(g.roads, 100.0, 5.0, M_PI, samples);
-            /* 恢复 ego.road_pos 到采样前位置（sample_ahead 推进到了最后采样点） */
             if (has_saved) {
                 ego_mut.road_pos.relocate(g.roads, saved_fp.road_id,
                                           saved_fp.lane_id, saved_fp.s,
                                           saved_fp.offset);
             }
-        }
-        /* fallback：road_pos 未初始化或采样失败 → 旧 route.sample_ahead */
-        if (n == 0) {
-            n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
         }
         for (int i = 0; i < n; ++i) {
             const auto& p = samples[i];

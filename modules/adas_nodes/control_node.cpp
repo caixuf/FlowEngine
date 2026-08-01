@@ -114,6 +114,10 @@ struct ControlContext {
     int    has_target_speed{0};  /* trajectory 回调是否已设置 target_speed */
     double ego_x{0}, ego_y{0};
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
+    double target_path_y{0};   /* 同一前视点的全局 y，避免最近点 rc_y + 前视点 lane_d 混拼 */
+    double target_path_heading{0};
+    double target_path_kappa{0};
+    double target_road_center_y{0};
     double road_center_y{0};   /* 当前帧目标道路中心 y（来自 trajectory 第一个点，供 fallback 使用） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
     int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
@@ -301,6 +305,10 @@ static void on_trajectory(const Message* msg, void* user_data) {
     }
     if (d_idx >= n_pts) d_idx = n_pts - 1;
     g.lane_d = (double)traj.points[d_idx].l;
+    g.target_path_y = (double)traj.points[d_idx].y;
+    g.target_path_heading = (double)traj.points[d_idx].heading;
+    g.target_path_kappa = (double)traj.points[d_idx].kappa;
+    g.target_road_center_y = g.target_path_y - g.lane_d * cos(g.target_path_heading);
     if (g.cycle > 900 && g.cycle < 1000) {
         LOG_WARN("control", "[DBG traj] cycle=%d pts=%d v_last=%.2f d_la=%.2f valid=%d",
                  g.cycle, n_pts, (double)traj.points[n_pts - 1].v,
@@ -514,11 +522,16 @@ protected:
                 ref_road_heading = 0.0;
                 ref_kappa = 0.0;
             }
+            if (g.has_planning) {
+                road_c = g.target_road_center_y;
+                ref_road_heading = g.target_path_heading;
+                ref_kappa = g.target_path_kappa;
+            }
             g.road_center_y = road_c;
 
             /* 车道保持目标：来自 planning/trajectory 的 lane_d。
              * 控制层不做独立车道判定——committed_lane_side 已移到 planning。 */
-            double cruise_lane_y = g.road_center_y + g.lane_d;
+            double cruise_lane_y = g.has_planning ? g.target_path_y : (g.road_center_y + g.lane_d);
             if (!g.has_planning) {
                 /* 无 planning 时保持当前 y，不自行推导目标车道 */
                 cruise_lane_y = g.ego_y;
@@ -963,6 +976,10 @@ static int control_init(MessageBus* bus, Transport* transport,
     g.target_speed = 0.0;
     g.ego_x = g.ego_y = 0.0;
     g.lane_d = 0.0;
+    g.target_path_y = 0.0;
+    g.target_path_heading = 0.0;
+    g.target_path_kappa = 0.0;
+    g.target_road_center_y = 0.0;
     g.driving_mode[0] = '\0';
 
     g.has_fusion = 0;

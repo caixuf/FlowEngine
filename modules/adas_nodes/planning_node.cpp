@@ -258,10 +258,61 @@ static void check_mode_downgrade(uint64_t now_us) {
     }
 }
 
+static bool has_fresh_map_ref(void) {
+    return g.map_ref_count >= 2 && g.last_map_ref_us != 0 &&
+           clock_now_us() - g.last_map_ref_us < 500000ULL;
+}
+
+static double lane_center_offset(int lane_idx, int n_lanes, double lane_w) {
+    return lane_center_y(lane_idx, n_lanes, lane_w, 0.0, 0.0);
+}
+
+static bool project_to_reference_path(double x, double y,
+                                      double& out_s, double& out_d,
+                                      double* out_ref_x = nullptr,
+                                      double* out_ref_y = nullptr,
+                                      double* out_heading = nullptr) {
+    if (!has_fresh_map_ref()) return false;
+
+    double best_dist2 = 1e300;
+    bool found = false;
+    for (int i = 0; i + 1 < g.map_ref_count; ++i) {
+        double x0 = g.map_ref_x[i];
+        double y0 = g.map_ref_y[i];
+        double x1 = g.map_ref_x[i + 1];
+        double y1 = g.map_ref_y[i + 1];
+        double vx = x1 - x0;
+        double vy = y1 - y0;
+        double seg_len2 = vx * vx + vy * vy;
+        if (seg_len2 <= 1e-9) continue;
+
+        double t = ((x - x0) * vx + (y - y0) * vy) / seg_len2;
+        if (t < 0.0) t = 0.0;
+        if (t > 1.0) t = 1.0;
+
+        double px = x0 + t * vx;
+        double py = y0 + t * vy;
+        double dx = x - px;
+        double dy = y - py;
+        double dist2 = dx * dx + dy * dy;
+        if (dist2 >= best_dist2) continue;
+
+        double theta = atan2(vy, vx);
+        double seg_len = sqrt(seg_len2);
+        out_s = g.map_ref_s[i] + t * seg_len;
+        out_d = -dx * sin(theta) + dy * cos(theta);
+        if (out_ref_x) *out_ref_x = px;
+        if (out_ref_y) *out_ref_y = py;
+        if (out_heading) *out_heading = theta;
+        best_dist2 = dist2;
+        found = true;
+    }
+    return found;
+}
+
 static void update_reference_path(double start_x) {
 #ifdef HAVE_FRENET
-    if (g.map_ref_count >= 2 && g.last_map_ref_us != 0 &&
-        clock_now_us() - g.last_map_ref_us < 500000ULL) {
+    if (has_fresh_map_ref()) {
         frenet_set_reference_path(g.frenet, g.map_ref_x, g.map_ref_y, g.map_ref_count);
         g.ref_path_start_x = g.ego_x;
         return;
@@ -294,8 +345,7 @@ static void update_reference_path(double start_x) {
 static bool frenet_to_cartesian(double s, double d,
                                 double& out_x, double& out_y,
                                 double& out_heading, double& out_kappa) {
-    if (g.map_ref_count >= 2 && g.last_map_ref_us != 0 &&
-        clock_now_us() - g.last_map_ref_us < 500000ULL) {
+    if (has_fresh_map_ref()) {
         double total_s = g.map_ref_s[g.map_ref_count - 1];
         if (total_s <= 1e-6) return false;
         if (s < 0.0) s = 0.0;
@@ -1138,6 +1188,9 @@ protected:
             {
                 double lane_w = g.lane_width;
                 int n_lanes = g.lane_count;
+                double ego_lane_d = g.ego_y;
+                double ego_ref_s = 0.0;
+                (void)project_to_reference_path(g.ego_x, g.ego_y, ego_ref_s, ego_lane_d);
 
                 if (g.lane_count < 1 || g.lane_count > 16 || g.lane_width < 1.0 || g.lane_width > 10.0) {
                     LOG_WARN("planning", "lane invariant: lane_count=%d lane_width=%.1f (unreasonable)",
@@ -1150,20 +1203,17 @@ protected:
                  *   变道 COMPLETED 后 ego 可能还未到新车道中心（如 y=-3.5），
                  *   若 target_lane_offset=0（道路中心），Frenet 会保持当前 y 不动，
                  *   ego 卡在两车道之间。改为跟踪最近车道中心，让 ego 继续归位。 */
-                double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
                 if (g.has_behavior && g.current_behavior.target_lane_idx >= 0 &&
                     g.current_behavior.target_lane_idx < n_lanes &&
                     (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
-                    double target_lane_y = lane_center_y(g.current_behavior.target_lane_idx, n_lanes, lane_w);
-                    g.target_lane_offset = target_lane_y - rc_y;
+                    g.target_lane_offset = lane_center_offset(g.current_behavior.target_lane_idx, n_lanes, lane_w);
                 } else {
                     /* 巡航/跟车：计算 ego 当前最近车道，目标其中心 */
-                    double off = (-g.ego_y) / lane_w + (n_lanes - 1) * 0.5;
+                    double off = (-ego_lane_d) / lane_w + (n_lanes - 1) * 0.5;
                     int cur_lane = (int)(off >= 0.0 ? off + 0.5 : off - 0.5);
                     if (cur_lane < 0) cur_lane = 0;
                     if (cur_lane >= n_lanes) cur_lane = n_lanes - 1;
-                    double cur_lane_y = lane_center_y(cur_lane, n_lanes, lane_w);
-                    g.target_lane_offset = cur_lane_y - rc_y;
+                    g.target_lane_offset = lane_center_offset(cur_lane, n_lanes, lane_w);
                 }
                 if (g.plan_count % 100 == 0 || (g.has_behavior && g.target_lane_offset != 0.0)) {
                     LOG_WARN("planning", "[DBG_LC] pc=%d has_beh=%d cmd=%d tgt_lane=%d n_lanes=%d offset=%.2f ego_y=%.2f",
@@ -1175,17 +1225,19 @@ protected:
             /* 规划轨迹 */
             double s_out[50], d_out[50], spd_out[50];
             int n_wp = 0;
+            double ego_ref_s = g.ego_x;
+            double ego_ref_d = g.ego_y - road_center_y(g.ego_x, g.curve_start_x,
+                                                       g.curve_length_m, g.curve_offset_m);
+            (void)project_to_reference_path(g.ego_x, g.ego_y, ego_ref_s, ego_ref_d);
 
 #ifdef HAVE_FRENET
             {
-                /* Frenet 参考路径沿道路中心线（d=0 = 道路中心），
-                 * ego_d = ego_y - road_center_y(ego_x) = ego_y - rc_y。
-                 * 旧实现基准是 y=-1.75（2 车道左车道中心），现在改为道路中心，
-                 * d_out=0 表示 ego 在道路中心，control 节点决定具体目标车道。 */
-                double rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
-                double ego_d = g.ego_y - rc_y;  /* 相对道路中心的偏移（弯道修正） */
+                /* map_ref 是 flowsim 发布的 route centerline 前视参考线时，
+                 * Frenet 初始条件必须投影到该参考线本地弧长坐标系，不能再把全局
+                 * ego_x 当 ego_s。否则右转/支路场景下 s 与参考线语义错位，control
+                 * 只会忠实跟踪一条已经偏出路沿的坏轨迹。 */
                 n_wp = frenet_plan(g.frenet,
-                    g.ego_x, ego_d, g.ego_v,
+                    ego_ref_s, ego_ref_d, g.ego_v,
                     command_speed,
                     s_out, d_out, spd_out, 50);
                 if (n_wp < 3) {
@@ -1199,8 +1251,8 @@ protected:
                     double horizon = 50.0;
                     int n = 10;
                     for (int i = 0; i < n; i++) {
-                        s_out[i] = g.ego_x + horizon * (double)i / (double)(n - 1);
-                        d_out[i] = ego_d;  /* 保持当前横向位置 */
+                        s_out[i] = ego_ref_s + horizon * (double)i / (double)(n - 1);
+                        d_out[i] = ego_ref_d;  /* 保持当前横向位置 */
                         spd_out[i] = command_speed;
                     }
                     n_wp = n;
@@ -1212,8 +1264,8 @@ protected:
                 double horizon = 50.0;   /* 前方 50m */
                 int n = 10;              /* 10 个路径点 */
                 for (int i = 0; i < n; i++) {
-                    s_out[i] = g.ego_x + horizon * (double)i / (double)(n - 1);
-                    d_out[i] = 0.0;     /* 保持参考线（道路中心，d=0） */
+                    s_out[i] = ego_ref_s + horizon * (double)i / (double)(n - 1);
+                    d_out[i] = ego_ref_d;  /* 保持当前参考线横向位置 */
                     spd_out[i] = command_speed;
                 }
                 n_wp = n;
@@ -1431,6 +1483,14 @@ protected:
             /* 发布 planning/debug（全链路横向调试，每10帧≈2Hz） */
             if (g.plan_count % 10 == 0) {
                 double dbg_rc_y = road_center_y(g.ego_x, g.curve_start_x, g.curve_length_m, g.curve_offset_m);
+                double dbg_ref_s = g.ego_x;
+                double dbg_ego_d = g.ego_y - dbg_rc_y;
+                double dbg_ref_x = g.ego_x;
+                double dbg_ref_y = dbg_rc_y;
+                double dbg_ref_heading = 0.0;
+                (void)project_to_reference_path(g.ego_x, g.ego_y, dbg_ref_s, dbg_ego_d,
+                                                &dbg_ref_x, &dbg_ref_y, &dbg_ref_heading);
+                dbg_rc_y = dbg_ref_y;
                 cJSON* dbg = cJSON_CreateObject();
                 char mode_buf[32] = {0};
                 statem_format_hierarchical(statem_current(&g.mode_sm), mode_buf, sizeof(mode_buf));
@@ -1443,7 +1503,11 @@ protected:
                 cJSON_AddNumberToObject(dbg, "route_count", g.route_count);
                 cJSON_AddNumberToObject(dbg, "route_next_idx", g.route_next_idx);
                 cJSON_AddNumberToObject(dbg, "road_center_y", dbg_rc_y);
-                cJSON_AddNumberToObject(dbg, "ego_d", g.ego_y - dbg_rc_y);
+                cJSON_AddNumberToObject(dbg, "ego_d", dbg_ego_d);
+                cJSON_AddNumberToObject(dbg, "ref_s", dbg_ref_s);
+                cJSON_AddNumberToObject(dbg, "ref_x", dbg_ref_x);
+                cJSON_AddNumberToObject(dbg, "ref_y", dbg_ref_y);
+                cJSON_AddNumberToObject(dbg, "ref_heading", dbg_ref_heading);
                 cJSON_AddNumberToObject(dbg, "target_lane_offset", g.target_lane_offset);
                 cJSON_AddNumberToObject(dbg, "command_speed", command_speed);
                 cJSON_AddNumberToObject(dbg, "n_wp", n_wp);
