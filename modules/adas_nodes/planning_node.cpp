@@ -1272,6 +1272,24 @@ protected:
             }
 #endif
 
+            /* 变道时覆盖 d_out：Frenet 规划器只知收敛到参考线中心 (d=0)，
+             * 不知目标车道偏移。behavior_planner 下发的 target_lane_idx 必须
+             * 通过 d_out 显式插值到目标车道，否则车永远不变道。
+             * 对 fallback 路径（d_out 恒为 ego_ref_d）同样适用。 */
+            if (g.has_behavior && n_wp > 2 &&
+                (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
+                double target_world_y = road_center_y(g.ego_x, g.curve_start_x,
+                                                      g.curve_length_m, g.curve_offset_m)
+                                      + g.target_lane_offset;
+                double target_ref_s = 0, target_ref_d = 0;
+                if (project_to_reference_path(g.ego_x, target_world_y, target_ref_s, target_ref_d)) {
+                    for (int i = 0; i < n_wp; i++) {
+                        double t = (double)i / (double)(n_wp - 1);
+                        d_out[i] = ego_ref_d * (1.0 - t) + target_ref_d * t;
+                    }
+                }
+            }
+
             /* 行为规划下发的 command_speed 是硬约束，不是 Frenet 的优化目标。
              * Frenet 只决定横向路径（s, d），纵向速度全由 command_speed 确定。
              * 从当前速度线性过渡到目标速度，保证轨迹末点 100% 跟踪行为指令。 */
