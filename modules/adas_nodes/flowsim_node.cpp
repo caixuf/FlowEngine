@@ -147,6 +147,10 @@ struct FlowSimContext {
      * 旧行为只 LOG_WARN，不影响退出码也不被 evaluator 捕获 → 同类回归漏检。 */
     std::atomic<uint32_t>  invariant_fail_count{0};
 
+    /* P2-8: 物理掉头标志。当车辆在路尾切换到对向车道时设为 true，
+     * 此时 esmini advance 方向与车辆行驶方向相反，需要用 world_to_frenet
+     * 同步 esmini position。当车辆再次回到起点完成循环时重置为 false。 */
+    bool                   u_turn_active{false};
     };
 
 FlowSimContext g;
@@ -1327,8 +1331,38 @@ protected:
                  * sin(dh) 本身构成负反馈：heading 偏 → 横向漂 → 控制器看到
                  * lat_error → 回打 → heading 收回来，闭环自洽。 */
                 double dist = ego.speed * FLOWSIM_DT_SEC;
+                bool advanced = false;
                 if (dist > 0.0) {
-                    bool advanced = ego.road_pos.advance(dist, M_PI);
+                    /* 物理掉头后：对向车道行驶时 esmini advance 方向（+s）
+                     * 与车辆实际行驶方向相反。改用 world_to_frenet 从物理
+                     * 模型的世界坐标同步 esmini position。 */
+                    if (g.u_turn_active && g.roads_loaded) {
+                        flowsim::FrenetPos fp;
+                        if (g.roads.world_to_frenet(ego.x, ego.y, fp)) {
+                            if (ego.road_pos.relocate(g.roads, fp.road_id, fp.lane_id, fp.s, 0.0)) {
+                                advanced = true;
+                                flowsim::WorldPos wp;
+                                if (ego.road_pos.world(wp)) {
+                                    ego.x = wp.x;
+                                    ego.y = wp.y;
+                                    /* heading 由物理模型保持，不从 esmini 同步 */
+                                }
+                                flowsim::FrenetPos fp2;
+                                if (ego.road_pos.frenet(fp2)) {
+                                    ego.road_id = fp2.road_id;
+                                    ego.lane_id = fp2.lane_id;
+                                    ego.s = fp2.s;
+                                    ego.offset = fp2.offset;
+                                }
+                            }
+                        }
+                        /* world_to_frenet 失败时回退到 esmini advance */
+                        if (!advanced) {
+                            advanced = ego.road_pos.advance(dist, M_PI);
+                        }
+                    } else {
+                        advanced = ego.road_pos.advance(dist, M_PI);
+                    }
                     if (advanced) {
                         flowsim::FrenetPos fp_cur;
                         if (ego.road_pos.frenet(fp_cur)) {
@@ -1366,15 +1400,14 @@ protected:
                             ego.offset = fp.offset;
                         }
                     }
-                    /* ── 路尾掉头循环 ──────────────────────────────────────────
-                     * 判据必须是「位置到了路尾」而非「本帧位移小」——后者会在起步/
-                     * 低速/红灯停车等正常慢速帧误判，把速度锁死在 0。用权威信号：
-                     * frenet s 抵达当前道路长度（esmini 在路网边界 clamp s、
-                     * RM_PositionMoveForward 仍返回 rc>=0）；advance() 真失败(false)
-                     * 亦视为到头。此判据与车速解耦，中途任何慢速都不触发。
-                     *
-                     * 到头后不是刹车停住，而是 relocate 到道路起点（s=0，同一车道），
-                     * 实现掉头无限循环。标记 last_teleport_cycle 豁免 Δpos 瞬移检查。 */
+                }
+                /* ── 物理掉头循环 ──────────────────────────────────────────
+                 * 判据根据当前车道方向区分：
+                 *   前进车道（lane_id < 0）：s ≈ road_len 时掉头到对向车道
+                 *   对向车道（lane_id > 0）：s ≈ 0 时掉头回前进车道
+                 * 对向车道行驶时 esmini advance 方向与车辆行驶方向相反，
+                 * 由上方 world_to_frenet 同步块处理。 */
+                {
                     constexpr double END_MARGIN_M = 1.0;
                     double road_len = -1.0;
                     for (int ri = 0, rn = g.roads.road_count(); ri < rn; ++ri) {
@@ -1385,11 +1418,50 @@ protected:
                             break;
                         }
                     }
-                    bool at_road_end = !advanced ||
-                        (road_len > 0.0 && ego.s >= road_len - END_MARGIN_M);
-                    if (at_road_end && g.cycle % 50 == 0) {
-                        LOG_WARN("flowsim", "ego reached road end (road_id=%d s=%.1f/%.1f), waiting navigation/planning",
-                                 ego.road_id, ego.s, road_len);
+                    bool at_road_end;
+                    if (ego.lane_id < 0) {
+                        /* 前进车道：路尾（s ≈ road_len）掉头到对向车道 */
+                        at_road_end = (road_len > 0.0 && ego.s >= road_len - END_MARGIN_M);
+                    } else {
+                        /* 对向车道：起点（s ≈ 0）掉头回到前进车道 */
+                        at_road_end = (road_len > 0.0 && ego.s <= END_MARGIN_M);
+                    }
+                    if (at_road_end) {
+                        /* 物理掉头：切换到对向车道，保持速度。
+                         * 前进车道→对向车道：车辆在路尾掉头，新的 heading 为 π（西向）。
+                         * 对向车道→前进车道：车辆回到起点，新的 heading 为 0（东向）。
+                         * 对向车道行驶时 esmini advance 方向与车辆行驶方向相反，
+                         * 由主循环中的 world_to_frenet 同步处理。 */
+                        int opposite_lane = -ego.lane_id;  /* -1→1, 1→-1 */
+                        /* 物理掉头定位：
+                         *  - 前进车道(lane<0)到路尾掉头：保持在路尾物理位置 -> s=road_len
+                         *  - 回程车道(lane>0)到路头掉头：保持在路头物理位置 -> s=0 */
+                        double turn_s = (ego.lane_id < 0 && road_len > 0.0) ? road_len : 0.0;
+                        if (ego.road_pos.relocate(g.roads, ego.road_id, opposite_lane, turn_s, 0.0)) {
+                            ego.speed = std::max(ego.speed, 5.0);
+                            ego.last_teleport_cycle = g.cycle;
+                            g.u_turn_active = (opposite_lane > 0);  /* 对向车道激活 world_to_frenet */
+                            flowsim::WorldPos wp;
+                            if (ego.road_pos.world(wp)) {
+                                ego.x = wp.x;
+                                ego.y = wp.y;
+                                ego.heading = wp.h;
+                            }
+                            flowsim::FrenetPos fp;
+                            if (ego.road_pos.frenet(fp)) {
+                                ego.road_id = fp.road_id;
+                                ego.lane_id = fp.lane_id;
+                                ego.s = fp.s;
+                                ego.offset = fp.offset;
+                            }
+                            if (g.cycle % 50 == 0) {
+                                LOG_WARN("flowsim", "ego physical U-turn: switched to lane %d at s=%.1f (v=%.1f, x=%.1f, y=%.1f, h=%.2f)",
+                                         opposite_lane, turn_s, ego.speed, ego.x, ego.y, ego.heading);
+                            }
+                        } else {
+                            LOG_ERROR("flowsim", "ego U-turn relay failed at road_end (road_id=%d s=%.1f/%.1f)",
+                                      ego.road_id, ego.s, road_len);
+                        }
                     }
                 }
             }
