@@ -38,6 +38,7 @@ STEER_DEADBAND   = 0.005   # 转向死区 rad
 MAX_LATERAL_ACCEL = 1.4    # 转向限幅最大横向加速度 m/s²
 STEER_LIMIT_MIN  = 0.016   # 最小转向限幅 rad
 STEER_LIMIT_MAX  = 0.16    # 最大转向限幅 rad
+STEER_FULL_LOCK  = 0.60    # 物理满舵角 rad（entity.h steer_override=true 的限幅）
 ROAD_GUARD_Y     = 4.5     # 路沿保护阈值 m
 
 # 变道参数
@@ -298,8 +299,13 @@ class VehicleState:
         self.yaw_rate = 0.0
         self.steer = 0.0
 
-    def step(self, steer_cmd, throttle, brake, dt=DT):
-        """运动学自行车模型积分（与physics.cpp一致，车辆中心参考点，支持倒车）"""
+    def step(self, steer_cmd, throttle, brake, dt=DT, grade=0.0, v_max=None):
+        """运动学自行车模型积分（与physics.cpp一致，车辆中心参考点，支持倒车）
+
+        参数扩展（默认值不变，向后兼容）：
+          grade — 坡度角(rad)，上坡为正；加重力分量 v += -g·sin(grade)·dt
+          v_max — 速度上限（默认 CRUISE_SPEED+2，科目二可设低速上限）
+        """
         # 注意：UTurn 时 steer 可能超过 0.25（C 代码限制），
         # 因为三把方向掉头/单把 U-turn 需要更大的转向角才能在有限路宽内完成
         # C 代码 physics.cpp 的 0.25 限幅在 U-turn 场景下需要临时放宽
@@ -315,7 +321,12 @@ class VehicleState:
             if self.v < 0: self.v = 0
         elif throttle > 0:
             self.v += throttle * 3.33 * dt
-            if self.v > CRUISE_SPEED + 2: self.v = CRUISE_SPEED + 2
+            _vmax = v_max if v_max is not None else CRUISE_SPEED + 2
+            if self.v > _vmax: self.v = _vmax
+
+        # 坡度重力分量（上坡减速、下坡加速）
+        if grade != 0.0:
+            self.v += -9.81 * math.sin(grade) * dt
 
         self.steer = steer_cmd
         self.yaw_rate = self.v / WHEELBASE * math.tan(steer_cmd)
