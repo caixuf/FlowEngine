@@ -1,0 +1,79 @@
+{
+  "name": "road_driving_exam",
+  "description": "科目三：道路驾驶技能考试。双向4车道城市道路，包含：行人横穿、前车急刹避让、红绿灯路口、对向来车、邻道cut-in、施工区绕行。覆盖实际道路驾驶核心能力。",
+  "random_seed": 42,
+  "duration_s": 180,
+  "npc_lane_change": false,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 10.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "urban",
+        "name": "road_driving_exam",
+        "length_m": 8000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 17.0,
+        "nodes": [[0, 0, 0], [8000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1,  "type": "car",        "x": 80.0,   "y": -1.75, "vx": 13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car",        "x": 150.0,  "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 3,  "type": "car",        "x": 300.0,  "y": -5.25, "vx": 14.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 4,  "type": "car",        "x": 450.0,  "y": -1.75, "vx": 12.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 5,  "type": "car",        "x": 600.0,  "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 6,  "type": "car",        "x": 750.0,  "y": -1.75, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 7,  "type": "car",        "x": 900.0,  "y": -5.25, "vx": 13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 10, "type": "pedestrian", "x": 250.0,  "y": -10.0, "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5},
+    {"id": 11, "type": "pedestrian", "x": 550.0,  "y": 10.0,  "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5},
+    {"id": 20, "type": "car",        "x": 1000.0, "y": 5.25,  "vx": -14.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 21, "type": "car",        "x": 1300.0, "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 22, "type": "car",        "x": 1600.0, "y": 5.25,  "vx": -13.0,"vy": 0.0, "len": 4.6, "wid": 2.0}
+  ],
+  "traffic_lights": [
+    {"id": 0, "x": 350.0,  "y_lane": -1.75, "green_s": 20.0, "yellow_s": 3.0, "red_s": 15.0, "phase_offset_s": 0.0},
+    {"id": 1, "x": 700.0,  "y_lane": -1.75, "green_s": 15.0, "yellow_s": 3.0, "red_s": 20.0, "phase_offset_s": 8.0},
+    {"id": 2, "x": 1100.0, "y_lane": -1.75, "green_s": 25.0, "yellow_s": 3.0, "red_s": 12.0, "phase_offset_s": 16.0}
+  ],
+  "construction_zones": [
+    {"id": 0, "x": 500.0, "y": 0.0, "length": 30.0, "width": 7.0}
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "no_red_light_violation": true,
+    "max_duration_s": 120.0,
+    "min_avg_speed_mps": 3.0,
+    "min_distance_m": 500.0
+  },
+  "route": [
+    {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 15.0, "label": "enter_noa_route"}
+  ],
+  "scenarios": [],
+  "choreography": {
+    "loop_period_s": 999,
+    "beats": [
+      {"t": 10.0, "actor": "1",  "act": "brake", "vx": 4.0},
+      {"t": 10.0, "actor": "2",  "act": "brake", "vx": 5.0},
+      {"t": 18.0, "actor": "10", "act": "cross", "vx": 1.5},
+      {"t": 25.0, "actor": "1",  "act": "brake", "vx": 13.0},
+      {"t": 25.0, "actor": "2",  "act": "brake", "vx": 10.0},
+      {"t": 35.0, "actor": "tl", "phase": "red"},
+      {"t": 45.0, "actor": "tl", "phase": "green"},
+      {"t": 50.0, "actor": "11", "act": "cross", "vx": -1.5},
+      {"t": 55.0, "actor": "tl", "phase": "red"},
+      {"t": 65.0, "actor": "tl", "phase": "green"},
+      {"t": 70.0, "actor": "4",  "act": "brake", "vx": 3.0},
+      {"t": 75.0, "actor": "tl", "phase": "red"},
+      {"t": 85.0, "actor": "tl", "phase": "green"}
+    ]
+  }
+}
