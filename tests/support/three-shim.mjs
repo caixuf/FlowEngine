@@ -163,6 +163,7 @@ export const CylinderGeometry = THREE;
 export const SphereGeometry = THREE;
 export const CircleGeometry = THREE;
 export const ConeGeometry = THREE;
+export const TubeGeometry = THREE;
 export const TorusGeometry = THREE;
 export const BufferGeometry = THREE;
 export const InstancedMesh = THREE;
