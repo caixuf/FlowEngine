@@ -190,6 +190,12 @@ tools/control_sim.py
 
 **排查方法**：在 planning/debug 中对比 `ref_heading`、`ref_x/ref_y`、`ego_d` 和 `target_lane_offset` 的值。
 
+**对向行驶（掉头返程）变体**：掉头后 ego 在对向车道，实际行进方向 = **-route_s**。
+- flowsim `Route::sample_ahead` 加 `reverse` 参数：沿 -route_s 采样、每点 heading 翻转 π、out 按行进方向有序、kappa 在行进坐标系计算 —— `ref_path` 始终代表"ego 真实行进方向前方的道路"，planning/control 无需知道 +x/-x
+- 掉头 finalize 对向车道 heading 翻转 π，否则车头仍指 +x 撞路尾卡死
+- **方向检测不得用 dx/heading 猜测**：三把方向掉头中 heading 扫过 ±x 两个半平面，去抖压不住会反复翻转 → route 步骤重放把返程 ego 拽回前进车道绕圈。唯一事实源 = flowsim 每帧发布的 `road/ref_path.reverse`（= `u_turn_active`），navigation/behavior 据此切返程
+- 排查：日志里 `travel direction` 一行每掉头应只翻一次；掉头处反复出现 → 有人在用 dx/heading 猜方向
+
 ### 5.2 Python 仿真 PASS 但 C++ 不工作
 
 | 排查项 | 方法 |
