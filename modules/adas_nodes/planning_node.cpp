@@ -114,6 +114,8 @@ struct PlanningContext {
      * vehicle/state（flowsim 真值）优先于 fusion/localization（EKF 估计），
      * 当 vehicle/state 近期到达时 on_fusion 不覆盖，避免 EKF 发散污染 ego 状态。 */
     double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0};
+    int    ego_lane_id{0};   /* 当前车道 ID（负=前进车道，正=对向车道，取自 vehicle/state）*/
+    int    ref_path_update_pending{0}; /* 1=亟需在下一主循环 tick 更新参考路径（车道方向变化）*/
     volatile int has_fusion{0};
     uint64_t last_vstate_us{0};
 
@@ -310,7 +312,7 @@ static bool project_to_reference_path(double x, double y,
     return found;
 }
 
-static void update_reference_path(double start_x) {
+static void update_reference_path(double start_x, bool opposite = false) {
 #ifdef HAVE_FRENET
     if (has_fresh_map_ref()) {
         frenet_set_reference_path(g.frenet, g.map_ref_x, g.map_ref_y, g.map_ref_count);
@@ -319,14 +321,18 @@ static void update_reference_path(double start_x) {
     }
     double wx[101], wy[101];
     const int ref_n = 101;
+    double step = g.cfg_ref_path_length / (double)(ref_n - 1);
+    /* 对向车道（lane_id > 0）：参考路径从右向左生成，heading = π，
+     * 匹配 U-turn 后的反向行驶方向 */
     for (int i = 0; i < ref_n; i++) {
-        wx[i] = start_x + (double)i * (g.cfg_ref_path_length / (double)(ref_n - 1));
+        wx[i] = opposite ? start_x - (double)i * step : start_x + (double)i * step;
         wy[i] = road_center_y(wx[i], g.curve_start_x, g.curve_length_m, g.curve_offset_m);
     }
     frenet_set_reference_path(g.frenet, wx, wy, ref_n);
-    g.ref_path_start_x = start_x;
+    g.ref_path_start_x = opposite ? start_x - g.cfg_ref_path_length : start_x;
 #else
     (void)start_x;
+    (void)opposite;
 #endif
 }
 
@@ -471,6 +477,18 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_v = j->valuedouble;
     if ((j = cJSON_GetObjectItem(root, "hdg")) && cJSON_IsNumber(j))
         g.ego_heading = j->valuedouble;
+    if ((j = cJSON_GetObjectItem(root, "lane_id")) && cJSON_IsNumber(j)) {
+        int new_lane_id = (int)j->valuedouble;
+        /* 检测车道方向变化：负→正（U-turn 到对向车道）或正→负（掉头回前进车道）
+         * 参考路径必须立即更新，否则 Frenet 规划器用正向路径生成反向轨迹。 */
+        if ((g.ego_lane_id < 0 && new_lane_id > 0) ||
+            (g.ego_lane_id > 0 && new_lane_id < 0)) {
+            g.ref_path_update_pending = 1;
+            LOG_WARN("planning", "lane_id sign change: %d -> %d, ref_path update pending",
+                     g.ego_lane_id, new_lane_id);
+        }
+        g.ego_lane_id = new_lane_id;
+    }
     g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
 
@@ -694,7 +712,7 @@ static void on_navigation_path(const Message* msg, void* user_data) {
             g.route_target_lane = lane;
             g.current_branch_id = branch_id;
             g.route_target_speed = (target_speed > 0.0) ? target_speed : -1.0;
-            update_reference_path(g.ego_x - 5.0);
+            update_reference_path(g.ego_x - 5.0, g.ego_lane_id > 0);
             LOG_INFO("planning", "NAV branch_select #%d @x=%.0f -> branch_id=%d lane=%d",
                      step_index, ego_x, branch_id, lane);
             break;
@@ -891,12 +909,46 @@ protected:
 
             /* 路线触发由 navigation_node 完成；planning 只消费 navigation/path。 */
 
-            if (g.ego_x > g.ref_path_start_x + g.cfg_ref_path_length * 0.8) {
-                double new_start = g.ego_x - 50.0;
-                if (new_start < 0.0) new_start = 0.0;
-                update_reference_path(new_start);
-                LOG_INFO("planning", "reference path shifted to x=%.0f..%.0f",
-                         g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
+            /* 参考路径更新：车道方向变化（U-turn 完成）时立即重建参考路径
+             *   负→正（对向车道）：ref_path 从右向左生成，匹配反向行驶方向
+             *   正→负（回到前进车道）：ref_path 从左向右生成，恢复正常行驶 */
+            if (g.ref_path_update_pending) {
+                g.ref_path_update_pending = 0;
+                bool opposite = (g.ego_lane_id > 0);
+                double start_x = opposite ? g.ego_x + g.cfg_ref_path_length * 0.5
+                                          : fmax(g.ego_x - 50.0, 0.0);
+                update_reference_path(start_x, opposite);
+                LOG_WARN("planning", "ref_path rebuilt for lane_id=%d opposite=%d start_x=%.0f..%.0f",
+                         g.ego_lane_id, opposite ? 1 : 0,
+                         opposite ? start_x - g.cfg_ref_path_length : start_x,
+                         opposite ? start_x : start_x + g.cfg_ref_path_length);
+            }
+
+            /* 参考路径滑动：根据行驶方向（lane_id 符号）前移/后移
+             *   前进车道（lane_id < 0）：ego_x 递增，路径向右滑动
+             *   对向车道（lane_id > 0）：ego_x 递减，路径向左滑动
+             * 对向车道的参考路径覆盖 [ref_path_start_x, ref_path_start_x + ref_path_length]，
+             * "前方"方向是 x 递减（从高 x 到低 x），故 ego 应位于高 x 端（路径末端）。
+             * 滑动条件：ego 接近路径低 x 端（< 20% 位置）时，将路径末端前移到 ego 附近。 */
+            bool opposite = (g.ego_lane_id > 0);
+            if (opposite) {
+                if (g.ego_x < g.ref_path_start_x + g.cfg_ref_path_length * 0.2) {
+                    /* 对向车道：路径覆盖 [ref_path_start_x, ref_path_start_x + ref_path_length]，
+                     * "前方"是 x 递减方向，ego 应位于路径末端（高 x 端）。
+                     * ego 到达低 x 端（<20%）时，把路径末端移到 ego 前方 50m。 */
+                    double new_start = g.ego_x + 50.0;
+                    update_reference_path(new_start, true);
+                    LOG_INFO("planning", "ref path shifted (opposite) to x=%.0f..%.0f",
+                             new_start - g.cfg_ref_path_length, new_start);
+                }
+            } else {
+                if (g.ego_x > g.ref_path_start_x + g.cfg_ref_path_length * 0.8) {
+                    double new_start = g.ego_x - 50.0;
+                    if (new_start < 0.0) new_start = 0.0;
+                    update_reference_path(new_start, false);
+                    LOG_INFO("planning", "reference path shifted to x=%.0f..%.0f",
+                             g.ref_path_start_x, g.ref_path_start_x + g.cfg_ref_path_length);
+                }
             }
 
             /* ── 速度决策：behavior 是唯一来源（Apollo 原则）──
