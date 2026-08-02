@@ -299,7 +299,7 @@ class VehicleState:
         self.steer = 0.0
 
     def step(self, steer_cmd, throttle, brake, dt=DT):
-        """运动学自行车模型积分（与flowsim一致，支持倒车）"""
+        """运动学自行车模型积分（与physics.cpp一致，车辆中心参考点，支持倒车）"""
         # 注意：UTurn 时 steer 可能超过 0.25（C 代码限制），
         # 因为三把方向掉头/单把 U-turn 需要更大的转向角才能在有限路宽内完成
         # C 代码 physics.cpp 的 0.25 限幅在 U-turn 场景下需要临时放宽
@@ -320,8 +320,15 @@ class VehicleState:
         self.steer = steer_cmd
         self.yaw_rate = self.v / WHEELBASE * math.tan(steer_cmd)
 
-        self.x += self.v * math.cos(self.heading) * dt
-        self.y += self.v * math.sin(self.heading) * dt
+        # 车辆中心参考点（与physics.cpp step_bicycle一致）
+        # 后轴不可横向移动，车辆中心绕后轴转动
+        # dx_c = v·cos(θ)·dt - half_wb·sin(θ)·yaw_rate·dt
+        # dy_c = v·sin(θ)·dt + half_wb·cos(θ)·yaw_rate·dt
+        half_wb = WHEELBASE * 0.5
+        self.x += (self.v * math.cos(self.heading)
+                   - half_wb * math.sin(self.heading) * self.yaw_rate) * dt
+        self.y += (self.v * math.sin(self.heading)
+                   + half_wb * math.cos(self.heading) * self.yaw_rate) * dt
         self.heading += self.yaw_rate * dt
 
         while self.heading >  math.pi: self.heading -= 2*math.pi
@@ -1152,6 +1159,106 @@ def tune_uturn():
             print("\n  ⚠️  无 lat<0.6g 的实用参数，建议增大 steer 上限")
         else:
             print("\n  ⚠️  未找到任何有效参数")
+
+
+def tune_uturn_three_point():
+    """扫描三把方向 U-turn 参数，找最优组合"""
+    print("\n" + "=" * 60)
+    print("  三把方向 U-turn 参数扫描")
+    print("=" * 60)
+    print("  运动学自行车模型: yaw_rate = v/L * tan(steer)")
+    print(f"  轴距 L={WHEELBASE}m, 路宽 14m (4车道)")
+    print("  目标: heading=π(180°), 对向车道 y≈1.75")
+    print("  策略: 左打死前进 → 右打死倒车 → 左打前进对齐")
+    print("=" * 60)
+
+    best = None
+    best_three = None
+    best_score = 1e9
+    best_three_score = 1e9
+    n_tried = 0
+
+    # Phase 0: 前进左打转向（第一阶段）
+    for p0_steer in [0.40, 0.45, 0.50, 0.55, 0.60]:
+        for p0_dur in [1.5, 2.0, 2.5, 3.0]:
+            for p0_thr in [0.18, 0.22, 0.26, 0.30]:
+                # Phase 1: 倒车右打反方向
+                for p1_steer in [-0.50, -0.55, -0.60]:
+                    for p1_dur in [1.5, 2.0, 2.5, 3.0, 3.5]:
+                        for p1_thr in [-0.30, -0.35, -0.40]:
+                            # Phase 2: 前进对齐
+                            for p2_steer in [0.05, 0.10, 0.15]:
+                                for p2_dur in [0.3, 0.5, 0.8, 1.0]:
+                                    n_tried += 1
+                                    p = UturnParams(mode='three_point')
+                                    p.init_speed = 4.0
+                                    p.phase0_steer = p0_steer
+                                    p.phase0_throttle = p0_thr
+                                    p.phase0_duration = p0_dur
+                                    p.phase1_steer = p1_steer
+                                    p.phase1_reverse_throttle = p1_thr
+                                    p.phase1_reverse_duration = p1_dur
+                                    p.phase2_steer = p2_steer
+                                    p.phase2_throttle = 0.24
+                                    p.phase2_duration = p2_dur
+                                    r = run_uturn_simulation(p, start_lane_y=-1.75)
+
+                                    # 综合评分：heading精度 + 车道偏差 + 转向惩罚(越小越好)
+                                    avg_steer = (abs(p0_steer) + abs(p1_steer) + abs(p2_steer)) / 3.0
+                                    score = (r.heading_error * 10.0
+                                             + r.lane_error * 5.0
+                                             + avg_steer * 1.0)
+
+                                    if r.success and score < best_score:
+                                        best_score = score
+                                        best = (p, r, score)
+
+                                    # 三把方向专用：要求 heading 转过 ≥150° 且不压线
+                                    dh = abs(r.final_heading - math.pi)
+                                    if (r.success and dh < 0.5
+                                            and r.min_dist_to_center > 0.5
+                                            and score < best_three_score):
+                                        best_three_score = score
+                                        best_three = (p, r, score)
+
+    print(f"\n  尝试: {n_tried}")
+
+    if best:
+        params, r, score = best
+        print(f"\n  {'='*50}")
+        print(f"  🏆 最佳整体 (评分={score:.2f})")
+        print(f"  {'='*50}")
+        print(f"  Phase 0: steer={params.phase0_steer:.2f}rad, throttle={params.phase0_throttle:.2f}, duration={params.phase0_duration:.2f}s")
+        print(f"  Phase 1: steer={params.phase1_steer:.2f}rad, reverse_throttle={params.phase1_reverse_throttle:.2f}, reverse_duration={params.phase1_reverse_duration:.2f}s")
+        print(f"  Phase 2: steer={params.phase2_steer:.2f}rad, throttle={params.phase2_throttle:.2f}, duration={params.phase2_duration:.2f}s")
+        print(f"  最终位置:      x={r.final_x:.1f}m, y={r.final_y:.2f}m")
+        print(f"  最终 heading:  {r.final_heading:.2f}rad ({math.degrees(r.final_heading):.0f}°)")
+        print(f"  heading 偏差:  {r.heading_error:.2f}rad (目标 π={math.pi:.2f})")
+        print(f"  车道偏差:      {r.lane_error:.2f}m (目标 y=1.75)")
+        print(f"  推荐 C 代码配置:")
+        print(f"    p0_steer={params.phase0_steer:.2f}  p0_thr={params.phase0_throttle:.2f}  p0_dur={params.phase0_duration:.2f}")
+        print(f"    p1_steer={params.phase1_steer:.2f}  p1_thr={params.phase1_reverse_throttle:.2f}  p1_dur={params.phase1_reverse_duration:.2f}")
+        print(f"    p2_steer={params.phase2_steer:.2f}  p2_dur={params.phase2_duration:.2f}")
+
+    if best_three:
+        params, r, score = best_three
+        print(f"\n  {'='*50}")
+        print(f"  ✅ 最佳三把方向 (dh<0.5rad, 不压线, 评分={score:.2f})")
+        print(f"  {'='*50}")
+        print(f"  Phase 0: steer={params.phase0_steer:.2f}rad, throttle={params.phase0_throttle:.2f}, duration={params.phase0_duration:.2f}s")
+        print(f"  Phase 1: steer={params.phase1_steer:.2f}rad, reverse_throttle={params.phase1_reverse_throttle:.2f}, reverse_duration={params.phase1_reverse_duration:.2f}s")
+        print(f"  Phase 2: steer={params.phase2_steer:.2f}rad, throttle={params.phase2_throttle:.2f}, duration={params.phase2_duration:.2f}s")
+        print(f"  最终位置:      x={r.final_x:.1f}m, y={r.final_y:.2f}m")
+        print(f"  最终 heading:  {r.final_heading:.2f}rad ({math.degrees(r.final_heading):.0f}°)")
+        print(f"  heading 偏差:  {r.heading_error:.2f}rad (目标 π={math.pi:.2f})")
+        print(f"  车道偏差:      {r.lane_error:.2f}m (目标 y=1.75)")
+        print(f"  距中线最小距离: {r.min_dist_to_center:.2f}m")
+        print(f"  推荐 C 代码配置:")
+        print(f"    p0_steer={params.phase0_steer:.2f}  p0_thr={params.phase0_throttle:.2f}  p0_dur={params.phase0_duration:.2f}")
+        print(f"    p1_steer={params.phase1_steer:.2f}  p1_thr={params.phase1_reverse_throttle:.2f}  p1_dur={params.phase1_reverse_duration:.2f}")
+        print(f"    p2_steer={params.phase2_steer:.2f}  p2_dur={params.phase2_duration:.2f}")
+    else:
+        print("\n  ⚠️  未找到满足三把方向条件的参数")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2136,6 +2243,7 @@ def main():
 
     if args.tune_uturn:
         tune_uturn()
+        tune_uturn_three_point()
         return
 
     if args.uturn:

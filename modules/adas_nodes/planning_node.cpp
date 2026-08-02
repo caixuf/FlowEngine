@@ -471,7 +471,8 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                      double ego_speed, double wheelbase,
                                      double forward_space_m) {
     const double dt = 0.05;               /* 20Hz 时间步长 */
-    const double max_steer = 0.55;        /* 满舵角 (rad)，≈31.5° */
+    const double max_steer = 0.60;        /* 满舵角 (rad)，≈34°，匹配 physics steer_override */
+    const double uturn_steer = 0.45;      /* 前进转向角 (rad)，Python 扫参最优 */
     const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
     const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
     const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
@@ -591,7 +592,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   - 超时：phase2 超过 4s
      */
     {
-        steer = max_steer;  /* 左打死 */
+        steer = uturn_steer;  /* 左打死（Python 扫参最优 0.45） */
         v = uturn_speed;
         double phase2_t = 0.0;
         while (n < max_points) {
@@ -630,7 +631,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   - 超时：phase3 超过 3s
      */
     {
-        steer = -max_steer;  /* 右打死 */
+        steer = -max_steer;  /* 右打死（Python 扫参最优 -0.60） */
         v = reverse_speed;
         double phase3_t = 0.0;
         while (n < max_points) {
@@ -666,7 +667,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   - 安全上限：超时 2.5s
      */
     {
-        steer = 0.30;  /* 较小转角精细对齐 */
+        steer = 0.15;  /* 较小转角精细对齐（Python 扫参最优 0.15） */
         v = uturn_speed;
         double phase4_t = 0.0;
         while (n < max_points) {
