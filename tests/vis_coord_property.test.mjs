@@ -8,7 +8,8 @@
  *   node --import ./tests/support/three-preload.mjs tests/vis_coord_property.test.mjs
  */
 
-import { worldToThree, headingToRotationY, forwardENU,
+import { worldToThree, threeToWorld, headingToRotationY, forwardENU,
+         headingBetweenPoints, distanceENU,
          directionToRotationY, offsetAlongNormal, tangentToNormal,
          placeOnRoad }
   from '../tools/flowboard/js/vis/math/Coord.js';
@@ -83,10 +84,53 @@ console.log('--- 1. worldToThree 轴映射 golden ---');
 }
 
 // ═══════════════════════════════════════════════════════════
-// 2. headingToRotationY — 朝向映射
+// 2. threeToWorld — THREE→ENU 反向映射（worldToThree 逆运算）
 // ═══════════════════════════════════════════════════════════
 
-console.log('--- 2. headingToRotationY ---');
+console.log('--- 2. threeToWorld 反向映射 ---');
+
+// THREE +x → ENU +x
+{
+  const [ex, ey, ez] = threeToWorld(1, 0, 0);
+  eq('THREE +x → ENU +x', ex, 1);
+  eq('THREE +x → ENU y=0', ey, 0);
+  eq('THREE +x → ENU z=0', ez, 0);
+}
+
+// THREE +y(up) → ENU +z(up)
+{
+  const [ex, ey, ez] = threeToWorld(0, 7, 0);
+  eq('THREE +y → ENU +z', ez, 7);
+  eq('THREE +y → ENU x=0', ex, 0);
+  eq('THREE +y → ENU y=0', ey, 0);
+}
+
+// THREE +z → ENU -y(South)
+{
+  const [ex, ey, ez] = threeToWorld(0, 0, 1);
+  eq('THREE +z → ENU -y', ey, -1);
+  eq('THREE +z → ENU z=0', ez, 0);
+}
+
+// THREE -z → ENU +y(North)
+{
+  const [ex, ey, ez] = threeToWorld(0, 0, -1);
+  eq('THREE -z → ENU +y', ey, 1);
+}
+
+// 与 worldToThree 互逆：round-trip
+for (const [x, y, z] of [[100, -3.5, 0], [500, 0, 7.0], [0, 5.25, 0], [10, 20, 30]]) {
+  const [tx, ty, tz] = worldToThree(x, y, z);
+  const [rx, ry, rz] = threeToWorld(tx, ty, tz);
+  ok(`worldToThree→threeToWorld round-trip (${x},${y},${z})`,
+     Math.abs(rx - x) < 1e-10 && Math.abs(ry - y) < 1e-10 && Math.abs(rz - z) < 1e-10);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 3. headingToRotationY — 朝向映射
+// ═══════════════════════════════════════════════════════════
+
+console.log('--- 3. headingToRotationY ---');
 
 // heading=0 → 车头朝 +X，rotationY=0
 eq('heading=0 → rotY=0', headingToRotationY(0), 0);
@@ -142,10 +186,85 @@ for (const h of [0, 0.5, 1.0, 1.5, Math.PI, -0.7, 2.3]) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 4. directionToRotationY — 2D 方向 → rotation.y
+// 4. headingBetweenPoints — 两点间 heading
 // ═══════════════════════════════════════════════════════════
 
-console.log('--- 4. directionToRotationY ---');
+console.log('--- 4. headingBetweenPoints ---');
+
+// 正东方向
+eq('正东 heading=0', headingBetweenPoints(0, 0, 10, 0), 0);
+
+// 正北方向
+ok('正北 heading≈π/2', Math.abs(headingBetweenPoints(0, 0, 0, 10) - Math.PI / 2) < 1e-10);
+
+// 正西方向
+ok('正西 heading≈π', Math.abs(Math.abs(headingBetweenPoints(0, 0, -10, 0)) - Math.PI) < 1e-10);
+
+// 正南方向
+ok('正南 heading≈-π/2', Math.abs(headingBetweenPoints(0, 0, 0, -10) + Math.PI / 2) < 1e-10);
+
+// 东北45°
+ok('东北45° heading≈π/4', Math.abs(headingBetweenPoints(0, 0, 10, 10) - Math.PI / 4) < 1e-10);
+
+// 西南45°
+ok('西南45° heading≈-3π/4', Math.abs(headingBetweenPoints(0, 0, -10, -10) + Math.PI * 3 / 4) < 1e-10);
+
+// 两点重合
+eq('重合点 heading=0', headingBetweenPoints(5, 5, 5, 5), 0);
+
+// 与 forwardENU 一致性：headingBetweenPoints(p1, p2) 应等于
+// 从 p1 到 p2 方向向量对应的 heading
+{
+  const x1 = 100, y1 = -3.5, x2 = 200, y2 = 50;
+  const h = headingBetweenPoints(x1, y1, x2, y2);
+  const [fx, fy] = forwardENU(h);
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  ok('forwardENU 与 headingBetweenPoints 一致',
+     Math.abs(fx - dx / len) < 1e-10 && Math.abs(fy - dy / len) < 1e-10);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 5. distanceENU — 2D 欧氏距离
+// ═══════════════════════════════════════════════════════════
+
+console.log('--- 5. distanceENU ---');
+
+// 同一点
+eq('同点距离=0', distanceENU(0, 0, 0, 0), 0);
+
+// 正东
+eq('正东10m', distanceENU(0, 0, 10, 0), 10);
+
+// 正北
+eq('正北10m', distanceENU(0, 0, 0, 10), 10);
+
+// 3-4-5 三角形
+eq('3-4-5 三角形', distanceENU(0, 0, 3, 4), 5);
+
+// 负数
+eq('负数坐标', distanceENU(-5, -5, -2, -1), 5);  // 3-4-5
+
+// 与 headingBetweenPoints 一起验证：方向+距离应能定位
+{
+  const x1 = 100, y1 = -3.5, x2 = 150, y2 = 10;
+  const h = headingBetweenPoints(x1, y1, x2, y2);
+  const d = distanceENU(x1, y1, x2, y2);
+  const [fx, fy] = forwardENU(h);
+  ok('heading+距离 重建位置', Math.abs(x1 + fx * d - x2) < 1e-10 && Math.abs(y1 + fy * d - y2) < 1e-10);
+}
+
+// 大数
+{
+  const d = distanceENU(0, 0, 3000, 4000);
+  ok('大数距离=5000', Math.abs(d - 5000) < 1e-6);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 6. directionToRotationY — 2D 方向 → rotation.y
+// ═══════════════════════════════════════════════════════════
+
+console.log('--- 6. directionToRotationY ---');
 
 // +X 方向 → rotationY=0
 eq('+X dir → rotY=0', directionToRotationY(1, 0), 0);
@@ -173,10 +292,10 @@ for (const h of [0, 0.3, 0.7, 1.2, Math.PI / 2, -0.5, Math.PI]) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 5. offsetAlongNormal — 法线偏移
+// 7. offsetAlongNormal — 法线偏移
 // ═══════════════════════════════════════════════════════════
 
-console.log('--- 5. offsetAlongNormal ---');
+console.log('--- 7. offsetAlongNormal ---');
 
 // 零偏移
 {
@@ -207,10 +326,10 @@ console.log('--- 5. offsetAlongNormal ---');
 }
 
 // ═══════════════════════════════════════════════════════════
-// 6. tangentToNormal — 切线 → 法线
+// 8. tangentToNormal — 切线 → 法线
 // ═══════════════════════════════════════════════════════════
 
-console.log('--- 6. tangentToNormal ---');
+console.log('--- 8. tangentToNormal ---');
 
 // +X 切线 → 法线指向 +Z（右侧）
 {
@@ -241,10 +360,10 @@ for (const [tx, tz] of [[1, 0], [3, 4], [-2, 5], [0.7, 0.7]]) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 7. placeOnRoad — 沿路参数 s + 横向偏移 → 位置 + 朝向 + 高度
+// 9. placeOnRoad — 沿路参数 s + 横向偏移 → 位置 + 朝向 + 高度
 // ═══════════════════════════════════════════════════════════
 
-console.log('--- 7. placeOnRoad ---');
+console.log('--- 9. placeOnRoad ---');
 
 // 直道 spine：沿 X 轴，从 x=0 到 x=100，无高度
 {

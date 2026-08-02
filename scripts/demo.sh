@@ -3,15 +3,15 @@
 # FlowEngine Demo — 一键演示脚本 (v2 — 配置驱动插件架构)
 #
 # 使用 flow_launcher + pipeline.json 启动全链路节点插件。
-# 自动打开可视化仪表盘。
+# 主流程不再自动弹浏览器（WSL/无头环境）；仅 --replay 模式会自动打开仪表盘。
 #
 # 用法:
 #   bash scripts/demo.sh              # 默认 15 秒，dlopen 单进程模式
 #   bash scripts/demo.sh 30           # 30 秒演示
 #   bash scripts/demo.sh --multi      # fork+exec 多进程模式
-#   bash scripts/demo.sh --no-browser # 不打开浏览器
 #   bash scripts/demo.sh --manual     # 游戏模式：终端 WASD 键盘直接驾驶 ego
-#   bash scripts/demo.sh --scenario scenarios/zhongkai_road_full.json  # 指定场景
+#   bash scripts/demo.sh --scenario scenarios/straight_road.json  # 指定场景
+#   bash scripts/demo.sh --no-browser # 不自动打开浏览器（仅对 --replay 模式生效）
 # =============================================================================
 set -e
 
@@ -172,7 +172,7 @@ BANNER
 echo ""
 
 # ── Build ───────────────────────────────────────────────────
-echo "───[1/5] Building..."
+echo "───[1/4] Building..."
 if [ ! -f "$LAUNCHER_BIN" ]; then
   echo "  First build, this may take a moment..."
   # 仅 Linux 强制 gcc（项目在 Ubuntu/CI 上以 gcc 为准）；macOS 无 gcc，用系统
@@ -293,7 +293,7 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
 # ── Start flow_launcher with pipeline ───────────────────────
-echo "───[2/5] Starting pipeline (flowsim→sensor_model→perception→fusion→planning→control→monitor)..."
+echo "───[2/4] Starting pipeline (flowsim→sensor_model→perception→fusion→planning→control→monitor)..."
 rm -f "$JSON_FILE"
 cd "$ROOT"  # run from root so build/lib/ paths resolve
 
@@ -320,7 +320,7 @@ echo "  ✓ Pipeline running (PID $LAUNCHER_PID)"
 # ── Start dashboard server (file bridge: read /tmp/flow_topology.json) ──
 # 依据 VISUALIZATION_ARCHITECTURE.md: flowmond 拥有独立 MessageBus,
 # 看不到 flow_launcher 进程内的数据, launch 演示必须用文件桥接。
-echo "───[3/5] Starting dashboard..."
+echo "───[3/4] Starting dashboard..."
 # Wait for monitor node to write first snapshot
 for _ in $(seq 1 30); do
   if [ -s "$JSON_FILE" ]; then break; fi
@@ -353,27 +353,8 @@ python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \
 BRIDGE_PID=$!
 echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 
-# ── Open browser ────────────────────────────────────────────
-if $OPEN_BROWSER; then
-  echo "───[4/5] Opening browser..."
-  # 等服务器就绪再开浏览器，避免冷启动白屏（复用 298-306 的 health check 写法）
-  for _ in $(seq 1 20); do
-    HEALTH_CODE=$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8800/api/health 2>/dev/null || echo "000")
-    if [ "$HEALTH_CODE" = "200" ]; then break; fi
-    sleep 0.25
-  done
-  if command -v xdg-open &>/dev/null; then
-    xdg-open http://localhost:8800 2>/dev/null || true
-  elif command -v open &>/dev/null; then
-    open http://localhost:8800 2>/dev/null || true
-  fi
-  echo "  ✓ Browser opened"
-else
-  echo "───[4/5] Skipping browser (--no-browser)"
-fi
-
 # ── Live monitor ────────────────────────────────────────────
-echo "───[5/5] Live monitor (${DURATION}s)..."
+echo "───[4/4] Live monitor (${DURATION}s)..."
 echo ""
 
 # 准备行为日志过滤（tail stderr，筛选 [BEH]、[SM] 和 [INV] 日志行）

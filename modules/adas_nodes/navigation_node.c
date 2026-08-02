@@ -41,15 +41,15 @@ static struct {
     double ego_x;
     double ego_y;
     int has_fusion;
+    int on_return;          /* 权威行进方向：flowsim road/ref_path.reverse（掉头返程=1） */
+    int has_return_signal;  /* 是否已收到过 ref_path.reverse 字段 */
 
     ScenarioRouteStep route[SCENARIO_MAX_ROUTE_STEPS];
     int route_count;
     int next_idx;
-    int travel_dir;         /* +1: x 递增（东向前进），-1: x 递减（西向回程） */
-    int dir_candidate;
-    int dir_stable_count;
-    int has_last_x;
-    double last_ego_x;
+    int travel_dir;         /* +1: x 递增（东向前进），-1: x 递减（西向回程）。
+                             *   唯一事实源 = flowsim road/ref_path.reverse
+                             *   （on_ref_path → on_return），不做 dx/heading 猜测。 */
     int active_step_index;
     int lane_count;
     double lane_width;
@@ -207,6 +207,24 @@ static void on_fusion(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
+/* road/ref_path 携带 flowsim 权威行进方向标志 reverse（掉头返程=true）。
+ * navigation 以此作为唯一 travel_dir 事实源，避免基于 dx/heading 猜测在掉头/
+ * 绕圈时来回翻转。 */
+static void on_ref_path(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* jr = cJSON_GetObjectItemCaseSensitive(root, "reverse");
+    if (cJSON_IsBool(jr)) {
+        pthread_mutex_lock(&g.mu);
+        g.on_return = cJSON_IsTrue(jr) ? 1 : 0;
+        g.has_return_signal = 1;
+        pthread_mutex_unlock(&g.mu);
+    }
+    cJSON_Delete(root);
+}
+
 static int navigation_execute(TaskBase* task) {
     const long period_us = (long)(1000000.0 / g.rate_hz);
     while (!task->should_stop) {
@@ -216,48 +234,42 @@ static int navigation_execute(TaskBase* task) {
         double ego_x = 0.0;
         double ego_y = 0.0;
         int has_fusion = 0;
+        int on_return = 0;
+        int has_return_signal = 0;
         pthread_mutex_lock(&g.mu);
         ego_x = g.ego_x;
         ego_y = g.ego_y;
         has_fusion = g.has_fusion;
+        on_return = g.on_return;
+        has_return_signal = g.has_return_signal;
         pthread_mutex_unlock(&g.mu);
 
-        /* 方向检测：用 ego_x 差分判断掉头后的行驶方向。
-         * 三把方向阶段会出现短时倒车，需做连续样本去抖，避免 route 游标抖动重置。 */
-        if (has_fusion) {
-            if (!g.has_last_x) {
-                g.has_last_x = 1;
-                g.last_ego_x = ego_x;
-            } else {
-                double dx = ego_x - g.last_ego_x;
-                g.last_ego_x = ego_x;
-                int new_dir = 0;
-                if (dx > 0.20) new_dir = +1;
-                else if (dx < -0.20) new_dir = -1;
-                if (new_dir == 0) {
-                    g.dir_stable_count = 0;
+        /* 行进方向 = flowsim 权威标志 road/ref_path.reverse。
+         * reverse=true（掉头返程）→ travel_dir=-1；否则前进 +1。此标志由 flowsim
+         * 掉头状态机在 finalize 时置位、整段返程保持，永不抖动 —— 彻底消除旧版基于
+         * dx/heading 猜测在掉头/绕圈时反复翻转、把 route 步骤/A* hop 反复重放、
+         * 将 ego 拽离对向车道绕圈的正反馈环。未收到信号前默认前进（+1）。 */
+        if (has_return_signal) {
+            int new_dir = on_return ? -1 : +1;
+            if (new_dir != g.travel_dir) {
+                g.travel_dir = new_dir;
+                g.active_goal_lane = -1;
+                g.active_goal_speed = -1.0;
+                g.last_hop_target_lane = -1;
+                g.active_step_index = -1;
+                /* 前进(+x)：从头执行 route 步骤（enter_noa / prepare_u_turn）。
+                 * 返回(-x)：route 步骤是「前进方向专用」的相对变道，返程重放会把 ego
+                 *   拽离掉头后所在的对向车道、绕圈。返程「保持当前对向车道直线开回起点」，
+                 *   起点处的二次掉头由 flowsim 路端检测触发，navigation 返程不发变道指令。
+                 *   next_idx=-1 关闭步骤重放；active_goal_lane 已清空 → 无 A* hop。 */
+                if (g.route_count > 0 && g.travel_dir > 0) {
+                    g.next_idx = 0;
                 } else {
-                    if (new_dir != g.dir_candidate) {
-                        g.dir_candidate = new_dir;
-                        g.dir_stable_count = 1;
-                    } else {
-                        g.dir_stable_count++;
-                    }
-                    if (g.dir_stable_count >= 8 && new_dir != g.travel_dir) {
-                        g.travel_dir = new_dir;
-                        g.active_goal_lane = -1;
-                        g.active_goal_speed = -1.0;
-                        g.last_hop_target_lane = -1;
-                        g.active_step_index = -1;
-                        if (g.route_count > 0) {
-                            g.next_idx = (g.travel_dir > 0) ? 0 : (g.route_count - 1);
-                        } else {
-                            g.next_idx = 0;
-                        }
-                        LOG_INFO("navigation", "travel direction flipped -> %s, reset route cursor to %d",
-                                 g.travel_dir > 0 ? "forward(+x)" : "return(-x)", g.next_idx);
-                    }
+                    g.next_idx = -1;  /* 返程或无 route：保持车道，不重放步骤 */
                 }
+                LOG_INFO("navigation", "travel direction -> %s (flowsim reverse=%d), route cursor=%d (%s)",
+                         g.travel_dir > 0 ? "forward(+x)" : "return(-x)", on_return, g.next_idx,
+                         g.travel_dir > 0 ? "replay forward steps" : "hold lane, drive back");
             }
         }
 
@@ -315,6 +327,7 @@ static const TaskInterface nav_vtable = {
 
 static const char* s_inputs[] = {
     TOPIC_FUSION_LOCALIZATION,
+    TOPIC_ROAD_REF_PATH,
     NULL
 };
 static const char* s_outputs[] = {
@@ -392,8 +405,6 @@ static int navigation_init(MessageBus* bus, Transport* transport,
             g.last_hop_pub_us = 0;
             g.active_step_index = -1;
             g.travel_dir = +1;
-            g.dir_candidate = +1;
-            g.dir_stable_count = 0;
             g.next_idx = 0;
             LOG_INFO("navigation", "loaded %d route step(s) from '%s' lanes=%d lane_width=%.2f",
                      g.route_count, g.scenario_file, g.lane_count, g.lane_width);
@@ -401,9 +412,11 @@ static int navigation_init(MessageBus* bus, Transport* transport,
     }
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION, on_fusion, NULL);
+    transport_subscribe(transport, TOPIC_ROAD_REF_PATH, on_ref_path, NULL);
     transport_advertise(transport, TOPIC_NAVIGATION_PATH, 0u);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION, 0xF0ED10C0u, CAP_SUBSCRIBER, 0);
+    discovery_advertise(discovery, TOPIC_ROAD_REF_PATH, 0u, CAP_SUBSCRIBER, 0);
     discovery_advertise(discovery, TOPIC_NAVIGATION_PATH, 0u, CAP_PUBLISHER, g.rate_hz);
 
     TaskConfig cfg;

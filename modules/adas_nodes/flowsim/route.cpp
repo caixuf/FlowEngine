@@ -124,7 +124,8 @@ double Route::to_route_s(int route_idx, double s_local) const {
 
 int Route::sample_ahead(FlowRoadNetwork& roads, double route_s_start,
                         double lookahead, double step_m,
-                        std::vector<RefPathPoint>& out) const {
+                        std::vector<RefPathPoint>& out,
+                        bool reverse) const {
     out.clear();
     if (segs_.empty() || lookahead <= 0.0 || step_m <= 0.0) return 0;
 
@@ -132,21 +133,35 @@ int Route::sample_ahead(FlowRoadNetwork& roads, double route_s_start,
     if (route_s_start < 0.0)      route_s_start = 0.0;
     if (route_s_start > total_)   route_s_start = total_;
 
-    // 第一遍：采样原始点 (route_s, x, y, h)，跳过 frenet_to_world 失败的点
+    auto norm_angle = [](double a) {
+        while (a >  M_PI) a -= 2.0 * M_PI;
+        while (a < -M_PI) a += 2.0 * M_PI;
+        return a;
+    };
+
+    // 第一遍：按行进方向采样原始点 (route_s, x, y, h)。
+    //   forward: route_s 从 start 递增到 start+lookahead，heading = 道路切线
+    //   reverse: route_s 从 start 递减到 start-lookahead，heading = 道路切线 + π
+    // 两种情况 out 均按「行进方向前方」有序（out[0]=起点）。
     struct Raw { double rs; double x; double y; double h; };
     std::vector<Raw> raw;
     raw.reserve(static_cast<size_t>(lookahead / step_m) + 2);
 
-    double rs_end = route_s_start + lookahead;
+    const double dir = reverse ? -1.0 : +1.0;
+    double rs_end = route_s_start + dir * lookahead;
     if (rs_end > total_) rs_end = total_;
+    if (rs_end < 0.0)    rs_end = 0.0;
 
-    for (double rs = route_s_start; rs <= rs_end + 1e-6; rs += step_m) {
+    for (double rs = route_s_start;
+         reverse ? (rs >= rs_end - 1e-6) : (rs <= rs_end + 1e-6);
+         rs += dir * step_m) {
         int rid = 0, ridx = -1;
         double sl = 0.0;
         locate(rs, rid, sl, ridx);
         WorldPos wp;
         if (!roads.frenet_to_world(rid, 0, sl, 0.0, wp)) continue;
-        raw.push_back({rs, wp.x, wp.y, wp.h});
+        double h = reverse ? norm_angle(wp.h + M_PI) : wp.h;
+        raw.push_back({rs, wp.x, wp.y, h});
         if (rs == rs_end) break;  // 避免浮点循环多采一个
     }
     if (raw.size() < 2) {
@@ -157,17 +172,11 @@ int Route::sample_ahead(FlowRoadNetwork& roads, double route_s_start,
         return static_cast<int>(out.size());
     }
 
-    // 第二遍：中心差分估计曲率 kappa
+    // 第二遍：中心差分估计曲率 kappa（在行进坐标系下，raw 已按行进方向有序）
     //   相邻两点的转角 dtheta = normalize(h[i+1] - h[i-1])
     //   弦长 chord = hypot(dx, dy)
     //   kappa = dtheta / chord
     // 端点用前向/后向差分
-    auto norm_angle = [](double a) {
-        while (a >  M_PI) a -= 2.0 * M_PI;
-        while (a < -M_PI) a += 2.0 * M_PI;
-        return a;
-    };
-
     for (size_t i = 0; i < raw.size(); ++i) {
         double dtheta = 0.0, chord = 0.0;
         if (i == 0) {

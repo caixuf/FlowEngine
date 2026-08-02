@@ -981,9 +981,17 @@ static void publish_ref_path(void) {
          * 控制器在高速段（27m/s）每步 1.35m 也有充足前视距离。 */
         std::vector<flowsim::RefPathPoint> samples;
         int n = 0;
-        n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples);
-        /* fallback：route 采样失败时再退回当前车道中心线，避免完全断 ref_path。 */
-        if (n == 0 && ego.road_pos.ok()) {
+        /* u_turn_active（ego 在对向车道，行进方向 = route_s 递减）时反向采样：
+         * ref_path 始终代表「ego 真实行进方向前方的道路」，heading 已翻转 π。
+         * 这样 planning/control 无需知道 +x/-x，把 ref_path 当作前方路径自然跟随。 */
+        n = g.route.sample_ahead(g.roads, ego_route_s, 100.0, 5.0, samples,
+                                 /*reverse=*/g.u_turn_active);
+        /* fallback：route 采样失败时再退回当前车道中心线，避免完全断 ref_path。
+         * 对向行驶（u_turn_active）时跳过：road_pos.sample_ahead 只能沿 +s 前进采样，
+         * 在返程（实际行进方向 = -s）会产出指向车后的坏 ref_path，比空 ref_path 更糟
+         * （control 会主动朝错误方向跟）。返程 route 采样失败宁可发空、走 control 的
+         * curve_* 兜底。 */
+        if (n == 0 && !g.u_turn_active && ego.road_pos.ok()) {
             flowsim::FrenetPos saved_fp;
             bool has_saved = ego.road_pos.frenet(saved_fp);
             flowsim::Entity& ego_mut = g.pool[0];
@@ -1006,6 +1014,10 @@ static void publish_ref_path(void) {
         }
     }
     cJSON_AddItemToObject(root, "points", pts);
+    /* 权威行进方向信号：u_turn_active 由 flowsim 掉头状态机在 finalize 时置位、
+     * 整个返程保持 true（第二次掉头才复位），永不抖动。navigation 消费此标志作为
+     * 唯一权威 travel_dir，取代基于 dx/heading 的猜测（掉头/绕圈时会来回翻）。 */
+    cJSON_AddBoolToObject(root, "reverse", g.u_turn_active ? 1 : 0);
     char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, TOPIC_ROAD_REF_PATH,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
@@ -1370,7 +1382,15 @@ protected:
                         if (ego.road_pos.world(wp)) {
                             ego.x = wp.x;
                             ego.y = wp.y;
+                            /* wp.h 是 road_pos.world() 返回的车道行驶方向切线：esmini/
+                             * OpenDRIVE 对车道朝向已按 lane_id 符号处理——对向车道
+                             * (lane_id > 0) 行驶方向 = -s / -x，world() 返回的 wp.h 本身
+                             * 已 ≈ π（指向 -x）；前进车道 (lane_id < 0) wp.h ≈ 0（指向 +x）。
+                             * 故直接用 wp.h 即掉头后正确车头方向，不能再叠加 π（会翻回
+                             * +x 撞路尾 x=road_len 卡死原地打转）。 */
                             ego.heading = wp.h;
+                            while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
+                            while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
                         }
                         flowsim::FrenetPos fp;
                         if (ego.road_pos.frenet(fp)) {

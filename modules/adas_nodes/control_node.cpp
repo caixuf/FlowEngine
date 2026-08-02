@@ -755,9 +755,14 @@ protected:
 
             /* ── Safety overrides ── */
 
-            /* 目标车道中心 = 道路中心 + 横向偏移（lane_d 来自 trajectory 前视点）。
-             * road_c 现在是真正的道路中心 y（已减去横向偏移），不再含 d 分量。 */
-            double target_lane_center = road_c + g.lane_d;
+            /* 目标车道中心 = 道路中心 + 横向偏移在世界系的投影。
+             * lane_d 是 trajectory 前视点的 Frenet 横向 offset（参考线法向），
+             * 映射到世界 y 需乘 cos(ref_road_heading)：前进(h=0) → +lane_d；
+             * 掉头返程(h=π) → -lane_d。与第 313 行 road_c 的推导
+             * (target_path_y - lane_d*cos(h)) 互逆，返程时符号自洽——否则
+             * target_lane_center 落到对侧车道、y_from_target 虚高 >3m 误触
+             * ROAD_GUARD，把在正确车道正常行驶的 ego 强行限速打转。 */
+            double target_lane_center = road_c + g.lane_d * cos(ref_road_heading);
 
             /* 接近路沿增强拉回：偏离目标车道中心 >4.5 时限制 steer 幅度，
              * 避免大 steer 冲出路沿。旧实现用 |ego_y - road_c|，对 4 车道

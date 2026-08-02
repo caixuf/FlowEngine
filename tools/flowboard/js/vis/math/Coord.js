@@ -16,8 +16,9 @@
  *   命中即违规（注释豁免）。所有 view 必须走以下纯函数。
  *
  * 用法：
- *   import { worldToThree, headingToRotationY, directionToRotationY,
- *            forwardENU, offsetAlongNormal, tangentToNormal, placeOnRoad }
+ *   import { worldToThree, threeToWorld, headingToRotationY, directionToRotationY,
+ *            forwardENU, headingBetweenPoints, distanceENU,
+ *            offsetAlongNormal, tangentToNormal, placeOnRoad }
  *     from '../math/Coord.js';
  *
  * 注意：sampleEdgeNodes（Curve.js）内部已做 ENU→THREE 交换，所以
@@ -35,6 +36,16 @@
  *  @returns {[number, number, number]}  [three.x, three.y(up), three.z] */
 export function worldToThree(x, y, z = 0) {
   return [x, z, -y];
+}
+
+/** THREE 坐标 → ENU 世界坐标（反向映射）
+ *  worldToThree 的逆运算：THREE(x, z, -y) → ENU(x, y, z)
+ *  @param {number} tx  THREE X
+ *  @param {number} ty  THREE Y（up）
+ *  @param {number} tz  THREE Z
+ *  @returns {[number, number, number]}  [enu.x, enu.y, enu.z] */
+export function threeToWorld(tx, ty, tz) {
+  return [tx, -tz, ty];
 }
 
 /** THREE.Vector3 版本（少用，优先 worldToThree + spread） */
@@ -61,6 +72,26 @@ export function headingToRotationY(heading) {
  *  @returns {[number, number]} [dx_ENU, dy_ENU] */
 export function forwardENU(heading) {
   return [Math.cos(heading), Math.sin(heading)];
+}
+
+/** 两点 ENU 坐标间的 heading（从 p1 指向 p2）
+ *  @param {number} x1  p1 ENU East
+ *  @param {number} y1  p1 ENU North
+ *  @param {number} x2  p2 ENU East
+ *  @param {number} y2  p2 ENU North
+ *  @returns {number} heading（弧度，范围 [-π, π]） */
+export function headingBetweenPoints(x1, y1, x2, y2) {
+  return Math.atan2(y2 - y1, x2 - x1);
+}
+
+/** ENU 2D 欧氏距离（平面距离，忽略高度）
+ *  @param {number} x1  p1 ENU East
+ *  @param {number} y1  p1 ENU North
+ *  @param {number} x2  p2 ENU East
+ *  @param {number} y2  p2 ENU North
+ *  @returns {number} 距离（米） */
+export function distanceENU(x1, y1, x2, y2) {
+  return Math.hypot(x2 - x1, y2 - y1);
 }
 
 /** THREE 空间中的 2D 方向向量 → rotation.y

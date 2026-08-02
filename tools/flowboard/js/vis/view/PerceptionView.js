@@ -13,7 +13,7 @@ import { worldToThree, forwardENU, tangentToNormal } from '../math/Coord.js';
 
 // ── 角标框几何体（共享，每帧更新位置） ──
 const CORNER_LEN = 0.8;  // 角标臂长（米）
-const BOX_COLOR = 0x00ff88;
+const BOX_COLOR = 0x00ffaa;  // 科技青绿（与轨迹湛蓝呼应）
 const SWEEP_SEGMENTS = 32;
 const SWEEP_RADIUS = 80;  // 米
 
@@ -62,7 +62,7 @@ export function createPerceptionView(scene) {
   const sweepGeo = new THREE.BufferGeometry();
   sweepGeo.setAttribute('position', new THREE.BufferAttribute(sweepPositions, 3));
   const sweepMat = new THREE.MeshBasicMaterial({
-    color: 0x00ff88,
+    color: 0x00ffaa,
     transparent: true,
     opacity: 0.06,
     side: THREE.DoubleSide,
@@ -78,9 +78,9 @@ export function createPerceptionView(scene) {
   const sweepEdgeGeo = new THREE.BufferGeometry();
   sweepEdgeGeo.setAttribute('position', new THREE.BufferAttribute(sweepEdgePositions, 3));
   const sweepEdgeMat = new THREE.LineBasicMaterial({
-    color: 0x00ff88,
+    color: 0x00ffaa,
     transparent: true,
-    opacity: 0.25,
+    opacity: 0.30,
     depthWrite: false,
     depthTest: false,
   });

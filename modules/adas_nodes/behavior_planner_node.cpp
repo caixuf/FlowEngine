@@ -129,6 +129,12 @@ struct BehaviorContext {
     int    tl_count{0};
     volatile int has_traffic_lights{0};
 
+    /* 行进方向：flowsim road/ref_path.reverse（掉头返程=1）。返程时几何镜像，
+     * 前进向的变道/归位逻辑（merge back、overtake 的左右/gap）全部失配，会误发
+     * OVERTAKE_LEFT 把 ego 从对向内道拽到对向外道（y=5.25）绕圈。返程一律纯
+     * 车道保持（抑制所有变道事件），纵向仍正常 CRUISE/FOLLOW。 */
+    volatile int on_return{0};
+
     /* ── 行为状态机状态 ── */
     int    state{0};        /* BehaviorCommand enum (镜像 sm.current) */
     double state_timer{0};  /* 当前状态持续秒数 */
@@ -457,6 +463,18 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
     }
 }
 
+/* ── road/ref_path 订阅 — 消费 flowsim 权威行进方向标志 reverse ──
+ * reverse=true（掉头返程）时，本节点切纯车道保持，抑制所有变道决策。 */
+static void on_ref_path(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    cJSON* jr = cJSON_GetObjectItemCaseSensitive(root, "reverse");
+    if (cJSON_IsBool(jr)) g.on_return = cJSON_IsTrue(jr) ? 1 : 0;
+    cJSON_Delete(root);
+}
+
 /* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。 */
 static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
     if (!g.has_traffic_lights || g.tl_count <= 0) return false;
@@ -548,7 +566,11 @@ protected:
 
             StateId cur_sm = statem_current(&g.sm);
             bool in_lane_change = (cur_sm == BEH_ST_LEFT_CHANGE || cur_sm == BEH_ST_RIGHT_CHANGE);
-            if (in_lane_change && g.target_lane_idx >= 0) {
+            if (g.on_return) {
+                /* 掉头返程：几何镜像，锁定 committed_lane 为 ego 当前所在车道，
+                 * 忽略残留 target（前进向变道逻辑发的 stale 指令）。纯车道保持。 */
+                g.committed_lane_idx = recalc_idx;
+            } else if (in_lane_change && g.target_lane_idx >= 0) {
                 double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
                 double dist_to_target = fabs(g.ego_y - target_lane_y);
                 /* 进入目标车道中心半个车道宽度内(1.75/2≈0.875m)即判定变道完成 */
@@ -619,7 +641,7 @@ protected:
             if (rel_speed < 0.0) rel_speed = 0.0;
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
-            bool worthwhile = blocked && (best_gap > min_gap);
+            bool worthwhile = blocked && (best_gap > min_gap) && !g.on_return;
 
             /* ── D: 行为决策 debug 日志（每 10 帧，复盘跟车/追尾过程） ── */
             if (g.seq % 10 == 0) {
@@ -767,7 +789,7 @@ protected:
                                  "blocked gap=%.1f/%.1f lead=%.1fm/s → FOLLOW id=%u v=%.1f (no adj lane: left_ok=%d right_ok=%d cooldown=%.1f)",
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
-                    } else if (left_ok && current_idx > 0 && g.cooldown <= 0.0 &&
+                    } else if (!g.on_return && left_ok && current_idx > 0 && g.cooldown <= 0.0 &&
                                !lane_ahead_stop_light(current_idx - 1, lc, lw) &&
                                (left_gap >= 1e8 ||
                                 left_lead_v >= g.cfg_cruise_speed * 0.7)) {
@@ -839,7 +861,13 @@ protected:
                      * (gap-5)/4 限速）+ safety_control 近场 TTC（gap 逼近 20m
                      * 内全刹）。变道横向位移 ~3s 内完成，纵向闭合由 TTC 分层
                      * 接管，不需要 behavior 在变道中强制跟车。 */
-                    if (g.committed_lane_idx == g.target_lane_idx) {
+                    if (g.on_return) {
+                        /* 掉头返程：立即中止任何进行中的变道，回 CRUISE 保持当前车道。 */
+                        ev = BEH_EV_COMPLETED;
+                        new_target_lane = -1;
+                        new_target_speed = g.cfg_cruise_speed;
+                        snprintf(reason, sizeof(reason), "return trip → abort lane change, hold lane");
+                    } else if (g.committed_lane_idx == g.target_lane_idx) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_s;
@@ -1151,6 +1179,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_PERCEPTION_OBSTACLES,        on_raw_obstacles,      nullptr);
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY,               on_road_geometry,      nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS,         on_traffic_lights,     nullptr);
+    transport_subscribe(transport, TOPIC_ROAD_REF_PATH,               on_ref_path,           nullptr);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION,       0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_PERCEPTION_TRACKED_OBJECTS, 0u, CAP_SUBSCRIBER,  0);

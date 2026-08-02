@@ -83,11 +83,17 @@ public:
      * @param lookahead    前瞻总长 m（采样到 route_s_start + lookahead 或 route 终点）
      * @param step_m       采样间距 m（默认 5m）
      * @param out          输出采样点（清空后追加），点数 = ceil(lookahead/step_m)+1
+     * @param reverse      false=沿 +route_s 采样（正常前进）；true=沿 -route_s
+     *                     采样并把每点航向翻转 π（对向车道掉头后，ego 真实行进
+     *                     方向是 route_s 递减方向）。输出点始终按「行进方向前方」
+     *                     有序：out[0]=起点，后续点是行进方向前方，heading 已朝
+     *                     实际行进方向，kappa 在行进坐标系下计算。
      * @return 实际采样点数（路网失败/空 route 时返回 0）
      */
     int sample_ahead(FlowRoadNetwork& roads, double route_s_start,
                      double lookahead, double step_m,
-                     std::vector<RefPathPoint>& out) const;
+                     std::vector<RefPathPoint>& out,
+                     bool reverse = false) const;
 
 private:
     std::vector<RouteSeg>                segs_;

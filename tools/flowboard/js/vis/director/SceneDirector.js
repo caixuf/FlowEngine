@@ -18,6 +18,7 @@ import { createETCGateView } from '../view/ETCGateView.js';
 import { createViaductView } from '../view/ViaductView.js';
 import { createStreetlightView } from '../view/StreetlightView.js';
 import { createBarrierView } from '../view/BarrierView.js';
+import { createConstructionView } from '../view/ConstructionView.js';
 import { createTreeView } from '../view/TreeView.js';
 import { createLabelView } from '../view/LabelView.js';
 import { createPerceptionView } from '../view/PerceptionView.js';
@@ -60,6 +61,7 @@ ViewRegistry.register('etcGate',      createETCGateView);
 ViewRegistry.register('viaduct',     createViaductView);
 ViewRegistry.register('streetlight',  createStreetlightView);
 ViewRegistry.register('barrier',      createBarrierView);
+ViewRegistry.register('construction', createConstructionView);
 ViewRegistry.register('tree',         createTreeView);
 ViewRegistry.register('label',        createLabelView);
 ViewRegistry.register('perception',   createPerceptionView);
@@ -98,7 +100,7 @@ export function createSceneDirector(scene) {
    * 不再保留 9 个顶层 const —— ViewRegistry 是单一事实来源，避免双份引用。 */
   for (const [layerName, viewNames] of [
     ['env',   ['ground', 'viaduct']],
-    ['road',  ['road', 'streetlight', 'barrier', 'connector', 'tree']],
+    ['road',  ['road', 'streetlight', 'barrier', 'connector', 'tree', 'construction']],
     ['agent', ['vehicle', 'label', 'perception', 'effect', 'trajectory']],
     ['infra', ['trafficLight', 'etcGate']],
   ]) {
@@ -161,6 +163,7 @@ export function createSceneDirector(scene) {
         );
 
         ViewRegistry.safeCall('road', 'build', rn);
+        ViewRegistry.safeCall('construction', 'build', rn);
         ViewRegistry.safeCall('ground', 'build', 20000);
 
         if (isViaduct) {
