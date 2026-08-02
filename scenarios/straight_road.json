@@ -58,7 +58,7 @@
   },
   "route": [
     {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 20.0, "label": "enter_noa_route"},
-    {"trigger_x": 2950.0, "type": "lane_change", "target_lane": -1, "target_speed": 20.0, "label": "prepare_u_turn"}
+    {"trigger_x": 2950.0, "type": "u_turn", "target_lane": -1, "target_speed": 3.5, "label": "prepare_u_turn"}
   ],
   "scenarios": [],
   "choreography": {

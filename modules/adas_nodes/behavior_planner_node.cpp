@@ -52,6 +52,7 @@ enum BehState {
     BEH_ST_STOP         = 204,
     BEH_ST_YIELD        = 205,
     BEH_ST_EMERGENCY    = 206,
+    BEH_ST_U_TURN       = 207,
 };
 
 enum BehEvent {
@@ -61,6 +62,7 @@ enum BehEvent {
     BEH_EV_OVERTAKE_RIGHT = 203,  /* 条件满足→向右变道 */
     BEH_EV_COMPLETED      = 204,  /* 变道完成 */
     BEH_EV_TIMEOUT        = 205,  /* 变道超时回退 */
+    BEH_EV_UTURN_TRIGGER  = 206,  /* 到达路端 → 开始掉头 */
 };
 
 /* ── 行为状态机转移表 ───────────────────────────────── */
@@ -80,6 +82,11 @@ static const TransitionRule BEH_TRANSITIONS[] = {
     { BEH_ST_LEFT_CHANGE,  BEH_EV_TIMEOUT,   BEH_ST_CRUISE,      "LEFT + TIMEOUT -> CRUISE",         false },
     { BEH_ST_RIGHT_CHANGE, BEH_EV_COMPLETED, BEH_ST_CRUISE,      "RIGHT + COMPLETED -> CRUISE",      false },
     { BEH_ST_RIGHT_CHANGE, BEH_EV_TIMEOUT,   BEH_ST_CRUISE,      "RIGHT + TIMEOUT -> CRUISE",        false },
+    /* 巡航 → 掉头（到达路端） */
+    { BEH_ST_CRUISE, BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "CRUISE + UTURN_TRIGGER -> U_TURN", false },
+    /* 掉头 → 巡航（完成或超时） */
+    { BEH_ST_U_TURN, BEH_EV_COMPLETED, BEH_ST_CRUISE, "U_TURN + COMPLETED -> CRUISE", false },
+    { BEH_ST_U_TURN, BEH_EV_TIMEOUT,   BEH_ST_CRUISE, "U_TURN + TIMEOUT -> CRUISE",   false },
     TRANSITION_TABLE_END,
 };
 
@@ -191,6 +198,11 @@ struct BehaviorContext {
     double rear_safe_time_s{3.0};       /* 后向安全时距 (s) */
     double same_lane_tol_offset{0.6};   /* 车道归属横向容差偏移 (m)，半车道宽 + offset */
 
+    /* ── 掉头触发参数 ── */
+    double uturn_approach_dist_m{60.0};   /* 距路端此距离触发掉头 (m)，含刹车距离 */
+    double uturn_timeout_s{15.0};         /* 掉头超时 (s)，超时回退 CRUISE */
+    double ref_path_end_x{1e9};           /* 参考路径终点 x（从 road/ref_path 解析，1e9=未初始化） */
+
     /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
     struct behavior_Wrapper* task_wrapper{nullptr};
 
@@ -215,6 +227,7 @@ static int beh_state_to_cmd(StateId s) {
     if (s == BEH_ST_STOP)         return BEH_STOP;
     if (s == BEH_ST_YIELD)        return BEH_YIELD;
     if (s == BEH_ST_EMERGENCY)    return BEH_EMERGENCY;
+    if (s == BEH_ST_U_TURN)       return BEH_U_TURN;
     return BEH_CRUISE;
 }
 
@@ -228,6 +241,7 @@ static const char* beh_state_str(StateId s) {
         case BEH_ST_STOP:         return "STOP";
         case BEH_ST_YIELD:        return "YIELD";
         case BEH_ST_EMERGENCY:    return "EMERGENCY";
+        case BEH_ST_U_TURN:       return "U_TURN";
         default:                  return "?";
     }
 }
@@ -241,6 +255,7 @@ static const char* beh_event_str(EventId ev) {
         case BEH_EV_OVERTAKE_RIGHT: return "OVERTAKE_RIGHT";
         case BEH_EV_COMPLETED:      return "COMPLETED";
         case BEH_EV_TIMEOUT:        return "TIMEOUT";
+        case BEH_EV_UTURN_TRIGGER:  return "UTURN_TRIGGER";
         default:                    return "?";
     }
 }
@@ -464,7 +479,8 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
 }
 
 /* ── road/ref_path 订阅 — 消费 flowsim 权威行进方向标志 reverse ──
- * reverse=true（掉头返程）时，本节点切纯车道保持，抑制所有变道决策。 */
+ * reverse=true（掉头返程）时，本节点切纯车道保持，抑制所有变道决策。
+ * 同时解析最后一个点的 x 坐标作为路端参考，用于掉头触发判定。 */
 static void on_ref_path(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;
@@ -472,6 +488,18 @@ static void on_ref_path(const Message* msg, void* user_data) {
     if (!root) return;
     cJSON* jr = cJSON_GetObjectItemCaseSensitive(root, "reverse");
     if (cJSON_IsBool(jr)) g.on_return = cJSON_IsTrue(jr) ? 1 : 0;
+    /* 解析参考路径终点 x：路端判定用 */
+    cJSON* pts = cJSON_GetObjectItemCaseSensitive(root, "points");
+    if (cJSON_IsArray(pts)) {
+        int n = cJSON_GetArraySize(pts);
+        if (n > 0) {
+            cJSON* last = cJSON_GetArrayItem(pts, n - 1);
+            if (last) {
+                cJSON* jx = cJSON_GetObjectItemCaseSensitive(last, "x");
+                if (cJSON_IsNumber(jx)) g.ref_path_end_x = jx->valuedouble;
+            }
+        }
+    }
     cJSON_Delete(root);
 }
 
@@ -535,6 +563,8 @@ protected:
             g.rear_safe_min_m           = param_get_float("behavior.rear_safe_min_m");
             g.rear_safe_time_s          = param_get_float("behavior.rear_safe_time_s");
             g.same_lane_tol_offset      = param_get_float("behavior.same_lane_tol_offset");
+            g.uturn_approach_dist_m     = param_get_float("behavior.uturn_approach_dist_m");
+            g.uturn_timeout_s           = param_get_float("behavior.uturn_timeout_s");
 
             int lc = g.has_road_geometry ? g.lane_count : 2;
             double lw = g.has_road_geometry ? g.lane_width : 3.5;
@@ -566,7 +596,11 @@ protected:
 
             StateId cur_sm = statem_current(&g.sm);
             bool in_lane_change = (cur_sm == BEH_ST_LEFT_CHANGE || cur_sm == BEH_ST_RIGHT_CHANGE);
-            if (g.on_return) {
+            bool in_uturn = (cur_sm == BEH_ST_U_TURN);
+            if (in_uturn) {
+                /* 掉头中：不重算 committed_lane，保持原值。
+                 * 掉头期间 ego 会跨过全部车道，重算会导致 committed_lane 剧烈抖动。 */
+            } else if (g.on_return) {
                 /* 掉头返程：几何镜像，锁定 committed_lane 为 ego 当前所在车道，
                  * 忽略残留 target（前进向变道逻辑发的 stale 指令）。纯车道保持。 */
                 g.committed_lane_idx = recalc_idx;
@@ -771,7 +805,27 @@ protected:
             {
                 StateId cur = statem_current(&g.sm);
                 if (cur == BEH_ST_CRUISE) {
-                    if (worthwhile && adj_idx >= 0 &&
+                    /* ── 掉头触发（优先级最高：路端掉头比变道/跟车更紧急）──
+                     * 前进 trip：ego_x 接近 ref_path 终点 → 掉头到对向车道
+                     * 返程 trip：ego_x 接近路起点（x≈0）→ 掉头回前进车道 */
+                    bool uturn_trigger = false;
+                    if (!g.on_return && g.ref_path_end_x < 1e8 &&
+                        g.ego_x > g.ref_path_end_x - g.uturn_approach_dist_m &&
+                        g.cooldown <= 0.0) {
+                        uturn_trigger = true;
+                    } else if (g.on_return &&
+                               g.ego_x < g.uturn_approach_dist_m &&
+                               g.cooldown <= 0.0) {
+                        uturn_trigger = true;
+                    }
+                    if (uturn_trigger) {
+                        ev = BEH_EV_UTURN_TRIGGER;
+                        new_target_lane = -1;
+                        new_target_speed = g.cfg_cruise_speed;
+                        snprintf(reason, sizeof(reason),
+                                 "uturn trigger: ego_x=%.1f ref_end=%.1f on_return=%d → U_TURN",
+                                 g.ego_x, g.ref_path_end_x, g.on_return);
+                    } else if (worthwhile && adj_idx >= 0 &&
                         !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
@@ -883,6 +937,18 @@ protected:
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
                     }
                     /* 变道进行中且未超时：不覆盖 target_speed，保持进入时的超车速度 */
+                } else if (cur == BEH_ST_U_TURN) {
+                    /* 掉头进行中：等待 planning 完成掉头轨迹。
+                     * 掉头完成后由 planning 通过 behavior.state 通知，
+                     * 或超时回退。target_speed 保持进入时的巡航速度。 */
+                    if (g.state_timer > g.uturn_timeout_s) {
+                        ev = BEH_EV_TIMEOUT;
+                        new_target_lane = -1;
+                        new_target_speed = g.cfg_cruise_speed;
+                        snprintf(reason, sizeof(reason), "uturn timeout %.1fs → CRUISE fallback", g.state_timer);
+                        LOG_WARN("behavior", "uturn timeout (timer=%.1f)", g.state_timer);
+                    }
+                    /* U_TURN 稳态：不覆盖 target_speed */
                 }
             }
 
@@ -1172,6 +1238,10 @@ static int behavior_init(MessageBus* bus, Transport* transport,
                          "后向安全时距 (s)：min_rd = max(min_m, rrs*time_s)");
     param_register_float("behavior.same_lane_tol_offset",   g.same_lane_tol_offset,   0.1, 2.0,
                          "车道归属横向容差偏移 (m)：半车道宽+offset");
+    param_register_float("behavior.uturn_approach_dist_m",  g.uturn_approach_dist_m,  20.0, 200.0,
+                         "掉头触发距离阈值 (m)：ego_x 距路端此距离时触发掉头");
+    param_register_float("behavior.uturn_timeout_s",        g.uturn_timeout_s,        5.0, 30.0,
+                         "掉头超时 (s)：超时回退 CRUISE");
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION,         on_fusion,             nullptr);
     transport_subscribe(transport, TOPIC_VEHICLE_STATE, on_vehicle_state, nullptr);

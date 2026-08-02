@@ -432,6 +432,232 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
     return road_c + side_offset - (lane_idx - (n_lanes - 1) / 2.0) * lane_w;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+ * 实车级三把方向掉头轨迹生成器（UTurnPlanner）
+ *
+ * 中国掉头操作规范（驾考标准）：
+ *   1. 先向左打死方向盘，尝试一把完成掉头
+ *   2. 若一把过不去（车头逼近对向路沿），向右打方向盘倒车调整
+ *   3. 再向左打前进，直至车头能进入对向车道
+ *
+ * 自适应相位切换（基于车辆状态，非固定时间）：
+ *   Phase 1: 直线重刹 → 掉头安全低速 (v ≤ 3.5 m/s)
+ *   Phase 2: 左打死前进 → 冲向对向路沿
+ *     切换条件：heading 转过 ≥130° 且 y 已越过路中线 (y > 0.5m)
+ *     OR 安全上限：heading 转过 ≥155°（防冲出路面）
+ *   Phase 3: 右打死倒车 → 车尾摆回车道区域
+ *     切换条件：y 回到对向车道半幅内 (|y - target_lane_y| < 1.5m)
+ *     OR 安全上限：倒车 ≥3.0s（防无限倒车）
+ *   Phase 4: 左打前进对齐 → 车头对准对向车道
+ *     切换条件：heading 接近 ±π (|heading_normalized| < 0.25 rad)
+ *     OR 安全上限：前进 ≥2.5s
+ *   Phase 5: 巡航 → 剩余点以目标速度直行填充
+ *
+ * 轨迹点 v 为负表示倒车（control 据此设 GEAR_REVERSE）。
+ * 自行车模型与 flowsim physics.cpp 完全一致：
+ *   yaw_rate = (speed / wheelbase) * tan(steer)
+ *   heading += yaw_rate * dt
+ *   x += speed * cos(heading) * dt
+ *   y += speed * sin(heading) * dt
+ * ═══════════════════════════════════════════════════════════════ */
+static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
+                                     double ego_x, double ego_y, double ego_heading,
+                                     double ego_speed, double wheelbase) {
+    const double dt = 0.05;               /* 20Hz 时间步长 */
+    const double max_steer = 0.55;        /* 满舵角 (rad)，≈31.5° */
+    const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
+    const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
+    const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
+    /* 对向车道中心 y：前进车道在 y<0 侧（lane_id<0），对向车道在 y>0 侧 */
+    const double opp_lane_center_y = g.lane_width * 0.5;  /* 对向最左车道中心 */
+
+    /* 安全上限（防止无限循环） */
+    const double phase2_max_dur = 4.0;   /* 左打死前进最多 4s */
+    const double phase3_max_dur = 3.0;   /* 倒车最多 3s */
+    const double phase4_max_dur = 2.5;   /* 对齐最多 2.5s */
+
+    int n = 0;
+    double x = ego_x, y = ego_y, h = ego_heading;
+    double v = ego_speed;
+    double steer = 0.0;
+    uint32_t t_us = 0;
+
+    /* 归一化 heading 到 [-π, π] */
+    auto norm_h = [](double hd) -> double {
+        while (hd > M_PI)  hd -= 2.0 * M_PI;
+        while (hd < -M_PI) hd += 2.0 * M_PI;
+        return hd;
+    };
+
+    double h_start = norm_h(h);  /* 记录起始 heading */
+
+    /* ═══ Phase 1: 直线重刹 → 掉头低速 ═══ */
+    {
+        const double brake_decel = -8.0;  /* 急刹减速度 (m/s²) */
+        while (v > uturn_speed + 0.1 && n < max_points) {
+            v += brake_decel * dt;
+            if (v < uturn_speed) v = uturn_speed;
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;  points[n].v = (float)v;
+            points[n].kappa = 0.0f;
+            points[n].a = (float)brake_decel;
+            points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            t_us += (uint32_t)(dt * 1e6);
+        }
+        /* 确保至少发布一个刹车点 */
+        if (n == 0) {
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;  points[n].v = (float)v;
+            points[n].kappa = 0.0f;  points[n].a = 0.0f;
+            points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            t_us += (uint32_t)(dt * 1e6);
+        }
+    }
+
+    /* ═══ Phase 2: 左打死前进 → 冲向对向路沿 ═══
+     * 自适应切换条件：
+     *   - 正常：heading 转过 ≥130° 且 y 已越过路中线 (y > 0.5m)
+     *   - 安全上限：heading 转过 ≥155° 或 y 逼近路沿 (y > road_half_w - 1.0)
+     *   - 超时：phase2 超过 4s
+     */
+    {
+        steer = max_steer;  /* 左打死 */
+        v = uturn_speed;
+        double phase2_t = 0.0;
+        while (n < max_points) {
+            double yaw_rate = (v / wheelbase) * tan(steer);
+            h += yaw_rate * dt;
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;  points[n].v = (float)v;
+            points[n].kappa = (float)(tan(steer) / wheelbase);
+            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            phase2_t += dt;
+            t_us += (uint32_t)(dt * 1e6);
+
+            double dh = fabs(norm_h(h - h_start));
+            bool heading_ok  = (dh >= 2.2689);              /* 130° in rad */
+            bool y_ok        = (y > 0.5);                   /* 越过路中线 */
+            bool safety_h    = (dh >= 2.7053);              /* 155° 安全上限 */
+            bool safety_y    = (y > road_half_w - 1.0);     /* 逼近路沿 1m */
+            bool timeout     = (phase2_t >= phase2_max_dur);
+
+            if ((heading_ok && y_ok) || safety_h || safety_y || timeout) break;
+        }
+    }
+
+    /* ═══ Phase 3: 右打死倒车 → 车尾摆回车道区域 ═══
+     * 倒车时方向盘右打 → 车尾右摆 → 车头左转（继续向对向车道方向转）。
+     * 自适应切换条件：
+     *   - 正常：y 回到对向车道半幅内 (|y - opp_lane_center_y| < 1.5m)
+     *   - 安全上限：y 回到路中线以下 (y < 0.8m) 或 heading 接近 π
+     *   - 超时：phase3 超过 3s
+     */
+    {
+        steer = -max_steer;  /* 右打死 */
+        v = reverse_speed;
+        double phase3_t = 0.0;
+        while (n < max_points) {
+            double yaw_rate = (v / wheelbase) * tan(steer);
+            h += yaw_rate * dt;
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;
+            points[n].v = (float)v;  /* 负值 = 倒车档 */
+            points[n].kappa = (float)(tan(steer) / wheelbase);
+            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            phase3_t += dt;
+            t_us += (uint32_t)(dt * 1e6);
+
+            bool y_in_lane   = (fabs(y - opp_lane_center_y) < 1.5);  /* 在对向车道半幅内 */
+            bool safety_y    = (y < 0.8);   /* 回到路中线以下，安全退出 */
+            bool safety_h    = (fabs(norm_h(h - h_start)) >= M_PI - 0.35);  /* heading 接近 π */
+            bool timeout     = (phase3_t >= phase3_max_dur);
+
+            if (y_in_lane || safety_y || safety_h || timeout) break;
+        }
+    }
+
+    /* ═══ Phase 4: 左打前进对齐 → 车头对准对向车道 ═══
+     * 自适应切换条件：
+     *   - 正常：heading 接近 ±π（|norm_h(h) - π| < 0.25 或 |norm_h(h) + π| < 0.25）
+     *   - 安全上限：超时 2.5s
+     */
+    {
+        steer = 0.30;  /* 较小转角精细对齐 */
+        v = uturn_speed;
+        double phase4_t = 0.0;
+        while (n < max_points) {
+            double yaw_rate = (v / wheelbase) * tan(steer);
+            h += yaw_rate * dt;
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;  points[n].v = (float)v;
+            points[n].kappa = (float)(tan(steer) / wheelbase);
+            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            phase4_t += dt;
+            t_us += (uint32_t)(dt * 1e6);
+
+            double hn = norm_h(h);
+            bool heading_aligned = (fabs(fabs(hn) - M_PI) < 0.25);  /* |heading| ≈ π */
+            bool timeout         = (phase4_t >= phase4_max_dur);
+
+            if (heading_aligned || timeout) break;
+        }
+    }
+
+    /* ═══ Phase 5: 巡航 → 剩余点以目标速度直行填充 ═══ */
+    {
+        steer = 0.0;
+        v = g.cfg_target_speed;
+        /* 如果对向车道（lane_id > 0），巡航速度取负以匹配 heading≈π */
+        if (fabs(norm_h(h)) > M_PI * 0.5) {
+            /* heading 指向 -x 方向 → 速度应沿 -x */
+            v = -g.cfg_target_speed;
+        }
+        while (n < max_points) {
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;
+            points[n].v = (float)v;
+            points[n].kappa = 0.0f;
+            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            t_us += (uint32_t)(dt * 1e6);
+        }
+    }
+
+    return n;
+}
+
 /* ── fusion/localization 订阅回调 ───────────────────────────── */
 
 static void on_fusion(const Message* msg, void* user_data) {
@@ -634,7 +860,8 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
     }
     g.current_behavior = beh;
     g.overtake_state = (beh.command == BEH_LEFT_CHANGE) ? 1 :
-                       (beh.command == BEH_RIGHT_CHANGE) ? 2 : 0;
+                       (beh.command == BEH_RIGHT_CHANGE) ? 2 :
+                       (beh.command == BEH_U_TURN) ? 3 : 0;
     g.has_behavior = 1;
     static int beh_recv_count = 0;
     if (beh_recv_count++ % 50 == 0 || beh.command == BEH_RIGHT_CHANGE || beh.command == BEH_LEFT_CHANGE) {
@@ -689,6 +916,7 @@ static void on_navigation_path(const Message* msg, void* user_data) {
     if (cJSON_IsString(j) && j->valuestring) {
         if (strcmp(j->valuestring, "branch_select") == 0) step_type = ROUTE_BRANCH_SELECT;
         else if (strcmp(j->valuestring, "merge") == 0)    step_type = ROUTE_MERGE;
+        else if (strcmp(j->valuestring, "u_turn") == 0)   step_type = ROUTE_U_TURN;
     }
     j = cJSON_GetObjectItemCaseSensitive(root, "target_lane");
     if (cJSON_IsNumber(j)) target_lane = (int)j->valuedouble;
@@ -726,6 +954,20 @@ static void on_navigation_path(const Message* msg, void* user_data) {
             g.route_target_speed = (target_speed > 0.0) ? target_speed : g.cfg_max_speed;
             LOG_INFO("planning", "NAV merge #%d @x=%.0f -> lane=%d speed=%.1f wait_gap",
                      step_index, ego_x, lane, g.route_target_speed);
+            break;
+        }
+        case ROUTE_U_TURN: {
+            /* 导航系统发出掉头指令 → 立即触发 UTurnPlanner。
+             * 绕开 behavior_planner 状态机，直接设置 overtake_state=3，
+             * 下一帧主循环 tick 中 generate_uturn_trajectory 生成三把方向轨迹。
+             * 同时更新参考路径为对向车道方向（opposite=true）。 */
+            g.overtake_state = 3;
+            g.target_lane_offset = 0.0;
+            g.route_target_speed = (target_speed > 0.0) ? target_speed : 3.5;  /* 掉头低速 */
+            /* 提前翻参考路径：掉头后在对向车道行驶，参考路径应从右向左生成 */
+            update_reference_path(g.ego_x, /*opposite=*/true);
+            LOG_WARN("planning", "NAV u_turn #%d @x=%.0f → UTurnPlanner triggered (speed=%.1f)",
+                     step_index, ego_x, g.route_target_speed);
             break;
         }
         case ROUTE_LANE_CHANGE:
@@ -1275,12 +1517,31 @@ protected:
             }
 
             /* 规划轨迹 */
-            double s_out[50], d_out[50], spd_out[50];
-            int n_wp = 0;
+            TrajectoryPoint points[64];
+            int n_pts = 0;
+            int n_wp = 0;  /* 规划路径点数量（Frenet 规划器输出；UTurn 时保持 0） */
+            bool use_stitch = false;  /* 轨迹拼接标志 */
             double ego_ref_s = g.ego_x;
             double ego_ref_d = g.ego_y - road_center_y(g.ego_x, g.curve_start_x,
                                                        g.curve_length_m, g.curve_offset_m);
+            memset(points, 0, sizeof(points));
             (void)project_to_reference_path(g.ego_x, g.ego_y, ego_ref_s, ego_ref_d);
+
+            /* ── UTurnPlanner: 掉头时跳过 Frenet，直接生成自行车模型轨迹 ── */
+            if (g.overtake_state == 3) {
+                const double wheelbase = 2.8;  /* 轴距 (m)，与 flowsim physics.cpp 一致 */
+                n_pts = generate_uturn_trajectory(points, 64,
+                                                  g.ego_x, g.ego_y, g.ego_heading,
+                                                  g.ego_v, wheelbase);
+                LOG_WARN("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f)",
+                         n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v);
+                /* 跳过 stitch（掉头是全新轨迹，不与上帧拼接） */
+                use_stitch = false;
+                /* 跳过下方所有 Frenet 规划逻辑 */
+                goto publish_trajectory;
+            }
+
+            double s_out[50], d_out[50], spd_out[50];
 
 #ifdef HAVE_FRENET
             {
@@ -1370,7 +1631,6 @@ protected:
 
             /* §9 轨迹拼接 */
             g.stitch_total_count++;
-            bool use_stitch = false;
             if (g.prev_traj.point_count > 0 && g.prev_traj_stamp_us > 0) {
                 /* 计算当前时刻在上一帧轨迹上的时间偏移 */
                 uint64_t dt_us = clock_now_us() - g.prev_traj_stamp_us;
@@ -1389,10 +1649,6 @@ protected:
             }
 
             /* ── 构建二进制 Trajectory 数组 ── */
-            TrajectoryPoint points[64];
-            int n_pts = 0;
-            memset(points, 0, sizeof(points));
-
             if (n_wp > 0) {
                 /* 移除错误的 command_speed = max(command_speed, spd_out[0]) 逻辑。
                  * 原注释担心的"停车闭锁"(v=0→target=0→永远0)实际不成立：
@@ -1480,6 +1736,7 @@ protected:
                 points[0].v = 0.0f;  /* 停车 */
             }
 
+publish_trajectory:
             /* ── 发布二进制 Trajectory ── */
             Trajectory traj;
             memset(&traj, 0, sizeof(traj));

@@ -172,6 +172,7 @@ struct ControlRaw {
     char     mode[24]       # 模式字符串: ACCEL/BRAKE/HOLD/ROAD_GUARD等
     uint8    turn_signal    # 转向灯指令：0=off, 1=left, 2=right（planning/control 决策下发）
     bool     hazard         # 双闪灯指令（紧急停车 / 碰撞时 planning/control 决策下发）
+    Gear     gear           # 档位（DRIVE=1/REVERSE=-1/NEUTRAL=0），control 从 trajectory v 符号推导
 }
 
 struct ControlCmd {
@@ -195,6 +196,7 @@ enum BehaviorCommand {
     BEH_STOP         = 4     # 停车
     BEH_YIELD        = 5     # 让行（减速等待）
     BEH_EMERGENCY    = 6     # 紧急停车
+    BEH_U_TURN       = 7     # 掉头（三把方向：左打死前进→右打倒退→左打前进入车道）
 }
 
 struct Behavior {

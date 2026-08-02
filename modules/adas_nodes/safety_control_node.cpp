@@ -50,6 +50,7 @@ struct ControlCmd {
     std::string mode{"RAW"};
     int    turn_signal{0};   /* 0=off, 1=left, 2=right */
     bool   hazard{false};
+    int    gear{GEAR_DRIVE}; /* 档位，从 control_node 透传 */
 };
 
 struct VehicleState {
@@ -132,6 +133,7 @@ ControlCmd parse_control_cmd(const Message& msg) {
             cmd.mode     = raw.mode;
             cmd.turn_signal = (int)raw.turn_signal;
             cmd.hazard      = raw.hazard;
+            cmd.gear        = (int)raw.gear;
             return cmd;
         }
     }
@@ -148,9 +150,10 @@ ControlCmd parse_control_cmd(const Message& msg) {
     cmd.mode = scan_mode(text);
     /* 灯光指令：turn_signal 和 hazard 从 text 解析 */
     {
-        double ts = 0, hz = 0;
+        double ts = 0, hz = 0, gv = 0;
         if (scan_double(text, "turn_signal=", &ts)) cmd.turn_signal = (int)ts;
         if (scan_double(text, "hazard=", &hz))     cmd.hazard = (hz != 0.0);
+        if (scan_double(text, "gear=", &gv))       cmd.gear = (int)gv;
     }
     return cmd;
 }
@@ -534,7 +537,7 @@ private:
         /* Binary serialized ControlCmd (serializer path) */
         ::ControlCmd bin;
         bin.seq            = 0;
-        bin.gear           = GEAR_DRIVE;
+        bin.gear           = (int8_t)cmd.gear;
 
         /* NaN/Inf 兜底：clamp 已把 NaN/Inf 收敛到 lo，但 brake 的 lo=0.0 意味着
          * "不刹车"，对制动不安全。发布前再做一次显式 isfinite 复查，任一字段

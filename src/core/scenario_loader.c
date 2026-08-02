@@ -200,6 +200,8 @@ ScenarioConfig* scenario_load(const char* path) {
                     r->type = ROUTE_BRANCH_SELECT;
                 else if (strcmp(j->valuestring, "merge") == 0)
                     r->type = ROUTE_MERGE;
+                else if (strcmp(j->valuestring, "u_turn") == 0)
+                    r->type = ROUTE_U_TURN;
                 else
                     r->type = ROUTE_LANE_CHANGE;
             }
@@ -594,6 +596,7 @@ char* scenario_to_json(const ScenarioConfig* scenario) {
         switch (r->type) {
             case ROUTE_BRANCH_SELECT: type_str = "branch_select"; break;
             case ROUTE_MERGE:         type_str = "merge";         break;
+            case ROUTE_U_TURN:        type_str = "u_turn";        break;
             default:                  type_str = "lane_change";   break;
         }
         cJSON_AddStringToObject(jr, "type", type_str);

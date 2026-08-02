@@ -128,6 +128,7 @@ typedef enum {
     ROUTE_LANE_CHANGE    = 0,
     ROUTE_BRANCH_SELECT  = 1,
     ROUTE_MERGE          = 2,
+    ROUTE_U_TURN         = 3,  /**< 掉头：导航指令触发规划器生成三把方向掉头轨迹 */
 } RouteStepType;
 
 typedef struct {

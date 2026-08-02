@@ -71,9 +71,10 @@ static struct {
 static const char* step_type_to_str(RouteStepType t) {
     switch (t) {
         case ROUTE_BRANCH_SELECT: return "branch_select";
-        case ROUTE_MERGE: return "merge";
+        case ROUTE_MERGE:         return "merge";
+        case ROUTE_U_TURN:        return "u_turn";
         case ROUTE_LANE_CHANGE:
-        default: return "lane_change";
+        default:                  return "lane_change";
     }
 }
 

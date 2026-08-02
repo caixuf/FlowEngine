@@ -121,6 +121,7 @@ struct ControlContext {
     double road_center_y{0};   /* 当前帧目标道路中心 y（来自 trajectory 第一个点，供 fallback 使用） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
     int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
+    int8_t gear{GEAR_DRIVE};   /* 当前档位（从 trajectory 轨迹点 v 符号推导：v<0→REVERSE） */
 
     volatile int has_fusion{0};
     volatile int has_planning{0};
@@ -292,6 +293,16 @@ static void on_trajectory(const Message* msg, void* user_data) {
      * 取末点 (=规划期内的期望速度) 让控制器跟随减速/加速意图。 */
     g.target_speed = (double)traj.points[n_pts - 1].v;
     g.has_target_speed = 1;
+    /* 档位推导：轨迹中有任何点 v<0 即为倒车档。
+     * UTurnPlanner 在倒车阶段填充负速度，control 据此设 GEAR_REVERSE，
+     * 经 safety_control 透传到 flowsim 执行倒车。 */
+    {
+        bool has_reverse = false;
+        for (uint32_t i = 0; i < n_pts; i++) {
+            if ((double)traj.points[i].v < -0.1) { has_reverse = true; break; }
+        }
+        g.gear = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
+    }
     /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
      * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
      * 增大，避免一次性跳到 3.5m 误差导致横向过冲冲出路沿。
@@ -545,14 +556,14 @@ protected:
             }
 
             /* ── 死锁恢复: 车长时间近乎静止时，给一点前向油门打破静摩擦 ── */
-            if (g.current_speed < STUCK_SPEED_MPS) {
+            if (fabs(g.current_speed) < STUCK_SPEED_MPS) {
                 g.stuck_timer += CONTROL_DT_S;
             } else {
                 g.stuck_timer = 0.0;
             }
 
             /* ── 全域速度死锁恢复: 无论 y 位置, 速度持续为0超过阈值就给小油门 ── */
-            if (g.current_speed < STUCK_SPEED_MPS) {
+            if (fabs(g.current_speed) < STUCK_SPEED_MPS) {
                 g.speed_zero_timer += CONTROL_DT_S;
             } else {
                 g.speed_zero_timer = 0.0;
@@ -592,7 +603,7 @@ protected:
                     g.target_speed = 0.0;
                     acc_target = 0.0;
                     g.integral = 0;
-                    if (g.current_speed < 0.5) {
+                    if (fabs(g.current_speed) < 0.5) {
                         g.mrm_stall_us += CONTROL_DT_S * 1e6;
                         if (g.mrm_stall_us > 3000000.0) {
                             degrade_clear();
@@ -612,45 +623,59 @@ protected:
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
             if (g.cycle % 100 == 0 || fabs(lat_error) > 0.5) {
-                LOG_WARN("control", "[DBG_LAT] cyc=%d lane_d=%.2f rc_y=%.2f tgt_y=%.2f ego_y=%.2f lat_err=%.2f spd=%.1f",
+                LOG_WARN("control", "[DBG_LAT] cyc=%d lane_d=%.2f rc_y=%.2f tgt_y=%.2f ego_y=%.2f lat_err=%.2f spd=%.1f gear=%d",
                          g.cycle, g.lane_d, g.road_center_y, effective_target_y, g.ego_y,
-                         lat_error, g.current_speed);
+                         lat_error, g.current_speed, (int)g.gear);
             }
             double throttle = 0, brake = 0, steer = 0;
             const char* mode = "NONE";
 
-            /* PID 纵向 */
-            g.integral += error * 0.05;
+            /* PID 纵向 — 倒车时镜像速度符号，让 PID 始终在正域工作。
+             * 倒车：target=-3.0, current=-1.0 → pid_target=3.0, pid_current=1.0
+             * → error=2.0 → output>0 → throttle=+ → 最后取反为负油门。 */
+            double pid_target = acc_target;
+            double pid_current = g.current_speed;
+            bool is_reverse = (g.gear == GEAR_REVERSE);
+            if (is_reverse) {
+                pid_target = -acc_target;
+                pid_current = -g.current_speed;
+            }
+            double pid_error = pid_target - pid_current;
+
+            g.integral += pid_error * 0.05;
             if (g.integral > 500)  g.integral = 500;
             if (g.integral < -200) g.integral = -200;
 
-            double derivative = (error - g.prev_error) / 0.05;
-            double output = g.kp * error + g.ki * g.integral + g.kd * derivative;
+            double derivative = (pid_error - g.prev_error) / 0.05;
+            double output = g.kp * pid_error + g.ki * g.integral + g.kd * derivative;
 
             if (output > 0) {
                 throttle = output / 5000.0;
                 if (throttle > 1.0) throttle = 1.0;
                 brake = 0;
-                mode = (error < 1.0) ? "HOLD" : "ACCEL";
+                mode = (pid_error < 1.0) ? "HOLD" : (is_reverse ? "REV_ACCEL" : "ACCEL");
             } else {
                 throttle = 0;
                 brake = (-output) / 8000.0;
                 if (brake > 1.0) brake = 1.0;
-                mode = "BRAKE";
+                mode = is_reverse ? "REV_BRAKE" : "BRAKE";
             }
+            /* 倒车：油门取反（flowsim physics 用负油门触发倒车） */
+            if (is_reverse) throttle = -throttle;
 
             /* Anti-windup：error 从正翻负时（加速→减速切换），积分饱和是追尾主因。
              * 加速阶段积分可累积到 +500（I=50×+500=+25000），此时减速指令 P=800×(-8)=-6400，
              * 总量 +18600 → 油门全开撞上去。
              * 修复：error 翻负且 |error|>2 时直接清零正积分；正常饱和时慢速泄放。 */
-            if (error < -2.0 && g.integral > 0) {
+            if (pid_error < -2.0 && g.integral > 0) {
                 g.integral = 0;  /* 从加速切到减速，残余正积分是催命符，立刻清零 */
             } else {
-                if (g.integral > 0 && throttle >= 1.0 && error > 0)
-                    g.integral -= error * 0.05;
-                if (g.integral > 0 && brake >= 1.0 && error < 0)
-                    g.integral += error * 0.05;
+                if (g.integral > 0 && throttle >= 1.0 && pid_error > 0)
+                    g.integral -= pid_error * 0.05;
+                if (g.integral > 0 && brake >= 1.0 && pid_error < 0)
+                    g.integral += pid_error * 0.05;
             }
+            g.prev_error = pid_error;
 
             /* ── LTV MPC 横向控制 ── */
             bool mpc_used = false;
@@ -689,8 +714,11 @@ protected:
             if (!mpc_used) {
                 steer = 0.0;
                 {
-                    double speed_eff = fmax(g.current_speed, 3.0);
-                    double v_lat_actual = g.current_speed *
+                    /* 倒车时用绝对值做横向控制：速度符号翻转会导致
+                     * v_lat_actual 和 cte_term 符号反转，steer 反向。 */
+                    double abs_speed = fabs(g.current_speed);
+                    double speed_eff = fmax(abs_speed, 3.0);
+                    double v_lat_actual = abs_speed *
                         sin(g.ego_heading - ref_road_heading);
                     /* v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual（巡航模式） */
                     double v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
@@ -723,7 +751,7 @@ protected:
                     double ff_term = g.wheelbase * kappa * ff_weight;
 
                     steer = cte_term - heading_term - yaw_damp_term + ff_term + delta_ff;
-                    double steer_limit = steer_limit_for_speed(g.current_speed, 1.4);
+                    double steer_limit = steer_limit_for_speed(abs_speed, 1.4);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
                     steer = STEER_FILTER_NEW * steer + (1.0 - STEER_FILTER_NEW) * g.prev_steer;
@@ -795,9 +823,9 @@ protected:
              * road_c 现在是道路中心 y（不含横向偏移），目标车道中心 = road_c + lane_d。
              * 旧实现检查 |ego_y - road_c|，对 4 车道外车道（y=±5.25）永远触发。 */
             if (y_from_target > ROAD_GUARD_THRESHOLD_M) {
-                double steer_limit = steer_limit_for_speed(g.current_speed, 2.4);
+                double steer_limit = steer_limit_for_speed(fabs(g.current_speed), 2.4);
                 steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
-                if (g.current_speed < 2.5) {
+                if (fabs(g.current_speed) < 2.5) {
                     throttle = 0.18;
                     brake = 0.0;
                     g.speed_zero_timer = 0.0;
@@ -837,6 +865,7 @@ protected:
             raw.cte      = (float)lat_error;
             raw.turn_signal = turn_signal;
             raw.hazard   = hazard;
+            raw.gear     = g.gear;
             memset(raw.mode, 0, sizeof(raw.mode));
             snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
 
@@ -855,10 +884,10 @@ protected:
             snprintf(cmd_text, sizeof(cmd_text),
                      "throttle=%.2f brake=%.2f steer=%.4f "
                      "speed=%.1f target=%.1f error=%.1f mode=%s "
-                     "turn_signal=%d hazard=%d",
+                     "turn_signal=%d hazard=%d gear=%d",
                      throttle, brake, steer,
                      g.current_speed, acc_target, error, mode,
-                     (int)turn_signal, (int)hazard);
+                     (int)turn_signal, (int)hazard, (int)g.gear);
             transport_publish(transport_, TOPIC_CONTROL_RAW_CMD_TEXT,
                               (const uint8_t*)cmd_text, (uint32_t)strlen(cmd_text) + 1);
 
