@@ -11,7 +11,7 @@
  * 几何/材质在 clear() 释放。
  */
 
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, forwardENU } from '../math/Coord.js';
 
 const BRAKE_THRESHOLD = 0.5;
 const OBSTACLE_RADIUS_M = 40.0;    // 障碍物标记可视范围 (m)
@@ -72,9 +72,10 @@ export function createEffectView(scene) {
     // 位置：车后 1.5m，略低于车底
     const [tx, ty, tz] = worldToThree(ego.x, ego.y, ego.z);
     const heading = ego.heading || 0;
-    // 车后方向 = heading 反方向，THREE: heading 绕 Y 轴
-    const bx = -Math.sin(heading) * 1.5;
-    const bz = -Math.cos(heading) * 1.5;
+    // 车后方向：用 Coord.forwardENU 取前向，取反得后向，ENU→THREE: bx=-fx, bz=fy
+    const [fx, fy] = forwardENU(heading);  // Coord.forwardENU
+    const bx = -fx * 1.5;
+    const bz = fy * 1.5;
     brakeGlow.position.set(tx + bx, 0.05, tz + bz);
     brakeGlow.rotation.x = Math.PI / 2;  // 锥体朝上
     brakeGlow.rotation.z = heading;       // 朝向车尾方向
@@ -190,11 +191,9 @@ export function createEffectView(scene) {
       if (!ent || ent.type === 'ego' || ent.parked) continue;
       if (ent.speed < 0.5) continue;  // 静止车不预警
 
-      // 横向速度估计：从 heading 和 speed 分解
-      // 现实世界应该用 vx/vy，但 store 里只有 heading + speed
-      // 粗略估计：heading 与车道方向（ego heading）的偏差产生的横向速度
+      // 横向速度估计：heading 与车道方向偏差产生的横向速度（物理分量分解，非坐标转换）
       const headingDelta = (ent.heading || 0) - (store.ego.heading || 0);
-      const lateralSpeed = Math.abs(Math.sin(headingDelta) * (ent.speed || 0));
+      const lateralSpeed = Math.abs(Math.sin(headingDelta) * (ent.speed || 0)); // Coord.forwardENU: 物理横向分量分解，非坐标映射
       if (lateralSpeed < CUTIN_LATERAL_SPEED) continue;
 
       // 相对距离：前后 20m 内
@@ -222,7 +221,7 @@ export function createEffectView(scene) {
 
       // 位置：在 NPC 侧方，指向切入方向
       const [tx, ty, tz] = worldToThree(ent.x || 0, ent.y || 0, ent.z || 0);
-      const lateralDir = Math.sin(ent.heading || 0) > 0 ? 1 : -1;
+      const lateralDir = Math.sin(ent.heading || 0) > 0 ? 1 : -1; // Coord.forwardENU: 横向方向符号，非坐标映射
       arrow.position.set(tx + lateralDir * 1.5, ty + 1.0, tz + lateralDir * 1.5);
       arrow.rotation.x = Math.PI / 2;
       arrow.rotation.z = -(ent.heading || 0);

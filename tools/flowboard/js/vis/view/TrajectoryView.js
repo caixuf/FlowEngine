@@ -12,7 +12,7 @@
  * 管线在每帧 update() 中重建，clear() 释放所有几何/材质。
  */
 
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, forwardENU } from '../math/Coord.js';
 
 const PREDICT_DURATION_S = 3.0;    // 预测时长 (s)
 const PREDICT_STEPS = 30;          // 轨迹点数
@@ -71,8 +71,10 @@ export function createTrajectoryView(scene) {
       const yawRate = v / WHEELBASE * Math.tan(steer);
       h += yawRate * dt;
 
-      x += v * Math.cos(h) * dt;
-      y += v * Math.sin(h) * dt;
+      // ENU 坐标积分：用 Coord.forwardENU 取前向单位向量
+      const [dx, dy] = forwardENU(h);
+      x += v * dx * dt;
+      y += v * dy * dt;
 
       // 转换为 THREE 坐标
       const [tx, ty, tz] = worldToThree(wx + x, wy + y, wz);
