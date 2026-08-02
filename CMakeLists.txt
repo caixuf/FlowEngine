@@ -812,6 +812,14 @@ target_link_libraries(test_ekf_slam m)
 add_test(NAME ekf_slam_tests COMMAND test_ekf_slam)
 set_tests_properties(ekf_slam_tests PROPERTIES TIMEOUT 10)
 
+# traversability_node 算法单元测试（单 TU 包含节点 .c 以访问 static 函数）
+add_executable(test_traversability tests/test_traversability.c)
+target_link_libraries(test_traversability flowengine_core scheduler_cpp m)
+add_dependencies(test_traversability msg_codegen)
+target_include_directories(test_traversability PRIVATE ${GEN_DIR} modules/adas_nodes)
+add_test(NAME traversability_tests COMMAND test_traversability)
+set_tests_properties(traversability_tests PROPERTIES TIMEOUT 10)
+
 # flowsim 实体池 + 自行车模型（运动学 + 动力学）单元测试。此前是孤儿文件，
 # 未在任何 CMakeLists 注册。Entity 内嵌 RoadPosition（移动赋值/析构在
 # road_position.cpp 中经 esminiRMLib 实现），故需与 flowsim_node 相同链接 esminiRMLib。

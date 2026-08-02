@@ -92,6 +92,9 @@
 #define TV_CELL_FREE     1
 #define TV_CELL_OCCUPIED 2
 
+/* 地面平面模型: a·x + b·y + c·z + d = 0（RANSAC 拟合，替代纯高度阈值） */
+typedef struct { float a, b, c, d; } Plane;
+
 /* ── 节点状态 ─────────────────────────────────────────────── */
 
 static struct {
@@ -115,6 +118,18 @@ static struct {
     double min_corridor_width_m;/* 最小可通行走廊宽度 (m)，默认 0.6 */
     int    publish_hz;         /* 发布频率，默认 10 */
     char   output_topic[64];   /* 输出 topic，默认 perception/traversability */
+
+    /* RANSAC 地面拟合参数 */
+    int    ransac_iters;        /* 迭代次数，默认 50 */
+    float  ransac_inlier_m;     /* inlier 距离阈值(m)，默认 0.05 */
+    /* 时域融合参数（log-odds 占用栅格） */
+    double grid_decay;          /* 帧间衰减系数(0~1)，默认 0.9 */
+    int    occ_log_step;        /* 障碍 log-odds 步长，默认 8 */
+    int    free_log_step;       /* 地面 log-odds 步长，默认 4 */
+    int    occ_log_thr;         /* 占用判定阈值，默认 6 */
+    int    free_log_thr;        /* 地面判定阈值，默认 -6 */
+    /* 持久栅格 log-odds（时域融合底表，由它派生 grid[]） */
+    int16_t grid_log[TV_GRID_MAX_CELLS];
 
     /* 缓冲（init 分配，cleanup 释放） */
     Point3D* point_buf;        /* 复用 stereo_vision 的 Point3D 类型 {x,y,z,intensity} */
@@ -224,15 +239,71 @@ static int depth_to_points_3d(const StereoFrame* frame, Point3D* points, int max
  *   障碍点 (world_z > obstacle_height) → 标 OCCUPIED（覆盖 FREE）
  * 其中 world_z = camera_height_m + Z_body (相机离地高 + 车体 Z)
  */
+/* ── RANSAC 地面平面拟合 ─────────────────────────────────────
+ * 从点云随机采样 3 点拟合平面 (a·x+b·y+c·z+d=0)，统计 inlier（有符号
+ * 距离 < inlier_tol 的点数），保留最佳模型。取代纯高度阈值法，能处理
+ * 坡度/路面起伏。点数 <3 或拟合失败返回 -1，调用方回退高度阈值法。
+ */
+static int fit_ground_ransac(const Point3D* pts, int n, Plane* out,
+                             int iters, float inlier_tol) {
+    if (!pts || n < 3 || !out) return -1;
+    int best_inliers = 0;
+    Plane best; memset(&best, 0, sizeof best); best.c = 1.0f;  /* 退化默认近水平 */
+
+    for (int it = 0; it < iters; it++) {
+        int i0 = rand() % n, i1 = rand() % n, i2 = rand() % n;
+        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+        const Point3D* p0 = &pts[i0];
+        const Point3D* p1 = &pts[i1];
+        const Point3D* p2 = &pts[i2];
+        float ax = p1->x - p0->x, ay = p1->y - p0->y, az = p1->z - p0->z;
+        float bx = p2->x - p0->x, by = p2->y - p0->y, bz = p2->z - p0->z;
+        float a = ay*bz - az*by;
+        float b = az*bx - ax*bz;
+        float c = ax*by - ay*bx;
+        float norm = sqrtf(a*a + b*b + c*c);
+        if (norm < 1e-6f) continue;
+        a /= norm; b /= norm; c /= norm;
+        float d = -(a*p0->x + b*p0->y + c*p0->z);
+        int cnt = 0;
+        for (int k = 0; k < n; k++) {
+            float dist = fabsf(a*pts[k].x + b*pts[k].y + c*pts[k].z + d);
+            if (dist < inlier_tol) cnt++;
+        }
+        if (cnt > best_inliers) {
+            best_inliers = cnt;
+            best.a = a; best.b = b; best.c = c; best.d = d;
+        }
+    }
+    if (best_inliers < 3) return -1;  /* 拟合失败，退化 */
+    *out = best;
+    return 0;
+}
+
 static void build_grid(const Point3D* pts, int n,
                        int grid_w, int grid_h,
                        double cell_size, double x_range, double y_range,
+                       const Plane* plane,
                        int* free_cnt, int* occ_cnt, int* unknown_cnt) {
     int total = grid_w * grid_h;
     if (total > TV_GRID_MAX_CELLS) total = TV_GRID_MAX_CELLS;
-    memset(g.grid, TV_CELL_UNKNOWN, (size_t)total);
+
+    /* 时域融合：帧间衰减持久 log-odds 栅格。不做世界系运动补偿
+     * （需订阅 vehicle/state 平移旋转 grid，留后续）；车大幅移动时旧
+     * 观测会滞留衰减，但短时保持 + 多帧去噪已显著优于每帧重置。 */
+    double decay = (g.grid_decay > 0.0 && g.grid_decay < 1.0) ? g.grid_decay : 0.9;
+    for (int i = 0; i < total; i++) {
+        int v = (int)(g.grid_log[i] * decay);
+        if (v > 100) v = 100; else if (v < -100) v = -100;
+        g.grid_log[i] = (int16_t)v;
+    }
 
     int fcnt = 0, ocnt = 0;
+    double plane_norm = 0.0;
+    if (plane) {
+        plane_norm = sqrt(plane->a*plane->a + plane->b*plane->b + plane->c*plane->c);
+        if (plane_norm < 1e-6) plane = NULL;  /* 退化，回退高度法 */
+    }
 
     for (int k = 0; k < n; k++) {
         double Xb = pts[k].x;
@@ -250,81 +321,111 @@ static void build_grid(const Point3D* pts, int n,
         int idx = gx * grid_h + gy;
         if (idx < 0 || idx >= total) continue;
 
-        /* 世界 Z (相对地面)：相机离地高 + 车体 Z */
-        double world_z = g.camera_height_m + Zb;
-
-        if (world_z > g.obstacle_height_m) {
-            if (g.grid[idx] != TV_CELL_OCCUPIED) {
-                g.grid[idx] = TV_CELL_OCCUPIED;
-                ocnt++;
-            }
-        } else if (fabs(world_z) < g.ground_tol_m) {
-            if (g.grid[idx] == TV_CELL_UNKNOWN) {
-                g.grid[idx] = TV_CELL_FREE;
-                fcnt++;
-            }
-            /* 已是 OCCUPIED 则不降级为 FREE */
+        /* 地面/障碍判定：优先 RANSAC 平面有符号距离，否则高度阈值法 */
+        double dist;
+        if (plane) {
+            dist = (plane->a*Xb + plane->b*Yb + plane->c*Zb + plane->d) / plane_norm;
+        } else {
+            dist = g.camera_height_m + Zb;  /* 原高度法 world_z */
         }
+
+        if (dist > g.obstacle_height_m) {
+            int v = g.grid_log[idx] + g.occ_log_step;   /* 障碍：log 上升 */
+            if (v > 100) v = 100;
+            g.grid_log[idx] = (int16_t)v;
+        } else if (fabs(dist) < g.ground_tol_m) {
+            int v = g.grid_log[idx] - g.free_log_step;  /* 地面：log 下探 */
+            if (v < -100) v = -100;
+            g.grid_log[idx] = (int16_t)v;
+        }
+        /* 中间带：不改 log，保持上一帧状态 */
     }
 
+    /* 由 log-odds 派生当前 grid[] 状态 */
+    for (int i = 0; i < total; i++) {
+        int v = g.grid_log[i];
+        if (v > g.occ_log_thr)        { g.grid[i] = TV_CELL_OCCUPIED; ocnt++; }
+        else if (v < g.free_log_thr)  { g.grid[i] = TV_CELL_FREE;      fcnt++; }
+        else                          { g.grid[i] = TV_CELL_UNKNOWN; }
+    }
     *free_cnt = fcnt;
     *occ_cnt = ocnt;
     *unknown_cnt = total - fcnt - ocnt;
 }
 
-/* ── 走廊提取：找最宽的连续可通行 y 列带 ────────────────────
- * 在所有 x 行上扫描每个 y 列：若该列所有 cell 都非 OCCUPIED → 可通行
- * 然后找最长的连续可通行 y 段，输出左右边界与宽度。
+/* ── 走廊提取：从车前方出发的 FREE 连通域 ───────────────────
+ * 取代原"整列无障碍"的过度保守判定。从车正前方近距 cell 出发做 4 邻接
+ * BFS，收集连通到车前的 FREE 区域，输出其 y 边界与宽度，支持绕行语义。
+ * 起点非 FREE 时回退到最近的 FREE cell。
  */
 static void find_corridor(int grid_w, int grid_h,
                           double cell_size, double y_range,
                           double* left_y, double* right_y, double* width,
                           int* blocked) {
-    /* col_passable[gy] = 1 表示该 y 列所有 x 都不是 OCCUPIED */
-    int col_passable[256];
-    if (grid_h > 256) grid_h = 256;  /* 安全上限 */
-    for (int gy = 0; gy < grid_h; gy++) {
-        col_passable[gy] = 1;
-        for (int gx = 0; gx < grid_w && col_passable[gy]; gx++) {
-            int idx = gx * grid_h + gy;
-            if (idx >= 0 && idx < TV_GRID_MAX_CELLS &&
-                g.grid[idx] == TV_CELL_OCCUPIED) {
-                col_passable[gy] = 0;
-            }
+    int start_gx = (grid_w > 1) ? 1 : 0;   /* 车正前方近距行 */
+    int start_gy = grid_h / 2;             /* 中心列 */
+
+    /* 起点非 FREE → 回退到最近 FREE cell */
+    if (g.grid[start_gx * grid_h + start_gy] != TV_CELL_FREE) {
+        int best_d = 1e9, bf = -1, bg = -1;
+        for (int gx = 0; gx < grid_w; gx++)
+            for (int gy = 0; gy < grid_h; gy++)
+                if (g.grid[gx * grid_h + gy] == TV_CELL_FREE) {
+                    int dx = gx - start_gx, dy = gy - start_gy;
+                    int d = dx*dx + dy*dy;
+                    if (d < best_d) { best_d = d; bf = gx; bg = gy; }
+                }
+        if (bf < 0) {  /* 无任何 FREE */
+            *left_y = *right_y = *width = 0.0; *blocked = 1; return;
+        }
+        start_gx = bf; start_gy = bg;
+    }
+
+    /* 4 邻接 BFS 连通分量 */
+    uint8_t visited[TV_GRID_MAX_CELLS];
+    memset(visited, 0, (size_t)(grid_w * grid_h));
+    int queue[TV_GRID_MAX_CELLS];
+    int qh = 0, qt = 0;
+    int start_idx = start_gx * grid_h + start_gy;
+    queue[qt++] = start_idx; visited[start_idx] = 1;
+    int min_gy = start_gy, max_gy = start_gy;
+
+    while (qh < qt) {
+        int idx = queue[qh++];
+        int gx = idx / grid_h, gy = idx % grid_h;
+        if (gy < min_gy) min_gy = gy;
+        if (gy > max_gy) max_gy = gy;
+        /* 上 */
+        if (gx + 1 < grid_w) {
+            int ni = (gx + 1) * grid_h + gy;
+            if (!visited[ni] && g.grid[ni] == TV_CELL_FREE) { visited[ni] = 1; queue[qt++] = ni; }
+        }
+        /* 下 */
+        if (gx - 1 >= 0) {
+            int ni = (gx - 1) * grid_h + gy;
+            if (!visited[ni] && g.grid[ni] == TV_CELL_FREE) { visited[ni] = 1; queue[qt++] = ni; }
+        }
+        /* 左 */
+        if (gy + 1 < grid_h) {
+            int ni = gx * grid_h + (gy + 1);
+            if (!visited[ni] && g.grid[ni] == TV_CELL_FREE) { visited[ni] = 1; queue[qt++] = ni; }
+        }
+        /* 右 */
+        if (gy - 1 >= 0) {
+            int ni = gx * grid_h + (gy - 1);
+            if (!visited[ni] && g.grid[ni] == TV_CELL_FREE) { visited[ni] = 1; queue[qt++] = ni; }
         }
     }
 
-    /* 找最长连续可通行段 */
-    int best_start = -1, best_len = 0;
-    int cur_start = -1, cur_len = 0;
-    for (int gy = 0; gy < grid_h; gy++) {
-        if (col_passable[gy]) {
-            if (cur_start < 0) cur_start = gy;
-            cur_len++;
-            if (cur_len > best_len) {
-                best_len = cur_len;
-                best_start = cur_start;
-            }
-        } else {
-            cur_start = -1;
-            cur_len = 0;
-        }
-    }
-
-    double best_w = (double)best_len * cell_size;
-    if (best_len <= 0 || best_w < g.min_corridor_width_m) {
-        *left_y = 0.0;
-        *right_y = 0.0;
-        *width = 0.0;
-        *blocked = 1;
-        return;
+    int comp_len = max_gy - min_gy + 1;
+    double best_w = (double)comp_len * cell_size;
+    if (comp_len <= 0 || best_w < g.min_corridor_width_m) {
+        *left_y = *right_y = *width = 0.0; *blocked = 1; return;
     }
 
     /* cell 中心对应的车体 Y 坐标 */
-    double y_left  = ((double)best_start + 0.5) * cell_size - y_range;
-    double y_right = ((double)(best_start + best_len) - 0.5) * cell_size - y_range;
-    *left_y  = y_left;
-    *right_y = y_right;
+    *left_y  = ((double)min_gy + 0.5) * cell_size - y_range;
+    *right_y = ((double)max_gy + 0.5) * cell_size - y_range;
     *width   = best_w;
     *blocked = 0;
 }
@@ -387,10 +488,17 @@ static int traversability_execute(TaskBase* task) {
         int n = depth_to_points_3d(&frame, g.point_buf, g.point_buf_cap);
         if (n < 4) continue;  /* 点太少，栅格无意义 */
 
-        /* 2. 构建占用栅格 */
+        /* 1b. RANSAC 地面拟合（失败回退高度阈值法 plane=NULL） */
+        Plane plane;
+        int have_plane = (fit_ground_ransac(g.point_buf, n, &plane,
+                                            g.ransac_iters,
+                                            (float)g.ransac_inlier_m) == 0);
+
+        /* 2. 构建占用栅格（时域融合 + 平面距离） */
         int free_cnt = 0, occ_cnt = 0, unknown_cnt = 0;
         build_grid(g.point_buf, n, grid_w, grid_h,
                    g.cell_size_m, g.x_range_m, g.y_range_m,
+                   have_plane ? &plane : NULL,
                    &free_cnt, &occ_cnt, &unknown_cnt);
 
         /* 3. 走廊提取 */
@@ -457,6 +565,7 @@ static int traversability_init(MessageBus* bus, Transport* transport,
                                 const char* params_json) {
     (void)bus;
     memset(&g, 0, sizeof(g));
+    srand((unsigned)time(NULL));   /* RANSAC 随机采样种子 */
     g.transport = transport;
     g.discovery = discovery;
     g.scheduler = scheduler;
@@ -478,6 +587,13 @@ static int traversability_init(MessageBus* bus, Transport* transport,
     g.v_fov_deg            = 50.0;
     g.min_corridor_width_m = 0.6;
     g.publish_hz           = 10;
+    g.ransac_iters         = 50;
+    g.ransac_inlier_m      = 0.05;
+    g.grid_decay           = 0.9;
+    g.occ_log_step         = 8;
+    g.free_log_step        = 4;
+    g.occ_log_thr          = 6;
+    g.free_log_thr         = -6;
     snprintf(g.output_topic, sizeof(g.output_topic), "perception/traversability");
 
     if (params_json) {
@@ -517,6 +633,20 @@ static int traversability_init(MessageBus* bus, Transport* transport,
                 strncpy(g.output_topic, j->valuestring, sizeof(g.output_topic) - 1);
                 g.output_topic[sizeof(g.output_topic) - 1] = '\0';
             }
+            j = cJSON_GetObjectItemCaseSensitive(p, "ransac_iters");
+            if (cJSON_IsNumber(j)) g.ransac_iters = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "ransac_inlier_m");
+            if (cJSON_IsNumber(j)) g.ransac_inlier_m = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "grid_decay");
+            if (cJSON_IsNumber(j)) g.grid_decay = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(p, "occ_log_step");
+            if (cJSON_IsNumber(j)) g.occ_log_step = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "free_log_step");
+            if (cJSON_IsNumber(j)) g.free_log_step = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "occ_log_thr");
+            if (cJSON_IsNumber(j)) g.occ_log_thr = j->valueint;
+            j = cJSON_GetObjectItemCaseSensitive(p, "free_log_thr");
+            if (cJSON_IsNumber(j)) g.free_log_thr = j->valueint;
             cJSON_Delete(p);
         }
     }
