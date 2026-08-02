@@ -305,9 +305,11 @@ export function createRoadView(scene) {
     })), shoulderW * 0.5, Y_SHOULDER);
 
     const whiteGeos = [];
-    // 匝道两侧白虚线边线
-    for (const g of dashedLine(spine, hw - EDGE_INSET)) whiteGeos.push(g);
-    for (const g of dashedLine(spine, -(hw - EDGE_INSET))) whiteGeos.push(g);
+    // 匝道两侧路缘边线（白实线，与静态 invariant「外沿=实线」一致）
+    const rampEdgeL = solidLine(spine, hw - EDGE_INSET);
+    if (rampEdgeL) whiteGeos.push(rampEdgeL);
+    const rampEdgeR = solidLine(spine, -(hw - EDGE_INSET));
+    if (rampEdgeR) whiteGeos.push(rampEdgeR);
 
     // 多车道匝道内部车道分隔（白虚线）
     if (rampLanes > 1) {
@@ -389,9 +391,13 @@ export function createRoadView(scene) {
     const whiteGeos = [];
     const yellowGeos = [];
 
-    // 边线（白虚线）：路缘内缩
-    for (const g of dashedLine(spine, hw - EDGE_INSET)) whiteGeos.push(g);
-    for (const g of dashedLine(spine, -(hw - EDGE_INSET))) whiteGeos.push(g);
+    // 路缘边线（白实线）：路缘内缩。外沿=实线（真路约定 + 静态 invariant
+    // 「外沿=实线」一致）；虚线只用于同向车道分隔。旧版把路缘画成虚线，
+    // 双向四车道上视觉上像"整条路都是虚线"。
+    const edgeL = solidLine(spine, hw - EDGE_INSET);
+    if (edgeL) whiteGeos.push(edgeL);
+    const edgeR = solidLine(spine, -(hw - EDGE_INSET));
+    if (edgeR) whiteGeos.push(edgeR);
 
     // 车道分隔
     for (let k = 1; k < lanes; k++) {
