@@ -14,9 +14,14 @@
  * 本视图直接使用 THREE 坐标放置物体。
  *
  * build(roadNetwork) 在路网变化时重建（静态布局，无 update 循环）。
+ *
+ * 后端单一事实源：build(roadNetwork, zones) 优先消费 scene.construction_zones
+ * （flowsim scenario 定义，经 monitor 透传）渲染施工区几何；zones 为空时回退到
+ * "道路末端 30m"自算逻辑。施工段占世界坐标 [x-length/2, x+length/2]。
  */
 
 import { LANE_WIDTH, DEFAULT_LANES } from '../core/Constants.js';
+import { makeSignTexture, makeStripeTexture } from '../utils/CanvasTextureFactory.js';
 
 // ── 施工区域参数 ──
 const ROAD_END_BUFFER = 30;       // 道路末端最后30m为施工区域
@@ -37,73 +42,6 @@ const COLOR_CONE_ORANGE = 0xff5500;
 const COLOR_CONE_BAND = 0xffffff;
 const COLOR_POST = 0x888888;
 
-// ── 缓存纹理 ──
-let _barrierTex = null;
-let _signNoEntryTex = null;       // 禁止通行
-let _signConstructionTex = null;  // 前方施工
-
-/** 创建围栏橙白条纹纹理 */
-function _makeBarrierTexture() {
-  if (_barrierTex) return _barrierTex;
-  const c = document.createElement('canvas');
-  c.width = 64;
-  c.height = 256;
-  const ctx = c.getContext('2d');
-  const h = 32;
-  for (let i = 0; i < 8; i++) {
-    ctx.fillStyle = i % 2 === 0 ? '#ff6600' : '#f0f0f0';
-    ctx.fillRect(0, i * h, c.width, h);
-  }
-  // 反光渐变覆盖
-  const g = ctx.createLinearGradient(0, 0, c.width, 0);
-  g.addColorStop(0, 'rgba(255,255,255,0.15)');
-  g.addColorStop(0.5, 'rgba(255,255,255,0.0)');
-  g.addColorStop(1, 'rgba(255,255,255,0.25)');
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, c.width, c.height);
-  _barrierTex = new THREE.CanvasTexture(c);
-  _barrierTex.wrapS = _barrierTex.wrapT = THREE.RepeatWrapping;
-  return _barrierTex;
-}
-
-/** 创建指示牌文字纹理 */
-function _makeSignTexture(text, bg, fg, border) {
-  const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 192;
-  const ctx = c.getContext('2d');
-
-  // 背景色
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, c.width, c.height);
-
-  // 边框
-  ctx.strokeStyle = border;
-  ctx.lineWidth = 5;
-  ctx.strokeRect(3, 3, c.width - 6, c.height - 6);
-
-  // 文字
-  ctx.fillStyle = fg;
-  ctx.font = `bold 54px 'Microsoft YaHei','SimHei','Noto Sans SC','PingFang SC',sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, c.width / 2, c.height / 2);
-
-  return new THREE.CanvasTexture(c);
-}
-
-function _getSignTexture(type) {
-  if (type === 'no_entry') {
-    if (!_signNoEntryTex) _signNoEntryTex = _makeSignTexture('禁止通行', '#cc0000', '#ffffff', '#ffffff');
-    return _signNoEntryTex;
-  }
-  if (type === 'construction') {
-    if (!_signConstructionTex) _signConstructionTex = _makeSignTexture('前方施工', '#ffcc00', '#000000', '#000000');
-    return _signConstructionTex;
-  }
-  return null;
-}
-
 export function createConstructionView(scene) {
   const group = new THREE.Group();
   group.name = 'constructionZone';
@@ -115,20 +53,17 @@ export function createConstructionView(scene) {
       group.remove(c);
       if (c.geometry) c.geometry.dispose();
       if (c.material) {
-        const tex = c.material.map;
-        if (tex && tex !== _barrierTex && tex !== _signNoEntryTex && tex !== _signConstructionTex) {
-          tex.dispose();
-        }
+        // 纹理由 CanvasTextureFactory 缓存，不在这里 dispose
         c.material.dispose();
       }
     }
   }
 
-  function build(roadNetwork) {
+  function build(roadNetwork, zones) {
     clear();
     if (!roadNetwork || !roadNetwork.edges || roadNetwork.edges.length === 0) return;
 
-    // 找最长 edge 确定道路终点
+    // 找最长 edge 确定道路终点 + 路宽
     let maxLen = 0, edge = null;
     for (const e of roadNetwork.edges) {
       const len = e.length || e.length_m || 0;
@@ -138,13 +73,28 @@ export function createConstructionView(scene) {
 
     const lanes = edge.lanes || DEFAULT_LANES;
     const laneWidth = edge.lane_width || LANE_WIDTH;
-    const halfW = (lanes * laneWidth) / 2;
+    const roadHalfW = (lanes * laneWidth) / 2;
 
     // 道路终点在 ENU (maxLen, 0, 0) → THREE (maxLen, 0, 0)
     const roadEndX = maxLen;
 
-    // 施工区域从 roadEndX - ROAD_END_BUFFER 开始
-    const constructionStartX = roadEndX - ROAD_END_BUFFER;
+    // 后端单一事实源：优先用 scene.construction_zones 渲染施工区几何。
+    // 施工段占世界坐标 [x-length/2, x+length/2]（ENU x 直接映射 THREE x）。
+    // 空时回退到"道路末端 30m"旧逻辑，保证无后端数据时仍可渲染。
+    if (Array.isArray(zones) && zones.length > 0) {
+      for (const z of zones) {
+        const zoneLen = (z.length > 0) ? z.length : ROAD_END_BUFFER;
+        const startX = z.x - zoneLen / 2;               // 施工区前缘（THREE x）
+        const halfW = (z.width > 0) ? z.width / 2 : roadHalfW;
+        _renderZone(startX, zoneLen, halfW);
+      }
+    } else {
+      _renderZone(roadEndX - ROAD_END_BUFFER, ROAD_END_BUFFER, roadHalfW);
+    }
+  }
+
+  // 渲染单个施工区：constructionStartX=前缘 THREE x，bufferLen=纵向长度，halfW=半路宽。
+  function _renderZone(constructionStartX, bufferLen, halfW) {
     const barrierX = constructionStartX - BARRIER_BUFFER;  // 围栏位置
     const signX = barrierX - 5.0;                           // 指示牌位置（围栏前5m）
 
@@ -205,7 +155,7 @@ export function createConstructionView(scene) {
     const bandMat = new THREE.MeshStandardMaterial({ color: COLOR_CONE_BAND, roughness: 0.2, metalness: 0.8 });  // exempt: 交通锥反光带，非车漆
     const bandGeo = new THREE.CylinderGeometry(CONE_RADIUS * 0.88, CONE_RADIUS * 0.82, 0.08, 12);
 
-    const coneCount = Math.floor(ROAD_END_BUFFER / CONE_SPACING);
+    const coneCount = Math.floor(bufferLen / CONE_SPACING);
     for (let i = 0; i < coneCount; i++) {
       const cx = constructionStartX + (i + 0.5) * CONE_SPACING;
       // 左右交错

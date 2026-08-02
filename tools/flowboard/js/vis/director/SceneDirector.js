@@ -163,7 +163,7 @@ export function createSceneDirector(scene) {
         );
 
         ViewRegistry.safeCall('road', 'build', rn);
-        ViewRegistry.safeCall('construction', 'build', rn);
+        ViewRegistry.safeCall('construction', 'build', rn, frame.construction_zones);
         ViewRegistry.safeCall('ground', 'build', 20000);
 
         if (isViaduct) {

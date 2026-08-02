@@ -815,6 +815,47 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
 
 /* ── 发布函数 ─────────────────────────────────────────────────── */
 
+/* 施工区域障碍物注入：把场景 construction_zones 前缘按车道宽铺成一排静态
+ * 障碍物写进 vehicle/state，供 perception 识别为 type="construction"（前方封路）。
+ * 位置 = 施工段前缘 front_x = center_x - length/2（ego 顺行 +x 从低 x 侧接近），
+ * 横向铺满施工宽度。这些障碍物不入实体池（不参与碰撞/NPC AI），仅作感知目标。
+ * 返回追加后的障碍物总数 n_obs。 */
+static int append_construction_obstacles(cJSON* vstate, int n_obs) {
+    if (!g.scenario) return n_obs;
+    const double lw = (g.lane_width > 0.5) ? g.lane_width : 3.5;
+    for (int z = 0; z < g.scenario->construction_zone_count; ++z) {
+        const ScenarioConstructionZone* cz = &g.scenario->construction_zones[z];
+        const double front_x = cz->x - cz->length * 0.5;
+        const double width = (cz->width > 0.0) ? cz->width : (lw * 4.0);
+        int lanes = (int)std::ceil(width / lw);
+        if (lanes < 1) lanes = 1;
+        const double y0 = cz->y - width * 0.5 + lw * 0.5;
+        for (int k = 0; k < lanes; ++k) {
+            if (n_obs >= 120) break;  /* 留余量给 128 上限 */
+            const double oy = y0 + (double)k * lw;
+            char key[24];
+            snprintf(key, sizeof(key), "oid%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, (double)(9000 + cz->id * 10 + k));
+            snprintf(key, sizeof(key), "ox%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, front_x);
+            snprintf(key, sizeof(key), "oy%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, oy);
+            snprintf(key, sizeof(key), "ov%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, 0.0);
+            snprintf(key, sizeof(key), "ovy%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, 0.0);
+            snprintf(key, sizeof(key), "ot%d", n_obs);
+            cJSON_AddStringToObject(vstate, key, "construction");
+            snprintf(key, sizeof(key), "ol%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, 2.0);   /* 围栏段纵向厚度 */
+            snprintf(key, sizeof(key), "ow%d", n_obs);
+            cJSON_AddNumberToObject(vstate, key, lw);     /* 单段宽 ≈ 车道宽 */
+            n_obs++;
+        }
+    }
+    return n_obs;
+}
+
 static void publish_vehicle_state(uint64_t sim_time_us) {
     flowsim::Entity& ego = g.pool[0];
 
@@ -881,6 +922,8 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
         cJSON_AddNumberToObject(vstate, key, e.width);
         n_obs++;
     }
+    /* 施工区域障碍物（前方封路）：追加到障碍物列表供感知识别 */
+    n_obs = append_construction_obstacles(vstate, n_obs);
     /* ── Mock NPC：场景无 actor 时注入两个前方慢车，供 behavior_planner 验证 ── */
     if (n_obs == 0) {
         /* 同车道（lane 2, y≈-1.75），前方 40m，时速 3m/s */
@@ -1157,6 +1200,28 @@ static void internal_cruise_control(flowsim::Entity& ego) {
               + y_err * IH_KP_LAT;
     if (ego.steer > 0.15) ego.steer = 0.15;
     if (ego.steer < -0.15) ego.steer = -0.15;
+}
+
+/* 返回 ego 当前 road 前方最近施工区前缘的 Frenet s（仅前进方向 lane_id<0 调用）；
+ * 无施工区/不在前方返回 -1。掉头点据此落在施工区之前（front - clearance）。 */
+static double forward_construction_front_s(const flowsim::Entity& ego) {
+    if (!g.scenario || g.scenario->construction_zone_count <= 0) return -1.0;
+    double best = -1.0;
+    for (int z = 0; z < g.scenario->construction_zone_count; ++z) {
+        const ScenarioConstructionZone* cz = &g.scenario->construction_zones[z];
+        const double fx = cz->x - cz->length * 0.5;  /* 前缘世界 x（顺行接近侧） */
+        double fs;
+        if (g.roads_loaded) {
+            flowsim::FrenetPos fp;
+            if (!g.roads.world_to_frenet(fx, cz->y, fp) || fp.road_id != ego.road_id)
+                continue;
+            fs = fp.s;
+        } else {
+            fs = fx;  /* 无路网：直道近似 front_x ≈ s */
+        }
+        if (fs > ego.s && (best < 0.0 || fs < best)) best = fs;
+    }
+    return best;
 }
 
 static void begin_three_point_uturn(flowsim::Entity& ego,
@@ -1544,6 +1609,24 @@ protected:
                  * lat_error → 回打 → heading 收回来，闭环自洽。 */
                 double dist = ego.speed * FLOWSIM_DT_SEC;
                 bool advanced = false;
+                /* 前进帧开始的「车头 − 道路切线」夹角 dh0（一次算好，advance 与
+                 * 横向共用）：
+                 *   沿道路推进 = dist·cos(dh0) —— 车沿车头方向的分量投影到路上。
+                 *                旧版 advance(满 dist) 让车沿路"斜滑"：车头偏角
+                 *                dh 大时运动方向 atan(sin dh) 滞后车头、掉头转不过
+                 *                去（py-sim 量化：dh=45° 斜走 9.7°，60° 斜走 19°）。
+                 *   横向偏移   = dist·sin(dh0) —— 车头偏角产生的横向移动。
+                 * 净位移 = dist·(cos·路切 + sin·法向) = 沿车头方向 dist（贴路约束），
+                 * 与 step_bicycle 的世界系积分一致，消除"斜着直行"。 */
+                double dh0 = 0.0;
+                {
+                    flowsim::WorldPos wp0;
+                    if (ego.road_pos.world(wp0)) {
+                        dh0 = ego.heading - wp0.h;
+                        while (dh0 >  M_PI) dh0 -= 2.0 * M_PI;
+                        while (dh0 < -M_PI) dh0 += 2.0 * M_PI;
+                    }
+                }
                 if (dist > 0.0) {
                     /* 物理掉头后：对向车道行驶时 esmini advance 方向（+s）
                      * 与车辆实际行驶方向相反。改用 world_to_frenet 从物理
@@ -1573,19 +1656,19 @@ protected:
                             advanced = ego.road_pos.advance(dist, M_PI);
                         }
                     } else {
-                        advanced = ego.road_pos.advance(dist, M_PI);
+                        /* 正常模式：沿车头方向推进量投影到道路 cos(dh0)。
+                         * dh0 偏过 90°（cos<0）时沿路推进钳 0，靠 sin(dh0) 横向
+                         * 继续转，不会像旧版那样沿路斜滑。 */
+                        double adv = dist * std::cos(dh0);
+                        if (adv < 0.0) adv = 0.0;
+                        advanced = ego.road_pos.advance(adv, M_PI);
                     }
                     if (advanced) {
                         flowsim::FrenetPos fp_cur;
                         if (ego.road_pos.frenet(fp_cur)) {
-                            flowsim::WorldPos wp;
-                            if (ego.road_pos.world(wp)) {
-                                double dh = ego.heading - wp.h;
-                                while (dh >  M_PI) dh -= 2.0 * M_PI;
-                                while (dh < -M_PI) dh += 2.0 * M_PI;
-                                double delta_lat = ego.speed * FLOWSIM_DT_SEC * std::sin(dh);
-                                ego.road_pos.set_offset(fp_cur.offset + delta_lat);
-                            }
+                            /* 横向偏移 = dist·sin(dh0)，与沿路推进 dist·cos(dh0)
+                             * 一起组成"沿车头方向"的净位移（见上方 dh0 注释）。 */
+                            ego.road_pos.set_offset(fp_cur.offset + dist * std::sin(dh0));
                         }
                         flowsim::WorldPos wp2;
                         if (ego.road_pos.world(wp2)) {
@@ -1615,15 +1698,18 @@ protected:
                 }
                 /* ── 物理掉头循环 ──────────────────────────────────────────
                  * 判据根据当前车道方向区分：
-                 *   前进车道（lane_id < 0）：s ≈ road_len 时掉头到对向车道
-                 *   对向车道（lane_id > 0）：s ≈ 0 时掉头回前进车道
+                 *   前进车道（lane_id < 0）：前方施工区前缘之前（无施工则路末 s≈road_len）
+                 *                            掉头到对向车道
+                 *   对向车道（lane_id > 0）：起点（s ≈ 0）掉头回前进车道
                  * 对向车道行驶时 esmini advance 方向与车辆行驶方向相反，
                  * 由上方 world_to_frenet 同步块处理。 */
                 {
-                    /* 触发提前量：从 20m/s 巡航重刹到掉头低速 ~3.5m/s 约需 36m，
-                     * 留 ~42m 提前量让刹车相位在路端前跑完，掉头相位在低速下就地
-                     * 完成（不会高速冲出路面几十米再瞬移拉回）。 */
-                    constexpr double END_MARGIN_M = 42.0;
+                    /* 刹车距离：从 20m/s 巡航重刹到掉头低速 ~3.5m/s 约需 36m；
+                     * CLEARANCE = 掉头点距施工前缘的余量（含围栏缓冲 + 车长 + 转弯弧）。
+                     * END_MARGIN 用于对向车道回程 / 无施工的路末 fallback。 */
+                    constexpr double UTURN_BRAKE_DIST_M = 36.0;
+                    constexpr double UTURN_CLEARANCE_M  = 15.0;
+                    constexpr double END_MARGIN_M       = 42.0;
                     double road_len = -1.0;
                     bool road_is_terminal = true;
                     if (g.route.ok() && g.route.count() > 1) {
@@ -1643,22 +1729,34 @@ protected:
                             break;
                         }
                     }
-                    bool at_road_end;
+                    bool at_trigger = false;
+                    double turn_s = 0.0;
+                    bool by_construction = false;
                     if (ego.lane_id < 0) {
-                        /* 前进车道：路尾（s ≈ road_len）掉头到对向车道 */
-                        at_road_end = (road_len > 0.0 && ego.s >= road_len - END_MARGIN_M);
+                        /* 前进车道：优先在施工区前缘之前掉头（识别到前方封路），
+                         * 无施工区则退化为路末掉头。 */
+                        double cz_front = forward_construction_front_s(ego);
+                        if (cz_front > 0.0) {
+                            turn_s = cz_front - UTURN_CLEARANCE_M;
+                            if (turn_s < 1.0) turn_s = 1.0;
+                            by_construction = true;
+                        } else if (road_len > 0.0) {
+                            turn_s = road_len;
+                        }
+                        at_trigger = (turn_s > 0.0 && ego.s >= turn_s - UTURN_BRAKE_DIST_M);
                     } else {
                         /* 对向车道：起点（s ≈ 0）掉头回到前进车道 */
-                        at_road_end = (road_len > 0.0 && ego.s <= END_MARGIN_M);
+                        turn_s = 0.0;
+                        at_trigger = (road_len > 0.0 && ego.s <= END_MARGIN_M);
                     }
-                    if (at_road_end && road_is_terminal && !g.uturn_maneuver_active) {
-                        /* 路端触发窄路三把方向：先物理转向/倒车，再落到对向车道。 */
+                    if (at_trigger && road_is_terminal && !g.uturn_maneuver_active) {
+                        /* 触发窄路三把方向：先物理转向/倒车，再落到对向车道。 */
                         int opposite_lane = -ego.lane_id;  /* -1→1, 1→-1 */
-                        double turn_s = (ego.lane_id < 0 && road_len > 0.0) ? road_len : 0.0;
                         begin_three_point_uturn(ego, ego.road_id, opposite_lane, turn_s);
                         LOG_WARN("flowsim",
-                                 "ego start three-point U-turn: lane %d -> %d at s=%.1f",
-                                 ego.lane_id, opposite_lane, turn_s);
+                                 "ego start three-point U-turn: lane %d -> %d at s=%.1f (%s)",
+                                 ego.lane_id, opposite_lane, turn_s,
+                                 by_construction ? "front of construction" : "road end");
                     }
                 }
             }
@@ -2036,6 +2134,20 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
      * 用于前端识别场景类型并选择对应的渲染模式。 */
     if (g.scenario->road.type[0]) {
         g.scene_pub_cfg.road_type = g.scenario->road.type;
+    }
+
+    /* 施工区：把 scenario 定义拷入 scene_pub_cfg，每帧透传给前端渲染
+     * （后端单一事实源，取代前端"道路末端 30m"自算逻辑）。 */
+    g.scene_pub_cfg.construction_zones.clear();
+    for (int z = 0; z < g.scenario->construction_zone_count; ++z) {
+        const ScenarioConstructionZone* cz = &g.scenario->construction_zones[z];
+        flowsim::ScenePubConstructionZone pz;
+        pz.id     = cz->id;
+        pz.x      = cz->x;
+        pz.y      = cz->y;
+        pz.length = cz->length;
+        pz.width  = cz->width;
+        g.scene_pub_cfg.construction_zones.push_back(pz);
     }
 
     /* 构造协程任务（托管模式） */

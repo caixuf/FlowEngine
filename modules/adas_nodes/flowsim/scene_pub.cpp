@@ -400,6 +400,22 @@ char* build_scene_frame_json(const EntityPool& pool,
     cJSON* entities = build_entities_json(pool);
     cJSON_AddItemToObject(root, "entities", entities);
 
+    /* 施工区（后端单一事实源）：把 scenario 定义的施工区几何透传给前端。
+     * 前端 ConstructionView 优先消费此数组渲染，取代"道路末端自算 30m"。
+     * 世界坐标：施工段占 [x-length/2, x+length/2]，横向以 y 为中心宽 width。 */
+    if (!cfg.construction_zones.empty()) {
+        cJSON* czs = cJSON_AddArrayToObject(root, "construction_zones");
+        for (const auto& cz : cfg.construction_zones) {
+            cJSON* z = cJSON_CreateObject();
+            cJSON_AddNumberToObject(z, "id", (double)cz.id);
+            cJSON_AddNumberToObject(z, "x", cz.x);
+            cJSON_AddNumberToObject(z, "y", cz.y);
+            cJSON_AddNumberToObject(z, "length", cz.length);
+            cJSON_AddNumberToObject(z, "width", cz.width);
+            cJSON_AddItemToArray(czs, z);
+        }
+    }
+
     char* s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return s;

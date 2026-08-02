@@ -179,6 +179,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
                     const char* t = jt->valuestring;
                     if (strcmp(t, "pedestrian") == 0)   g.obs_type[i] = OBJ_TYPE_PEDESTRIAN;
                     else if (strcmp(t, "cyclist") == 0) g.obs_type[i] = OBJ_TYPE_CYCLIST;
+                    else if (strcmp(t, "construction") == 0) g.obs_type[i] = OBJ_TYPE_CONSTRUCTION;
                 }
                 if (cJSON_IsNumber(jl)) g.obs_length[i] = jl->valuedouble;
                 if (cJSON_IsNumber(jw)) g.obs_width[i]  = jw->valuedouble;

@@ -81,6 +81,7 @@ extern "C" {
 #define SCENARIO_MAX_TRAFFIC_LIGHTS 16   /* 10km 直路 1km 间距 */
 #define SCENARIO_MAX_ETC_GATES      4
 #define SCENARIO_MAX_STOP_LINES     16   /* 与红绿灯对应 */
+#define SCENARIO_MAX_CONSTRUCTION_ZONES 4 /* 施工区域（道路封闭段） */
 #define SCENARIO_MAX_SCRIPTS        8   /* 顶层 scenarios[] 工况脚本数组上限 */
 #define SCENARIO_MAX_OVERRIDES      8   /* 单个工况脚本的 actor_overrides 上限 */
 #define SCENARIO_SCRIPT_LABEL_LEN   48
@@ -191,6 +192,27 @@ typedef struct {
     double y;               /**< 横向坐标（m，默认 0） */
     double heading;         /**< 停止线法向（rad，默认 0 = 垂直于 +X；未配置时 flowsim 可按道路切线估算） */
 } ScenarioStopLine;
+
+/* ── 施工区域（道路封闭段，FlowSim 新增） ─────────────────────
+ *
+ * 前方施工封路：在道路某段（默认道路末端）设置围栏 + 交通锥 + 指示牌，
+ * 封闭 ego 当前行驶方向的车道。ego 感知到施工区域后应在其前方掉头折返。
+ *
+ * 是「施工区域识别 + 前方掉头」能力的权威数据源（单一事实源）：
+ *   - flowsim 据此在 vehicle/state 发布 type="construction" 障碍物（感知识别）
+ *   - flowsim U-turn 触发点落在施工区前缘之前（front - clearance）
+ *   - 前端 ConstructionView 优先按此渲染（缺省回退到路末启发式）
+ *
+ * 几何约定：施工段占据 [x-length/2, x+length/2]，横向以 y 为中心、宽 width。
+ * ego 顺行（+x）从低 x 侧接近，前缘 = x - length/2。
+ */
+typedef struct {
+    int    id;              /**< 施工区 ID（可视化/识别标识） */
+    double x;               /**< 施工段中心纵向位置（ego 前向坐标, m） */
+    double y;               /**< 施工段横向中心（m，默认 0 = 跨路面中心） */
+    double length;          /**< 施工段纵向长度（m，默认 30） */
+    double width;           /**< 施工段横向宽度（m，默认跨全路面） */
+} ScenarioConstructionZone;
 
 /* ── 光照模式（FlowSim v2 中凯路场景新增） ─────────────────── */
 
@@ -315,6 +337,8 @@ typedef struct {
     int               etc_gate_count;
     ScenarioStopLine  stop_lines[SCENARIO_MAX_STOP_LINES]; /**< 停止线（FlowSim v2 新增） */
     int               stop_line_count;
+    ScenarioConstructionZone construction_zones[SCENARIO_MAX_CONSTRUCTION_ZONES]; /**< 施工区域（前方封路，可选） */
+    int               construction_zone_count;
     /* ── 中凯路场景新增（Task 3 + Task 4）── */
     ScenarioLighting  lighting;        /**< 全局光照模式（day/night/dusk，默认 day） */
     ScenarioScript    scripts[SCENARIO_MAX_SCRIPTS]; /**< 顶层 scenarios[] 工况脚本数组 */

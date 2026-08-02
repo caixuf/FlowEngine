@@ -26,6 +26,7 @@ enum ObstacleType {
     OBJ_TYPE_VEHICLE   = 1
     OBJ_TYPE_PEDESTRIAN = 2
     OBJ_TYPE_CYCLIST   = 3
+    OBJ_TYPE_CONSTRUCTION = 4
 }
 
 enum Gear {

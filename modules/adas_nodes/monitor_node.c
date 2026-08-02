@@ -106,6 +106,7 @@ static struct {
                                           * → export_dashboard_json 静默丢弃 scene.entities，
                                           *   前端 3D 场景只剩 ego。扩到 64KB 足够 30+ 实体。 */
     char   scene_ego_json[4096];        /* ego 实体 JSON（含 lights/brake/vx/vy，~1.5KB 实测） */
+    char   scene_construction_json[1024]; /* construction_zones（施工区几何，后端单一事实源，透传给前端） */
 
 #define MAX_SAMPLES 200  /* samples 环形缓冲长度：20Hz × 200 = 10s 窗口 */
     /* ── samples 环形缓冲：最近 ~10s 的 ego 快照 ── */
@@ -370,6 +371,25 @@ static void on_scene_frame(const Message* msg, void* user_data) {
             g.scene_road_network_json[len] = '\0';
             pthread_mutex_unlock(&g.scene_frame_mutex);
             free(rn_str);
+        }
+    }
+
+    /* 缓存 construction_zones（施工区几何，后端单一事实源）。
+     * 与 road_network 同样处理：锁外生成字符串，锁内 memcpy。前端 ConstructionView
+     * 优先消费此数组渲染施工区，取代旧的"道路末端 30m"自算逻辑。 */
+    cJSON* czs = cJSON_GetObjectItem(root, "construction_zones");
+    if (czs && cJSON_IsArray(czs)) {
+        char* cz_str = cJSON_PrintUnformatted(czs);
+        if (cz_str) {
+            size_t len = strlen(cz_str);
+            if (len >= sizeof(g.scene_construction_json)) {
+                len = sizeof(g.scene_construction_json) - 1;
+            }
+            pthread_mutex_lock(&g.scene_frame_mutex);
+            memcpy(g.scene_construction_json, cz_str, len);
+            g.scene_construction_json[len] = '\0';
+            pthread_mutex_unlock(&g.scene_frame_mutex);
+            free(cz_str);
         }
     }
 
@@ -916,6 +936,24 @@ static void export_dashboard_json(void) {
                          rn_snap_len, rn_snap);
                 rn_parse_warn++;
             }
+        }
+    }
+
+    /* 施工区（后端单一事实源）：从 scene/frame 缓存透传给前端。
+     * 前端 ConstructionView 优先消费 scene.construction_zones 渲染施工区几何，
+     * 空时回退到"道路末端 30m"旧逻辑。 */
+    if (g.has_scene_frame && g.scene_construction_json[0] != '\0') {
+        char cz_snap[sizeof(g.scene_construction_json)];
+        size_t cz_snap_len;
+        pthread_mutex_lock(&g.scene_frame_mutex);
+        cz_snap_len = strlen(g.scene_construction_json);
+        if (cz_snap_len >= sizeof(cz_snap)) cz_snap_len = sizeof(cz_snap) - 1;
+        memcpy(cz_snap, g.scene_construction_json, cz_snap_len);
+        cz_snap[cz_snap_len] = '\0';
+        pthread_mutex_unlock(&g.scene_frame_mutex);
+        cJSON* czs = cJSON_Parse(cz_snap);
+        if (czs) {
+            cJSON_AddItemToObject(scene, "construction_zones", czs);
         }
     }
 

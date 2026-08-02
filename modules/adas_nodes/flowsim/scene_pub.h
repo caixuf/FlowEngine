@@ -42,11 +42,27 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 /* 前向声明：transport.h 里的 Transport 结构 */
 struct Transport;
 
 namespace flowsim {
+
+/**
+ * 施工区几何（scene/frame 透传给前端渲染）。
+ * 与 scenario_loader 的 ScenarioConstructionZone 一致：center x + length + width。
+ * 施工段占据世界坐标 [x-length/2, x+length/2]，横向以 y 为中心宽 width。
+ * 前端 ConstructionView 据此渲染围栏/锥桶，取代"从道路末端自算 30m"的旧逻辑，
+ * 实现后端单一事实源。
+ */
+struct ScenePubConstructionZone {
+    int    id{0};
+    double x{0};       /* 中心 x（世界坐标，m） */
+    double y{0};       /* 中心 y（横向，m） */
+    double length{0};  /* 纵向长度（m） */
+    double width{0};   /* 横向宽度（m），0=跨全路面 */
+};
 
 /**
  * scene/frame 发布配置。
@@ -76,6 +92,12 @@ struct ScenePubConfig {
      * 从 road_network.edges[0].type 提取（如 viaduct_highway/urban/ramp_curve），
      * 用于前端识别场景类型并选择对应的渲染模式。空字符串表示旧格式。 */
     std::string road_type;
+
+    /* ── 施工区（后端单一事实源） ──
+     * 来源：scenario_loader 解析的 construction_zones，flowsim_node 在 init 阶段
+     * 拷入。每帧序列化进 scene/frame，经 monitor 透传给前端 ConstructionView 渲染。
+     * 空 → 前端回退到"道路末端 30m"旧逻辑。 */
+    std::vector<ScenePubConstructionZone> construction_zones;
 
     /* ── 性能优化：road_network JSON 缓存 ──
      * 道路网络在仿真过程中不变（仅 init 阶段加载 xodr），但 build_road_network_json

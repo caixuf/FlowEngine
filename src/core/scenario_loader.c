@@ -355,6 +355,34 @@ ScenarioConfig* scenario_load(const char* path) {
         }
     }
 
+    /* construction_zones（可选，FlowSim 新增）：前方施工封路段。
+     * 缺省 = 无施工区，与既有场景完全兼容。见 ScenarioConstructionZone。 */
+    cJSON* jcz = cJSON_GetObjectItemCaseSensitive(root, "construction_zones");
+    if (cJSON_IsArray(jcz)) {
+        int n = cJSON_GetArraySize(jcz);
+        if (n > SCENARIO_MAX_CONSTRUCTION_ZONES) n = SCENARIO_MAX_CONSTRUCTION_ZONES;
+        sc->construction_zone_count = n;
+        for (int i = 0; i < n; i++) {
+            cJSON* jz = cJSON_GetArrayItem(jcz, i);
+            if (!cJSON_IsObject(jz)) continue;
+            ScenarioConstructionZone* cz = &sc->construction_zones[i];
+            cJSON* j;
+            j = cJSON_GetObjectItemCaseSensitive(jz, "id");
+            cz->id = cJSON_IsNumber(j) ? (int)j->valuedouble : i;
+            j = cJSON_GetObjectItemCaseSensitive(jz, "x");
+            if (cJSON_IsNumber(j)) cz->x = j->valuedouble;
+            j = cJSON_GetObjectItemCaseSensitive(jz, "y");
+            if (cJSON_IsNumber(j)) cz->y = j->valuedouble;
+            else cz->y = 0.0;  /* 默认跨路面中心 */
+            j = cJSON_GetObjectItemCaseSensitive(jz, "length");
+            if (cJSON_IsNumber(j)) cz->length = j->valuedouble;
+            else cz->length = 30.0;  /* 默认封 30m */
+            j = cJSON_GetObjectItemCaseSensitive(jz, "width");
+            if (cJSON_IsNumber(j)) cz->width = j->valuedouble;
+            else cz->width = 0.0;  /* 0 = flowsim 按当前路面宽度跨全路 */
+        }
+    }
+
     /* lighting（可选，Task 4）：场景全局光照模式。
      * 缺省 = SCENARIO_LIGHT_DAY（与既有场景完全向后兼容）。
      * 字符串映射："day"→DAY, "night"→NIGHT, "dusk"→DUSK。 */
@@ -498,9 +526,10 @@ ScenarioConfig* scenario_load(const char* path) {
     }
 
     cJSON_Delete(root);
-    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, lighting=%d, %d scripts, seed=%u)",
+    LOG_INFO("scenario", "loaded '%s' (%d actors, %d route steps, %d traffic_lights, %d etc_gates, %d stop_lines, %d construction_zones, lighting=%d, %d scripts, seed=%u)",
              sc->name, sc->actor_count, sc->route_count, sc->traffic_light_count,
-             sc->etc_gate_count, sc->stop_line_count, (int)sc->lighting, sc->script_count,
+             sc->etc_gate_count, sc->stop_line_count, sc->construction_zone_count,
+             (int)sc->lighting, sc->script_count,
              sc->random_seed);
     return sc;
 }
