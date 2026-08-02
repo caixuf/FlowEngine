@@ -82,17 +82,27 @@ void step_bicycle(Entity& e, double dt, double throttle, double brake, double st
 
     update_steer(e, steer, dt);
 
-    // ── 运动学 yaw_rate ──
+    // ── 运动学 yaw_rate（后轴参考点）──
     e.yaw_rate = (e.speed / e.wheelbase) * std::tan(e.steer);
     e.heading += e.yaw_rate * dt;
     normalize_heading(e);
 
-    e.x += e.speed * dt * std::cos(e.heading);
-    e.y += e.speed * dt * std::sin(e.heading);
+    // ── 车辆中心为参考点（非后轴）──
+    // 标准自行车模型的后轴速度 = v·cos(θ)/v·sin(θ)，后轴绕弯心转动。
+    // 车辆中心 = 后轴 + half_wb·forward，其速度需叠加绕后轴转动的切向分量。
+    // 若直接以后轴速度更新中心位置，车体会绕后轴转动导致车尾"平移"（视觉上
+    // 车尾横滑），与真实车辆后轴不可动不符。
+    // 推导：dx_c/dt = v·cos(θ) - half_wb·sin(θ)·yaw_rate
+    //       dy_c/dt = v·sin(θ) + half_wb·cos(θ)·yaw_rate
+    double half_wb = e.wheelbase * 0.5;
+    double vx_rear = e.speed * std::cos(e.heading);
+    double vy_rear = e.speed * std::sin(e.heading);
+    e.x += vx_rear * dt - half_wb * std::sin(e.heading) * e.yaw_rate * dt;
+    e.y += vy_rear * dt + half_wb * std::cos(e.heading) * e.yaw_rate * dt;
 
-    // 世界系速度（供 perception/sensor 使用）
-    e.vx = e.speed * std::cos(e.heading);
-    e.vy = e.speed * std::sin(e.heading);
+    // 世界系速度（车辆中心，供 perception/sensor 使用）
+    e.vx = vx_rear - half_wb * std::sin(e.heading) * e.yaw_rate;
+    e.vy = vy_rear + half_wb * std::cos(e.heading) * e.yaw_rate;
 }
 
 void step_pedestrian(Entity& e, double dt) {

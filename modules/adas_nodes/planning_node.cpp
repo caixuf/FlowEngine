@@ -475,6 +475,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
     const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
     const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
+    const double half_wb = wheelbase * 0.5;  /* 半轴距：车辆中心偏移后轴距离 */
     /* 对向车道中心 y：前进车道在 y<0 侧（lane_id<0），对向车道在 y>0 侧 */
     const double opp_lane_center_y = g.lane_width * 0.5;  /* 对向最左车道中心 */
     const double min_uturn_space = 12.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
@@ -596,8 +597,9 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         while (n < max_points) {
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
-            x += v * cos(h) * dt;
-            y += v * sin(h) * dt;
+            /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
+            x += v * cos(h) * dt - half_wb * sin(h) * yaw_rate * dt;
+            y += v * sin(h) * dt + half_wb * cos(h) * yaw_rate * dt;
 
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
@@ -634,8 +636,9 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         while (n < max_points) {
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
-            x += v * cos(h) * dt;
-            y += v * sin(h) * dt;
+            /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
+            x += v * cos(h) * dt - half_wb * sin(h) * yaw_rate * dt;
+            y += v * sin(h) * dt + half_wb * cos(h) * yaw_rate * dt;
 
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
@@ -669,8 +672,9 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         while (n < max_points) {
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
-            x += v * cos(h) * dt;
-            y += v * sin(h) * dt;
+            /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
+            x += v * cos(h) * dt - half_wb * sin(h) * yaw_rate * dt;
+            y += v * sin(h) * dt + half_wb * cos(h) * yaw_rate * dt;
 
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
