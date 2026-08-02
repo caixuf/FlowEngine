@@ -29,9 +29,11 @@ const LINE_YELLOW = 0xffd700;
 const RAMP_COLOR = 0x353535;    // 匝道路面比主路略浅
 
 const LINE_W = 0.15;      // 车道线宽度 (m)
+const EDGE_LINE_W = 0.20; // 路缘边线宽度 (m)，比车道线略宽以区分路边界
 const EDGE_INSET = 0.25;  // 边线相对路缘内缩 (m)
 const Y_ROAD = 0.10;      // 路面高度
 const Y_MARK = 0.13;      // 车道线高度（略高于路面防 z-fight）
+const Y_EDGE = 0.14;      // 路缘边线高度，略高于车道线确保远距离可见
 const Y_SHOULDER = 0.08;  // 路肩高度（略低于路面）
 const SHOULDER_W = 0.6;   // 路肩宽度 (m)
 const DASH = 3.0;         // 虚线段长 (m)
@@ -221,6 +223,11 @@ export function createRoadView(scene) {
     return ribbonGeo(offsetSpine(spine, d), LINE_W / 2, Y_MARK);
   }
 
+  /** 路缘边线（实线，比车道线略宽略高，远距离可见） */
+  function edgeLine(spine, d) {
+    return ribbonGeo(offsetSpine(spine, d), EDGE_LINE_W / 2, Y_EDGE);
+  }
+
   /** 虚线：沿偏移中心线按弧长 march，每 (DASH+GAP) 铺一段 */
   function dashedLine(spine, d) {
     const centers = offsetSpine(spine, d);
@@ -306,9 +313,9 @@ export function createRoadView(scene) {
 
     const whiteGeos = [];
     // 匝道两侧路缘边线（白实线，与静态 invariant「外沿=实线」一致）
-    const rampEdgeL = solidLine(spine, hw - EDGE_INSET);
+    const rampEdgeL = edgeLine(spine, hw - EDGE_INSET);
     if (rampEdgeL) whiteGeos.push(rampEdgeL);
-    const rampEdgeR = solidLine(spine, -(hw - EDGE_INSET));
+    const rampEdgeR = edgeLine(spine, -(hw - EDGE_INSET));
     if (rampEdgeR) whiteGeos.push(rampEdgeR);
 
     // 多车道匝道内部车道分隔（白虚线）
@@ -392,11 +399,11 @@ export function createRoadView(scene) {
     const yellowGeos = [];
 
     // 路缘边线（白实线）：路缘内缩。外沿=实线（真路约定 + 静态 invariant
-    // 「外沿=实线」一致）；虚线只用于同向车道分隔。旧版把路缘画成虚线，
-    // 双向四车道上视觉上像"整条路都是虚线"。
-    const edgeL = solidLine(spine, hw - EDGE_INSET);
+    // 「外沿=实线」一致）；虚线只用于同向车道分隔。边线比车道线宽（0.20m vs
+    // 0.15m）且略高（0.14m vs 0.13m），远距离可见，与车道分隔虚线视觉区分明显。
+    const edgeL = edgeLine(spine, hw - EDGE_INSET);
     if (edgeL) whiteGeos.push(edgeL);
-    const edgeR = solidLine(spine, -(hw - EDGE_INSET));
+    const edgeR = edgeLine(spine, -(hw - EDGE_INSET));
     if (edgeR) whiteGeos.push(edgeR);
 
     // 车道分隔

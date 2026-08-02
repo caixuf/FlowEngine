@@ -163,7 +163,7 @@ struct FlowSimContext {
     int                    uturn_turn_sign{1}; /* +1 左打轮起步，-1 右打轮起步 */
     double                 uturn_start_heading{0.0};  /* 掉头起始航向 */
     double                 uturn_target_heading{0.0}; /* 掉头目标航向 = 起始 + π */
-    /* 掉头落位平滑：三把方向物理相位后不再瞬移（relocate 后一帧硬覆盖 x/y），
+    /* 掉头落位平滑：单弧掉头物理相位后不再瞬移（relocate 后一帧硬覆盖 x/y），
      * 而是把「当前物理位姿 → 目标车道位姿」的残差在 UTURN_BLEND_S 内线性插值，
      * 消除用户可见的"瞬移"跳变。blend_* 存插值起止。 */
     double                 uturn_blend_x0{0.0}, uturn_blend_y0{0.0}, uturn_blend_h0{0.0};
@@ -1224,10 +1224,10 @@ static double forward_construction_front_s(const flowsim::Entity& ego) {
     return best;
 }
 
-static void begin_three_point_uturn(flowsim::Entity& ego,
-                                    int target_road_id,
-                                    int target_lane,
-                                    double target_s) {
+static void begin_uturn(flowsim::Entity& ego,
+                        int target_road_id,
+                        int target_lane,
+                        double target_s) {
     g.uturn_maneuver_active = true;
     g.uturn_phase = 0;
     g.uturn_phase_time_s = 0.0;
@@ -1248,7 +1248,7 @@ static void begin_three_point_uturn(flowsim::Entity& ego,
     ego.steer_override = true;
 }
 
-static void apply_three_point_uturn_command(flowsim::Entity& ego) {
+static void apply_uturn_command(flowsim::Entity& ego) {
     const int sign = g.uturn_turn_sign;
     switch (g.uturn_phase) {
         case 0: /* 刹车相位：直线重刹到掉头低速（~3.5m/s），先把 20m/s 巡航速度
@@ -1257,34 +1257,17 @@ static void apply_three_point_uturn_command(flowsim::Entity& ego) {
             ego.brake = 1.0;
             ego.steer = 0.0;
             break;
-        case 1: /* 前进一把：满舵左打（CCW），车头从行进向转过 ~95°。 */
-            ego.throttle = 0.20;
-            ego.brake = 0.0;
-            ego.steer = 0.55 * sign;
-            break;
-        case 2: /* 倒车一把：先刹停再反打满舵倒车，车头继续同向转过（趋近目标航向）。
-                 * 关键——先刹停再倒：否则 0.35 反油门下车体先向前滑行数米冲出路沿。 */
-            if (ego.speed > 0.3) {
-                ego.throttle = 0.0;
-                ego.brake = 1.0;              /* 快速刹停 */
-                ego.steer = -0.55 * sign;     /* 停车中先把方向盘反打到位 */
-            } else {
-                ego.throttle = -0.40;         /* 倒车 */
-                ego.brake = 0.0;
-                ego.steer = -0.55 * sign;
-            }
-            break;
-        case 3: { /* 前进回正：比例跟踪目标航向，车头对准目标车道方向。 */
-            double eh = g.uturn_target_heading - ego.heading;
-            while (eh >  M_PI) eh -= 2.0 * M_PI;
-            while (eh < -M_PI) eh += 2.0 * M_PI;
+        case 1: /* 单弧掉头：满舵左打（CCW）持续前进，车头一气呵成扫过 ~180°。
+                 * 14m 宽双向 4 车道，转弯直径 2R≈7m 正好从内侧前进道(y=-1.75)
+                 * 扫到外侧对向道(y≈+5.25)——车体沿圆弧自然平移到对向车道，无需
+                 * 倒车、无落位瞬移。这消除了旧三把方向中"倒车相位把 y 拽回前进侧、
+                 * 终点落在错误一侧、再靠 blend 横向硬滑数米"的斜行根因（真车在宽路
+                 * 上本就是一把方向掉头）。steer=0.50 使弧稍宽、落点贴外侧车道中心，
+                 * blend 残差≈0 且落位在车道内（0.60 会偏紧落在两道之间骑线）。 */
             ego.throttle = 0.22;
             ego.brake = 0.0;
-            ego.steer = eh * 1.5;
-            if (ego.steer >  0.55) ego.steer =  0.55;
-            if (ego.steer < -0.55) ego.steer = -0.55;
+            ego.steer = 0.50 * sign;
             break;
-        }
         default: /* 落位平滑相位（4）：位姿由 blend 覆盖，控制置空滑行 */
             ego.throttle = 0.0;
             ego.brake = 0.0;
@@ -1446,15 +1429,20 @@ protected:
                 if (hz)           ego.lights.set_hazard(true);
             }
             if (g.uturn_maneuver_active) {
-                /* 窄路掉头状态机接管控制：前进一把 + 倒车一把 + 前进回正。 */
-                apply_three_point_uturn_command(ego);
+                /* 窄路掉头状态机接管控制：单弧连续满舵掉头（刹车→单弧→落位 blend）。 */
+                apply_uturn_command(ego);
             }
             /* EPS 转向执行器低通滤波：模拟电动助力转向惯性，
              * 滤掉 20Hz 控制环中 Stanley 控制器的小幅振荡。
              * 时间常数 ~0.1s（alpha=0.33 @ 20Hz 对应 -3dB@~3Hz）。
              * 变道 steer 较大时滤波影响小（alpha 较高让大 steer 快速通过），
-             * 巡航小幅修正时滤波效果显著。 */
-            {
+             * 巡航小幅修正时滤波效果显著。
+             * 掉头期间（uturn_maneuver_active）绕过此滤波器：掉头需要满舵
+             * 迅速到位（0.50 rad），两帧内从 0 拉到 0.50；EPS 低通 α=0.4
+             * 需 ~8 帧（0.4s）才到位，期间车已直行 1.4m，弧线严重变形
+             * → 看起来像"斜着直行"。physics.cpp 的 update_steer 提供执行器
+             * 层滤波（τ=0.15s），已是足够的物理约束。 */
+            if (!g.uturn_maneuver_active) {
                 static double prev_steer = 0.0;
                 const double eps_alpha = 0.4;  /* 滤波系数：0-1，越小滤波越强 */
                 double raw = ego.steer;
@@ -1472,13 +1460,8 @@ protected:
                 g.uturn_phase_time_s += FLOWSIM_DT_SEC;
                 constexpr double UTURN_TURN_SPEED = 3.5;   /* 掉头目标低速 (m/s) */
                 constexpr double UTURN_BLEND_S     = 0.6;   /* 落位平滑时长 (s) */
-                /* 已转过角度 rot、距目标航向剩余 eh（都归一化到 [-π,π]）。
-                 * 相位切换用航向反馈（而非固定时间），使掉头就地闭环、落位贴近
-                 * 目标，blend 残差最小。 */
-                double rot = ego.heading - g.uturn_start_heading;
-                while (rot >  M_PI) rot -= 2.0 * M_PI;
-                while (rot < -M_PI) rot += 2.0 * M_PI;
-                rot = std::fabs(rot);
+                /* 距目标航向剩余 eh（归一化到 [-π,π]）。相位切换用航向反馈
+                 * （而非固定时间），使单弧掉头就地闭环、落位贴近目标。 */
                 double eh = g.uturn_target_heading - ego.heading;
                 while (eh >  M_PI) eh -= 2.0 * M_PI;
                 while (eh < -M_PI) eh += 2.0 * M_PI;
@@ -1489,28 +1472,36 @@ protected:
                         g.uturn_phase = 1;
                         g.uturn_phase_time_s = 0.0;
                     }
-                } else if (g.uturn_phase == 1) {
-                    /* 前进转过 ~95°（1.65rad）即转倒车相位，避免继续前冲出路沿。 */
-                    if (rot >= 1.65 || g.uturn_phase_time_s >= 4.00) {
-                        g.uturn_phase = 2;
-                        g.uturn_phase_time_s = 0.0;
+                } else if (g.uturn_phase == 1 && (std::fabs(eh) <= 0.12 ||
+                                                  g.uturn_phase_time_s >= 8.00)) {
+                    /* 单弧掉头物理相位结束（车头已扫过 ~180°，对齐目标航向）：
+                     * 把 esmini road_pos 同步到 ego 当前物理位姿，进入 blend 相位。
+                     *
+                     * 落位用 ego 当前物理位置反投影的完整 Frenet（world_to_frenet：
+                     * road + lane + s + 车道内偏移），而非预定 turn_s / 镜像车道：
+                     *   - 用当前物理 s（非 turn_s）：消除纵向落差 → 无前后瞬移；
+                     *   - 用当前物理 lane（车弧线自然落进的对向车道，通常是外侧
+                     *     +5.25 车道）：车已物理位于对向车道，不必再横向硬拉；
+                     *   - 保留车道内真实横向偏移：blend 目标≈物理位姿，残差≈0，
+                     *     后续由 control + 对向车道 world_to_frenet 同步自然回中。
+                     * 这从根上消除了旧三把方向"倒车把车拽回前进侧、终点落错车道、
+                     * 再靠 blend 横向硬滑数米（~90° crab 斜行）"的瞬移/斜行。 */
+                    int    finalize_road = g.uturn_target_road_id;
+                    int    finalize_lane = g.uturn_target_lane;
+                    double finalize_s    = g.uturn_target_s;
+                    double finalize_off  = 0.0;
+                    flowsim::FrenetPos cur_fp;
+                    if (g.roads.world_to_frenet(ego.x, ego.y, cur_fp)) {
+                        finalize_road = cur_fp.road_id;
+                        finalize_lane = cur_fp.lane_id;   /* 车弧线落进的对向车道 */
+                        finalize_s    = cur_fp.s;
+                        finalize_off  = cur_fp.offset;    /* 车道内真实横向 → blend≈0 */
                     }
-                } else if (g.uturn_phase == 2) {
-                    /* 倒车把车头转到距目标航向 <0.45rad，再转前进回正相位。 */
-                    if (std::fabs(eh) <= 0.45 || g.uturn_phase_time_s >= 6.00) {
-                        g.uturn_phase = 3;
-                        g.uturn_phase_time_s = 0.0;
-                    }
-                } else if (g.uturn_phase == 3 && (std::fabs(eh) <= 0.12 ||
-                                                  g.uturn_phase_time_s >= 3.00)) {
-                    /* 物理相位结束：把 esmini road_pos 落到目标车道，读出目标位姿，
-                     * 但不再一帧硬覆盖 ego.x/y（"瞬移"），而是进入 blend 相位，把
-                     * 当前物理位姿 → 目标位姿的残差在 UTURN_BLEND_S 内插值补齐。 */
-                    if (ego.road_pos.relocate(g.roads, g.uturn_target_road_id,
-                                              g.uturn_target_lane,
-                                              g.uturn_target_s, 0.0)) {
+                    if (ego.road_pos.relocate(g.roads, finalize_road,
+                                              finalize_lane,
+                                              finalize_s, finalize_off)) {
                         ego.last_teleport_cycle = g.cycle;
-                        g.u_turn_active = (g.uturn_target_lane > 0);
+                        g.u_turn_active = (finalize_lane > 0);
                         flowsim::WorldPos wp;
                         double ht = ego.heading;
                         if (ego.road_pos.world(wp)) {
@@ -1540,8 +1531,8 @@ protected:
                         g.uturn_phase_time_s = 0.0;
                     } else {
                         LOG_ERROR("flowsim",
-                                  "ego three-point U-turn finalize failed (road_id=%d lane=%d s=%.1f)",
-                                  g.uturn_target_road_id, g.uturn_target_lane, g.uturn_target_s);
+                                  "ego U-turn finalize failed (road_id=%d lane=%d s=%.1f)",
+                                  finalize_road, finalize_lane, finalize_s);
                         g.uturn_maneuver_active = false;
                         g.uturn_phase = 0;
                         g.uturn_phase_time_s = 0.0;
@@ -1634,21 +1625,49 @@ protected:
                     if (g.u_turn_active && g.roads_loaded) {
                         flowsim::FrenetPos fp;
                         if (g.roads.world_to_frenet(ego.x, ego.y, fp)) {
-                            if (ego.road_pos.relocate(g.roads, fp.road_id, fp.lane_id, fp.s, 0.0)) {
+                            /* 物理位置（step_bicycle 沿车头积分）是真值。
+                             * relocate 用「参考线 + ref 偏移」落位（与 scene_events
+                             * NPC 传送同一模式），保留车道内真实横向偏移；旧版
+                             * relocate(lane, 0.0) 把车吸附到车道中心线——返程车被
+                             * 钉在中心线、车头一偏就"斜着直行"。 */
+                            double ref_off = flowsim::offset_from_lane_internal(
+                                g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
+                            if (ego.road_pos.relocate(g.roads, fp.road_id, 0, fp.s, ref_off)) {
                                 advanced = true;
                                 flowsim::WorldPos wp;
                                 if (ego.road_pos.world(wp)) {
                                     ego.x = wp.x;
                                     ego.y = wp.y;
-                                    /* heading 由物理模型保持，不从 esmini 同步 */
+                                    /* 返程航向对齐车道切线：位置已被 relocate 强钉在
+                                     * 车道内，control 对横向无权限；若放任 heading 由
+                                     * control 的 steer 自由积分，它会稳在偏离车道方向
+                                     * ~20° 的姿态 → 车身斜着沿道直行（用户所见"斜着直行"），
+                                     * 且 u_turn 释放（临近路端触发二次掉头）时按该偏航
+                                     * 直接冲出路面（实测 y 掉到 -16m，路半宽仅 7m）。
+                                     * 这里把 heading 平滑收敛到参考线切线（取与当前
+                                     * heading 同向的 ± 支解 180° 歧义，对向返程自然选反向），
+                                     * 使车身始终对齐车道。仅返程 on-rails 段生效（position
+                                     * 已钉住），不触及前进段 control 的 heading 自由度。 */
+                                    double cand = wp.h;
+                                    double d0 = cand - ego.heading;
+                                    while (d0 >  M_PI) d0 -= 2.0 * M_PI;
+                                    while (d0 < -M_PI) d0 += 2.0 * M_PI;
+                                    if (std::fabs(d0) > M_PI / 2.0) cand = wp.h + M_PI;
+                                    double dh_align = cand - ego.heading;
+                                    while (dh_align >  M_PI) dh_align -= 2.0 * M_PI;
+                                    while (dh_align < -M_PI) dh_align += 2.0 * M_PI;
+                                    ego.heading += 0.15 * dh_align;
+                                    while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
+                                    while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
+                                    ego.vx = ego.speed * std::cos(ego.heading);
+                                    ego.vy = ego.speed * std::sin(ego.heading);
                                 }
-                                flowsim::FrenetPos fp2;
-                                if (ego.road_pos.frenet(fp2)) {
-                                    ego.road_id = fp2.road_id;
-                                    ego.lane_id = fp2.lane_id;
-                                    ego.s = fp2.s;
-                                    ego.offset = fp2.offset;
-                                }
+                                /* 字段从 world_to_frenet 的 fp 直接读（权威）；
+                                 * 不从 relocate 后的 handle 读（参考线上 lane_id 恒 0）。 */
+                                ego.road_id = fp.road_id;
+                                ego.lane_id = fp.lane_id;
+                                ego.s = fp.s;
+                                ego.offset = ref_off;
                             }
                         }
                         /* world_to_frenet 失败时回退到 esmini advance */
@@ -1750,11 +1769,11 @@ protected:
                         at_trigger = (road_len > 0.0 && ego.s <= END_MARGIN_M);
                     }
                     if (at_trigger && road_is_terminal && !g.uturn_maneuver_active) {
-                        /* 触发窄路三把方向：先物理转向/倒车，再落到对向车道。 */
+                        /* 触发窄路单弧掉头：满舵连续前进扫过 180°，再落到对向车道。 */
                         int opposite_lane = -ego.lane_id;  /* -1→1, 1→-1 */
-                        begin_three_point_uturn(ego, ego.road_id, opposite_lane, turn_s);
+                        begin_uturn(ego, ego.road_id, opposite_lane, turn_s);
                         LOG_WARN("flowsim",
-                                 "ego start three-point U-turn: lane %d -> %d at s=%.1f (%s)",
+                                 "ego start U-turn: lane %d -> %d at s=%.1f (%s)",
                                  ego.lane_id, opposite_lane, turn_s,
                                  by_construction ? "front of construction" : "road end");
                     }
