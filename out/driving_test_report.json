@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-08-02T23:37:12",
+  "subjects": {
+    "S1": {
+      "status": "NOT_IMPLEMENTED",
+      "items": [],
+      "total_score": 0,
+      "max_score": 0,
+      "all_pass": true,
+      "note": "科目一（交规理论） 尚未实现，跳过"
+    },
+    "S2": {
+      "status": "FAIL",
+      "items": [],
+      "total_score": 0,
+      "max_score": 0,
+      "all_pass": false,
+      "error": "subject2_sim.py 不存在: /workspace/tools/subject2_sim.py"
+    },
+    "S3": {
+      "status": "NOT_IMPLEMENTED",
+      "items": [],
+      "total_score": 0,
+      "max_score": 0,
+      "all_pass": true,
+      "note": "科目三（道路驾驶） 尚未实现，跳过"
+    },
+    "S4": {
+      "status": "NOT_IMPLEMENTED",
+      "items": [],
+      "total_score": 0,
+      "max_score": 0,
+      "all_pass": true,
+      "note": "科目四（安全文明） 尚未实现，跳过"
+    }
+  },
+  "overall_pass": false,
+  "baseline_regressions": []
+}

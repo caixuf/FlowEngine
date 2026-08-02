@@ -297,3 +297,14 @@ jobs:
       # ── Scenario regression vs baseline ──
       - name: Scenario regression vs baseline
         run: python3 ci/evaluators/scenario_regression.py --baseline
+      # ── Driving school exam gate (plan phase 2) ──
+      # 与 scenario_regression.py 并列的另一档门禁：tools/driving_test.py 跑
+      # 驾校全科，--ci 门禁不及格(任一项目<90)、--baseline 门禁单项分数较
+      # baseline 下降>5。本期仅科目二(subject2_sim.py)实跑，科目一/三/四标
+      # NOT_IMPLEMENTED 不阻断。
+      # continue-on-error: 过渡保护——subject2_sim.py 与 baseline 尚在并行
+      # 落地中；两者合入后删除 continue-on-error 即转为硬门禁（与 scenario
+      # regression 同档阻断合并）。
+      - name: Driving school exam vs baseline
+        continue-on-error: true
+        run: python3 tools/driving_test.py --all --ci --baseline
