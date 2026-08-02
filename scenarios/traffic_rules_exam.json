@@ -1,0 +1,73 @@
+{
+  "name": "traffic_rules_exam",
+  "description": "科目一：交通规则遵守考试。连续5盏错相红绿灯 + 施工区绕行 + 限速区 + 停止线。覆盖：红灯停、绿灯行、黄灯减速、施工变道、限速遵守、车道纪律。",
+  "random_seed": 42,
+  "duration_s": 120,
+  "ego": {
+    "x": 5.0,
+    "y": -1.75,
+    "heading": 0.0,
+    "init_speed": 10.0,
+    "target_speed": 15.0
+  },
+  "road_network": {
+    "edges": [
+      {
+        "id": 0,
+        "type": "urban",
+        "name": "exam_road",
+        "length_m": 6000,
+        "lanes": 4,
+        "lane_width": 3.5,
+        "speed_limit": 16.0,
+        "nodes": [[0, 0, 0], [6000, 0, 0]]
+      }
+    ]
+  },
+  "actors": [
+    {"id": 1,  "type": "car",  "x": 200.0,  "y": -5.25, "vx": 12.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 2,  "type": "car",  "x": 500.0,  "y": -1.75, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 3,  "type": "car",  "x": 800.0,  "y": -5.25, "vx": 11.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 4,  "type": "car",  "x": 1200.0, "y": -5.25, "vx": 13.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 5,  "type": "car",  "x": 1600.0, "y": -1.75, "vx": 9.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
+    {"id": 10, "type": "pedestrian", "x": 400.0,  "y": -10.0, "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5},
+    {"id": 11, "type": "pedestrian", "x": 1000.0, "y": 10.0,  "vx": 0.0,  "vy": 0.0, "len": 0.5, "wid": 0.5}
+  ],
+  "traffic_lights": [
+    {"id": 0, "x": 250.0,  "y_lane": -1.75, "green_s": 15.0, "yellow_s": 3.0, "red_s": 12.0, "phase_offset_s": 0.0},
+    {"id": 1, "x": 550.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 15.0, "phase_offset_s": 5.0},
+    {"id": 2, "x": 900.0,  "y_lane": -1.75, "green_s": 18.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 10.0},
+    {"id": 3, "x": 1300.0, "y_lane": -1.75, "green_s": 10.0, "yellow_s": 3.0, "red_s": 18.0, "phase_offset_s": 15.0},
+    {"id": 4, "x": 1700.0, "y_lane": -1.75, "green_s": 14.0, "yellow_s": 3.0, "red_s": 13.0, "phase_offset_s": 20.0}
+  ],
+  "construction_zones": [
+    {"id": 0, "x": 750.0, "y": 0.0, "length": 40.0, "width": 7.0}
+  ],
+  "stop_lines": [
+    {"id": 0, "x": 248.0, "y": -1.75},
+    {"id": 1, "x": 548.0, "y": -1.75},
+    {"id": 2, "x": 898.0, "y": -1.75},
+    {"id": 3, "x": 1298.0, "y": -1.75},
+    {"id": 4, "x": 1698.0, "y": -1.75}
+  ],
+  "pass_criteria": {
+    "no_collision": true,
+    "no_red_light_violation": true,
+    "max_duration_s": 120.0,
+    "min_avg_speed_mps": 3.0,
+    "min_distance_m": 800.0
+  },
+  "route": [],
+  "scenarios": [],
+  "choreography": {
+    "loop_period_s": 999,
+    "beats": [
+      {"t": 15.0, "actor": "10", "act": "cross", "vx": 1.2},
+      {"t": 30.0, "actor": "tl", "phase": "red"},
+      {"t": 42.0, "actor": "tl", "phase": "green"},
+      {"t": 55.0, "actor": "11", "act": "cross", "vx": -1.2},
+      {"t": 70.0, "actor": "tl", "phase": "red"},
+      {"t": 85.0, "actor": "tl", "phase": "green"}
+    ]
+  }
+}
