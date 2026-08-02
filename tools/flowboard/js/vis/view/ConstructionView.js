@@ -99,7 +99,7 @@ export function createConstructionView(scene) {
     const signX = barrierX - 5.0;                           // 指示牌位置（围栏前5m）
 
     // ── 1. 围栏（横跨整个路面，BoxGeometry 分段） ──
-    const barrierTex = _makeBarrierTexture();
+    const barrierTex = makeStripeTexture('#ff6600', '#f0f0f0', { width: 64, height: 256, stripeCount: 8 });
     const barrierMat = new THREE.MeshStandardMaterial({
       map: barrierTex,
       roughness: 0.35,
@@ -119,7 +119,7 @@ export function createConstructionView(scene) {
 
     // ── 2. "禁止通行"指示牌（红底白字，挂在围栏右侧） ──
     const noEntryMat = new THREE.MeshStandardMaterial({
-      map: _getSignTexture('no_entry'),
+      map: makeSignTexture('禁止通行', '#cc0000', '#ffffff', '#ffffff'),
       roughness: 0.25,
       metalness: 0.2,
     });
@@ -131,7 +131,7 @@ export function createConstructionView(scene) {
 
     // ── 3. "前方施工"指示牌（黄底黑字，围栏前5m，路右侧） ──
     const constMat = new THREE.MeshStandardMaterial({
-      map: _getSignTexture('construction'),
+      map: makeSignTexture('前方施工', '#ffcc00', '#000000', '#000000'),
       roughness: 0.25,
       metalness: 0.2,
     });

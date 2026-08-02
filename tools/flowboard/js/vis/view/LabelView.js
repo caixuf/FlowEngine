@@ -1,7 +1,7 @@
 /**
  * LabelView.js — 实体标签（NPC 头顶 speed + ai_state 文字）
  *
- * 使用 THREE.Sprite + CanvasTexture 渲染文字标签，始终面向相机。
+ * 使用 THREE.Sprite + CanvasTextureFactory 渲染文字标签，始终面向相机。
  * 通过 Layer 树每帧 update(store) 驱动，与 VehicleView 共享 agent 层。
  *
  * 每帧 diff store.entities 与内部 Map，自动创建/更新/删除标签。
@@ -9,78 +9,15 @@
  */
 
 import { worldToThree } from '../math/Coord.js';
+import { makeLabelTexture } from '../utils/CanvasTextureFactory.js';
 
 const LABEL_SCALE = 2.0;       // 标签世界大小
 const LABEL_Y_OFFSET = 2.8;    // 头顶上方偏移
-const FONT_SIZE = 28;          // Canvas 字体大小
 const CANVAS_W = 256;          // 标签纹理分辨率
 const CANVAS_H = 64;
 
-/** 创建文字 canvas（每帧重建，因为文本变化） */
-function _makeLabelCanvas(speed, aiState) {
-  const canvas = document.createElement('canvas');
-  canvas.width = CANVAS_W;
-  canvas.height = CANVAS_H;
-  const ctx = canvas.getContext('2d');
-
-  // 透明背景 + 圆角矩形底色
-  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-
-  // 速度文本（大号，白色）
-  const speedText = (speed != null ? speed.toFixed(1) : '?') + ' m/s';
-  ctx.font = `bold ${FONT_SIZE}px 'JetBrains Mono', 'Inter', monospace, sans-serif`;
-  const speedMetrics = ctx.measureText(speedText);
-  const speedW = speedMetrics.width;
-
-  // ai_state 文本（小号，灰色）
-  let stateText = '';
-  let stateW = 0;
-  if (aiState && aiState !== '') {
-    stateText = aiState;
-    ctx.font = `${FONT_SIZE * 0.7}px 'Inter', sans-serif`;
-    stateW = ctx.measureText(stateText).width;
-  }
-
-  // 总宽度 = 速度 + 间隔 + 状态
-  const gap = stateText ? 16 : 0;
-  const totalW = speedW + gap + stateW;
-  const startX = (CANVAS_W - totalW) / 2;
-
-  // 绘制背景圆角矩形容器
-  const padX = 14, padY = 8;
-  const bgX = startX - padX;
-  const bgW = totalW + padX * 2;
-  const bgY = (CANVAS_H - FONT_SIZE) / 2 - padY;
-  const bgH = FONT_SIZE + padY * 2;
-
-  ctx.beginPath();
-  ctx.roundRect(bgX, bgY, bgW, bgH, 8);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // 速度文字
-  ctx.font = `bold ${FONT_SIZE}px 'JetBrains Mono', 'Inter', monospace, sans-serif`;
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(speedText, startX, CANVAS_H / 2);
-
-  // ai_state 文字
-  if (stateText) {
-    ctx.font = `${FONT_SIZE * 0.7}px 'Inter', sans-serif`;
-    ctx.fillStyle = '#8b949e';
-    ctx.fillText(stateText, startX + speedW + gap, CANVAS_H / 2);
-  }
-
-  return canvas;
-}
-
-/** 从 canvas 创建 Sprite 标签 */
-function _createLabelSprite(canvas) {
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.needsUpdate = true;
+/** 从纹理创建 Sprite 标签 */
+function _createLabelSprite(texture) {
   const material = new THREE.SpriteMaterial({
     map: texture,
     transparent: true,
@@ -105,16 +42,14 @@ export function createLabelView(scene) {
   function _ensureLabel(id, speed, aiState) {
     let entry = _labelMap.get(id);
     if (!entry) {
-      const canvas = _makeLabelCanvas(speed, aiState);
-      const sprite = _createLabelSprite(canvas);
+      const tex = makeLabelTexture(speed, aiState, { width: CANVAS_W, height: CANVAS_H });
+      const sprite = _createLabelSprite(tex);
       labelGroup.add(sprite);
       entry = { sprite, lastSpeed: speed, lastState: aiState };
       _labelMap.set(id, entry);
     } else if (entry.lastSpeed !== speed || entry.lastState !== aiState) {
-      // 文本变了才重建 canvas（避免每帧 GC）
-      const canvas = _makeLabelCanvas(speed, aiState);
-      entry.sprite.material.map = new THREE.CanvasTexture(canvas);
-      entry.sprite.material.map.needsUpdate = true;
+      // 文本变了才换纹理（避免每帧 GC）
+      entry.sprite.material.map = makeLabelTexture(speed, aiState, { width: CANVAS_W, height: CANVAS_H });
       entry.sprite.material.needsUpdate = true;
       entry.lastSpeed = speed;
       entry.lastState = aiState;
