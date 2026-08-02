@@ -440,7 +440,13 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
  *   2. 若一把过不去（车头逼近对向路沿），向右打方向盘倒车调整
  *   3. 再向左打前进，直至车头能进入对向车道
  *
+ * 路端空间不足时的倒车腾挪（人类司机正常操作）：
+ *   Phase 0: 若前向空间 < 最小掉头半径（~12m），先直线倒车腾出空间
+ *   → 再进入 Phase 1-5 正常掉头流程
+ *
  * 自适应相位切换（基于车辆状态，非固定时间）：
+ *   Phase 0 (可选): 直线倒车腾挪 → 腾出 ≥12m 前向空间
+ *     切换条件：前向空间 ≥12m OR 倒车 ≥5s（安全上限）
  *   Phase 1: 直线重刹 → 掉头安全低速 (v ≤ 3.5 m/s)
  *   Phase 2: 左打死前进 → 冲向对向路沿
  *     切换条件：heading 转过 ≥130° 且 y 已越过路中线 (y > 0.5m)
@@ -462,7 +468,8 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
  * ═══════════════════════════════════════════════════════════════ */
 static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                      double ego_x, double ego_y, double ego_heading,
-                                     double ego_speed, double wheelbase) {
+                                     double ego_speed, double wheelbase,
+                                     double forward_space_m) {
     const double dt = 0.05;               /* 20Hz 时间步长 */
     const double max_steer = 0.55;        /* 满舵角 (rad)，≈31.5° */
     const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
@@ -470,8 +477,10 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
     /* 对向车道中心 y：前进车道在 y<0 侧（lane_id<0），对向车道在 y>0 侧 */
     const double opp_lane_center_y = g.lane_width * 0.5;  /* 对向最左车道中心 */
+    const double min_uturn_space = 12.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
 
     /* 安全上限（防止无限循环） */
+    const double phase0_max_dur = 5.0;   /* 腾挪倒车最多 5s */
     const double phase2_max_dur = 4.0;   /* 左打死前进最多 4s */
     const double phase3_max_dur = 3.0;   /* 倒车最多 3s */
     const double phase4_max_dur = 2.5;   /* 对齐最多 2.5s */
@@ -490,6 +499,57 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     };
 
     double h_start = norm_h(h);  /* 记录起始 heading */
+
+    /* ═══ Phase 0 (可选): 倒车腾挪 — 前向空间不足时先倒车 ═══
+     * 人类司机：路端空间不够时，先直线倒车腾出空间，再执行掉头。
+     * 触发条件：forward_space_m > 0 且 < min_uturn_space。
+     * 倒车到 forward_space ≥ min_uturn_space 或超时 5s。 */
+    if (forward_space_m > 0.0 && forward_space_m < min_uturn_space) {
+        double need_reverse = min_uturn_space - forward_space_m + 1.0;  /* +1m 安全余量 */
+        double reversed = 0.0;
+        steer = 0.0;  /* 直线倒车 */
+        v = reverse_speed;
+        double phase0_t = 0.0;
+        LOG_WARN("planning", "[UTURN] forward_space=%.1fm < %.1fm → reverse to make room (need %.1fm)",
+                 forward_space_m, min_uturn_space, need_reverse);
+        while (n < max_points) {
+            x += v * cos(h) * dt;
+            y += v * sin(h) * dt;
+            reversed += fabs(v) * dt;
+
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;
+            points[n].v = (float)v;  /* 负值 = 倒车档 */
+            points[n].kappa = 0.0f;
+            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            phase0_t += dt;
+            t_us += (uint32_t)(dt * 1e6);
+
+            bool space_ok = (reversed >= need_reverse);
+            bool timeout  = (phase0_t >= phase0_max_dur);
+            if (space_ok || timeout) break;
+        }
+        /* 倒车结束后刹停，再进入 Phase 1 */
+        if (n < max_points && v < -0.1) {
+            /* 加一个刹停点 */
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;
+            points[n].v = 0.0f;  /* 刹停 */
+            points[n].kappa = 0.0f;
+            points[n].a = -5.0f;  /* 中等刹车 */
+            points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            t_us += (uint32_t)(dt * 1e6);
+            v = 0.0;
+        }
+        LOG_WARN("planning", "[UTURN] Phase 0 done: reversed %.1fm, now at x=%.1f y=%.2f",
+                 reversed, x, y);
+    }
 
     /* ═══ Phase 1: 直线重刹 → 掉头低速 ═══ */
     {
@@ -1530,11 +1590,20 @@ protected:
             /* ── UTurnPlanner: 掉头时跳过 Frenet，直接生成自行车模型轨迹 ── */
             if (g.overtake_state == 3) {
                 const double wheelbase = 2.8;  /* 轴距 (m)，与 flowsim physics.cpp 一致 */
+                /* 计算前向可用空间：到路端/障碍物的距离，用于倒车腾挪决策 */
+                double forward_space_m = 1e9;  /* 默认无限（无路端信息） */
+                if (has_fresh_map_ref() && g.map_ref_count >= 2) {
+                    /* 参考路径最后一点是路端（flowsim 前向采样在路端停止） */
+                    double road_end_x = g.map_ref_x[g.map_ref_count - 1];
+                    forward_space_m = road_end_x - g.ego_x;
+                    if (forward_space_m < 0.0) forward_space_m = 0.0;
+                }
                 n_pts = generate_uturn_trajectory(points, 64,
                                                   g.ego_x, g.ego_y, g.ego_heading,
-                                                  g.ego_v, wheelbase);
-                LOG_WARN("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f)",
-                         n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v);
+                                                  g.ego_v, wheelbase,
+                                                  forward_space_m);
+                LOG_WARN("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm)",
+                         n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v, forward_space_m);
                 /* 跳过 stitch（掉头是全新轨迹，不与上帧拼接） */
                 use_stitch = false;
                 /* 跳过下方所有 Frenet 规划逻辑 */
