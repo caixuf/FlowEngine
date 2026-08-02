@@ -84,6 +84,12 @@ body[data-workspace="operate"] .ws-observe-analyze{display:none!important}
   background:radial-gradient(circle at 50% 8%, #7a42ff22, transparent 45%);
 }
 #scene3d > *{position:relative;z-index:1}
+/* ── 小地图 HUD ── */
+#minimap-pip{position:absolute;top:10px;right:10px;width:220px;height:160px;z-index:20;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);box-shadow:0 4px 16px rgba(0,0,0,0.55);pointer-events:none}
+#minimap-canvas{display:block;width:220px;height:160px}
+#minimap-label{position:absolute;top:5px;left:8px;font-size:9px;font-weight:700;letter-spacing:.08em;color:rgba(255,255,255,0.35);pointer-events:none;font-family:'JetBrains Mono',monospace}
+#minimap-toggle{position:absolute;top:6px;right:6px;padding:2px 7px;font-size:9px;background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.12);border-radius:4px;color:rgba(255,255,255,0.45);cursor:pointer;z-index:21;pointer-events:auto}
+#minimap-toggle:hover{background:rgba(255,255,255,0.08)}
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid#0d1117;font-size:13px}
 .stat-row .label{color:#8b949e;font-size:12px}
 .stat-row .value{font-weight:700;font-size:14px;color:#58a6ff}

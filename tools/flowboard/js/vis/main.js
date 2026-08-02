@@ -17,6 +17,7 @@ import { createSceneDirector } from './director/SceneDirector.js';
 import { clearCache } from './core/AssetFactory.js';
 import { initModels } from './view/VehicleView.js';
 import { createStatsView } from './view/StatsView.js';
+import { createMinimapHUD } from './MinimapHUD.js';
 
 // ── 模块级状态（只此一处，取代旧架构 51 个 let）──
 let _scene = null;
@@ -29,6 +30,7 @@ let _director = null;
 let _ready = false;
 let _lastTopoData = null;
 let _statsView = null;
+let _minimap = null;
 
 /** 暴露 scene 对象（app.js 直接 import scene3d）*/
 export let scene3d = null;
@@ -98,6 +100,12 @@ export function init3DScene(canvas) {
   }
 
   _ready = true;
+
+  // 小地图 HUD（叠层 2D canvas，右上角）
+  const scene3dContainer = document.getElementById('scene3d');
+  if (scene3dContainer) {
+    _minimap = createMinimapHUD(scene3dContainer);
+  }
 
   // 性能监控面板（DOM 层，非 3D 场景）
   _statsView = createStatsView();
@@ -218,6 +226,9 @@ function _startRenderLoop() {
 
       renderFrame(_renderer, _composer, _scene, _cameraRig.camera);
       _frameCount++;
+
+      // 小地图 HUD（2D 叠层，每帧绘制）
+      if (_minimap) _minimap.draw(store);
 
       // 性能监控面板（每 500ms 更新一次 DOM）
       if (_statsView) {
@@ -469,4 +480,10 @@ export function togglePerfOverlay() {
   const el = _statsView.dom;
   el.style.display = el.style.display === 'none' ? '' : 'none';
   return el.style.display !== 'none';
+}
+/** 切换小地图可见性 */
+export function toggleMinimap() {
+  if (!_minimap) return false;
+  _minimap.toggle();
+  return _minimap.isVisible();
 }
