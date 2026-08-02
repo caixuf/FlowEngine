@@ -186,6 +186,12 @@ struct PlanningContext {
     Behavior current_behavior{};    /* 最新 behavior 指令 */
     volatile int has_behavior{0};
 
+    /* UTurn 轨迹缓存：避免每帧重新生成 64 点轨迹（含 LOG 轰炸 + 前向积分）。
+     * 首次进入 U-turn 状态时生成一次，后续帧复用。当 ego 偏离首点 > 2m 时重新生成。 */
+    TrajectoryPoint uturn_cache[64];
+    int    uturn_cache_n{0};
+    double uturn_cache_ego_x{0.0}, uturn_cache_ego_y{0.0};  /* 生成时的 ego 位置 */
+
     /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
     struct planning_Wrapper* task_wrapper{nullptr};
 };
@@ -512,7 +518,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         steer = 0.0;  /* 直线倒车 */
         v = reverse_speed;
         double phase0_t = 0.0;
-        LOG_WARN("planning", "[UTURN] forward_space=%.1fm < %.1fm → reverse to make room (need %.1fm)",
+        LOG_INFO("planning", "[UTURN] forward_space=%.1fm < %.1fm → reverse to make room (need %.1fm)",
                  forward_space_m, min_uturn_space, need_reverse);
         while (n < max_points) {
             x += v * cos(h) * dt;
@@ -549,7 +555,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             t_us += (uint32_t)(dt * 1e6);
             v = 0.0;
         }
-        LOG_WARN("planning", "[UTURN] Phase 0 done: reversed %.1fm, now at x=%.1f y=%.2f",
+        LOG_INFO("planning", "[UTURN] Phase 0 done: reversed %.1fm, now at x=%.1f y=%.2f",
                  reversed, x, y);
     }
 
@@ -1574,7 +1580,7 @@ protected:
                     if (cur_lane >= n_lanes) cur_lane = n_lanes - 1;
                     g.target_lane_offset = lane_center_offset(cur_lane, n_lanes, lane_w);
                 }
-                if (g.plan_count % 100 == 0 || (g.has_behavior && g.target_lane_offset != 0.0)) {
+                if (g.plan_count % 200 == 0) {
                     LOG_WARN("planning", "[DBG_LC] pc=%d has_beh=%d cmd=%d tgt_lane=%d n_lanes=%d offset=%.2f ego_y=%.2f",
                             g.plan_count, g.has_behavior, (int)g.current_behavior.command,
                             (int)g.current_behavior.target_lane_idx, n_lanes, g.target_lane_offset, g.ego_y);
@@ -1607,7 +1613,7 @@ protected:
                                                   g.ego_x, g.ego_y, g.ego_heading,
                                                   g.ego_v, wheelbase,
                                                   forward_space_m);
-                LOG_WARN("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm)",
+                LOG_INFO("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm)",
                          n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v, forward_space_m);
                 /* 跳过 stitch（掉头是全新轨迹，不与上帧拼接） */
                 use_stitch = false;
@@ -1688,18 +1694,21 @@ protected:
                 }
             }
 
-            /* 变道/车道保持时偏移 Frenet 轨迹（控制层只跟轨迹，不自己决策）。
-             * target_lane_offset 现在始终非零（巡航时 = 当前车道中心），
-             * 用线性渐变让轨迹从当前 d 平滑过渡到 target_lane_offset。
-             * 100% 线性渐变（全轨迹长度）比 30% 阶跃更平滑：
-             *   - 30% 渐变时，0.5s 前视点（index 5/10）已过渐变区，看到全量
-             *     target_offset → lat_err 跳变 3.5m → 横向过冲冲出路沿。
-             *   - 线性渐变时，0.5s 前视点只看到 56% 的 target_offset，
-             *     lat_err 从 0 线性增大到目标值，控制器平滑跟进。 */
+            /* 车道保持：直接设目标车道中心，不再渐变混合。
+             * 旧实现用线性渐变 d_out = d_out*(1-t) + target_lane_offset*t，
+             * 0.5s 前视点只混合了 ~10% 的 target_lane_offset，Frenet 的
+             * kd=1.0 代价又往 d=0（道路中心）拉 → 车逐渐偏离车道中心。
+             * 修复：Frenet 设 kd=0（不再拉 d=0），此处巡航时直接锁定
+             * target_lane_offset，控制层前视点拿到的就是精确车道中心。
+             * 变道时 d_out 由上方 1668-1684 的变道逻辑覆盖，此处跳过。 */
             if (n_wp > 0) {
-                for (int i = 0; i < n_wp; i++) {
-                    double t = (double)i / (double)(n_wp - 1);
-                    d_out[i] = d_out[i] * (1.0 - t) + g.target_lane_offset * t;
+                bool in_lane_change = (g.has_behavior &&
+                    (g.current_behavior.command == BEH_LEFT_CHANGE ||
+                     g.current_behavior.command == BEH_RIGHT_CHANGE));
+                if (!in_lane_change) {
+                    for (int i = 0; i < n_wp; i++) {
+                        d_out[i] = g.target_lane_offset;
+                    }
                 }
             }
 

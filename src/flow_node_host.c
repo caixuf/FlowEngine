@@ -27,11 +27,13 @@
  *   区别仅在于 transport 使用 TRANSPORT_IPC (跨进程) 而非 TRANSPORT_LOCAL。
  */
 
+#include "fp_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <dlfcn.h>
 
 #include "logger.h"
@@ -91,6 +93,7 @@ static void* load_plugin_lib(const char* library) {
 }
 
 int main(int argc, char** argv) {
+    fp_env_init();  /* FTZ/DAZ：防 denormal 进 JSON 触发 glibc strtod 断言 */
     if (argc < 3) {
         fprintf(stderr,
                 "usage: %s <config_path> <node_name> [duration_sec]\n", argv[0]);
@@ -100,7 +103,19 @@ int main(int argc, char** argv) {
     const char* node_name   = argv[2];
     int duration            = argc > 3 ? atoi(argv[3]) : 0;
 
-    log_init(LOG_INFO, NULL);
+    /* 按模块名写独立日志文件：/tmp/flow_logs/{node_name}.log
+     * 环境变量 FLOW_LOG_DIR 可覆盖日志目录。未设置模块名时用 PID 兜底。 */
+    const char* log_dir = getenv("FLOW_LOG_DIR");
+    if (!log_dir || !log_dir[0]) log_dir = "/tmp/flow_logs";
+    mkdir(log_dir, 0755);
+    char log_path[320];
+    const char* log_name = (node_name && node_name[0]) ? node_name : NULL;
+    if (log_name) {
+        snprintf(log_path, sizeof(log_path), "%s/%s.log", log_dir, log_name);
+    } else {
+        snprintf(log_path, sizeof(log_path), "%s/pid_%d.log", log_dir, (int)getpid());
+    }
+    log_init(LOG_INFO, log_path);
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 

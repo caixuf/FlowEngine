@@ -200,6 +200,23 @@ void degrade_supervisor_tick(int64_t now_ms) {
     /* 当前等级 */
     int current = (int)FLOW_ATOMIC_LOAD(&g_degrade.degrade_level);
 
+    /* 自动恢复：全部心跳健康持续 3s → 清降级。
+     * 没有这条，supervisor 只升不降——一次瞬时抖动（调度延迟/负载尖峰）
+     * 就把系统钉死在 L2/L3 直到重启。恢复必须滞后（3s 去抖）防振荡。 */
+    static int64_t healthy_since_ms = 0;
+    if (timeout_count == 0 && timeout_1s_count == 0) {
+        if (current > DEGRADE_L0) {
+            if (healthy_since_ms == 0) healthy_since_ms = now_ms;
+            else if (now_ms - healthy_since_ms > 3000) {
+                degrade_clear();
+                healthy_since_ms = 0;
+                return;
+            }
+        }
+    } else {
+        healthy_since_ms = 0;
+    }
+
     /* 递进策略 */
     if (timeout_1s_count >= 2) {
         /* 多节点超时 >2s → L3 */

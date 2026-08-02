@@ -20,6 +20,7 @@
 #include "serializer.h"
 #include "stats_bridge.h"
 #include "clock_service.h"
+#include "fp_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1210,6 +1211,7 @@ typedef struct {
 } ClientCtx;
 
 static void* client_thread_fn(void* arg) {
+    fp_env_init();  /* FTZ/DAZ：线程入口兜底，防 denormal 进 JSON 触发 glibc strtod 断言 */
     ClientCtx* ctx = (ClientCtx*)arg;
     MonitorServer* ms = ctx->ms;
     handle_client(ctx->fd, ms);
@@ -1221,6 +1223,7 @@ static void* client_thread_fn(void* arg) {
 }
 
 static void* server_thread_fn(void* arg) {
+    fp_env_init();  /* FTZ/DAZ：线程入口兜底，防 denormal 进 JSON 触发 glibc strtod 断言 */
     MonitorServer* ms = (MonitorServer*)arg;
 
     ms->listen_fd = socket(AF_INET, SOCK_STREAM, 0);

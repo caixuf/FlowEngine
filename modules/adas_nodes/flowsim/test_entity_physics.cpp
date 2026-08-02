@@ -225,6 +225,81 @@ static void test_dynamic_lowspeed_degrade() {
     CHECK(approx(ed.heading, ek.heading, 1e-6), "low-speed heading matches kinematic");
 }
 
+static void test_rear_axle_no_slip() {
+    std::printf("--- rear axle no-slip invariant ---\n");
+    // 中心参考点模型的核心不变量：后轴 = 中心 − half_wb·[cosθ,sinθ]，
+    // 后轴速度必须平行于车头方向（运动学自行车后轮无侧滑）。
+    // 回归意义：若位置更新丢掉 half_wb·yaw_rate 旋转项（如被轨道覆盖替换），
+    // 后轴侧滑速度会达到 half_wb·ω ≈ 1.2 m/s（"屁股横扫"），本测试红灯。
+    Entity e;
+    e.type = EntityType::Car;
+    apply_vehicle_defaults(e);
+    e.speed = 5.0;
+    e.steer_override = true;  // 满舵掉头域，yaw_rate 最大，最容易暴露侧滑
+
+    double dt = 0.05;
+    double half_wb = e.wheelbase * 0.5;
+    for (int i = 0; i < 40; ++i)  // 2s 预热：steer 收敛到 0.45
+        step_bicycle(e, dt, 0.05, 0.0, 0.45);
+
+    double max_slip = 0.0;
+    for (int i = 0; i < 60; ++i) {
+        double rx0 = e.x - half_wb * std::cos(e.heading);
+        double ry0 = e.y - half_wb * std::sin(e.heading);
+        step_bicycle(e, dt, 0.05, 0.0, 0.45);
+        double rx1 = e.x - half_wb * std::cos(e.heading);
+        double ry1 = e.y - half_wb * std::sin(e.heading);
+        double vrx = (rx1 - rx0) / dt, vry = (ry1 - ry0) / dt;
+        // 后轴速度在垂直车头方向上的分量（侧滑速度）
+        double slip = std::fabs(-std::sin(e.heading) * vrx +
+                                 std::cos(e.heading) * vry);
+        if (slip > max_slip) max_slip = slip;
+    }
+    std::printf("  max rear-axle lateral slip = %.4f m/s (fwd 5 m/s)\n", max_slip);
+    CHECK(max_slip < 0.2, "rear axle slip < 0.2 m/s (no tail sweep)");
+}
+
+static void test_steer_override_full_lock() {
+    std::printf("--- steer_override full-lock turning circle ---\n");
+    // override=false：命令 0.60 被钳到 0.25
+    Entity ec;
+    ec.type = EntityType::Car;
+    apply_vehicle_defaults(ec);
+    ec.speed = 3.0;
+    double dt = 0.05;
+    for (int i = 0; i < 60; ++i) step_bicycle(ec, dt, 0.01, 0.0, 0.60);
+    CHECK(approx(ec.steer, 0.25, 0.01), "override=false clamps steer to 0.25");
+
+    // override=true：满舵 0.60，转弯半径 ≈ L/tan(0.60) ≈ 3.95m
+    Entity e;
+    e.type = EntityType::Car;
+    apply_vehicle_defaults(e);
+    e.speed = 3.0;
+    e.steer_override = true;
+    e.x = 0; e.y = 0; e.heading = 0;
+    for (int i = 0; i < 60; ++i) step_bicycle(e, dt, 0.01, 0.0, 0.60);  // steer 到位
+    CHECK(approx(e.steer, 0.60, 0.01), "override=true reaches 0.60 full lock");
+
+    // 从当前点转过 180°，起终点距离 = 直径 2R
+    double x0 = e.x, y0 = e.y, turned = 0.0;
+    while (turned < M_PI && turned > -M_PI) {
+        double h_prev = e.heading;
+        step_bicycle(e, dt, 0.01, 0.0, 0.60);
+        double d = e.heading - h_prev;
+        while (d >  M_PI) d -= 2.0 * M_PI;
+        while (d < -M_PI) d += 2.0 * M_PI;
+        turned += d;
+    }
+    double diam = std::hypot(e.x - x0, e.y - y0);
+    // 后轴转弯半径 R = L/tan(δ)；车辆中心距弯心 √(R²+hw²)（中心在后轴前方 hw）
+    double R_rear = e.wheelbase / std::tan(0.60);
+    double half_wb = e.wheelbase * 0.5;
+    double R_center = std::sqrt(R_rear * R_rear + half_wb * half_wb);
+    std::printf("  180deg diameter=%.2fm expect 2R_center=%.2fm (R_rear=%.2fm)\n",
+                diam, 2.0 * R_center, R_rear);
+    CHECK(approx(diam, 2.0 * R_center, 0.3), "U-turn diameter ~ 2*sqrt(R^2+hw^2)");
+}
+
 static void test_pedestrian() {
     std::printf("--- pedestrian ---\n");
     Entity p;
@@ -246,6 +321,8 @@ int main() {
     test_dynamic_turn();
     test_dynamic_highspeed_bounded();
     test_dynamic_lowspeed_degrade();
+    test_rear_axle_no_slip();
+    test_steer_override_full_lock();
     test_pedestrian();
     std::printf("=== %d failures ===\n", failures);
     return failures == 0 ? 0 : 1;

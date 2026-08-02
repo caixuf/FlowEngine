@@ -46,7 +46,7 @@ FrenetHandle* frenet_create(double max_speed, double max_accel) {
     fh->hp.d_t_s              = 2.0;
     fh->hp.n_s_sample         = 3.0;
     fh->hp.obstacle_clearance = 1.0;
-    fh->hp.kd                 = 1.0;
+    fh->hp.kd                 = 0.0;  /* 不往 d=0 拉：车道中心由 planning 的 target_lane_offset 控制 */
     fh->hp.kv                 = 2.0;  /* 0.5→2.0: 提高速度跟踪权重，让 target_speed 更好被追踪 */
     fh->hp.ka                 = 0.3;
     fh->hp.kj                 = 0.1;

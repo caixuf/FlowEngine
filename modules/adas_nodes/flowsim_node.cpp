@@ -156,6 +156,14 @@ struct FlowSimContext {
      * 此时 esmini advance 方向与车辆行驶方向相反，需要用 world_to_frenet
      * 同步 esmini position。由 lane_id 符号自动推导，不再由硬编码状态机设置。 */
     bool                   u_turn_active{false};
+
+    /* 机动模式（off-rails）：掉头/倒车期间自行车模型是位姿唯一权威。
+     * 进入：control 命令 |steer|>0.28（超巡航钳位域，只能是掉头轨迹）或倒挡。
+     * 退出：转向需求消失 且 车头与车道方向夹角 < 20°（对齐后才重新上轨）。
+     * 期间跳过 Frenet 轨道位置覆盖 —— 轨道覆盖是纯"沿车头平移"，丢掉了
+     * step_bicycle 的 half_wb·yaw_rate 旋转项，大角速度时车绕自身中心
+     * 原地旋转（"屁股横扫"视觉伪影）。 */
+    bool                   off_rails{false};
     };
 
 FlowSimContext g;
@@ -1238,6 +1246,7 @@ protected:
         BusQueueBridge cmd_bridge(bus(), {TOPIC_CONTROL_CMD});
 
         while (!should_stop()) {
+            uint64_t t_start = clock_now_us();
             bool use_internal_cruise = true;
 
             /* 每 tick：桥取最新控制指令（若有）并解析到 atomics。
@@ -1309,7 +1318,7 @@ protected:
              * 启动早期多节点并发订阅存在随机竞争窗口，桥回调可能永久
              * 停滞（实测同代码 45s/60s run 正常、120s run 启动即断）。
              * 重建把"永久断流"降级为"短暂停滞"，配合 FSAFE 停车不撞。 */
-            if (g.cycle % 100 == 0) {
+            if (g.cycle % 200 == 0) {
                 uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 uint64_t now  = clock_now_us();
                 if (last > 0 && now > last &&
@@ -1366,12 +1375,26 @@ protected:
                 else if (ts == 2) ego.lights.set_turn_right(true);
                 if (hz)           ego.lights.set_hazard(true);
             }
+            /* ── off-rails 机动模式进入判定 ──
+             * control 巡航钳位上限 0.16rad，只有掉头/倒车轨迹会命令 |steer|>0.28。
+             * 进入后 ego.steer_override=true 放开物理层满舵限幅（0.25→0.60），
+             * 且下方 Frenet 轨道位置覆盖整体跳过（见 off_rails 声明处注释）。 */
+            {
+                int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
+                if (!g.off_rails &&
+                    (std::fabs(ego.steer) > 0.28 || gear == GEAR_REVERSE)) {
+                    g.off_rails = true;
+                    LOG_WARN("flowsim", "[OFFRAILS] enter: steer=%.3f gear=%d x=%.1f y=%.2f h=%.2f v=%.1f",
+                             ego.steer, (int)gear, ego.x, ego.y, ego.heading, ego.speed);
+                }
+                ego.steer_override = g.off_rails;
+            }
             /* EPS 转向执行器低通滤波：模拟电动助力转向惯性。
-             * 倒车时（gear=REVERSE）绕过此滤波器：倒车需要满舵迅速到位，
+             * 倒车/机动（off-rails）时绕过此滤波器：掉头需要满舵迅速到位，
              * physics.cpp 的 update_steer 提供执行器层滤波（τ=0.15s）已是足够约束。 */
             {
                 int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
-                if (gear != GEAR_REVERSE) {
+                if (gear != GEAR_REVERSE && !g.off_rails) {
                     static double prev_steer = 0.0;
                     const double eps_alpha = 0.4;  /* 滤波系数：0-1，越小滤波越强 */
                     double raw = ego.steer;
@@ -1388,8 +1411,10 @@ protected:
             }
             /* 掉头对向车道标志：由 lane_id 符号自动推导。
              * lane_id > 0 → 对向车道 → u_turn_active=true（ref_path 反向、esmini 反向同步）。
-             * 不再由硬编码掉头状态机设置，而是跟随物理 lane_id 实时更新。 */
-            if (ego.road_pos.ok()) {
+             * 不再由硬编码掉头状态机设置，而是跟随物理 lane_id 实时更新。
+             * off-rails 期间跳过：handle 已被 relocate 到参考线（lane_id 恒 0），
+             * 改由下方 off-rails 分支从 world_to_frenet 真值更新。 */
+            if (!g.off_rails && ego.road_pos.ok()) {
                 flowsim::FrenetPos fp;
                 if (ego.road_pos.frenet(fp)) {
                     g.u_turn_active = (fp.lane_id > 0);
@@ -1411,7 +1436,52 @@ protected:
              *   直路巡航时 steer≈0.02 → delta_lat≈0.012 m/帧 → 过冲可控
              *   变道 steer≈0.10 → delta_lat≈0.060 m/帧 → ~3.5s 完成车道变换 */
             bool is_dynamic = (strcmp(g.physics_model, "dynamic") == 0);
-            if (ego.road_pos.ok()) {
+            if (g.off_rails) {
+                /* ── off-rails：机动期（掉头/倒车）自行车模型是位姿唯一权威 ──
+                 * 不做任何轨道位置覆盖（轨道覆盖 = 纯沿车头平移，丢掉
+                 * step_bicycle 的 half_wb·yaw_rate 旋转项 → 车绕自身中心
+                 * 原地旋转、"屁股横扫"）。每帧只把物理真值投影回 Frenet：
+                 *   1. 遥测字段回写（road_id/lane_id/s/offset + u_turn_active）
+                 *   2. relocate 让 handle 跟随（不回写 ego.x/y/heading）
+                 *   3. 退出判定：转向需求消失 且 车头与车道方向对折角 <20° */
+                bool exit_ok = false;
+                if (g.roads_loaded) {
+                    flowsim::FrenetPos fp;
+                    if (g.roads.world_to_frenet(ego.x, ego.y, fp)) {
+                        ego.road_id = fp.road_id;
+                        ego.lane_id = fp.lane_id;
+                        ego.s = fp.s;
+                        ego.offset = fp.offset;
+                        g.u_turn_active = (fp.lane_id > 0);
+                        double ref_off = flowsim::offset_from_lane_internal(
+                            g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
+                        if (ego.road_pos.relocate(g.roads, fp.road_id, 0, fp.s, ref_off)) {
+                            flowsim::WorldPos wp;
+                            if (ego.road_pos.world(wp)) {
+                                double dh = ego.heading - wp.h;
+                                while (dh >  M_PI) dh -= 2.0 * M_PI;
+                                while (dh < -M_PI) dh += 2.0 * M_PI;
+                                /* 对折角：与车道方向或其反向的最小夹角
+                                 * （掉头终点在对向车道，heading ≈ 路切线 +π）。 */
+                                double fold = std::min(std::fabs(dh),
+                                                       M_PI - std::fabs(dh));
+                                int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
+                                exit_ok = (gear != GEAR_REVERSE) &&
+                                          (std::fabs(ego.steer) <= 0.28) &&
+                                          (fold < 20.0 * M_PI / 180.0);
+                            }
+                        }
+                    }
+                }
+                if (exit_ok) {
+                    g.off_rails = false;
+                    LOG_WARN("flowsim", "[OFFRAILS] exit: x=%.1f y=%.2f h=%.2f v=%.1f",
+                             ego.x, ego.y, ego.heading, ego.speed);
+                } else if (g.cycle % 100 == 0) {
+                    LOG_WARN("flowsim", "[OFFRAILS] active: x=%.1f y=%.2f h=%.2f v=%.1f steer=%.3f",
+                             ego.x, ego.y, ego.heading, ego.speed, ego.steer);
+                }
+            } else if (ego.road_pos.ok()) {
                 /* ⚠ 横向位移由 heading 与道路切线的夹角 dh 驱动，不是由 steer 直接驱动。
                  *
                  * 原 bug（3d092ad）：delta_lat = v * dt * tan(steer) 把转角当成了
@@ -1486,7 +1556,14 @@ protected:
                                     double dh_align = cand - ego.heading;
                                     while (dh_align >  M_PI) dh_align -= 2.0 * M_PI;
                                     while (dh_align < -M_PI) dh_align += 2.0 * M_PI;
-                                    ego.heading += 0.15 * dh_align;
+                                    /* 速率封顶 ≤0.35rad/s：0.15·dh_align 在 dh≈90°
+                                     * 时是 ≈4.7rad/s（270°/s）原地自旋——正是
+                                     * "屁股横扫"的直接元凶。 */
+                                    double slew = 0.15 * dh_align;
+                                    double slew_max = 0.35 * FLOWSIM_DT_SEC;
+                                    if (slew >  slew_max) slew =  slew_max;
+                                    if (slew < -slew_max) slew = -slew_max;
+                                    ego.heading += slew;
                                     while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
                                     while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
                                     ego.vx = ego.speed * std::cos(ego.heading);
@@ -1643,11 +1720,29 @@ protected:
                                          sim_time_us, g.cycle);
 
             /* 固定 20Hz 节拍：原 select_for 的消息/超时唤醒由 BusQueueBridge
-             * + 固定周期取代——主循环不依赖消息到达即可稳定推进。 */
-            co_await sleep_us(FLOWSIM_DT_US);
+             * + 固定周期取代——主循环不依赖消息到达即可稳定推进。
+             *
+             * 自适应 sleep：减去本帧工作时间，维持稳定 20Hz。
+             * 旧代码 sleep_us(FLOWSIM_DT_US) 固定 50ms，不扣除工作时间，
+             * 实际帧率 = 1/(T_work + 50ms)，T_work 越大帧率越低——
+             * 场景跑到一半 T_work 从 5ms 涨到 55ms 时 FPS 从 18 跌到 9.5。 */
+            uint64_t t_frame_us = clock_now_us() - t_start;
+            uint64_t sleep_us_val = FLOWSIM_DT_US;
+            if (t_frame_us < sleep_us_val) {
+                sleep_us_val = FLOWSIM_DT_US - t_frame_us;
+            } else {
+                sleep_us_val = 0;  /* 帧超时：不休眠，下一帧立即开始追 */
+            }
+            if (g.cycle % 200 == 0) {
+                LOG_INFO("flowsim", "[PERF] cycle=%u frame_time=%llu us (%.1f ms) sleep=%llu us",
+                         g.cycle, (unsigned long long)t_frame_us,
+                         (double)t_frame_us / 1000.0,
+                         (unsigned long long)sleep_us_val);
+            }
+            co_await sleep_us(sleep_us_val);
 
             g.cycle++;
-            if (g.cycle % 100 == 0) {
+            if (g.cycle % 200 == 0) {
                 uint64_t last_cmd = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 double cmd_age_ms = last_cmd > 0
                     ? (double)(clock_now_us() - last_cmd) / 1000.0 : -1.0;
@@ -1662,9 +1757,10 @@ protected:
                          (unsigned long long)cmd_bridge.take_count,
                          sc == 0 ? (int)cmd_stats.subscriber_count : -1);
             }
-            /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 5 帧打一次，
-             * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。 */
-            if (ego.speed > 2.0 && ego.brake > 0.5 && g.cycle % 5 == 0) {
+            /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 50 帧打一次，
+             * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。
+             * 旧频率每 5 帧（250ms）过于密集，配合 fflush 阻塞主循环。 */
+            if (ego.speed > 2.0 && ego.brake > 0.5 && g.cycle % 50 == 0) {
                 LOG_WARN("flowsim", "[BRK] cyc=%u spd=%.2f thr=%.2f brk=%.2f last_cmd_us_age=%.0fms",
                          g.cycle, ego.speed, ego.throttle, ego.brake,
                          g.last_control_cmd_us.load(std::memory_order_relaxed) > 0
@@ -1681,9 +1777,7 @@ protected:
                 // 空间 invariant
                 auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);
-                /* A-4b: 始终打印 passed/failed/warned 计数，失败时再补 stderr。 */
-                LOG_INFO("flowsim", "spatial_invariant: %d passed, %d failed, %d warned",
-                         spatial.passed, spatial.failed, spatial.warned);
+                /* 仅失败时输出到 stderr；每帧计数用 DEBUG 级别避免刷屏。 */
                 if (spatial.failed > 0) {
                     g.invariant_fail_count.fetch_add(spatial.failed, std::memory_order_relaxed);
                     if (!spatial.details.empty()) {
@@ -1694,8 +1788,6 @@ protected:
                 // 运动方向 invariant
                 auto motion = flowsim::check_motion_direction(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);
-                LOG_INFO("flowsim", "motion_direction: %d passed, %d failed, %d warned",
-                         motion.passed, motion.failed, motion.warned);
                 if (motion.failed > 0) {
                     g.invariant_fail_count.fetch_add(motion.failed, std::memory_order_relaxed);
                     if (!motion.details.empty()) {
@@ -1712,8 +1804,6 @@ protected:
                     if (inv_dt < 0.01) inv_dt = FLOWSIM_DT_SEC * 20;  // fallback
                     auto temporal = flowsim::check_temporal_invariants(
                         g.prev_dynamic_digest, dd, inv_dt);
-                    LOG_INFO("flowsim", "temporal_invariant: %d passed, %d failed, %d warned",
-                             temporal.passed, temporal.failed, temporal.warned);
                     if (temporal.failed > 0) {
                         g.invariant_fail_count.fetch_add(temporal.failed, std::memory_order_relaxed);
                         if (!temporal.details.empty()) {
@@ -1723,13 +1813,15 @@ protected:
                     }
                 }
                 // ASCII 俯视图：3D 运行时自动生成，写到 /tmp/flow_ascii_overhead.txt
-                // 供 dashboard / 终端 cat 查看（与 flow_topology.json 文件桥接模式一致）。
-                // 频率 = digest 块频率（每 20 帧 ≈ 1s），覆盖式写。
-                std::string ascii = flowsim::render_ascii_overhead(g.static_digest, dd, 80, 40);
-                FILE* fp = fopen("/tmp/flow_ascii_overhead.txt", "w");
-                if (fp) {
-                    fputs(ascii.c_str(), fp);
-                    fclose(fp);
+                // 供 dashboard / 终端 cat 查看。每 100 帧（5s）更新一次，
+                // 避免高频文件 I/O 阻塞主循环。
+                if (g.cycle % 100 == 0) {
+                    std::string ascii = flowsim::render_ascii_overhead(g.static_digest, dd, 80, 40);
+                    FILE* fp = fopen("/tmp/flow_ascii_overhead.txt", "w");
+                    if (fp) {
+                        fputs(ascii.c_str(), fp);
+                        fclose(fp);
+                    }
                 }
                 g.prev_dynamic_digest = std::move(dd);
             } else if (!g.digest_initialized && g.cycle == 1) {

@@ -81,6 +81,9 @@ LogLevel log_get_module_level(const char* module);
 /** 切换输出目标（NULL=stderr） */
 void log_set_output_file(const char* filename);
 
+/** 设置按模块分文件输出目录。设置后每个模块额外写入 {dir}/{module}.log */
+void log_set_module_dir(const char* dir);
+
 /** 获取当前输出文件指针 */
 FILE* log_get_output(void);
 
@@ -147,6 +150,15 @@ void log_write(const char* module, LogLevel level,
 
 #define LOG_FATAL(module, fmt, ...) \
     log_write(module, LOG_FATAL, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+
+/** 调试日志专用宏：LOG_DEBUG + [DBG] 前缀，语义上区分于真正的 WARN/ERROR。
+ *  用法：LOG_DBG("planning", "lane_offset=%.2f ego_y=%.2f", offset, y);
+ *  输出：[DEBUG] [planning      ] [DBG] lane_offset=-1.75 ego_y=-1.75
+ *  默认级别 LOG_DEBUG 被全局 LOG_INFO 过滤，需运行时开：
+ *    log_set_module_level("planning", LOG_DEBUG);  // 只开 planning 的调试日志
+ *    log_set_level(LOG_DEBUG);                      // 全局开调试日志 */
+#define LOG_DBG(module, fmt, ...) \
+    log_write(module, LOG_DEBUG, __FILE__, __LINE__, __func__, "[DBG] " fmt, ##__VA_ARGS__)
 
 /* ── 兼容旧 API ──────────────────────────────────────────── */
 

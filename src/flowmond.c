@@ -18,6 +18,7 @@
  * 编译: 由 CMakeLists.txt 自动处理
  */
 
+#include "fp_env.h"
 #include "message_bus.h"
 #include "discovery.h"
 #include "monitor_server.h"
@@ -247,6 +248,7 @@ static void check_alerts(MessageBus* bus, const AlertRule* rules, int rule_count
 /* ══════════════════════════════════════════════════════════ */
 
 int main(int argc, char** argv) {
+    fp_env_init();  /* FTZ/DAZ：防 denormal 进 JSON 触发 glibc strtod 断言 */
     int port = 8800;
     const char* config_file = NULL;
     char html_path[512] = "";

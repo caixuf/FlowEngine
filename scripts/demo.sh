@@ -28,6 +28,10 @@ DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
   pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
 sleep 1
+# Clean up old per-module log files from previous run
+LOG_DIR="${FLOW_LOG_DIR:-/tmp/flow_logs}"
+rm -rf "$LOG_DIR" 2>/dev/null || true
+mkdir -p "$LOG_DIR"
 for port in 8800 8765; do
   # Linux 优先 ss；macOS 无 ss（也无 /proc）用 lsof 找监听该端口的进程。
   if command -v ss >/dev/null 2>&1; then
@@ -357,13 +361,17 @@ echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 echo "───[4/4] Live monitor (${DURATION}s)..."
 echo ""
 
-# 准备行为日志过滤（tail stderr，筛选 [BEH]、[SM] 和 [INV] 日志行）
+# 准备行为日志过滤（tail launcher 日志，筛选 [BEH]、[SM] 和 [INV] 日志行）
 BEH_LOG="/tmp/flow_beh_monitor.txt"
 : > "$BEH_LOG"  # 清空
-sleep 1  # 等 stderr 文件就绪
+sleep 1  # 等日志文件就绪
 {
-  tail -F /tmp/flow_launcher_stderr.txt 2>/dev/null \
-    | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
+  # 优先 tail 按模块分文件的日志；fallback 到旧 stderr 文件
+  if [ -f "$LOG_DIR/launcher.log" ]; then
+    tail -F "$LOG_DIR/launcher.log" 2>/dev/null
+  else
+    tail -F /tmp/flow_launcher_stderr.txt 2>/dev/null
+  fi | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
     > "$BEH_LOG"
 } &
 TAIL_BEH_PID=$!
@@ -435,18 +443,23 @@ echo ""
 # ── Print summary ───────────────────────────────────────────
 echo "═══ Pipeline Summary ═══"
 
-# Extract stats from launcher stderr
-# 用 grep -oE(BSD/GNU 通用)替代 grep -oP(\K 属 PCRE,macOS BSD grep 不支持):
-# 先抓 "#123" 整体,再用 tr/cut 剥掉前缀,等价于原 \K 的"仅取后半段"。
-FUSED=$(grep -a "EKF" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
-CTRL=$(grep -a "control.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
-PLAN=$(grep -a "planning.*#" /tmp/flow_launcher_stderr.txt 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
-SPEED=$(grep -a "flowsim.*stopped" /tmp/flow_launcher_stderr.txt 2>/dev/null | grep -oE "speed=[0-9.]+" | head -1 | cut -d= -f2 || echo "?")
+# Extract stats from per-module log files (fallback to old stderr file)
+LAUNCHER_LOG="$LOG_DIR/launcher.log"
+STDERR_LOG="/tmp/flow_launcher_stderr.txt"
+STAT_SRC="${LAUNCHER_LOG}"
+[ -f "$STAT_SRC" ] || STAT_SRC="$STDERR_LOG"
+
+FUSED=$(grep -a "EKF" "$STAT_SRC" 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+CTRL=$(grep -a "control.*#" "$STAT_SRC" 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+PLAN=$(grep -a "planning.*#" "$STAT_SRC" 2>/dev/null | tail -1 | grep -oE "#[0-9]+" | tail -1 | tr -d '#' || echo "0")
+SPEED=$(grep -a "flowsim.*stopped" "$STAT_SRC" 2>/dev/null | grep -oE "speed=[0-9.]+" | head -1 | cut -d= -f2 || echo "?")
 
 echo "  Simulation : $SPEED m/s final speed"
 echo "  Fusion     : $FUSED EKF frames"
 echo "  Planning   : $PLAN trajectories"
 echo "  Control    : $CTRL control cycles"
+echo ""
+echo "  Logs       : $LOG_DIR/{launcher,flowsim,planning,control,...}.log"
 
 echo ""
 echo "  Dashboard  : http://localhost:8800"

@@ -22,12 +22,14 @@
  *   include/node_plugin.h       — NodePlugin 接口定义
  */
 
+#include "fp_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <time.h>
 #include <dlfcn.h>
@@ -321,6 +323,7 @@ static int run_multi_process_mode(int duration, int stagger_ms,
 /* ── main ────────────────────────────────────────────────── */
 
 int main(int argc, char** argv) {
+    fp_env_init();  /* FTZ/DAZ：防 denormal 进 JSON 触发 glibc strtod 断言 */
     const char* config_path = "config/pipeline.json";
     const char* bag_path    = NULL;
     int duration = 0;
@@ -333,7 +336,21 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') config_path = argv[i];
     }
 
-    log_init(LOG_INFO, NULL);
+    /* 按模块名写独立日志文件：launcher → /tmp/flow_logs/launcher.log
+     * 单进程模式(dlopen)下各节点通过 log_set_module_dir 写入
+     * /tmp/flow_logs/{module}.log。多进程模式下每个 flow_node_host
+     * 各自写独立日志文件。环境变量 FLOW_LOG_DIR 可覆盖日志目录。 */
+    const char* log_dir = getenv("FLOW_LOG_DIR");
+    if (!log_dir || !log_dir[0]) log_dir = "/tmp/flow_logs";
+    mkdir(log_dir, 0755);
+    char launcher_log[320];
+    snprintf(launcher_log, sizeof(launcher_log), "%s/launcher.log", log_dir);
+    log_init(LOG_INFO, launcher_log);
+
+    /* 单进程模式：设置模块目录，各节点 LOG_* 自动写入 {module}.log */
+    if (!multi_mode) {
+        log_set_module_dir(log_dir);
+    }
 
     crash_handler_install();
 

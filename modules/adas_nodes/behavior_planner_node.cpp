@@ -539,12 +539,12 @@ protected:
         LOG_INFO("behavior", "FlowCoro behavior planner started (20Hz)");
 
         while (!should_stop()) {
-            co_await sleep_us(50000);  /* 20Hz */
-            if (should_stop()) break;
+            uint64_t t_start = clock_now_us();
 
             /* 等待感知数据就绪 */
             if (!g.has_fusion || !g.has_obs) {
                 g.seq++;
+                co_await sleep_us(50000);  /* 未就绪也必须让出，否则忙自旋饿死全管道 */
                 continue;
             }
 
@@ -1122,6 +1122,12 @@ protected:
             }
 
             g.seq++;
+
+            /* 自适应 sleep：维持稳定 20Hz，减去本帧工作时间 */
+            uint64_t t_frame_us = clock_now_us() - t_start;
+            uint64_t sleep_us_val = (t_frame_us < 50000) ? (50000 - t_frame_us) : 0;
+            if (should_stop()) break;
+            co_await sleep_us(sleep_us_val);
         }
 
         LOG_INFO("behavior", "FlowCoro behavior planner stopped (%u frames)", g.seq);

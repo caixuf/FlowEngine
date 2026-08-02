@@ -122,6 +122,9 @@ struct ControlContext {
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
     int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
     int8_t gear{GEAR_DRIVE};   /* 当前档位（从 trajectory 轨迹点 v 符号推导：v<0→REVERSE） */
+    bool   maneuver_mode{false}; /* 机动轨迹（掉头/倒车）：轨迹含倒车点或曲率超巡航转向域。
+                                  * 巡航限幅 0.16rad（R≥16.7m）物理上无法执行掉头弧
+                                  * （规划 0.45rad，R≈5.6m），机动期放开到 0.60rad。 */
 
     volatile int has_fusion{0};
     volatile int has_planning{0};
@@ -298,10 +301,21 @@ static void on_trajectory(const Message* msg, void* user_data) {
      * 经 safety_control 透传到 flowsim 执行倒车。 */
     {
         bool has_reverse = false;
+        double max_kappa = 0.0;
         for (uint32_t i = 0; i < n_pts; i++) {
-            if ((double)traj.points[i].v < -0.1) { has_reverse = true; break; }
+            if ((double)traj.points[i].v < -0.1) has_reverse = true;
+            double k = fabs((double)traj.points[i].kappa);
+            if (k > max_kappa) max_kappa = k;
         }
         g.gear = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
+        /* 机动检测：倒车点 或 曲率超过巡航转向域（tan(0.25)/L≈0.094 是物理
+         * 巡航钳位的极限曲率，超过它的轨迹只能来自掉头规划器满舵弧）。 */
+        bool mv = has_reverse || (max_kappa > 0.12);
+        if (mv != g.maneuver_mode) {
+            LOG_WARN("control", "[MANEUVER] %d->%d has_rev=%d max_kappa=%.3f n_pts=%u",
+                     (int)g.maneuver_mode, (int)mv, (int)has_reverse, max_kappa, n_pts);
+        }
+        g.maneuver_mode = mv;
     }
     /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
      * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
@@ -591,15 +605,14 @@ protected:
              * 无变道场景下, cruise_lane_y = road_center_y + lane_d 即为目标车道中心。 */
             double effective_target_y = cruise_lane_y;
 
-            /* §11.2 MRM 前置：降级停车必须在 PID 之前生效。
-             * 原实现在 PID 之后（line 688）覆盖 acc_target——throttle/brake
-             * 已按旧目标算出（err=+4 → thr=0.57 油门），停车指令形同虚设
-             * （2026-07-31 幽灵停车实证：MRM 下 thr=0.57/1.00 全油门）。
-             * 停稳 3s 自动恢复：degrade 只升不降（degrade_clear 无调用者），
-             * MRM 触发后永不恢复 → 永久停车（实测 5s+ 幽灵停车）。 */
+            /* §11.2 MRM 前置：降级必须在 PID 之前生效。
+             * 职责分明：降级速度上限的唯一权威 = degrade_ladder 的 l1_speed_limit
+             * （L2=3.0 爬行 / L3=0 停车）。control 不得自行硬编码"L2→停车"——
+             * 那会把瞬时心跳抖动（WSL 过载 500ms）放大成永久趴窝。
+             * 停稳 3s 自动恢复兜底保留（供 L3 停死后解锁）。 */
             {
                 DegradeState* ds = degrade_global_state();
-                if (ds->degrade_level >= DEGRADE_L2) {
+                if (ds->degrade_level >= DEGRADE_L3) {
                     g.target_speed = 0.0;
                     acc_target = 0.0;
                     g.integral = 0;
@@ -615,6 +628,10 @@ protected:
                     } else {
                         g.mrm_stall_us = 0;
                     }
+                } else if (ds->degrade_level >= DEGRADE_L2) {
+                    double lim = ds->l1_speed_limit > 0.0 ? ds->l1_speed_limit : 3.0;
+                    if (acc_target > lim) acc_target = lim;   /* 爬行，不停车 */
+                    g.mrm_stall_us = 0;
                 } else {
                     g.mrm_stall_us = 0;
                 }
@@ -677,9 +694,11 @@ protected:
             }
             g.prev_error = pid_error;
 
-            /* ── LTV MPC 横向控制 ── */
+            /* ── LTV MPC 横向控制 ──
+             * 机动模式（掉头/倒车）跳过：MPC 线性化假设小转角误差动力学，
+             * 满舵弧 + 倒挡在其模型域外，直接走 Stanley + kappa 前馈。 */
             bool mpc_used = false;
-            if (g.use_ltv_mpc && g.has_planning && g.ref_path.size() > 1) {
+            if (g.use_ltv_mpc && !g.maneuver_mode && g.has_planning && g.ref_path.size() > 1) {
                 if (!g.ltv_mpc) {
                     g.ltv_mpc = ltv_mpc_create(&g.ltv_mpc_cfg);
                 }
@@ -751,7 +770,11 @@ protected:
                     double ff_term = g.wheelbase * kappa * ff_weight;
 
                     steer = cte_term - heading_term - yaw_damp_term + ff_term + delta_ff;
-                    double steer_limit = steer_limit_for_speed(abs_speed, 1.4);
+                    /* 机动模式放开限幅到满舵 0.60rad：巡航限幅 0.16rad 的转弯
+                     * 半径 ≥16.7m，无法执行规划的掉头弧（0.45rad，R≈5.6m）。
+                     * flowsim 物理层看到 |steer|>0.28 会同步 steer_override。 */
+                    double steer_limit = g.maneuver_mode
+                        ? 0.60 : steer_limit_for_speed(abs_speed, 1.4);
                     if (steer >  steer_limit) steer =  steer_limit;
                     if (steer < -steer_limit) steer = -steer_limit;
                     steer = STEER_FILTER_NEW * steer + (1.0 - STEER_FILTER_NEW) * g.prev_steer;

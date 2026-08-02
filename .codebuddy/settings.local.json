@@ -1,0 +1,7 @@
+{
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "browser"
+  ],
+  "disabledMcpjsonServers": []
+}

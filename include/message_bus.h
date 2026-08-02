@@ -39,7 +39,7 @@ extern "C" {
  * bag.c 中两处栈缓冲也变成 64KB —— 系统 3.8GB RAM / 8MB 默认线程栈均能承受。 */
 #define MSG_BUS_MAX_DATA_SIZE    65536
 #define MSG_BUS_MAX_TOPICS       64
-#define MSG_BUS_MAX_SUBSCRIBERS  128
+#define MSG_BUS_MAX_SUBSCRIBERS  256  /* 全总线扁平表；26 节点 pipeline 实测 >128，见 SUB_OVERFLOW */
 #define MSG_BUS_QUEUE_SIZE       1024
 
 /* ── 消息结构 ────────────────────────────────────────────── */
