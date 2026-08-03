@@ -168,6 +168,9 @@ typedef struct {
     char   type[32];        /**< 道路类型（road_network 新格式：viaduct_highway/urban/ramp_curve 等） */
     int    lanes;           /**< 车道数（road_network.edges[0].lanes，默认 0=未配置→fallback 2） */
     double lane_width;      /**< 车道宽度 m（road_network.edges[0].lane_width，默认 0=未配置→fallback 3.5） */
+    int    oneway;          /**< 1=单向（全部车道同向），0=双向（跨中心线=对向）。
+                             *   behavior 变道候选据此限制（双向路禁止越线变道，
+                             *   2026-08：双向路超车变道到对向 = 逆行）。 */
 } ScenarioRoad;
 
 /* ── 红绿灯（可选, 见 traffic_light.h） ────────────────────── */

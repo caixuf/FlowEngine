@@ -1043,6 +1043,9 @@ static void publish_road_geometry(void) {
         }
     }
     cJSON_AddNumberToObject(root, "lane_count", lane_count);
+    /* 单双向：behavior 变道候选限制用（双向路禁止越线变道到对向） */
+    cJSON_AddNumberToObject(root, "oneway",
+                            (g.scenario && g.scenario->road.oneway) ? 1 : 0);
     /* 同步到 scene_pub_cfg，供 ego fallback 横向控制（lane_keep_ego_fallback）
      * 和 scene/frame 发布使用，否则它们仍用 init 默认值 2，导致 4 车道场景
      * ego target_y 算错。 */

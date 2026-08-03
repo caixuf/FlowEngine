@@ -278,6 +278,8 @@ ScenarioConfig* scenario_load(const char* path) {
                 if (cJSON_IsNumber(jlanes)) sc->road.lanes = (int)jlanes->valuedouble;
                 cJSON* jlwid = cJSON_GetObjectItemCaseSensitive(jedge0, "lane_width");
                 if (cJSON_IsNumber(jlwid)) sc->road.lane_width = jlwid->valuedouble;
+                cJSON* joneway = cJSON_GetObjectItemCaseSensitive(jedge0, "oneway");
+                if (cJSON_IsTrue(joneway)) sc->road.oneway = 1;
             }
         }
     }

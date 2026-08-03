@@ -130,6 +130,7 @@ struct BehaviorContext {
     /* 道路几何（从 road/geometry JSON 解析） */
     int    lane_count{2};
     double lane_width{3.5};
+    int    road_oneway{0};  /* 1=单向（全部车道同向），0=双向（跨中心线=对向） */
     volatile int has_road_geometry{0};
 
     /* 红绿灯缓存（road/traffic_lights 解析走 traffic_light.h 的共享
@@ -473,6 +474,7 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     cJSON* item;
     if ((item = cJSON_GetObjectItem(root, "lane_count"))) g.lane_count = item->valueint;
     if ((item = cJSON_GetObjectItem(root, "lane_width"))) g.lane_width = item->valuedouble;
+    if ((item = cJSON_GetObjectItem(root, "oneway")))     g.road_oneway = item->valueint;
     g.has_road_geometry = 1;
     cJSON_Delete(root);
 }
@@ -805,6 +807,22 @@ protected:
 
             bool left_ok  = left_same_side && left_rear_safe && (left_gap > min_gap * g.lc_gap_mult);
             bool right_ok = right_same_side && right_rear_safe && (right_gap > min_gap * g.lc_gap_mult);
+            /* 双向路保护（2026-08）：变道候选不得跨过中心线（目标车道 y 与
+             * ego 同号）。旧实现不感知单双向 —— 双向 4 车道（2 同向 + 2 对向）
+             * 上超车变道（左移）越过中心线进入对向车道 → 逆行（实测启动
+             * 后变道到 y=+5.2 对向最左，20 m/s 逆行）。单向路（oneway=1）
+             * 全部车道同向，不受限。 */
+            if (!g.road_oneway) {
+                double ego_lane_y = lane_center_y(current_idx, lc, lw, 0.0, 0.0);
+                if (current_idx - 1 >= 0 &&
+                    lane_center_y(current_idx - 1, lc, lw, 0.0, 0.0) * ego_lane_y < 0.0) {
+                    left_ok = false;   /* 左移跨中心线 → 对向 → 禁止 */
+                }
+                if (current_idx + 1 < lc &&
+                    lane_center_y(current_idx + 1, lc, lw, 0.0, 0.0) * ego_lane_y < 0.0) {
+                    right_ok = false;  /* 右移跨中心线 → 对向 → 禁止 */
+                }
+            }
 
             if (left_ok && right_ok) {
                 adj_idx = (left_gap >= right_gap) ? current_idx - 1 : current_idx + 1;
