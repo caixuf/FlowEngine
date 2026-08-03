@@ -28,6 +28,7 @@
 #include "coroutine_task.h"
 #include "logger.h"
 #include "clock_service.h"
+#include "maneuver_tracker.h"      /* 通用机动跟踪器（header-only，替代掉头 5 层 gate） */
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -122,19 +123,13 @@ struct ControlContext {
     double road_center_y{0};   /* 当前帧目标道路中心 y（来自 trajectory 第一个点，供 fallback 使用） */
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
     int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
-    int8_t gear{GEAR_DRIVE};   /* 当前档位（从 trajectory 轨迹点 v 符号推导：v<0→REVERSE） */
-    bool   gear_pending{false}; /* 换挡待决：想换挡但带速，本帧刹停（on_trajectory 置位） */
-    double maneuver_exec_v{0}; /* 机动执行点（最近点）计划速度 |v|：换挡刹停 clamp 参考 */
-    uint32_t maneuver_prog_i{0}; /* 机动轨迹单调推进索引：掉头缓存轨迹前进段+倒车段拼接，
-                                  * 段交界处两段几何邻近（返程 y≈3.6 前向弧与倒车弧只差
-                                  * ~1m），最近点每帧在 D/R 两段间跳 → gear 振荡原地抖
-                                  * （2026-08-03 实测 30s 卡死 y≈3.4 不动）。prog_i 只
-                                  * 前进不后退：一旦进入倒车段就锁 REVERSE，直到推进到
-                                  * Phase 4 正向段才解锁——段交界物理上车也动不了几米，
-                                  * 单调推进不会漏执行任何一段。 */
+    int8_t gear{GEAR_DRIVE};   /* 当前档位（机动期 = ManeuverTracker 输出镜像；巡航 = DRIVE） */
+    bool   gear_pending{false}; /* 换挡待决：想换挡但带速，本帧刹停（tracker 输出镜像） */
     bool   maneuver_mode{false}; /* 机动轨迹（掉头/倒车）：轨迹含倒车点或曲率超巡航转向域。
-                                  * 巡航限幅 0.16rad（R≥16.7m）物理上无法执行掉头弧
-                                  * （规划 0.45rad，R≈5.6m），机动期放开到 0.60rad。 */
+                                  * 驱动 safety/MPC/label gate（+MANEUVER、ROAD_GUARD 豁免、
+                                  * 左转向灯、steer 限幅 0.60）。档位/横向由 ManeuverTracker 负责。 */
+    maneuver::ManeuverTracker       mv_tracker;   /* 通用机动跟随器（弧长推进 + 挡位 + 横向） */
+    maneuver::ManeuverTrackerParams mv_params;    /* 热重载调参（control.mv_*） */
 
     volatile int has_fusion{0};
     volatile int has_planning{0};
@@ -315,160 +310,51 @@ static void on_trajectory(const Message* msg, void* user_data) {
         }
     }
 
-    /* 目标速度取轨迹末点：规划器可生成从当前速度到目标速度的减速轨迹，
-     * 取首点 (=当前速度) 会让控制器永远不减速 → 追尾前车。
-     * 取末点 (=规划期内的期望速度) 让控制器跟随减速/加速意图。 */
-    g.target_speed = (double)traj.points[n_pts - 1].v;
-    g.has_target_speed = 1;
-    /* 档位推导：从「车在轨迹上的执行点」推，不再扫全轨迹。
-     * 旧实现（轨迹含任何 v<0 点即 REVERSE）在掉头时把 Phase 2 前进阶段
-     * 也判成倒挡 → control 横向符号镜像 + flowsim off_rails 全程激活 →
-     * 第一把转向不足、v 归零、冲出路面（实测 y=11.13 路面外，2026-08-03）。
-     * 掉头轨迹相位：Phase 1/2/4 正速（前进），Phase 3/5 负速（倒车）。
-     * 车在轨迹上的投影点（最近点）的速度符号 = 当前应执行的档位：
-     * Phase 2 中最近点在正速段 → DRIVE（满舵左打前进）；
-     * Phase 3 中最近点在负速段 → REVERSE（右打满舵倒车调整）。 */
-    uint32_t best_i = 0;   /* ego 在轨迹上的最近点（机动期前视锚点） */
-    {
-        bool has_reverse = false;
-        double max_kappa = 0.0;
-        if (n_pts > 0) {
-            double best_d2 = 1e18;
-            for (uint32_t i = 0; i < n_pts; i++) {
-                double dx = (double)traj.points[i].x - g.ego_x;
-                double dy = (double)traj.points[i].y - g.ego_y;
-                double d2 = dx * dx + dy * dy;
-                if (d2 < best_d2) { best_d2 = d2; best_i = i; }
-                double k = fabs((double)traj.points[i].kappa);
-                if (k > max_kappa) max_kappa = k;
-            }
-            /* gear 判定不能只看最近点：掉头缓存轨迹是前进段+倒车段拼接，
-             * ego 停在段交界时最近点 v 符号每帧摆动 → gear 振荡原地抖。
-             * 从最近点向前扫第一个 |v|>0.3 的点取符号（执行方向的意图）。
-             * 段交界几何歧义（返程 y≈3.6 前向弧与倒车弧相距 <1m）时最近点
-             * 在 D/R 两段间跳 → 用单调推进索引 maneuver_prog_i 锁段：一旦
-             * 进入倒车段就锁 REVERSE，直到推进到 Phase 4 正向段才解锁。
-             * 推进 gate 必须带朝向一致性：两弧几何邻近时最近点会提前跳到
-             * 倒车段（倒车弧在 y≈4.4 处折回，车还在前进段 heading 101° 时
-             * 最近点已是 heading 160° 的倒车点）→ prog_i 过早进倒车段 →
-             * gear 提前翻 R → 车 101° 就开始倒车、轨迹对不上 → e_lat 发散
-             * 冲出路面（2026-08-03 实测 y=-13）。只有轨迹点朝向与车头
-             * 接近（|Δheading|<0.8rad≈46°）才算"车已推进到该点"。 */
-            auto heading_near = [](double h1, double h2) {
-                double d = h1 - h2;
-                while (d >  M_PI) d -= 2.0 * M_PI;
-                while (d < -M_PI) d += 2.0 * M_PI;
-                return fabs(d);
-            };
-            if (best_i > g.maneuver_prog_i) {
-                double dh = heading_near((double)traj.points[best_i].heading,
-                                         g.ego_heading);
-                if (dh < 0.8) g.maneuver_prog_i = best_i;
-            }
-            uint32_t gear_anchor = g.maneuver_prog_i;
-            if (gear_anchor >= n_pts) gear_anchor = n_pts - 1;
-            for (uint32_t i = gear_anchor; i < n_pts; i++) {
-                double vv = (double)traj.points[i].v;
-                if (fabs(vv) > 0.3) { has_reverse = (vv < 0.0); break; }
-            }
-        }
-        /* 换挡滞回 + 真实换挡语义：带速不换挡(消灭交界 D/R 振荡)，但想换
-         * 挡时必须主动刹停——否则 gear 卡死在旧挡、被反向 target 拖着狂奔
-         * （demo6：gear 卡 R + ROAD_GUARD 给油 → 倒车冲出路面 y=-11）。 */
-        int8_t want = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
-        g.gear_pending = false;
-        if (want != g.gear && fabs(g.current_speed) > 0.8) {
-            g.gear_pending = true;   /* 保持旧挡，本帧强制刹停 */
-        } else {
-            g.gear = want;
-        }
-        has_reverse = (g.gear == GEAR_REVERSE);
-        /* 机动检测：倒车点 或 曲率超过巡航转向域（tan(0.25)/L≈0.094 是物理
-         * 巡航钳位的极限曲率，超过它的轨迹只能来自掉头规划器满舵弧）。 */
-        bool mv = has_reverse || (max_kappa > 0.12);
-        if (mv != g.maneuver_mode) {
-            LOG_WARN("control", "[MANEUVER] %d->%d has_rev=%d max_kappa=%.3f n_pts=%u",
-                     (int)g.maneuver_mode, (int)mv, (int)has_reverse, max_kappa, n_pts);
-        }
-        if (mv && !g.maneuver_mode) {
-            g.maneuver_prog_i = 0;  /* 新机动轨迹：推进索引从 0 起 */
-        }
-        g.maneuver_mode = mv;
-        /* 机动期速度取执行点（最近点）|v| 而非轨迹末点：掉头轨迹末点是
-         * Phase 5 巡航填充（v=cfg_target_speed），拿末点当目标会在满舵段
-         * 冲到巡航速度；反之末点若为 0 会让车在半途丧失动力。
-         * 下限 1.5 m/s：运动学 yaw_rate=v/L·tan(δ)，v=0 时车头永远转不动
-         * （2026-08-03 掉头死锁：刹停在对向车道定格"逆行"）。
-         * 执行点用单调推进索引（maneuver_prog_i）而非几何最近点 best_i：
-         * 段交界两弧邻近时 best_i 每帧在 D/R 段间跳，exec 跟着跳 → 目标
-         * 速度 +1.5/−3.0 交替、换挡振荡卡死。prog_i 只前进，段交界锁住
-         * 已进入的那段。 */
-        if (mv && n_pts > 0) {
-            uint32_t exec_i = g.maneuver_prog_i;
-            if (exec_i >= n_pts) exec_i = n_pts - 1;
-            double ev = (double)traj.points[exec_i].v;
-            g.maneuver_exec_v = fabs(ev);   /* 执行点计划速度（先刹后转 clamp 参考） */
-            /* 目标速度取执行点起前视 6m 弧长内的最小 |v|：只用执行点 v
-             * 会"车追着最近点跑、最近点速度追着车涨"——减速计划永远
-             * 追不上，满舵段还带 6-7m/s（R=4.1m 需 ≤3.5）understeer
-             * 冲出路面（2026-08-03 demo8 y=10.9 → 24.4）。 */
-            double mag = fabs(ev);
-            {
-                double arc = 0.0;
-                for (uint32_t i = exec_i; i + 1 < n_pts && arc < 6.0; i++) {
-                    double ddx = (double)traj.points[i + 1].x - (double)traj.points[i].x;
-                    double ddy = (double)traj.points[i + 1].y - (double)traj.points[i].y;
-                    arc += sqrt(ddx * ddx + ddy * ddy);
-                    double vv = fabs((double)traj.points[i + 1].v);
-                    /* 只在同挡段内取 min（跨 D/R 边界的 0 速不算） */
-                    if (((double)traj.points[i + 1].v < -0.1) != (ev < -0.1)) break;
-                    if (vv < mag) mag = vv;
-                }
-            }
-            if (mag < 1.5 && exec_i + 1 < n_pts) mag = 1.5;
-            /* 保留符号：倒挡 PID 约定 target 为负（见下方 is_reverse 镜像） */
-            g.target_speed = (ev < -0.1) ? -mag : mag;
-            /* 换挡待决：先刹停（|v|<0.8 时上面滞回自动放行换挡） */
-            if (g.gear_pending) g.target_speed = 0.0;
-        }
+    /* ── 机动分类器（留在 control）：这是机动轨迹吗？──
+     * whole-trajectory any(v<0) 或 max_kappa>0.12。只决定"是否调用
+     * ManeuverTracker"，不再推导 gear —— gear 由 tracker 的 s+exec v 决定，
+     * Phase 2 前进段误判倒挡的旧 bug（曾致 y=11.13 出路面）结构上消失。 */
+    bool has_reverse = false;
+    double max_kappa = 0.0;
+    for (uint32_t i = 0; i < n_pts; i++) {
+        double k = fabs((double)traj.points[i].kappa);
+        if (k > max_kappa) max_kappa = k;
+        if ((double)traj.points[i].v < -0.1) has_reverse = true;
     }
-    /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
-     * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
-     * 增大，避免一次性跳到 3.5m 误差导致横向过冲冲出路沿。
-     * 轨迹点间距 100ms，0.5s = 第 5 个点。 */
+    bool mv = has_reverse || (max_kappa > 0.12);
+    if (mv != g.maneuver_mode) {
+        LOG_WARN("control", "[MANEUVER] %d->%d has_rev=%d max_kappa=%.3f n_pts=%u",
+                 (int)g.maneuver_mode, (int)mv, (int)has_reverse, max_kappa, n_pts);
+    }
+    if (mv && !g.maneuver_mode) {
+        g.mv_tracker.init(traj.points, (int)n_pts, g.wheelbase);
+        g.mv_tracker.setParams(g.mv_params);
+    } else if (mv) {
+        g.mv_tracker.setTrajectory(traj.points, (int)n_pts, g.wheelbase);
+        g.mv_tracker.setParams(g.mv_params);
+    } else if (g.maneuver_mode) {
+        g.gear = GEAR_DRIVE;        /* 机动结束：复位巡航挡位基线 */
+        g.gear_pending = false;
+    }
+    g.maneuver_mode = mv;
+
+    /* 目标速度：巡航 = 轨迹末点（跟随减速/加速意图）；
+     * 机动 = ManeuverTracker 每帧刷新（见 tick）。 */
+    if (!mv) {
+        g.target_speed = (double)traj.points[n_pts - 1].v;
+    }
+    g.has_target_speed = 1;
+
+    /* lane_d / target_path_*：巡航 = 0.5s t_rel 前视点（原样保留，向后兼容）；
+     * 机动 = tracker 前视点（tracker 横向反馈用的同一几何）。 */
     uint32_t d_idx = 0;
-    if (g.maneuver_mode) {
-        /* 机动期（缓存重放的掉头轨迹）：t_rel 相对生成时刻，不随 ego 推进。
-         * 用固定 t_rel 前视 = 永远追轨迹开头 → 车直行怼向路端被 safety
-         * 拦停（2026-08-03 demo7：40s 定在 y=-0.85 打不了方向）。
-         * 改为锚定最近点 + 前视 ~2m 弧长。锚点同样用单调推进索引 prog_i：
-         * 段交界两弧邻近时最近点每帧在 D/R 段间跳，d_idx 跟着跳 → 横向
-         * 目标在两条弧的 y 间振荡 → 车原地抖。锁段后前视点稳定落在当前
-         * 执行的弧段上。
-         * 前视必须留在同一挡段内：Phase 3 倒车弧仅 ~2.6m，2m 前视会跨进
-         * Phase 4 正向弧 → 控制律拿到正向 kappa（左打）在倒车时右打变
-         * 左打 → 车拐错方向冲出路面（2026-08-03 实测 y=-7.8 → 8.6）。 */
-        d_idx = g.maneuver_prog_i;
-        if (d_idx >= n_pts) d_idx = n_pts - 1;
-        /* 段方向由当前 gear 决定，不由锚点 v 推断：Phase 2→3 交界有
-         * v=0 刹停点，锚在它上面时 v≈0 被误判为正向段 → 倒车时目标
-         * 落在刹停点（kappa=0、heading 还是 Phase 2 末向）→ 反馈项把
-         * 舵角翻成左打 → 倒车拐错方向冲出路面（2026-08-03 实测
-         * y=-7.8 → 8.6）。按 gear 前进到本段第一个有效点再前视。 */
-        const bool dseg_rev = (g.gear == GEAR_REVERSE);
-        while (d_idx + 1 < n_pts &&
-               (((double)traj.points[d_idx].v < -0.1) != dseg_rev)) {
-            d_idx++;   /* 跳过 v=0 刹停点，落到本段有效点 */
-        }
-        double lookahead = 0.0;
-        while (d_idx + 1 < n_pts && lookahead < 2.0) {
-            /* 跨 D/R 边界就停：本段轨迹已到尽头，再往前是下一挡段的弧 */
-            if (((double)traj.points[d_idx + 1].v < -0.1) != dseg_rev) break;
-            double ddx = (double)traj.points[d_idx + 1].x - (double)traj.points[d_idx].x;
-            double ddy = (double)traj.points[d_idx + 1].y - (double)traj.points[d_idx].y;
-            lookahead += sqrt(ddx * ddx + ddy * ddy);
-            d_idx++;
-        }
+    if (mv) {
+        const maneuver::TrackPoint& lp = g.mv_tracker.lookaheadPoint();
+        g.lane_d = lp.l;
+        g.target_path_y = lp.y;
+        g.target_path_x = lp.x;
+        g.target_path_heading = lp.heading;
+        g.target_path_kappa = lp.kappa;
     } else {
         for (uint32_t i = 0; i < n_pts; i++) {
             if ((double)traj.points[i].t_rel_us >= 500000.0) {  /* 0.5s */
@@ -476,13 +362,13 @@ static void on_trajectory(const Message* msg, void* user_data) {
                 break;
             }
         }
+        if (d_idx >= n_pts) d_idx = n_pts - 1;
+        g.lane_d = (double)traj.points[d_idx].l;
+        g.target_path_y = (double)traj.points[d_idx].y;
+        g.target_path_x = (double)traj.points[d_idx].x;
+        g.target_path_heading = (double)traj.points[d_idx].heading;
+        g.target_path_kappa = (double)traj.points[d_idx].kappa;
     }
-    if (d_idx >= n_pts) d_idx = n_pts - 1;
-    g.lane_d = (double)traj.points[d_idx].l;
-    g.target_path_y = (double)traj.points[d_idx].y;
-    g.target_path_x = (double)traj.points[d_idx].x;
-    g.target_path_heading = (double)traj.points[d_idx].heading;
-    g.target_path_kappa = (double)traj.points[d_idx].kappa;
     g.target_road_center_y = g.target_path_y - g.lane_d * cos(g.target_path_heading);
     if (g.cycle > 900 && g.cycle < 1000) {
         LOG_WARN("control", "[DBG traj] cycle=%d pts=%d v_last=%.2f d_la=%.2f valid=%d",
@@ -606,6 +492,18 @@ protected:
             g.k_v_lat          = param_get_float("control.k_v_lat");
             g.k_vy             = param_get_float("control.k_vy");
             g.k_vy_damp        = param_get_float("control.k_vy_damp");
+            /* ManeuverTracker 调参热重载（control.mv_*） */
+            g.mv_params.heading_gate_rad = param_get_float("control.mv_heading_gate_rad");
+            g.mv_params.diverge_guard_rad= param_get_float("control.mv_diverge_guard_rad");
+            g.mv_params.lookahead_m      = param_get_float("control.mv_lookahead_m");
+            g.mv_params.speed_scan_m     = param_get_float("control.mv_speed_scan_m");
+            g.mv_params.speed_floor_mps  = param_get_float("control.mv_speed_floor_mps");
+            g.mv_params.gear_v_threshold = param_get_float("control.mv_gear_v_threshold");
+            g.mv_params.gear_pending_speed=param_get_float("control.mv_gear_pending_speed");
+            g.mv_params.lat_gain_dh      = param_get_float("control.mv_lat_gain_dh");
+            g.mv_params.lat_gain_elat    = param_get_float("control.mv_lat_gain_elat");
+            g.mv_params.max_steer        = param_get_float("control.mv_max_steer");
+            g.mv_tracker.setParams(g.mv_params);
             /* Reset stale data flags: if no message received for >1000ms, clear flag */
             uint64_t now_us = clock_now_us();
             if (g.has_fusion   && now_us - g.last_fusion_us   > 1000000ULL) g.has_fusion   = 0;
@@ -740,6 +638,28 @@ protected:
              * 无轨迹时（has_planning=0）acc_target=0 → 匀减速停车。
              * 这里的 has_planning 检查在上方 DATA_TIMEOUT 分支已 continue，
              * 所以走到这里时 has_planning 必为 1。但保险起见仍做检查。 */
+            /* ── 机动执行：ManeuverTracker 每帧推进 s + 算 steer/target/gear ──
+             * 放在 acc_target 之前：让下方纵向 PID（含 reverse mirror）和 MRM
+             * 叠加读到新鲜的 target_speed / gear。tracker 只做跟随，纵向 PID 留在
+             * control（复用已验证的 reverse mirror + anti-windup + SHIFT_STOP）。 */
+            maneuver::ManeuverResult mv_res;
+            if (g.maneuver_mode && g.mv_tracker.hasTrajectory()) {
+                mv_res = g.mv_tracker.tick(g.ego_x, g.ego_y, g.ego_heading,
+                                           g.current_speed, CONTROL_DT_S);
+                g.gear         = (mv_res.gear == -1) ? GEAR_REVERSE : GEAR_DRIVE;
+                g.gear_pending = mv_res.gear_pending;
+                g.target_speed = mv_res.target_speed;   /* 覆盖 on_trajectory 的巡航末点 */
+                g.prev_steer   = mv_res.steer;          /* 平滑机动→巡航 */
+                /* 刷新参考几何跟随 s（planning 未必每帧都发新轨迹） */
+                const maneuver::TrackPoint& lp = g.mv_tracker.lookaheadPoint();
+                g.lane_d = lp.l;
+                g.target_path_y = lp.y;
+                g.target_path_x = lp.x;
+                g.target_path_heading = lp.heading;
+                g.target_path_kappa = lp.kappa;
+                g.target_road_center_y = g.target_path_y - g.lane_d * std::cos(g.target_path_heading);
+            }
+
             double acc_target;
             if (g.has_planning && g.has_target_speed) {
                 acc_target = g.target_speed;  /* 纯轨迹跟随 */
@@ -919,43 +839,11 @@ protected:
 
             /* ── Stanley 横向控制（LTV MPC 未启用或求解失败时回退）── */
             if (!mpc_used && g.maneuver_mode) {
-                /* ── 机动（掉头）专用控制律 ──
-                 * Stanley 的 cte_term 用世界系 y 差，在大角度机动（heading
-                 * 扫过 ±π）下符号语义随朝向翻转 → 满舵来回打（demo9 实测
-                 * st +0.60→-0.60 振荡画 S 形，超调 y=11）。
-                 * 改为纯几何跟踪：曲率前馈（轨迹 κ → steer=atan(L·κ)）
-                 * + 车体系横向误差 + heading 误差，倒挡横向项反号。 */
-                double dh = g.target_path_heading - g.ego_heading;
-                while (dh >  M_PI) dh -= 2.0 * M_PI;
-                while (dh < -M_PI) dh += 2.0 * M_PI;
-                /* e_lat = (p_target - p_ego)·n̂，n̂ = 目标点 heading 左法向 */
-                double e_lat = -sin(g.target_path_heading) * (g.target_path_x - g.ego_x)
-                             +  cos(g.target_path_heading) * (g.target_path_y - g.ego_y);
-                bool rev = (g.gear == GEAR_REVERSE);
-                double ff = atan(g.wheelbase * g.target_path_kappa);
-                double fb = 0.8 * dh + 0.25 * e_lat;
-                if (rev) fb = -fb;   /* 倒挡：舵角对横向误差的作用反向 */
-                steer = ff + fb;
-                /* 先刹后转：实际车速明显高于执行点计划速度时压住大舵角——
-                 * 带 6m/s 打满舵（计划 3.5）转弯半径不够，冲出路面
-                 * （demo10：y 冲到 7.9 恰好在路沿外）。
-                 * 参考用执行点计划速度 maneuver_exec_v 而非 target_speed：
-                 * target_speed 是 6m 前视内的 min|v|，Phase 2→3 交界有
-                 * v=0 刹停点会让它掉到 1.5 → 阈值塌缩 → 满舵弧被压成
-                 * 0.10（R≈27m）完不成掉头 → 车直冲出路面 y=8.83
-                 * （2026-08-03 实测）。执行点速度在进弧段 = 3.5 保持阈值
-                 * 4.85，只在真正带 6m/s 冲进弧时才 clamp。 */
-                double maneuver_v_ref = g.maneuver_exec_v;
-                if (maneuver_v_ref < 0.5) maneuver_v_ref = 0.5;
-                if (fabs(g.current_speed) > maneuver_v_ref * 1.3 + 0.3) {
-                    const double lim = 0.10;
-                    if (steer >  lim) steer =  lim;
-                    if (steer < -lim) steer = -lim;
-                }
-                if (steer >  0.60) steer =  0.60;
-                if (steer < -0.60) steer = -0.60;
-                g.prev_steer = steer;
-                mpc_used = true;  /* 跳过下方 Stanley */
+                /* ── 机动横向：ManeuverTracker.tick() 已在 acc_target 前算好 ──
+                 * 几何跟踪（kappa 前馈 + 车体系 e_lat/dh 反馈，倒挡反号）
+                 * 与 ±0.60 限幅都在 tracker 内部。这里只取结果跳过巡航 Stanley。 */
+                steer = mv_res.steer;
+                mpc_used = true;
             }
             if (!mpc_used) {
                 steer = 0.0;
@@ -1391,6 +1279,17 @@ static int control_init(MessageBus* bus, Transport* transport,
     param_register_float("control.k_v_lat", g.k_v_lat, 0.0, 2.0, "LQR-style lateral velocity damping gain (anti-overshoot, replaces yaw_damping patch)");
     param_register_float("control.k_vy", g.k_vy, 0.0, 2.0, "v_y_des position gain: v_y_des = k_vy*lat_error - k_vy_damp*v_lat");
     param_register_float("control.k_vy_damp", g.k_vy_damp, 0.0, 2.0, "v_y_des velocity damping gain (D term of lateral PD)");
+    /* ManeuverTracker 通用机动跟随器调参（默认值 = Python 原型字面量） */
+    param_register_float("control.mv_heading_gate_rad",  g.mv_params.heading_gate_rad,  0.0, 3.14, "Maneuver D/R boundary heading gate (rad)");
+    param_register_float("control.mv_diverge_guard_rad", g.mv_params.diverge_guard_rad, 0.0, 3.14, "Maneuver exec/car heading diverge guard (rad)");
+    param_register_float("control.mv_lookahead_m",       g.mv_params.lookahead_m,        0.5, 8.0,  "Maneuver lateral lookahead arc (m)");
+    param_register_float("control.mv_speed_scan_m",      g.mv_params.speed_scan_m,       1.0, 20.0, "Maneuver target-speed min|v| scan window (m)");
+    param_register_float("control.mv_speed_floor_mps",   g.mv_params.speed_floor_mps,    0.5, 5.0,  "Maneuver target-speed floor (m/s)");
+    param_register_float("control.mv_gear_v_threshold",  g.mv_params.gear_v_threshold,   0.1, 1.0,  "Maneuver gear-intent |v| threshold");
+    param_register_float("control.mv_gear_pending_speed",g.mv_params.gear_pending_speed, 0.1, 3.0,  "Maneuver gear-change brake speed threshold");
+    param_register_float("control.mv_lat_gain_dh",       g.mv_params.lat_gain_dh,        0.0, 3.0,  "Maneuver heading-error feedback gain");
+    param_register_float("control.mv_lat_gain_elat",     g.mv_params.lat_gain_elat,      0.0, 2.0,  "Maneuver body-frame lateral-error gain");
+    param_register_float("control.mv_max_steer",         g.mv_params.max_steer,          0.1, 0.8,  "Maneuver max steer (rad)");
 
     /* 运行时从 param_registry 读取 (支持 flowctl param set 热重载)。
      * 全新初始化时此值等于上方注册的默认值（即 JSON 值或代码默认值）；

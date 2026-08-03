@@ -796,6 +796,14 @@ target_include_directories(test_adas_nodes_logic PRIVATE ${GEN_DIR})
 add_test(NAME adas_nodes_logic_tests COMMAND test_adas_nodes_logic)
 set_tests_properties(adas_nodes_logic_tests PROPERTIES TIMEOUT 10)
 
+# ── ManeuverTracker 通用机动跟踪器单元测试（纯算法，无 transport/param 依赖）──
+add_executable(test_maneuver_tracker tests/test_maneuver_tracker.cpp)
+target_link_libraries(test_maneuver_tracker m)
+add_dependencies(test_maneuver_tracker msg_codegen)
+target_include_directories(test_maneuver_tracker PRIVATE ${GEN_DIR} modules/adas_nodes)
+add_test(NAME maneuver_tracker_tests COMMAND test_maneuver_tracker)
+set_tests_properties(maneuver_tracker_tests PROPERTIES TIMEOUT 10)
+
 # ── EKF 融合 / EKF-SLAM 纯 C 单元测试 ──
 # 这两个测试文件此前存在却未进门禁：test_ekf_slam 只在 adas_nodes 子项目里有
 # add_executable 而无 add_test（且子项目不 enable_testing()、不被标准 ctest 覆盖）；
