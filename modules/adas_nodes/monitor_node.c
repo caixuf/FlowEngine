@@ -884,6 +884,7 @@ static void export_dashboard_json(void) {
             const char* merge_fields[] = {
                 "lights", "brake", "throttle", "vx", "vy",
                 "target_vx", "length", "width", "ai_state",
+                "yaw_rate",  /* 前端 heading 外推用（位置/朝向同步，2026-08） */
                 NULL
             };
             for (int i = 0; merge_fields[i]; i++) {

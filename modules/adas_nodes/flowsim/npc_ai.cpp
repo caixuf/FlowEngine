@@ -262,9 +262,13 @@ static bool boundary_permissive(const Entity& npc, double target_offset,
 
     // 同向半宽估算：双向道路同向车道数 ≈ total_lanes/2；
     // total_lanes 为奇数（单向道路）时同向车道数 = total_lanes。
+    // 车道宽从路网查询（非标准路宽如 3.0/4.0m 场景不再算错）：
+    // 旧硬编码 3.5m 在窄路场景把合法车道判成越界（2026-08 修复）。
     int same_dir_lanes = total_lanes / 2;
     if (same_dir_lanes < 1) same_dir_lanes = total_lanes;
-    double same_dir_half = same_dir_lanes * 3.5;
+    double lw = roads->lane_width(npc.road_id, 0, npc.s);
+    if (lw < 1.0) lw = 3.5;  /* 查询失败兜底 */
+    double same_dir_half = same_dir_lanes * lw;
 
     // 目标 offset 必须在同向路面范围内（+1m 余量）
     if (npc.route_dir > 0) {
@@ -293,11 +297,18 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
     // 旧 id%5 只有 5 个位置（每类 8 个 NPC），B4 防叠车 5 次重试不够，第 6-8 个叠车。
     const double back = 50.0 + (double)(npc.id % 10) * 20.0;
     double target;
-    if (ego_route_s > 1.0) {
-        target = (npc.route_dir > 0) ? (ego_route_s - back)   // 顺行：回 ego 后方
-                                     : (ego_route_s + back);  // 对向：回 ego 前方(朝 ego 开来)
+    if (npc.route_dir > 0) {
+        /* 顺行：回 ego 后方（ego 未定位时回起点 0）形成持续车流 */
+        target = (ego_route_s > 1.0) ? (ego_route_s - back) : 0.0;
     } else {
-        target = (npc.route_dir > 0) ? 0.0 : total;           // ego 未定位：回起/末端
+        /* 对向（route_dir<0）：循环回 route 末端（起点对面），保持当前
+         * offset 车道。旧实现放 ego 前方 (ego_route_s+back)：ego 在单向
+         * 高速时对向 offset 超出路面 → 回收出路外与同向 NPC 冲撞并把
+         * ego 推出路缘（d4ac6b0 事故）；旧「到起点即 inactive」又让对向
+         * 车流跑完就消失（2026-08 修复为循环）。末端是双向路的对向
+         * 车道，对向车从末端沿 -s 重新驶来，形成循环车流。 */
+        target = total - back;
+        if (target < 0.0) target = 0.0;
     }
     // B4: 防叠车 — 目标点 8m 内若已有同方向 NPC，再后退 15m，最多重试 8 次。
     // id%10 每类最多 4 个 NPC，3 次重试即够；8 次留充足余量应对边界情况。
@@ -386,8 +397,27 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
 void step_npc_vehicle(Entity& npc, const EntityPool& pool,
                       double dt, const NpcAiConfig& cfg,
                       FlowRoadNetwork* roads, const Route* route,
-                      double ego_route_s, uint32_t cycle) {
+                      double ego_route_s, uint32_t cycle,
+                      bool ego_maneuvering) {
     bool in_crash_cooldown = (npc.crash_cooldown > 0.0);
+    /* ── 对向车让行掉头中的 ego ──
+     * 对向 NPC（route_dir<0）循环回收回 route 末端（掉头区）重新发车后，
+     * 会在 ego 掉头时迎面驶来 → safety 近场 TTC 刹停 ego → 掉头失败卡死
+     * （2026-08-03 实测：best_gap=6.4 卡在路端，U_TURN 10s+ v=0）。
+     * ego 机动（off_rails 掉头/倒车）期间，对向车在掉头区（末端 150m 内）
+     * 停车等待（uturn_yield 压制纵向目标），掉头完成（ego_maneuvering=
+     * false）后恢复行驶。横向（E2 保持车道）不受影响。 */
+    bool uturn_yield = false;
+    if (ego_maneuvering && npc.route_dir < 0 && route && route->ok()) {
+        const double uturn_zone_start = route->total_length() - 150.0;
+        if (npc.route_s > uturn_zone_start && npc.route_s <= route->total_length()) {
+            uturn_yield = true;
+            npc.speed = 0.0;
+            npc.throttle = 0.0;
+            npc.brake = 1.0;
+            npc.target_vx = 0.0;
+        }
+    }
     if (in_crash_cooldown) {
         npc.crash_cooldown -= dt;
         if (npc.crash_cooldown < 0.0) npc.crash_cooldown = 0.0;
@@ -568,8 +598,11 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             // offset=0 进入对向车道。留 0.5m 余量防 E2 平滑插值期间越线。
             // 原 `> 0.0` 判断允许 cand_left==0.0 → NPC 变到中心线，下一帧又变回，
             // 表现为"向逆向车道来回变道"。
-            double cand_right = npc.target_offset - 3.5;
-            double cand_left  = npc.target_offset + 3.5;
+            // 车道宽从路网查询（旧硬编码 3.5 在非标准路宽场景候选车道错位）。
+            double lw = roads->lane_width(npc.road_id, 0, npc.s);
+            if (lw < 1.0) lw = 3.5;
+            double cand_right = npc.target_offset - lw;
+            double cand_left  = npc.target_offset + lw;
             if (npc.route_dir > 0 && cand_left >= -0.5) cand_left = -999;
 
             double best_gain = -1e9;
@@ -626,7 +659,11 @@ mobil_done: ;
     // 2. 计算 v_desired（碰撞冷却期间 v_desired=0）
     double v = npc.speed;
     double v_desired = 0.0;
-    if (!in_crash_cooldown) {
+    if (uturn_yield) {
+        /* 对向车让行掉头中的 ego：压制一切纵向目标（保持刹车），
+         * 掉头完成（ego_maneuvering=false）后恢复。 */
+        v_desired = 0.0;
+    } else if (!in_crash_cooldown) {
         if (npc.state == NpcState::Stopped || npc.state == NpcState::StopForTL) {
             v_desired = 0.0;
         } else if (npc.state == NpcState::CutIn) {
@@ -822,17 +859,14 @@ mobil_done: ;
         double old_route_s = npc.route_s;
         npc.route_s += (double)npc.route_dir * npc.speed * dt;
         // 顺行 NPC (route_dir>0) 到达 route 末端 → recycle 到 ego 后方形成持续车流。
-        // 对向 NPC (route_dir<0) 到达 route 起点 → 直接停用，不 recycle。
-        //   原因：recycle_npc 把对向车放到 ego 前方 (ego_route_s + back)，但 ego
-        //   可能在高速公路（单向 3 车道，半宽 5.25m），对向车 offset=+5.5/+8.0
-        //   超出高速路半宽 → 被回收到路外/对向不存在车道，与同向 NPC 冲撞并把
-        //   ego 推出路缘（实测 d4ac6b0 commit 引入 entity21/23/24 三次碰撞 +
-        //   2.12m road departure）。对向车是单次事件（迎面驶过后不再相关），
-        //   停用比错误回收更安全。
+        // 对向 NPC (route_dir<0) 到达 route 起点 → recycle 回 route 末端（循环车流）。
+        //   历史：旧实现到起点即 inactive（对向车流跑完就消失）；更早的
+        //   "回 ego 前方"回收在单向高速把对向车放到路外（d4ac6b0 事故），
+        //   recycle_npc 对向目标已改为 route 末端（2026-08 修复），循环安全。
         if (npc.route_dir > 0 && npc.route_s > route->total_length()) {
             recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
         } else if (npc.route_dir < 0 && npc.route_s < 0.0) {
-            npc.active = false;
+            recycle_npc(npc, *route, ego_route_s, pool, roads, cycle, cfg);
             return;
         }
         int rid = 0, ridx = -1;

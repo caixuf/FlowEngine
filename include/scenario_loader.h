@@ -109,6 +109,15 @@ typedef struct {
     double heading;        /**< 初始航向角（rad） */
     double init_speed;     /**< 初始速度（m/s） */
     double target_speed;   /**< 期望巡航速度（m/s） */
+    /* ── 车辆参数（车参单一事实源，2026-08 收口）──────────────
+     * 场景 ego 块是车辆参数的权威来源：flowsim 用它初始化 Entity 并随
+     * vehicle/state 广播，planning/control 订阅同步（消灭三层各写一份
+     * wheelbase 硬编码的历史问题：planning 2.8 vs physics 2.7）。
+     * 0 = 未配置（用各层默认值）。 */
+    double wheelbase;      /**< 轴距 (m)，默认 2.7 */
+    double length;         /**< 车长 (m)，默认 4.6 */
+    double width;          /**< 车宽 (m)，默认 2.0 */
+    double max_steer;      /**< 物理满舵角 (rad)，默认 0.60 */
 } ScenarioEgo;
 
 /* ── 导航路线变道指令（NOA 主动变道） ───────────────────────── */

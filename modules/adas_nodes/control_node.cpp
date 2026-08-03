@@ -242,6 +242,13 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
     j = cJSON_GetObjectItemCaseSensitive(root, "hdg");
     if (cJSON_IsNumber(j)) g.ego_heading = j->valuedouble;
+    /* 车参同步：场景 ego 块（单一事实源）→ flowsim 广播 → 此处覆盖。
+     * 广播优先于 pipeline params（params.wheelbase 仅在没有广播时生效，
+     * 兼容旧 pipeline_car.json RC 小车配置；新配置应写场景 ego 块）。 */
+    j = cJSON_GetObjectItemCaseSensitive(root, "wheelbase");
+    if (cJSON_IsNumber(j) && j->valuedouble > 0.0) {
+        g.wheelbase = j->valuedouble;
+    }
     g.last_vstate_us = clock_now_us();
     g.has_fusion = 1;
     g.last_fusion_us = clock_now_us();
@@ -303,16 +310,29 @@ static void on_trajectory(const Message* msg, void* user_data) {
      * 取末点 (=规划期内的期望速度) 让控制器跟随减速/加速意图。 */
     g.target_speed = (double)traj.points[n_pts - 1].v;
     g.has_target_speed = 1;
-    /* 档位推导：轨迹中有任何点 v<0 即为倒车档。
-     * UTurnPlanner 在倒车阶段填充负速度，control 据此设 GEAR_REVERSE，
-     * 经 safety_control 透传到 flowsim 执行倒车。 */
+    /* 档位推导：从「车在轨迹上的执行点」推，不再扫全轨迹。
+     * 旧实现（轨迹含任何 v<0 点即 REVERSE）在掉头时把 Phase 2 前进阶段
+     * 也判成倒挡 → control 横向符号镜像 + flowsim off_rails 全程激活 →
+     * 第一把转向不足、v 归零、冲出路面（实测 y=11.13 路面外，2026-08-03）。
+     * 掉头轨迹相位：Phase 1/2/4 正速（前进），Phase 3/5 负速（倒车）。
+     * 车在轨迹上的投影点（最近点）的速度符号 = 当前应执行的档位：
+     * Phase 2 中最近点在正速段 → DRIVE（满舵左打前进）；
+     * Phase 3 中最近点在负速段 → REVERSE（右打满舵倒车调整）。 */
     {
         bool has_reverse = false;
         double max_kappa = 0.0;
-        for (uint32_t i = 0; i < n_pts; i++) {
-            if ((double)traj.points[i].v < -0.1) has_reverse = true;
-            double k = fabs((double)traj.points[i].kappa);
-            if (k > max_kappa) max_kappa = k;
+        if (n_pts > 0) {
+            double best_d2 = 1e18;
+            uint32_t best_i = 0;
+            for (uint32_t i = 0; i < n_pts; i++) {
+                double dx = (double)traj.points[i].x - g.ego_x;
+                double dy = (double)traj.points[i].y - g.ego_y;
+                double d2 = dx * dx + dy * dy;
+                if (d2 < best_d2) { best_d2 = d2; best_i = i; }
+                double k = fabs((double)traj.points[i].kappa);
+                if (k > max_kappa) max_kappa = k;
+            }
+            has_reverse = ((double)traj.points[best_i].v < -0.1);
         }
         g.gear = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
         /* 机动检测：倒车点 或 曲率超过巡航转向域（tan(0.25)/L≈0.094 是物理
@@ -891,8 +911,12 @@ protected:
             bool    hazard      = false;
             /* 变道打灯：LEFT_CHANGE/RIGHT_CHANGE → 左/右转向灯。
              * （原实现 turn_signal 恒 0，变道不打灯——2026-07-31 用户反馈。
-             * 命令取自 planning/behavior 类型化消息的 command enum。） */
-            if (g.beh_command == BEH_LEFT_CHANGE) {
+             * 命令取自 planning/behavior 类型化消息的 command enum。）
+             * 掉头机动（maneuver_mode）：第一把左转 → 左灯（用户规范
+             * "左转向灯+方向盘接近打死第一把，然后倒车调整"），全程保持。 */
+            if (g.maneuver_mode) {
+                turn_signal = 1;  /* 左灯（掉头） */
+            } else if (g.beh_command == BEH_LEFT_CHANGE) {
                 turn_signal = 1;  /* 左灯 */
             } else if (g.beh_command == BEH_RIGHT_CHANGE) {
                 turn_signal = 2;  /* 右灯 */

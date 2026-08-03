@@ -8,7 +8,11 @@
     "y": -1.75,
     "heading": 0.0,
     "init_speed": 10.0,
-    "target_speed": 20.0
+    "target_speed": 20.0,
+    "wheelbase": 2.7,
+    "length": 4.6,
+    "width": 2.0,
+    "max_steer": 0.6
   },
   "road_network": {
     "edges": [
@@ -20,36 +24,229 @@
         "lanes": 4,
         "lane_width": 3.5,
         "speed_limit": 22.0,
-        "nodes": [[0, 0, 0], [3000, 0, 0]]
+        "nodes": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            3000,
+            0,
+            0
+          ]
+        ]
       }
     ]
   },
   "actors": [
-    {"id": 1,  "type": "car",  "x": 80.0,   "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 2,  "type": "car",  "x": 400.0,  "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 3,  "type": "car",  "x": 800.0,  "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 4,  "type": "car",  "x": 1400.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 5,  "type": "car",  "x": 2000.0, "y": -1.75, "vx": 7.0,  "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 11, "type": "car",  "x": 250.0,  "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 12, "type": "car",  "x": 600.0,  "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 13, "type": "car",  "x": 1100.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 14, "type": "car",  "x": 1700.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 15, "type": "car",  "x": 2300.0, "y": -5.25, "vx": 10.0, "vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 41, "type": "car",  "x": 500.0,  "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 43, "type": "car",  "x": 1000.0, "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 44, "type": "car",  "x": 1600.0, "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 45, "type": "car",  "x": 2200.0, "y": 5.25,  "vx": -12.0,"vy": 0.0, "len": 4.6, "wid": 2.0},
-    {"id": 42, "type": "pedestrian", "x": 500.0, "y": -12.0, "vx": 0.0, "vy": 0.0, "len": 0.6, "wid": 0.6, "parked": true}
+    {
+      "id": 1,
+      "type": "car",
+      "x": 80.0,
+      "y": -1.75,
+      "vx": 7.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 2,
+      "type": "car",
+      "x": 400.0,
+      "y": -1.75,
+      "vx": 7.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 3,
+      "type": "car",
+      "x": 800.0,
+      "y": -1.75,
+      "vx": 7.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 4,
+      "type": "car",
+      "x": 1400.0,
+      "y": -1.75,
+      "vx": 7.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 5,
+      "type": "car",
+      "x": 2000.0,
+      "y": -1.75,
+      "vx": 7.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 11,
+      "type": "car",
+      "x": 250.0,
+      "y": -5.25,
+      "vx": 10.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 12,
+      "type": "car",
+      "x": 600.0,
+      "y": -5.25,
+      "vx": 10.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 13,
+      "type": "car",
+      "x": 1100.0,
+      "y": -5.25,
+      "vx": 10.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 14,
+      "type": "car",
+      "x": 1700.0,
+      "y": -5.25,
+      "vx": 10.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 15,
+      "type": "car",
+      "x": 2300.0,
+      "y": -5.25,
+      "vx": 10.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 41,
+      "type": "car",
+      "x": 500.0,
+      "y": 5.25,
+      "vx": -12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 43,
+      "type": "car",
+      "x": 1000.0,
+      "y": 5.25,
+      "vx": -12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 44,
+      "type": "car",
+      "x": 1600.0,
+      "y": 5.25,
+      "vx": -12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 45,
+      "type": "car",
+      "x": 2200.0,
+      "y": 5.25,
+      "vx": -12.0,
+      "vy": 0.0,
+      "len": 4.6,
+      "wid": 2.0
+    },
+    {
+      "id": 42,
+      "type": "pedestrian",
+      "x": 500.0,
+      "y": -12.0,
+      "vx": 0.0,
+      "vy": 0.0,
+      "len": 0.6,
+      "wid": 0.6,
+      "parked": true
+    }
   ],
   "traffic_lights": [
-    {"id": 0,  "x": 120.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 12.0},
-    {"id": 1,  "x": 600.0,  "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 5.0},
-    {"id": 2,  "x": 1200.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 0.0},
-    {"id": 3,  "x": 1800.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 8.0},
-    {"id": 4,  "x": 2400.0, "y_lane": -1.75, "green_s": 12.0, "yellow_s": 3.0, "red_s": 10.0, "phase_offset_s": 3.0}
+    {
+      "id": 0,
+      "x": 120.0,
+      "y_lane": -1.75,
+      "green_s": 12.0,
+      "yellow_s": 3.0,
+      "red_s": 10.0,
+      "phase_offset_s": 12.0
+    },
+    {
+      "id": 1,
+      "x": 600.0,
+      "y_lane": -1.75,
+      "green_s": 12.0,
+      "yellow_s": 3.0,
+      "red_s": 10.0,
+      "phase_offset_s": 5.0
+    },
+    {
+      "id": 2,
+      "x": 1200.0,
+      "y_lane": -1.75,
+      "green_s": 12.0,
+      "yellow_s": 3.0,
+      "red_s": 10.0,
+      "phase_offset_s": 0.0
+    },
+    {
+      "id": 3,
+      "x": 1800.0,
+      "y_lane": -1.75,
+      "green_s": 12.0,
+      "yellow_s": 3.0,
+      "red_s": 10.0,
+      "phase_offset_s": 8.0
+    },
+    {
+      "id": 4,
+      "x": 2400.0,
+      "y_lane": -1.75,
+      "green_s": 12.0,
+      "yellow_s": 3.0,
+      "red_s": 10.0,
+      "phase_offset_s": 3.0
+    }
   ],
   "construction_zones": [
-    {"id": 0, "x": 2985.0, "y": 0.0, "length": 30.0, "width": 14.0}
+    {
+      "id": 0,
+      "x": 2985.0,
+      "y": 0.0,
+      "length": 30.0,
+      "width": 14.0
+    }
   ],
   "pass_criteria": {
     "no_collision": true,
@@ -57,8 +254,13 @@
     "min_avg_speed_mps": 5.0
   },
   "route": [
-    {"trigger_x": 60.0, "type": "lane_change", "target_lane": -1, "target_speed": 20.0, "label": "enter_noa_route"},
-    {"trigger_x": 2900.0, "type": "u_turn", "target_lane": -1, "target_speed": 3.5, "label": "prepare_u_turn"}
+    {
+      "trigger_x": 60.0,
+      "type": "lane_change",
+      "target_lane": 2,
+      "target_speed": 20.0,
+      "label": "enter_noa_route"
+    }
   ],
   "scenarios": [],
   "choreography": {

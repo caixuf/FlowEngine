@@ -9,6 +9,7 @@
  */
 
 import { createSceneStore, roadNetworkHash } from '../store/SceneStore.js';
+import { headingBetweenPoints } from '../math/Coord.js';
 import { createRoadView } from '../view/RoadView.js';
 import { createGroundView } from '../view/GroundView.js';
 import { createVehicleView } from '../view/VehicleView.js';
@@ -212,6 +213,7 @@ export function createSceneDirector(scene) {
         vy: e.vy || 0,
         length: e.length != null ? e.length : (e.len || 4.6),
         width: e.width != null ? e.width : (e.wid || 2.0),
+        height: e.height != null ? e.height : 1.5,
         ai_state: e.ai_state || e.ai || '',
         _simX: newX,
         _visualX: newX,
@@ -260,21 +262,57 @@ export function createSceneDirector(scene) {
           _collisions.length > 5 ? `(+${_collisions.length - 5} more)` : '');
       }
       store.entities = frame.entities.filter(e => e && e.type !== 'ego').map((e) => {
+        /* 按类型给出默认尺寸（后端 len/wid/height 缺失时兜底） */
+        const etype = e.type || 'car';
+        let defLen, defWid, defH;
+        switch (etype) {
+          case 'pedestrian': defLen = 0.5; defWid = 0.5; defH = 1.75; break;
+          case 'bicycle': case 'cyclist': case 'motorcycle': defLen = 1.8; defWid = 0.6; defH = 1.6; break;
+          case 'truck': case 'bus': defLen = 8.0; defWid = 2.5; defH = 4.0; break;
+          case 'suv': defLen = 4.7; defWid = 2.0; defH = 1.85; break;
+          case 'car': default: defLen = 4.6; defWid = 2.0; defH = 1.5; break;
+        }
+        const rawLen = e.length != null ? e.length : (e.len != null ? e.len : defLen);
+        const rawWid = e.width != null ? e.width : (e.wid != null ? e.wid : defWid);
+        const rawH   = e.height != null ? e.height : defH;
+
+        /* 速度分量（ENU 世界系，后端 obstacles 发布 vx=east, vy=north） */
+        const evx = e.vx || 0;
+        const evy = e.vy || 0;
+        const speedFromVel = Math.hypot(evx, evy);
+        /* heading 优先级：
+         * - 车辆(Car/SUV/Truck)：后端显式 heading > h > 从 vx/vy 推算
+         * - 行人(pedestrian)：优先从 vx/vy 推算（后端 heading 可能是道路航向而非行人朝向），
+         *   静止时保留上次 heading（由 dead-reckon 平滑） */
+        let heading;
+        if (etype === 'pedestrian') {
+          if (speedFromVel > 0.3) heading = headingBetweenPoints(0, 0, evx, evy);
+          else if (e.heading != null) heading = e.heading;
+          else if (e.h != null) heading = e.h;
+          else heading = 0;
+        } else {
+          if (e.heading != null) heading = e.heading;
+          else if (e.h != null) heading = e.h;
+          else if (speedFromVel > 0.5) heading = headingBetweenPoints(0, 0, evx, evy);
+          else heading = 0;
+        }
+
         const ent = {
           id: e.id,
-          type: e.type,
+          type: etype,
           x: e.x || 0,
           y: e.y || 0,
           z: e.z || 0,
-          heading: e.heading != null ? e.heading : (e.h || 0),
-          speed: e.speed != null ? e.speed : (e.spd || 0),
+          heading: heading,
+          speed: e.speed != null ? e.speed : (e.spd != null ? e.spd : speedFromVel),
           steer: e.steer || 0,
-          length: e.length != null ? e.length : (e.len || 4.6),
-          width: e.width != null ? e.width : (e.wid || 2.0),
+          length: rawLen,
+          width: rawWid,
+          height: rawH,
           ai_state: e.ai_state || e.ai || '',
           lights: e.lights || 0,
-          vx: e.vx || 0,
-          vy: e.vy || 0,
+          vx: evx,
+          vy: evy,
           throttle: e.throttle || 0,
           brake: e.brake || 0,
           state: e.state || '',

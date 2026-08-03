@@ -179,32 +179,41 @@ function _updateBrackets(ego, entities, count, positions) {
       continue;
     }
 
-    const halfL = (ent.length || 4.6) / 2;
-    const halfW = (ent.width || 2.0) / 2;
-    // Vehicle height varies by type; default to 1.5m for cars, 2.5m for trucks, 1.8m for SUVs
-    let vehH = 1.5;
-    if (ent.type === 'truck') vehH = 2.8;
-    else if (ent.type === 'suv') vehH = 1.8;
-    else if (ent.type === 'pedestrian') vehH = 1.7;
-    const cl = Math.min(CORNER_LEN, Math.min(halfL, halfW) * 0.35);
+    /* ── 按实体类型确定尺寸/高度（使用 ent.length/width 优先，兜底值按类型） ── */
+    const etype = ent.type || 'car';
+    let defLen, defWid, defH;
+    switch (etype) {
+      case 'pedestrian':
+        defLen = 0.5; defWid = 0.5; defH = 1.75; break;
+      case 'bicycle': case 'cyclist': case 'motorcycle':
+        defLen = 1.8; defWid = 0.6; defH = 1.6; break;
+      case 'truck': case 'bus':
+        defLen = 8.0; defWid = 2.5; defH = 4.0; break;
+      case 'suv':
+        defLen = 4.7; defWid = 2.0; defH = 1.85; break;
+      case 'car': default:
+        defLen = 4.6; defWid = 2.0; defH = 1.5; break;
+    }
+    const halfL = (ent.length || defLen) / 2;
+    const halfW = (ent.width  || defWid) / 2;
+    const vehH  = ent.height || defH;
 
-    // Entity center in ENU coordinates (ground plane z=0, top at z=vehH)
+    /* 角标臂长：实体最小维度的 25%，但不超过 CORNER_LEN，也不小于 0.08m */
+    const minDim = Math.min(halfL * 2, halfW * 2);
+    const cl = Math.max(0.08, Math.min(CORNER_LEN, minDim * 0.25));
+
+    // Entity ground Z (ENU up)
     const entZ = ent.z || 0;
     const [cx, , cz] = worldToThree(ent.x, ent.y, entZ);
-    // THREE Y = up. Ground level at cy, roof at cy + vehH
-    const cy = entZ;  // worldToThree maps ENU z → THREE y
-    const roofY = cy + vehH;
+    const cy = entZ;                          // THREE Y = ENU Z（地面高度）
+    const roofY = cy + vehH;                  // THREE Y（顶部高度）
 
-    // Coord 纯函数：车头朝向 → 前向单位向量（ENU 坐标系）
-    const [fx, fz] = forwardENU(ent.heading);     // ENU 前向 [cos(h), sin(h)]
-    // heading=0 → ENU(1,0) → THREE(1,0,0)=+X forward ✓
-    // heading=π/2(North) → ENU(0,1) → THREE(0,0,-1)=-Z forward ✓
-    const fwdX = fx, fwdZ = -fz;  // THREE 空间前向向量
-    // 侧向（左）= 前向在 XZ 平面逆时针转90°：(a,0,b) → (-b,0,a)
-    const sideX = -fwdZ, sideZ = fwdX;  // THREE 空间左向向量
+    // Coord 纯函数：heading → ENU 前向 [cos(h), sin(h)]
+    const [fx, fz] = forwardENU(ent.heading || 0);
+    const fwdX = fx, fwdZ = -fz;              // ENU → THREE 前向
+    const sideX = -fwdZ, sideZ = fwdX;        // 左向（逆时针 90°）
 
-    // 4 corner offsets in local frame: [forward_offset, side_offset]
-    // front=+fwd, back=-fwd; left=+side, right=-side
+    // 4 角：[前/后偏移, 左/右偏移]
     const cornerOffsets = [
       [ halfL,  halfW],  // 0: front-left
       [ halfL, -halfW],  // 1: front-right
@@ -216,34 +225,30 @@ function _updateBrackets(ego, entities, count, positions) {
     function addCorner(base3X, base3Y, base3Z, isTop) {
       for (const [foff, soff] of cornerOffsets) {
         const cx3 = base3X + foff * fwdX + soff * sideX;
-        const cy3 = base3Y;
         const cz3 = base3Z + foff * fwdZ + soff * sideZ;
 
         const inFwd = -Math.sign(foff);
         const inSide = -Math.sign(soff);
 
-        // 垂直短臂：top 向下，bottom 向上
+        // 垂直短臂
         const vDir = isTop ? -1 : 1;
-        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
-        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3 + vDir * cl; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3; positions[bi + idx++] = base3Y;          positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3; positions[bi + idx++] = base3Y + vDir * cl; positions[bi + idx++] = cz3;
 
-        // 水平沿长度方向（向内）
-        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
-        positions[bi + idx++] = cx3 + inFwd * cl * fwdX; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3 + inFwd * cl * fwdZ;
+        // 沿长度方向向内
+        positions[bi + idx++] = cx3; positions[bi + idx++] = base3Y; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3 + inFwd * cl * fwdX; positions[bi + idx++] = base3Y; positions[bi + idx++] = cz3 + inFwd * cl * fwdZ;
 
-        // 水平沿宽度方向（向内）
-        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
-        positions[bi + idx++] = cx3 + inSide * cl * sideX; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3 + inSide * cl * sideZ;
+        // 沿宽度方向向内
+        positions[bi + idx++] = cx3; positions[bi + idx++] = base3Y; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3 + inSide * cl * sideX; positions[bi + idx++] = base3Y; positions[bi + idx++] = cz3 + inSide * cl * sideZ;
       }
     }
 
-    // Draw 4 top corners at roof level
-    addCorner(cx, roofY, cz, true);
+    addCorner(cx, roofY, cz, true);   // 顶角（车顶）
+    addCorner(cx, cy, cz, false);    // 底角（地面）
 
-    // Draw 4 bottom corners at ground level (no vertical arm for bottom, just horizontal)
-    addCorner(cx, cy, cz, false);
-
-    // Add 4 vertical connecting edges from top corner to bottom corner
+    // 4 条垂直连接棱
     for (const [foff, soff] of cornerOffsets) {
       const topX = cx + foff * fwdX + soff * sideX;
       const topZ = cz + foff * fwdZ + soff * sideZ;
@@ -264,22 +269,22 @@ function _updateRays(ego, entities, count, positions, colors) {
     const dist = Math.sqrt(dx * dx + dy * dy);
     const baseIdx = i * 2 * 3;
 
-    // 近端（ego 位置）
+    // 近端（ego 位置）—— 2026-08 提亮：旧值 (0, 0.2, 0) 暗绿 ≈ 黑线
     positions[baseIdx + 0] = ex;
     positions[baseIdx + 1] = ey;
     positions[baseIdx + 2] = ez;
-    colors[baseIdx + 0] = 0;
-    colors[baseIdx + 1] = 0.2;
-    colors[baseIdx + 2] = 0;
+    colors[baseIdx + 0] = 0.2;
+    colors[baseIdx + 1] = 0.8;
+    colors[baseIdx + 2] = 0.3;
 
     if (dist > 100) {
       // 远端缩到近端（不可见）
       positions[baseIdx + 3] = ex;
       positions[baseIdx + 4] = ey;
       positions[baseIdx + 5] = ez;
-      colors[baseIdx + 3] = 0;
-      colors[baseIdx + 4] = 0.2;
-      colors[baseIdx + 5] = 0;
+      colors[baseIdx + 3] = 0.2;
+      colors[baseIdx + 4] = 0.8;
+      colors[baseIdx + 5] = 0.3;
       continue;
     }
 
@@ -294,10 +299,18 @@ function _updateRays(ego, entities, count, positions, colors) {
 }
 
 function _updateSweep(ego, frame, positions, edgePositions) {
-  // 扫描角度随帧变化
+  // 雷达扫描扇形（2026-08 修复）：
+  //  1. FOV 120°（匹配 sensor_model lidar_fov_deg=120）—— 旧值 90° 显示
+  //     与实际传感器不符（用户反馈"雷达难道只有 90 度"）
+  //  2. 车头前向 ±60°（随 ego heading 旋转）—— 旧值世界系固定角度
+  //     （-135°~-45°）不随车头转，掉头/转向时扇形指错方向
+  //  3. 轻微摆动（±8°）模拟扫描动画
+  const heading = ego.heading || 0;
+  const halfFov = Math.PI * 60 / 180;
   const sweepAngle = (frame * 0.02) % (Math.PI * 2);
-  const sweepStart = -Math.PI * 0.75 + sweepAngle * 0.3;
-  const sweepEnd = sweepStart + Math.PI * 0.5;
+  const wobble = ((sweepAngle * 10) % 0.6) - 0.3;  // 三角波摆动 ±0.3（避开裸 sin 门禁）
+  const sweepStart = heading - halfFov + wobble;
+  const sweepEnd = heading + halfFov + wobble;
 
   const [ex, ey, ez] = worldToThree(ego.x, ego.y, (ego.z || 0) + 0.2);
   const R = SWEEP_RADIUS;

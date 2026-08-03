@@ -168,9 +168,69 @@ struct FlowSimContext {
      * step_bicycle 的 half_wb·yaw_rate 旋转项，大角速度时车绕自身中心
      * 原地旋转（"屁股横扫"视觉伪影）。 */
     bool                   off_rails{false};
+
+    /* 进程级缓存，重复初始化时必须清零。 */
+    double                prev_steer{0.0};
+    uint64_t              bridge_last_cb_check{0};
+    uint64_t              bridge_prev_cb_count{0};
+    uint64_t              bridge_last_reconnect_us{0};  /* 桥重连防抖时间戳（10s 窗口） */
     };
 
 FlowSimContext g;
+
+static void reset_runtime_state() {
+    if (g.scenario) {
+        scenario_free(g.scenario);
+        g.scenario = nullptr;
+    }
+
+    g.roads.close();
+    g.pool.clear();
+    g.route = flowsim::Route();
+    g.scene_pub_cfg = flowsim::ScenePubConfig();
+    g.scene_pub_cfg.lane_count = 2;
+    g.scene_pub_cfg.lane_width = 3.5;
+    g.scene_pub_cfg.cached_road_network_json.clear();
+    g.scene_pub_cfg.roads = nullptr;
+    g.scene_pub_cfg.construction_zones.clear();
+
+    g.has_control_input.store(0, std::memory_order_relaxed);
+    g.last_control_cmd_us.store(0, std::memory_order_relaxed);
+    g.ego_throttle.store(0.0, std::memory_order_relaxed);
+    g.ego_brake.store(0.0, std::memory_order_relaxed);
+    g.ego_steer.store(0.0, std::memory_order_relaxed);
+    g.ego_turn_signal.store(0, std::memory_order_relaxed);
+    g.ego_hazard.store(false, std::memory_order_relaxed);
+    g.ego_gear.store(GEAR_DRIVE, std::memory_order_relaxed);
+
+    g.cycle = 0;
+    g.sim_start_us = 0;
+    g.roads_loaded = false;
+    g.last_road_geom_road_id = -9999;
+    g.last_road_geom_lane_count = -1;
+    g.static_digest = flowsim::StaticDigest();
+    g.prev_dynamic_digest = flowsim::DynamicDigest();
+    g.digest_initialized = false;
+    g.invariant_fail_count.store(0, std::memory_order_relaxed);
+    g.u_turn_active = false;
+    g.off_rails = false;
+    g.prev_steer = 0.0;
+    g.bridge_last_cb_check = 0;
+    g.bridge_prev_cb_count = 0;
+    g.bridge_last_reconnect_us = 0;
+
+    g.scenario_file[0] = '\0';
+    std::snprintf(g.physics_model, sizeof(g.physics_model), "%s", "kinematic");
+    g.init_speed = 5.0;
+    g.target_speed = 12.0;
+    g.lane_width = 3.5;
+    g.random_seed = 42;
+    g.curve_start_x = 0.0;
+    g.curve_length_m = 0.0;
+    g.curve_offset_m = 0.0;
+
+    flowsim::reset_choreography_state();
+}
 
 /* ── control/cmd 订阅回调 ─────────────────────────────────────── */
 /* 与 sim_world_node.c on_control_cmd 行为一致：先试二进制 ControlCmd，
@@ -454,9 +514,13 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                        * 会在第一帧 step_bicycle 前残留。 */
     ego.target_vx = (sc->ego.target_speed > 0) ? sc->ego.target_speed : g.target_speed;
     ego.vx = ego.speed;  /* 初始沿 x 方向 */
-    ego.length = EGO_LEN_M;
-    ego.width = EGO_WID_M;
-    ego.wheelbase = 2.7;
+    /* 车参单一事实源 = 场景 ego 块（scenario_loader 已解析）。
+     * 场景未配置（0）时用默认值，再交给 apply_vehicle_defaults 兜底。
+     * 旧实现三处硬编码 2.7（entity.h/flowsim/planning 2.8 甚至不一致），
+     * 2026-08 收口：场景配了 → Entity 用之并广播给 planning/control。 */
+    ego.length = (sc->ego.length > 0.0) ? sc->ego.length : EGO_LEN_M;
+    ego.width = (sc->ego.width > 0.0) ? sc->ego.width : EGO_WID_M;
+    ego.wheelbase = (sc->ego.wheelbase > 0.0) ? sc->ego.wheelbase : 2.7;
     ego.mass = 1500.0;
     ego.drag_coeff = 0.3;
     flowsim::apply_vehicle_defaults(ego);
@@ -556,6 +620,10 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             flowsim::apply_vehicle_defaults(e);
             e.length = (a->len > 0) ? a->len : e.length;
             e.width = (a->wid > 0) ? a->wid : e.width;
+        } else if (e.type == flowsim::EntityType::Pedestrian) {
+            /* 行人默认尺寸：0.5m × 0.5m（场景配置了 len/wid 时优先使用） */
+            if (a->len <= 0) e.length = 0.5;
+            if (a->wid <= 0) e.width = 0.5;
         }
         /* 中央 route 初始化：所有 NPC 车辆（新旧格式）都通过 world_to_frenet
          * 定位到路网后初始化 route_dir/route_s/offset，保证严格贴道路几何行驶。
@@ -890,6 +958,17 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     cJSON_AddNumberToObject(vstate, "t_us", (double)sim_time_us);
     cJSON_AddNumberToObject(vstate, "road_id", (double)ego.road_id);
     cJSON_AddNumberToObject(vstate, "lane_id", (double)ego.lane_id);
+    /* 车参广播（车参单一事实源 = 场景 ego 块）：仅场景显式配置时才发，
+     * 下游（planning/control）收到字段即同步，未收到保持各自默认/配置。
+     * 这样 RC 小车（pipeline_car.json 场景配 wheelbase=0.25）也能同步。 */
+    if (g.scenario && g.scenario->ego.wheelbase > 0.0) {
+        cJSON_AddNumberToObject(vstate, "wheelbase", ego.wheelbase);
+        cJSON_AddNumberToObject(vstate, "length", ego.length);
+        cJSON_AddNumberToObject(vstate, "width", ego.width);
+        cJSON_AddNumberToObject(vstate, "max_steer",
+                                (g.scenario->ego.max_steer > 0.0)
+                                    ? g.scenario->ego.max_steer : 0.60);
+    }
 
     /* 收集非 ego 的活跃实体作为障碍物（车辆 + 行人） */
     int n_obs = 0;
@@ -929,26 +1008,9 @@ static void publish_vehicle_state(uint64_t sim_time_us) {
     }
     /* 施工区域障碍物（前方封路）：追加到障碍物列表供感知识别 */
     n_obs = append_construction_obstacles(vstate, n_obs);
-    /* ── Mock NPC：场景无 actor 时注入两个前方慢车，供 behavior_planner 验证 ── */
-    if (n_obs == 0) {
-        /* 同车道（lane 2, y≈-1.75），前方 40m，时速 3m/s */
-        cJSON_AddNumberToObject(vstate, "ox0", ego.x + 40.0);
-        cJSON_AddNumberToObject(vstate, "oy0", ego.y);
-        cJSON_AddNumberToObject(vstate, "ov0", 3.0);
-        cJSON_AddNumberToObject(vstate, "ovy0", 0.0);
-        cJSON_AddStringToObject(vstate, "ot0", "car");
-        cJSON_AddNumberToObject(vstate, "ol0", 4.6);
-        cJSON_AddNumberToObject(vstate, "ow0", 2.0);
-        /* 右侧车道（lane 3, y≈-5.25），前方 60m，时速 4m/s */
-        cJSON_AddNumberToObject(vstate, "ox1", ego.x + 60.0);
-        cJSON_AddNumberToObject(vstate, "oy1", -5.25);
-        cJSON_AddNumberToObject(vstate, "ov1", 4.0);
-        cJSON_AddNumberToObject(vstate, "ovy1", 0.0);
-        cJSON_AddStringToObject(vstate, "ot1", "car");
-        cJSON_AddNumberToObject(vstate, "ol1", 4.6);
-        cJSON_AddNumberToObject(vstate, "ow1", 2.0);
-        n_obs = 2;
-    }
+    /* Mock NPC 注入已移除（2026-08）：空场景时伪造两辆前车会把"无车场景"
+     * 变成"有前车场景"，behavior/planning 无法区分真伪（测试脚手架不应在
+     * 产线路径上）。空场景 = 无前车 = 正常巡航。 */
     cJSON_AddNumberToObject(vstate, "n_obs", n_obs);
 
     char* s = cJSON_PrintUnformatted(vstate);
@@ -1366,29 +1428,40 @@ protected:
              * 确实停滞）时才重连。重连后重置 last_control_cmd_us 给
              * 新订阅 2s 窗口期，避免立即 FSAFE。 */
             {
-                static uint64_t last_cb_check = 0;
-                static uint64_t prev_cb_count = 0;
+                /* 桥自愈检查：状态用 g 字段（reset_runtime_state 场景切换清零），
+                 * 旧实现是函数内 static —— 跨场景残留 + 与 g 字段双份状态
+                 * （2026-08 修复）。 */
                 if (g.cycle % 200 == 0) {
                     uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
                     uint64_t now  = clock_now_us();
                     uint64_t cur_cb = cmd_bridge.cb_count;
-                    bool cb_stalled = (cur_cb == prev_cb_count && last_cb_check > 0);
-                    prev_cb_count = cur_cb;
-                    last_cb_check = now;
+                    bool cb_stalled = (cur_cb == g.bridge_prev_cb_count &&
+                                       g.bridge_last_cb_check > 0);
+                    g.bridge_prev_cb_count = cur_cb;
+                    g.bridge_last_cb_check = now;
 
                     if (last > 0 && now > last &&
                         now - last >= CONTROL_STALE_TIMEOUT_US &&
                         use_internal_cruise && cb_stalled) {
-                        cmd_bridge.reconnect();
-                        /* 重连后重置时间戳：给新订阅 CONTROL_STALE_TIMEOUT_US
-                         * 窗口期建立连接，避免重连后立即 FSAFE。 */
-                        g.last_control_cmd_us.store(now, std::memory_order_relaxed);
-                        LOG_WARN("flowsim",
-                                 "[BRIDGE_RECONNECT] cb stalled %llu→%llu over %.0fms — "
-                                 "resubscribed, reset timer",
-                                 (unsigned long long)prev_cb_count,
-                                 (unsigned long long)cur_cb,
-                                 (double)(now - last) / 1000.0);
+                        /* 重连防抖：距上次重连 <10s 不再重连。
+                         * 旧实现无防抖：短暂卡顿（2s 断流后恢复）在 10s 检查点
+                         * 若 cb 恰好未增长 → 误判停滞 → reconnect → 重连本身
+                         * 造成短暂断流 → 下一轮又满足 → 反复重连放大控制断流
+                         * （2026-08 事故链 cb=4→reconnect→cb=0→FSAFE 循环）。 */
+                        if (g.bridge_last_reconnect_us == 0 ||
+                            now - g.bridge_last_reconnect_us >= 10000000ULL) {
+                            cmd_bridge.reconnect();
+                            g.bridge_last_reconnect_us = now;
+                            /* 重连后重置时间戳：给新订阅 CONTROL_STALE_TIMEOUT_US
+                             * 窗口期建立连接，避免重连后立即 FSAFE。 */
+                            g.last_control_cmd_us.store(now, std::memory_order_relaxed);
+                            LOG_WARN("flowsim",
+                                     "[BRIDGE_RECONNECT] cb stalled %llu→%llu over %.0fms — "
+                                     "resubscribed, reset timer (debounced 10s)",
+                                     (unsigned long long)g.bridge_prev_cb_count,
+                                     (unsigned long long)cur_cb,
+                                     (double)(now - last) / 1000.0);
+                        }
                     }
                 }
             }
@@ -1464,11 +1537,13 @@ protected:
             {
                 int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
                 if (gear != GEAR_REVERSE && !g.off_rails) {
-                    static double prev_steer = 0.0;
+                    /* prev_steer 用 g 结构（reset_runtime_state 场景切换清零），
+                     * 不再用函数内 static —— 旧实现跨场景残留上一场景的 steer
+                     * 滤波状态，重进场景首帧转向被旧值污染（2026-08 修复）。 */
                     const double eps_alpha = 0.4;  /* 滤波系数：0-1，越小滤波越强 */
                     double raw = ego.steer;
-                    ego.steer = eps_alpha * raw + (1.0 - eps_alpha) * prev_steer;
-                    prev_steer = ego.steer;
+                    ego.steer = eps_alpha * raw + (1.0 - eps_alpha) * g.prev_steer;
+                    g.prev_steer = ego.steer;
                 }
             }
             if (strcmp(g.physics_model, "dynamic") == 0) {
@@ -1659,43 +1734,30 @@ protected:
                             advanced = ego.road_pos.advance(dist, M_PI);
                         }
                     } else {
-                        /* 正常模式：沿车头方向推进量投影到道路 cos(dh0)。
-                         * dh0 偏过 90°（cos<0）时沿路推进钳 0，靠 sin(dh0) 横向
-                         * 继续转，不会像旧版那样沿路斜滑。 */
-                        double adv = dist * std::cos(dh0);
-                        if (adv < 0.0) adv = 0.0;
-                        advanced = ego.road_pos.advance(adv, M_PI);
+                        /* 正常模式：位置 = step_bicycle 积分（物理真值，架构
+                         * 收口 2026-08）。旧实现 advance+set_offset 后把
+                         * ego.x/y 覆盖为 esmini 轨道位置 —— 车的位置由"参考线
+                         * 推进 + 手填横向偏移"决定而非车模型 → 变道 = 轨道
+                         * 拖动（"车屁股平移"的根因）。现在位置姿态单一来源
+                         * = 自行车模型（GTA 式：一个积分器算位置+朝向）；
+                         * 车道保持由 control 的 Stanley 横向控制完成。
+                         * esmini 仅做投影查询：车道归属/限速/碰撞。 */
+                        advanced = false;
                     }
-                    if (advanced) {
-                        flowsim::FrenetPos fp_cur;
-                        if (ego.road_pos.frenet(fp_cur)) {
-                            /* 横向偏移 = dist·sin(dh0)，与沿路推进 dist·cos(dh0)
-                             * 一起组成"沿车头方向"的净位移（见上方 dh0 注释）。 */
-                            ego.road_pos.set_offset(fp_cur.offset + dist * std::sin(dh0));
-                        }
-                        flowsim::WorldPos wp2;
-                        if (ego.road_pos.world(wp2)) {
-                            ego.x = wp2.x;
-                            ego.y = wp2.y;
-                            if (!is_dynamic) {
-                                /* heading 由 step_bicycle 的自行车模型自由积分，
-                                 * 不再被道路切线拽回。sin(dh) 已构成负反馈闭环，
-                                 * heading 漂移会自动产生横向位移被控制器纠正。
-                                 * 只保留 heading 归一化防数值溢出。 */
-                                while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
-                                while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
-                                ego.vx = ego.speed * std::cos(ego.heading);
-                                ego.vy = ego.speed * std::sin(ego.heading);
-                            }
-                            /* 动力学模式：heading/vx/vy 由 step_bicycle_dynamic 自主演化，
-                             * 此处仅更新 x/y 位置，不覆盖 heading。 */
-                        }
+                    if (true) {
+                        /* esmini handle 每帧 relocate 跟随物理位置（碰撞/路网
+                         * 查询用；物理位置本身不依赖 handle）。车道归属用物理
+                         * 位置的 world_to_frenet 投影（比 handle 的轨道位置准，
+                         * 车在物理位置而非轨道上）。 */
                         flowsim::FrenetPos fp;
-                        if (ego.road_pos.frenet(fp)) {
+                        if (g.roads_loaded && g.roads.world_to_frenet(ego.x, ego.y, fp)) {
                             ego.road_id = fp.road_id;
                             ego.lane_id = fp.lane_id;
                             ego.s = fp.s;
                             ego.offset = fp.offset;
+                            double ref_off = flowsim::offset_from_lane_internal(
+                                g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
+                            ego.road_pos.relocate(g.roads, fp.road_id, fp.lane_id, fp.s, ref_off);
                         }
                     }
                 }
@@ -1734,7 +1796,7 @@ protected:
                 if (e.is_npc_vehicle()) {
                     flowsim::step_npc_vehicle(e, g.pool, FLOWSIM_DT_SEC,
                                               g.ai_cfg, roads_ptr, route_ptr, ego_route_s,
-                                              g.cycle);
+                                              g.cycle, g.off_rails);
                 } else if (e.type == flowsim::EntityType::Pedestrian) {
                     flowsim::step_npc_pedestrian(e, FLOWSIM_DT_SEC, g.ai_cfg);
                 }
@@ -1938,6 +2000,13 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     g.scheduler  = scheduler;
     g.cycle      = 0;
 
+    /* 运行时状态重置必须在配置解析之前：reset 会清 scenario_file/
+     * physics_model/init_speed 等配置字段（它们是"输入"，由 params_json
+     * 重新注入）。旧接线放在场景加载前（配置解析后）→ scenario_file 被
+     * 清空 → scenario_load 跳过 → 默认空场景（actors=0，NPC 全灭，
+     * 2026-08-03 实测回归）。重复 init 时这里同样先清旧状态再解析。 */
+    reset_runtime_state();
+
     /* 默认 AI 配置（与 Phase 1 测试一致） */
     g.ai_cfg.lane_width = 3.5;
     g.ai_cfg.same_lane_tol = 2.0;
@@ -1971,7 +2040,8 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
         }
     }
 
-    /* 加载场景文件 */
+    /* 加载场景文件（reset_runtime_state 已在 flowsim_init 开头调用，
+     * 此时 scenario_file 由 params_json 解析注入完毕） */
     if (g.scenario_file[0] != '\0') {
         g.scenario = scenario_load(g.scenario_file);
     }

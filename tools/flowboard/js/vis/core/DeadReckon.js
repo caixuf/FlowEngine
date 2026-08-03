@@ -37,7 +37,11 @@
 // 默认值与原实现一致，行为保持兼容。
 export const _cfg = {
   lambdaPos: 8.0,
-  lambdaHeading: 6.0,
+  /* λHeading 与 λPos 对称（2026-08 修复）：旧值 6.0 使 heading 平滑比位置
+   * 慢 30%（τ=167ms vs 125ms）→ 变道时位置先动、车头朝向后追 → 车身持续
+   * 蟹行（0.05-0.2 m/s）→ "车屁股先移动"的观感。同速率后位置与朝向同步
+   * 收敛，车头转向与横向位移一致。 */
+  lambdaHeading: 8.0,
 };
 
 export function setDeadReckonConfig(p) {
@@ -66,6 +70,8 @@ export var _dr = {
   lastVx: 0,
   lastVy: 0,
   hasVel: false,
+  lastYawRate: 0,
+  hasYawRate: false,
   lastTime: 0,
   targetX: 0,
   targetZ: 0,
@@ -90,6 +96,8 @@ export function initDeadReckon() {
   _dr.lastVx = 0;
   _dr.lastVy = 0;
   _dr.hasVel = false;
+  _dr.lastYawRate = 0;
+  _dr.hasYawRate = false;
   _dr.lastTime = 0;
   _dr.targetX = 0;
   _dr.targetZ = 0;
@@ -121,14 +129,18 @@ export function initDeadReckon() {
  * @param {number} [vx]    world X velocity (m/s) — step_bicycle 的中心速度，
  *                         含绕后轴切向分量；缺省时回退 speed·(cos,sin) 外推
  * @param {number} [vy]    world Z (lateral) velocity (m/s)
+ * @param {number} [yawRate] 横摆角速度 (rad/s) — heading 外推用，与位置外推
+ *                         同构（斜坡 vs 阶跃的平滑滞后差异消除，2026-08）
  */
-export function updateDeadReckon(x, z, speed, heading, vx, vy) {
+export function updateDeadReckon(x, z, speed, heading, vx, vy, yawRate) {
   var now = performance.now() / 1000;
   var hasVel = (typeof vx === 'number' && isFinite(vx) &&
                 typeof vy === 'number' && isFinite(vy));
+  var hasYaw = (typeof yawRate === 'number' && isFinite(yawRate));
   if (
     !_dr.init ||
     _dr.hasVel !== hasVel ||
+    _dr.hasYawRate !== hasYaw ||
     Math.abs(x - _dr.lastX) > 0.01 ||
     Math.abs(z - _dr.lastZ) > 0.01 ||
     Math.abs(speed - _dr.lastSpeed) > 0.1 ||
@@ -140,6 +152,8 @@ export function updateDeadReckon(x, z, speed, heading, vx, vy) {
     _dr.lastHeading = heading;
     _dr.hasVel = hasVel;
     if (hasVel) { _dr.lastVx = vx; _dr.lastVy = vy; }
+    _dr.hasYawRate = hasYaw;
+    if (hasYaw) { _dr.lastYawRate = yawRate; }
     _dr.lastTime = now;
     if (!_dr.init) {
       // First sample: snap smooth to truth so we do not lerp from (0,0).
@@ -281,7 +295,15 @@ function _advanceState(s, dt, now) {
       s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
       s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
     }
-    s.targetHeading = s.lastHeading;
+    // heading 外推（与位置同构）：lastHeading + yawRate·elapsed。
+    // 旧实现 targetHeading = lastHeading（每包阶跃）→ 指数平滑对"阶跃"
+    // 目标有跟踪滞后、对"斜坡"（位置外推）无滞后 → 位置领先朝向 →
+    // 车身横着滑（"车屁股平移"的前端根源，2026-08 修复）。
+    if (s.hasYawRate) {
+      s.targetHeading = s.lastHeading + s.lastYawRate * elapsed;
+    } else {
+      s.targetHeading = s.lastHeading;
+    }
   }
 
   // 2. 帧率无关的指数平滑。读 _cfg 而非 LAMBDA_POS/LAMBDA_HEADING 顶层常量，

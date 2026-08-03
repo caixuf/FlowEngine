@@ -29,6 +29,18 @@
 #define FLOWSIM_DT_SEC  0.05
 
 namespace flowsim {
+namespace {
+
+constexpr int kChoreoBeatCapacity = SCENARIO_MAX_CHOREO_BEATS;
+int g_last_triggered[kChoreoBeatCapacity];
+bool g_choreo_init_done = false;
+
+}  // namespace
+
+void reset_choreography_state() {
+    for (int& beat : g_last_triggered) beat = -1;
+    g_choreo_init_done = false;
+}
 
 void tick_traffic_lights(EntityPool& pool, double sim_time_s) {
     for (int i = 0; i < pool.size(); ++i) {
@@ -196,22 +208,19 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
     if (phase < 0.0) phase += T;
     int current_loop = (int)(sim_time_s / T);
 
-    /* 静态 last_triggered_loop 数组，跟踪每个 beat 上次触发的 loop 编号 */
-    static int last_triggered[SCENARIO_MAX_CHOREO_BEATS];
-    static bool init_done = false;
-    if (!init_done) {
-        for (int i = 0; i < SCENARIO_MAX_CHOREO_BEATS; ++i)
-            last_triggered[i] = -1;
-        init_done = true;
+    /* 进程级缓存，跟踪每个 beat 上次触发的 loop 编号 */
+    if (!g_choreo_init_done) {
+        for (int& v : g_last_triggered) v = -1;
+        g_choreo_init_done = true;
     }
 
     for (int i = 0; i < choreo->beat_count; ++i) {
-        if (last_triggered[i] >= current_loop) continue;  /* 本轮已触发 */
+        if (g_last_triggered[i] >= current_loop) continue;  /* 本轮已触发 */
 
         const ChoreoBeat* b = &choreo->beats[i];
         if (phase < b->t) continue;  /* 还没到节拍时间 */
 
-        last_triggered[i] = current_loop;
+        g_last_triggered[i] = current_loop;
 
         /* ── 红绿灯 beat ── */
         if (strcmp(b->actor, "tl") == 0) {

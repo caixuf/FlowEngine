@@ -101,6 +101,9 @@ void tick_choreography(EntityPool& pool, const Entity& ego,
                        const Route* route = nullptr,
                        uint32_t cycle = 0);
 
+/** 重置编舞节拍的进程级缓存。 */
+void reset_choreography_state();
+
 }  // namespace flowsim
 
 #endif  // FLOWSIM_SCENE_EVENTS_H

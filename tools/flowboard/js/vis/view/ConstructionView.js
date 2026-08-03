@@ -126,7 +126,7 @@ export function createConstructionView(scene) {
     const signGeo = new THREE.PlaneGeometry(SIGN_W, SIGN_H);
     const noEntrySign = new THREE.Mesh(signGeo, noEntryMat);
     noEntrySign.position.set(barrierX, BARRIER_H + 0.3, halfW * 0.5);
-    noEntrySign.rotation.y = Math.PI;  // 朝向来车方向（-X）
+    noEntrySign.rotation.y = -Math.PI / 2;  /* 正面朝 -X（来车方向），宽度沿 Z（横向） */
     group.add(noEntrySign);
 
     // ── 3. "前方施工"指示牌（黄底黑字，围栏前5m，路右侧） ──
@@ -138,7 +138,7 @@ export function createConstructionView(scene) {
     const constSign = new THREE.Mesh(signGeo, constMat);
     const signZ = halfW + 1.5;
     constSign.position.set(signX, SIGN_POST_H + SIGN_H / 2, signZ);
-    constSign.rotation.y = Math.PI;
+    constSign.rotation.y = -Math.PI / 2;  /* 正面朝 -X（来车方向），宽度沿 Z（横向） */
     group.add(constSign);
 
     // 指示牌立柱

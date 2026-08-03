@@ -114,6 +114,9 @@ struct PlanningContext {
      * vehicle/state（flowsim 真值）优先于 fusion/localization（EKF 估计），
      * 当 vehicle/state 近期到达时 on_fusion 不覆盖，避免 EKF 发散污染 ego 状态。 */
     double ego_x{0}, ego_y{0}, ego_v{0}, ego_heading{0};
+    /* 车参单一事实源 = 场景 ego 块（flowsim 随 vehicle/state 广播，on_vehicle_state 同步）。
+     * 旧硬编码 2.8 与 physics 2.7 差 3.7% 导致掉头轨迹漂移（2026-08 修复）。 */
+    double wheelbase{2.7};
     int    ego_lane_id{0};   /* 当前车道 ID（负=前进车道，正=对向车道，取自 vehicle/state）*/
     int    ref_path_update_pending{0}; /* 1=亟需在下一主循环 tick 更新参考路径（车道方向变化）*/
     volatile int has_fusion{0};
@@ -478,7 +481,10 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                      double forward_space_m) {
     const double dt = 0.05;               /* 20Hz 时间步长 */
     const double max_steer = 0.60;        /* 满舵角 (rad)，≈34°，匹配 physics steer_override */
-    const double uturn_steer = 0.45;      /* 前进转向角 (rad)，Python 扫参最优 */
+    const double uturn_steer = 0.60;      /* 第一把前进转向角：满舵（用户规范"方向盘接近打死第一把"）。
+                                           * 旧值 0.45（wheelbase=2.8 模型下 Python 扫参最优）转弯慢，
+                                           * 64 点轨迹截断在 Phase 3 前；满舵 yaw_rate 提高 38%，
+                                           * Phase 2 缩短到 ~2.6s，轨迹可覆盖全部相位。 */
     const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
     const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
     const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
@@ -507,6 +513,18 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     };
 
     double h_start = norm_h(h);  /* 记录起始 heading */
+
+    /* 掉头目标车道方向（2026-08 返程掉头修复）：
+     * 前进端掉头（进入时 heading≈0，前进车道）→ 掉到对向车道，Phase 4 对齐 ±π
+     * 返程掉头（进入时 heading≈±π，对向车道）→ 掉回前进车道，Phase 4 对齐 0
+     * 旧实现 Phase 4 硬编码对齐 |h|≈π —— 返程掉头永远对齐不到 → 超时失败
+     * → 车滞留对向车道 → 正常规划器下发正向轨迹 → 逆行（2026-08-03 实测）。 */
+    const double uturn_target_h =
+        (std::fabs(h_start) > M_PI * 0.5) ? 0.0 : M_PI;
+    /* 转向方向符号：前进端掉头（目标 ±π）左打为正；返程掉头（目标 0，
+     * 车在对向车道）转向方向相反（右打）—— 旧实现恒左打，返程掉头
+     * 转错方向（车转去更远）→ 掉头失败。 */
+    const double steer_sign = (uturn_target_h < 0.5) ? -1.0 : 1.0;
 
     /* ═══ Phase 0 (可选): 倒车腾挪 — 前向空间不足时先倒车 ═══
      * 人类司机：路端空间不够时，先直线倒车腾出空间，再执行掉头。
@@ -598,7 +616,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   - 超时：phase2 超过 4s
      */
     {
-        steer = uturn_steer;  /* 左打死（Python 扫参最优 0.45） */
+        steer = steer_sign * uturn_steer;  /* 左打死/右打死（按目标方向） */
         v = uturn_speed;
         double phase2_t = 0.0;
         while (n < max_points) {
@@ -620,9 +638,12 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
 
             double dh = fabs(norm_h(h - h_start));
             bool heading_ok  = (dh >= 2.2689);              /* 130° in rad */
-            bool y_ok        = (y > 0.5);                   /* 越过路中线 */
+            /* 越过路中线方向按目标车道：前进端 y>0.5 / 返程 y<-0.5 */
+            bool y_ok        = (uturn_target_h < 0.5) ? (y < -0.5) : (y > 0.5);
             bool safety_h    = (dh >= 2.7053);              /* 155° 安全上限 */
-            bool safety_y    = (y > road_half_w - 1.0);     /* 逼近路沿 1m */
+            bool safety_y    = (uturn_target_h < 0.5)
+                                   ? (y < -(road_half_w - 1.0))
+                                   : (y > road_half_w - 1.0);
             bool timeout     = (phase2_t >= phase2_max_dur);
 
             if ((heading_ok && y_ok) || safety_h || safety_y || timeout) break;
@@ -637,7 +658,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   - 超时：phase3 超过 3s
      */
     {
-        steer = -max_steer;  /* 右打死（Python 扫参最优 -0.60） */
+        steer = -steer_sign * max_steer;  /* 右打死/左打死（按目标方向，倒车相位反向） */
         v = reverse_speed;
         double phase3_t = 0.0;
         while (n < max_points) {
@@ -676,7 +697,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      * （屁股横扫）。收严后掉头结束位姿更接近车道切线，slew 只清残余小角。
      */
     {
-        steer = 0.15;  /* 较小转角精细对齐（Python 扫参最优 0.15） */
+        steer = steer_sign * 0.15;  /* 较小转角精细对齐（方向按目标车道） */
         v = uturn_speed;
         double phase4_t = 0.0;
         while (n < max_points) {
@@ -697,7 +718,8 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             t_us += (uint32_t)(dt * 1e6);
 
             double hn = norm_h(h);
-            bool heading_aligned = (fabs(fabs(hn) - M_PI) < 0.10);  /* |heading| ≈ π，收严自 0.25 */
+            /* 对齐目标 = 目标车道方向（前进端掉头 ±π / 返程掉头 0） */
+            bool heading_aligned = (fabs(norm_h(hn - uturn_target_h)) < 0.10);
             bool timeout         = (phase4_t >= phase4_max_dur);
 
             if (heading_aligned || timeout) break;
@@ -727,6 +749,16 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             n++;
             t_us += (uint32_t)(dt * 1e6);
         }
+    }
+
+    /* 截断兜底：64 点 (max_points) 在高速触发时可能截断在倒车段（v<0）。
+     * control 的 target_speed 取轨迹末点 v，负目标在 DRIVE 档下 = 刹停到 0
+     * → 掉头失败（实测 2026-08-03 spd 5.4→0.0）。强制末点为正速，
+     * 倒车段由 gear 语义（最近点 v 符号）驱动，不靠末点 target。 */
+    if (n > 0 && points[n - 1].v < -0.1) {
+        points[n - 1].v = (float)uturn_speed;
+        LOG_WARN("planning", "[UTURN] trajectory truncated in reverse segment — force end point v=%.1f (n=%d/%d)",
+                 uturn_speed, n, max_points);
     }
 
     return n;
@@ -777,6 +809,10 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
         g.ego_v = j->valuedouble;
     if ((j = cJSON_GetObjectItem(root, "hdg")) && cJSON_IsNumber(j))
         g.ego_heading = j->valuedouble;
+    /* 车参同步：flowsim 广播（场景 ego 块配置了 wheelbase 才发） */
+    if ((j = cJSON_GetObjectItem(root, "wheelbase")) && cJSON_IsNumber(j) && j->valuedouble > 0.0) {
+        g.wheelbase = j->valuedouble;
+    }
     if ((j = cJSON_GetObjectItem(root, "lane_id")) && cJSON_IsNumber(j)) {
         int new_lane_id = (int)j->valuedouble;
         /* 检测车道方向变化：负→正（U-turn 到对向车道）或正→负（掉头回前进车道）
@@ -933,9 +969,15 @@ static void on_planning_behavior(const Message* msg, void* user_data) {
         return;
     }
     g.current_behavior = beh;
+    int prev_overtake = g.overtake_state;
     g.overtake_state = (beh.command == BEH_LEFT_CHANGE) ? 1 :
                        (beh.command == BEH_RIGHT_CHANGE) ? 2 :
                        (beh.command == BEH_U_TURN) ? 3 : 0;
+    /* 掉头退出（overtake 3→其他）时清掉头轨迹缓存，下次掉头重新生成 */
+    if (prev_overtake == 3 && g.overtake_state != 3) {
+        g.uturn_cache_n = 0;
+        LOG_INFO("planning", "[UTURN] exit overtake_state=%d → cache cleared", g.overtake_state);
+    }
     g.has_behavior = 1;
     static int beh_recv_count = 0;
     if (beh_recv_count++ % 50 == 0 || beh.command == BEH_RIGHT_CHANGE || beh.command == BEH_LEFT_CHANGE) {
@@ -1031,17 +1073,13 @@ static void on_navigation_path(const Message* msg, void* user_data) {
             break;
         }
         case ROUTE_U_TURN: {
-            /* 导航系统发出掉头指令 → 立即触发 UTurnPlanner。
-             * 绕开 behavior_planner 状态机，直接设置 overtake_state=3，
-             * 下一帧主循环 tick 中 generate_uturn_trajectory 生成三把方向轨迹。
-             * 同时更新参考路径为对向车道方向（opposite=true）。 */
-            g.overtake_state = 3;
-            g.target_lane_offset = 0.0;
-            g.route_target_speed = (target_speed > 0.0) ? target_speed : 3.5;  /* 掉头低速 */
-            /* 提前翻参考路径：掉头后在对向车道行驶，参考路径应从右向左生成 */
-            update_reference_path(g.ego_x, /*opposite=*/true);
-            LOG_WARN("planning", "NAV u_turn #%d @x=%.0f → UTurnPlanner triggered (speed=%.1f)",
-                     step_index, ego_x, g.route_target_speed);
+            /* 掉头触发已统一到 behavior_planner（路端检测 + 状态机 + 冷却 +
+             * COMPLETED 完成握手）。navigation 的 route u_turn 步骤仅作播报，
+             * 不再直连 overtake_state —— 旧实现与 behavior 触发并存，构成
+             * 双重触发：NAV 置位被下一条 behavior 消息无条件覆盖，掉头在
+             * 触发边缘抖动（实测 7ms 内退出，2026-08-03）。 */
+            LOG_INFO("planning", "NAV u_turn #%d @x=%.0f ignored — u-turn unified to behavior (overtake=%d)",
+                     step_index, ego_x, g.overtake_state);
             break;
         }
         case ROUTE_LANE_CHANGE:
@@ -1603,10 +1641,24 @@ protected:
 
             /* ── UTurnPlanner: 掉头时跳过 Frenet，直接生成自行车模型轨迹 ── */
             if (g.overtake_state == 3) {
-                /* 轴距必须与物理真值一致（entity.h 默认 2.7，flowsim_node 显式
-                 * 写 2.7）：旧值 2.8 与 physics.cpp 差 3.7%，轨迹 yaw_rate 和
-                 * 实际积分不一致 → 掉头轨迹与实车位姿漂移。control 也用 2.7。 */
-                const double wheelbase = 2.7;
+                /* 车参单一事实源：场景 ego 块 → flowsim 广播 → 此处同步。
+                 * 旧硬编码 2.8 与 physics 2.7 差 3.7% → 轨迹 yaw_rate 与实际
+                 * 积分不一致 → 掉头轨迹与实车位姿漂移（2026-08 修复收口）。 */
+                const double wheelbase = g.wheelbase;
+                /* 掉头轨迹固定化：触发时生成一次，整个掉头期间复用。
+                 * 旧实现每帧从当前 ego 状态重生成 → 车一旦偏离（v 归零/冲出
+                 * 路面），新轨迹从偏离位置重新出发，目标永远跟着车跑 → 掉头
+                 * 失败死循环（实测 y=11.05 路面外卡死 3 分钟）。固定轨迹让
+                 * control 沿原始掉头弧执行，偏离会被拉回。 */
+                bool cache_hit = (g.uturn_cache_n > 0) &&
+                    (fabs(g.ego_x - g.uturn_cache_ego_x) < 40.0) &&
+                    (fabs(g.ego_y - g.uturn_cache_ego_y) < 40.0);
+                if (cache_hit) {
+                    memcpy(points, g.uturn_cache, sizeof(TrajectoryPoint) * (size_t)g.uturn_cache_n);
+                    n_pts = g.uturn_cache_n;
+                    use_stitch = false;
+                    goto publish_trajectory;
+                }
                 /* 计算前向可用空间：到路端/障碍物的距离，用于倒车腾挪决策 */
                 double forward_space_m = 1e9;  /* 默认无限（无路端信息） */
                 if (has_fresh_map_ref() && g.map_ref_count >= 2) {
@@ -1619,7 +1671,11 @@ protected:
                                                   g.ego_x, g.ego_y, g.ego_heading,
                                                   g.ego_v, wheelbase,
                                                   forward_space_m);
-                LOG_INFO("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm)",
+                memcpy(g.uturn_cache, points, sizeof(TrajectoryPoint) * (size_t)n_pts);
+                g.uturn_cache_n = n_pts;
+                g.uturn_cache_ego_x = g.ego_x;
+                g.uturn_cache_ego_y = g.ego_y;
+                LOG_INFO("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm) — cached, replay until exit",
                          n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v, forward_space_m);
                 /* 跳过 stitch（掉头是全新轨迹，不与上帧拼接） */
                 use_stitch = false;
@@ -1674,7 +1730,12 @@ protected:
             /* 变道时覆盖 d_out：Frenet 规划器只知收敛到参考线中心 (d=0)，
              * 不知目标车道偏移。behavior_planner 下发的 target_lane_idx 必须
              * 通过 d_out 显式插值到目标车道，否则车永远不变道。
-             * 对 fallback 路径（d_out 恒为 ego_ref_d）同样适用。 */
+             * 对 fallback 路径（d_out 恒为 ego_ref_d）同样适用。
+             *
+             * 渐变形态用 smoothstep（端点斜率为 0）而非线性：线性渐变生成
+             * 一条斜直线轨迹，车头不偏转、车身整体横移（实测 lat_err 恒 1m、
+             * 车身偏转仅 2.5°，"车头不先过去"）。smoothstep 使横向速度先增
+             * 后减、路径为 S 形弧线 → 车头先偏转插入目标车道，再回正。 */
             if (g.has_behavior && n_wp > 2 &&
                 (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
                 double target_world_y = road_center_y(g.ego_x, g.curve_start_x,
@@ -1684,7 +1745,8 @@ protected:
                 if (project_to_reference_path(g.ego_x, target_world_y, target_ref_s, target_ref_d)) {
                     for (int i = 0; i < n_wp; i++) {
                         double t = (double)i / (double)(n_wp - 1);
-                        d_out[i] = ego_ref_d * (1.0 - t) + target_ref_d * t;
+                        double st = t * t * (3.0 - 2.0 * t);  /* smoothstep */
+                        d_out[i] = ego_ref_d * (1.0 - st) + target_ref_d * st;
                     }
                 }
             }
@@ -1812,6 +1874,21 @@ protected:
                         points[i].kappa = (float)ck;
                     }
                 }
+                /* 变道轨迹 heading 修正（2026-08 根因修复）：
+                 * frenet_to_cartesian 的 heading = 参考线切线，完全忽略 d 渐变
+                 * → 变道轨迹 heading 恒 0 → control 的 psi_des 基准永远直行
+                 * → 车头不转、横向硬拉 → "车屁股平移"（实测 lat_err 恒 1m、
+                 * 车身偏转仅 2.5°）。
+                 * 用相邻轨迹点世界坐标差分算实际路径切线（含 d 渐变）：
+                 * 变道段车头朝目标车道偏转（斜插），收敛段回正。 */
+                for (int i = 0; i + 1 < n_pts; i++) {
+                    double dx = (double)points[i + 1].x - (double)points[i].x;
+                    double dy = (double)points[i + 1].y - (double)points[i].y;
+                    if (dx * dx + dy * dy > 1e-9) {
+                        points[i].heading = (float)atan2(dy, dx);
+                    }
+                }
+                if (n_pts > 1) points[n_pts - 1].heading = points[n_pts - 2].heading;
             } else {
                 /* 规划失败 → 停车（Apollo 原则：不能规划就停）
                  * 用 ego 当前位置 + v=0，control PID 会匀减速到 0。

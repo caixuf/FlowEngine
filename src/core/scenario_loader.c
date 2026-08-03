@@ -89,6 +89,15 @@ ScenarioConfig* scenario_load(const char* path) {
         if (cJSON_IsNumber(j)) sc->ego.init_speed = j->valuedouble;
         j = cJSON_GetObjectItemCaseSensitive(jego, "target_speed");
         if (cJSON_IsNumber(j)) sc->ego.target_speed = j->valuedouble;
+        /* 车辆参数（车参单一事实源）：0=未配置，由下游用默认值 */
+        j = cJSON_GetObjectItemCaseSensitive(jego, "wheelbase");
+        if (cJSON_IsNumber(j)) sc->ego.wheelbase = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(jego, "length");
+        if (cJSON_IsNumber(j)) sc->ego.length = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(jego, "width");
+        if (cJSON_IsNumber(j)) sc->ego.width = j->valuedouble;
+        j = cJSON_GetObjectItemCaseSensitive(jego, "max_steer");
+        if (cJSON_IsNumber(j)) sc->ego.max_steer = j->valuedouble;
     }
 
     /* actors */

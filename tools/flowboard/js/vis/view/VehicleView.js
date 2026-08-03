@@ -355,14 +355,15 @@ export function createVehicleView(scene, renderer, modelCache) {
 
     // 前轴转向：glTF 模型 axle_front（含 wheel_FL/wheel_FR）整体绕 Y 旋转。
     // steer > 0 = 右转，THREE rotation.y 正向 = 逆时针，故取负。
-    // 乘子 0.6：steer=0.1 rad → 前轮转 0.06 rad ≈ 3.4°（真实车辆前轮最大转角 ~30°，
-    // steer=0.25 时 map 到 0.15 rad ≈ 8.6°，方向盘转 143° → 前轮转 8.6° 是合理
-    // 传动比 16.6:1）。
+    // 1:1 映射（2026-08 修复）：后端 step_bicycle 的 steer 就是前轮转角 δ，
+    // 直接显示 —— 变道 0.05-0.1 rad ≈ 3-6°（可见），掉头满舵 0.45-0.60 rad
+    // ≈ 26-34°（真实前轮最大转角）。旧乘子 0.6 把前轮角又缩小 40%，
+    // 变道时前轮只转 2-3.5° 肉眼不可见 → "前轮不会动"。
     // 死区滤波：|steer| < 0.005 时视为 0，避免直路巡航时方向盘和车轮微动。
     const rawSteer = (entry && entry.steerAngle) || 0;
     const steerFiltered = (Math.abs(rawSteer) < 0.005) ? 0 : rawSteer;
     if (vis.userData && vis.userData.frontAxle) {
-      vis.userData.frontAxle.rotation.y = -steerFiltered * 0.6;
+      vis.userData.frontAxle.rotation.y = -steerFiltered;
     }
 
     vis.traverse((child) => {
@@ -539,12 +540,13 @@ export function createVehicleView(scene, renderer, modelCache) {
         // 行人灯光不处理
         if (type === 'pedestrian') return;
       } else {
-        // 程序化 fallback 前轴转向（加死区滤波，避免直路巡航时微动）
+        // 程序化 fallback 前轴转向（1:1 显示前轮角，见上方 glTF 路径注释；
+        // 加死区滤波，避免直路巡航时微动）
         const vis = _getVisGroup(entry);
         if (vis && vis.userData && vis.userData.frontAxle) {
           const raw = (entry && entry.steerAngle) || 0;
           const sf = (Math.abs(raw) < 0.005) ? 0 : raw;
-          vis.userData.frontAxle.rotation.y = -sf * 0.6;
+          vis.userData.frontAxle.rotation.y = -sf;
         }
       }
 

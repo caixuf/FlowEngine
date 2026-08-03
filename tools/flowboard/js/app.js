@@ -1359,13 +1359,17 @@ function sync2DTarget() {
   if (scn && scn.ego) {
     // vx/vy（世界系中心速度，含绕后轴切向分量）让死推算在掉头/急转弯时
     // 保持正确——只用 speed·(cos,sin) 外推会丢切向项导致车尾横移。
+    // yaw_rate：heading 外推用（位置是斜坡外推、heading 是阶跃+平滑 →
+    // 平滑器跟踪斜坡无滞后、跟踪阶跃有滞后 → 位置领先朝向 → 车身横着滑。
+    // 与位置同构外推后位置/朝向完全同步，2026-08）。
     updateDeadReckon(
       scn.ego.x || 0,
       scn.ego.y || 0,
       scn.ego.speed || v.speed || 0,
       scn.ego.heading || 0,
       scn.ego.vx,
-      scn.ego.vy
+      scn.ego.vy,
+      scn.ego.yaw_rate || 0
     );
   } else if (v) {
     // Vehicle-only payload has no heading → derive from GPS history.

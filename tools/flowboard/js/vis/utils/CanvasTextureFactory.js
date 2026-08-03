@@ -86,25 +86,32 @@ export function makeLabelTexture(speed, aiState, opts = {}) {
   const bgY = (height - fontSize) / 2 - padY;
   const bgH = fontSize + padY * 2;
 
-  // 背景圆角矩形
+  // 背景圆角矩形（2026-08 淡化：0.65 太黑，观感像"一块黑的长方形"；
+  // 0.4 半透明 + 细边框，文字为主背景为辅）
   ctx.beginPath();
   ctx.roundRect(bgX, bgY, bgW, bgH, 8);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.fillStyle = 'rgba(10, 16, 24, 0.40)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // 速度文字
+  // 速度文字（加细描边，浅背景上仍可读）
   ctx.font = `bold ${fontSize}px ${FONT_MONO}`;
   ctx.textBaseline = 'middle';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.strokeText(speedText, startX, height / 2);
   ctx.fillStyle = '#ffffff';
   ctx.fillText(speedText, startX, height / 2);
 
   // ai_state 文字
   if (stateText) {
     ctx.font = `${fontSize * 0.7}px ${FONT_SANS}`;
-    ctx.fillStyle = '#8b949e';
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.strokeText(stateText, startX + speedW + gap, height / 2);
+    ctx.fillStyle = '#c9d4e0';
     ctx.fillText(stateText, startX + speedW + gap, height / 2);
   }
 

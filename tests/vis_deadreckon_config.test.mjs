@@ -5,7 +5,8 @@
  * _cfg 对象，可通过 setDeadReckonConfig() 运行时调整，且立即生效于
  * 后续 tickDeadReckon() 调用。
  *
- * 默认值与原实现一致（lambdaPos=8, lambdaHeading=6），保证现有行为兼容。
+ * 默认值（lambdaPos=8, lambdaHeading=8）：λ 对称消除"位置先动、朝向
+ * 后追"的蟹行相位差（2026-08 修复，旧值 heading=6 慢 30%）。
  */
 import {
   _dr,
@@ -27,7 +28,7 @@ console.log('--- 默认配置（兼容原硬编码值）---');
 initDeadReckon();
 const def = getDeadReckonConfig();
 ok('默认 lambdaPos=8', def.lambdaPos === 8);
-ok('默认 lambdaHeading=6', def.lambdaHeading === 6);
+ok('默认 lambdaHeading=8（与位置对称，消除蟹行相位差）', def.lambdaHeading === 8);
 
 console.log('\n--- setDeadReckonConfig：合法值生效 ---');
 setDeadReckonConfig({ lambdaPos: 12.0, lambdaHeading: 9.0 });
@@ -89,10 +90,10 @@ const smallDiff = Math.abs(_dr.targetX - _dr.smoothX);
 ok('小 lambda 下 smoothX 远落后 targetX (|targetX-smoothX|>0.5)', smallDiff > 0.5);
 
 console.log('\n--- 复位默认配置（避免污染其他测试）---');
-setDeadReckonConfig({ lambdaPos: 8, lambdaHeading: 6 });
+setDeadReckonConfig({ lambdaPos: 8, lambdaHeading: 8 });
 const restored = getDeadReckonConfig();
 ok('恢复默认 lambdaPos=8', restored.lambdaPos === 8);
-ok('恢复默认 lambdaHeading=6', restored.lambdaHeading === 6);
+ok('恢复默认 lambdaHeading=8', restored.lambdaHeading === 8);
 
 console.log('\n--- summary: ' + pass + ' pass, ' + fail + ' fail ---');
 if (fail > 0) process.exit(1);

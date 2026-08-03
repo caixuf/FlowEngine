@@ -251,6 +251,7 @@ cJSON* build_ego_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "brake", e.brake);
     cJSON_AddNumberToObject(j, "length", e.length);
     cJSON_AddNumberToObject(j, "width", e.width);
+    cJSON_AddNumberToObject(j, "height", 1.5);
     cJSON_AddNumberToObject(j, "target_vx", e.target_vx);
     /* vx/vy 用于前端速度向量可视化（弯道时 vy≠0） */
     cJSON_AddNumberToObject(j, "vx", e.vx);
@@ -274,6 +275,11 @@ cJSON* build_npc_vehicle_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "yaw_rate", e.yaw_rate);
     cJSON_AddNumberToObject(j, "length", e.length);
     cJSON_AddNumberToObject(j, "width", e.width);
+    /* height 按类型：car=1.5, suv=1.85, truck/bus=4.0 */
+    double vehH = 1.5;
+    if (e.type == EntityType::SUV) vehH = 1.85;
+    else if (e.type == EntityType::Truck) vehH = 4.0;
+    cJSON_AddNumberToObject(j, "height", vehH);
     cJSON_AddStringToObject(j, "ai_state", npc_state_str(e.state));
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
@@ -294,9 +300,21 @@ cJSON* build_pedestrian_json(const Entity& e) {
     cJSON_AddNumberToObject(j, "id", (double)e.id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
-    cJSON_AddNumberToObject(j, "speed", e.speed);
+    /* 行人 heading 从 vx/vy 推算（step_pedestrian 不维护 heading 字段，
+     * 横穿时 e.heading 为道路航向而非行人朝向） */
+    double ped_heading = e.heading;
+    double spd = std::sqrt(e.vx * e.vx + e.vy * e.vy);
+    if (spd > 0.1) {
+        ped_heading = std::atan2(e.vy, e.vx);
+    }
+    cJSON_AddNumberToObject(j, "heading", ped_heading);
+    cJSON_AddNumberToObject(j, "speed", spd);
     cJSON_AddNumberToObject(j, "vx", e.vx);
     cJSON_AddNumberToObject(j, "vy", e.vy);
+    /* 行人尺寸：0.5m × 0.5m × 1.75m */
+    cJSON_AddNumberToObject(j, "length", e.length > 0 && e.length < 2.0 ? e.length : 0.5);
+    cJSON_AddNumberToObject(j, "width",  e.width  > 0 && e.width  < 2.0 ? e.width  : 0.5);
+    cJSON_AddNumberToObject(j, "height", 1.75);
     /* ped_parked 状态供前端区分"站立"vs"行走"动画 */
     cJSON_AddBoolToObject(j, "parked", e.ped_parked != 0);
     return j;
