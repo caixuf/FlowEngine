@@ -12,8 +12,10 @@ export function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({
     canvas, antialias: true, powerPreference: 'high-performance'
   });
-  /* 全分辨率：演示画质优先，不压 devicePixelRatio */
-  renderer.setPixelRatio(window.devicePixelRatio);
+  /* 默认中档：压制 DPR 上限 1.5，避免高分屏（DPR=2-3）下全屏后处理
+   * （GTAO/Bloom/SMAA）在 4-9 倍像素分辨率逐像素计算导致 GPU 卡死。
+   * 高性能设备可通过 setPerfTier('high') 恢复全 DPR。 */
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   /* r152+：outputColorSpace 替代 outputEncoding */
@@ -82,6 +84,20 @@ export function createComposer(renderer, scene, camera) {
 export function renderFrame(renderer, composer, scene, camera) {
   if (composer) composer.render();
   else renderer.render(scene, camera);
+}
+
+/** 判断 pass 是否为 GTAO（接触阴影）。GTAO 是全屏后处理里最贵的一趟，
+ * low 档禁用整个 composer、medium 档单独关掉 GTAO 以明显降 GPU 压力。 */
+function _isGTAOPass(p) {
+  return p && (p.isGTAOPass || (p.constructor && p.constructor.name === 'GTAOPass'));
+}
+
+/** 启用/禁用 composer 中的 GTAO pass（medium 档用，保留 Bloom+SMAA） */
+export function setComposerGTAOPassEnabled(composer, enabled) {
+  if (!composer || !composer.passes || !composer.passes.length) return;
+  for (const p of composer.passes) {
+    if (_isGTAOPass(p)) p.enabled = !!enabled;
+  }
 }
 
 /** 调整大小 */

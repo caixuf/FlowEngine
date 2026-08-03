@@ -27,9 +27,10 @@ export function createLighting(scene) {
   sun.intensity = 3.0;
   sun.position.set(50, 80, 30);
   sun.castShadow = true;
-  /* 阴影 4096：演示画质优先，车边缘锯齿几乎不可见。
-   * ±90 范围在 4096 贴图下 = 22.8px/m，极锐。 */
-  sun.shadow.mapSize.set(4096, 4096);
+  /* 阴影 2048（默认中档）：4096 在 PCFSoft 软阴影过滤下每帧渲 shadow map
+   * 很贵，是卡顿来源之一。2048 在 ±90 范围 = 11.4px/m，车边缘仍清晰。
+   * 高性能设备可 setPerfTier('high') 恢复 4096。 */
+  sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.camera.near = 1;
   sun.shadow.camera.far = 220;
   sun.shadow.camera.left = -90;
