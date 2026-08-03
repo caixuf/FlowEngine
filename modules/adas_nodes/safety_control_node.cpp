@@ -431,12 +431,53 @@ private:
             }
         }
 
-        set_changed(cmd.throttle, clamp(cmd.throttle, 0.0, params_.max_throttle));
+        /* ── 机动窗口（掉头/倒车）──
+         * control 巡航钳位上限 0.16rad，只有 maneuver_mode（掉头/倒车轨迹）
+         * 会发出 |steer|>0.30 或倒挡。此时 safety 的巡航级钳位/TTC 规则会
+         * 直接杀死掉头：low_speed_steer=0.18 → 转弯半径 R=L/tan(0.18)≈15m，
+         * 14m 路宽物理上掉不过来；施工区/停车被近场 TTC 当前车全刹 → v=0
+         * → yaw_rate=v/L·tan(δ)=0 转不动 → 车横漂进对向车道定格"逆行"
+         * （2026-08-03 死锁现场）。机动窗口内放行满舵、豁免巡航级 TTC，
+         * 只保留 <2.0m 硬碰撞保护——这是 planning 掉头轨迹的执行前提。 */
+        const bool maneuver = (cmd.gear == GEAR_REVERSE) ||
+                              std::fabs(cmd.steer) > 0.30 ||
+                              cmd.mode.find("MANEUVER") != std::string::npos;
+
+        /* 倒挡时油门为负（flowsim 负油门=倒车驱动），钳位下界随挡位放开 */
+        const double thr_lo = (cmd.gear == GEAR_REVERSE) ? -params_.max_throttle : 0.0;
+        set_changed(cmd.throttle, clamp(cmd.throttle, thr_lo, params_.max_throttle));
         set_changed(cmd.brake, clamp(cmd.brake, 0.0, params_.max_brake));
-        double steer_limit = (has_state && state.speed < 3.0) ? params_.low_speed_steer : params_.max_steer;
+        double steer_limit = maneuver ? 0.62
+                           : (has_state && state.speed < 3.0) ? params_.low_speed_steer
+                                                              : params_.max_steer;
         set_changed(cmd.steer, clamp(cmd.steer, -steer_limit, steer_limit));
 
-        if (has_state) {
+        if (has_state && maneuver) {
+            /* 硬碰撞保护：沿运动方向 2m 内有障碍才全刹，其余放行。
+             * 不复用 min_vehicle_ttc——它无候选时返回 dx=0，会被误判
+             * "0m 处有障碍" → 恒全刹（2026-08-03 掉头两次死于此）。
+             * 方向性：前进只看前方障碍，倒车只看后方——倒车逃离前方
+             * 障碍是 Phase 0 腾挪的合法动作，不得拦截。 */
+            const bool backing = (cmd.gear == GEAR_REVERSE);
+            const double ch = std::cos(state.heading), sh = std::sin(state.heading);
+            for (int i = 0; i < kMaxObs; ++i) {
+                if (!state.obs_valid[i]) continue;
+                const double dx = state.obs_x[i] - state.x;
+                const double dy = state.obs_y[i] - state.y;
+                /* 车体系投影：掉头转过 90°/180° 后世界系 +x 早已不是"前方" */
+                const double lon = dx * ch + dy * sh;
+                const double lat = -dx * sh + dy * ch;
+                const double ahead = backing ? -lon : lon;
+                /* 1.2m 净距 + 3.6m 偏置（半车长 2.4 + 半障碍 1.2，中心距） */
+                if (ahead > 0.0 && ahead < 3.6 + 1.2 && std::fabs(lat) < 1.4) {
+                    set_changed(cmd.throttle, 0.0);
+                    set_changed(cmd.brake, 1.0);
+                    break;
+                }
+            }
+        }
+
+        if (has_state && !maneuver) {
             double gap = nearest_same_lane_gap(state, params_);
             double safe_gap = params_.min_gap + state.speed * params_.time_headway;
             if (gap < safe_gap && gap < 80.0) {

@@ -115,6 +115,7 @@ struct ControlContext {
     double ego_x{0}, ego_y{0};
     double lane_d{0};          /* 从 trajectory 解析的横向偏移（Frenet d） */
     double target_path_y{0};   /* 同一前视点的全局 y，避免最近点 rc_y + 前视点 lane_d 混拼 */
+    double target_path_x{0};   /* 前视点全局 x（机动控制律横向误差投影用） */
     double target_path_heading{0};
     double target_path_kappa{0};
     double target_road_center_y{0};
@@ -318,12 +319,12 @@ static void on_trajectory(const Message* msg, void* user_data) {
      * 车在轨迹上的投影点（最近点）的速度符号 = 当前应执行的档位：
      * Phase 2 中最近点在正速段 → DRIVE（满舵左打前进）；
      * Phase 3 中最近点在负速段 → REVERSE（右打满舵倒车调整）。 */
+    uint32_t best_i = 0;   /* ego 在轨迹上的最近点（机动期前视锚点） */
     {
         bool has_reverse = false;
         double max_kappa = 0.0;
         if (n_pts > 0) {
             double best_d2 = 1e18;
-            uint32_t best_i = 0;
             for (uint32_t i = 0; i < n_pts; i++) {
                 double dx = (double)traj.points[i].x - g.ego_x;
                 double dy = (double)traj.points[i].y - g.ego_y;
@@ -332,9 +333,25 @@ static void on_trajectory(const Message* msg, void* user_data) {
                 double k = fabs((double)traj.points[i].kappa);
                 if (k > max_kappa) max_kappa = k;
             }
-            has_reverse = ((double)traj.points[best_i].v < -0.1);
+            /* gear 判定不能只看最近点：掉头缓存轨迹是前进段+倒车段拼接，
+             * ego 停在段交界时最近点 v 符号每帧摆动 → gear 振荡原地抖。
+             * 从最近点向前扫第一个 |v|>0.3 的点取符号（执行方向的意图）。 */
+            for (uint32_t i = best_i; i < n_pts; i++) {
+                double vv = (double)traj.points[i].v;
+                if (fabs(vv) > 0.3) { has_reverse = (vv < 0.0); break; }
+            }
         }
-        g.gear = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
+        /* 换挡滞回 + 真实换挡语义：带速不换挡(消灭交界 D/R 振荡)，但想换
+         * 挡时必须主动刹停——否则 gear 卡死在旧挡、被反向 target 拖着狂奔
+         * （demo6：gear 卡 R + ROAD_GUARD 给油 → 倒车冲出路面 y=-11）。 */
+        int8_t want = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
+        bool gear_pending = false;
+        if (want != g.gear && fabs(g.current_speed) > 0.8) {
+            gear_pending = true;   /* 保持旧挡，本帧强制刹停 */
+        } else {
+            g.gear = want;
+        }
+        has_reverse = (g.gear == GEAR_REVERSE);
         /* 机动检测：倒车点 或 曲率超过巡航转向域（tan(0.25)/L≈0.094 是物理
          * 巡航钳位的极限曲率，超过它的轨迹只能来自掉头规划器满舵弧）。 */
         bool mv = has_reverse || (max_kappa > 0.12);
@@ -343,21 +360,68 @@ static void on_trajectory(const Message* msg, void* user_data) {
                      (int)g.maneuver_mode, (int)mv, (int)has_reverse, max_kappa, n_pts);
         }
         g.maneuver_mode = mv;
+        /* 机动期速度取执行点（最近点）|v| 而非轨迹末点：掉头轨迹末点是
+         * Phase 5 巡航填充（v=cfg_target_speed），拿末点当目标会在满舵段
+         * 冲到巡航速度；反之末点若为 0 会让车在半途丧失动力。
+         * 下限 1.5 m/s：运动学 yaw_rate=v/L·tan(δ)，v=0 时车头永远转不动
+         * （2026-08-03 掉头死锁：刹停在对向车道定格"逆行"）。 */
+        if (mv && n_pts > 0) {
+            uint32_t exec_i = best_i;
+            double ev = (double)traj.points[exec_i].v;
+            /* 目标速度取执行点起前视 6m 弧长内的最小 |v|：只用执行点 v
+             * 会"车追着最近点跑、最近点速度追着车涨"——减速计划永远
+             * 追不上，满舵段还带 6-7m/s（R=4.1m 需 ≤3.5）understeer
+             * 冲出路面（2026-08-03 demo8 y=10.9 → 24.4）。 */
+            double mag = fabs(ev);
+            {
+                double arc = 0.0;
+                for (uint32_t i = exec_i; i + 1 < n_pts && arc < 6.0; i++) {
+                    double ddx = (double)traj.points[i + 1].x - (double)traj.points[i].x;
+                    double ddy = (double)traj.points[i + 1].y - (double)traj.points[i].y;
+                    arc += sqrt(ddx * ddx + ddy * ddy);
+                    double vv = fabs((double)traj.points[i + 1].v);
+                    /* 只在同挡段内取 min（跨 D/R 边界的 0 速不算） */
+                    if (((double)traj.points[i + 1].v < -0.1) != (ev < -0.1)) break;
+                    if (vv < mag) mag = vv;
+                }
+            }
+            if (mag < 1.5 && exec_i + 1 < n_pts) mag = 1.5;
+            /* 保留符号：倒挡 PID 约定 target 为负（见下方 is_reverse 镜像） */
+            g.target_speed = (ev < -0.1) ? -mag : mag;
+            /* 换挡待决：先刹停（|v|<0.8 时上面滞回自动放行换挡） */
+            if (gear_pending) g.target_speed = 0.0;
+        }
     }
     /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
      * 渐变到目标车道偏移。取前视点而非中段点，让 lat_error 随 ego 前进逐渐
      * 增大，避免一次性跳到 3.5m 误差导致横向过冲冲出路沿。
      * 轨迹点间距 100ms，0.5s = 第 5 个点。 */
     uint32_t d_idx = 0;
-    for (uint32_t i = 0; i < n_pts; i++) {
-        if ((double)traj.points[i].t_rel_us >= 500000.0) {  /* 0.5s */
-            d_idx = i;
-            break;
+    if (g.maneuver_mode) {
+        /* 机动期（缓存重放的掉头轨迹）：t_rel 相对生成时刻，不随 ego 推进。
+         * 用固定 t_rel 前视 = 永远追轨迹开头 → 车直行怼向路端被 safety
+         * 拦停（2026-08-03 demo7：40s 定在 y=-0.85 打不了方向）。
+         * 改为锚定最近点 + 前视 ~2m 弧长。 */
+        d_idx = best_i;
+        double lookahead = 0.0;
+        while (d_idx + 1 < n_pts && lookahead < 2.0) {
+            double ddx = (double)traj.points[d_idx + 1].x - (double)traj.points[d_idx].x;
+            double ddy = (double)traj.points[d_idx + 1].y - (double)traj.points[d_idx].y;
+            lookahead += sqrt(ddx * ddx + ddy * ddy);
+            d_idx++;
+        }
+    } else {
+        for (uint32_t i = 0; i < n_pts; i++) {
+            if ((double)traj.points[i].t_rel_us >= 500000.0) {  /* 0.5s */
+                d_idx = i;
+                break;
+            }
         }
     }
     if (d_idx >= n_pts) d_idx = n_pts - 1;
     g.lane_d = (double)traj.points[d_idx].l;
     g.target_path_y = (double)traj.points[d_idx].y;
+    g.target_path_x = (double)traj.points[d_idx].x;
     g.target_path_heading = (double)traj.points[d_idx].heading;
     g.target_path_kappa = (double)traj.points[d_idx].kappa;
     g.target_road_center_y = g.target_path_y - g.lane_d * cos(g.target_path_heading);
@@ -685,6 +749,12 @@ protected:
 
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
+            /* 横向误差投影到参考线左法向：n̂=(−sinθ,cosθ)，y 差分量 = cosθ。
+             * lat_error 是世界系 y 差，Stanley/MPC/psi_des 全链假设"正误差=左打舵"，
+             * 该假设仅在车头朝 +x（θ≈0）成立；掉头返程 θ≈π 时符号语义翻转，
+             * 控制器会稳定在镜像平衡点——目标 y=+1.75 却收敛到 y=-1.2 对向
+             * 车道（2026-08-03 demo13 实测逆行）。投影后对两个方向都自洽。 */
+            double lat_err_n = lat_error * cos(ref_road_heading);
             if (g.cycle % 100 == 0 || fabs(lat_error) > 0.5) {
                 LOG_WARN("control", "[DBG_LAT] cyc=%d lane_d=%.2f rc_y=%.2f tgt_y=%.2f ego_y=%.2f lat_err=%.2f spd=%.1f gear=%d",
                          g.cycle, g.lane_d, g.road_center_y, effective_target_y, g.ego_y,
@@ -750,7 +820,7 @@ protected:
                 }
                 if (g.ltv_mpc) {
                     ltv_mpc_update_config(g.ltv_mpc, &g.ltv_mpc_cfg);
-                    double e_y = -lat_error;
+                    double e_y = -lat_err_n;
                     double heading_error = g.ego_heading - ref_road_heading;
                     while (heading_error >  M_PI) heading_error -= 2.0 * M_PI;
                     while (heading_error < -M_PI) heading_error += 2.0 * M_PI;
@@ -776,6 +846,37 @@ protected:
             }
 
             /* ── Stanley 横向控制（LTV MPC 未启用或求解失败时回退）── */
+            if (!mpc_used && g.maneuver_mode) {
+                /* ── 机动（掉头）专用控制律 ──
+                 * Stanley 的 cte_term 用世界系 y 差，在大角度机动（heading
+                 * 扫过 ±π）下符号语义随朝向翻转 → 满舵来回打（demo9 实测
+                 * st +0.60→-0.60 振荡画 S 形，超调 y=11）。
+                 * 改为纯几何跟踪：曲率前馈（轨迹 κ → steer=atan(L·κ)）
+                 * + 车体系横向误差 + heading 误差，倒挡横向项反号。 */
+                double dh = g.target_path_heading - g.ego_heading;
+                while (dh >  M_PI) dh -= 2.0 * M_PI;
+                while (dh < -M_PI) dh += 2.0 * M_PI;
+                /* e_lat = (p_target - p_ego)·n̂，n̂ = 目标点 heading 左法向 */
+                double e_lat = -sin(g.target_path_heading) * (g.target_path_x - g.ego_x)
+                             +  cos(g.target_path_heading) * (g.target_path_y - g.ego_y);
+                bool rev = (g.gear == GEAR_REVERSE);
+                double ff = atan(g.wheelbase * g.target_path_kappa);
+                double fb = 0.8 * dh + 0.25 * e_lat;
+                if (rev) fb = -fb;   /* 倒挡：舵角对横向误差的作用反向 */
+                steer = ff + fb;
+                /* 先刹后转：实际车速明显高于机动目标速度时压住大舵角——
+                 * 带 6m/s 打满舵（计划 3.5）转弯半径不够，冲出路面
+                 * （demo10：y 冲到 7.9 恰好在路沿外）。 */
+                if (fabs(g.current_speed) > fabs(g.target_speed) * 1.3 + 0.3) {
+                    const double lim = 0.10;
+                    if (steer >  lim) steer =  lim;
+                    if (steer < -lim) steer = -lim;
+                }
+                if (steer >  0.60) steer =  0.60;
+                if (steer < -0.60) steer = -0.60;
+                g.prev_steer = steer;
+                mpc_used = true;  /* 跳过下方 Stanley */
+            }
             if (!mpc_used) {
                 steer = 0.0;
                 {
@@ -785,8 +886,8 @@ protected:
                     double speed_eff = fmax(abs_speed, 3.0);
                     double v_lat_actual = abs_speed *
                         sin(g.ego_heading - ref_road_heading);
-                    /* v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual（巡航模式） */
-                    double v_y_des = g.k_vy * lat_error - g.k_vy_damp * v_lat_actual;
+                    /* v_y_des = k_vy * e_lat - k_vy_damp * v_lat（参考系左法向，巡航模式） */
+                    double v_y_des = g.k_vy * lat_err_n - g.k_vy_damp * v_lat_actual;
                     double psi_des = ref_road_heading;
                     {
                         double vy_ratio = v_y_des / speed_eff;
@@ -804,8 +905,16 @@ protected:
                         while (dh < -M_PI) dh += 2.0 * M_PI;
                         if (fabs(dh) > 0.5) ref_h_eff = g.ego_heading;
                     }
-                    double cte_term     = atan2(g.lat_kp * lat_error, speed_eff);
-                    double heading_term = g.lat_kd_heading * (g.ego_heading - ref_h_eff);
+                    double cte_term     = atan2(g.lat_kp * lat_err_n, speed_eff);
+                    double heading_term;
+                    {
+                        /* wrap：返程 heading 在 ±π 边界抖动时，ego_h=3.1 与
+                         * ref_h_eff=-3.1 等价，裸差 6.2 会打满舵。 */
+                        double dh_t = g.ego_heading - ref_h_eff;
+                        while (dh_t >  M_PI) dh_t -= 2.0 * M_PI;
+                        while (dh_t < -M_PI) dh_t += 2.0 * M_PI;
+                        heading_term = g.lat_kd_heading * dh_t;
+                    }
                     double yaw_damp_term = g.yaw_damping * g.ego_yaw_rate;
                     double kappa = ref_kappa;
                     double ff_weight = 1.0;
@@ -833,7 +942,9 @@ protected:
             {
                 DegradeState* ds = degrade_global_state();
                 if (ds->degrade_level >= DEGRADE_L2) {
-                    mode = "MRM";
+                    /* 机动期必须保留 +MANEUVER 标签，否则 safety 认不出机动 →
+                     * 近场 TTC 全刹 → 再设 L2 → MRM 自锁环（2026-08-03）。 */
+                    mode = g.maneuver_mode ? "MRM+MANEUVER" : "MRM";
                 }
                 /* L1: 禁变道——planning 的 overtake_state 会被忽略，control 只巡航 */
 
@@ -865,7 +976,7 @@ protected:
              * 避免大 steer 冲出路沿。旧实现用 |ego_y - road_c|，对 4 车道
              * 外车道（y=±5.25）永远 >4.5 → steer 被永久限幅。 */
             double y_from_target = fabs(g.ego_y - target_lane_center);
-            if (y_from_target > 4.5) {
+            if (y_from_target > 4.5 && !g.maneuver_mode) {
                 const double near_edge_limit = 0.165;
                 if (steer >  near_edge_limit) steer =  near_edge_limit;
                 if (steer < -near_edge_limit) steer = -near_edge_limit;
@@ -890,10 +1001,16 @@ protected:
 
             /* ROAD_GUARD：车辆偏离目标车道中心过远时强制回正。
              * road_c 现在是道路中心 y（不含横向偏移），目标车道中心 = road_c + lane_d。
-             * 旧实现检查 |ego_y - road_c|，对 4 车道外车道（y=±5.25）永远触发。 */
-            if (y_from_target > ROAD_GUARD_THRESHOLD_M) {
+             * 旧实现检查 |ego_y - road_c|，对 4 车道外车道（y=±5.25）永远触发。
+             * 机动期豁免：掉头本来就要横穿整条路，y_from_target 必然 >3m，
+             * 不豁免则 ROAD_GUARD 抢走执行权（钳 steer=0.16 + 乱设油门），
+             * 掉头永不完成（2026-08-03 demo6 实测车被拽出路面到 y=-11）。 */
+            if (y_from_target > ROAD_GUARD_THRESHOLD_M && !g.maneuver_mode) {
                 double steer_limit = steer_limit_for_speed(fabs(g.current_speed), 2.4);
-                steer = (lat_error > 0.0) ? steer_limit : -steer_limit;
+                /* 用参考系投影误差 lat_err_n：正误差=左打对前进/返程都成立。
+                 * 旧实现用世界系 lat_error，假设车头恒朝 +x，掉头返程时打反
+                 * → 车持续北漂出路面越漂越远（2026-08-03 demo11：y 23→33）。 */
+                steer = (lat_err_n > 0.0) ? steer_limit : -steer_limit;
                 if (fabs(g.current_speed) < 2.5) {
                     throttle = 0.18;
                     brake = 0.0;
@@ -940,7 +1057,12 @@ protected:
             raw.hazard   = hazard;
             raw.gear     = g.gear;
             memset(raw.mode, 0, sizeof(raw.mode));
-            snprintf(raw.mode, sizeof(raw.mode) - 1, "%s", mode);
+            /* 机动期（掉头/倒车）打 MANEUVER 标签：safety_control 据此放行
+             * 满舵/豁免巡航级 TTC（Phase 1 直行减速段 steer 还小、挡位还是 D，
+             * safety 无法从 steer/gear 推断机动 → 施工区被当前车全刹 →
+             * v=0 掉头死锁）。mode 是 control→safety 的唯一带外信号通道。 */
+            snprintf(raw.mode, sizeof(raw.mode) - 1, "%s%s",
+                     mode, g.maneuver_mode ? "+MANEUVER" : "");
 
             uint8_t raw_buf[64];
             size_t  raw_len = sizeof(raw_buf);
