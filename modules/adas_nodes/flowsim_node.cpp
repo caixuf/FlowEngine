@@ -1514,6 +1514,12 @@ protected:
                  *   2. relocate 让 handle 跟随（不回写 ego.x/y/heading）
                  *   3. 退出判定：转向需求消失 且 车头与车道方向对折角 <20° */
                 bool exit_ok = false;
+                /* 退出残差观测（迭代返程对齐用）：退出瞬间车头与车道方向的对折角
+                 * 和到车道中心的横向偏移。残差大 = 掉头结束位姿差 → 之后 on-rails
+                 * 段要靠 slew 原地转车身对齐（"屁股横扫"），或位置被 relocate 钉
+                 * 回车道时产生横向跳变。 */
+                double exit_fold_deg = 1e9;
+                double exit_lat_m    = 1e9;
                 if (g.roads_loaded) {
                     flowsim::FrenetPos fp;
                     if (g.roads.world_to_frenet(ego.x, ego.y, fp)) {
@@ -1522,6 +1528,7 @@ protected:
                         ego.s = fp.s;
                         ego.offset = fp.offset;
                         g.u_turn_active = (fp.lane_id > 0);
+                        exit_lat_m = fp.offset;
                         double ref_off = flowsim::offset_from_lane_internal(
                             g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
                         if (ego.road_pos.relocate(g.roads, fp.road_id, 0, fp.s, ref_off)) {
@@ -1534,6 +1541,7 @@ protected:
                                  * （掉头终点在对向车道，heading ≈ 路切线 +π）。 */
                                 double fold = std::min(std::fabs(dh),
                                                        M_PI - std::fabs(dh));
+                                exit_fold_deg = fold * 180.0 / M_PI;
                                 int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
                                 exit_ok = (gear != GEAR_REVERSE) &&
                                           (std::fabs(ego.steer) <= 0.28) &&
@@ -1544,8 +1552,8 @@ protected:
                 }
                 if (exit_ok) {
                     g.off_rails = false;
-                    LOG_WARN("flowsim", "[OFFRAILS] exit: x=%.1f y=%.2f h=%.2f v=%.1f",
-                             ego.x, ego.y, ego.heading, ego.speed);
+                    LOG_WARN("flowsim", "[OFFRAILS] exit: x=%.1f y=%.2f h=%.2f v=%.1f fold=%.1fdeg lat=%.2fm",
+                             ego.x, ego.y, ego.heading, ego.speed, exit_fold_deg, exit_lat_m);
                 } else if (g.cycle % 100 == 0) {
                     LOG_WARN("flowsim", "[OFFRAILS] active: x=%.1f y=%.2f h=%.2f v=%.1f steer=%.3f",
                              ego.x, ego.y, ego.heading, ego.speed, ego.steer);

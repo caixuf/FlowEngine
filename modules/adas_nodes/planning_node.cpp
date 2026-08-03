@@ -669,8 +669,11 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
 
     /* ═══ Phase 4: 左打前进对齐 → 车头对准对向车道 ═══
      * 自适应切换条件：
-     *   - 正常：heading 接近 ±π（|norm_h(h) - π| < 0.25 或 |norm_h(h) + π| < 0.25）
+     *   - 正常：heading 接近 ±π（|norm_h(h) - π| < 0.10 或 |norm_h(h) + π| < 0.10）
      *   - 安全上限：超时 2.5s
+     * 容差 0.25→0.10：退出残差直接进 Phase 5 巡航轨迹 heading，control 以轨迹
+     * 航向为横向目标 → 残差大 = 返程"斜着直行" + 触发 flowsim slew 原地转车身
+     * （屁股横扫）。收严后掉头结束位姿更接近车道切线，slew 只清残余小角。
      */
     {
         steer = 0.15;  /* 较小转角精细对齐（Python 扫参最优 0.15） */
@@ -694,7 +697,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             t_us += (uint32_t)(dt * 1e6);
 
             double hn = norm_h(h);
-            bool heading_aligned = (fabs(fabs(hn) - M_PI) < 0.25);  /* |heading| ≈ π */
+            bool heading_aligned = (fabs(fabs(hn) - M_PI) < 0.10);  /* |heading| ≈ π，收严自 0.25 */
             bool timeout         = (phase4_t >= phase4_max_dur);
 
             if (heading_aligned || timeout) break;
@@ -1600,7 +1603,10 @@ protected:
 
             /* ── UTurnPlanner: 掉头时跳过 Frenet，直接生成自行车模型轨迹 ── */
             if (g.overtake_state == 3) {
-                const double wheelbase = 2.8;  /* 轴距 (m)，与 flowsim physics.cpp 一致 */
+                /* 轴距必须与物理真值一致（entity.h 默认 2.7，flowsim_node 显式
+                 * 写 2.7）：旧值 2.8 与 physics.cpp 差 3.7%，轨迹 yaw_rate 和
+                 * 实际积分不一致 → 掉头轨迹与实车位姿漂移。control 也用 2.7。 */
+                const double wheelbase = 2.7;
                 /* 计算前向可用空间：到路端/障碍物的距离，用于倒车腾挪决策 */
                 double forward_space_m = 1e9;  /* 默认无限（无路端信息） */
                 if (has_fresh_map_ref() && g.map_ref_count >= 2) {
