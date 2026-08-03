@@ -1844,18 +1844,23 @@ protected:
                     const double absD = std::fabs(D);
                     if (absD > 0.2 && absD < 8.0) {  /* 有效变道范围 */
                         const double R = (L * L + D * D) / (2.0 * absD);
-                        const double sign = (D >= 0.0) ? 1.0 : -1.0;
                         for (int i = 0; i < n_wp; i++) {
                             const double t = (double)i / (double)(n_wp - 1);
                             const double s = t * L;
-                            /* sagitta：d/D = R/D · (1-cos(s/R)) ∈ [0,1] */
-                            const double st = (R / absD) *
-                                              (1.0 - std::cos(s / R)) * sign;
-                            d_out[i] = ego_ref_d + D * st;
+                            /* sagitta：d_out = ego_ref_d + D·frac，frac∈[0,1]。
+                             * 圆弧凸高公式 frac = R/|D|·(1-cos(s/R))，恒正。
+                             * 旧实现 st 里乘了 sign(D)——D 本身已带符号，右变道
+                             * (D<0) 时 st<0 与 D 相乘得正 → 轨迹反向冲向 +y 侧，
+                             * 车变道必冲出对侧路面（2026-08-03 demo 实测
+                             * RIGHT_CHANGE 车冲到 y=+6.4 再反向回正）。 */
+                            const double frac = (R / absD) *
+                                              (1.0 - std::cos(s / R));
+                            d_out[i] = ego_ref_d + D * frac;
                         }
                         /* 圆弧曲率（固定方向盘 = 固定 kappa）存入全局，
-                         * 轨迹回填后填给变道段（control kappa 前馈用） */
-                        g.lane_change_kappa = (1.0 / R) * sign;
+                         * 轨迹回填后填给变道段（control kappa 前馈用）。
+                         * 符号与 D 一致：右变道(D<0)曲率负（向右弯）。 */
+                        g.lane_change_kappa = (D >= 0.0) ? (1.0 / R) : -(1.0 / R);
                         g.lane_change_kappa_active = 1;
                     }
                 }
