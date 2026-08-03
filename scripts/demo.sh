@@ -26,7 +26,9 @@ DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
 
 # Kill any stale processes from previous runs (node hosts + servers + bridges)
 { pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
-  pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
+  pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; \
+  pkill -9 -f "tail -F /tmp/flow_logs/launcher.log"; \
+  pkill -9 -f "tail -F /tmp/flow_launcher_stderr.txt"; } 2>/dev/null || true
 sleep 1
 # Clean up old per-module log files from previous run
 LOG_DIR="${FLOW_LOG_DIR:-/tmp/flow_logs}"
@@ -365,17 +367,25 @@ echo ""
 BEH_LOG="/tmp/flow_beh_monitor.txt"
 : > "$BEH_LOG"  # 清空
 sleep 1  # 等日志文件就绪
+# GNU tail 支持 --pid=$$：主 shell 退出后 tail 自动退出 → grep 收 EOF → 整条
+# 管道终止。没有它，EXIT trap 只能 kill 子 shell，tail/grep 孙子进程泄漏
+# （grep 持有评估器捕获管道写端 → demo_evaluator 的 stdout.read() 等 EOF 挂死）。
+# BSD tail（macOS）不支持 --pid，探测失败则不传，靠下方 trap kill 兜底。
+TAIL_PID_FLAG=""
+if tail --pid=$$ --version >/dev/null 2>&1; then
+  TAIL_PID_FLAG="--pid=$$"
+fi
 {
   # 优先 tail 按模块分文件的日志；fallback 到旧 stderr 文件
   if [ -f "$LOG_DIR/launcher.log" ]; then
-    tail -F "$LOG_DIR/launcher.log" 2>/dev/null
+    exec tail -F $TAIL_PID_FLAG "$LOG_DIR/launcher.log" 2>/dev/null
   else
-    tail -F /tmp/flow_launcher_stderr.txt 2>/dev/null
-  fi | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
-    > "$BEH_LOG"
-} &
+    exec tail -F $TAIL_PID_FLAG /tmp/flow_launcher_stderr.txt 2>/dev/null
+  fi
+} | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
+  > "$BEH_LOG" &
 TAIL_BEH_PID=$!
-# cleanup 时 kill tail
+# cleanup 时 kill tail（--pid=$$ 使 tail 在主 shell 退出后自动清理，这里双保险）
 trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup" EXIT
 trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 130" INT
 trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 143" TERM

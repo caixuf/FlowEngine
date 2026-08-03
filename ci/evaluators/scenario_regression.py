@@ -92,7 +92,19 @@ def run_scenario(entry: dict, default_duration: int, interval: float,
         "--json-out", str(out_path),
     ]
     print(f"\n─── running scenario '{key}' ({duration}s) ───")
-    proc = subprocess.run(cmd, cwd=ROOT)
+    # 超时兜底：demo_evaluator 理论上不会挂（select 限时读取），但冷构建
+    # （adas_nodes 子项目 ~2.5min）+ 运行 + 收尾可能很长，给足余量后仍超时
+    # 就判 FAIL 而不是无限等待。demo.sh 自身有 start_new_session + killpg 清理。
+    try:
+        proc = subprocess.run(cmd, cwd=ROOT, timeout=duration + 420)
+    except subprocess.TimeoutExpired:
+        return {
+            "scenario": key,
+            "result": "FAIL",
+            "failures": [f"evaluator timed out after {duration + 420}s (hang?)"],
+            "warnings": [],
+            "summary": {},
+        }
     payload = load_json(out_path)
     if payload is None:
         payload = {

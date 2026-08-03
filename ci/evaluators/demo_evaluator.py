@@ -15,6 +15,8 @@ import json
 import math
 import os
 import re
+import select
+import signal
 import statistics
 import subprocess
 import sys
@@ -775,6 +777,22 @@ def collect_samples(duration: int, json_file: Path, interval: float,
         start_new_session=True,
     )
 
+    # 兜底：评估器被 kill（SIGTERM/SIGINT，如 CI 超时）时不留孤儿 demo.sh ——
+    # demo.sh 是 start_new_session 的独立会话，默认信号传播不到它。
+    # 处理完清理后恢复默认处置并重发，保证进程按原语义终止（如 SIGTERM→143）。
+    _demo_pgid = proc.pid
+
+    def _kill_demo_session(sig, _frm):
+        try:
+            os.killpg(_demo_pgid, 15)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+
+    _prev_sigterm = signal.signal(signal.SIGTERM, _kill_demo_session)
+    _prev_sigint = signal.signal(signal.SIGINT, _kill_demo_session)
+
     samples: list[dict] = []
     started = time.monotonic()
     # 缓冲时间：demo.sh 自身总时长 = 构建(0-5s) + wait-for-JSON(最多 15s)
@@ -818,7 +836,30 @@ def collect_samples(duration: int, json_file: Path, interval: float,
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 pass
-    output = proc.stdout.read() if proc.stdout else ""
+    # 读 demo.sh 输出仅用于展示（评估数据源是 /tmp/flow_topology.json 采样）。
+    # 不能 read() 等 EOF：demo.sh 的后台 tail/grep 泄漏进程可能持有本管道写端
+    # （stderr=STDOUT 继承），read() 将无限阻塞 → 评估挂死。用 select 限时读取，
+    # 3s 无新数据即止，泄漏进程持管也不会阻塞评估。
+    output = ""
+    if proc.stdout:
+        fd = proc.stdout.fileno()
+        while True:
+            try:
+                ready, _, _ = select.select([fd], [], [], 3.0)
+            except (OSError, ValueError):
+                break  # 管道已关闭
+            if not ready:
+                break  # 3s 空闲 → 停止（可能仍有泄漏进程持有写端，不等待）
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break  # 真 EOF
+            output += chunk.decode("utf-8", errors="replace")
+        proc.stdout.close()
+    signal.signal(signal.SIGTERM, _prev_sigterm)
+    signal.signal(signal.SIGINT, _prev_sigint)
     if output:
         print(output.rstrip())
     return samples, proc.returncode or 0
