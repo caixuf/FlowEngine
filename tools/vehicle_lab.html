@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Vehicle Lab — FlowEngine 车辆模型操控台</title>
+<style>
+  body { margin:0; background:#10151c; color:#c9d4e0; font-family:monospace; display:flex; height:100vh; }
+  #wrap { display:flex; flex:1; }
+  canvas { flex:1; background:#18202b; }
+  #panel { width:260px; padding:14px; background:#151b24; border-left:1px solid #2a3542; overflow-y:auto; }
+  h3 { margin:6px 0; color:#58a6ff; font-size:14px; }
+  .row { margin:6px 0; font-size:12px; }
+  .row b { color:#58a6ff; }
+  .key { display:inline-block; padding:1px 6px; background:#24303d; border-radius:3px; margin-right:4px; }
+  #trail { font-size:11px; color:#8b949e; margin-top:8px; white-space:pre-wrap; }
+  button { background:#24303d; color:#c9d4e0; border:1px solid #3a4755; padding:4px 10px; border-radius:4px; cursor:pointer; margin-right:6px; }
+  button:hover { background:#2f3d4d; }
+  #crab { color:#f7a825; font-weight:bold; }
+  .good { color:#3fb950; } .bad { color:#f85149; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="900" height="700"></canvas>
+  <div id="panel">
+    <h3>Vehicle Lab — 操控</h3>
+    <div class="row"><span class="key">↑</span> 油门 <span class="key">↓</span> 刹车 <span class="key">←</span><span class="key">→</span> 转向（前轮）</div>
+    <div class="row"><button id="btnReset">重置</button><button id="btnTrail">轨迹开关</button></div>
+    <div class="row">转向角 <b id="vSteer">0.00</b> rad（前轮）</div>
+    <div class="row">速度 <b id="vSpeed">0.00</b> m/s</div>
+    <div class="row">heading <b id="vHead">0.00</b> rad</div>
+    <div class="row">横向速度 <b id="vLat">0.00</b> m/s</div>
+    <div class="row">crab 指数 <span id="crab">—</span>
+      <div style="font-size:10px;color:#8b949e">= 实际横向速度 / 车头方向横向分量<br>≈1 正常弧线 · &gt;1.5 横移（车没转就横着动）</div>
+    </div>
+    <div class="row" id="verdict" style="font-size:13px"></div>
+    <div class="row"><b>公式（与后端 step_bicycle 完全一致）：</b></div>
+    <div id="trail">yaw_rate = (v/wb)·tan(steer)
+heading += yaw_rate·dt
+x += v·cos(h)·dt − hw·sin(h)·yaw_rate·dt
+y += v·sin(h)·dt + hw·cos(h)·yaw_rate·dt
+（中心参考 + 后轴无侧滑切向项）</div>
+  </div>
+</div>
+
+<script>
+/* ── 与后端 modules/adas_nodes/flowsim/physics.cpp step_bicycle 一致 ── */
+const WHEELBASE = 2.7;   // 轴距
+const HALF_WB   = WHEELBASE / 2;
+const CAR_LEN   = 4.6;
+const CAR_WID   = 2.0;
+const DT        = 1 / 60;
+
+let car = { x: 0, y: 0, heading: 0, speed: 0, steer: 0 };
+const keys = {};
+const trail = [];
+let showTrail = true;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+/* ── 后端 step_bicycle 积分（中心参考，含切向项）── */
+function step(dt) {
+  const yaw_rate = (car.speed / WHEELBASE) * Math.tan(car.steer);
+  car.heading += yaw_rate * dt;
+  car.x += car.speed * Math.cos(car.heading) * dt
+         - HALF_WB * Math.sin(car.heading) * yaw_rate * dt;
+  car.y += car.speed * Math.sin(car.heading) * dt
+         + HALF_WB * Math.cos(car.heading) * yaw_rate * dt;
+  return yaw_rate;
+}
+
+/* ── 输入 ── */
+document.addEventListener('keydown', e => { keys[e.key] = true; e.preventDefault(); });
+document.addEventListener('keyup',   e => { keys[e.key] = false; });
+
+function handleInput(dt) {
+  const steerRate = 2.5;   // 转向执行器速率 rad/s
+  const target = (keys['ArrowLeft'] ? 0.6 : 0) + (keys['ArrowRight'] ? -0.6 : 0);
+  const d = target - car.steer;
+  const maxD = steerRate * dt;
+  car.steer += Math.max(-maxD, Math.min(maxD, d));
+  if (keys['ArrowUp'])   car.speed += 3.0 * dt;
+  if (keys['ArrowDown']) car.speed -= 5.0 * dt;
+  car.speed = Math.max(0, Math.min(car.speed, 25));
+}
+
+/* ── 渲染 ── */
+const SCALE = 14;  // px/m
+function worldToScreen(wx, wy) {
+  return [cv.width / 2 + wx * SCALE, cv.height / 2 - wy * SCALE];
+}
+
+function drawCar() {
+  ctx.save();
+  const [sx, sy] = worldToScreen(car.x, car.y);
+  ctx.translate(sx, sy);
+  ctx.rotate(-car.heading);
+
+  /* 车体 */
+  ctx.fillStyle = '#2f81f7';
+  ctx.fillRect(-CAR_LEN / 2 * SCALE, -CAR_WID / 2 * SCALE,
+                CAR_LEN * SCALE, CAR_WID * SCALE);
+  ctx.strokeStyle = '#58a6ff';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(-CAR_LEN / 2 * SCALE, -CAR_WID / 2 * SCALE,
+                  CAR_LEN * SCALE, CAR_WID * SCALE);
+
+  /* 车轮（后轮固定、前轮随 steer 转）*/
+  function wheel(fx, rx, steer) {
+    ctx.save();
+    ctx.translate(fx * SCALE, 0);
+    ctx.rotate(-steer);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(-0.35 * SCALE, -0.55 * SCALE, 0.7 * SCALE, 1.1 * SCALE);
+    ctx.restore();
+  }
+  const wy = CAR_WID / 2 - 0.45;
+  wheel(CAR_LEN / 2 - 0.6, 0, car.steer);  // 前左（屏幕上方）
+  wheel(CAR_LEN / 2 - 0.6, 0, car.steer);  // 前右
+  // 后轮
+  ctx.save();
+  ctx.translate(-(CAR_LEN / 2 - 0.6) * SCALE, 0);
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(-0.35 * SCALE, -0.55 * SCALE, 0.7 * SCALE, 1.1 * SCALE);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(-(CAR_LEN / 2 - 0.6) * SCALE, 0);
+  ctx.fillRect(-0.35 * SCALE, -0.55 * SCALE, 0.7 * SCALE, 1.1 * SCALE);
+  ctx.restore();
+
+  /* 车头标记 */
+  ctx.fillStyle = '#3fb950';
+  ctx.fillRect(CAR_LEN / 2 * SCALE - 2, -4, 4, 8);
+  ctx.restore();
+}
+
+function drawGrid() {
+  ctx.strokeStyle = '#223041';
+  ctx.lineWidth = 1;
+  for (let gx = -400; gx <= 400; gx += 40) {
+    const [x1] = worldToScreen(gx, -400);
+    const [x2] = worldToScreen(gx, 400);
+    ctx.beginPath(); ctx.moveTo(x1, 0); ctx.lineTo(x2, cv.height); ctx.stroke();
+  }
+  for (let gy = -400; gy <= 400; gy += 40) {
+    const [, y1] = worldToScreen(-400, gy);
+    const [, y2] = worldToScreen(400, gy);
+    ctx.beginPath(); ctx.moveTo(0, y1); ctx.lineTo(cv.width, y2); ctx.stroke();
+  }
+}
+
+function drawTrail() {
+  if (!showTrail) return;
+  ctx.strokeStyle = 'rgba(88,166,255,0.6)';
+  ctx.lineWidth = 2;
+  for (let i = 1; i < trail.length; i++) {
+    const [x1, y1] = worldToScreen(trail[i - 1][0], trail[i - 1][1]);
+    const [x2, y2] = worldToScreen(trail[i][0], trail[i][1]);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+}
+
+/* ── 指标 ── */
+let prevPos = { x: 0, y: 0 };
+function metrics() {
+  const dx = car.x - prevPos.x, dy = car.y - prevPos.y;
+  prevPos = { x: car.x, y: car.y };
+  const vLat = dy / DT;                       // 实际横向速度（y 横向）
+  const vLatHead = car.speed * Math.sin(car.heading);
+  const crab = Math.abs(vLat) / Math.max(Math.abs(vLatHead), 0.1);
+  document.getElementById('vSteer').textContent = car.steer.toFixed(3);
+  document.getElementById('vSpeed').textContent = car.speed.toFixed(2);
+  document.getElementById('vHead').textContent = car.heading.toFixed(3);
+  document.getElementById('vLat').textContent = vLat.toFixed(2);
+  const crabEl = document.getElementById('crab');
+  crabEl.textContent = crab.toFixed(2);
+  crabEl.className = crab > 1.5 ? 'bad' : (crab > 1.05 ? '' : 'good');
+  const verdict = document.getElementById('verdict');
+  if (crab > 1.5) verdict.innerHTML = '<span class="bad">⚠ 横移中：横向运动不是来自车头转向</span>';
+  else if (crab > 1.05) verdict.innerHTML = '<span class="bad">⚠ 略高于弧线（车身轻微横滑）</span>';
+  else verdict.innerHTML = '<span class="good">✓ 正常弧线：横向运动来自车头转向</span>';
+}
+
+/* ── 主循环 ── */
+function frame() {
+  handleInput(DT);
+  step(DT);
+  if (showTrail && trail.length < 4000) trail.push([car.x, car.y]);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  drawGrid();
+  drawTrail();
+  drawCar();
+  metrics();
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('btnReset').onclick = () => {
+  car = { x: 0, y: 0, heading: 0, speed: 0, steer: 0 };
+  trail.length = 0;
+  prevPos = { x: 0, y: 0 };
+};
+document.getElementById('btnTrail').onclick = () => { showTrail = !showTrail; trail.length = 0; };
+
+frame();
+</script>
+</body>
+</html>

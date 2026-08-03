@@ -160,6 +160,11 @@ struct PlanningContext {
     int    lane_count{2};       /* 从 road/geometry 订阅获取 */
     double lane_width{3.5};     /* 从 road/geometry 订阅获取 */
 
+    /* 变道圆弧曲率（固定方向盘 = 固定 kappa，2026-08）：
+     * 变道轨迹生成时计算，回填后填给轨迹点，control kappa 前馈用 */
+    double lane_change_kappa{0.0};
+    int    lane_change_kappa_active{0};
+
     /* 红绿灯状态缓存（从 road/traffic_lights topic 获取，flowsim_node 发布）。
      * 解析统一走 include/traffic_light.h 的 traffic_lights_parse()（TL_CACHE_MAX
      * 即该头定义的 16），此处只存消费视图。
@@ -1732,10 +1737,17 @@ protected:
              * 通过 d_out 显式插值到目标车道，否则车永远不变道。
              * 对 fallback 路径（d_out 恒为 ego_ref_d）同样适用。
              *
-             * 渐变形态用 smoothstep（端点斜率为 0）而非线性：线性渐变生成
-             * 一条斜直线轨迹，车头不偏转、车身整体横移（实测 lat_err 恒 1m、
-             * 车身偏转仅 2.5°，"车头不先过去"）。smoothstep 使横向速度先增
-             * 后减、路径为 S 形弧线 → 车头先偏转插入目标车道，再回正。 */
+             * 渐变形态 = 圆弧 sagitta（2026-08 用户规范 + HTML 车辆实验室
+             * 验证："左变道每一个方向盘固定就是一个圆弧，是圆的一部分，
+             * 车头先进"）：d(s) = R·(1-cos(s/R))，固定曲率（固定方向盘）
+             * 的圆的一段。车头沿弧线先转进目标车道，车身/屁股沿弧线跟随。
+             * 与 tools/vehicle_lab.html 的操控行为一致。
+             *
+             * 数值稳健性（上次圆弧实现乱飞的修复）：
+             *   - 变道纵向长度固定 L=50m，不依赖 target_ref_s 投影（投影
+             *     在弯道/异常位置可能返回远点 → R 巨大 → cos 参数极小）。
+             *   - D 取目标投影 d 与当前 d 之差（有界）。
+             *   - 圆弧半径 R = (L²+D²)/(2|D|)，|D| 下限保护。 */
             if (g.has_behavior && n_wp > 2 &&
                 (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
                 double target_world_y = road_center_y(g.ego_x, g.curve_start_x,
@@ -1743,12 +1755,28 @@ protected:
                                       + g.target_lane_offset;
                 double target_ref_s = 0, target_ref_d = 0;
                 if (project_to_reference_path(g.ego_x, target_world_y, target_ref_s, target_ref_d)) {
-                    for (int i = 0; i < n_wp; i++) {
-                        double t = (double)i / (double)(n_wp - 1);
-                        double st = t * t * (3.0 - 2.0 * t);  /* smoothstep */
-                        d_out[i] = ego_ref_d * (1.0 - st) + target_ref_d * st;
+                    const double D = target_ref_d - ego_ref_d;
+                    const double L = 50.0;  /* 变道纵向长度固定（投影鲁棒） */
+                    const double absD = std::fabs(D);
+                    if (absD > 0.2 && absD < 8.0) {  /* 有效变道范围 */
+                        const double R = (L * L + D * D) / (2.0 * absD);
+                        const double sign = (D >= 0.0) ? 1.0 : -1.0;
+                        for (int i = 0; i < n_wp; i++) {
+                            const double t = (double)i / (double)(n_wp - 1);
+                            const double s = t * L;
+                            /* sagitta：d/D = R/D · (1-cos(s/R)) ∈ [0,1] */
+                            const double st = (R / absD) *
+                                              (1.0 - std::cos(s / R)) * sign;
+                            d_out[i] = ego_ref_d + D * st;
+                        }
+                        /* 圆弧曲率（固定方向盘 = 固定 kappa）存入全局，
+                         * 轨迹回填后填给变道段（control kappa 前馈用） */
+                        g.lane_change_kappa = (1.0 / R) * sign;
+                        g.lane_change_kappa_active = 1;
                     }
                 }
+            } else {
+                g.lane_change_kappa_active = 0;
             }
 
             /* 行为规划下发的 command_speed 是硬约束，不是 Frenet 的优化目标。
@@ -1889,6 +1917,15 @@ protected:
                     }
                 }
                 if (n_pts > 1) points[n_pts - 1].heading = points[n_pts - 2].heading;
+                /* 变道段 kappa = 圆弧固定曲率（固定方向盘，2026-08）：
+                 * control 的 kappa 前馈（ff_term = wb·kappa）让车沿圆弧走，
+                 * 而不是靠反馈慢慢追上。frenet_to_cartesian 的 kappa=0
+                 * （参考线直线），圆弧曲率在这里显式填入。 */
+                if (g.lane_change_kappa_active) {
+                    for (int i = 0; i < n_pts; i++) {
+                        points[i].kappa = (float)g.lane_change_kappa;
+                    }
+                }
             } else {
                 /* 规划失败 → 停车（Apollo 原则：不能规划就停）
                  * 用 ego 当前位置 + v=0，control PID 会匀减速到 0。
