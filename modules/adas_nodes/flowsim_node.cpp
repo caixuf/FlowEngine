@@ -1135,6 +1135,10 @@ static void publish_ref_path(void) {
      * 整个返程保持 true（第二次掉头才复位），永不抖动。navigation 消费此标志作为
      * 唯一权威 travel_dir，取代基于 dx/heading 的猜测（掉头/绕圈时会来回翻）。 */
     cJSON_AddBoolToObject(root, "reverse", g.u_turn_active ? 1 : 0);
+    /* 路端位置（单一事实源）：route 总长。behavior 的掉头触发用它做固定
+     * 参考（替代"采样末点封顶检测"——低速起步时末点位移小会误判封顶，
+     * 导致启动即触发掉头逆行，2026-08-03 实测）。 */
+    cJSON_AddNumberToObject(root, "road_end_x", g.route.total_length());
     char* s = cJSON_PrintUnformatted(root);
     transport_publish(g.transport, TOPIC_ROAD_REF_PATH,
                       (const uint8_t*)s, (uint32_t)strlen(s) + 1);
@@ -1553,16 +1557,18 @@ protected:
                 flowsim::step_bicycle(ego, FLOWSIM_DT_SEC,
                                       ego.throttle, ego.brake, ego.steer);
             }
-            /* 掉头对向车道标志：由 lane_id 符号自动推导。
-             * lane_id > 0 → 对向车道 → u_turn_active=true（ref_path 反向、esmini 反向同步）。
-             * 不再由硬编码掉头状态机设置，而是跟随物理 lane_id 实时更新。
-             * off-rails 期间跳过：handle 已被 relocate 到参考线（lane_id 恒 0），
-             * 改由下方 off-rails 分支从 world_to_frenet 真值更新。 */
+            /* 掉头对向车道标志（2026-08 修复）：由「车头方向」判定，不再用
+             * lane_id 符号。旧判定 (lane_id > 0) 在"同向道路跨中心线"（4 车道
+             * 同向 y 跨 ±5.25，OpenDRIVE lane_id 正=左）时把 y>0 的车道误判为
+             * 对向 → ego 变道到超车道（y=+1.75）即触发返程逻辑 → ref_path 反向
+             * + esmini 反向同步 → 启动即逆行（2026-08-03 实测 lane=1 逆行）。
+             * 语义正确的判据：返程 = 车头朝 -x（heading≈±π，掉头完成后的
+             * 行驶方向），与车道编号无关。 */
             if (!g.off_rails && ego.road_pos.ok()) {
-                flowsim::FrenetPos fp;
-                if (ego.road_pos.frenet(fp)) {
-                    g.u_turn_active = (fp.lane_id > 0);
-                }
+                double hn = ego.heading;
+                while (hn >  M_PI) hn -= 2.0 * M_PI;
+                while (hn < -M_PI) hn += 2.0 * M_PI;
+                g.u_turn_active = (std::fabs(hn) > M_PI * 0.5);
             }
 
             /* Phase 2: ego 用 road_pos 推进纵向 + set_offset 做横向变道。
@@ -1602,7 +1608,14 @@ protected:
                         ego.lane_id = fp.lane_id;
                         ego.s = fp.s;
                         ego.offset = fp.offset;
-                        g.u_turn_active = (fp.lane_id > 0);
+                        /* 同上方修复：车头方向判定（lane_id 符号在跨中心线
+                         * 同向道路误判对向 → 启动即逆行） */
+                        {
+                            double hn = ego.heading;
+                            while (hn >  M_PI) hn -= 2.0 * M_PI;
+                            while (hn < -M_PI) hn += 2.0 * M_PI;
+                            g.u_turn_active = (std::fabs(hn) > M_PI * 0.5);
+                        }
                         exit_lat_m = fp.offset;
                         double ref_off = flowsim::offset_from_lane_internal(
                             g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
