@@ -390,8 +390,14 @@ protected:
                 /* 车已停稳（speed<=0.5）时 raw_cmd 停发属正常行为：
                  * 例如红灯前刹停后 control 不再高频发 cmd。此时心跳缺失
                  * 不应判 L3，否则与 degrade_ladder 的自动恢复形成 MRM 拉锯
-                 * （车停稳却反复 降级→恢复→降级）。仅当车仍在运动而 1s 无
-                 * cmd 时才视为真实失联 → L3。 */
+                 * （车停稳却反复 降级→恢复→降级）。仅当车仍在运动而 2s 无
+                 * cmd 时才视为真实失联 → L3。
+                 *
+                 * 超时从 1s 提升到 2s（2026-08-03）：与 flowsim 的
+                 * CONTROL_STALE_TIMEOUT_US(2s) 保持一致。高负载下消息总线
+                 * 丢包率高，1s 超时导致 MRM 拉锯循环：
+                 *   车停→L3清除→起步加速→speed>0.5→raw_cmd 1s stale→L3
+                 *   →刹车→停稳→3s 恢复→起步→... 无限循环车速恒为 0 */
                 double cur_speed = 0.0;
                 bool has_state = false;
                 pthread_mutex_lock(&g.state_mutex);
@@ -399,8 +405,8 @@ protected:
                 has_state = g.has_state;
                 pthread_mutex_unlock(&g.state_mutex);
                 bool moving = has_state && cur_speed > 0.5;
-                if (moving && (now_us - last_msg_us > 1000000ULL)) {
-                    /* 行驶中数据超时 > 1s → L3 立即停 */
+                if (moving && (now_us - last_msg_us > 2000000ULL)) {
+                    /* 行驶中数据超时 > 2s → L3 立即停 */
                     degrade_set_level(DEGRADE_L3, DEGRADE_REASON_HEARTBEAT);
                 }
             }

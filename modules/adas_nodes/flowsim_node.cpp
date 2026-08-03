@@ -65,8 +65,12 @@ namespace {
 #define FLOWSIM_DT_SEC         (1.0 / FLOWSIM_FREQUENCY_HZ)   /* 0.05s */
 #define FLOWSIM_DT_US          ((uint64_t)(FLOWSIM_DT_SEC * 1e6))  /* 50000 */
 
-/* control/cmd 陈旧超时：500ms 未收到则回退内置巡航（同 sim_world_node） */
-#define CONTROL_STALE_TIMEOUT_US  500000ULL
+/* control/cmd 陈旧超时：2000ms 未收到则回退 FSAFE 停车。
+ * 原 500ms 在高负载（15 tasks, ~34% 丢包率）下过于激进：
+ * 消息总线偶尔拥塞导致 2-3 帧连续丢失 → 500ms 内无新消息 → FSAFE 误触发
+ * → brake=1.0 与间歇到达的 throttle 形成"走/停"振荡 → 车速恒为 0
+ * （2026-08-03 事故链）。改为 2000ms（40 帧 @20Hz），给传输层恢复窗口。 */
+#define CONTROL_STALE_TIMEOUT_US  2000000ULL
 
 /* road/geometry 周期性重发：50 cycle = 2.5s @ 20Hz。
  * 另：路段/车道数变化时会立即补发，避免 planning/behavior 在新 road 上继续用旧 lane_count。 */
@@ -443,7 +447,11 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
     ego.x = sc->ego.x;
     ego.y = sc->ego.y;
     ego.heading = sc->ego.heading;
-    ego.speed = (sc->ego.init_speed > 0) ? sc->ego.init_speed : g.init_speed;
+    ego.speed = 0.0;  /* 冷启动：初始速度恒为 0，等控制指令到达后再加速。
+                       * 原 init_speed=10.0 在控制未就绪时让 ego 以 10m/s 无控行驶，
+                       * 可能与 NPC 碰撞。冷启动分支（use_internal_cruise=true,
+                       * last==0）已设 brake=1.0/speed=0，但 init 阶段设非零速度
+                       * 会在第一帧 step_bicycle 前残留。 */
     ego.target_vx = (sc->ego.target_speed > 0) ? sc->ego.target_speed : g.target_speed;
     ego.vx = ego.speed;  /* 初始沿 x 方向 */
     ego.length = EGO_LEN_M;
@@ -1245,9 +1253,23 @@ protected:
          * （depth=1 drop_oldest 语义），协程每 tick try_take 取走。 */
         BusQueueBridge cmd_bridge(bus(), {TOPIC_CONTROL_CMD});
 
+        /* use_internal_cruise 是持久状态（不再每 tick 重置）。
+         * 之前是每 tick 局部变量 → 无新消息的 tick 上 FSAFE 误触发
+         * brake=1.0 → 与控制指令的 throttle 形成"走/停"振荡 → 车速
+         * 恒为 0（2026-08-03 事故链）。改为持久状态后：
+         *   - 收到指令 → false（用控制值）
+         *   - 指令陈旧 >2000ms → true（FSAFE 停车）
+         *   - 再次收到指令 → false（恢复正常） */
+        bool use_internal_cruise = true;
+
         while (!should_stop()) {
-            uint64_t t_start = clock_now_us();
-            bool use_internal_cruise = true;
+            /* 用墙钟单调时间测量帧工作时间——clock_now_us() 在仿真模式下
+             * 返回按 50ms/tick 推进的逻辑时间，同一 tick 内 clock_advance_us
+             * 后 t_frame_us 恒为 50000 → sleep 恒为 0 → 节点以 3000+Hz
+             * 空转，消息总线被淹没（2026-08-03 根因）。
+             * clock_now_monotonic_wall_us() 始终返回真实 CLOCK_MONOTONIC，
+             * 不受仿真时钟污染。 */
+            uint64_t t_start = clock_now_monotonic_wall_us();
 
             /* 每 tick：桥取最新控制指令（若有）并解析到 atomics。
              * 固定 50ms 周期（sleep_us），不再依赖消息唤醒——即使
@@ -1258,11 +1280,11 @@ protected:
                 Message take_msg;
                 if (cmd_bridge.try_take(TOPIC_CONTROL_CMD, &take_msg) &&
                     take_msg.data_size > 0) {
-                    use_internal_cruise = false;
                     /* 二进制 ControlCmd 路径 */
                     ControlCmd bin;
                     if (ControlCmd_deserialize(&bin,
                             (const uint8_t*)take_msg.data, take_msg.data_size) == 0) {
+                        use_internal_cruise = false;
                         g.ego_throttle.store(bin.throttle, std::memory_order_relaxed);
                         g.ego_brake.store(bin.brake, std::memory_order_relaxed);
                         g.ego_steer.store(bin.steering, std::memory_order_relaxed);
@@ -1275,6 +1297,7 @@ protected:
                         /* JSON fallback */
                         cJSON* root = cJSON_Parse((const char*)take_msg.data);
                         if (root) {
+                            use_internal_cruise = false;
                             cJSON* j;
                             if ((j = cJSON_GetObjectItemCaseSensitive(root, "throttle"))
                                 && cJSON_IsNumber(j))
@@ -1291,59 +1314,105 @@ protected:
                             cJSON_Delete(root);
                             g.last_control_cmd_us.store(clock_now_us(),
                                 std::memory_order_relaxed);
+                        } else {
+                            /* 两种解析路径都失败 → 诊断日志 */
+                            if (g.cycle % 100 == 0) {
+                                LOG_WARN("flowsim",
+                                         "[DESER_FAIL] control/cmd msg %uB "
+                                         "neither binary nor JSON — "
+                                         "first 16B: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                         "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                         (unsigned)take_msg.data_size,
+                                         take_msg.data_size > 0 ? (unsigned)take_msg.data[0] : 0,
+                                         take_msg.data_size > 1 ? (unsigned)take_msg.data[1] : 0,
+                                         take_msg.data_size > 2 ? (unsigned)take_msg.data[2] : 0,
+                                         take_msg.data_size > 3 ? (unsigned)take_msg.data[3] : 0,
+                                         take_msg.data_size > 4 ? (unsigned)take_msg.data[4] : 0,
+                                         take_msg.data_size > 5 ? (unsigned)take_msg.data[5] : 0,
+                                         take_msg.data_size > 6 ? (unsigned)take_msg.data[6] : 0,
+                                         take_msg.data_size > 7 ? (unsigned)take_msg.data[7] : 0,
+                                         take_msg.data_size > 8 ? (unsigned)take_msg.data[8] : 0,
+                                         take_msg.data_size > 9 ? (unsigned)take_msg.data[9] : 0,
+                                         take_msg.data_size > 10 ? (unsigned)take_msg.data[10] : 0,
+                                         take_msg.data_size > 11 ? (unsigned)take_msg.data[11] : 0,
+                                         take_msg.data_size > 12 ? (unsigned)take_msg.data[12] : 0,
+                                         take_msg.data_size > 13 ? (unsigned)take_msg.data[13] : 0,
+                                         take_msg.data_size > 14 ? (unsigned)take_msg.data[14] : 0,
+                                         take_msg.data_size > 15 ? (unsigned)take_msg.data[15] : 0);
+                            }
                         }
                     }
                 }
             }
 
-            /* control/cmd 陈旧检查：超时且无近期控制指令 → 内置巡航。
-             * 注意 now >= last（非严格大于）：仿真时钟按 tick 推进，
-             * 本 tick 刚收到指令时 now == last，严格大于会把"刚收到"误判
-             * 为"从未收到"→ 内置巡航恒运行（2026-07-31 定位：STALE_DBG
-             * now=10000000 last=10000000 diff=0）。 */
-            if (use_internal_cruise) {
+            /* 持久状态切换：无近期控制指令 → 切回内置巡航/FSAFE */
+            if (!use_internal_cruise) {
                 uint64_t now = clock_now_us();
                 uint64_t last = g.last_control_cmd_us.load(
                     std::memory_order_relaxed);
-                if (last > 0 && now >= last
-                    && now - last < CONTROL_STALE_TIMEOUT_US) {
-                    use_internal_cruise = false;
+                if (last == 0 || (now > last &&
+                    now - last >= CONTROL_STALE_TIMEOUT_US)) {
+                    use_internal_cruise = true;
                 }
             }
-            if (use_internal_cruise && g.last_control_cmd_us.load(
-                    std::memory_order_relaxed) == 0) {
-                ; /* 冷启动：尚无任何控制指令，用内置巡航起步 */
-            }
-            /* 桥自愈：指令陈旧（>500ms）且桥回调停滞 → 重建订阅。
-             * 启动早期多节点并发订阅存在随机竞争窗口，桥回调可能永久
-             * 停滞（实测同代码 45s/60s run 正常、120s run 启动即断）。
-             * 重建把"永久断流"降级为"短暂停滞"，配合 FSAFE 停车不撞。 */
-            if (g.cycle % 200 == 0) {
-                uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
-                uint64_t now  = clock_now_us();
-                if (last > 0 && now > last &&
-                    now - last >= CONTROL_STALE_TIMEOUT_US &&
-                    use_internal_cruise) {
-                    cmd_bridge.reconnect();
-                    LOG_WARN("flowsim",
-                             "[BRIDGE_RECONNECT] control/cmd stale %.0fms — resubscribed "
-                             "(cb=%llu take=%llu)",
-                             (double)(now - last) / 1000.0,
-                             (unsigned long long)cmd_bridge.cb_count,
-                             (unsigned long long)cmd_bridge.take_count);
+
+            /* 桥自愈：仅当回调真正停滞（200 cycle 内 cb_count 零增长）
+             * 才重建订阅。原逻辑无条件重连 → 重置 cb/take 计数器 →
+             * 重连窗口内消息丢失 → FSAFE 立即触发 → 车速恒为 0
+             * （2026-08-03 事故链：cb=4→reconnect→cb=0→FSAFE→cb=5
+             * →reconnect→cb=0... 无限循环）。
+             *
+             * 修复：跟踪上一检查点的 cb_count，仅当它未增长（桥回调
+             * 确实停滞）时才重连。重连后重置 last_control_cmd_us 给
+             * 新订阅 2s 窗口期，避免立即 FSAFE。 */
+            {
+                static uint64_t last_cb_check = 0;
+                static uint64_t prev_cb_count = 0;
+                if (g.cycle % 200 == 0) {
+                    uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
+                    uint64_t now  = clock_now_us();
+                    uint64_t cur_cb = cmd_bridge.cb_count;
+                    bool cb_stalled = (cur_cb == prev_cb_count && last_cb_check > 0);
+                    prev_cb_count = cur_cb;
+                    last_cb_check = now;
+
+                    if (last > 0 && now > last &&
+                        now - last >= CONTROL_STALE_TIMEOUT_US &&
+                        use_internal_cruise && cb_stalled) {
+                        cmd_bridge.reconnect();
+                        /* 重连后重置时间戳：给新订阅 CONTROL_STALE_TIMEOUT_US
+                         * 窗口期建立连接，避免重连后立即 FSAFE。 */
+                        g.last_control_cmd_us.store(now, std::memory_order_relaxed);
+                        LOG_WARN("flowsim",
+                                 "[BRIDGE_RECONNECT] cb stalled %llu→%llu over %.0fms — "
+                                 "resubscribed, reset timer",
+                                 (unsigned long long)prev_cb_count,
+                                 (unsigned long long)cur_cb,
+                                 (double)(now - last) / 1000.0);
+                    }
                 }
             }
 
             /* ── Step 1: ego 动力学 ──
-             * 失效安全：控制指令陈旧（断流 >500ms）时停车而非内置巡航——
+             * 失效安全：控制指令陈旧（断流 >2000ms）时停车而非内置巡航——
              * 内置巡航用油门维持速度，会把"失去控制"伪装成"正常巡航"，
              * 15.1 直冲前车追尾（2026-07-31 事故链：select_for/transport
              * 回调在 control/cmd 高频下间歇断流，三通道全断 30s+）。
-             * Apollo 原则：控制丢失 → 减速停车，不允许继续前进。 */
+             * Apollo 原则：控制丢失 → 减速停车，不允许继续前进。
+             * 超时从 500ms 提升到 2000ms：高负载下消息总线 ~34% 丢包率，
+             * 500ms 过于激进导致 FSAFE 误触发（2026-08-03 事故链）。 */
             if (use_internal_cruise) {
                 uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 uint64_t now  = clock_now_us();
-                if (last > 0 && now > last &&
+                if (last == 0) {
+                    /* 冷启动：从未收到控制指令 → 保持静止 */
+                    ego.throttle = 0.0;
+                    ego.brake    = 1.0;
+                    ego.steer    = 0.0;
+                    ego.speed = 0.0;
+                    ego.vx = 0.0;
+                    ego.vy = 0.0;
+                } else if (now > last &&
                     now - last >= CONTROL_STALE_TIMEOUT_US) {
                     /* 曾收到过控制指令但已陈旧 → 失效安全停车 */
                     ego.throttle = 0.0;
@@ -1356,7 +1425,7 @@ protected:
                                  (double)(now - last) / 1000.0);
                     }
                 } else {
-                    /* 冷启动（从未收到指令）或短暂间隙 → 内置巡航起步 */
+                    /* 短暂间隙（<500ms）→ 不应到达（持久状态保证） */
                     internal_cruise_control(ego);
                 }
             } else {
@@ -1726,7 +1795,7 @@ protected:
              * 旧代码 sleep_us(FLOWSIM_DT_US) 固定 50ms，不扣除工作时间，
              * 实际帧率 = 1/(T_work + 50ms)，T_work 越大帧率越低——
              * 场景跑到一半 T_work 从 5ms 涨到 55ms 时 FPS 从 18 跌到 9.5。 */
-            uint64_t t_frame_us = clock_now_us() - t_start;
+            uint64_t t_frame_us = clock_now_monotonic_wall_us() - t_start;
             uint64_t sleep_us_val = FLOWSIM_DT_US;
             if (t_frame_us < sleep_us_val) {
                 sleep_us_val = FLOWSIM_DT_US - t_frame_us;

@@ -199,6 +199,17 @@ protected:
             g.fused_heading = h; g.fused_yaw_rate = yr;
             g.fused_count++;
 
+            /* 速度 sanity check：EKF 在收敛期（update_count<100）跳过 χ² gating，
+             * 异常 GPS 速度观测会直接注入状态向量导致速度尖峰（实测 spd=71.7，
+             * 实际速度仅 2-3 m/s）。下游 control 收到尖峰后触发 ROAD_GUARD 刹车。
+             * 限幅到合理范围 [0, 50] m/s（180 km/h，远超场景限速 22 m/s）。 */
+            if (v < 0.0 || v > 50.0) {
+                LOG_WARN("fusion", "EKF speed outlier: v=%.1f clamped (was %.1f)",
+                         v, g.fused_v);
+                v = (v < 0.0) ? 0.0 : 50.0;
+                ekf_->x[2] = v;  /* 同步修正 EKF 状态 */
+            }
+
             /* EKF 发散恢复 */
             if (ekf_->diverged && g.fused_count % 10 == 0) {
                 LOG_WARN("fusion", "EKF diverged (trace=%.0f) — resetting to (%.1f,%.1f)",

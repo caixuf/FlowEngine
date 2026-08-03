@@ -203,7 +203,14 @@ static void on_fusion(const Message* msg, void* user_data) {
             if (!vstate_recent) {
                 cJSON* j;
                 j = cJSON_GetObjectItemCaseSensitive(root, "v");
-                if (cJSON_IsNumber(j)) g.current_speed = j->valuedouble;
+                if (cJSON_IsNumber(j)) {
+                    double fv = j->valuedouble;
+                    /* 速度异常值过滤：EKF 偶尔输出速度尖峰（>50 m/s），
+                     * 直接使用会触发 ROAD_GUARD 刹车。丢弃明显异常值，
+                     * 保持上一帧速度（control 20Hz，丢失一帧速度无影响）。 */
+                    if (fv >= 0.0 && fv <= 50.0)
+                        g.current_speed = fv;
+                }
                 j = cJSON_GetObjectItemCaseSensitive(root, "x");
                 if (cJSON_IsNumber(j)) g.ego_x = j->valuedouble;
                 j = cJSON_GetObjectItemCaseSensitive(root, "y");
@@ -609,20 +616,25 @@ protected:
              * 职责分明：降级速度上限的唯一权威 = degrade_ladder 的 l1_speed_limit
              * （L2=3.0 爬行 / L3=0 停车）。control 不得自行硬编码"L2→停车"——
              * 那会把瞬时心跳抖动（WSL 过载 500ms）放大成永久趴窝。
-             * 停稳 3s 自动恢复兜底保留（供 L3 停死后解锁）。 */
+             *
+             * 自动恢复：L2/L3 均支持 3s 停稳后清降级。L2 原只限速不恢复，
+             * 导致碰撞后 safety_control 设 L2 → 车卡在 0 永不解锁
+             * （2026-08-03 事故链：冷启动碰撞 → L2 → 永久 MRM）。 */
             {
                 DegradeState* ds = degrade_global_state();
+                bool stalled = (fabs(g.current_speed) < 0.5);
                 if (ds->degrade_level >= DEGRADE_L3) {
                     g.target_speed = 0.0;
                     acc_target = 0.0;
                     g.integral = 0;
-                    if (fabs(g.current_speed) < 0.5) {
+                    if (stalled) {
                         g.mrm_stall_us += CONTROL_DT_S * 1e6;
                         if (g.mrm_stall_us > 3000000.0) {
                             degrade_clear();
                             g.mrm_stall_us = 0;
+                            g.integral = 0;
                             LOG_WARN("control",
-                                     "MRM auto-recover: stalled 3s at spd=%.1f — degrade cleared",
+                                     "MRM auto-recover(L3): stalled 3s at spd=%.1f — degrade cleared",
                                      g.current_speed);
                         }
                     } else {
@@ -631,7 +643,21 @@ protected:
                 } else if (ds->degrade_level >= DEGRADE_L2) {
                     double lim = ds->l1_speed_limit > 0.0 ? ds->l1_speed_limit : 3.0;
                     if (acc_target > lim) acc_target = lim;   /* 爬行，不停车 */
-                    g.mrm_stall_us = 0;
+                    /* L2 自动恢复：停稳 3s 后清降级。与 L3 同理——
+                     * 碰撞后 safety_control 设 L2，车已停但降级永不解锁。 */
+                    if (stalled) {
+                        g.mrm_stall_us += CONTROL_DT_S * 1e6;
+                        if (g.mrm_stall_us > 3000000.0) {
+                            degrade_clear();
+                            g.mrm_stall_us = 0;
+                            g.integral = 0;
+                            LOG_WARN("control",
+                                     "MRM auto-recover(L2): stalled 3s at spd=%.1f — degrade cleared",
+                                     g.current_speed);
+                        }
+                    } else {
+                        g.mrm_stall_us = 0;
+                    }
                 } else {
                     g.mrm_stall_us = 0;
                 }
