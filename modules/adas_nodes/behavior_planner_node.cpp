@@ -90,6 +90,12 @@ static const TransitionRule BEH_TRANSITIONS[] = {
     { BEH_ST_FOLLOW, BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "FOLLOW + UTURN_TRIGGER -> U_TURN", false },
     { BEH_ST_STOP,   BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "STOP + UTURN_TRIGGER -> U_TURN",   false },
     { BEH_ST_YIELD,  BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "YIELD + UTURN_TRIGGER -> U_TURN",  false },
+    /* 变道中 → 掉头：掉头触发计算对"任何状态生效"且优先级最高（抢占 ev），
+     * 但旧表缺这两行 → 路端触发区内一旦在变道（如朝施工区变道超车），
+     * UTURN_TRIGGER 每帧发出、每帧被拒，TIMEOUT 分支被抢占永不可达 →
+     * RIGHT_CHANGE 卡死 59s+ 直到撞墙（2026-08-03 实测）。 */
+    { BEH_ST_LEFT_CHANGE,  BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "LEFT + UTURN_TRIGGER -> U_TURN",  false },
+    { BEH_ST_RIGHT_CHANGE, BEH_EV_UTURN_TRIGGER, BEH_ST_U_TURN, "RIGHT + UTURN_TRIGGER -> U_TURN", false },
     /* 掉头 → 巡航（完成或超时） */
     { BEH_ST_U_TURN, BEH_EV_COMPLETED, BEH_ST_CRUISE, "U_TURN + COMPLETED -> CRUISE", false },
     { BEH_ST_U_TURN, BEH_EV_TIMEOUT,   BEH_ST_CRUISE, "U_TURN + TIMEOUT -> CRUISE",   false },
@@ -216,7 +222,7 @@ struct BehaviorContext {
                                            * 120m：触发提前 → 减速从容 → 施工前完成。 */
     double uturn_max_trigger_speed{8.0};  /* 掉头触发速度上限 (m/s)：高于此先减速
                                            * 再触发，避免 64 点轨迹被 Phase 1 刹车截断 */
-    double uturn_timeout_s{15.0};         /* 掉头超时 (s)，超时回退 CRUISE */
+    double uturn_timeout_s{40.0};         /* 掉头超时 (s)：倒车腾挪+三把方向需 20-30s，超时回退 CRUISE */
     double ref_path_end_x{1e9};           /* 参考路径终点 x（从 road/ref_path 解析，1e9=未初始化） */
     double road_end_x{1e9};               /* 路端 x（flowsim 权威 route 总长，掉头触发固定参考） */
 
@@ -1047,6 +1053,10 @@ protected:
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         new_target_speed = g.cfg_cruise_speed;
+                        /* 完成后同样冷却：防止执行残差（车还没回到车道中心）
+                         * 让触发条件再次满足 → 连环掉头（2026-08-03 demo8：
+                         * COMPLETED 9s 后重触发，车越跑越偏）。 */
+                        g.cooldown = g.lane_change_cooldown_timeout_s * 6.0;  /* 30s，同 TIMEOUT */
                         snprintf(reason, sizeof(reason),
                                  "uturn completed (on_return=1 h=%.2f) → CRUISE", g.ego_heading);
                         LOG_WARN("behavior", "uturn COMPLETED (h=%.2f) → CRUISE", g.ego_heading);
@@ -1361,7 +1371,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
                          "掉头触发距离阈值 (m)：ego_x 距路端此距离时触发掉头");
     param_register_float("behavior.uturn_max_trigger_speed", g.uturn_max_trigger_speed, 3.0, 12.0,
                          "掉头触发速度上限 (m/s)：高于此先减速再触发，防 64 点轨迹截断");
-    param_register_float("behavior.uturn_timeout_s",        g.uturn_timeout_s,        5.0, 30.0,
+    param_register_float("behavior.uturn_timeout_s",        g.uturn_timeout_s,        5.0, 90.0,
                          "掉头超时 (s)：超时回退 CRUISE");
 
     transport_subscribe(transport, TOPIC_FUSION_LOCALIZATION,         on_fusion,             nullptr);

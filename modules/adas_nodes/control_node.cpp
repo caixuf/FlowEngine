@@ -123,6 +123,15 @@ struct ControlContext {
     char   driving_mode[32]{}; /* 从 planning 广播的驾驶模式（如 "NOA:READY"），仅用于日志/透传 */
     int8_t beh_command{0};     /* 最新 planning/behavior 指令（BehaviorCommand enum：LEFT_CHANGE=2…），用于转向灯 */
     int8_t gear{GEAR_DRIVE};   /* 当前档位（从 trajectory 轨迹点 v 符号推导：v<0→REVERSE） */
+    bool   gear_pending{false}; /* 换挡待决：想换挡但带速，本帧刹停（on_trajectory 置位） */
+    double maneuver_exec_v{0}; /* 机动执行点（最近点）计划速度 |v|：换挡刹停 clamp 参考 */
+    uint32_t maneuver_prog_i{0}; /* 机动轨迹单调推进索引：掉头缓存轨迹前进段+倒车段拼接，
+                                  * 段交界处两段几何邻近（返程 y≈3.6 前向弧与倒车弧只差
+                                  * ~1m），最近点每帧在 D/R 两段间跳 → gear 振荡原地抖
+                                  * （2026-08-03 实测 30s 卡死 y≈3.4 不动）。prog_i 只
+                                  * 前进不后退：一旦进入倒车段就锁 REVERSE，直到推进到
+                                  * Phase 4 正向段才解锁——段交界物理上车也动不了几米，
+                                  * 单调推进不会漏执行任何一段。 */
     bool   maneuver_mode{false}; /* 机动轨迹（掉头/倒车）：轨迹含倒车点或曲率超巡航转向域。
                                   * 巡航限幅 0.16rad（R≥16.7m）物理上无法执行掉头弧
                                   * （规划 0.45rad，R≈5.6m），机动期放开到 0.60rad。 */
@@ -335,8 +344,30 @@ static void on_trajectory(const Message* msg, void* user_data) {
             }
             /* gear 判定不能只看最近点：掉头缓存轨迹是前进段+倒车段拼接，
              * ego 停在段交界时最近点 v 符号每帧摆动 → gear 振荡原地抖。
-             * 从最近点向前扫第一个 |v|>0.3 的点取符号（执行方向的意图）。 */
-            for (uint32_t i = best_i; i < n_pts; i++) {
+             * 从最近点向前扫第一个 |v|>0.3 的点取符号（执行方向的意图）。
+             * 段交界几何歧义（返程 y≈3.6 前向弧与倒车弧相距 <1m）时最近点
+             * 在 D/R 两段间跳 → 用单调推进索引 maneuver_prog_i 锁段：一旦
+             * 进入倒车段就锁 REVERSE，直到推进到 Phase 4 正向段才解锁。
+             * 推进 gate 必须带朝向一致性：两弧几何邻近时最近点会提前跳到
+             * 倒车段（倒车弧在 y≈4.4 处折回，车还在前进段 heading 101° 时
+             * 最近点已是 heading 160° 的倒车点）→ prog_i 过早进倒车段 →
+             * gear 提前翻 R → 车 101° 就开始倒车、轨迹对不上 → e_lat 发散
+             * 冲出路面（2026-08-03 实测 y=-13）。只有轨迹点朝向与车头
+             * 接近（|Δheading|<0.8rad≈46°）才算"车已推进到该点"。 */
+            auto heading_near = [](double h1, double h2) {
+                double d = h1 - h2;
+                while (d >  M_PI) d -= 2.0 * M_PI;
+                while (d < -M_PI) d += 2.0 * M_PI;
+                return fabs(d);
+            };
+            if (best_i > g.maneuver_prog_i) {
+                double dh = heading_near((double)traj.points[best_i].heading,
+                                         g.ego_heading);
+                if (dh < 0.8) g.maneuver_prog_i = best_i;
+            }
+            uint32_t gear_anchor = g.maneuver_prog_i;
+            if (gear_anchor >= n_pts) gear_anchor = n_pts - 1;
+            for (uint32_t i = gear_anchor; i < n_pts; i++) {
                 double vv = (double)traj.points[i].v;
                 if (fabs(vv) > 0.3) { has_reverse = (vv < 0.0); break; }
             }
@@ -345,9 +376,9 @@ static void on_trajectory(const Message* msg, void* user_data) {
          * 挡时必须主动刹停——否则 gear 卡死在旧挡、被反向 target 拖着狂奔
          * （demo6：gear 卡 R + ROAD_GUARD 给油 → 倒车冲出路面 y=-11）。 */
         int8_t want = has_reverse ? GEAR_REVERSE : GEAR_DRIVE;
-        bool gear_pending = false;
+        g.gear_pending = false;
         if (want != g.gear && fabs(g.current_speed) > 0.8) {
-            gear_pending = true;   /* 保持旧挡，本帧强制刹停 */
+            g.gear_pending = true;   /* 保持旧挡，本帧强制刹停 */
         } else {
             g.gear = want;
         }
@@ -359,15 +390,24 @@ static void on_trajectory(const Message* msg, void* user_data) {
             LOG_WARN("control", "[MANEUVER] %d->%d has_rev=%d max_kappa=%.3f n_pts=%u",
                      (int)g.maneuver_mode, (int)mv, (int)has_reverse, max_kappa, n_pts);
         }
+        if (mv && !g.maneuver_mode) {
+            g.maneuver_prog_i = 0;  /* 新机动轨迹：推进索引从 0 起 */
+        }
         g.maneuver_mode = mv;
         /* 机动期速度取执行点（最近点）|v| 而非轨迹末点：掉头轨迹末点是
          * Phase 5 巡航填充（v=cfg_target_speed），拿末点当目标会在满舵段
          * 冲到巡航速度；反之末点若为 0 会让车在半途丧失动力。
          * 下限 1.5 m/s：运动学 yaw_rate=v/L·tan(δ)，v=0 时车头永远转不动
-         * （2026-08-03 掉头死锁：刹停在对向车道定格"逆行"）。 */
+         * （2026-08-03 掉头死锁：刹停在对向车道定格"逆行"）。
+         * 执行点用单调推进索引（maneuver_prog_i）而非几何最近点 best_i：
+         * 段交界两弧邻近时 best_i 每帧在 D/R 段间跳，exec 跟着跳 → 目标
+         * 速度 +1.5/−3.0 交替、换挡振荡卡死。prog_i 只前进，段交界锁住
+         * 已进入的那段。 */
         if (mv && n_pts > 0) {
-            uint32_t exec_i = best_i;
+            uint32_t exec_i = g.maneuver_prog_i;
+            if (exec_i >= n_pts) exec_i = n_pts - 1;
             double ev = (double)traj.points[exec_i].v;
+            g.maneuver_exec_v = fabs(ev);   /* 执行点计划速度（先刹后转 clamp 参考） */
             /* 目标速度取执行点起前视 6m 弧长内的最小 |v|：只用执行点 v
              * 会"车追着最近点跑、最近点速度追着车涨"——减速计划永远
              * 追不上，满舵段还带 6-7m/s（R=4.1m 需 ≤3.5）understeer
@@ -389,7 +429,7 @@ static void on_trajectory(const Message* msg, void* user_data) {
             /* 保留符号：倒挡 PID 约定 target 为负（见下方 is_reverse 镜像） */
             g.target_speed = (ev < -0.1) ? -mag : mag;
             /* 换挡待决：先刹停（|v|<0.8 时上面滞回自动放行换挡） */
-            if (gear_pending) g.target_speed = 0.0;
+            if (g.gear_pending) g.target_speed = 0.0;
         }
     }
     /* lane_d 取轨迹前视点（0.5s 处）：planning 在变道时将轨迹前 30% 从当前位置
@@ -401,10 +441,29 @@ static void on_trajectory(const Message* msg, void* user_data) {
         /* 机动期（缓存重放的掉头轨迹）：t_rel 相对生成时刻，不随 ego 推进。
          * 用固定 t_rel 前视 = 永远追轨迹开头 → 车直行怼向路端被 safety
          * 拦停（2026-08-03 demo7：40s 定在 y=-0.85 打不了方向）。
-         * 改为锚定最近点 + 前视 ~2m 弧长。 */
-        d_idx = best_i;
+         * 改为锚定最近点 + 前视 ~2m 弧长。锚点同样用单调推进索引 prog_i：
+         * 段交界两弧邻近时最近点每帧在 D/R 段间跳，d_idx 跟着跳 → 横向
+         * 目标在两条弧的 y 间振荡 → 车原地抖。锁段后前视点稳定落在当前
+         * 执行的弧段上。
+         * 前视必须留在同一挡段内：Phase 3 倒车弧仅 ~2.6m，2m 前视会跨进
+         * Phase 4 正向弧 → 控制律拿到正向 kappa（左打）在倒车时右打变
+         * 左打 → 车拐错方向冲出路面（2026-08-03 实测 y=-7.8 → 8.6）。 */
+        d_idx = g.maneuver_prog_i;
+        if (d_idx >= n_pts) d_idx = n_pts - 1;
+        /* 段方向由当前 gear 决定，不由锚点 v 推断：Phase 2→3 交界有
+         * v=0 刹停点，锚在它上面时 v≈0 被误判为正向段 → 倒车时目标
+         * 落在刹停点（kappa=0、heading 还是 Phase 2 末向）→ 反馈项把
+         * 舵角翻成左打 → 倒车拐错方向冲出路面（2026-08-03 实测
+         * y=-7.8 → 8.6）。按 gear 前进到本段第一个有效点再前视。 */
+        const bool dseg_rev = (g.gear == GEAR_REVERSE);
+        while (d_idx + 1 < n_pts &&
+               (((double)traj.points[d_idx].v < -0.1) != dseg_rev)) {
+            d_idx++;   /* 跳过 v=0 刹停点，落到本段有效点 */
+        }
         double lookahead = 0.0;
         while (d_idx + 1 < n_pts && lookahead < 2.0) {
+            /* 跨 D/R 边界就停：本段轨迹已到尽头，再往前是下一挡段的弧 */
+            if (((double)traj.points[d_idx + 1].v < -0.1) != dseg_rev) break;
             double ddx = (double)traj.points[d_idx + 1].x - (double)traj.points[d_idx].x;
             double ddy = (double)traj.points[d_idx + 1].y - (double)traj.points[d_idx].y;
             lookahead += sqrt(ddx * ddx + ddy * ddy);
@@ -796,6 +855,19 @@ protected:
             /* 倒车：油门取反（flowsim physics 用负油门触发倒车） */
             if (is_reverse) throttle = -throttle;
 
+            /* 机动换挡刹停：gear_pending = 带速想换挡（掉头 Phase 2→3 D→R
+             * 交界）。巡航 PID 是减速工况标定的，对 2.4m/s 只给 0.23 brake
+             * （decel≈1.2m/s²，需 1.9s/2.3m），车还没停就冲过倒车段、最近点
+             * 跳到 Phase 4 正向 → gear 翻回 D → 加速冲出路面（2026-08-03
+             * 实测 y=8.5）。换挡必须物理刹停，直接给全刹——这就是掉头
+             * 三把方向的"停"字。 */
+            if (g.maneuver_mode && g.gear_pending) {
+                throttle = 0.0;
+                brake = 1.0;
+                mode = "SHIFT_STOP";
+                g.integral = 0;  /* 全刹时清积分，防换挡后残余积分反向推车 */
+            }
+
             /* Anti-windup：error 从正翻负时（加速→减速切换），积分饱和是追尾主因。
              * 加速阶段积分可累积到 +500（I=50×+500=+25000），此时减速指令 P=800×(-8)=-6400，
              * 总量 +18600 → 油门全开撞上去。
@@ -864,10 +936,18 @@ protected:
                 double fb = 0.8 * dh + 0.25 * e_lat;
                 if (rev) fb = -fb;   /* 倒挡：舵角对横向误差的作用反向 */
                 steer = ff + fb;
-                /* 先刹后转：实际车速明显高于机动目标速度时压住大舵角——
+                /* 先刹后转：实际车速明显高于执行点计划速度时压住大舵角——
                  * 带 6m/s 打满舵（计划 3.5）转弯半径不够，冲出路面
-                 * （demo10：y 冲到 7.9 恰好在路沿外）。 */
-                if (fabs(g.current_speed) > fabs(g.target_speed) * 1.3 + 0.3) {
+                 * （demo10：y 冲到 7.9 恰好在路沿外）。
+                 * 参考用执行点计划速度 maneuver_exec_v 而非 target_speed：
+                 * target_speed 是 6m 前视内的 min|v|，Phase 2→3 交界有
+                 * v=0 刹停点会让它掉到 1.5 → 阈值塌缩 → 满舵弧被压成
+                 * 0.10（R≈27m）完不成掉头 → 车直冲出路面 y=8.83
+                 * （2026-08-03 实测）。执行点速度在进弧段 = 3.5 保持阈值
+                 * 4.85，只在真正带 6m/s 冲进弧时才 clamp。 */
+                double maneuver_v_ref = g.maneuver_exec_v;
+                if (maneuver_v_ref < 0.5) maneuver_v_ref = 0.5;
+                if (fabs(g.current_speed) > maneuver_v_ref * 1.3 + 0.3) {
                     const double lim = 0.10;
                     if (steer >  lim) steer =  lim;
                     if (steer < -lim) steer = -lim;

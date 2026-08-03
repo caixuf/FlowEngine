@@ -116,6 +116,13 @@ struct DynamicDigest {
     int    frame;
     bool   ego_centered;
     double origin[2];
+    /* ego 掉头机动中（flowsim 权威 u_turn_active，|heading|>90°）：
+     * 掉头三把方向会合法地倒车/横穿路面/车头偏离车道方向，这些是
+     * 机动本身不是故障。机动期豁免的 invariant：anti-reverse(Δs)、
+     * dot(forward,lane)、dot(forward,vel)、lateral_offset。其余
+     * （碰撞/尺度/高程/teleport/accel）照常检查——掉头不是撞车的
+     * 理由。来源：flowsim_node build_dynamic_digest 时注入。 */
+    bool   maneuver{false};
     std::vector<ActorDigest> actors;
     /* 红绿灯相位（每帧）：与 StaticDigest::traffic_lights 按 id 关联，
      * render_ascii_overhead 据此画 G/Y/R 字符。build_dynamic_digest 从
@@ -159,7 +166,8 @@ StaticDigest build_static_digest(FlowRoadNetwork& roads, const Route& route,
 
 /** 从当前帧生成动态演员 digest */
 DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
-                                    int frame, bool ego_centered);
+                                    int frame, bool ego_centered,
+                                    bool ego_maneuver = false);
 
 // ═══════════════════════════════════════════════════════════
 // 单帧 invariant 检查

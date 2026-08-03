@@ -1025,6 +1025,44 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     timestamps = [float(s.get("timestamp", 0.0) or 0.0) for s in samples]
     scenario_layer_counts = scenario_actor_layer_counts(scenario)
 
+    # ── 掉头检测（防巡航向门禁对合法掉头误报）──
+    # 掉头三把方向：车头横穿路面（heading 扫过 ±π/2）、返程沿 −x 行驶、
+    # 机动期满舵。以下门禁都是"巡航假设"（x 只前进、y 不跨路、steer 不
+    # 满舵），掉头场景下必然误报。检测到掉头（任一帧 heading 越过 ±90°）
+    # 后：
+    #   - x_delta 用累计路径长而非净 x 位移（返程 −x 合法）
+    #   - y_range 降为 WARN（掉头合法横穿整条路）
+    #   - steer 饱和只在非机动帧（|heading|<90°）统计
+    # 掉头自身的正确性由 wrong-way + uturn-oscillation 门禁（下方）兜底，
+    # 巡航向门禁只为巡航行为服务。
+    heading_norm = [math.atan2(math.sin(h), math.cos(h)) for h in headings]
+    uturn_detected = any(abs(h) > math.pi / 2.0 for h in heading_norm)
+    maneuver_mask = [abs(h) > math.pi / 2.0 for h in heading_norm]
+
+    # ── 逆行检测（防回归：2026-08-03 掉头死锁把 ego 定格在对向车道朝东行驶）──
+    # 直路双向车道约定：y_rel<0 侧朝东（heading≈0），y_rel>0 侧朝西（|heading|≈π）。
+    # 运动中（speed>1.0）且车头与所在侧车道方向夹角 >120°、持续 >5s → FAIL。
+    # 掉头/变道横穿期 heading≈±π/2（夹角≈90°<120°）不会误报。
+    wrong_way_run = 0.0
+    wrong_way_max = 0.0
+    for i in range(1, len(series)):
+        m = series[i]
+        dt_s = max(0.0, timestamps[i] - timestamps[i - 1]) if i < len(timestamps) else 0.5
+        hn = math.atan2(math.sin(m["heading"]), math.cos(m["heading"]))
+        lane_dir = 0.0 if m["y_rel"] < 0 else math.pi
+        dev = abs(math.atan2(math.sin(hn - lane_dir), math.cos(hn - lane_dir)))
+        if m["speed"] > 1.0 and dev > math.radians(120.0) and abs(m["y_rel"]) < 20.0:
+            wrong_way_run += dt_s
+            wrong_way_max = max(wrong_way_max, wrong_way_run)
+        else:
+            wrong_way_run = 0.0
+    if wrong_way_max > 5.0:
+        failures.append(
+            f"WRONG-WAY: ego drove against lane direction for {wrong_way_max:.1f}s "
+            f"(>5s) — u-turn deadlock or lane-model regression "
+            f"(2026-08-03 known failure mode)"
+        )
+
     # ── run 完整性门禁：截断的 run 不许冒充 PASS ──
     # 请求跑 N 秒但样本跨度 < 50% → INCONCLUSIVE → FAIL。触发场景：monitor
     # 写 /tmp/flow_topology.json 中途静默停止（back-to-back demo 瞬态），
@@ -1094,6 +1132,19 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             f"(spatial+motion+temporal checks, see stderr for details)"
         )
 
+    # ── 掉头卡死检测（防回归：2026-08-03 U_TURN 触发→safety 全刹→v=0
+    # 转不动→15s TIMEOUT→CRUISE→再触发 的振荡死锁）。
+    # 一次 uturn timeout 可能是场景边界问题（WARN），两次以上=振荡（FAIL）。
+    uturn_timeouts = len(re.findall(r"uturn timeout", log_text))
+    if uturn_timeouts >= 2:
+        failures.append(
+            f"U-TURN oscillation: behavior hit 'uturn timeout' {uturn_timeouts} times "
+            f"— u-turn cannot complete (deadlock between planner/safety), "
+            f"ego likely stranded mid-turn"
+        )
+    elif uturn_timeouts == 1:
+        warnings.append("u-turn timed out once (single occurrence — check if scenario expects a completed u-turn)")
+
     max_lane_index = max(range(len(series)), key=lambda i: lane_errors[i])
     max_lane_error = lane_errors[max_lane_index]
     min_road_margin_index = min(range(len(series)), key=lambda i: road_margins[i])
@@ -1123,7 +1174,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if max_lane_error > 2.0:
         warnings.append(f"large lane-center deviation during maneuver: {max_lane_error:.2f} m")
 
-    progress = xs[-1] - xs[0] if len(xs) >= 2 else 0.0
+    # 掉头返程合法沿 −x 行驶：净 x 位移≈0，用累计路径长代替"前进距离"。
+    if uturn_detected:
+        progress = sum(abs(xs[i] - xs[i - 1]) for i in range(1, len(xs)))
+    else:
+        progress = xs[-1] - xs[0] if len(xs) >= 2 else 0.0
     min_distance = float(criteria.get("min_distance_m", 0.0) or 0.0)
     required_distance = min_distance if min_distance > 0.0 else 10.0
     if progress < required_distance:
@@ -1304,7 +1359,10 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # 旧值 0.219 按 max_steer=0.22 定，但实际生效限幅是 low_speed_steer=0.18
     # （pipeline.json:220 → safety_control_node.cpp:383，速度<3.0 分支）。
     # 差 0.039 完美漏检 0.18 饱和——98% 帧死贴 0.18 时旧门禁看不到。
-    steer_saturation_ratio = sum(1 for s in steer_values if s > 0.17) / max(1, len(steer_values))
+    # 掉头机动期满舵（0.60）是执行掉头弧的唯一方式，不是巡航饱和。
+    # 只在非机动帧（|heading|<90°）统计饱和，机动帧交给 wrong-way 门禁。
+    cruise_steer = [s for s, m in zip(steer_values, maneuver_mask) if not m]
+    steer_saturation_ratio = sum(1 for s in cruise_steer if s > 0.17) / max(1, len(cruise_steer))
     if steer_saturation_ratio > 0.45:
         warnings.append(f"steer saturated often: {steer_saturation_ratio * 100:.0f}% samples")
     elif steer_saturation_ratio > 0.10:
@@ -1335,10 +1393,19 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     if len(ys) >= 10:
         y_range = max(ys) - min(ys)
         if y_range > 4.5:
-            failures.append(
-                f"lateral excursion too large: y range={y_range:.2f} m > 4.5 m "
-                f"(snaking across lanes, y_min={min(ys):.2f} y_max={max(ys):.2f})"
-            )
+            if uturn_detected:
+                # 掉头合法横穿整条路（本侧车道 y=-1.75 → 对向车道 y=+5.25），
+                # y 范围 7m+ 是机动路径本身。横向安全由 road_margin 门禁兜底
+                # （车没飞出路面边沿），这里只对巡航蛇形降级告警。
+                warnings.append(
+                    f"lateral excursion {y_range:.2f} m spans the road during u-turn "
+                    f"(expected for cross-road maneuver, y_min={min(ys):.2f} y_max={max(ys):.2f})"
+                )
+            else:
+                failures.append(
+                    f"lateral excursion too large: y range={y_range:.2f} m > 4.5 m "
+                    f"(snaking across lanes, y_min={min(ys):.2f} y_max={max(ys):.2f})"
+                )
         elif y_range > 4.0:
             warnings.append(f"lateral wobble: y range={y_range:.2f} m > 4.0 m")
 

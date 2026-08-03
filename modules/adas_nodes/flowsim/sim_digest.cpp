@@ -156,11 +156,13 @@ static int entity_type_to_digest(EntityType t) {
 }
 
 DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
-                                    int frame, bool ego_centered) {
+                                    int frame, bool ego_centered,
+                                    bool ego_maneuver) {
     DynamicDigest dd;
     dd.sim_time = sim_time;
     dd.frame = frame;
     dd.ego_centered = ego_centered;
+    dd.maneuver = ego_maneuver;
 
     const Entity& ego = pool[0];
     double ox = ego_centered ? ego.x : 0.0;
@@ -186,7 +188,13 @@ DynamicDigest build_dynamic_digest(const EntityPool& pool, double sim_time,
         ad.heading = e.heading;
         ad.vel[0] = e.vx;
         ad.vel[1] = e.vy;
-        ad.speed = e.speed;
+        /* speed 取模长：e.speed 在掉头倒车段是负的（显式负油门倒车），
+         * 但 digest 的 speed 语义是标量速率（√(vx²+vy²)，见 entity.h）。
+         * 时序 Δpos 检查用 speed×dt 估算期望位移，负 speed 会把 expected
+         * 算成负值 → 合法倒车位移被误报"瞬移/teleport"（2026-08-03 掉头
+         * 实测 Δpos=0.96 >> expected=-0.09）。方向性由 vel[] 和 anti-reverse
+         * 检查承担，speed 只当模长用。 */
+        ad.speed = std::fabs(e.speed);
         ad.road_id = e.road_id;
         ad.lane_id = e.lane_id;
         ad.lateral_offset = e.offset;
@@ -412,11 +420,16 @@ InvariantResult check_spatial_invariants(const DynamicDigest& d,
         }
 
         // 2. 横向范围：运动中的 actor 必须留在路面内；静止路侧泊车可位于路缘外一个车位宽
+        /* ego 掉头机动豁免：三把方向要把车从本侧车道横穿到对向车道，
+         * lateral_offset（Frenet 相对参考线）必然越过半路宽——这是机动
+         * 本身的路径，不是"飞出路面"。飞行方向正确性由 speed/Δpos 检查
+         * 兜底，这里只放行机动期 ego。 */
         double lateral_eps = EPS_LATERAL;
         if (a.type != 0 && std::fabs(a.speed) < 0.1) {
             lateral_eps = EPS_LATERAL_PARKED;
         }
-        if (std::fabs(a.lateral_offset) > half_w + lateral_eps) {
+        if (std::fabs(a.lateral_offset) > half_w + lateral_eps &&
+            !(a.type == 0 && d.maneuver)) {
             r.failed++;
             char buf[256];
             snprintf(buf, sizeof(buf),
@@ -516,6 +529,12 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
         char tag[32];
         snprintf(tag, sizeof(tag), "actor[%d]", a.id);
 
+        /* ego 掉头机动豁免：三把方向掉头时车头要横穿路面（heading 扫过
+         * ±π）并在 Phase 3 倒车，dot(forward,vel) 与 dot(forward,lane)
+         * 在机动期必然越界——这是机动路径本身，不是"横着/倒着开"故障。
+         * 倒车段的正确性由时序 Δs/Δpos 检查 + 控制层机动控制律兜底。 */
+        const bool ego_maneuver_skip = (a.type == 0 && d.maneuver);
+
         // 1. dot(forward(heading), vel/|vel|) > cos(30°)
         double fwd_x = std::cos(a.heading);
         double fwd_y = std::sin(a.heading);
@@ -524,7 +543,7 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
             double vx = a.vel[0] / vel_norm;
             double vy = a.vel[1] / vel_norm;
             double dot = fwd_x * vx + fwd_y * vy;
-            if (dot < std::cos(M_PI / 6.0)) {  // cos(30°)
+            if (dot < std::cos(M_PI / 6.0) && !ego_maneuver_skip) {  // cos(30°)
                 r.failed++;
                 char buf[256];
                 snprintf(buf, sizeof(buf),
@@ -538,7 +557,13 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
 
         // 2. dot(forward(heading), lane_dir) > cos(45°)
         // 从 road network 取车道方向
-        if (roads && roads->loaded()) {
+        /* route_dir==0 = actor 尚未被指定到任何车道方向（掉头横穿路面期间
+         * ego 的 route_dir 被清 0，车头合法扫过所有车道方向）。对没有车道
+         * 方向的 actor 断言"车头要与车道方向一致"是无意义的——它当前不在
+         * 跟车道上。掉头横穿的正确性由 wrong-way 门禁 + 时序 Δs 检查兜底。 */
+        if (a.route_dir == 0) {
+            r.passed++;
+        } else if (roads && roads->loaded()) {
             WorldPos wp_s, wp_s1;
             if (roads->frenet_to_world(a.road_id, a.lane_id, a.s, 0, wp_s) &&
                 roads->frenet_to_world(a.road_id, a.lane_id, a.s + 1.0, 0, wp_s1)) {
@@ -558,7 +583,7 @@ InvariantResult check_motion_direction(const DynamicDigest& d,
                     } else {
                         dir_ok = (dot_lane > std::cos(M_PI / 4.0));
                     }
-                    if (!dir_ok) {
+                    if (!dir_ok && !ego_maneuver_skip) {
                         r.failed++;
                         char buf[256];
                         snprintf(buf, sizeof(buf),
@@ -697,8 +722,12 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
         /* B-2 新增：用 Δs 和 route_dir 检测倒车。route_dir>0 的顺行车 s 应递增，
          * route_dir<0 的对向车 s 应递减。同一 road 上 Δs 方向与 route_dir 相反
          * 即倒车（如顺行车 s 减小 = 倒退）。teleported 时 s 被重置，跳过检查。
-         * 跨 road 时 s 范围重置，也跳过（road_id 不一致）。容差 0.5m 防数值噪声。 */
-        if (!teleported && ca.route_dir != 0 && pa->route_dir != 0
+         * 跨 road 时 s 范围重置，也跳过（road_id 不一致）。容差 0.5m 防数值噪声。
+         * ego 掉头机动豁免：三把方向的 Phase 3 就是倒车段（s 合法减小），
+         * 这不是逆行故障。掉头是否完成/走向由 behavior 状态机 + wrong-way
+         * 门禁兜底。 */
+        if (!teleported && !(ca.type == 0 && curr.maneuver)
+            && ca.route_dir != 0 && pa->route_dir != 0
             && ca.route_dir == pa->route_dir && ca.road_id == pa->road_id) {
             double ds = ca.s - pa->s;
             if (ca.route_dir > 0 && ds < -0.5) {

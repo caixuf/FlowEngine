@@ -1928,7 +1928,10 @@ protected:
              * 每 20 帧（~1s）跑一次完整 invariant，避免每帧序列化开销过大。
              * 时序 invariant 需要连续两帧，从第 2 帧开始。 */
             if (g.cycle % 20 == 0 && g.digest_initialized) {
-                auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true);
+                /* ego_maneuver=u_turn_active：掉头机动期豁免 lane-keeping
+                 * invariant（倒车/横穿/heading 扫过 ±π 是机动路径本身）。 */
+                auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true,
+                                                        g.u_turn_active);
                 // 空间 invariant
                 auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);

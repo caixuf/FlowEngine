@@ -40,11 +40,15 @@ static inline double clamp_slip(double a) {
     return a;
 }
 
-/* 纵向加速度：两模型共用（净力/质量） */
+/* 纵向加速度：两模型共用（净力/质量）。
+ * brake/drag 是耗散力，方向恒与运动方向相反——旧实现符号固定为负，
+ * 倒车（v<0）时刹车/风阻反而把车往更负速度推（越刹越快倒车）。
+ * v==0 时刹车不产生运动（静摩擦），只有 drive 起作用。 */
 static double longitudinal_accel(const Entity& e, double throttle, double brake, double v) {
     double drive_force = throttle * 5000.0;
-    double brake_force = brake    * 8000.0;
-    double drag_force  = e.drag_coeff * v * v;
+    double sgn = (v > 0.0) ? 1.0 : (v < 0.0 ? -1.0 : 0.0);
+    double brake_force = brake * 8000.0 * sgn;
+    double drag_force  = e.drag_coeff * v * std::fabs(v);
     return (drive_force - brake_force - drag_force) / e.mass;
 }
 

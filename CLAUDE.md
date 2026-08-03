@@ -27,6 +27,25 @@ sim_world → sensor_model → perception → fusion → planning → control �
                              flowmond (IPC stats bridge + HTTP/SSE) → DashBoard
 ```
 
+## 模块职责铁律（架构设计 — 2026-08 掉头死锁 8 环连坏后确立）
+
+> 2026-08 排掉头死锁时发现 8 个环环相扣的坏因,根源全是**职责越界**:
+> 仿真替控制做操控决策、安全层替规划做速度决策、控制读错权威数据源。
+> 以下职责边界是硬约束,**跨界写逻辑的代码不会被合并**。
+
+| 模块 | 唯一职责 | 禁止做的事 |
+|------|---------|-----------|
+| **flowsim**(仿真) | 纯被控对象:执行 throttle/brake/steer/gear,物理积分,发布真值 | ❌ 操控决策(自动回正/辅助转向/替驾驶员判断);❌ 依据"合理性"改写控制指令。物理限幅(轮胎极限/执行器速率)可以有,"驾驶策略"不准有 |
+| **planning** | 速度与轨迹的**唯一权威**:command_speed、trajectory.points[].v 由它一家说了算 | ❌ 直接输出执行量(throttle/steer) |
+| **control** | 纯轨迹跟随:从 trajectory 推 gear/steer/throttle,不质疑轨迹 | ❌ 自己发明目标速度/路径;❌ 绕开 trajectory 读别的源做决策(fallback 巡航是唯一例外且要收敛) |
+| **safety_control** | 纯安全闸门:只做"限幅+紧急制动",不理解任务意图 | ❌ 用巡航假设治理机动工况(必须识别机动窗口后豁免);❌ 改写任务性指令(变道/掉头的方向盘) |
+| **behavior** | 离散状态机:决定"做什么"(变道/掉头/跟车),不管"怎么做" | ❌ 输出连续控制量;❌ 状态转移表缺行(任何事件×状态组合必须显式可达或显式拒绝) |
+
+跨模块信号约定:
+- control→safety 带外信号唯一通道 = `raw.mode` 字符串(如 `"+MANEUVER"` 后缀)
+- 行进方向唯一事实源 = flowsim `road/ref_path.reverse`(navigation/behavior/control 全部消费它,不许各自猜)
+- 同一功能出现第二份实现(如两处都算 forward_space)= 违规,必须收敛到权威模块
+
 ## 关键文件
 
 | 文件 | 作用 |

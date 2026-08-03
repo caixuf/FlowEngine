@@ -655,6 +655,28 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         }
     }
 
+    /* ═══ Phase 2→3 交界: 刹停点 ═══
+     * 掉头三把方向的前进→倒车必须经过 v=0（物理上 D→R 换挡要先刹停）。
+     * 旧实现 Phase 2 直接跳 v=+3.5 → Phase 3 v=-3.0，control 在交界处
+     * 靠 gear_pending 强置 target=0 刹停——但巡航 PID 对 2.4m/s 只给
+     * 0.23 brake（decel≈1.2m/s²，需 1.9s/2.3m），车还没停就冲过倒车
+     * 段、最近点跳到 Phase 4 正向段 → gear 翻回 D → 加速冲出路面
+     * （2026-08-03 实测 y=8.5 路沿外）。补一个 v=0 刹停点，让
+     * min|v| 前视把目标速度提前压下来 + gear 扫描提前看到倒车点。 */
+    if (n < max_points && fabs(v) > 0.1) {
+        points[n].t_rel_us = t_us;
+        points[n].x = (float)x;  points[n].y = (float)y;
+        points[n].heading = (float)h;
+        points[n].v = 0.0f;  /* 刹停 → 换挡 */
+        points[n].kappa = 0.0f;
+        points[n].a = -5.0f;  /* 中等刹车 */
+        points[n].jerk = 0.0f;  points[n].s = 0.0f;
+        points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+        n++;
+        t_us += (uint32_t)(dt * 1e6);
+        v = 0.0;
+    }
+
     /* ═══ Phase 3: 右打死倒车 → 车尾摆回车道区域 ═══
      * 倒车时方向盘右打 → 车尾右摆 → 车头左转（继续向对向车道方向转）。
      * 自适应切换条件：
@@ -731,15 +753,15 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         }
     }
 
-    /* ═══ Phase 5: 巡航 → 剩余点以目标速度直行填充 ═══ */
+    /* ═══ Phase 5: 巡航 → 剩余点以目标速度直行填充 ═══
+     * v 是车体纵向速度（负=倒挡），不是世界系 x 分量：h≈π 时
+     * x += v·cos(h)·dt 已自动朝 -x 推进。旧实现 heading 反向时取
+     * v=-cfg_target_speed 是双重取负——整段返程被标成"倒车 -20"
+     * → control gear 推 REVERSE、末点 target=-20、"truncated in
+     * reverse" 警告，掉头后狂倒车冲出路面（2026-08-03 demo6 y=-11）。 */
     {
         steer = 0.0;
         v = g.cfg_target_speed;
-        /* 如果对向车道（lane_id > 0），巡航速度取负以匹配 heading≈π */
-        if (fabs(norm_h(h)) > M_PI * 0.5) {
-            /* heading 指向 -x 方向 → 速度应沿 -x */
-            v = -g.cfg_target_speed;
-        }
         while (n < max_points) {
             x += v * cos(h) * dt;
             y += v * sin(h) * dt;
@@ -766,6 +788,42 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                  uturn_speed, n, max_points);
     }
 
+    return n;
+}
+
+/* 段感知下采样：512 点细轨迹 → 消息容量 64 点。
+ * 必须保留 v 符号翻转边界点（D/R 换挡点），否则倒车段被稀释后
+ * control 的 gear 推导（最近点向前扫符号）会跳段错挡。
+ * control 是最近点追踪，~0.5m 点距足够。 */
+static int downsample_uturn(const TrajectoryPoint* src, int sn,
+                            TrajectoryPoint* dst, int cap) {
+    if (sn <= cap) {
+        memcpy(dst, src, sizeof(TrajectoryPoint) * (size_t)sn);
+        return sn;
+    }
+    static bool keep[512];
+    memset(keep, 0, sizeof(keep));
+    keep[0] = true; keep[sn - 1] = true;
+    int forced = 2;
+    for (int i = 1; i < sn; i++) {
+        bool a = src[i - 1].v < -0.05f, b = src[i].v < -0.05f;
+        if (a != b) {
+            if (!keep[i - 1]) { keep[i - 1] = true; forced++; }
+            if (!keep[i])     { keep[i] = true;     forced++; }
+        }
+    }
+    int remain = cap - forced;
+    double stride = (double)sn / (double)(remain > 0 ? remain + 1 : 1);
+    for (int k = 1; k <= remain; k++) {
+        int idx = (int)(k * stride);
+        if (idx < 1) idx = 1;
+        if (idx > sn - 1) idx = sn - 1;
+        while (idx < sn && keep[idx]) idx++;
+        if (idx < sn) keep[idx] = true;
+    }
+    int n = 0;
+    for (int i = 0; i < sn && n < cap; i++)
+        if (keep[i]) dst[n++] = src[i];
     return n;
 }
 
@@ -1619,10 +1677,16 @@ protected:
                     (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
                     g.target_lane_offset = lane_center_offset(g.current_behavior.target_lane_idx, n_lanes, lane_w);
                 } else {
-                    /* 巡航/跟车：计算 ego 当前最近车道，目标其中心 */
+                    /* 巡航/跟车：计算 ego 当前最近车道，目标其中心。
+                     * 只允许本方向合法车道（行进坐标系下右半幅，idx ≥ n_lanes/2）：
+                     * map_ref 已随行进方向对齐（返程反向采样），左侧半幅恒为对向
+                     * 车道。不 clamp 则 ego 被扰动推过道路中心时"最近车道"跟着
+                     * ego 翻到对向侧（正反馈），最终锁定逆行目标（2026-08-03
+                     * demo12 实测：返程 ego 漂到 y=-8，目标锁 y=-5.25 东行道）。 */
                     double off = (-ego_lane_d) / lane_w + (n_lanes - 1) * 0.5;
                     int cur_lane = (int)(off >= 0.0 ? off + 0.5 : off - 0.5);
-                    if (cur_lane < 0) cur_lane = 0;
+                    int own_side_min = n_lanes / 2;
+                    if (cur_lane < own_side_min) cur_lane = own_side_min;
                     if (cur_lane >= n_lanes) cur_lane = n_lanes - 1;
                     g.target_lane_offset = lane_center_offset(cur_lane, n_lanes, lane_w);
                 }
@@ -1672,10 +1736,30 @@ protected:
                     forward_space_m = road_end_x - g.ego_x;
                     if (forward_space_m < 0.0) forward_space_m = 0.0;
                 }
-                n_pts = generate_uturn_trajectory(points, 64,
+                /* 前方静止障碍（施工区/停放车）同样占据掉头空间：只看路端会在
+                 * 施工区前 1.3m 处误判 fwd=30m → 跳过 Phase 0 倒车腾挪直接
+                 * 前进满舵 → 撞墙被 safety 拦停（2026-08-03 实测）。取
+                 * min(路端, 本车道前方最近静止障碍距离-安全裕度)。 */
+                for (int i = 0; i < g.kMaxObs; i++) {
+                    /* 空槽 (0,0)：on_perception_obstacles 清零未用槽位 */
+                    if (g.obs_x[i] == 0.0 && g.obs_y[i] == 0.0) continue;
+                    if (fabs(g.obs_vx[i]) < 0.5 && fabs(g.obs_vy[i]) < 0.5 &&
+                        g.obs_x[i] > g.ego_x &&
+                        fabs(g.obs_y[i] - g.ego_y) < 3.0) {
+                        double d = g.obs_x[i] - g.ego_x - 2.0; /* 2m 安全裕度 */
+                        if (d < 0.0) d = 0.0;
+                        if (d < forward_space_m) forward_space_m = d;
+                    }
+                }
+                /* 512 点细生成 + 段感知下采样到 64：Phase 0 倒车 3.4s×20Hz
+                 * 就吃掉 69 点，直接生成 64 点必截断满舵弧（kappa 全 0 →
+                 * control 认不出机动，2026-08-03 demo5 实测）。 */
+                static TrajectoryPoint uturn_big[512];
+                int big_n = generate_uturn_trajectory(uturn_big, 512,
                                                   g.ego_x, g.ego_y, g.ego_heading,
                                                   g.ego_v, wheelbase,
                                                   forward_space_m);
+                n_pts = downsample_uturn(uturn_big, big_n, points, 64);
                 memcpy(g.uturn_cache, points, sizeof(TrajectoryPoint) * (size_t)n_pts);
                 g.uturn_cache_n = n_pts;
                 g.uturn_cache_ego_x = g.ego_x;
