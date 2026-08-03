@@ -17,6 +17,9 @@ export function createSceneStore() {
     // ── ego ──
     ego: null,                // { x, y, heading, speed, steer, brake, throttle, lights, vx, vy, length, width }
 
+    // ── 规划轨迹（planning_node 输出的全局 ENU 坐标点） ──
+    trajectoryPath: null,     // [[x, y, v], ...]  全局 ENU 坐标，或 null
+
     // ── 实体列表 ──
     entities: [],             // [{ id, type, x, y, heading, speed, lights, ai_state, ... }]
 

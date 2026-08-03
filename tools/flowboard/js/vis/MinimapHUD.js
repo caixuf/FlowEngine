@@ -26,7 +26,7 @@ export function createMinimapHUD(container) {
 
   const label = document.createElement('span');
   label.id = 'minimap-label';
-  label.textContent = 'MAP';
+  label.textContent = '地图';
   pip.appendChild(label);
 
   const btn = document.createElement('button');

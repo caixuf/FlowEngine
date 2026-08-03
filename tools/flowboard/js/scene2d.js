@@ -596,14 +596,14 @@ export function draw2D() {
   ctx.fillStyle = '#8b949e';
   ctx.font = "10px 'Inter',system-ui,sans-serif";
   ctx.textAlign = 'left';
-  ctx.fillText('TARGET', 150, hudY + 11);
+  ctx.fillText('目标速度', 150, hudY + 11);
   ctx.fillStyle = '#fff';
   ctx.font = "bold 20px 'JetBrains Mono',monospace";
   ctx.fillText((v.target_speed || 0).toFixed(1), 150, hudY + 30);
   // THROTTLE gauge
   ctx.fillStyle = '#8b949e';
   ctx.font = "10px 'Inter',system-ui,sans-serif";
-  ctx.fillText('THR', 240, hudY + 11);
+  ctx.fillText('油门', 240, hudY + 11);
   ctx.fillStyle = '#1a1e28';
   ctx.fillRect(240, hudY + 20, 80, 10);
   var thr = v.throttle || 0;
@@ -619,7 +619,7 @@ export function draw2D() {
   // BRAKE gauge
   ctx.fillStyle = '#8b949e';
   ctx.font = "10px 'Inter',system-ui,sans-serif";
-  ctx.fillText('BRK', 340, hudY + 11);
+  ctx.fillText('制动', 340, hudY + 11);
   ctx.fillStyle = '#1a1e28';
   ctx.fillRect(340, hudY + 20, 60, 10);
   var brk = v.brake || 0;
@@ -633,7 +633,7 @@ export function draw2D() {
   ctx.fillText((brk * 100).toFixed(0) + '%', 345, hudY + 31);
   // MODE
   var err = v.error || 0;
-  var mode = err < -0.3 ? 'BRAKE' : err > 0.3 ? 'ACCEL' : '⏺ HOLD';
+  var mode = err < -0.3 ? '制动中' : err > 0.3 ? '加速中' : '⏺ 保持';
   var modeColor = err < -0.3 ? '#f85149' : err > 0.3 ? '#3fb950' : '#8b949e';
   ctx.fillStyle = modeColor;
   ctx.font = "bold 14px 'Inter',system-ui,sans-serif";
@@ -642,12 +642,12 @@ export function draw2D() {
   // ERROR
   ctx.fillStyle = '#8b949e';
   ctx.font = "10px 'JetBrains Mono',monospace";
-  ctx.fillText('err ' + err.toFixed(1) + ' m/s', 430, hudY + 36);
+  ctx.fillText('误差 ' + err.toFixed(1) + ' m/s', 430, hudY + 36);
   // ODO
   ctx.fillStyle = '#484f58';
   ctx.font = "11px 'JetBrains Mono',monospace";
   ctx.textAlign = 'right';
-  ctx.fillText('odo ' + (v.x || 0).toFixed(1) + ' m', W - 20, hudY + hudH / 2);
+  ctx.fillText('里程 ' + (v.x || 0).toFixed(1) + ' m', W - 20, hudY + hudH / 2);
 }
 
 export function switchSceneView(mode) {

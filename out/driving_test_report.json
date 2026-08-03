@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-02T23:37:12",
+  "timestamp": "2026-08-03T10:39:10",
   "subjects": {
     "S1": {
       "status": "NOT_IMPLEMENTED",
@@ -15,7 +15,7 @@
       "total_score": 0,
       "max_score": 0,
       "all_pass": false,
-      "error": "subject2_sim.py 不存在: /workspace/tools/subject2_sim.py"
+      "error": "subject2_sim.py 不存在: /home/caixuf/code/FlowEngine/tools/subject2_sim.py"
     },
     "S3": {
       "status": "NOT_IMPLEMENTED",

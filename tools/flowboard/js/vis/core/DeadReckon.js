@@ -55,11 +55,17 @@ export function getDeadReckonConfig() {
 // target*   : 用 last speed 外推出的预测位置
 // smooth*   : 指数平滑后的值，渲染层消费
 // lastFrameTime : 上一次 tickDeadReckon() 的墙钟
+// lastVx/lastVy : 世界系速度（step_bicycle 的 vx/vy 含绕后轴切向分量
+//                 half_wb·yaw_rate）。掉头/急转弯时 speed·(cos,sin) 外推
+//                 会丢 ~34% 的横向速度 → 车尾横移（见 _advanceState）。
 export var _dr = {
   lastX: 0,
   lastZ: 0,
   lastSpeed: 0,
   lastHeading: 0,
+  lastVx: 0,
+  lastVy: 0,
+  hasVel: false,
   lastTime: 0,
   targetX: 0,
   targetZ: 0,
@@ -81,6 +87,9 @@ export function initDeadReckon() {
   _dr.lastZ = 0;
   _dr.lastSpeed = 0;
   _dr.lastHeading = 0;
+  _dr.lastVx = 0;
+  _dr.lastVy = 0;
+  _dr.hasVel = false;
   _dr.lastTime = 0;
   _dr.targetX = 0;
   _dr.targetZ = 0;
@@ -109,19 +118,28 @@ export function initDeadReckon() {
  * @param {number} z       world Z position (lateral, m)
  * @param {number} speed   forward speed (m/s)
  * @param {number} heading heading angle (radians)
+ * @param {number} [vx]    world X velocity (m/s) — step_bicycle 的中心速度，
+ *                         含绕后轴切向分量；缺省时回退 speed·(cos,sin) 外推
+ * @param {number} [vy]    world Z (lateral) velocity (m/s)
  */
-export function updateDeadReckon(x, z, speed, heading) {
+export function updateDeadReckon(x, z, speed, heading, vx, vy) {
   var now = performance.now() / 1000;
+  var hasVel = (typeof vx === 'number' && isFinite(vx) &&
+                typeof vy === 'number' && isFinite(vy));
   if (
     !_dr.init ||
+    _dr.hasVel !== hasVel ||
     Math.abs(x - _dr.lastX) > 0.01 ||
     Math.abs(z - _dr.lastZ) > 0.01 ||
-    Math.abs(speed - _dr.lastSpeed) > 0.1
+    Math.abs(speed - _dr.lastSpeed) > 0.1 ||
+    (hasVel && (Math.abs(vx - _dr.lastVx) > 0.1 || Math.abs(vy - _dr.lastVy) > 0.1))
   ) {
     _dr.lastX = x;
     _dr.lastZ = z;
     _dr.lastSpeed = speed;
     _dr.lastHeading = heading;
+    _dr.hasVel = hasVel;
+    if (hasVel) { _dr.lastVx = vx; _dr.lastVy = vy; }
     _dr.lastTime = now;
     if (!_dr.init) {
       // First sample: snap smooth to truth so we do not lerp from (0,0).
@@ -182,9 +200,13 @@ export function getDeadReckonState() {
 export const _entities = new Map();  // id -> drState
 let _entLastFrame = 0;
 
-function _newState(x, y, speed, heading, now) {
+function _newState(x, y, speed, heading, now, vx, vy) {
+  var hasVel = (typeof vx === 'number' && isFinite(vx) &&
+                typeof vy === 'number' && isFinite(vy));
   return {
-    lastX: x, lastZ: y, lastSpeed: speed, lastHeading: heading, lastTime: now,
+    lastX: x, lastZ: y, lastSpeed: speed, lastHeading: heading,
+    lastVx: hasVel ? vx : 0, lastVy: hasVel ? vy : 0, hasVel: hasVel,
+    lastTime: now,
     targetX: x, targetZ: y, targetHeading: heading,
     smoothX: x, smoothZ: y, smoothHeading: heading, smoothSpeed: speed,
     init: true
@@ -197,22 +219,28 @@ function _newState(x, y, speed, heading, now) {
  * 与 ego 同样做心跳去重（位移 < 1cm 且速度变化 < 0.1m/s 视为重复帧，
  * 不刷新 lastTime，避免外推时钟被重置）。
  */
-export function updateEntityDeadReckon(id, x, y, speed, heading) {
+export function updateEntityDeadReckon(id, x, y, speed, heading, vx, vy) {
   var now = performance.now() / 1000;
   var s = _entities.get(id);
   if (!s) {
-    _entities.set(id, _newState(x, y, speed, heading, now));
+    _entities.set(id, _newState(x, y, speed, heading, now, vx, vy));
     return;
   }
+  var hasVel = (typeof vx === 'number' && isFinite(vx) &&
+                typeof vy === 'number' && isFinite(vy));
   if (
+    s.hasVel !== hasVel ||
     Math.abs(x - s.lastX) > 0.01 ||
     Math.abs(y - s.lastZ) > 0.01 ||
-    Math.abs(speed - s.lastSpeed) > 0.1
+    Math.abs(speed - s.lastSpeed) > 0.1 ||
+    (hasVel && (Math.abs(vx - s.lastVx) > 0.1 || Math.abs(vy - s.lastVy) > 0.1))
   ) {
     s.lastX = x;
     s.lastZ = y;
     s.lastSpeed = speed;
     s.lastHeading = heading;
+    s.hasVel = hasVel;
+    if (hasVel) { s.lastVx = vx; s.lastVy = vy; }
     s.lastTime = now;
   }
 }
@@ -237,12 +265,22 @@ export function tickEntityDeadReckon(nowSec) {
  * 最短路径 heading lerp。state 字段布局与 _dr 一致。
  */
 function _advanceState(s, dt, now) {
-  // 1. 用 last speed 外推 target（真 dead reckoning）。
+  // 1. 外推 target（真 dead reckoning）。
   if (s.lastTime > 0) {
     var elapsed = now - s.lastTime;
     if (elapsed > 2.0) elapsed = 2.0; // cap staleness
-    s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
-    s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
+    if (s.hasVel) {
+      // 世界系速度外推：step_bicycle 的 vx/vy 是车辆中心速度，含绕后轴的
+      // 切向分量 half_wb·yaw_rate·(-sin h, cos h)。只用 speed·(cos,sin)
+      // 会在掉头/急转弯时丢掉 ~34% 的横向速度 → 中心横向漂移 + 车身旋转
+      // 解耦 = "车屁股横移"。vx/vy 由后端直接发布，无需前端猜半轴距。
+      s.targetX = s.lastX + s.lastVx * elapsed;
+      s.targetZ = s.lastZ + s.lastVy * elapsed;
+    } else {
+      // 回退：无 vx/vy（旧 payload / vehicle-only 路径）时沿 lastHeading 直线外推。
+      s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
+      s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
+    }
     s.targetHeading = s.lastHeading;
   }
 

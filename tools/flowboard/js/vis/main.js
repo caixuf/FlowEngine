@@ -59,7 +59,7 @@ export function init3DScene(canvas) {
 
   // 检查 Three.js 是否可用
   if (typeof THREE === 'undefined') {
-    _showInitError('Three.js not loaded. Check network /tools/three.min.js');
+    _showInitError('Three.js 未加载，请检查网络连接 /tools/three.min.js');
     return null;
   }
 
@@ -69,7 +69,7 @@ export function init3DScene(canvas) {
     _renderer = createRenderer(canvas);
   } catch (err) {
     console.error('[vis] WebGL renderer creation failed:', err);
-    _showInitError('WebGL not available: ' + err.message);
+    _showInitError('WebGL 不可用: ' + err.message);
     return null;
   }
 
@@ -88,7 +88,7 @@ export function init3DScene(canvas) {
     _bakeEnvironment(_renderer, _scene);
   } catch (err) {
     console.error('[vis] Scene init failed:', err);
-    _showInitError('Scene init failed: ' + err.message);
+    _showInitError('场景初始化失败: ' + err.message);
     return null;
   }
 

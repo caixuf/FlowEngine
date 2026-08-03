@@ -219,6 +219,19 @@ export function createSceneDirector(scene) {
       };
     }
 
+    // ── 规划轨迹（planning/trajectory → scene.trajectory_path: [[x,y,v],...]） ──
+    if (frame.trajectory_path && Array.isArray(frame.trajectory_path)) {
+      // 校验每个点是 [x, y, v] 三元组且 x/y 为有限数
+      const valid = frame.trajectory_path.every(p =>
+        Array.isArray(p) && p.length >= 2 &&
+        typeof p[0] === 'number' && isFinite(p[0]) &&
+        typeof p[1] === 'number' && isFinite(p[1])
+      );
+      store.trajectoryPath = valid ? frame.trajectory_path : null;
+    } else {
+      store.trajectoryPath = null;
+    }
+
     if (frame.entities !== undefined && !skipEntities) {
       /* P2-7 前端 invariant：scene.entities 的 (type, id) 必须全局唯一。
        *
@@ -271,8 +284,10 @@ export function createSceneDirector(scene) {
         };
         /* 流畅专题：把真值喂进多实体 dead reckon Map。tickAnimation 每帧
          * 会用平滑后的 x/y/heading/speed 覆盖上面的真值，让 NPC 在 SSE
-         * 5Hz 离散帧之间平滑插值，不再每帧 snap 跳变。 */
-        updateEntityDeadReckon(entityDrKey(ent), ent.x, ent.y, ent.speed, ent.heading);
+         * 5Hz 离散帧之间平滑插值，不再每帧 snap 跳变。
+         * vx/vy（世界系，含切向分量）：转弯/掉头时只用 speed·(cos,sin) 外推
+         * 会丢 ~34% 横向速度导致车体横移。 */
+        updateEntityDeadReckon(entityDrKey(ent), ent.x, ent.y, ent.speed, ent.heading, ent.vx, ent.vy);
         return ent;
       });
       /* 清理消失的 NPC，防止 Map 无限增长。 */

@@ -102,9 +102,9 @@ export function updateCharts(data) {
     });
   }
 
-  drawChart('ch-rate', 'tt-rate', chartHistory.rate, '#58a6ff', 'Pub Rate' + suf, 'msg/s');
-  drawChart('ch-lat', 'tt-lat', chartHistory.latency, '#d29922', 'Latency' + suf, 'µs');
-  drawChart('ch-frames', 'tt-frames', chartHistory.frames, '#3fb950', 'Deliveries' + suf, 'msg/s');
+  drawChart('ch-rate', 'tt-rate', chartHistory.rate, '#58a6ff', '发布速率' + suf, 'msg/s');
+  drawChart('ch-lat', 'tt-lat', chartHistory.latency, '#d29922', '延迟' + suf, 'µs');
+  drawChart('ch-frames', 'tt-frames', chartHistory.frames, '#3fb950', '投递速率' + suf, 'msg/s');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -128,7 +128,7 @@ function drawChart(canvasId, tooltipId, data, color, title, unit) {
   ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   if (!data || data.length < 2) {
     ctx.fillStyle = '#30363d'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
-    ctx.fillText('Waiting for data...', W / 2, H / 2);
+    ctx.fillText('等待数据...', W / 2, H / 2);
     ctx.fillStyle = '#8b949e'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'left';
     ctx.fillText(title, pad.l, pad.t - 10);
     return;
@@ -228,7 +228,7 @@ function populateTopicSelector() {
   var exist = [];
   for (var i = 1; i < sel.options.length; i++) exist.push(sel.options[i].value);
   if (exist.join(',') === topics.join(',')) return;
-  sel.innerHTML = '<option value="">All Topics</option>';
+  sel.innerHTML = '<option value="">全部话题</option>';
   topics.forEach(function(n) {
     var o = document.createElement('option');
     o.value = n;

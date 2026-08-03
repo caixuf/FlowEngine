@@ -111,9 +111,9 @@ function _set3DStaleMessage(show, text) {
   el.style.display = '';
   el.style.color = '#d29922';
   el.innerHTML = '<div style="font-size:32px;margin-bottom:10px">...</div>' +
-    '<div style="color:#d29922;font-size:14px;font-weight:600;margin-bottom:6px">Waiting for data...</div>' +
+    '<div style="color:#d29922;font-size:14px;font-weight:600;margin-bottom:6px">等待数据...</div>' +
     '<div style="color:#8b949e;font-size:11px;font-family:monospace;line-height:1.5;max-width:340px;word-break:break-all">' +
-    (text || 'No message from server for a few seconds.') + '</div>';
+    (text || '已有几秒未收到服务器数据。') + '</div>';
 }
 
 function _markDataFresh() {
@@ -124,22 +124,22 @@ function _markDataFresh() {
 function _checkDataStale() {
   var age = performance.now() - _lastDataTime;
   if (_lastDataTime > 0 && age > _staleThreshold) {
-    setConnStatus('warn', '● stale ' + Math.round(age / 1000) + 's');
-    _set3DStaleMessage(true, 'No data for ' + Math.round(age / 1000) + 's');
+    setConnStatus('warn', '● 超时 ' + Math.round(age / 1000) + '秒');
+    _set3DStaleMessage(true, '已 ' + Math.round(age / 1000) + ' 秒未收到数据');
   }
 }
 
 function applyLiveStatus(d) {
   _markDataFresh();
   var wm = document.getElementById('demo-watermark');
-  if (!d || typeof d !== 'object') { setConnStatus('live','● live'); if (wm) wm.style.display='none'; return; }
-  if (d.source === 'demo') { setConnStatus('live','● demo'); if (wm) wm.style.display=''; return; }
+  if (!d || typeof d !== 'object') { setConnStatus('live','● 已连接'); if (wm) wm.style.display='none'; return; }
+  if (d.source === 'demo') { setConnStatus('live','● 演示模式'); if (wm) wm.style.display=''; return; }
   if (wm) wm.style.display='none';
   if (d.stale === true) {
-    var age = (typeof d.age_sec === 'number') ? (' '+Math.round(d.age_sec)+'s') : '';
-    setConnStatus('warn','● stale'+age);
+    var age = (typeof d.age_sec === 'number') ? (' '+Math.round(d.age_sec)+'秒') : '';
+    setConnStatus('warn','● 超时'+age);
   } else {
-    setConnStatus('live','● live');
+    setConnStatus('live','● 已连接');
   }
 }
 
@@ -234,7 +234,7 @@ function updateTopo(data) {
   if (msg) msg.style.display = 'none';
 
   if (typeof d3 === 'undefined') {
-    el.innerHTML = '<div style="padding:20px;color:#f85149">D3.js not loaded</div>';
+    el.innerHTML = '<div style="padding:20px;color:#f85149">D3.js 未加载</div>';
     return;
   }
 
@@ -512,7 +512,7 @@ function doSimulate() {
     ]
   };
   updateAll();
-  setConnStatus('live','● demo');
+  setConnStatus('live','● 演示模式');
   var wm = document.getElementById('demo-watermark');
   if (wm) wm.style.display = '';
   document.getElementById('vehicle-card').style.display = '';
@@ -527,7 +527,7 @@ function startSSE() {
   if (sseRenewTimer) { clearTimeout(sseRenewTimer); sseRenewTimer = null; }
   if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
 
-  setConnStatus('warn', '● connecting');
+  setConnStatus('warn', '● 连接中...');
   eventSource = new EventSource(serverUrl+'/api/stream');
 
   // Seamless renewal: server caps each SSE stream at 300s.
@@ -564,7 +564,7 @@ function startSSE() {
   };
 
   eventSource.onerror = function() {
-    setConnStatus('warn','● retry');
+    setConnStatus('warn','● 重连中...');
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (sseRenewTimer) { clearTimeout(sseRenewTimer); sseRenewTimer = null; }
     if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
@@ -573,7 +573,7 @@ function startSSE() {
   };
 
   eventSource.onopen = function() {
-    setConnStatus('live','● live');
+    setConnStatus('live','● 已连接');
     _markDataFresh();
     _reconnectDelay = 2000;
     connectRetries = 0;
@@ -582,7 +582,7 @@ function startSSE() {
 
 function tryReconnect() {
   if (paused) { reconnectTimer = setTimeout(tryReconnect, _reconnectDelay); return; }
-  setConnStatus('warn','● retry');
+  setConnStatus('warn','● 重连中...');
   fetch(serverUrl+'/api/topology')
     .then(function(r) { return r.json(); })
     .then(function(d) {
@@ -594,9 +594,8 @@ function tryReconnect() {
       startSSE();
     })
     .catch(function() {
-      // 指数退避：2s -> 4s -> 8s ... 最大 30s，减轻 server 压力
       _reconnectDelay = Math.min(_reconnectDelay * 2, _maxReconnectDelay);
-      setConnStatus('warn','● retry ('+Math.round(_reconnectDelay/1000)+'s)');
+      setConnStatus('warn','● 重连 ('+Math.round(_reconnectDelay/1000)+'秒后)');
       reconnectTimer = setTimeout(tryReconnect, _reconnectDelay);
     });
 }
@@ -607,7 +606,7 @@ async function doConnect() {
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (_dataStaleTimer) { clearInterval(_dataStaleTimer); _dataStaleTimer = null; }
-  setConnStatus('warn', '● connecting');
+  setConnStatus('warn', '● 连接中...');
   try {
     // 并行：/api/topology + startSSE 同时发，不串行等
     var r = await fetch(serverUrl+'/api/topology');
@@ -621,12 +620,11 @@ async function doConnect() {
   } catch(err) {
     connectRetries++;
     if (connectRetries <= 3) {
-      // 指数退避：250ms → 500ms → 1000ms（localhost 冷启动 <0.5s 命中）
       var delay = 250 * Math.pow(2, connectRetries - 1);
-      setConnStatus('warn','● retry ('+connectRetries+'/3)');
+      setConnStatus('warn','● 重试 ('+connectRetries+'/3)');
       reconnectTimer = setTimeout(doConnect, delay);
     } else {
-      setConnStatus('dead','● offline');
+      setConnStatus('dead','● 离线');
       doSimulate();
     }
   }
@@ -634,7 +632,7 @@ async function doConnect() {
 
 function doPause() {
   paused = !paused;
-  document.getElementById('pause-btn').textContent = paused ? '▶ Resume' : '⏯ Pause';
+  document.getElementById('pause-btn').textContent = paused ? '▶ 继续' : '⏯ 暂停';
 }
 
 function clearFrames() {
@@ -716,10 +714,10 @@ function updateMetrics() {
   var bc = document.getElementById('bus-card');
   if ((b.dropped||0) > 0) {
     bc.classList.add('alert');
-    document.getElementById('m-drop').parentElement.querySelector('.lbl').textContent = '⚠ DROPPED';
+    document.getElementById('m-drop').parentElement.querySelector('.lbl').textContent = '⚠ 丢包';
   } else {
     bc.classList.remove('alert');
-    document.getElementById('m-drop').parentElement.querySelector('.lbl').textContent = 'Dropped';
+    document.getElementById('m-drop').parentElement.querySelector('.lbl').textContent = '丢弃';
   }
 
   // Vehicle
@@ -738,7 +736,7 @@ function updateMetrics() {
     setText('v-mode', driverMode);
     setStyle('v-mode', 'color', modeColors[modeTop] || '#bc8cff');
     var routeLane = (topoData.metrics||{}).route_lane || 0;
-    setText('v-route', routeLane === 0 ? '--' : (routeLane > 0 ? '→ right' : '← left'));
+    setText('v-route', routeLane === 0 ? '--' : (routeLane > 0 ? '→ 右变道' : '← 左变道'));
     setStyle('v-route', 'color', routeLane === 0 ? '#484f58' : '#f0883e');
   } else {
     showEl('vehicle-card', false);
@@ -759,9 +757,9 @@ function updateMetrics() {
     document.getElementById('s-rss').textContent = rssMb;
     document.getElementById('s-load').textContent = (sm.load1||0).toFixed(2);
     document.getElementById('s-detail').textContent =
-      'cores '+(sm.cpu_count||0)+' · mem '+usedMb+'/'+totMb+'MB · '+
-      'load '+(sm.load1||0).toFixed(2)+'/'+(sm.load5||0).toFixed(2)+'/'+(sm.load15||0).toFixed(2)+' · '+
-      'thr '+(sm.thread_count||0)+' · disk R'+((sm.disk_read_bps||0)/1024).toFixed(0)+' W'+((sm.disk_write_bps||0)/1024).toFixed(0)+'KB/s';
+      '核心 '+(sm.cpu_count||0)+' · 内存 '+usedMb+'/'+totMb+'MB · '+
+      '负载 '+(sm.load1||0).toFixed(2)+'/'+(sm.load5||0).toFixed(2)+'/'+(sm.load15||0).toFixed(2)+' · '+
+      '线程 '+(sm.thread_count||0)+' · 磁盘 R'+((sm.disk_read_bps||0)/1024).toFixed(0)+' W'+((sm.disk_write_bps||0)/1024).toFixed(0)+'KB/s';
 
     // Threads view
     var thrArr = (sm.threads||[]);
@@ -783,7 +781,7 @@ function updateMetrics() {
             '<div class="th-bar"><div class="th-bar-fill" style="width:'+barPct+'%;background:'+barColor+'"></div></div>'+
             '</div>';
         }).join('')
-      : '<span style="color:#484f58">No thread data</span>';
+      : '<span style="color:#484f58">暂无线程数据</span>';
   } else {
     document.getElementById('sysmon-card').style.display = 'none';
   }
@@ -793,8 +791,8 @@ function updateMetrics() {
   document.getElementById('node-status').innerHTML = ns.map(function(n) {
     return '<div class="stat-row"><span>'+(n.name||'?')+'</span>'+
       '<span style="color:'+(n.alive===false?'#f85149':'#3fb950')+';cursor:pointer" onclick="showNodeDetail(\''+(n.name||'')+'\')">'+
-      (n.alive===false?'💀 Dead':'🟢 PID '+(n.pid||'—'))+'</span></div>';
-  }).join('') || '<span style="color:#484f58">No nodes</span>';
+      (n.alive===false?'💀 离线':'🟢 PID '+(n.pid||'—'))+'</span></div>';
+  }).join('') || '<span style="color:#484f58">暂无节点</span>';
 }
 
 function updateFrames() {
@@ -813,12 +811,12 @@ function updateFrames() {
   document.getElementById('frames').innerHTML = frames.slice(-60).reverse().map(function(f) {
     return '<div class="frame-line">'+
       '<span style="color:#484f58;min-width:72px">'+f.ts+'</span>'+
-      '<span style="color:#58a6ff;min-width:60px">pub:'+f.pub+'</span>'+
-      '<span style="min-width:60px">del:'+f.del+'</span>'+
-      '<span style="color:'+(f.drop?'#f85149':'#484f58')+';min-width:50px">drop:'+f.drop+'</span>'+
-      '<span style="color:#d29922;min-width:60px">lat:'+f.lat+'µs</span>'+
-      '<span style="color:#bc8cff;min-width:70px">mode:'+f.mode+'</span></div>';
-  }).join('') || '<span style="color:#484f58">Waiting...</span>';
+      '<span style="color:#58a6ff;min-width:60px">发:'+f.pub+'</span>'+
+      '<span style="min-width:60px">收:'+f.del+'</span>'+
+      '<span style="color:'+(f.drop?'#f85149':'#484f58')+';min-width:50px">丢:'+f.drop+'</span>'+
+      '<span style="color:#d29922;min-width:60px">延:'+f.lat+'µs</span>'+
+      '<span style="color:#bc8cff;min-width:70px">模式:'+f.mode+'</span></div>';
+  }).join('') || '<span style="color:#484f58">等待数据...</span>';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -867,18 +865,18 @@ function updateTopicStats() {
   ts = ts.filter(function(t) { return topicMatches(t.topic||t.name||''); });
   var container = document.getElementById('topic-stats');
   if (!ts.length) {
-    container.innerHTML = '<span style="color:#484f58">Waiting for per-topic data...</span>';
+    container.innerHTML = '<span style="color:#484f58">等待话题数据...</span>';
     _tsRowCache = {};
     return;
   }
   var tbody = _ensureTable('topic-stats', [
-    {label:'Topic',style:'text-align:left;padding:2px 3px'},
+    {label:'话题',style:'text-align:left;padding:2px 3px'},
     {label:'QoS',style:'text-align:center;padding:2px 3px'},
-    {label:'Pub',style:'text-align:right;padding:2px 3px'},
-    {label:'Del',style:'text-align:right;padding:2px 3px'},
-    {label:'Drop',style:'text-align:right;padding:2px 3px'},
-    {label:'Lat',style:'text-align:right;padding:2px 3px'},
-    {label:'DL',style:'text-align:right;padding:2px 3px'},
+    {label:'发布',style:'text-align:right;padding:2px 3px'},
+    {label:'接收',style:'text-align:right;padding:2px 3px'},
+    {label:'丢包',style:'text-align:right;padding:2px 3px'},
+    {label:'延迟',style:'text-align:right;padding:2px 3px'},
+    {label:'超时',style:'text-align:right;padding:2px 3px'},
     {label:'Hz',style:'text-align:right;padding:2px 3px'}
   ]);
   if (!tbody) return;
@@ -953,16 +951,16 @@ function updateProcessTopics() {
     });
   }
   if (!endpoints.length) {
-    document.getElementById('process-topics').innerHTML = '<span class="muted">Waiting for registry...</span>';
+    document.getElementById('process-topics').innerHTML = '<span class="muted">等待注册数据...</span>';
     _ptRowCache = {};
     return;
   }
   var tbody = _ensureTable('process-topics', [
-    {label:'Process',style:'text-align:left;padding:3px 4px'},
-    {label:'Role',style:'text-align:left;padding:3px 4px'},
-    {label:'Topic',style:'text-align:left;padding:3px 4px'},
-    {label:'Type',style:'text-align:left;padding:3px 4px'},
-    {label:'Freq',style:'text-align:right;padding:3px 4px'}
+    {label:'进程',style:'text-align:left;padding:3px 4px'},
+    {label:'角色',style:'text-align:left;padding:3px 4px'},
+    {label:'话题',style:'text-align:left;padding:3px 4px'},
+    {label:'类型ID',style:'text-align:left;padding:3px 4px'},
+    {label:'频率',style:'text-align:right;padding:3px 4px'}
   ]);
   if (!tbody) return;
 
@@ -1001,7 +999,8 @@ function updateProcessTopics() {
     }
     cache.cells[0].textContent = e.node||'?';
     cache.roleSpan.className = roleClass(role);
-    cache.roleSpan.textContent = role;
+    var roleLabel = {pub:'发布',sub:'订阅',pubsub:'发/订',unknown:'—'}[role] || role;
+    cache.roleSpan.textContent = roleLabel;
     cache.cells[2].textContent = e.topic||'?';
     cache.cells[3].textContent = e.type_id||'—';
     cache.cells[4].textContent = freq;
@@ -1020,22 +1019,23 @@ function showNodeDetail(name) {
   if (!n) return;
   document.getElementById('det-name').textContent = n.name;
   var html = '<div class="stat-row"><span class="label">PID</span><span class="value">'+(n.pid||'—')+'</span></div>';
-  html += '<div class="stat-row"><span class="label">Status</span><span class="value" style="color:'+(n.alive===false?'#f85149':'#3fb950')+'">'+(n.alive===false?'Dead':'Alive')+'</span></div>';
-  if (n.description) html += '<div class="stat-row"><span class="label">Desc</span><span class="value">'+n.description+'</span></div>';
-  if (n.plugin) html += '<div class="stat-row"><span class="label">Plugin</span><span class="value mono" style="font-size:10px">'+n.plugin+'</span></div>';
-  html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">Topics</div>';
+  html += '<div class="stat-row"><span class="label">状态</span><span class="value" style="color:'+(n.alive===false?'#f85149':'#3fb950')+'">'+(n.alive===false?'离线':'运行中')+'</span></div>';
+  if (n.description) html += '<div class="stat-row"><span class="label">描述</span><span class="value">'+n.description+'</span></div>';
+  if (n.plugin) html += '<div class="stat-row"><span class="label">插件</span><span class="value mono" style="font-size:10px">'+n.plugin+'</span></div>';
+  html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">话题列表</div>';
   (n.topics||[]).forEach(function(t) {
     var role = endpointRoleFromCaps(t);
-    html += '<div class="stat-row"><span style="color:#58a6ff;font-size:11px">'+(t.topic||t.name)+'</span><span><span class="'+roleClass(role)+'">'+role+'</span> '+(Number(t.freq||0)>0?Number(t.freq).toFixed(1)+'Hz':'')+'</span></div>';
+    var roleLabel = {pub:'发布',sub:'订阅',pubsub:'发/订',unknown:'—'}[role] || role;
+    html += '<div class="stat-row"><span style="color:#58a6ff;font-size:11px">'+(t.topic||t.name)+'</span><span><span class="'+roleClass(role)+'">'+roleLabel+'</span> '+(Number(t.freq||0)>0?Number(t.freq).toFixed(1)+'Hz':'')+'</span></div>';
   });
   // Per-topic live stats for this node
   var ts = (topoData.metrics||{}).topics||[];
   var nodeTopics = (n.topics||[]).map(function(t) { return t.topic||t.name; });
   var matchedTs = ts.filter(function(t) { return nodeTopics.indexOf(t.topic||t.name) >= 0; });
   if (matchedTs.length) {
-    html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">Live Stats</div>';
+    html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">实时统计</div>';
     matchedTs.forEach(function(t) {
-      html += '<div class="stat-row"><span style="font-size:10px">'+((t.topic||t.name).split('/').pop())+'</span><span style="font-size:10px">pub:'+(t.pub||0)+' del:'+(t.del||0)+' lat:'+(t.lat_us||0)+'µs</span></div>';
+      html += '<div class="stat-row"><span style="font-size:10px">'+((t.topic||t.name).split('/').pop())+'</span><span style="font-size:10px">发:'+(t.pub||0)+' 收:'+(t.del||0)+' 延:'+(t.lat_us||0)+'µs</span></div>';
     });
   }
   // Thread resources for this node
@@ -1043,7 +1043,7 @@ function showNodeDetail(name) {
   var thrArr = smThr.threads||[];
   var matchThreads = thrArr.filter(function(th) { return th.name && th.name.indexOf(n.name) >= 0; });
   if (matchThreads.length) {
-    html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">Thread Resources</div>';
+    html += '<div style="margin-top:8px;font-weight:600;color:#8b949e;font-size:10px">线程资源</div>';
     matchThreads.forEach(function(th) {
       var cpuColor = th.cpu_pct > 50 ? '#f85149' : (th.cpu_pct > 20 ? '#d29922' : '#3fb950');
       var stateIcon = th.state === 'R' ? '🟢' : (th.state === 'S' ? '💤' : '⏸');
@@ -1084,7 +1084,7 @@ function exportPNG() {
     a.download = 'topology.png';
     a.href = canvas.toDataURL();
     a.click();
-    toast('PNG exported');
+    toast('PNG 已导出');
   };
   img.src = 'data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(data)));
   document.getElementById('export-menu').classList.remove('show');
@@ -1100,7 +1100,7 @@ function exportCSV() {
   a.download = 'qos.csv';
   a.href = 'data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
   a.click();
-  toast('CSV exported');
+  toast('CSV 已导出');
   document.getElementById('export-menu').classList.remove('show');
 }
 
@@ -1144,7 +1144,7 @@ async function refreshTrainingStatus() {
     var d = await r.json();
     renderTrainingStatus(d);
   } catch(err) {
-    document.getElementById('train-status').textContent = 'offline';
+    document.getElementById('train-status').textContent = '离线';
     document.getElementById('train-status').style.color = '#f85149';
   }
 }
@@ -1152,18 +1152,20 @@ async function refreshTrainingStatus() {
 function renderTrainingStatus(d) {
   var job = d.job || {}, models = d.models || [];
   var st = document.getElementById('train-status'), modelEl = document.getElementById('train-model');
-  st.textContent = job.running ? 'running' : (job.returncode===0 ? 'done' : (job.error ? 'failed' : 'idle'));
+  var statusMap = {running:'训练中', done:'已完成', failed:'失败', idle:'空闲'};
+  var statusKey = job.running ? 'running' : (job.returncode===0 ? 'done' : (job.error ? 'failed' : 'idle'));
+  st.textContent = statusMap[statusKey] || '空闲';
   st.style.color = job.running ? '#d29922' : (job.returncode===0 ? '#3fb950' : (job.error ? '#f85149' : '#58a6ff'));
   modelEl.textContent = job.model_name || '—';
   var log = (job.log_tail||[]).join('\n');
   var logEl = document.getElementById('train-log');
-  if (logEl) { logEl.textContent = log || 'No training job yet.'; logEl.scrollTop = logEl.scrollHeight; }
+  if (logEl) { logEl.textContent = log || '暂无训练任务。'; logEl.scrollTop = logEl.scrollHeight; }
   renderModelList(models);
 
   var init = document.getElementById('train-init');
   if (init) {
     var cur = init.value;
-    init.innerHTML = '<option value="">none</option>'+
+    init.innerHTML = '<option value="">无 (从头训练)</option>'+
       models.filter(function(m) { return m.backend === 'torch'; })
         .map(function(m) { return '<option value="'+m.name+'">'+m.name+'</option>'; }).join('');
     init.value = cur;
@@ -1176,12 +1178,12 @@ function renderTrainingStatus(d) {
 function renderModelList(models) {
   var el = document.getElementById('train-models');
   if (!el) return;
-  if (!models.length) { el.innerHTML = '<span class="muted">No model artifacts yet</span>'; return; }
+  if (!models.length) { el.innerHTML = '<span class="muted">暂无模型产物</span>'; return; }
   el.innerHTML = models.slice().sort(function(a,b) { return (b.mtime||0) - (a.mtime||0); }).map(function(m) {
     var metric = m.metrics||{};
     var loss = metric.mse != null ? (' mse '+Number(metric.mse).toFixed(4)) : (metric.mae != null ? (' mae '+Number(metric.mae).toFixed(4)) : '');
-    var promote = m.promotable ? '<button onclick="promoteTrainingModel(\''+m.name+'\')">Promote</button>' : '';
-    return '<div class="model-row"><span><b style="color:#58a6ff">'+m.name+'</b><br><span class="muted">'+m.backend+' · samples '+(m.sample_count||'?')+loss+'</span></span><span>'+promote+'</span></div>';
+    var promote = m.promotable ? '<button onclick="promoteTrainingModel(\''+m.name+'\')">上线</button>' : '';
+    return '<div class="model-row"><span><b style="color:#58a6ff">'+m.name+'</b><br><span class="muted">'+m.backend+' · 样本 '+(m.sample_count||'?')+loss+'</span></span><span>'+promote+'</span></div>';
   }).join('');
 }
 
@@ -1206,12 +1208,12 @@ async function startTraining() {
       body: JSON.stringify(payload)
     });
     var d = await r.json();
-    if (!d.ok) { toast(d.error||'training failed to start'); return; }
-    toast('training started');
+    if (!d.ok) { toast(d.error||'训练启动失败'); return; }
+    toast('训练已启动');
     renderTrainingStatus({job:d.job, models:[]});
     refreshTrainingStatus();
   } catch(err) {
-    toast('training API offline');
+    toast('训练接口离线');
   }
 }
 
@@ -1223,10 +1225,10 @@ async function promoteTrainingModel(name) {
       body: JSON.stringify({name: name})
     });
     var d = await r.json();
-    toast(d.ok ? 'promoted '+name : (d.output||d.error||'promote failed'));
+    toast(d.ok ? '已上线 '+name : (d.output||d.error||'上线失败'));
     refreshTrainingStatus();
   } catch(err) {
-    toast('promote API offline');
+    toast('上线接口离线');
   }
 }
 
@@ -1238,12 +1240,12 @@ function _renderOpsJob(idPrefix, job) {
   var stateEl = document.getElementById(idPrefix + '-state');
   var logEl = document.getElementById(idPrefix + '-log');
   if (stateEl) {
-    stateEl.textContent = job && job.running ? ('running (pid '+(job.pid||'?')+')') : 'idle';
+    stateEl.textContent = job && job.running ? ('运行中 (pid '+(job.pid||'?')+')') : '空闲';
     stateEl.style.color = job && job.running ? '#d29922' : '#58a6ff';
   }
   if (logEl) {
     var lines = (job && job.log_tail) || [];
-    logEl.textContent = lines.length ? lines.join('\n') : ('ops-bag' === idPrefix ? 'No bag replay job yet.' : 'No learning-loop job yet.');
+    logEl.textContent = lines.length ? lines.join('\n') : ('ops-bag' === idPrefix ? '暂无 bag 回灌任务。' : '暂无学习闭环任务。');
     logEl.scrollTop = logEl.scrollHeight;
   }
 }
@@ -1271,14 +1273,14 @@ async function refreshOpsStatus() {
     var r = await fetch(serverUrl + '/api/ops/status');
     var d = await r.json();
     if (!d.ok) {
-      setOpsOutput(d.error || 'ops status failed');
+      setOpsOutput(d.error || '获取运维状态失败');
       return;
     }
     var jobs = d.jobs || {};
     _renderOpsJob('ops-bag', jobs.bag_replay || {});
     _renderOpsJob('ops-learning', jobs.learning_loop || {});
   } catch(err) {
-    setOpsOutput('ops API offline');
+    setOpsOutput('运维接口离线');
   }
 }
 
@@ -1292,17 +1294,17 @@ async function runOpsAction(action, extra) {
     });
     var d = await r.json();
     if (!d.ok) {
-      setOpsOutput((d.error || 'operation failed') + (d.output ? '\n' + d.output : ''));
+      setOpsOutput((d.error || '操作失败') + (d.output ? '\n' + d.output : ''));
       toast('操作失败');
     } else {
-      var msg = d.message || d.output || (action + ' ok');
+      var msg = d.message || d.output || (action + ' 执行成功');
       setOpsOutput(msg);
       toast('操作已提交');
     }
     refreshOpsStatus();
   } catch(err) {
-    setOpsOutput('ops API offline');
-    toast('ops API offline');
+    setOpsOutput('运维接口离线');
+    toast('运维接口离线');
   }
 }
 
@@ -1355,11 +1357,15 @@ function sync2DTarget() {
   // updateDeadReckon() dedups heartbeat frames and snaps the first
   // sample, so calling it every tick is safe.
   if (scn && scn.ego) {
+    // vx/vy（世界系中心速度，含绕后轴切向分量）让死推算在掉头/急转弯时
+    // 保持正确——只用 speed·(cos,sin) 外推会丢切向项导致车尾横移。
     updateDeadReckon(
       scn.ego.x || 0,
       scn.ego.y || 0,
       scn.ego.speed || v.speed || 0,
-      scn.ego.heading || 0
+      scn.ego.heading || 0,
+      scn.ego.vx,
+      scn.ego.vy
     );
   } else if (v) {
     // Vehicle-only payload has no heading → derive from GPS history.

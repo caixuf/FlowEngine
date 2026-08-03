@@ -9,20 +9,27 @@
  * 所有坐标使用 worldToThree 映射，零魔法数。
  */
 
-import { worldToThree, forwardENU, tangentToNormal } from '../math/Coord.js';
+import { worldToThree, forwardENU } from '../math/Coord.js';
 
-// ── 角标框几何体（共享，每帧更新位置） ──
-const CORNER_LEN = 0.8;  // 角标臂长（米）
-const BOX_COLOR = 0x00ffaa;  // 科技青绿（与轨迹湛蓝呼应）
+// ── 角标框几何体常量（模块级，供 _updateBrackets 使用） ──
+const CORNER_LEN = 0.6;  // 角标臂长（米），稍短更精致
+const BOX_COLOR = 0x00ff88;  // 科技青绿
 const SWEEP_SEGMENTS = 32;
 const SWEEP_RADIUS = 80;  // 米
+// 每实体几何数据大小：每个角（top/bottom）3 segments（1 vertical + 2 horizontal）
+const SEGMENTS_PER_CORNER = 3;
+const VERTS_PER_SEGMENT = 2;
+const COMPS_PER_VERT = 3;
+const FLOATS_PER_CORNER = SEGMENTS_PER_CORNER * VERTS_PER_SEGMENT * COMPS_PER_VERT;  // 18
+const FLOATS_PER_VEDGE = 2 * 3;       // 6
+const CORNERS = 8;                    // 4 top + 4 bottom
+const VEDGES = 4;
+const FLOATS_PER_BOX = CORNERS * FLOATS_PER_CORNER + VEDGES * FLOATS_PER_VEDGE;  // 8*18+4*6 = 168
+const VERTICES_PER_BOX = CORNERS * SEGMENTS_PER_CORNER * VERTS_PER_SEGMENT + VEDGES * 2; // 8*6+8 = 56
+const MAX_ENTITIES = 32;
 
 export function createPerceptionView(scene) {
   // ── 角标框 ──
-  // 每实体 4 个 L 形角，每角 2 个线段 → 每实体 8 顶点对
-  // 最大同时跟踪 32 实体
-  const MAX_ENTITIES = 32;
-  const FLOATS_PER_BOX = 8 * 3 * 2;  // 8 线段 × 2 端点 × 3 分量
   const boxPositions = new Float32Array(MAX_ENTITIES * FLOATS_PER_BOX);
   const boxGeo = new THREE.BufferGeometry();
   boxGeo.setAttribute('position', new THREE.BufferAttribute(boxPositions, 3));
@@ -30,7 +37,7 @@ export function createPerceptionView(scene) {
   const boxMat = new THREE.LineBasicMaterial({
     color: BOX_COLOR,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.9,
     depthTest: true,
     depthWrite: false,
   });
@@ -62,7 +69,7 @@ export function createPerceptionView(scene) {
   const sweepGeo = new THREE.BufferGeometry();
   sweepGeo.setAttribute('position', new THREE.BufferAttribute(sweepPositions, 3));
   const sweepMat = new THREE.MeshBasicMaterial({
-    color: 0x00ffaa,
+    color: BOX_COLOR,
     transparent: true,
     opacity: 0.06,
     side: THREE.DoubleSide,
@@ -78,9 +85,9 @@ export function createPerceptionView(scene) {
   const sweepEdgeGeo = new THREE.BufferGeometry();
   sweepEdgeGeo.setAttribute('position', new THREE.BufferAttribute(sweepEdgePositions, 3));
   const sweepEdgeMat = new THREE.LineBasicMaterial({
-    color: 0x00ffaa,
+    color: BOX_COLOR,
     transparent: true,
-    opacity: 0.30,
+    opacity: 0.25,
     depthWrite: false,
     depthTest: false,
   });
@@ -113,7 +120,7 @@ export function createPerceptionView(scene) {
     // ── 更新角标框 ──
     _updateBrackets(ego, entities, count, boxPositions);
     boxGeo.attributes.position.needsUpdate = true;
-    boxGeo.setDrawRange(0, count * 8 * 2);
+    boxGeo.setDrawRange(0, count * VERTICES_PER_BOX);
 
     // ── 更新检测射线 ──
     _updateRays(ego, entities, count, rayPositions, rayColors);
@@ -166,48 +173,82 @@ function _updateBrackets(ego, entities, count, positions) {
     const dx = ent.x - ego.x;
     const dy = ent.y - ego.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    const bi = i * 8 * 2 * 3;
+    const bi = i * FLOATS_PER_BOX;
     if (dist > 100 || dist < 2) {
-      for (let j = 0; j < 8 * 2 * 3; j++) positions[bi + j] = 0;
+      for (let j = 0; j < FLOATS_PER_BOX; j++) positions[bi + j] = 0;
       continue;
     }
 
     const halfL = (ent.length || 4.6) / 2;
     const halfW = (ent.width || 2.0) / 2;
-    const H = 1.5;
-    const cl = Math.min(0.8, Math.min(halfL, halfW) * 0.3);
-    const [cx, cy, cz] = worldToThree(ent.x, ent.y, (ent.z || 0) + H / 2);
+    // Vehicle height varies by type; default to 1.5m for cars, 2.5m for trucks, 1.8m for SUVs
+    let vehH = 1.5;
+    if (ent.type === 'truck') vehH = 2.8;
+    else if (ent.type === 'suv') vehH = 1.8;
+    else if (ent.type === 'pedestrian') vehH = 1.7;
+    const cl = Math.min(CORNER_LEN, Math.min(halfL, halfW) * 0.35);
 
-    // Coord 纯函数：车头朝向 → 前向/侧向单位向量（ENU 坐标系）
-    const [fx, fz] = forwardENU(ent.heading);     // 前向向量
-    const [sx, sz] = tangentToNormal(fx, fz);    // 侧向向量（垂直于前向）
+    // Entity center in ENU coordinates (ground plane z=0, top at z=vehH)
+    const entZ = ent.z || 0;
+    const [cx, , cz] = worldToThree(ent.x, ent.y, entZ);
+    // THREE Y = up. Ground level at cy, roof at cy + vehH
+    const cy = entZ;  // worldToThree maps ENU z → THREE y
+    const roofY = cy + vehH;
 
-    // 局部 4 个上角点（车体朝前 +X，朝左 +Y）
-    const localTops = [
-      [-halfL,  halfW],  // 后左
-      [ halfL,  halfW],  // 前左
-      [ halfL, -halfW],  // 前右
-      [-halfL, -halfW],  // 后右
+    // Coord 纯函数：车头朝向 → 前向单位向量（ENU 坐标系）
+    const [fx, fz] = forwardENU(ent.heading);     // ENU 前向 [cos(h), sin(h)]
+    // heading=0 → ENU(1,0) → THREE(1,0,0)=+X forward ✓
+    // heading=π/2(North) → ENU(0,1) → THREE(0,0,-1)=-Z forward ✓
+    const fwdX = fx, fwdZ = -fz;  // THREE 空间前向向量
+    // 侧向（左）= 前向在 XZ 平面逆时针转90°：(a,0,b) → (-b,0,a)
+    const sideX = -fwdZ, sideZ = fwdX;  // THREE 空间左向向量
+
+    // 4 corner offsets in local frame: [forward_offset, side_offset]
+    // front=+fwd, back=-fwd; left=+side, right=-side
+    const cornerOffsets = [
+      [ halfL,  halfW],  // 0: front-left
+      [ halfL, -halfW],  // 1: front-right
+      [-halfL, -halfW],  // 2: back-right
+      [-halfL,  halfW],  // 3: back-left
     ];
-    // 每个角：垂直向下 cl，水平向里 cl → 共 2 条线段
+
     let idx = 0;
-    for (const [lx, ly] of localTops) {
-      // 角点 ENU 世界坐标 = 中心 + 前向分量 + 侧向分量
-      const wx = cx + lx * fx + ly * sx;
-      const wy = cy + H;
-      const wz = cz + lx * fz + ly * sz;
-      // 垂直向下
-      positions[bi + idx++] = wx; positions[bi + idx++] = wy; positions[bi + idx++] = wz;
-      positions[bi + idx++] = wx; positions[bi + idx++] = wy - cl; positions[bi + idx++] = wz;
-      // 水平向里（沿 -lx, -ly 方向的单位向量）
-      const inDir = Math.sqrt(lx * lx + ly * ly) || 1;
-      const inLx = -lx / inDir;
-      const inLy = -ly / inDir;
-      const hwx = wx + inLx * fx * cl + inLy * sx * cl;
-      const hwy = wy;
-      const hwz = wz + inLx * fz * cl + inLy * sz * cl;
-      positions[bi + idx++] = wx; positions[bi + idx++] = wy; positions[bi + idx++] = wz;
-      positions[bi + idx++] = hwx; positions[bi + idx++] = hwy; positions[bi + idx++] = hwz;
+    function addCorner(base3X, base3Y, base3Z, isTop) {
+      for (const [foff, soff] of cornerOffsets) {
+        const cx3 = base3X + foff * fwdX + soff * sideX;
+        const cy3 = base3Y;
+        const cz3 = base3Z + foff * fwdZ + soff * sideZ;
+
+        const inFwd = -Math.sign(foff);
+        const inSide = -Math.sign(soff);
+
+        // 垂直短臂：top 向下，bottom 向上
+        const vDir = isTop ? -1 : 1;
+        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3 + vDir * cl; positions[bi + idx++] = cz3;
+
+        // 水平沿长度方向（向内）
+        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3 + inFwd * cl * fwdX; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3 + inFwd * cl * fwdZ;
+
+        // 水平沿宽度方向（向内）
+        positions[bi + idx++] = cx3; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3;
+        positions[bi + idx++] = cx3 + inSide * cl * sideX; positions[bi + idx++] = cy3; positions[bi + idx++] = cz3 + inSide * cl * sideZ;
+      }
+    }
+
+    // Draw 4 top corners at roof level
+    addCorner(cx, roofY, cz, true);
+
+    // Draw 4 bottom corners at ground level (no vertical arm for bottom, just horizontal)
+    addCorner(cx, cy, cz, false);
+
+    // Add 4 vertical connecting edges from top corner to bottom corner
+    for (const [foff, soff] of cornerOffsets) {
+      const topX = cx + foff * fwdX + soff * sideX;
+      const topZ = cz + foff * fwdZ + soff * sideZ;
+      positions[bi + idx++] = topX; positions[bi + idx++] = roofY; positions[bi + idx++] = topZ;
+      positions[bi + idx++] = topX; positions[bi + idx++] = cy;    positions[bi + idx++] = topZ;
     }
   }
 }
@@ -268,20 +309,19 @@ function _updateSweep(ego, frame, positions, edgePositions) {
   positions[2] = ez;
   for (let i = 0; i <= SWEEP_SEGMENTS; i++) {
     const t = sweepStart + (sweepEnd - sweepStart) * (i / SWEEP_SEGMENTS);
-    const [fx, fz] = forwardENU(t);  // Coord.js 纯函数
+    const [fx, fz] = forwardENU(t);  // ENU 前向向量 [east, north]
+    // ENU(east,north) → THREE(east, -north)，所以 Z 分量 = -fz*R
     positions[(i + 1) * 3 + 0] = ex + fx * R;
     positions[(i + 1) * 3 + 1] = ey;
-    positions[(i + 1) * 3 + 2] = ez + fz * R;
+    positions[(i + 1) * 3 + 2] = ez - fz * R;
   }
 
   // 前沿线（原点 → 弧终点）
   edgePositions[0] = ex;
   edgePositions[1] = ey;
   edgePositions[2] = ez;
-  const [fxEnd, fzEnd] = forwardENU(sweepEnd);  // Coord.js 纯函数
+  const [fxEnd, fzEnd] = forwardENU(sweepEnd);
   edgePositions[3] = ex + fxEnd * R;
   edgePositions[4] = ey;
-  edgePositions[5] = ez + fzEnd * R;
+  edgePositions[5] = ez - fzEnd * R;
 }
-
-// 不再使用模块级帧计数器——使用闭包内 _frame
