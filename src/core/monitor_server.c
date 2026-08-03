@@ -832,6 +832,35 @@ static bool dispatch_request(int fd, MonitorServer* ms,
             }
             return false;
         }
+        /* POST /api/vis/health → 可视化前端 PHM 上报。
+         * 前端 PerfMonitor 每 5s POST {fps, tier, drawCalls, jank, ts}。
+         * 把可视化注册成 health 节点 "vis"，让 /api/debug/nodes 与监控系统
+         * 能感知渲染健康：掉帧（fps<30）记 stall，帧耗时记 latency，可据此
+         * 判定可视化模块是否卡死。 */
+        if (strcmp(path, "/api/vis/health") == 0) {
+            char* body = read_post_body(fd, req, req_len, 1024);
+            int fps = 0;
+            if (body) {
+                cJSON* root = cJSON_Parse(body);
+                if (root) {
+                    cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "fps");
+                    if (cJSON_IsNumber(j)) fps = (int)j->valuedouble;
+                    cJSON_Delete(root);
+                }
+                free(body);
+            }
+            health_init();   /* 激活 health 系统（幂等） */
+            health_register("vis", HEALTH_CAP_MONITOR);
+            health_heartbeat("vis");
+            if (fps > 0) {
+                uint64_t frame_us = 1000000ULL / (uint64_t)fps;  /* 每帧耗时 */
+                health_record_latency("vis", frame_us);
+                if (fps < 30) health_record_stall("vis");        /* 掉帧=卡顿 */
+            }
+            send_response(fd, "200 OK", "application/json", "{\"ok\":true}");
+            close(fd);
+            return false;
+        }
         send_response(fd, "404 Not Found", "text/plain", "not found");
         close(fd);
         return false;

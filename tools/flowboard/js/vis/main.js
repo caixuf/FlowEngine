@@ -9,10 +9,11 @@
  *            closeNPCDetail, setPerfTier } from './vis/main.js';
  */
 
-import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo, setComposerGTAOPassEnabled } from './core/Renderer.js';
+import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo, setComposerGTAOPassEnabled, setResolutionScale } from './core/Renderer.js';
 import { createCameraRig } from './core/CameraRig.js';
 import { createLighting, updateSunShadow } from './core/Lighting.js';
 import { createSkyEnv } from './core/SkyEnv.js';
+import { PerfMonitor } from './core/PerfMonitor.js';
 import { createSceneDirector } from './director/SceneDirector.js';
 import { clearCache } from './core/AssetFactory.js';
 import { initModels } from './view/VehicleView.js';
@@ -38,13 +39,12 @@ let _minimap = null;
  *   high   — composer 全开（GTAO+Bloom+SMAA），阴影 4096，DPR min(dpr,1.5)
  *   medium — composer 开但关 GTAO（最贵的一趟），阴影 2048，DPR min(dpr,1.5)
  *   low    — 禁用 composer 直接渲染，关阴影，DPR 1
- * 自动降级：渲染循环采样 FPS，连续多帧低于阈值自动降档（high→medium→low），
- * 直到帧率恢复。用户手动 setPerfTier 设档后暂停自动降级，避免被覆盖。 */
+ *   ultra  — 同 low，再压低渲染分辨率（0.5x）由 CSS 放大，最后兜底
+ * 自动降级由独立 watchdog（PerfMonitor，setInterval 不依赖 rAF）驱动，
+ * 卡死时也能采样降级。手动 setPerfTier 设档后暂停自动降级。 */
 let _perfTier = 'medium';
-let _autoTier = true;          // 是否允许自动降级（手动设档后置 false）
-let _fpsAccum = 0;             // 累计帧数
-let _fpsAccumStart = 0;        // 采样窗口起点
-let _autoTierCooldown = 0;     // 自动降级冷却计数（避免抖动）
+let _perfMonitor = null;
+let _lastReportTs = 0;   // 上报节流：每 5s 最多上报一次可视化健康
 
 /** 暴露 scene 对象（app.js 直接 import scene3d）*/
 export let scene3d = null;
@@ -117,6 +117,16 @@ export function init3DScene(canvas) {
 
   // 应用默认性能档位（medium：关 GTAO、阴影 2048、DPR≤1.5）
   _applyPerfTier(_perfTier);
+
+  // 独立 PHM watchdog：setInterval 驱动，不依赖 rAF（GPU 卡死也能降级）
+  _perfMonitor = new PerfMonitor({
+    windowMs: 1000,
+    lowFps: 30,
+    downgradeWindows: 3,
+    onDowngrade: _onPhmDowngrade,
+    onReport: _onPhmReport,
+  });
+  _perfMonitor.start();
 
   // 小地图 HUD（叠层 2D canvas，右上角）
   const scene3dContainer = document.getElementById('scene3d');
@@ -206,7 +216,6 @@ let _lastRenderErr = null;
 function _startRenderLoop() {
   let _lastFrameTime = 0;
   const _TARGET_FPS_MS = 1000 / 60; // 60fps 目标帧间隔
-  _fpsAccumStart = performance.now();  // 初始化 FPS 采样窗口起点
 
   function loop(timestamp) {
     requestAnimationFrame(loop);
@@ -242,14 +251,15 @@ function _startRenderLoop() {
       // 天空穹顶跟随相机 + 雨粒子动画
       _skyEnv.tick(1 / 60);
 
-      // low 档：禁用 composer 直接渲染（旁路后处理管线，GPU 压力骤降）
-      if (_perfTier === 'low') {
+      // low/ultra 档：禁用 composer 直接渲染（旁路后处理管线，GPU 压力骤降）
+      const noPost = _perfTier === 'low' || _perfTier === 'ultra';
+      if (noPost) {
         _renderer.render(_scene, _cameraRig.camera);
       } else {
         renderFrame(_renderer, _composer, _scene, _cameraRig.camera);
       }
       _frameCount++;
-      _fpsAccum++;   // 累积帧数供自动降级采样
+      if (_perfMonitor) _perfMonitor.tickFrame();   // 供给 PHM watchdog 采样
 
       // 小地图 HUD（2D 叠层，每帧绘制）
       if (_minimap) _minimap.draw(store);
@@ -258,9 +268,6 @@ function _startRenderLoop() {
       if (_statsView) {
         _statsView.update(_renderer);
       }
-
-      // 自动降级判断（每 500ms 采样一次，低帧率自动降档）
-      _autoDowngrade();
     } catch (err) {
       console.error('[vis] render loop error:', err);
       _lastRenderErr = err;
@@ -474,23 +481,30 @@ export function resetMapView() {
 
 /** 设置性能档位 */
 export function setPerfTier(tier) {
-  if (!tier || !['low', 'medium', 'high'].includes(tier)) return;
+  if (!tier || !['low', 'medium', 'high', 'ultra'].includes(tier)) return;
   _perfTier = tier;
-  _autoTier = false;   // 手动设档后暂停自动降级，避免被覆盖
+  if (_perfMonitor) _perfMonitor.pause();   // 手动设档后暂停自动降级，避免被覆盖
   _applyPerfTier(tier);
+
+  /* 手动设档后重置分辨率，避免曾降到 ultra 的低分辨率残留 */
+  if (!_renderer) return;
+  if (tier === 'ultra') setResolutionScale(_renderer, 0.5);
+  else setResolutionScale(_renderer, 1);
 }
 
 /* 应用性能档位到渲染器/灯光/后处理。
- * 关键：low 档「禁用 composer 直接渲染」—— 这是真正的降级，
+ * 关键：low/ultra 档「禁用 composer 直接渲染」—— 这是真正的降级，
  * 之前只关阴影/降 DPR 却仍每帧跑 GTAO+Bloom+SMAA，等于没降。 */
 function _applyPerfTier(tier) {
   if (!_renderer || !_lights || !_lights.sun) return;
 
   const isLow = tier === 'low';
+  const isUltra = tier === 'ultra';
   const isMedium = tier === 'medium';
+  const noPost = isLow || isUltra;   // 禁用整个后处理管线
 
-  /* 阴影：low 关，medium 2048，high 4096 */
-  _renderer.shadowMap.enabled = !isLow;
+  /* 阴影：low/ultra 关，medium 2048，high 4096 */
+  _renderer.shadowMap.enabled = !noPost;
   const shadowSize = isMedium ? 2048 : 4096;
   const sun = _lights.sun;
   if (sun.shadow.mapSize.x !== shadowSize) {
@@ -499,12 +513,15 @@ function _applyPerfTier(tier) {
     sun.shadow.map = null;   // 强制重建阴影贴图
   }
 
-  /* DPR：low=1，medium/high=min(dpr,1.5) */
-  _renderer.setPixelRatio(isLow ? 1 : Math.min(window.devicePixelRatio, 1.5));
+  /* DPR：low/ultra=1，medium/high=min(dpr,1.5) */
+  _renderer.setPixelRatio(noPost ? 1 : Math.min(window.devicePixelRatio, 1.5));
 
-  /* 后处理：low 禁用整个 composer（直接渲染），medium 关 GTAO 保留 Bloom+SMAA */
+  /* ultra 额外压低渲染分辨率（0.5x），CSS 拉伸到全屏 —— 最后兜底 */
+  if (isUltra) setResolutionScale(_renderer, 0.5);
+
+  /* 后处理：low/ultra 禁用整个 composer（直接渲染），medium 关 GTAO 保留 Bloom+SMAA */
   if (_composer) {
-    if (isLow) {
+    if (noPost) {
       // 禁掉所有 pass，让渲染走 renderer.render 旁路（见渲染循环）
       for (const p of _composer.passes) p.enabled = false;
     } else {
@@ -515,27 +532,40 @@ function _applyPerfTier(tier) {
   }
 }
 
-/* 渲染循环内自动降级：每 500ms 采样一次 FPS，低于阈值则降一档。
- * 只在 _autoTier 开启时生效。冷却 3 个采样窗口（1.5s）避免瞬时抖动误降。 */
-function _autoDowngrade() {
-  if (!_autoTier) return;
+/* ── PHM 降级/上报回调（由 PerfMonitor watchdog 驱动）──
+ * watchdog 用独立 setInterval，即使 rAF 被 GPU 卡死仍能采样降级。 */
+
+/** 自动降级：连续 3 个 1s 窗口 <30fps → 降一档（high→medium→low→ultra） */
+function _onPhmDowngrade(fps) {
+  const next = _perfTier === 'high' ? 'medium'
+            : _perfTier === 'medium' ? 'low'
+            : _perfTier === 'low' ? 'ultra' : null;
+  if (!next) return;   // 已到最低档 ultra，不再降
+  _perfTier = next;
+  _applyPerfTier(next);
+  console.warn(`[vis] PHM: FPS ${fps.toFixed(0)} < 30 for 3s — downgraded to '${next}'`);
+}
+
+/** 上报可视化健康到后端（POST /api/vis/health），每 5s 节流一次 */
+function _onPhmReport(stats) {
   const now = performance.now();
-  if (now - _fpsAccumStart < 500) return;
-  const fps = _fpsAccum * 1000 / (now - _fpsAccumStart);
-  _fpsAccum = 0;
-  _fpsAccumStart = now;
-
-  if (fps >= 30) { _autoTierCooldown = 0; return; }   // 帧率正常，重置冷却
-
-  if (_autoTierCooldown < 3) { _autoTierCooldown++; return; }  // 连续 3 窗口低帧才降
-
-  const next = _perfTier === 'high' ? 'medium' : _perfTier === 'medium' ? 'low' : null;
-  if (next) {
-    _perfTier = next;
-    _autoTierCooldown = 0;
-    _applyPerfTier(next);
-    console.warn(`[vis] FPS ${fps.toFixed(0)} < 30 — auto-downgraded to perf tier '${next}'`);
-  }
+  if (now - _lastReportTs < 5000) return;
+  _lastReportTs = now;
+  try {
+    const body = JSON.stringify({
+      fps: Math.round(stats.fps),
+      tier: _perfTier,
+      drawCalls: stats.drawCalls,
+      jank: stats.jank,
+      ts: Date.now(),
+    });
+    fetch('/api/vis/health', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,   // 页面关闭时仍尽量送达
+    }).catch(() => { /* 后端不可达时静默，不影响渲染 */ });
+  } catch (e) { /* 忽略 */ }
 }
 
 /** 调试相机（占位，Phase 3 实现） */

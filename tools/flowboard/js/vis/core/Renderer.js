@@ -102,10 +102,33 @@ export function setComposerGTAOPassEnabled(composer, enabled) {
 
 /** 调整大小 */
 export function resize(renderer, composer, camera, width, height) {
-  renderer.setSize(width, height);
-  if (composer) composer.setSize(width, height);
-  camera.aspect = width / height;
+  /* ultra 档：渲染到缩放后的分辨率（如 0.5x），CSS 仍拉伸到全屏。
+   * setSize 第三参 updateStyle=false 保证 canvas 由 CSS 100% 拉伸，
+   * 避免覆盖 layout 的固定尺寸。 */
+  const w = Math.max(1, Math.floor(width * _resScale));
+  const h = Math.max(1, Math.floor(height * _resScale));
+  renderer.setSize(w, h, false);
+  if (composer) composer.setSize(w, h);
+  camera.aspect = width / height;  // 用原始容器宽高比，避免拉伸变形
   camera.updateProjectionMatrix();
+}
+
+/* 当前渲染分辨率缩放（默认 1，ultra 档降为 0.5） */
+let _resScale = 1;
+
+/** 设置渲染分辨率缩放（0.2~1）。ultra 档最后兜底：先降分辨率再让 CSS 放大，
+ * 即使弱 GPU 也能把 2fps 提到可用的 15-30fps。 */
+export function setResolutionScale(renderer, scale) {
+  _resScale = Math.max(0.2, Math.min(1, scale));
+  if (renderer && renderer.domElement) {
+    const canvas = renderer.domElement;
+    const container = canvas.parentElement;
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      resize(renderer, null, null, rect.width || window.innerWidth, rect.height || window.innerHeight);
+      // 分辨率变化后需通知 camera 更新（resize 已处理 aspect）
+    }
+  }
 }
 
 /** 获取渲染器性能统计（Draw Call 数、三角形数等）*/
