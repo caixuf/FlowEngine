@@ -623,7 +623,11 @@ InvariantResult check_temporal_invariants(const DynamicDigest& prev,
 
     const double V_MAX = 55.0;     // 200 km/h
     const double YAW_MAX = 1.5;    // rad/s
-    const double ACCEL_MIN = -8.0; // m/s²
+    /* 加速度物理上限（2026-08-04 修正）：-8 是舒适性阈值不是物理极限，
+     * 真车急刹（ABS）可达 -10~-12 m/s² —— 红灯/跟车急刹被误判"运动学
+     * 不可行"（实测 NPC 急刹 -11 误报 FAIL）。invariant 只抓物理不可行，
+     * 急刹允许（-12），舒适性由控制层调。 */
+    const double ACCEL_MIN = -12.0; // m/s²
     const double ACCEL_MAX = 4.0;  // m/s²
 
     for (size_t i = 0; i < curr.actors.size(); ++i) {
