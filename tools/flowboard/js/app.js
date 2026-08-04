@@ -1716,11 +1716,13 @@ window.flowboard = {
     var now = performance.now();
     if (now - lastSend < 50) return;  // 20Hz 节流
     lastSend = now;
-    var thr = (keys['ArrowUp'] || keys['w'] || keys['W']) ? 0.7 : 0;
+    /* 转向 0.12 rad ≈ 巡航转向域（满舵 0.6 的 20%）—— 旧 0.35 按一下
+     * 车就甩（20 m/s 时 yaw_rate 2.7 rad/s = 每秒转 155°），没法玩 */
+    var thr = (keys['ArrowUp'] || keys['w'] || keys['W']) ? 0.5 : 0;
     var brk = (keys['ArrowDown'] || keys['s'] || keys['S']) ? 0.8 : 0;
     var st = 0;
-    if (keys['ArrowLeft'] || keys['a'] || keys['A']) st += 0.35;
-    if (keys['ArrowRight'] || keys['d'] || keys['D']) st -= 0.35;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) st += 0.12;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) st -= 0.12;
     if (keys[' ']) { brk = 1.0; thr = 0; }  // 空格 = 手刹
     fetch(location.origin + '/api/game/control', {
       method: 'POST',
