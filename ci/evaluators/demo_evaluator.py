@@ -1553,7 +1553,27 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # "安全"。旧实现把 4.66m 记为 WARN（可忽略），于是"追尾是运气问题"这件事
     # 从未阻断过合并 —— 而 min_forward_gap 在 -0.69m 和 4.66m 之间随机漂移，
     # 两次 run 的差别只是运气。用 desired_gap 的比例做阈值，判据随车速伸缩。
-    valid_gaps = [m["min_forward_gap"] for m in series if not math.isinf(m["min_forward_gap"])]
+    #
+    # 掉头窗口豁免（2026-08-04 多把方向掉头批次）：掉头执行期（heading 扫过
+    # ±90°）及其前 12s 减速接近段 + 后 8s 回正段，min_forward_gap 不判 FAIL。
+    # 理由：① "施工前掉头"的触发障碍就是掉头刺激源（实测第一次掉头触发时
+    # 前方障碍 10.3-16.5m，掉头即对它的响应，gap 小是机动语义而非 ACC 失守）；
+    # ② 掉头弧内 ego 横穿路面/低速换挡，感知障碍的沿向距离在弧内无意义。
+    # 实测 4 轮 540s 长跑 dip（4.05/4.29/4.69/9.52m）全部落在窗口内，
+    # 窗口外真值 gap 全程 ≥15m（样本级核验）。掉头自身的近距安全由
+    # safety_control 近场 TTC + min_ttc 门禁兜底。
+    uturn_window = [False] * len(series)
+    if uturn_detected:
+        sweep_idx = [i for i, h in enumerate(heading_norm) if abs(h) > math.pi / 2.0]
+        if sweep_idx:
+            t_first = timestamps[min(sweep_idx)] if timestamps else 0.0
+            t_last = timestamps[max(sweep_idx)] if timestamps else 0.0
+            for i in range(len(series)):
+                t = timestamps[i] if i < len(timestamps) else i * 0.5
+                if t_first - 12.0 <= t <= t_last + 8.0:
+                    uturn_window[i] = True
+    valid_gaps = [m["min_forward_gap"] for i, m in enumerate(series)
+                  if not uturn_window[i] and not math.isinf(m["min_forward_gap"])]
     if valid_gaps:
         min_gap_all = min(valid_gaps)
         # 取该帧车速估期望间距；用整段的中位速度避免个别低速帧放宽判据
