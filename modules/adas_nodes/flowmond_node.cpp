@@ -34,7 +34,11 @@ extern "C" {
 
 /* dladdr anchor: dladdr 需要一个动态导出的符号来定位 .so 文件路径。
  * 用 __attribute__((used)) 确保编译器不把它优化掉。 */
+#if defined(__GNUC__) || defined(__clang__)
 extern "C" void flowmond_dladdr_anchor(void) __attribute__((used));
+#else
+extern "C" void flowmond_dladdr_anchor(void);
+#endif
 extern "C" void flowmond_dladdr_anchor(void) {}
 
 static struct {
@@ -112,10 +116,17 @@ static int flowmond_init(MessageBus* bus, Transport* transport,
         for (int ci = 0; candidates[ci]; ci++) {
             if (access(candidates[ci], F_OK) == 0) {
                 /* 转为绝对路径以便 monitor_server 后续使用 */
+#if defined(_WIN32)
+                char abs_buf[512];
+                char* abs = _fullpath(abs_buf, candidates[ci], sizeof(abs_buf));
+#else
                 char* abs = realpath(candidates[ci], NULL);
+#endif
                 if (abs) {
                     snprintf(g.html_path, sizeof(g.html_path), "%s", abs);
+#if !defined(_WIN32)
                     free(abs);
+#endif
                 } else {
                     snprintf(g.html_path, sizeof(g.html_path), "%s", candidates[ci]);
                 }

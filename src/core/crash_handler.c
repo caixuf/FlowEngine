@@ -27,6 +27,30 @@
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
+
+#if defined(_WIN32)
+
+static void crash_signal_handler(int sig) {
+    fprintf(stderr, "\n[crash_handler] fatal signal %d\n", sig);
+    fflush(stderr);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+void crash_handler_install(void) {
+    signal(SIGSEGV, crash_signal_handler);
+    signal(SIGABRT, crash_signal_handler);
+    signal(SIGFPE,  crash_signal_handler);
+    signal(SIGILL,  crash_signal_handler);
+    fprintf(stderr, "[crash_handler] installed (Windows signal fallback)\n");
+}
+
+void crash_handler_print_backtrace(void) {
+    fprintf(stderr, "[crash_handler] backtrace is not available on native Windows build\n");
+}
+
+#else
+
 #include <unistd.h>
 #include <pthread.h>
 #include <execinfo.h>
@@ -248,3 +272,5 @@ void crash_handler_print_backtrace(void) {
     fprintf(stderr, "\n");
     fflush(stderr);
 }
+
+#endif /* _WIN32 */

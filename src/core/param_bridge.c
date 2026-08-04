@@ -223,6 +223,10 @@ static void* server_loop(void* arg) {
 }
 
 ParamBridgeServer* param_bridge_server_start(const char* sock_path) {
+#if defined(_WIN32)
+    (void)sock_path;
+    return NULL;
+#else
     const char* path = resolve_sock_path(sock_path);
 
     ParamBridgeServer* s = (ParamBridgeServer*)calloc(1, sizeof(*s));
@@ -250,6 +254,7 @@ ParamBridgeServer* param_bridge_server_start(const char* sock_path) {
         close(s->fd); unlink(s->path); free(s); return NULL;
     }
     return s;
+#endif
 }
 
 void param_bridge_server_stop(ParamBridgeServer* s) {
@@ -266,6 +271,10 @@ void param_bridge_server_stop(ParamBridgeServer* s) {
 int param_bridge_client_request(const char* request, char* out, size_t out_size) {
     if (!request || !out || out_size == 0) return ERR_INVALID_PARAM;
     out[0] = '\0';
+#if defined(_WIN32)
+    snprintf(out, out_size, "param bridge is not available on native Windows yet");
+    return ERR_NOT_FOUND;
+#else
 
     const char* path = resolve_sock_path(NULL);
 
@@ -322,4 +331,5 @@ int param_bridge_client_request(const char* request, char* out, size_t out_size)
         return code;
     }
     return ERR_IO;
+#endif
 }

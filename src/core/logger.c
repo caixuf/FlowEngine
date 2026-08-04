@@ -75,7 +75,11 @@ void log_init(LogLevel min_level, const char* filename) {
     /* 行缓冲模式：遇 \n 自动 flush，无需每行手动 fflush。
      * stderr 默认无缓冲（_IONBF），文件默认全缓冲（_IOFBF），
      * 统一设为行缓冲（_IOLBF）保证日志实时可见且不阻塞主循环。 */
+#if defined(_WIN32)
+    setvbuf(g_log.output, NULL, _IONBF, 0);
+#else
     setvbuf(g_log.output, NULL, _IOLBF, 0);
+#endif
 
     g_log.initialized = true;
 
@@ -255,6 +259,7 @@ void log_write(const char* module, LogLevel level,
     fprintf(out, "\n");
 
     /* 同时写入模块专属日志文件（如 /tmp/flow_logs/planning.log） */
+#if !defined(_WIN32)
     if (g_log.module_dir[0] && module) {
         FILE* mf = get_module_file(module);
         if (mf && mf != out) {
@@ -272,6 +277,7 @@ void log_write(const char* module, LogLevel level,
             fprintf(mf, "\n");
         }
     }
+#endif
     va_end(args_copy);
 
     pthread_mutex_unlock(&g_log.mutex);

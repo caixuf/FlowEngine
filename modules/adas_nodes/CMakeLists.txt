@@ -29,6 +29,12 @@ endif()
 
 message(STATUS "FlowEngine root:  ${FLOW_ROOT}")
 message(STATUS "FlowEngine build: ${FLOWENGINE_BUILD}")
+if(WIN32 AND NOT TARGET m)
+    add_library(m INTERFACE)
+endif()
+if(WIN32)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # ── 头文件目录 ────────────────────────────────────────────────
 # flowcoro 路径优先级：1. 同级目录本地仓库 2. third_party 3. FetchContent下载
@@ -86,7 +92,10 @@ endif()
 # 故 C 节点 .so 不会引入额外运行时依赖）。
 # macOS: clang 用 libc++ 而非 libstdc++，原子操作为编译器内建、无独立 libatomic，
 # 故这两个库名不存在，替换为 c++（libc++）。
-if(APPLE)
+if(WIN32)
+    set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} ws2_32)
+    set(NODE_CXX_RT "")
+elseif(APPLE)
     set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread c++)
     # 各节点 target_link_libraries 里额外重申的 C++/atomic 运行时:macOS 用 libc++,
     # 无独立 libatomic(原子为编译器内建),故为 c++;Linux 保持 stdc++ atomic 不变。
@@ -138,10 +147,17 @@ endif()
 
 # ── 编译选项 ──────────────────────────────────────────────────
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+if(MSVC)
+    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+else()
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+if(NOT MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+endif()
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -155,7 +171,14 @@ add_compile_definitions(PROJECT_SOURCE_DIR="${FLOW_ROOT}")
 # macOS 跨平台兼容层：全局 force-include，统一 pthread_setname_np 签名、robust
 # mutex 降级等平台差异（详见 include/platform_compat.h）。仅 APPLE 生效，
 # Linux 完全透明。第三方（cJSON/Eigen/flowcoro）不调用这些符号，无副作用。
-if(APPLE)
+if(WIN32)
+    if(MSVC)
+        add_compile_options(/FI${FLOW_ROOT}/include/platform_compat.h)
+    else()
+        add_compile_options(-include ${FLOW_ROOT}/include/platform_compat.h)
+    endif()
+    include_directories(BEFORE ${FLOW_ROOT}/include/compat_win)
+elseif(APPLE)
     add_compile_options(-include ${FLOW_ROOT}/include/platform_compat.h)
     # 节点 .so 是被 flow_launcher / flow_node_host 用 dlopen 加载的插件,宿主进程
     # 已链接 flowengine_core。两处差异需要对齐 Linux 的"扁平命名空间"语义:
@@ -177,6 +200,7 @@ endif()
 
 # 输出目录: 与主项目的 build/lib 保持一致，方便 flow_launcher 查找
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${FLOWENGINE_BUILD}/lib)
 
 # ── 节点插件 ──────────────────────────────────────────────────
 
@@ -286,6 +310,9 @@ add_library(flowsim_node SHARED
     flowsim/actor/VehicleActor.cpp
     flowsim/route.cpp
 )
+if(NOT ESMINI_RMLIB)
+    target_sources(flowsim_node PRIVATE flowsim/esmini_stub.cpp)
+endif()
 target_compile_definitions(flowsim_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(flowsim_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 target_include_directories(flowsim_node PRIVATE
@@ -297,7 +324,7 @@ if(ESMINI_RMLIB)
     message(STATUS "flowsim_node: esminiRMLib found at ${ESMINI_RMLIB}")
 else()
     target_link_libraries(flowsim_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
-    message(WARNING "flowsim_node: esminiRMLib NOT found — road_network.cpp will fail to link")
+    message(WARNING "flowsim_node: esminiRMLib NOT found — using limited RoadManager stub")
 endif()
 
 # ── 离线 esmini 链路自检（挂 ctest）───────────────────────────
@@ -365,14 +392,14 @@ endif()
 # 波动，steer 产生小幅振荡。CoroutineTask 周期精确，且 PID+Stanley 计算量小，
 # 同步 resume 阻塞可忽略。与 safety_control 一致。
 add_library(control_node SHARED control_node.cpp)
-target_link_libraries(control_node ${NODE_LINK_LIBS} stdc++)
+target_link_libraries(control_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # safety_control_node: safety envelope for control commands
 # Uses CoroutineTask (synchronous resume on bus delivery thread) instead of
 # FlowCoroTask — the safety check is lightweight (<10us) and synchronous resume
 # avoids thread-pool starvation that caused control/cmd staleness.
 add_library(safety_control_node SHARED safety_control_node.cpp)
-target_link_libraries(safety_control_node ${NODE_LINK_LIBS} stdc++)
+target_link_libraries(safety_control_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 
 # monitor_node: 系统监控 + 仪表盘 JSON 导出
 add_library(monitor_node SHARED monitor_node.c)
@@ -490,7 +517,7 @@ target_link_libraries(imu_driver_node ${NODE_LINK_LIBS})
 # 前置里程碑（不在本轮）：先把 LidarFrame 扩成真实点云 topic，才谈得上接 FAST_LIO。
 option(ENABLE_FAST_LIO2 "Enable FAST-LIO2 SLAM backend (requires PCL/Eigen/Sophus + libfast_lio2.a)" OFF)
 add_library(slam_node SHARED slam_node.cpp ekf_slam.c)
-target_link_libraries(slam_node ${NODE_LINK_LIBS} stdc++)
+target_link_libraries(slam_node ${NODE_LINK_LIBS} ${NODE_CXX_RT})
 if(ENABLE_FAST_LIO2)
     target_compile_definitions(slam_node PRIVATE HAVE_FAST_LIO2)
     # 用户预装好依赖后取消注释以下行：

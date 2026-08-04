@@ -415,7 +415,7 @@ class CodeGenerator:
         return generated
 
     def _write_file(self, path: str, content: str):
-        with open(path, 'w') as f:
+        with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
 
     def _gen_split_enums_header(self) -> str:
@@ -796,7 +796,7 @@ def main():
                     help="Root output directory for --split mode (default: dirname of output)")
     args = ap.parse_args()
 
-    with open(args.input, 'r') as f:
+    with open(args.input, 'r', encoding='utf-8') as f:
         text = f.read()
 
     parser = IDLParser(text)
@@ -823,7 +823,7 @@ def main():
         output = gen.generate()
         if args.output:
             os.makedirs(os.path.dirname(args.output), exist_ok=True)
-            with open(args.output, 'w') as f:
+            with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(output)
             print(f"Generated: {args.output} ({len(parser.structs)} structs, {len(parser.enums)} enums)")
         else:

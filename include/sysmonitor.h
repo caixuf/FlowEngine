@@ -22,7 +22,11 @@
  */
 
 #include <stdint.h>
+#if defined(_WIN32)
+typedef int pid_t;
+#else
 #include <sys/types.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {

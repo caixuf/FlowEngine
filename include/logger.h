@@ -100,10 +100,15 @@ FILE* log_get_output(void);
  * @param fmt      printf 格式字符串
  * @param ...      可变参数
  */
+#if defined(__GNUC__) || defined(__clang__)
+#define FLOW_PRINTF_FORMAT(fmt_idx, arg_idx) __attribute__((format(printf, fmt_idx, arg_idx)))
+#else
+#define FLOW_PRINTF_FORMAT(fmt_idx, arg_idx)
+#endif
+
 void log_write(const char* module, LogLevel level,
                const char* file, int line, const char* func,
-               const char* fmt, ...)
-    __attribute__((format(printf, 6, 7)));
+               const char* fmt, ...) FLOW_PRINTF_FORMAT(6, 7);
 
 /* ── 便捷宏 ────────────────────────────────────────────────── */
 

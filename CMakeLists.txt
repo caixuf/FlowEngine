@@ -19,17 +19,29 @@ if(CCACHE_PROGRAM)
 endif()
 
 # 设置编译选项
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+if(MSVC)
+    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+else()
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
+endif()
 # -fcoroutines 是 GCC 专属开关;Clang(含 Apple clang)的 C++20 协程随 -std=c++20
 # 自动启用,传 -fcoroutines 会报 "unknown argument"。故仅对 GNU 编译器追加。
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fcoroutines")
 endif()
-set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
-set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+if(MSVC)
+    set(CMAKE_C_FLAGS_DEBUG "/Zi /Od /DDEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Zi /Od /DDEBUG")
+    set(CMAKE_C_FLAGS_RELEASE "/O2 /DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG")
+else()
+    set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
+    set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+endif()
 
 # ── Sanitizer options ──────────────────────────────────────
 option(ENABLE_ASAN "Enable Address Sanitizer" OFF)
@@ -75,7 +87,14 @@ include_directories(include)
 # 在 APPLE 平台全局强制包含 include/platform_compat.h(-include),把 Linux/macOS
 # 的 pthread 差异(线程命名签名、robust mutex)透明抹平,调用点零改动。
 # 所有兼容内容都在 __APPLE__ 守卫内,Linux 上此选项不生效、行为零变化。
-if(APPLE)
+if(WIN32)
+    if(MSVC)
+        add_compile_options(/FI${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
+    else()
+        add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
+    endif()
+    include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/compat_win)
+elseif(APPLE)
     add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     # epoll/eventfd 平替：把 include/compat 抢在系统头之前,让 flowcoro/net 的
     # `#include <sys/epoll.h>` / `<sys/eventfd.h>` 命中 kqueue/self-pipe 实现。
@@ -86,7 +105,9 @@ endif()
 # 「忽略目标文件里的未解析符号」链接选项 —— GNU ld 与 Apple ld64 语法不同。
 # 用途:flow_launcher/flow_node_host/flow_bag 链接静态 flowengine_core 时,允许
 # 存在 dlopen 加载的节点 .so 才会提供的符号(以及 frenet/eigen 可选符号)。
-if(APPLE)
+if(WIN32)
+    set(FLOW_IGNORE_UNDEF_LINKOPT "")
+elseif(APPLE)
     set(FLOW_IGNORE_UNDEF_LINKOPT -Wl,-undefined,dynamic_lookup)
 else()
     set(FLOW_IGNORE_UNDEF_LINKOPT -Wl,--unresolved-symbols=ignore-in-object-files)
@@ -97,6 +118,9 @@ find_package(Threads REQUIRED)
 # PkgConfig 非强制:macOS 无 Homebrew 时可能缺失,缺失时 cjson 走 FetchContent 兜底。
 find_package(PkgConfig)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(WIN32 AND NOT TARGET m)
+    add_library(m INTERFACE)
+endif()
 
 # =============================================================================
 # Phase 1: IDL 代码生成 (msg/*.msg -> 序列化头文件)
@@ -203,6 +227,19 @@ if(NOT _FLOWCORO_FOUND_LOCAL)
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(flowcoro)
+endif()
+
+if(WIN32 AND flowcoro_SOURCE_DIR AND EXISTS "${flowcoro_SOURCE_DIR}/src/c_api.cpp")
+    file(READ "${flowcoro_SOURCE_DIR}/src/c_api.cpp" _flowcoro_c_api)
+    string(REPLACE
+        "using namespace std::chrono;\n    return task->future.wait_for(0ms)"
+        "return task->future.wait_for(std::chrono::milliseconds(0))"
+        _flowcoro_c_api "${_flowcoro_c_api}")
+    string(REPLACE
+        "using namespace std::chrono_literals;\n    return task->future.wait_for(0ms)"
+        "return task->future.wait_for(std::chrono::milliseconds(0))"
+        _flowcoro_c_api "${_flowcoro_c_api}")
+    file(WRITE "${flowcoro_SOURCE_DIR}/src/c_api.cpp" "${_flowcoro_c_api}")
 endif()
 
 # flowcoro 的 CMakeLists 用 `CACHE ... FORCE` 往全局塞了 GNU/x86 专属的构建标志
@@ -388,6 +425,9 @@ target_link_libraries(flowengine_core
     ${CMAKE_DL_LIBS}
     ${CJSON_LIBRARIES}
 )
+if(WIN32)
+    target_link_libraries(flowengine_core ws2_32 psapi)
+endif()
 target_include_directories(flowengine_core PUBLIC
     ${CJSON_INCLUDE_DIRS}
     ${GEN_DIR}              # 代码生成的头文件
@@ -428,7 +468,7 @@ add_dependencies(flowctl msg_codegen)
 # 性能基准测试程序
 # macOS 排除:benchmark.c 用无名信号量 sem_init(macOS 已废弃,运行时返回 -1)
 # 且依赖 Linux CPU 亲和性。纯性能工具,不在 demo 链路,APPLE 下不构建。
-if(NOT APPLE)
+if(NOT APPLE AND NOT WIN32)
     add_executable(benchmark src/benchmark.c)
     target_link_libraries(benchmark flowengine_core m)
 endif()
@@ -440,7 +480,7 @@ target_link_libraries(flow_bus flowengine_core m)
 # ── Step 1: IPC 跨进程通道 ───────────────────────────────
 add_executable(flow_ipc src/ipc_demo.c)
 # librt 仅 Linux 存在;macOS 的 shm_open/clock 等在 libSystem 中,无需 -lrt。
-target_link_libraries(flow_ipc flowengine_core $<$<NOT:$<PLATFORM_ID:Darwin>>:rt>)
+target_link_libraries(flow_ipc flowengine_core $<$<AND:$<NOT:$<PLATFORM_ID:Darwin>>,$<NOT:$<PLATFORM_ID:Windows>>>:rt>)
 
 # ── Step 3: Bag 录制回放（含 Step 5 统一时钟）────────────
 add_executable(flow_bag src/bag_demo.c)
@@ -483,7 +523,8 @@ target_include_directories(frenet_planner PUBLIC
     ${FRENET_PLANNER_DIR}/Obstacle
     ${FRENET_PLANNER_DIR}/Car
 )
-target_compile_options(frenet_planner PRIVATE -Wno-unused-variable -Wno-sign-compare)
+target_compile_options(frenet_planner PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-variable -Wno-sign-compare>)
 target_link_libraries(frenet_planner PUBLIC Eigen3::Eigen m)
 
 # ── Frenet C Bridge (C++ → C wrapper for e2e demo) ──
@@ -498,7 +539,8 @@ target_include_directories(frenet_bridge PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/frenet_planner/src/Car
 )
 target_link_libraries(frenet_bridge PUBLIC frenet_planner Eigen3::Eigen m)
-target_compile_options(frenet_bridge PRIVATE -Wno-unused-variable -Wno-sign-compare)
+target_compile_options(frenet_bridge PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-variable -Wno-sign-compare>)
 endif() # FLOWENGINE_HAVE_EIGEN
 
 # =============================================================================
@@ -541,7 +583,10 @@ target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 # 是 e2e_demo --multi 的解耦升级版: 编排逻辑完全在配置文件里
 add_executable(flow_launcher src/flow_launcher.c)
 # scheduler_cpp: 提供 net_transport_unbridge_topic 等 C++ 符号
-if(APPLE)
+if(WIN32)
+    target_link_libraries(flow_launcher
+        flowengine_core scheduler_cpp ${CMAKE_DL_LIBS} ${CJSON_LIBRARIES} ws2_32)
+elseif(APPLE)
     # macOS 两级命名空间:节点 .so 各自静态链接 cJSON/core(见 modules CMake),
     # 无需 launcher 导出符号;plugin->init(bus,transport,...) 以指针传入总线,
     # 各 .so 的符号副本互不干扰,核心 pub/sub 走同一 bus 指针。故普通链接
@@ -592,7 +637,7 @@ target_link_libraries(flow_nuscenes_demo flowengine_core m)
 install(TARGETS flowmond flowctl flow_bus flow_ipc flow_bag bag_check flow_coro flow_launcher flow_node_host flow_mcap_replay flow_nuscenes_demo benchmark_coro coro_correctness_test
     RUNTIME DESTINATION bin
 )
-if(NOT APPLE)
+if(NOT APPLE AND NOT WIN32)
     install(TARGETS benchmark RUNTIME DESTINATION bin)
 endif()
 
@@ -608,6 +653,7 @@ install(DIRECTORY "${CMAKE_BINARY_DIR}/lib/"
     FILES_MATCHING
     PATTERN "lib*_node.so"
     PATTERN "lib*_node.dylib"
+    PATTERN "*_node.dll"
 )
 
 install(TARGETS example_process example_task cpp_example_task reactive_task flowcoro_task
@@ -897,7 +943,9 @@ message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "flowcoro source dir: ${flowcoro_SOURCE_DIR}")
 
 # 创建开发者友好的别名（benchmark 仅 Linux 构建，APPLE 下从依赖列表剔除）
-if(APPLE)
+if(WIN32)
+    add_custom_target(dev DEPENDS flow_bus flow_coro benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
+elseif(APPLE)
     add_custom_target(dev DEPENDS flow_bus flow_coro benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
 else()
     add_custom_target(dev DEPENDS flow_bus flow_coro benchmark benchmark_coro coro_correctness_test example_process example_task flowcoro_task config)
