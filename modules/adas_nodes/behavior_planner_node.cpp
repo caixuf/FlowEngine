@@ -550,6 +550,7 @@ static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
         if (g.tl_state[i] == 0) continue;  /* 绿灯 */
         if (fabs(g.tl_y_lane[i] - lane_c) > lw * 0.5) continue;  /* 只查目标车道 */
         double dx = g.tl_x[i] - g.ego_x;
+        if (g.on_return) dx = -dx;  /* 返程朝 -x：灯在前方时 dx<0 */
         if (dx <= 0.0 || dx > stop_range) continue;
         return true;
     }
@@ -635,8 +636,22 @@ protected:
                  * 掉头期间 ego 会跨过全部车道，重算会导致 committed_lane 剧烈抖动。 */
             } else if (g.on_return) {
                 /* 掉头返程：几何镜像，锁定 committed_lane 为 ego 当前所在车道，
-                 * 忽略残留 target（前进向变道逻辑发的 stale 指令）。纯车道保持。 */
-                g.committed_lane_idx = recalc_idx;
+                 * 忽略残留 target（前进向变道逻辑发的 stale 指令）。纯车道保持。
+                 * 例外：返程中进行的合法超车变道（2026-08-04 允许返程借道
+                 * 超车），变道进行中 committed 跟随 target 逼近，让
+                 * LEFT/RIGHT_CHANGE 的 committed==target 完成判定能触发；
+                 * 否则返程变道永远完不成 → TIMEOUT 弹回原车道 → 超车无效。 */
+                if (in_lane_change && g.target_lane_idx >= 0) {
+                    double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
+                    double dist_to_target = fabs(g.ego_y - target_lane_y);
+                    if (dist_to_target < lw * 0.3) {
+                        g.committed_lane_idx = g.target_lane_idx;
+                    } else {
+                        g.committed_lane_idx = recalc_idx;
+                    }
+                } else {
+                    g.committed_lane_idx = recalc_idx;
+                }
             } else if (in_lane_change && g.target_lane_idx >= 0) {
                 double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
                 double dist_to_target = fabs(g.ego_y - target_lane_y);
@@ -661,7 +676,6 @@ protected:
              * 横向距离阈值 —— 它对索引抖动天然免疫，也能正确处理"前车正在
              * 跨线切入本车道"这种索引尚未更新的情形。
              * 阈值取半车道 + 0.6m 余量，略宽于车道以捕捉切入车。 */
-            double lane_center_cur = lane_center_y(current_idx, lc, lw, 0.0, 0.0);
             double lead_lat_tol = lw * 0.5 + 0.6;
             double best_gap = 1e9;
             double lead_speed = g.target_speed;
@@ -721,7 +735,13 @@ protected:
             if (rel_speed < 0.0) rel_speed = 0.0;
             double min_gap = g.min_overtake_gap_base + rel_speed * g.min_overtake_gap_speed_mult;
             if (min_gap > g.min_overtake_gap_cap) min_gap = g.min_overtake_gap_cap;
-            bool worthwhile = blocked && (best_gap > min_gap) && !g.on_return;
+            /* 2026-08-04：去掉 !g.on_return —— 返程被静止/慢车堵住时必须
+             * 允许借道超车（实测 car14 停在返程车道 25s+ 堵死 ego）。
+             * 原抑制是掩盖变道评估方向盲（dx>0 硬编码 + 变道进行中 on_return
+             * 强制 COMPLETED）的补丁；方向修正后返程变道评估正确，堵车
+             * 超车与去程同权。committed_lane 锁定由下方 on_return 分支
+             * 独立处理（几何镜像锁定当前车道），不受放开影响。 */
+            bool worthwhile = blocked && (best_gap > min_gap);
 
             /* ── D: 行为决策 debug 日志（每 10 帧，复盘跟车/追尾过程） ── */
             if (g.seq % 10 == 0) {
@@ -751,6 +771,14 @@ protected:
             /* 道路中心 y（双向道路用0，单向road/geometry可传side_offset） */
             double road_center_y_pos = 0.0;
 
+            /* 变道纵向方向：沿车头投影（2026-08-04 返程修复）——旧实现
+             * dx>0/dx<0 硬编码前进向 +x，掉头返程（heading≈π 朝 -x）时
+             * 前/后判定全反：前方 95m 的车被当后方、后方被当前方 →
+             * 变道 gap 评估错乱 + on_return 抑制超车（掩盖此 bug）。
+             * 与主 lead 检测同款投影，前进/返程/任意 heading 正确。 */
+            const double lc_fwd_x = std::cos(g.ego_heading);
+            const double lc_fwd_y = std::sin(g.ego_heading);
+
             /* 左：lane_idx 减小 → y 增大方向 */
             double left_gap = 1e9;
             double left_lead_v = g.target_speed;
@@ -766,15 +794,19 @@ protected:
                     for (int i = 0; i < g.obs_count; i++) {
                         if (g.obs_vx[i] < 0) continue;
                         if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
-                        double dx = g.obs_x[i] - g.ego_x;
-                        if (dx > 0 && dx < left_gap) { left_gap = dx; left_lead_v = g.obs_vx[i]; }
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        if (along > 0.0 && along < left_gap) { left_gap = along; left_lead_v = g.obs_vx[i]; }
                     }
                     left_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
                         if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
-                        double dx = g.obs_x[i] - g.ego_x;
-                        if (dx < 0) {
-                            double rd = -dx;
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        if (along < 0.0) {
+                            double rd = -along;
                             double rrs = g.obs_vx[i] - g.ego_v;
                             double min_rd = (rrs > 0.0) ? fmax(g.rear_safe_min_m, rrs * g.rear_safe_time_s) : g.rear_safe_min_m;
                             if (rd < min_rd) left_rear_safe = false;
@@ -798,15 +830,19 @@ protected:
                     for (int i = 0; i < g.obs_count; i++) {
                         if (g.obs_vx[i] < 0) continue;
                         if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
-                        double dx = g.obs_x[i] - g.ego_x;
-                        if (dx > 0 && dx < right_gap) { right_gap = dx; right_lead_v = g.obs_vx[i]; }
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        if (along > 0.0 && along < right_gap) { right_gap = along; right_lead_v = g.obs_vx[i]; }
                     }
                     right_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
                         if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
-                        double dx = g.obs_x[i] - g.ego_x;
-                        if (dx < 0) {
-                            double rd = -dx;
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        if (along < 0.0) {
+                            double rd = -along;
                             double rrs = g.obs_vx[i] - g.ego_v;
                             /* 右侧后方安全距离增强（超车后切回场景）：
                              * 左道超车后切回右道时，被超的车虽在后方且更慢，
@@ -1027,13 +1063,13 @@ protected:
                      * (gap-5)/4 限速）+ safety_control 近场 TTC（gap 逼近 20m
                      * 内全刹）。变道横向位移 ~3s 内完成，纵向闭合由 TTC 分层
                      * 接管，不需要 behavior 在变道中强制跟车。 */
-                    if (g.on_return) {
-                        /* 掉头返程：立即中止任何进行中的变道，回 CRUISE 保持当前车道。 */
-                        ev = BEH_EV_COMPLETED;
-                        new_target_lane = -1;
-                        new_target_speed = g.cfg_cruise_speed;
-                        snprintf(reason, sizeof(reason), "return trip → abort lane change, hold lane");
-                    } else if (g.committed_lane_idx == g.target_lane_idx) {
+                    /* 2026-08-04：删除 on_return 立即中止变道分支 —— 返程超车
+                     * 变道必须在 LEFT/RIGHT_CHANGE 中正常走到目标车道才算完成，
+                     * 否则超车一启动就被 COMPLETED 掐掉（配合 worthwhile 的
+                     * !g.on_return 抑制，返程永远无法借道——实测 car14 堵死
+                     * 返程 25s+）。返程变道由 committed_lane 的 on_return 例外
+                     * （变道中跟随 target）配套完成判定。 */
+                    if (g.committed_lane_idx == g.target_lane_idx) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_s;
