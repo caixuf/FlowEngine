@@ -1489,22 +1489,38 @@ protected:
                 double lane_center = lane_center_y(cur_lane, g.lane_count, lane_w);
                 double min_gap = 1e9;
                 int gap_src = 0;  /* 0=none 1=perception 2=truth */
-                for (int i = 0; i < g.kMaxObs; i++) {
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx <= 0.0 || dx > 80.0) continue;
-                    if (g.obs_vx[i] < -2.0) continue;  /* 对向车不走此限速 */
-                    if (std::fabs(g.obs_y[i] - lane_center) > lane_w * 0.75) continue;
-                    if (dx < min_gap) { min_gap = dx; gap_src = 1; }
+                /* 前方 = 沿车头方向（2026-08-04 掉头返程撞车修复）：
+                 * 旧实现硬编码 dx>0（+x 前进方向）—— 返程（heading≈π 朝 -x）
+                 * 时前方车在 -x 被跳过 → 不减速 → 撞车。沿车头方向投影对
+                 * 前进/返程/任意 heading 正确。 */
+                {
+                    const double fwd_x = std::cos(g.ego_heading);
+                    const double fwd_y = std::sin(g.ego_heading);
+                    for (int i = 0; i < g.kMaxObs; i++) {
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * fwd_x + ry * fwd_y;
+                        if (along <= 0.0 || along > 80.0) continue;
+                        if (g.obs_vx[i] < -2.0) continue;  /* 对向车不走此限速 */
+                        const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                        if (lat > lane_w * 0.75) continue;
+                        if (along < min_gap) { min_gap = along; gap_src = 1; }
+                    }
                 }
                 /* 真值兜底：感知链未提供本车道前车（漏检/停更）时，
                  * 用 flowsim 真值障碍物计算 gap——安全兜底不依赖感知链。 */
                 if (min_gap >= 1e8) {
+                    const double fwd_x = std::cos(g.ego_heading);
+                    const double fwd_y = std::sin(g.ego_heading);
                     for (int i = 0; i < g.truth_obs_count; i++) {
-                        double dx = g.truth_obs_x[i] - g.ego_x;
-                        if (dx <= 0.0 || dx > 80.0) continue;
+                        const double rx = g.truth_obs_x[i] - g.ego_x;
+                        const double ry = g.truth_obs_y[i] - g.ego_y;
+                        const double along = rx * fwd_x + ry * fwd_y;
+                        if (along <= 0.0 || along > 80.0) continue;
                         if (g.truth_obs_vx[i] < -2.0) continue;
-                        if (std::fabs(g.truth_obs_y[i] - lane_center) > lane_w * 0.75) continue;
-                        if (dx < min_gap) { min_gap = dx; gap_src = 2; }
+                        const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                        if (lat > lane_w * 0.75) continue;
+                        if (along < min_gap) { min_gap = along; gap_src = 2; }
                     }
                 }
                 if (min_gap < 80.0 && min_gap > 0.0) {

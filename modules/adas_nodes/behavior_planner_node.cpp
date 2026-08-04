@@ -666,14 +666,27 @@ protected:
             double best_gap = 1e9;
             double lead_speed = g.target_speed;
             uint32_t lead_id = 0;
-            for (int i = 0; i < g.obs_count; i++) {
-                if (g.obs_vx[i] < 0) continue;
-                if (fabs(g.obs_y[i] - lane_center_cur) > lead_lat_tol) continue;
-                double dx = g.obs_x[i] - g.ego_x;
-                if (dx > 0 && dx < best_gap) {
-                    best_gap = dx;
-                    lead_speed = g.obs_vx[i];
-                    lead_id = g.obs_id[i];
+            /* 前方车检测（2026-08-04 修复掉头返程撞车）：
+             * 旧实现硬编码 obs_vx>0 && dx>0（前进 +x 方向）—— 掉头返程
+             * （heading≈π 朝 -x）时前方车 vx<0 被跳过、-x 方向被忽略 →
+             * 找不到前车 → 不减速 → 撞车（实测掉头后追尾）。
+             * 修复：沿车头方向投影（沿向距离 + 横向距离），对前进/返程/
+             * 任意 heading 正确。 */
+            {
+                const double fwd_x = std::cos(g.ego_heading);
+                const double fwd_y = std::sin(g.ego_heading);
+                for (int i = 0; i < g.obs_count; i++) {
+                    const double rx = g.obs_x[i] - g.ego_x;
+                    const double ry = g.obs_y[i] - g.ego_y;
+                    const double along = rx * fwd_x + ry * fwd_y;  /* 沿车头方向 */
+                    if (along < 0.0) continue;                      /* 后方 */
+                    const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                    if (lat > lead_lat_tol) continue;               /* 不在本车道 */
+                    if (along < best_gap) {
+                        best_gap = along;
+                        lead_speed = g.obs_vx[i];
+                        lead_id = g.obs_id[i];
+                    }
                 }
             }
 
