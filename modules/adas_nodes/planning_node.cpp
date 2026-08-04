@@ -475,15 +475,12 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
  *   Phase 0 (可选): 直线倒车腾挪 → 腾出 ≥12m 前向空间
  *     切换条件：前向空间 ≥12m OR 倒车 ≥5s（安全上限）
  *   Phase 1: 直线重刹 → 掉头安全低速 (v ≤ 3.5 m/s)
- *   Phase 2: 左打死前进 → 冲向对向路沿
- *     切换条件：heading 转过 ≥130° 且 y 已越过路中线 (y > 0.5m)
- *     OR 安全上限：heading 转过 ≥155°（防冲出路面）
- *   Phase 3: 右打死倒车 → 车尾摆回车道区域
- *     切换条件：y 回到对向车道半幅内 (|y - target_lane_y| < 1.5m)
- *     OR 安全上限：倒车 ≥3.0s（防无限倒车）
- *   Phase 4: 左打前进对齐 → 车头对准对向车道
- *     切换条件：heading 接近 ±π (|heading_normalized| < 0.25 rad)
- *     OR 安全上限：前进 ≥2.5s
+ *   Phase 2-4: 多把方向（N-point，2026-08-04 重构）—— 人手式"不碰路边"：
+ *     前进弧满舵（±0.6，去/返程都左打）以车身角点达 corner_limit 为界即收，
+ *     倒车反打回撤到 |y|≤corridor 走廊，末把 heading 对准目标车道 ±0.10 且
+ *     y 在目标车道半幅内即收。替代旧的固定角度（130°/170°）切换 —— 固定角度
+ *     几何本身就把角点甩出路沿 0.12m，叠加执行偏差实测出沿 2.1m（2026-08-04）。
+ *     （Python control_sim.py mode='multi' 扫参 72/72 PASS）
  *   Phase 5: 巡航 → 剩余点以目标速度直行填充
  *
  * 轨迹点 v 为负表示倒车（control 据此设 GEAR_REVERSE）。
@@ -498,24 +495,19 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                      double ego_speed, double wheelbase,
                                      double forward_space_m) {
     const double dt = 0.05;               /* 20Hz 时间步长 */
-    const double max_steer = 0.60;        /* 满舵角 (rad)，≈34°，匹配 physics steer_override */
-    const double uturn_steer = 0.60;      /* 第一把前进转向角：满舵（用户规范"方向盘接近打死第一把"）。
+    const double uturn_steer = 0.60;      /* 前进弧转向角：满舵（用户规范"方向盘接近打死第一把"）。
                                            * 旧值 0.45（wheelbase=2.8 模型下 Python 扫参最优）转弯慢，
                                            * 64 点轨迹截断在 Phase 3 前；满舵 yaw_rate 提高 38%，
-                                           * Phase 2 缩短到 ~2.6s，轨迹可覆盖全部相位。 */
+                                           * 弧段缩短，轨迹可覆盖全部相位。 */
     const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
     const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
-    const double road_half_w = g.lane_width * g.lane_count * 0.5;  /* 半路宽 */
     const double half_wb = wheelbase * 0.5;  /* 半轴距：车辆中心偏移后轴距离 */
-    /* 对向车道中心 y：前进车道在 y<0 侧（lane_id<0），对向车道在 y>0 侧 */
-    const double opp_lane_center_y = g.lane_width * 0.5;  /* 对向最左车道中心 */
     const double min_uturn_space = 12.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
 
     /* 安全上限（防止无限循环） */
     const double phase0_max_dur = 5.0;   /* 腾挪倒车最多 5s */
-    const double phase2_max_dur = 4.0;   /* 左打死前进最多 4s */
-    const double phase3_max_dur = 3.0;   /* 倒车最多 3s */
-    const double phase4_max_dur = 2.5;   /* 对齐最多 2.5s */
+    /* 多把方向的每把超时在 Phase 2-4 stroke 循环内定义（uturn_stroke_timeout_s
+     * / uturn_reverse_timeout_s），Phase 0 是唯一保留 phaseX_max_dur 的相位 */
 
     int n = 0;
     double x = ego_x, y = ego_y, h = ego_heading;
@@ -539,10 +531,10 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      * → 车滞留对向车道 → 正常规划器下发正向轨迹 → 逆行（2026-08-03 实测）。 */
     const double uturn_target_h =
         (std::fabs(h_start) > M_PI * 0.5) ? 0.0 : M_PI;
-    /* 转向方向符号：前进端掉头（目标 ±π）左打为正；返程掉头（目标 0，
-     * 车在对向车道）转向方向相反（右打）—— 旧实现恒左打，返程掉头
-     * 转错方向（车转去更远）→ 掉头失败。 */
-    const double steer_sign = (uturn_target_h < 0.5) ? -1.0 : 1.0;
+    /* 转向方向（2026-08-04 多把方向重构）：
+     * 去/返程的前进弧都左打（掉头规范"方向盘向左打死"），方向差异只体现在
+     * 角点约束符号（stroke_dir）—— 旧实现返程右打，右转弧从 y=+1.7 起甩到
+     * y≈+10 冲出路面（实测 2026-08-04 y=+11.85）。 */
 
     /* ═══ Phase 0 (可选): 倒车腾挪 — 前向空间不足时先倒车 ═══
      * 人类司机：路端空间不够时，先直线倒车腾出空间，再执行掉头。
@@ -627,24 +619,42 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         }
     }
 
-    /* ═══ Phase 2: 左打死前进 → 冲向对向路沿 ═══
-     * 自适应切换条件：
-     *   - 正常：heading 转过 ≥130° 且 y 已越过路中线 (y > 0.5m)
-     *   - 安全上限：heading 转过 ≥155° 或 y 逼近路沿 (y > road_half_w - 1.0)
-     *   - 超时：phase2 超过 4s
+    /* ═══ Phase 2-4: 多把方向掉头（N-point，角点约束退出）═══
+     * 2026-08-04 掉头出路沿根治：旧实现 Phase 2 单弧固定角度（去程 130°/
+     * 返程 170°）—— 弧几何本身把车身角点甩出路沿 0.12m（r=3.95 满舵时
+     * 外角半径 5.46m），叠加执行偏差（进入速度 7.9 vs 设计 3.5）实测
+     * 出沿 2.1m。新实现人手式多把方向（Python control_sim.py mode='multi'
+     * 扫参 72/72 PASS，corner_limit=6.0 时角点 max 6.16m，路沿余量 0.84m）：
+     *   - 前进弧满舵（±0.6，"向左打死"规范，去/返程同号）：车身角点达
+     *     corner_limit 即收（人手式"不碰路边"）
+     *   - 倒车反打（heading 继续向目标转）：回撤到 |y|≤corridor 走廊
+     *   - 末把 heading 对准目标车道（±0.10 且 y 在目标车道半幅）即收
+     * 角点公式（车身 len=4.6, wid=2.0，与 flowsim/evaluator 一致）：
+     *   去程北角点: y + 2.3*sin(h) + 1.0*|cos(h)|
+     *   返程南角点: y + 2.3*sin(h) - 1.0*|cos(h)|
      */
-    {
-        steer = steer_sign * uturn_steer;  /* 左打死/右打死（按目标方向） */
+    const double uturn_corner_limit = 6.0;         /* 前弧角点上限（路沿 7.0 − 1.0 余量）*/
+    const double uturn_reverse_corridor = 0.5;     /* 倒车回撤走廊（中心回 |y|≤0.5）*/
+    const int    uturn_max_strokes = 5;            /* 最多前进弧把数 */
+    const double uturn_stroke_timeout_s = 4.0;     /* 每把超时 */
+    const double uturn_reverse_timeout_s = 3.0;    /* 倒车超时 */
+    const double uturn_reverse_h_guard = 0.30;     /* 倒车 heading 护栏（离目标 0.3 rad 内收）*/
+    const double half_body_len = 2.3;              /* 车身半长 */
+    const double half_body_wid = 1.0;              /* 车身半宽 */
+    /* 目标车道中心：去程 +1.75（对向）/ 返程 -1.75（前进车道） */
+    const double target_lane_center_y =
+        (uturn_target_h < 0.5) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+    const double stroke_dir = (uturn_target_h < 0.5) ? -1.0 : 1.0;  /* 去程 +1 / 返程 -1 */
+
+    bool uturn_done = false;
+    for (int stroke = 0; stroke < uturn_max_strokes && !uturn_done && n < max_points; stroke++) {
+        /* ── 前进弧 ── */
         v = uturn_speed;
-        double phase2_t = 0.0;
+        double stroke_t = 0.0;
         while (n < max_points) {
-            /* 转向渐进（2026-08 修复"屁股先扫 100°"观感）：
-             * 旧实现 Phase 2 首帧即满舵 → yaw_rate 0.87 rad/s（每秒转 50°）
-             * 低速下几乎原地突然旋转 → 观感"车屁股先旋转"。真车掉头是
-             * 渐进打方向（1-2s 打满），前轮角度渐进 → 车头渐进转。
-             * 前 1.2s steer 从 0 线性打到满舵。 */
-            double ramp = std::min(1.0, phase2_t / 1.2);
-            steer = steer_sign * uturn_steer * ramp;
+            /* 渐进打方向（1-2s 打满，2026-08 观感修复）：前轮角度渐进 → 车头渐进转 */
+            double ramp = std::min(1.0, stroke_t / 1.2);
+            steer = uturn_steer * ramp;
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
             /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
@@ -658,60 +668,46 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
             points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
             n++;
-            phase2_t += dt;
+            stroke_t += dt;
             t_us += (uint32_t)(dt * 1e6);
 
-            double dh = fabs(norm_h(h - h_start));
-            bool heading_ok  = (dh >= 2.2689);              /* 130° in rad */
-            /* 越过路中线方向按目标车道：前进端 y>0.5 / 返程 y<-0.5 */
-            bool y_ok        = (uturn_target_h < 0.5) ? (y < -0.5) : (y > 0.5);
-            bool safety_h    = (dh >= 2.7053);              /* 155° 安全上限 */
-            bool safety_y    = (uturn_target_h < 0.5)
-                                   ? (y < -(road_half_w - 1.0))
-                                   : (y > road_half_w - 1.0);
-            bool timeout     = (phase2_t >= phase2_max_dur);
-
-            if ((heading_ok && y_ok) || safety_h || safety_y || timeout) break;
+            /* 外侧角点（方向相关）*/
+            double corner_y = y + half_body_len * sin(h)
+                            + stroke_dir * half_body_wid * fabs(cos(h));
+            bool corner_ok = (stroke_dir > 0) ? (corner_y <= uturn_corner_limit)
+                                              : (corner_y >= -uturn_corner_limit);
+            /* 对准目标车道即收（末把自然对齐，残差方向收敛由全锁弧完成）*/
+            bool aligned = (fabs(norm_h(h - uturn_target_h)) < 0.10)
+                        && (fabs(y - target_lane_center_y) < 1.75);
+            if (!corner_ok || aligned || stroke_t >= uturn_stroke_timeout_s) {
+                uturn_done = aligned;
+                break;
+            }
         }
-    }
+        if (uturn_done) break;
 
-    /* ═══ Phase 2→3 交界: 刹停点 ═══
-     * 掉头三把方向的前进→倒车必须经过 v=0（物理上 D→R 换挡要先刹停）。
-     * 旧实现 Phase 2 直接跳 v=+3.5 → Phase 3 v=-3.0，control 在交界处
-     * 靠 gear_pending 强置 target=0 刹停——但巡航 PID 对 2.4m/s 只给
-     * 0.23 brake（decel≈1.2m/s²，需 1.9s/2.3m），车还没停就冲过倒车
-     * 段、最近点跳到 Phase 4 正向段 → gear 翻回 D → 加速冲出路面
-     * （2026-08-03 实测 y=8.5 路沿外）。补一个 v=0 刹停点，让
-     * min|v| 前视把目标速度提前压下来 + gear 扫描提前看到倒车点。 */
-    if (n < max_points && fabs(v) > 0.1) {
-        points[n].t_rel_us = t_us;
-        points[n].x = (float)x;  points[n].y = (float)y;
-        points[n].heading = (float)h;
-        points[n].v = 0.0f;  /* 刹停 → 换挡 */
-        points[n].kappa = 0.0f;
-        points[n].a = -5.0f;  /* 中等刹车 */
-        points[n].jerk = 0.0f;  points[n].s = 0.0f;
-        points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
-        n++;
-        t_us += (uint32_t)(dt * 1e6);
-        v = 0.0;
-    }
+        /* 前进→倒车交界: 刹停点 v=0（物理上 D→R 换挡要先刹停）*/
+        if (n < max_points && fabs(v) > 0.1) {
+            points[n].t_rel_us = t_us;
+            points[n].x = (float)x;  points[n].y = (float)y;
+            points[n].heading = (float)h;
+            points[n].v = 0.0f;
+            points[n].kappa = 0.0f;
+            points[n].a = -5.0f;  /* 中等刹车 */
+            points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+            n++;
+            t_us += (uint32_t)(dt * 1e6);
+            v = 0.0;
+        }
 
-    /* ═══ Phase 3: 右打死倒车 → 车尾摆回车道区域 ═══
-     * 倒车时方向盘右打 → 车尾右摆 → 车头左转（继续向对向车道方向转）。
-     * 自适应切换条件：
-     *   - 正常：y 回到对向车道半幅内 (|y - opp_lane_center_y| < 1.5m)
-     *   - 安全上限：y 回到路中线以下 (y < 0.8m) 或 heading 接近 π
-     *   - 超时：phase3 超过 3s
-     */
-    {
-        steer = -steer_sign * max_steer;  /* 右打死/左打死（按目标方向，倒车相位反向） */
+        /* ── 倒车：反打满舵，heading 继续向目标转，中心回撤走廊 ── */
+        steer = -uturn_steer;
         v = reverse_speed;
-        double phase3_t = 0.0;
+        double rev_t = 0.0;
         while (n < max_points) {
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
-            /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
             x += v * cos(h) * dt - half_wb * sin(h) * yaw_rate * dt;
             y += v * sin(h) * dt + half_wb * cos(h) * yaw_rate * dt;
 
@@ -723,53 +719,33 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
             points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
             n++;
-            phase3_t += dt;
+            rev_t += dt;
             t_us += (uint32_t)(dt * 1e6);
 
-            bool y_in_lane   = (fabs(y - opp_lane_center_y) < 1.5);  /* 在对向车道半幅内 */
-            bool safety_y    = (y < 0.8);   /* 回到路中线以下，安全退出 */
-            bool safety_h    = (fabs(norm_h(h - h_start)) >= M_PI - 0.35);  /* heading 接近 π */
-            bool timeout     = (phase3_t >= phase3_max_dur);
-
-            if (y_in_lane || safety_y || safety_h || timeout) break;
+            /* 回撤走廊（去程 y≤+0.5 / 返程 y≥-0.5）*/
+            bool corridor = (stroke_dir > 0) ? (y <= uturn_reverse_corridor)
+                                             : (y >= -uturn_reverse_corridor);
+            /* heading 护栏：去程离 π 0.3 rad 内 / 返程离 -π 0.3 rad 内即收
+             * （防止倒车把 heading 转过目标）*/
+            double hn = norm_h(h);
+            bool h_guard = (stroke_dir > 0) ? (hn >= uturn_target_h - uturn_reverse_h_guard)
+                                            : (hn <= -M_PI + uturn_reverse_h_guard);
+            if (corridor || h_guard || rev_t >= uturn_reverse_timeout_s) break;
         }
-    }
 
-    /* ═══ Phase 4: 左打前进对齐 → 车头对准对向车道 ═══
-     * 自适应切换条件：
-     *   - 正常：heading 接近 ±π（|norm_h(h) - π| < 0.10 或 |norm_h(h) + π| < 0.10）
-     *   - 安全上限：超时 2.5s
-     * 容差 0.25→0.10：退出残差直接进 Phase 5 巡航轨迹 heading，control 以轨迹
-     * 航向为横向目标 → 残差大 = 返程"斜着直行" + 触发 flowsim slew 原地转车身
-     * （屁股横扫）。收严后掉头结束位姿更接近车道切线，slew 只清残余小角。
-     */
-    {
-        steer = steer_sign * 0.15;  /* 较小转角精细对齐（方向按目标车道） */
-        v = uturn_speed;
-        double phase4_t = 0.0;
-        while (n < max_points) {
-            double yaw_rate = (v / wheelbase) * tan(steer);
-            h += yaw_rate * dt;
-            /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
-            x += v * cos(h) * dt - half_wb * sin(h) * yaw_rate * dt;
-            y += v * sin(h) * dt + half_wb * cos(h) * yaw_rate * dt;
-
+        /* 倒车→前进交界: 刹停点 v=0（换挡 R→D）*/
+        if (n < max_points && fabs(v) > 0.1) {
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
-            points[n].heading = (float)h;  points[n].v = (float)v;
-            points[n].kappa = (float)(tan(steer) / wheelbase);
-            points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+            points[n].heading = (float)h;
+            points[n].v = 0.0f;
+            points[n].kappa = 0.0f;
+            points[n].a = -5.0f;
+            points[n].jerk = 0.0f;  points[n].s = 0.0f;
             points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
             n++;
-            phase4_t += dt;
             t_us += (uint32_t)(dt * 1e6);
-
-            double hn = norm_h(h);
-            /* 对齐目标 = 目标车道方向（前进端掉头 ±π / 返程掉头 0） */
-            bool heading_aligned = (fabs(norm_h(hn - uturn_target_h)) < 0.10);
-            bool timeout         = (phase4_t >= phase4_max_dur);
-
-            if (heading_aligned || timeout) break;
+            v = 0.0;
         }
     }
 

@@ -1943,10 +1943,18 @@ protected:
              * 每 20 帧（~1s）跑一次完整 invariant，避免每帧序列化开销过大。
              * 时序 invariant 需要连续两帧，从第 2 帧开始。 */
             if (g.cycle % 20 == 0 && g.digest_initialized) {
-                /* ego_maneuver=u_turn_active：掉头机动期豁免 lane-keeping
-                 * invariant（倒车/横穿/heading 扫过 ±π 是机动路径本身）。 */
+                /* ego_maneuver：掉头机动期豁免 lane-keeping invariant
+                 * （倒车/横穿/heading 扫过 ±π 是机动路径本身，非"横着/倒着开"故障）。
+                 * 2026-08-04 多把方向掉头后豁免窗口扩宽：
+                 *   旧 = u_turn_active（heading 派生，|hn|>π/2）—— Phase 0 腾挪
+                 *   倒车（heading≈0）与返程倒车起始段（|hn|<π/2）漏豁免 → 误报
+                 *   dot=-1.000/-0.946（实测 540s 长跑 motion_direction 2 次 FAIL）。
+                 *   掉头倒车是仿真里唯一的倒车场景（GEAR_REVERSE 只由掉头轨迹
+                 *   触发），故 gear==REVERSE 并入豁免 = 覆盖整个掉头执行窗口。 */
+                bool ego_maneuver = g.u_turn_active ||
+                                    (g.ego_gear.load(std::memory_order_relaxed) == GEAR_REVERSE);
                 auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true,
-                                                        g.u_turn_active);
+                                                        ego_maneuver);
                 // 空间 invariant
                 auto spatial = flowsim::check_spatial_invariants(dd, g.static_digest,
                     g.roads_loaded ? &g.roads : nullptr);

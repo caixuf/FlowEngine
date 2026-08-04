@@ -155,6 +155,13 @@ struct BehaviorContext {
      * 车道保持（抑制所有变道事件），纵向仍正常 CRUISE/FOLLOW。 */
     volatile int on_return{0};
 
+    /* 进入 U_TURN 时的行进方向（on_return 快照）：掉头完成判定按进入方向
+     * 对齐目标 heading —— 去程掉头（进入时朝 +x）目标 |h|≈π，返程掉头
+     * （进入时朝 -x）目标 |h|≈0。旧实现恒用「当前 on_return && |h|≈π」，
+     * 二次掉头触发瞬间 h≈π、on_return=1 → 掉头还没执行就假 COMPLETED →
+     * ego 继续朝 -x 冲出道路（2026-08-04 实测 y=22.4 路外）。 */
+    volatile int uturn_entry_on_return{0};
+
     /* ── 行为状态机状态 ── */
     int    state{0};        /* BehaviorCommand enum (镜像 sm.current) */
     double state_timer{0};  /* 当前状态持续秒数 */
@@ -220,9 +227,13 @@ struct BehaviorContext {
                                            * → 冲到施工面前才触发 → 卡死（2026-08-03
                                            * 实测触发点 2950，施工前缘 2970）。
                                            * 120m：触发提前 → 减速从容 → 施工前完成。 */
-    double uturn_max_trigger_speed{8.0};  /* 掉头触发速度上限 (m/s)：高于此先减速
-                                           * 再触发，避免 64 点轨迹被 Phase 1 刹车截断 */
-    double uturn_timeout_s{40.0};         /* 掉头超时 (s)：倒车腾挪+三把方向需 20-30s，超时回退 CRUISE */
+    double uturn_max_trigger_speed{5.0};  /* 掉头触发速度上限 (m/s)：高于此先减速
+                                           * 再触发。2026-08-04 多把方向重构配套：
+                                           * 旧值 8.0 实测进入速度 7.9 vs 轨迹假设 3.5
+                                           * → 弧偏离 1.4m → 出沿 2.1m；收紧到 5.0
+                                           * 让弧段实际速度≈设计 3.5（扫参验证 init_speed
+                                           * 3.5-8.0 角点均 ≤6.7，5.0 留更大执行余量） */
+    double uturn_timeout_s{40.0};         /* 掉头超时 (s)：倒车腾挪+多把方向需 20-30s，超时回退 CRUISE */
     double ref_path_end_x{1e9};           /* 参考路径终点 x（从 road/ref_path 解析，1e9=未初始化） */
     double road_end_x{1e9};               /* 路端 x（flowsim 权威 route 总长，掉头触发固定参考） */
 
@@ -698,7 +709,15 @@ protected:
                     if (lat > lead_lat_tol) continue;               /* 不在本车道 */
                     if (along < best_gap) {
                         best_gap = along;
-                        lead_speed = g.obs_vx[i];
+                        /* 沿车头方向的投影速度（2026-08-04 返程撞车修复）：
+                         * obs_vx 是世界系 vx（fusion/perception 回调按
+                         * ego heading 从车体系旋转而来）—— 返程（heading≈π）
+                         * 同向前车世界 vx=−12 → follow 目标 = 负 + k·gap_err
+                         * → clamp 0 → 对 12m/s 正常前车刹停到 0（实测
+                         * 停在路中被编舞回收的 NPC 撞上，14:16:33）。
+                         * 投影到车头方向后同向前车恒为正（远离），前进/返程
+                         * 统一正确；对向车为负 → follow 目标 0 刹停 ✓。 */
+                        lead_speed = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
                         lead_id = g.obs_id[i];
                     }
                 }
@@ -969,6 +988,9 @@ protected:
                     ev = BEH_EV_UTURN_TRIGGER;
                     new_target_lane = -1;
                     new_target_speed = g.cfg_cruise_speed;
+                    /* 记录进入方向：二次掉头（返程掉头）的完成判定目标
+                     * 是 h≈0 而非 h≈π，必须用进入时的 on_return 快照。 */
+                    g.uturn_entry_on_return = g.on_return;
                     snprintf(reason, sizeof(reason),
                              "uturn trigger: ego_x=%.1f ref_end=%.1f on_return=%d → U_TURN",
                              g.ego_x, g.ref_path_end_x, g.on_return);
@@ -1098,7 +1120,15 @@ protected:
                     double hn = g.ego_heading;
                     while (hn > M_PI) hn -= 2.0 * M_PI;
                     while (hn < -M_PI) hn += 2.0 * M_PI;
-                    if (g.on_return && fabs(fabs(hn) - M_PI) < 0.15) {
+                    /* 掉头完成判定：按进入方向对齐目标 heading（2026-08-04
+                     * 二次掉头修复）。去程掉头（进入时 on_return=0，朝 +x）
+                     * 目标 |h|≈π；返程掉头（进入时 on_return=1，朝 -x）
+                     * 目标 |h|≈0。旧实现恒用「当前 on_return && |h|≈π」：
+                     * 二次掉头触发瞬间 h≈π、on_return=1 → 掉头还没执行就
+                     * 假 COMPLETED → ego 继续朝 -x 冲出道路（实测 y=22.4）。 */
+                    const double uturn_target_h =
+                        g.uturn_entry_on_return ? 0.0 : M_PI;
+                    if (fabs(fabs(hn) - uturn_target_h) < 0.15) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         new_target_speed = g.cfg_cruise_speed;
@@ -1107,7 +1137,8 @@ protected:
                          * COMPLETED 9s 后重触发，车越跑越偏）。 */
                         g.cooldown = g.lane_change_cooldown_timeout_s * 6.0;  /* 30s，同 TIMEOUT */
                         snprintf(reason, sizeof(reason),
-                                 "uturn completed (on_return=1 h=%.2f) → CRUISE", g.ego_heading);
+                                 "uturn completed (entry_on_return=%d h=%.2f target=%.2f) → CRUISE",
+                                 g.uturn_entry_on_return, g.ego_heading, uturn_target_h);
                         LOG_WARN("behavior", "uturn COMPLETED (h=%.2f) → CRUISE", g.ego_heading);
                     } else if (g.state_timer > g.uturn_timeout_s) {
                         ev = BEH_EV_TIMEOUT;
