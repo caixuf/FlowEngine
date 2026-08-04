@@ -86,6 +86,22 @@ export function renderFrame(renderer, composer, scene, camera) {
   else renderer.render(scene, camera);
 }
 
+/** 判断是否为软件渲染（无 GPU 的 WSL/云 VM/远程桌面）。
+ * SwiftShader / llvmpipe / Softpipe / Mesa(无硬件) 是软件 WebGL 常见实现，
+ * 跑 medium 档的 Bloom+SMAA+2048 阴影会卡成 PPT —— 必须直接落低档启动，
+ * 不能等 6-9s 的自动降级（这段时间里用户已经在看 PPT 了）。 */
+export function isSoftwareRenderer(renderer) {
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    if (!ext) return false;
+    const name = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '');
+    return /swiftshader|llvmpipe|softpipe|software|angle \(software/i.test(name);
+  } catch (_e) {
+    return false;
+  }
+}
+
 /** 判断 pass 是否为 GTAO（接触阴影）。GTAO 是全屏后处理里最贵的一趟，
  * low 档禁用整个 composer、medium 档单独关掉 GTAO 以明显降 GPU 压力。 */
 function _isGTAOPass(p) {

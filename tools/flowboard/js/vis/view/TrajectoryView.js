@@ -401,6 +401,11 @@ export function createTrajectoryView(scene) {
     const ego = store.ego;
     const now = performance.now() / 1000;
 
+    /* 低/超低档（软件渲染）：跳过装饰性加法混合层（外层辉光 + 流动条），
+     * 只留主体光带 + 内亮核心。AdditiveBlending 在软件 WebGL（SwiftShader/
+     * llvmpipe）下按屏幕面积逐像素混合，是"后段卡成 PPT"的主因之一。 */
+    const lowTier = store.perfTier === 'low' || store.perfTier === 'ultra';
+
     if (!ego || !trajPath || trajPath.length < 2) {
       clear();
       _lastFrameT = now;
@@ -423,8 +428,10 @@ export function createTrajectoryView(scene) {
     const firstRgb = points[0].rgb;
     const fixedColor = [firstRgb[0], firstRgb[1], firstRgb[2]];
 
-    /* 2. 外层辉光（固定色，加法混合） */
-    _fillRibbon(outerGeo, points, OUTER_WIDTH_START, OUTER_WIDTH_END, OUTER_ALPHA, 0, false, fixedColor);
+    /* 2. 外层辉光（固定色，加法混合）—— 低档跳过（装饰层，软件渲染最贵） */
+    if (!lowTier) {
+      _fillRibbon(outerGeo, points, OUTER_WIDTH_START, OUTER_WIDTH_END, OUTER_ALPHA, 0, false, fixedColor);
+    }
 
     /* 3. 主体光带（逐点颜色，平滑色彩过渡） */
     _fillRibbon(ribbonGeo, points, RIBBON_WIDTH_START, RIBBON_WIDTH_END, RIBBON_ALPHA_START, RIBBON_ALPHA_END, true, fixedColor);
@@ -437,10 +444,12 @@ export function createTrajectoryView(scene) {
     ];
     _fillRibbon(coreGeo, points, CORE_WIDTH_START, CORE_WIDTH_END, CORE_ALPHA_START, CORE_ALPHA_END, false, coreColor);
 
-    /* 5. 流动高亮条（高亮主光带，略宽一点，用加法混合 + 时间偏移 sin 波） */
+    /* 5. 流动高亮条（高亮主光带，略宽一点，用加法混合 + 时间偏移 sin 波）—— 低档跳过 */
     const totalLen = points[points.length - 1].dist || 1;
     const flowOff = _flowTime % (FLOW_SEG_LEN * 2);
-    _fillRibbon(flowGeo, points, FLOW_WIDTH, FLOW_WIDTH * 0.3, FLOW_ALPHA, 0, true, fixedColor, flowOff);
+    if (!lowTier) {
+      _fillRibbon(flowGeo, points, FLOW_WIDTH, FLOW_WIDTH * 0.3, FLOW_ALPHA, 0, true, fixedColor, flowOff);
+    }
 
     /* 6. 方向箭头 */
     _buildArrows(points, [Math.round(fixedColor[0]*255), Math.round(fixedColor[1]*255), Math.round(fixedColor[2]*255)]);

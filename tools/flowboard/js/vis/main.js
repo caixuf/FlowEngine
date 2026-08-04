@@ -9,7 +9,7 @@
  *            closeNPCDetail, setPerfTier } from './vis/main.js';
  */
 
-import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo, setComposerGTAOPassEnabled, setResolutionScale } from './core/Renderer.js';
+import { createRenderer, createComposer, renderFrame, resize, getRendererInfo, resetRendererInfo, setComposerGTAOPassEnabled, setResolutionScale, isSoftwareRenderer } from './core/Renderer.js';
 import { createCameraRig } from './core/CameraRig.js';
 import { createLighting, updateSunShadow } from './core/Lighting.js';
 import { createSkyEnv } from './core/SkyEnv.js';
@@ -115,8 +115,18 @@ export function init3DScene(canvas) {
 
   _ready = true;
 
-  // 应用默认性能档位（medium：关 GTAO、阴影 2048、DPR≤1.5）
+  // 软件渲染（无 GPU 的 WSL/云 VM）直接低档启动：Bloom+SMAA+阴影在
+  // SwiftShader/llvmpipe 下逐像素软件计算会卡成 PPT，等 6-9s 的 PHM
+  // 自动降级期间用户已经在看 PPT 了（2026-08-04 后段卡顿实测）。
+  if (isSoftwareRenderer(_renderer)) {
+    if (_perfTier !== 'low' && _perfTier !== 'ultra') {
+      console.warn('[vis] software renderer detected — starting at low tier (no post-processing)');
+    }
+    _perfTier = 'low';
+  }
+  // 应用性能档位（medium：关 GTAO、阴影 2048、DPR≤1.5）
   _applyPerfTier(_perfTier);
+  _syncPerfTier();
 
   // 独立 PHM watchdog：setInterval 驱动，不依赖 rAF（GPU 卡死也能降级）
   _perfMonitor = new PerfMonitor({
@@ -479,12 +489,18 @@ export function resetMapView() {
   resetCamera();
 }
 
+/** 同步档位到 store（视图可读：TrajectoryView 低档跳过装饰性加法混合层） */
+function _syncPerfTier() {
+  if (_director) _director.getStore().perfTier = _perfTier;
+}
+
 /** 设置性能档位 */
 export function setPerfTier(tier) {
   if (!tier || !['low', 'medium', 'high', 'ultra'].includes(tier)) return;
   _perfTier = tier;
   if (_perfMonitor) _perfMonitor.pause();   // 手动设档后暂停自动降级，避免被覆盖
   _applyPerfTier(tier);
+  _syncPerfTier();
 
   /* 手动设档后重置分辨率，避免曾降到 ultra 的低分辨率残留 */
   if (!_renderer) return;
@@ -543,6 +559,7 @@ function _onPhmDowngrade(fps) {
   if (!next) return;   // 已到最低档 ultra，不再降
   _perfTier = next;
   _applyPerfTier(next);
+  _syncPerfTier();
   console.warn(`[vis] PHM: FPS ${fps.toFixed(0)} < 30 for 3s — downgraded to '${next}'`);
 }
 
