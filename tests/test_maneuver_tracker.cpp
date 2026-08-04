@@ -180,6 +180,38 @@ static std::vector<TrajectoryPoint> gen_parking_traj() {
     return pts;
 }
 
+// ── 侧方停车（平行泊车）轨迹：第三个操作，验证同一 tracker 通用性 ──
+// 库位在右侧：倒车右打满舵摆尾入位 → 回正直倒 → 停正。含两段方向相反的
+// 倒车弧（S 形），比倒库更考验换挡/横向反号的鲁棒性。
+static std::vector<TrajectoryPoint> gen_parallel_parking_traj() {
+    std::vector<TrajectoryPoint> pts;
+    double x = 0.0, y = 1.75, h = 0.0;
+    auto push = [&](double steer, double v, double dur) {
+        int n = (int)(dur / DT);
+        for (int _ = 0; _ < n; _++) {
+            double yaw = v / WHEELBASE * std::tan(steer);
+            double half_wb = WHEELBASE * 0.5;
+            h += yaw * DT;
+            x += (v * std::cos(h) - half_wb * std::sin(h) * yaw) * DT;
+            y += (v * std::sin(h) + half_wb * std::cos(h) * yaw) * DT;
+            TrajectoryPoint p{};
+            p.x = (float)x; p.y = (float)y; p.heading = (float)h;
+            p.kappa = (float)(std::tan(steer) / WHEELBASE); p.v = (float)v;
+            pts.push_back(p);
+        }
+    };
+    // 前进过库位
+    push(0.0, 5.0, 1.2);
+    { TrajectoryPoint b{}; b.x = (float)x; b.y = (float)y; b.heading = (float)h; b.v = 0; pts.push_back(b); }
+    // 倒车右打摆尾入位
+    push(0.50, REVERSE_SPEED, 0.8);
+    // 倒车回正/左打修直
+    push(-0.30, REVERSE_SPEED, 0.7);
+    // 停正
+    { TrajectoryPoint b{}; b.x = (float)x; b.y = (float)y; b.heading = (float)h; b.v = 0; pts.push_back(b); }
+    return pts;
+}
+
 static int failures = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", msg); failures++; } } while (0)
 
@@ -235,6 +267,29 @@ static void test_parking_closed_loop() {
     std::printf("[parking] final x=%.1f y=%.2f h=%.2f v=%.1f flips=%d\n", x, y, h, v, flips);
     CHECK(saw_r, "parking: never entered REVERSE");
     CHECK(flips >= 1, "parking: no gear change");
+}
+
+// ── 测试 2b: 侧方停车闭环（第三个操作，验证同一 tracker 通用性）──
+static void test_parallel_parking_closed_loop() {
+    auto traj = downsample64(gen_parallel_parking_traj());
+    ManeuverTracker mt;
+    mt.init(traj.data(), (int)traj.size(), WHEELBASE);
+    double x = 0.0, y = 1.75, h = 0.0, v = 0.0;
+    std::vector<int> gears;
+    for (int t = 0; t < 200; t++) {
+        ManeuverResult r = mt.tick(x, y, h, v, DT);
+        drive_speed(v, r.target_speed, DT);
+        step_bicycle(x, y, h, v, r.steer, DT);
+        gears.push_back(r.gear);
+    }
+    bool saw_r = false;
+    for (int g : gears) if (g == -1) saw_r = true;
+    int flips = 0;
+    for (size_t i = 1; i < gears.size(); i++) if (gears[i] != gears[i-1]) flips++;
+    std::printf("[parallel] final x=%.1f y=%.2f h=%.2f v=%.1f flips=%d\n", x, y, h, v, flips);
+    CHECK(saw_r, "parallel: never entered REVERSE");
+    CHECK(flips >= 1, "parallel: no gear change");
+    CHECK(std::fabs(norm_angle(h)) < 0.5, "parallel: heading drifted (should stay ~0)");
 }
 
 // ── 测试 3: advanceS 段边界 heading gate ──
@@ -339,6 +394,7 @@ static void test_end_stop() {
 int main() {
     test_uturn_closed_loop();
     test_parking_closed_loop();
+    test_parallel_parking_closed_loop();
     test_segment_boundary_gate();
     test_target_speed();
     test_end_stop();
