@@ -728,7 +728,14 @@ protected:
              * 不再用裸 80m 魔法数。 */
             double desired_gap = g.acc_standoff + g.acc_time_headway * g.ego_v;
             double follow_speed = lead_speed;
-            if (best_gap < 1e8) {
+            /* 跟车只在感知量程内生效（2026-08-04 返程速度退化修复）：旧逻辑
+             * 对任意 best_gap 都跟车——掉头后感知跟踪错乱产生 1.8km 外的
+             * 幻影"前车"（位置以 100m/s 瞬移，实测返程 x≈1033 幽灵），
+             * ACC 追着它把巡航压到 15.2 m/s，目标速度永远达不到。
+             * 真实前车全在传感器量程内（≤100m），200m 上限不影响正常跟车，
+             * 只挡幻影。 */
+            const double kFollowMaxRange = 200.0;
+            if (best_gap < 1e8 && best_gap <= kFollowMaxRange) {
                 double gap_err = best_gap - desired_gap;
                 if (gap_err >  g.acc_gap_err_clamp) gap_err =  g.acc_gap_err_clamp;
                 if (gap_err < -g.acc_gap_err_clamp) gap_err = -g.acc_gap_err_clamp;
@@ -929,6 +936,11 @@ protected:
                  * 转移已补（见转移表）。速度门槛：>8m/s 先减速再触发，
                  * 避免 64 点轨迹被 Phase 1 刹车截断。 */
                 bool uturn_trigger = false;
+                /* 掉头减速区激活（2026-08-04）：approach 减速期间抑制 CRUISE
+                 * 决策（变道/跟车/恢复巡航），否则 CRUISE 块每帧把 approach
+                 * 的 5 m/s 目标覆盖回 20 → 减速形同虚设，实测减速全靠 Frenet
+                 * 近距刹停，v=5 恰在障碍前 10m 才达到 → 被迫 Phase 0 倒车。 */
+                bool uturn_approach_active = false;
                 if (cur != BEH_ST_U_TURN) {
                     /* 掉头触发参考点 = min(路端, 触发区内前方最近静止障碍)。
                      * 施工区在路端时必须在施工前完成掉头（2026-08-03 实测：
@@ -942,14 +954,21 @@ protected:
                      * 总长）—— 旧"采样末点封顶检测"在低速起步时误判封顶
                      * → 起点就触发掉头（实测启动即 U_TURN 逆行，2026-08-03）。
                      * 路端固定，触发区 = [road_end - 2×approach, road_end]。 */
+                    /* 扫描门 3×approach（2026-08-04 修复）：旧 2×approach 门把
+                     * 障碍缩短的减速区（obs−2×approach）钳在 road_end−2×approach
+                     * 之后——实测减速从 2760（obs−208）才开始，20→5 需 197m，
+                     * v=5 恰在 obs−11 才达到 → 仍被迫 Phase 0 倒车腾挪。扫描门
+                     * 放宽 32m 后减速区以障碍为基准（obs−240），v=5 提前到
+                     * obs−43，空间充足。起步误判防护不变（起步区 x<360 远在
+                     * 门外）。 */
                     bool at_road_end = (g.road_end_x < 1e8 &&
-                                        g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 2.0);
+                                        g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 3.0);
                     double uturn_ref_x = g.road_end_x;
                     /* 障碍缩短触发点（施工前掉头）只在已接近路端时生效：
                      * 起步阶段前方慢车/未起步 NPC 会被误当"路端障碍"，
                      * 提前触发掉头（实测启动即 U_TURN）。 */
                     if (at_road_end &&
-                        g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 2.0) {
+                        g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 3.0) {
                         for (int i = 0; i < g.obs_count; ++i) {
                             if (std::fabs(g.obs_vx[i]) < 0.5 &&
                                 std::fabs(g.obs_vy[i]) < 0.5 &&
@@ -958,29 +977,54 @@ protected:
                             }
                         }
                     }
+                    /* 减速区 = 3×approach（360m），触发区 = 1×approach（120m）+ v≤5。
+                     * 2026-08-04 修复：旧实现减速区 120m（实测控制减速仅 ~0.8-1.0
+                     * m/s²，20→5 需 230m）—— v=5 恰在障碍前 10m 才达到 →
+                     * forward_space < 12m → 被迫 Phase 0 倒车腾挪（实测每次
+                     * 掉头前倒车 2.5-3m）。360m 减速区让 v=5 提前到障碍前
+                     * ~130m，触发时前向空间 ~98-118m，无需腾挪。 */
+                    const double approach3 = g.uturn_approach_dist_m * 3.0;
                     if (!g.on_return && at_road_end && uturn_ref_x < 1e8 &&
-                        g.ego_x > uturn_ref_x - g.uturn_approach_dist_m &&
+                        g.ego_x > uturn_ref_x - approach3 &&
                         g.cooldown <= 0.0) {
-                        if (g.ego_v > g.uturn_max_trigger_speed) {
+                        /* 距离兜底触发（2026-08-04）：approach 目标速度经 planning
+                         * 轨迹链路衰减慢（实测 20→5 需 230m，v=5 恰在障碍前 13m
+                         * 才达到 → 被迫 Phase 0 倒车腾挪）。距障碍 ≤30m 且 v≤7
+                         * 即触发（Frenet 障碍刹车在此处速度已自然降至 ~7），
+                         * 前向空间 ~20m > 12m 无需腾挪。注意必须排在 decel
+                         * 分支之前——否则 v>5 进 decel、fallback 永不评估。 */
+                        if (g.ego_x > uturn_ref_x - 30.0 && g.ego_v <= 7.0) {
+                            uturn_trigger = true;
+                        } else if (g.ego_v > g.uturn_max_trigger_speed) {
                             new_target_lane = -1;
                             new_target_speed = g.uturn_max_trigger_speed;
+                            uturn_approach_active = true;
                             snprintf(reason, sizeof(reason),
                                      "uturn approach: decelerate %.1f→%.1f m/s before trigger (x=%.1f end=%.1f)",
                                      g.ego_v, g.uturn_max_trigger_speed, g.ego_x, g.ref_path_end_x);
-                        } else {
+                        } else if (g.ego_x > uturn_ref_x - g.uturn_approach_dist_m) {
                             uturn_trigger = true;
+                        } else {
+                            /* v≤5 但未到触发区：维持低速巡航直到触发（否则
+                             * CRUISE 块恢复 20 后触发条件又失配 → 振荡） */
+                            uturn_approach_active = true;
                         }
                     } else if (g.on_return &&
-                               g.ego_x < g.uturn_approach_dist_m &&
+                               g.ego_x < approach3 &&
                                g.cooldown <= 0.0) {
-                        if (g.ego_v > g.uturn_max_trigger_speed) {
+                        if (g.ego_x < 30.0 && g.ego_v <= 7.0) {
+                            uturn_trigger = true;
+                        } else if (g.ego_v > g.uturn_max_trigger_speed) {
                             new_target_lane = -1;
                             new_target_speed = g.uturn_max_trigger_speed;
+                            uturn_approach_active = true;
                             snprintf(reason, sizeof(reason),
                                      "uturn approach(return): decelerate %.1f→%.1f m/s",
                                      g.ego_v, g.uturn_max_trigger_speed);
-                        } else {
+                        } else if (g.ego_x < g.uturn_approach_dist_m) {
                             uturn_trigger = true;
+                        } else {
+                            uturn_approach_active = true;
                         }
                     }
                 }
@@ -995,7 +1039,14 @@ protected:
                              "uturn trigger: ego_x=%.1f ref_end=%.1f on_return=%d → U_TURN",
                              g.ego_x, g.ref_path_end_x, g.on_return);
                 } else if (cur == BEH_ST_CRUISE) {
-                    if (worthwhile && adj_idx >= 0 &&
+                    if (uturn_approach_active) {
+                        /* 掉头减速区：抑制变道/超车/归位决策，只保持减速目标
+                         * （掉头在即，变道无意义；实测旧行为变道+减速打架） */
+                        new_target_speed = g.uturn_max_trigger_speed;
+                        snprintf(reason, sizeof(reason),
+                                 "uturn approach active: hold %.1f m/s (x=%.1f)",
+                                 g.uturn_max_trigger_speed, g.ego_x);
+                    } else if (worthwhile && adj_idx >= 0 &&
                         !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;

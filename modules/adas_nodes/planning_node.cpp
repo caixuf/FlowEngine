@@ -1550,13 +1550,23 @@ protected:
 
                     /* 会车检测: 对向车道且横向相邻 (2.0 < |dy| ≤ 1.5×路宽),
                      * 迎面驶来 (vx < -2 m/s), 前方 60m 内 */
+                    /* 方向感知（2026-08-04 返程速度退化修复）：前方/对向判定
+                     * 从世界 +x/世界 vx 改为沿车头方向投影——旧实现返程把
+                     * 同向车（世界 vx<0）误判为迎头对向，相邻车道同向车每辆
+                     * 都触发 0.4× 让行 → 掉头后速度跑不到目标（实测返程被
+                     * 压到 10-14 m/s，全跑程复现）。投影后同向车沿向速度
+                     * 恒为正（远离）、对向车为负（接近），前进/返程统一。 */
+                    double fwd_x = std::cos(g.ego_heading);
+                    double fwd_y = std::sin(g.ego_heading);
+                    double along = dx * fwd_x + dy * fwd_y;  /* 沿车头方向距离 */
+                    double rel_v = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
                     if (std::fabs(dy) > 2.0 && std::fabs(dy) <= oncoming_dy_max &&
-                        dx > 0.0 && dx < 60.0 && g.obs_vx[i] < -2.0) {
+                        along > 0.0 && along < 60.0 && rel_v < -2.0) {
                         oncoming = 1;
                     }
 
-                    /* 窄路检测: 统计左右两侧最近障碍物横向距离 */
-                    if (dx > 0.0 && dx < 20.0) {  /* 20m 前瞻窗 */
+                    /* 窄路检测: 统计左右两侧最近障碍物横向距离（前瞻窗沿车头方向）*/
+                    if (along > 0.0 && along < 20.0) {  /* 20m 前瞻窗 */
                         if (dy < 0.0 && fabs(dy) < min_clearance_right)
                             min_clearance_right = fabs(dy);
                         if (dy > 0.0 && dy < min_clearance_left)
@@ -1632,6 +1642,24 @@ protected:
                     for (int ti = 0; ti < g.tl_count && n_obs < 128; ti++) {
                         if (g.tl_state[ti] == 0) continue;  /* 绿灯，不注入 */
                         double dx_tl = g.tl_x[ti] - g.ego_x;
+                        /* 方向感知（2026-08-04 掉头后对向灯误停修复）：
+                         * 旧实现 dx_tl>0 = 世界 +x 判"前方"——返程朝 -x 时已越过
+                         * 的灯（dx>0）被当"前方灯"注入墙 → 掉头后每盏已过灯都
+                         * 刹停（实测返程 x=1785 停在对向灯后 15m）。返程前方
+                         * 的灯 dx<0，翻转后同语义；且返程只响应管辖本侧车道的
+                         * 灯（对向车道的灯管不到返程车道）。与 behavior
+                         * lane_ahead_stop_light 的 on_return 翻转同源。 */
+                        /* 行进方向 = flowsim road/ref_path.reverse 同式推导
+                         * （u_turn_active = |hn| > π/2，见 flowsim_node.cpp），
+                         * planning 未订阅 ref_path 故本地同式计算，与权威一致 */
+                        double hn_r = g.ego_heading;
+                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
+                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
+                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
+                        if (tl_on_return) {
+                            dx_tl = -dx_tl;
+                            if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
+                        }
                         if (dx_tl <= 0.0) continue;  /* 已过停止线 */
                         if (dx_tl > 60.0) continue;  /* 太远，不注入 */
 
@@ -1646,8 +1674,9 @@ protected:
                         }
 
                         /* 注入虚拟墙：位置在停止线前 1m，宽度覆盖全路（8m > 6m OBS_MAX_ABS_Y），
-                         * 长度给薄墙 0.5m。vx=0 静止。 */
-                        ox[n_obs]  = g.tl_x[ti] - 1.0;  /* 停止线前 1m */
+                         * 长度给薄墙 0.5m。vx=0 静止。返程墙在停止线的 -x 侧。 */
+                        ox[n_obs]  = tl_on_return ? (g.tl_x[ti] + 1.0)
+                                                      : (g.tl_x[ti] - 1.0);  /* 停止线前 1m */
                         oy[n_obs]  = 0.0;               /* 路中心 */
                         ow[n_obs]  = 8.0;                /* 跨双车道 */
                         ol[n_obs]  = 0.5;                /* 薄墙 */
@@ -1966,6 +1995,21 @@ protected:
                     for (int ti = 0; ti < g.tl_count; ti++) {
                         if (g.tl_state[ti] == 0) continue;  /* 绿灯 */
                         double dx_tl = g.tl_x[ti] - g.ego_x;
+                        /* 方向感知（2026-08-04 掉头后对向灯误停修复）：与上方
+                         * 红灯墙注入同款——返程翻转 dx + 只响应本侧车道灯。
+                         * 旧实现返程越过灯线后 dx 翻正，把已过的灯当"前方红灯"
+                         * 强制停车（实测返程停在对向灯后 15m）。 */
+                        /* 行进方向 = flowsim road/ref_path.reverse 同式推导
+                         * （u_turn_active = |hn| > π/2，见 flowsim_node.cpp），
+                         * planning 未订阅 ref_path 故本地同式计算，与权威一致 */
+                        double hn_r = g.ego_heading;
+                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
+                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
+                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
+                        if (tl_on_return) {
+                            dx_tl = -dx_tl;
+                            if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
+                        }
                         if (dx_tl <= 0.0 || dx_tl > 60.0) continue;
                         if (dx_tl > brake_dist + 20.0) continue;  /* 还很远（fusion 滞后补 20m 余量） */
                         /* 刹停范围内 → 强制停车
