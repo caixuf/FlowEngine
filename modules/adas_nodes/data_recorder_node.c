@@ -73,7 +73,18 @@ static struct {
     volatile int has_scene;
 
     double cfg_frequency_hz;
+    /* 数据质量过滤（pause 时通过参数热调，见 recorder_init 解析） */
+    int    filter_reverse;       /* 剔除倒车样本（v < -0.5） */
+    int    filter_inconsistent;  /* 剔除油门刹车同时踩（throttle>0.1 && brake>0.1） */
+    int    filter_stalled;       /* 剔除长时间停滞（连续 |v|<0.5 超过 STALL_KEEP 帧） */
     int    sample_count;
+    /* 过滤统计（在任务退出时汇总打印） */
+    long   keep_count;
+    long   reject_nan;
+    long   reject_reverse;
+    long   reject_inconsistent;
+    long   reject_stalled;
+    int    stall_count;          /* 连续停滞帧计数 */
 } g;
 
 static void on_fusion(const Message* msg, void* user_data) {
@@ -202,25 +213,15 @@ static void select_front_obstacles(const ObstacleList* src, const Obstacle** fir
     }
 }
 
-static cJSON* build_obstacle_json(const Obstacle* obs) {
+static cJSON* build_obstacle_json(const double v[5]) {
     cJSON* obj = cJSON_CreateObject();
-    if (obs) {
-        cJSON_AddNumberToObject(obj, "id", (double)obs->id);
-        cJSON_AddNumberToObject(obj, "x", (double)obs->x);
-        cJSON_AddNumberToObject(obj, "y", (double)obs->y);
-        cJSON_AddNumberToObject(obj, "vx", (double)obs->vx);
-        cJSON_AddNumberToObject(obj, "vy", (double)obs->vy);
-        cJSON_AddNumberToObject(obj, "type", (int)obs->type);
-        cJSON_AddNumberToObject(obj, "confidence", (double)obs->confidence);
-    } else {
-        cJSON_AddNumberToObject(obj, "id", 0);
-        cJSON_AddNumberToObject(obj, "x", 0.0);
-        cJSON_AddNumberToObject(obj, "y", 0.0);
-        cJSON_AddNumberToObject(obj, "vx", 0.0);
-        cJSON_AddNumberToObject(obj, "vy", 0.0);
-        cJSON_AddNumberToObject(obj, "type", 0);
-        cJSON_AddNumberToObject(obj, "confidence", 0.0);
-    }
+    cJSON_AddNumberToObject(obj, "id", 0);
+    cJSON_AddNumberToObject(obj, "x", v[0]);
+    cJSON_AddNumberToObject(obj, "y", v[1]);
+    cJSON_AddNumberToObject(obj, "vx", v[2]);
+    cJSON_AddNumberToObject(obj, "vy", 0.0);
+    cJSON_AddNumberToObject(obj, "type", (int)v[3]);
+    cJSON_AddNumberToObject(obj, "confidence", v[4]);
     return obj;
 }
 
@@ -229,6 +230,28 @@ static cJSON* build_obstacle_json(const Obstacle* obs) {
  * task_thread_fn 调用本函数一次（完整主循环），循环中检查 task->should_stop
  * 退出；task_stop() 置 should_stop=true 并 join 本线程。这与原先自管 pthread
  * 的 recorder_thread 行为等价，只是 should_stop 改由 TaskBase 提供。 */
+
+/* 停滞过滤：连续停滞超过 STALL_KEEP 帧后才丢弃（保留"减速→停稳"的过渡帧，
+ * 只丢掉长时间停着不动的冗余帧，避免刷屏静止样本把模型教成"遇停永不走"）。 */
+#define STALL_KEEP 2
+
+/* 样本质量过滤：返回 1=可存，0=丢弃。reason 记录丢弃原因（1=NaN, 2=倒车,
+ * 3=油门刹车同时踩, 4=长时间停滞）。 */
+static int sample_acceptable(double v, double throttle, double brake, int* reason) {
+    if (!isfinite(v) || !isfinite(throttle) || !isfinite(brake)) { *reason = 1; return 0; }
+    if (g.filter_reverse && v < -0.5) { *reason = 2; return 0; }
+    if (g.filter_inconsistent && throttle > 0.1 && brake > 0.1) { *reason = 3; return 0; }
+    if (g.filter_stalled) {
+        if (fabs(v) < 0.5) {
+            g.stall_count++;
+            if (g.stall_count > STALL_KEEP) { *reason = 4; return 0; }
+        } else {
+            g.stall_count = 0;
+        }
+    }
+    return 1;
+}
+
 static int recorder_execute(TaskBase* task) {
     pthread_setname_np(pthread_self(), "recorder");
 
@@ -244,8 +267,45 @@ static int recorder_execute(TaskBase* task) {
         const Obstacle* front0 = NULL;
         const Obstacle* front1 = NULL;
         select_front_obstacles(g.has_obstacles ? &g.obstacles : NULL, &front0, &front1);
+
+        /* 数据质量：缺失障碍物用"远处无车"占位（type=1, conf=1, x=ego+500）。
+         * 与 inference_node.cpp / feature_schema.py 的占位口径完全一致，保证
+         * 训练与推理对"无车"的输入分布相同。旧实现写 type=0/conf=0/x=0，
+         * 而 type/confidence 的 norm_scale≈1e-6，训练时 (0-1)/1e-6≈-1e6、
+         * 推理时 (1-1)/1e-6=0 → 同一"无车"状态在训练/推理被编码成完全不同的
+         * 输入 → 模型横漂/倒车。占位统一 + 前向钳制双保险。 */
+        double f0[5], f1[5];  /* x, y, vx, type, confidence */
+        if (front0) {
+            f0[0] = front0->x; f0[1] = front0->y; f0[2] = front0->vx;
+            f0[3] = (double)(int)front0->type; f0[4] = front0->confidence;
+        } else {
+            f0[0] = g.ego_x + 500.0; f0[1] = 0.0; f0[2] = 0.0; f0[3] = 1.0; f0[4] = 1.0;
+        }
+        if (front1) {
+            f1[0] = front1->x; f1[1] = front1->y; f1[2] = front1->vx;
+            f1[3] = (double)(int)front1->type; f1[4] = front1->confidence;
+        } else {
+            f1[0] = g.ego_x + 520.0; f1[1] = 0.0; f1[2] = 0.0; f1[3] = 1.0; f1[4] = 1.0;
+        }
+
         double control_brake = g.has_control ? g.control.brake : 0.0;
         int control_emergency_stop = g.has_control ? (g.control.emergency_stop ? 1 : 0) : 0;
+        double control_throttle = g.has_control ? g.control.throttle : 0.0;
+
+        /* 数据质量过滤：丢脏样本（倒车/油门刹车同时踩/长时间停滞/NaN）。
+         * 过滤后的样本才是干净分布，避免模型学到"倒车""原地停死"等坏行为。 */
+        int reject_reason = 0;
+        if (!sample_acceptable(g.ego_v, control_throttle, control_brake, &reject_reason)) {
+            switch (reject_reason) {
+                case 1: g.reject_nan++; break;
+                case 2: g.reject_reverse++; break;
+                case 3: g.reject_inconsistent++; break;
+                case 4: g.reject_stalled++; break;
+                default: break;
+            }
+            continue;
+        }
+        g.keep_count++;
 
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "schema_version", "flowengine.e2e_sample.v2");
@@ -264,10 +324,8 @@ static int recorder_execute(TaskBase* task) {
          * 维度不匹配硬报错，禁止静默补零混训。 */
         {   double arr[] = {
                 g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
-                front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
-                (double)(front0 ? (int)front0->type : 0), front0 ? front0->confidence : 0.0,
-                front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
-                (double)(front1 ? (int)front1->type : 0), front1 ? front1->confidence : 0.0,
+                f0[0], f0[1], f0[2], f0[3], f0[4],
+                f1[0], f1[1], f1[2], f1[3], f1[4],
                 control_brake, (double)control_emergency_stop };
             cJSON_AddItemToObject(root, "features_v2", cJSON_CreateDoubleArray(arr, 16)); }
 
@@ -279,10 +337,8 @@ static int recorder_execute(TaskBase* task) {
         g.ego_lane_offset = g.ego_y;
         {   double v3[23] = {
                 g.ego_v, g.ego_y, g.ego_heading, g.ego_yaw_rate,
-                front0 ? front0->x : 0.0, front0 ? front0->y : 0.0, front0 ? front0->vx : 0.0,
-                (double)(front0 ? (int)front0->type : 0), front0 ? front0->confidence : 0.0,
-                front1 ? front1->x : 0.0, front1 ? front1->y : 0.0, front1 ? front1->vx : 0.0,
-                (double)(front1 ? (int)front1->type : 0), front1 ? front1->confidence : 0.0,
+                f0[0], f0[1], f0[2], f0[3], f0[4],
+                f1[0], f1[1], f1[2], f1[3], f1[4],
                 control_brake, (double)control_emergency_stop,
                 g.tl_state, g.tl_distance, g.road_curvature,
                 g.road_speed_limit, g.lane_count, g.lane_width, g.ego_lane_offset };
@@ -321,8 +377,8 @@ static int recorder_execute(TaskBase* task) {
         cJSON_AddItemToObject(root, "control", control);
 
         cJSON* obstacles = cJSON_CreateArray();
-        cJSON_AddItemToArray(obstacles, build_obstacle_json(front0));
-        cJSON_AddItemToArray(obstacles, build_obstacle_json(front1));
+        cJSON_AddItemToArray(obstacles, build_obstacle_json(f0));
+        cJSON_AddItemToArray(obstacles, build_obstacle_json(f1));
         cJSON_AddItemToObject(root, "obstacles", obstacles);
 
         /* ── instant_reward（用于 learner reward-weighted 训练）── */
@@ -357,6 +413,9 @@ static int recorder_execute(TaskBase* task) {
     }
 
     LOG_INFO("recorder", "stopped (%d samples → %s)", g.sample_count, g.out_path);
+    LOG_INFO("recorder", "quality: kept=%ld NaN=%ld reverse=%ld inconsistent=%ld stalled=%ld",
+             g.keep_count, g.reject_nan, g.reject_reverse,
+             g.reject_inconsistent, g.reject_stalled);
     statem_send_event(&g.sm, SM_EVENT_STOP, NULL);
     statem_send_event(&g.sm, SM_EVENT_DONE, NULL);
     return 0;
@@ -387,6 +446,11 @@ static int recorder_init(MessageBus* bus, Transport* transport,
     g.cfg_frequency_hz = 10.0;
     strncpy(g.out_path, "/tmp/flow_train_samples.jsonl", sizeof(g.out_path) - 1);
 
+    /* 数据质量过滤默认开启：正向前向驾驶模型，倒车/油门刹车同踩/长停滞都是脏样本 */
+    g.filter_reverse = 1;
+    g.filter_inconsistent = 1;
+    g.filter_stalled = 1;
+
     /* v3 场景上下文默认值（与 inference_node.cpp 一致） */
     g.tl_state = -1.0;
     g.tl_distance = -1.0;
@@ -404,6 +468,12 @@ static int recorder_init(MessageBus* bus, Transport* transport,
                 g.cfg_frequency_hz = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "output_path")) && cJSON_IsString(j))
                 strncpy(g.out_path, j->valuestring, sizeof(g.out_path) - 1);
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "filter_reverse")) && cJSON_IsNumber(j))
+                g.filter_reverse = j->valueint != 0;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "filter_inconsistent")) && cJSON_IsNumber(j))
+                g.filter_inconsistent = j->valueint != 0;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "filter_stalled")) && cJSON_IsNumber(j))
+                g.filter_stalled = j->valueint != 0;
             cJSON_Delete(p);
         }
     }

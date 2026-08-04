@@ -221,9 +221,12 @@ static void on_obstacles(const Message* msg, void* user_data) {
                 }
                 fi++;
             }
-            /* 未满的 slot 置零 */
-            if (fi <= 0) { g.front0_x = 0; g.front0_y = 0; g.front0_vx = 0; g.front0_type = 0; g.front0_confidence = 0; }
-            if (fi <= 1) { g.front1_x = 0; g.front1_y = 0; g.front1_vx = 0; g.front1_type = 0; g.front1_confidence = 0; }
+            /* 未满的 slot 用"远处无车"占位（type=1, conf=1 与训练分布一致）。
+             * 旧实现 fill 0 → type/confidence 的 norm_scale≈1e-6 时 (0-1)/1e-6≈-1e6
+             * → tanh 饱和 → 模型输出冻结成常量（"变死鸭子"）。远处占位 + 前向钳制
+             * 双保险。 */
+            if (fi <= 0) { g.front0_x = g.ego_x + 500.0; g.front0_y = 0; g.front0_vx = 0; g.front0_type = 1; g.front0_confidence = 1; }
+            if (fi <= 1) { g.front1_x = g.ego_x + 520.0; g.front1_y = 0; g.front1_vx = 0; g.front1_type = 1; g.front1_confidence = 1; }
             g.has_obstacles = 1;
             return;
         }
@@ -231,8 +234,9 @@ static void on_obstacles(const Message* msg, void* user_data) {
 
     /* Fallback: 文本 JSON 解析 */
     const char* d = (const char*)msg->data;
-    g.front0_x = 0; g.front0_y = 0; g.front0_vx = 0; g.front0_type = 0; g.front0_confidence = 0;
-    g.front1_x = 0; g.front1_y = 0; g.front1_vx = 0; g.front1_type = 0; g.front1_confidence = 0;
+    /* 默认"远处无车"占位（type=1, conf=1），避免未知障碍物 type/conf=0 归一化爆炸 */
+    g.front0_x = g.ego_x + 500.0; g.front0_y = 0; g.front0_vx = 0; g.front0_type = 1; g.front0_confidence = 1;
+    g.front1_x = g.ego_x + 520.0; g.front1_y = 0; g.front1_vx = 0; g.front1_type = 1; g.front1_confidence = 1;
     const char* p;
     for (int i = 0; i < 2; i++) {
         char key[16];

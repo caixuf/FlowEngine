@@ -273,6 +273,12 @@ PROMOTE_SHADOW_MAE_MAX = 2.0
 PROMOTE_SHADOW_MIN_N = 50
 # shadow_eval.json 最大年龄（秒）：过旧的评估结论不能为当前代码/场景背书。
 PROMOTE_SHADOW_MAX_AGE_S = 7 * 24 * 3600
+# 闭环安全评估 (eval_closed_loop.py) 结果最大年龄（秒）。
+# 这是"能不能用"的硬门禁：模型会倒车/横漂/冲出路面/撞车 = 不可用，
+# 即使影子 MAE 好看也禁止 promote。过旧或缺失 = 无法判定，按 require 拒绝。
+PROMOTE_CLOSED_LOOP_MAX_AGE_S = 7 * 24 * 3600
+# 闭环评估必须覆盖的场景（缺任一 = 覆盖不全，按 require 拒绝）。
+PROMOTE_CLOSED_LOOP_SCENARIOS = ("cruise", "lead", "emergency")
 # 场景矩阵 baseline 目录（scenario_regression.py --update-baseline 生成）。
 SCENARIO_BASELINE_DIR = ROOT / "tests" / "baseline"
 
@@ -316,6 +322,41 @@ def promote_gate(artifact_dir: Path, force: bool = False) -> list[str]:
             n = shadow.get("shadow_n")
             if n is not None and int(n) < PROMOTE_SHADOW_MIN_N:
                 errors.append(f"shadow_n={n} < {PROMOTE_SHADOW_MIN_N}，评估样本太少不可信")
+
+    # 闭环安全评估门禁（Phase 0 — 2026-08）。
+    # 影子 MAE 只衡量"像不像 teacher"，不衡量"能不能用"。模型会倒车/横漂/冲路沿/
+    # 撞车时，必须由 eval_closed_loop.py 的闭环场景判定 FAIL。缺失/过期/覆盖不全
+    # 均按 require 拒绝（无法判定 ≠ 通过）。
+    closed_path = artifact_dir / "closed_loop_eval.json"
+    if not closed_path.exists():
+        errors.append(
+            f"missing {closed_path.name} — 未做闭环安全评估。先跑 "
+            f"`python3 tools/train_e2e/eval_closed_loop.py --model {artifact_dir.name}/model.txt "
+            f"--output {artifact_dir.name}/closed_loop_eval.json`"
+        )
+    else:
+        try:
+            closed = json.loads(closed_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            closed = None
+        if not isinstance(closed, dict):
+            errors.append(f"invalid {closed_path.name}")
+        else:
+            age = time.time() - float(closed.get("created_unix_ms", 0)) / 1000.0
+            if age > PROMOTE_CLOSED_LOOP_MAX_AGE_S:
+                errors.append(
+                    f"closed_loop_eval.json 已过期 ({age / 86400.0:.1f} 天前) — 重新评估"
+                )
+            if closed.get("evaluator_result") != "PASS":
+                failed = [n for n, r in closed.get("scenarios", {}).items()
+                          if r.get("result") == "FAIL"]
+                err = (f"闭环评估 = {closed.get('evaluator_result')!r} (要求 PASS)"
+                       + (f"；FAIL 场景: {failed}" if failed else ""))
+                errors.append(err)
+            scenarios = closed.get("scenarios", {})
+            missing = [s for s in PROMOTE_CLOSED_LOOP_SCENARIOS if s not in scenarios]
+            if missing:
+                errors.append(f"闭环评估覆盖不全，缺场景: {missing}")
 
     # 场景矩阵不退化 hook：baseline 存在才启用（Phase 1 交付后自动生效）。
     # baseline 缺失时明示跳过而不是静默通过——但不算拒绝理由（该门禁归 CI）。

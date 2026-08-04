@@ -465,6 +465,23 @@ class E2ETrainingToolsTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            # 闭环安全评估（eval_closed_loop.py 产物）—— promote 门禁的硬性 require。
+            (artifact / "closed_loop_eval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "flowengine.e2e_closed_loop.v1",
+                        "created_unix_ms": int(time.time() * 1000),
+                        "evaluator_result": "PASS",
+                        "scenarios": {
+                            "cruise": {"result": "PASS", "metrics": {"progress": 88.0, "final_v": 12.0}},
+                            "lead": {"result": "PASS", "metrics": {"progress": 60.0, "final_v": 6.0}},
+                            "emergency": {"result": "PASS", "metrics": {"progress": 45.0, "final_v": 0.0}},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             list_result = subprocess.run(
                 [
@@ -689,6 +706,98 @@ class E2ETrainingToolsTest(unittest.TestCase):
                             self.assertLess(abs(float(got[k]) - ref[k]), 1e-3,
                                             f"onnx vs tiny_mlp mismatch @out{k}: "
                                             f"{got[k]} vs {ref[k]} (x={x})")
+
+    def test_feature_placeholder_consistency_across_recorder_inference_schema(self):
+        """数据一致性门禁：训练侧特征构建与运行时采集器/推理的"无车"占位必须一致。
+
+        训练侧 feature_schema.build_v2/v3_features 与运行时 data_recorder_node.c /
+        inference_node.cpp 对缺失障碍物用同一占位（type=1, conf=1, x=ego+500/520）。
+        若某侧退回 fill 0（type=0），type/confidence 的 norm_scale≈1e-6 会把
+        归一化输入推到 ~1e6 → tanh 饱和 → 模型输出冻结成常量（车"倒车/横漂"）。
+        此测试把三处占位口径钉死，防止回归。
+        """
+        # 与 inference_node.cpp / data_recorder_node.c 的占位常量保持一致。
+        FRONT0_OFFSET = 500.0
+        FRONT1_OFFSET = 520.0
+
+        sys.path.insert(0, str(ROOT / "tools/train_e2e"))
+        from feature_schema import build_v2_features, build_v3_features
+
+        ego = {"x": 100.0, "y": -1.75, "v": 10.0, "heading": 0.0, "yaw_rate": 0.0}
+        control = {"brake": 0.0, "emergency_stop": False}
+
+        # 无障碍物：两个 slot 都应为远处占位，type/conf=1
+        f = build_v2_features(ego, [], control)
+        self.assertEqual(len(f), 16)
+        self.assertAlmostEqual(f[4], ego["x"] + FRONT0_OFFSET, places=3)
+        self.assertAlmostEqual(f[9], ego["x"] + FRONT1_OFFSET, places=3)
+        self.assertEqual(f[7], 1.0)   # front0_type
+        self.assertEqual(f[12], 1.0)  # front1_type
+        self.assertEqual(f[8], 1.0)   # front0_confidence
+        self.assertEqual(f[13], 1.0)  # front1_confidence
+
+        # 1 个障碍物：front0 用真实值，front1 用远处占位
+        f1 = build_v2_features(ego, [{"x": 150.0, "y": -1.75, "vx": 5.0,
+                                      "type": 1, "confidence": 0.9}], control)
+        self.assertAlmostEqual(f1[4], 150.0, places=3)
+        self.assertAlmostEqual(f1[9], ego["x"] + FRONT1_OFFSET, places=3)
+        self.assertEqual(f1[12], 1.0)
+
+        # 2 个障碍物：都用真实值
+        f2 = build_v2_features(ego, [
+            {"x": 150.0, "y": -1.75, "vx": 5.0, "type": 1, "confidence": 0.9},
+            {"x": 200.0, "y": -1.75, "vx": 4.0, "type": 1, "confidence": 0.8},
+        ], control)
+        self.assertAlmostEqual(f2[4], 150.0, places=3)
+        self.assertAlmostEqual(f2[9], 200.0, places=3)
+
+        # v3 场景上下文不污染占位（前 16 维与 v2 一致）
+        ctx = {"tl_state": 0.0, "tl_distance": -1.0, "curvature": 0.0,
+               "speed_limit": 30.0, "lane_count": 2.0, "lane_width": 3.5,
+               "ego_lane_offset": -1.75}
+        f3 = build_v3_features(ego, [], control, scene_context=ctx)
+        self.assertEqual(len(f3), 23)
+        self.assertAlmostEqual(f3[4], ego["x"] + FRONT0_OFFSET, places=3)
+        self.assertAlmostEqual(f3[9], ego["x"] + FRONT1_OFFSET, places=3)
+        self.assertEqual(f3[7], 1.0)
+        self.assertEqual(f3[12], 1.0)
+
+    def test_closed_loop_gate_missing_file_rejected(self):
+        """闭环评估缺失时 promote 必须拒绝（require 语义：无法判定 ≠ 通过）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            runtime = work / "runtime" / "model.txt"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("runtime-model\n", encoding="utf-8")
+
+            artifact = work / "models" / "no_closed_loop"
+            artifact.mkdir(parents=True)
+            (artifact / "model.txt").write_text("artifact-model\n", encoding="utf-8")
+            (artifact / "manifest.json").write_text(
+                json.dumps({"backend": "tiny_mlp", "model_format": "flowengine-tinymlp-v3",
+                            "model_path": "model.txt", "dataset": {"sample_count": 1}})
+                + "\n",
+                encoding="utf-8",
+            )
+            (artifact / "shadow_eval.json").write_text(
+                json.dumps({"schema": "flowengine.shadow_eval.v1",
+                            "created_unix_ms": int(time.time() * 1000),
+                            "evaluator_result": "PASS", "shadow_speed_mae": 1.0,
+                            "shadow_n": 100})
+                + "\n",
+                encoding="utf-8",
+            )
+            # 故意不写 closed_loop_eval.json
+
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "tools/modelctl.py"), "promote", str(artifact),
+                 "--runtime-model", str(runtime)],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("closed_loop_eval.json", result.stderr)
+            # 未通过评估，runtime 不得被覆盖
+            self.assertEqual(runtime.read_text(encoding="utf-8"), "runtime-model\n")
 
 
 if __name__ == "__main__":

@@ -98,7 +98,14 @@ static inline int tiny_mlp_forward(const TinyMLP* m, const float* x, float* y) {
     int prev_dim = m->in_dim;
     for (int i = 0; i < m->in_dim && i < TINY_MLP_MAX_IN; i++) {
         float s = m->norm_scale[i] != 0.0f ? m->norm_scale[i] : 1.0f;
-        prev[i] = (x[i] - m->norm_mean[i]) / s;
+        float xn = (x[i] - m->norm_mean[i]) / s;
+        /* 防御性钳制：归一化后输入 clamp 到 [-5,5]。
+         * 特征缺失/异常（如 type/confidence 的 norm_scale≈1e-6 却 fill 0，
+         * (0-1)/1e-6 ≈ -1e6）会让 tanh 饱和 → 输出冻结成常量（"模型变死鸭子"）。
+         * ±5 远超 tanh 有效区（tanh(±5)≈±0.9999），钳制不丢信息，只阻断爆炸。 */
+        if (xn > 5.0f) xn = 5.0f;
+        if (xn < -5.0f) xn = -5.0f;
+        prev[i] = xn;
     }
 
     /* 逐隐层计算（最多 TINY_MLP_MAX_HID_LAYERS 层） */
