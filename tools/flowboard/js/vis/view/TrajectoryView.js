@@ -145,18 +145,15 @@ export function createTrajectoryView(scene) {
 
     arrowGroup = new THREE.Group();
     group.add(arrowGroup);
+    _ensureArrowPool();
   }
 
   function clear() {
     [outerGeo, ribbonGeo, coreGeo, flowGeo].forEach(g => { if (g) g.setDrawRange(0, 0); });
-    if (arrowGroup) {
-      while (arrowGroup.children.length) {
-        const c = arrowGroup.children[0];
-        arrowGroup.remove(c);
-        if (c.geometry) c.geometry.dispose();
-        if (c.material) c.material.dispose();
-      }
-    }
+    /* 箭头池：隐藏而非销毁（复用，避免每帧新建 ConeGeometry + clone 材质
+     * 的分配风暴 —— 60fps × ~11 箭头/帧 = 每秒 ~660 个几何体，150s 累积
+     * 近 10 万个，GC 压力逐步恶化 → 后段卡成 PPT（2026-08-04 实测）。 */
+    for (const m of _arrowPool) m.visible = false;
   }
 
   /**
@@ -343,48 +340,63 @@ export function createTrajectoryView(scene) {
   }
 
   /** 沿路径放置方向箭头 */
-  function _buildArrows(points, colorArr) {
-    while (arrowGroup.children.length) {
-      const c = arrowGroup.children[0];
-      arrowGroup.remove(c);
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) c.material.dispose();
+  /* 箭头池：一次性预建 MAX_ARROWS 个锥体，每帧只改 position/quaternion/
+   * opacity，不新建/释放几何体 —— 消除每帧分配风暴导致的 GC 渐进卡顿。 */
+  const ARROW_POOL_MAX = 40;
+  const _arrowPool = [];
+
+  function _ensureArrowPool() {
+    if (_arrowPool.length) return;
+    const geo = new THREE.ConeGeometry(ARROW_RADIUS, ARROW_LENGTH, 6);
+    for (let i = 0; i < ARROW_POOL_MAX; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: ARROW_ALPHA, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.visible = false;
+      arrowGroup.add(mesh);
+      _arrowPool.push(mesh);
     }
-    if (points.length < 2) return;
+  }
+
+  function _buildArrows(points, colorArr) {
+    if (points.length < 2) { clear(); return; }
 
     const totalLen = points[points.length - 1].dist || 1;
-    if (totalLen < ARROW_LENGTH) return;
+    if (totalLen < ARROW_LENGTH) { clear(); return; }
 
     const hex = (colorArr[_R] << 16) | (colorArr[_G] << 8) | colorArr[_B];
-    const mat = new THREE.MeshBasicMaterial({
-      color: hex, transparent: true, opacity: ARROW_ALPHA, depthWrite: false,
-    });
+    const baseColor = new THREE.Color(hex);
+
+    for (const m of _arrowPool) m.visible = false;
 
     const up = new THREE.Vector3(0, 1, 0);
+    const dir = new THREE.Vector3();
     let nextArrowDist = ARROW_SPACING_M * 0.3;
+    let arrowIdx = 0;
 
     for (let i = 1; i < points.length; i++) {
       const p = points[i];
       const prev = points[i - 1];
       const segLen = p.dist - prev.dist;
       while (p.dist >= nextArrowDist) {
+        if (arrowIdx >= ARROW_POOL_MAX) return;   // 池满截断（正常不会到）
         const t = segLen > 0.001 ? (nextArrowDist - prev.dist) / segLen : 0;
         const ax = prev.x + (p.x - prev.x) * t;
         const az = prev.z + (p.z - prev.z) * t;
         const adx = prev.dx + (p.dx - prev.dx) * t;
         const adz = prev.dz + (p.dz - prev.dz) * t;
 
-        const geo = new THREE.ConeGeometry(ARROW_RADIUS, ARROW_LENGTH, 6);
-        const mesh = new THREE.Mesh(geo, mat.clone());
+        const mesh = _arrowPool[arrowIdx++];
+        mesh.visible = true;
         mesh.position.set(ax, prev.y + 0.25, az);
-
-        const dir = new THREE.Vector3(adx, 0, adz).normalize();
+        dir.set(adx, 0, adz).normalize();
         mesh.quaternion.setFromUnitVectors(up, dir);
 
         const fadeT = totalLen > 0.1 ? nextArrowDist / totalLen : 0;
+        mesh.material.color.copy(baseColor);
         mesh.material.opacity = ARROW_ALPHA * (1 - fadeT * 0.7);
 
-        arrowGroup.add(mesh);
         nextArrowDist += ARROW_SPACING_M;
         if (nextArrowDist > totalLen) break;
       }
@@ -436,13 +448,15 @@ export function createTrajectoryView(scene) {
     /* 3. 主体光带（逐点颜色，平滑色彩过渡） */
     _fillRibbon(ribbonGeo, points, RIBBON_WIDTH_START, RIBBON_WIDTH_END, RIBBON_ALPHA_START, RIBBON_ALPHA_END, true, fixedColor);
 
-    /* 4. 内亮核心（白色偏基础色，加法混合） */
+    /* 4. 内亮核心（白色偏基础色，加法混合）—— 低档也跳过（只剩主体光带 1 层） */
     const coreColor = [
       Math.min(1, fixedColor[0] * 0.4 + 0.6),
       Math.min(1, fixedColor[1] * 0.4 + 0.6),
       Math.min(1, fixedColor[2] * 0.4 + 0.6),
     ];
-    _fillRibbon(coreGeo, points, CORE_WIDTH_START, CORE_WIDTH_END, CORE_ALPHA_START, CORE_ALPHA_END, false, coreColor);
+    if (!lowTier) {
+      _fillRibbon(coreGeo, points, CORE_WIDTH_START, CORE_WIDTH_END, CORE_ALPHA_START, CORE_ALPHA_END, false, coreColor);
+    }
 
     /* 5. 流动高亮条（高亮主光带，略宽一点，用加法混合 + 时间偏移 sin 波）—— 低档跳过 */
     const totalLen = points[points.length - 1].dist || 1;
@@ -461,6 +475,11 @@ export function createTrajectoryView(scene) {
     [outerMesh, ribbonMesh, coreMesh, flowMesh].forEach(m => {
       if (m && m.material) m.material.dispose();
     });
+    for (const m of _arrowPool) {
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) m.material.dispose();
+    }
+    _arrowPool.length = 0;
     scene.remove(group);
   }
 
