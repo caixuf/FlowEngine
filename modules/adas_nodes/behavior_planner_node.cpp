@@ -992,8 +992,12 @@ protected:
                          * 才达到 → 被迫 Phase 0 倒车腾挪）。距障碍 ≤30m 且 v≤7
                          * 即触发（Frenet 障碍刹车在此处速度已自然降至 ~7），
                          * 前向空间 ~20m > 12m 无需腾挪。注意必须排在 decel
-                         * 分支之前——否则 v>5 进 decel、fallback 永不评估。 */
-                        if (g.ego_x > uturn_ref_x - 30.0 && g.ego_v <= 7.0) {
+                         * 分支之前——否则 v>5 进 decel、fallback 永不评估。
+                         * 2026-08-04 撞护栏修复：兜底速度阈值 7→5 —— 旧值在
+                         * 车仍以 6.8m/s 进弯时就触发（safety 幽灵刹车打断接近
+                         * 减速所致），进弯太快 → 掉头弧外甩擦护栏。降到 5 后
+                         * 车必须减速到 5 才触发（120m 分支兜底），进弯更慢。 */
+                        if (g.ego_x > uturn_ref_x - 30.0 && g.ego_v <= 5.0) {
                             uturn_trigger = true;
                         } else if (g.ego_v > g.uturn_max_trigger_speed) {
                             new_target_lane = -1;

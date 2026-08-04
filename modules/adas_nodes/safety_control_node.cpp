@@ -213,12 +213,20 @@ void on_perception_obstacles(const Message* msg, void*) {
 
 double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& params) {
     double best_gap = 1e9;
+    /* 方向感知（2026-08-04 掉头返程）：旧实现 dx=obs_x-ego_x 世界 +x 判"前方"，
+     * 返程向西时前车在 -x（dx<0）被 skip → 同向 gap 恒 1e9 → 返程跟车失效。
+     * 沿车头方向投影 ahead 后前进/返程统一。 */
+    const double fwd_x = std::cos(state.heading);
+    const double fwd_y = std::sin(state.heading);
     for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
-        if (std::fabs(state.obs_y[i] - state.y) > params.same_lane_tol) continue;
-        double dx = state.obs_x[i] - state.x;
-        double gap = dx - 4.6;
-        if (dx > 0.0 && gap < best_gap) best_gap = gap;
+        const double ex = state.obs_x[i] - state.x;
+        const double ey = state.obs_y[i] - state.y;
+        const double lat = std::fabs(-ex * fwd_y + ey * fwd_x);
+        if (lat > params.same_lane_tol) continue;
+        const double along = ex * fwd_x + ey * fwd_y;
+        const double gap = along - 4.6;
+        if (along > 0.0 && gap < best_gap) best_gap = gap;
     }
     return best_gap;
 }
@@ -262,21 +270,29 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
     double best_ttc = 1e9;
     double best_dx = 0.0;
     double best_dy = 0.0;
+    /* 方向感知（2026-08-04 掉头返程同向防撞失效）：旧实现用世界 dx=obs_x-ego_x，
+     * 返程 ego 向西时前车在 -x（dx<0）被 skip → 同向 TTC 完全失效，返程无防撞。
+     * 改为沿车头方向投影 ahead + 沿向速度，前进/返程统一。 */
+    const double fwd_x = std::cos(state.heading);
+    const double fwd_y = std::sin(state.heading);
     for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
-        const double dx = state.obs_x[i] - state.x;
-        const double dy = std::fabs(state.obs_y[i] - state.y);
-        if (dx < 0.0 || dx > 35.0 || dy > 2.3) continue;
+        const double ex = state.obs_x[i] - state.x;
+        const double ey = state.obs_y[i] - state.y;
+        const double along = ex * fwd_x + ey * fwd_y;      /* 沿车头前方距离 */
+        const double lat = std::fabs(-ex * fwd_y + ey * fwd_x);  /* 横向偏移 */
+        if (along < 0.0 || along > 35.0 || lat > 2.3) continue;
 
-        const double closing = state.speed - state.obs_v[i];
+        const double along_v = state.obs_v[i] * fwd_x + state.obs_vy[i] * fwd_y;
+        const double closing = state.speed - along_v;
         if (closing <= 0.4) continue;
 
-        const double clearance = dx - 4.8;
+        const double clearance = along - 4.8;
         const double ttc = clearance / std::max(0.1, closing);
         if (ttc < best_ttc) {
             best_ttc = ttc;
-            best_dx = dx;
-            best_dy = dy;
+            best_dx = along;
+            best_dy = lat;
         }
     }
     if (out_dx) *out_dx = best_dx;
@@ -285,33 +301,43 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
 }
 
 /* Phase 5: 对向来车 TTC.
- * 检查相邻对向车道 (2.0 < |dy| ≤ 6.0m) 是否有迎面驶来的车辆 (obs_v < -2 m/s)。
- * head-on closing speed = ego_speed + |obs_v|, 比同向 closing speed 大得多。
+ * 检查相邻对向车道 (2.0 < |dy| ≤ 6.0m) 是否有迎面驶来的车辆。
+ * head-on closing speed = ego_speed + |obs_v_along|, 比同向 closing speed 大得多。
  *
  * |dy| 上界 6.0m ≈ 1.5×标准车道宽：只把**相邻车道**的对向车当迎头威胁。
  * 旧逻辑 |dy|>2.0 把对向任意车道都算上，多车道高速上 ego 在 lane3、对向车
  * 在 lane0（横向 10.5m，中间隔两条车道）也触发 → 巡航被压到 0.5~1.0 全刹
- * （2026-07-31 实跑：合并回 lane2 途中遇 2 车道外对向车刹停到 0）。 */
+ * （2026-07-31 实跑：合并回 lane2 途中遇 2 车道外对向车刹停到 0）。
+ *
+ * 方向感知（2026-08-04 掉头返程幽灵刹车）：旧实现用世界 obs_v < -2 判"迎面"，
+ * 掉头返程 ego 向西（世界 vx<0）时，**同向车**（世界 vx 也 <0）被误判为迎头 →
+ * head-on TTC 用 speed+|obs_v| 硬刹 → 不敢超旁边车道同向车。改为沿车头方向
+ * 投影沿向速度 along_v：沿向为负（朝 ego 靠近）才算迎头，同向车沿向恒为正。
+ */
 static constexpr double kOncomingAdjacentDyMax = 6.0;
 double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
     double best_ttc = 1e9;
     double best_dx = 0.0;
+    const double fwd_x = std::cos(state.heading);
+    const double fwd_y = std::sin(state.heading);
     for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = state.obs_y[i] - state.y;
-        /* 相邻对向车道: 2.0 < |dy| ≤ 6.0m, 前方 60m */
-        if (dx < 0.0 || dx > 60.0 || std::fabs(dy) < 2.0 ||
+        /* 相邻对向车道: 2.0 < |dy| ≤ 6.0m, 前方 60m（沿车头方向，返程自适应） */
+        const double along = dx * fwd_x + dy * fwd_y;
+        if (along < 0.0 || along > 60.0 || std::fabs(dy) < 2.0 ||
             std::fabs(dy) > kOncomingAdjacentDyMax) continue;
-        /* 迎面驶来: obs_v < -2 m/s */
-        if (state.obs_v[i] > -2.0) continue;
+        /* 沿车头方向速度：负 = 朝 ego 驶来（迎头）。同向车沿向恒为正（远离）。 */
+        const double along_v = state.obs_v[i] * fwd_x + state.obs_vy[i] * fwd_y;
+        if (along_v > -2.0) continue;
 
-        const double closing = state.speed + std::fabs(state.obs_v[i]);
-        const double clearance = dx - 4.0;  /* 车长余量 */
+        const double closing = state.speed + std::fabs(along_v);
+        const double clearance = along - 4.0;  /* 车长余量 */
         const double ttc = clearance / std::max(0.1, closing);
         if (ttc < best_ttc) {
             best_ttc = ttc;
-            best_dx = dx;
+            best_dx = along;
         }
     }
     if (out_dx) *out_dx = best_dx;
@@ -322,17 +348,23 @@ double nearest_vehicle_lateral_cross_risk(const VehicleState& state, double* out
     double best = 1e9;
     double best_dx = 0.0;
     double best_dy_signed = 0.0;
+    /* 方向感知（2026-08-04 掉头返程）：旧实现用世界 dx 窗口 [-5,12]，返程
+     * 时把车后的障碍算进横向穿越风险 → 误刹。改沿车头投影（ahead 窗口 + 横向）。 */
+    const double fwd_x = std::cos(state.heading);
+    const double fwd_y = std::sin(state.heading);
     for (int i = 0; i < kMaxObs; ++i) {
         if (!state.obs_valid[i]) continue;
-        const double dx = state.obs_x[i] - state.x;
-        const double dy_signed = state.obs_y[i] - state.y;
+        const double ex = state.obs_x[i] - state.x;
+        const double ey = state.obs_y[i] - state.y;
+        const double along = ex * fwd_x + ey * fwd_y;
+        const double dy_signed = -ex * fwd_y + ey * fwd_x;
         const double dy = std::fabs(dy_signed);
-        if (dx < -5.0 || dx > 12.0) continue;
+        if (along < -5.0 || along > 12.0) continue;
         if (dy > 2.2) continue;
-        const double metric = std::fabs(dx) + 2.0 * dy;
+        const double metric = std::fabs(along) + 2.0 * dy;
         if (metric < best) {
             best = metric;
-            best_dx = dx;
+            best_dx = along;
             best_dy_signed = dy_signed;
         }
     }
