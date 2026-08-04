@@ -354,7 +354,7 @@ static void test_target_speed() {
     CHECK(std::fabs(r.target_speed - 1.5) < 0.05, "target: min|v| over 6m not 1.5");
     // 推进 s 进入 R 段但不到终点（终点 s=25，R 段 s=15..25；推进到 ~16 停）
     for (int t = 0; t < 130; t++) {
-        ManeuverResult rt = mt.tick(5.0, 0, 0, 3.0, DT);   // 每 tick 推进 0.15m
+        mt.tick(5.0, 0, 0, 3.0, DT);   // 每 tick 推进 0.15m
         if (mt.arcLengthS() >= 16.0) break;
     }
     double s_rev = mt.arcLengthS();
@@ -381,7 +381,7 @@ static void test_end_stop() {
     ManeuverTracker mt;
     mt.init(traj.data(), (int)traj.size(), WHEELBASE);
     for (int t = 0; t < 200; t++) {
-        ManeuverResult r = mt.tick(9.0, 0, 0, 3.0, DT);
+        mt.tick(9.0, 0, 0, 3.0, DT);
         if (mt.done()) break;
     }
     CHECK(mt.done(), "end: tracker not done at end");

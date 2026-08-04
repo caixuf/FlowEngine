@@ -1693,50 +1693,20 @@ protected:
                     if (g.u_turn_active && g.roads_loaded) {
                         flowsim::FrenetPos fp;
                         if (g.roads.world_to_frenet(ego.x, ego.y, fp)) {
-                            /* 物理位置（step_bicycle 沿车头积分）是真值。
-                             * relocate 用「参考线 + ref 偏移」落位（与 scene_events
-                             * NPC 传送同一模式），保留车道内真实横向偏移；旧版
-                             * relocate(lane, 0.0) 把车吸附到车道中心线——返程车被
-                             * 钉在中心线、车头一偏就"斜着直行"。 */
+                            /* 掉头返程段（2026-08 架构收口）：
+                             * 位置 = step_bicycle 积分（物理真值，与 HTML 车辆
+                             * 实验室一致）。旧实现 relocate 读回 ego.x/y 把位置
+                             * 钉到参考线 + heading slew 对齐 —— 位置被轨道拽、
+                             * heading 原地转 → "屁股横扫/大移动"（用户实测
+                             * 掉头屁股大移动）。现在 relocate 仅同步 esmini
+                             * handle（碰撞/路网查询），位置/heading 保持
+                             * step_bicycle 自由积分，车道对齐由 control 横向
+                             * 控制完成（与正常模式一致；Phase 4 收严后掉头
+                             * 结束残差 <6°，无"斜着直行"）。 */
                             double ref_off = flowsim::offset_from_lane_internal(
                                 g.roads, fp.road_id, fp.lane_id, fp.s, fp.offset);
                             if (ego.road_pos.relocate(g.roads, fp.road_id, 0, fp.s, ref_off)) {
                                 advanced = true;
-                                flowsim::WorldPos wp;
-                                if (ego.road_pos.world(wp)) {
-                                    ego.x = wp.x;
-                                    ego.y = wp.y;
-                                    /* 返程航向对齐车道切线：位置已被 relocate 强钉在
-                                     * 车道内，control 对横向无权限；若放任 heading 由
-                                     * control 的 steer 自由积分，它会稳在偏离车道方向
-                                     * ~20° 的姿态 → 车身斜着沿道直行（用户所见"斜着直行"），
-                                     * 且 u_turn 释放（临近路端触发二次掉头）时按该偏航
-                                     * 直接冲出路面（实测 y 掉到 -16m，路半宽仅 7m）。
-                                     * 这里把 heading 平滑收敛到参考线切线（取与当前
-                                     * heading 同向的 ± 支解 180° 歧义，对向返程自然选反向），
-                                     * 使车身始终对齐车道。仅返程 on-rails 段生效（position
-                                     * 已钉住），不触及前进段 control 的 heading 自由度。 */
-                                    double cand = wp.h;
-                                    double d0 = cand - ego.heading;
-                                    while (d0 >  M_PI) d0 -= 2.0 * M_PI;
-                                    while (d0 < -M_PI) d0 += 2.0 * M_PI;
-                                    if (std::fabs(d0) > M_PI / 2.0) cand = wp.h + M_PI;
-                                    double dh_align = cand - ego.heading;
-                                    while (dh_align >  M_PI) dh_align -= 2.0 * M_PI;
-                                    while (dh_align < -M_PI) dh_align += 2.0 * M_PI;
-                                    /* 速率封顶 ≤0.35rad/s：0.15·dh_align 在 dh≈90°
-                                     * 时是 ≈4.7rad/s（270°/s）原地自旋——正是
-                                     * "屁股横扫"的直接元凶。 */
-                                    double slew = 0.15 * dh_align;
-                                    double slew_max = 0.35 * FLOWSIM_DT_SEC;
-                                    if (slew >  slew_max) slew =  slew_max;
-                                    if (slew < -slew_max) slew = -slew_max;
-                                    ego.heading += slew;
-                                    while (ego.heading >  M_PI) ego.heading -= 2.0 * M_PI;
-                                    while (ego.heading < -M_PI) ego.heading += 2.0 * M_PI;
-                                    ego.vx = ego.speed * std::cos(ego.heading);
-                                    ego.vy = ego.speed * std::sin(ego.heading);
-                                }
                                 /* 字段从 world_to_frenet 的 fp 直接读（权威）；
                                  * 不从 relocate 后的 handle 读（参考线上 lane_id 恒 0）。 */
                                 ego.road_id = fp.road_id;

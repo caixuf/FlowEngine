@@ -465,7 +465,17 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         // 防过冲：剩余距离不足一个 step 时直接收敛到目标
         double remain = npc.target_offset - npc.offset;
         if (std::fabs(step) > std::fabs(remain)) step = remain;
-        npc.offset += step;
+        /* CutIn 车头偏转（2026-08 修复"NPC 屁股先动"）：
+         * 旧实现 offset 直推平移 + world 回写把 heading 钉回路切线（零
+         * 偏航）→ 车身纯横移 = "屁股先"。自行车模型语义：横向速度由
+         * 车头偏转角产生（v_lat = v·sin(dh)）→ 车头先转、车身沿弧线。
+         * npc.steer 存偏转角（前端前轮转向 + world 回写保留偏转）。 */
+        const double npc_v = std::max(npc.speed, 0.5);
+        double dh = std::atan2(u, npc_v);
+        if (dh >  0.5) dh =  0.5;
+        if (dh < -0.5) dh = -0.5;
+        npc.steer = dh;
+        npc.offset += npc_v * std::sin(dh) * dt;
         /* 中心线硬 clamp（同 E2 分支）：CutIn 跨实线变道允许跨车道线，
          * 但严禁跨过道路中心线进入对向。 */
         if (npc.route_dir > 0 && npc.offset > -0.3) npc.offset = -0.3;

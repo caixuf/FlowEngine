@@ -625,6 +625,13 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         v = uturn_speed;
         double phase2_t = 0.0;
         while (n < max_points) {
+            /* 转向渐进（2026-08 修复"屁股先扫 100°"观感）：
+             * 旧实现 Phase 2 首帧即满舵 → yaw_rate 0.87 rad/s（每秒转 50°）
+             * 低速下几乎原地突然旋转 → 观感"车屁股先旋转"。真车掉头是
+             * 渐进打方向（1-2s 打满），前轮角度渐进 → 车头渐进转。
+             * 前 1.2s steer 从 0 线性打到满舵。 */
+            double ramp = std::min(1.0, phase2_t / 1.2);
+            steer = steer_sign * uturn_steer * ramp;
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
             /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */

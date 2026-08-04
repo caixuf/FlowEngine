@@ -377,7 +377,7 @@ static void send_response(int fd, const char* status, const char* content_type,
 /* ── P1-4: gzip + keep-alive + 路径分级缓存 ──────────────────
  *
  * 旧 send_response 每个静态资源都 Connection: close，60+ ES module 各自
- * TCP 握手；Cache-Control: no-cache 让 vendor/three/* 永变资源每次重下；
+ * TCP 握手；Cache-Control: no-cache 让 vendor/three* 永变资源每次重下；
  * 全文件无 gzip，three.module.js 1243KB 裸传。本扩展解决三件事：
  *
  * 1) keep_alive=true → Connection: keep-alive，调用者负责在同一 socket
@@ -420,11 +420,11 @@ static char* gzip_compress(const char* body, int body_len, int* out_len) {
 }
 
 /* 路径分级缓存策略：
- *   /tools/flowboard/vendor/*    → 三方库永不变 → immutable
+ *   /tools/flowboard/vendor*     → 三方库永不变 → immutable
  *   /tools/d3.v7.min.js          → 永不变 → immutable
- *   /index.html, /js/*, /css/*   → 开发热更新 → no-cache
- *   /api/*                       → 实时数据 → no-cache
- *   /tools/flowboard/models/*    → 开发期会重新生成（gen_models.py 改模型
+ *   /index.html, /js*, /css*     → 开发热更新 → no-cache
+ *   /api*                        → 实时数据 → no-cache
+ *   /tools/flowboard/models*     → 开发期会重新生成（gen_models.py 改模型
  *     后必须让浏览器重拉）→ no-cache。2026-07-31 曾标 immutable 导致模型
  *     左右修复后用户浏览器一直用旧的缓存模型、转向灯仍反。
  */

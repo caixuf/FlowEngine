@@ -12,7 +12,7 @@
  *   - 按点速度染色：巡航蓝 / 制动橙 / 加速青绿
  */
 
-import { worldToThree } from '../math/Coord.js';
+import { worldToThree, forwardENU } from '../math/Coord.js';
 
 const TRAJ_GROUND_OFFSET = 0.08;
 const MAX_PLAN_POINTS   = 64;             // 后端轨迹点上限
@@ -168,12 +168,14 @@ export function createTrajectoryView(scene) {
 
     const egoZ = (ego.z || 0) + TRAJ_GROUND_OFFSET;
 
-    /* 轨迹点始终是全局 ENU 坐标：planning 从 ego_x/ego_y 出发逐点积分
-     * （x += v·cos(h)·dt），monitor 按 [[x,y,v],...] 透传。曾用 isVehicleFrame
-     * 启发式（distToEgo>10 && |p0[0]|<50 && |p0[1]|<50）检测"是否车辆系"，
-     * 但轨迹从来都是全局坐标 → 该启发式在 ego 靠近世界原点（|x|<50）时把
-     * 全局点误判为车辆系、二次变换 → 轨迹跳变（"不跟着车"）。2026-08 移除，
-     * 恒按全局坐标渲染。 */
+    /* 轨迹起点锚定到车头实时位置（ENU）：
+     * 规划 10Hz 快照，车每帧（60fps）实时运动。变道时车横向移动快，
+     * 轨迹起点停留在上一次规划时的车位置，而车头已前进/横移 → 轨迹与车脱节。
+     * 用速度方向把轨迹第0点前移到车头，其余真实规划点保留，CatmullRom
+     * 平滑衔接，全程贴合车头。 */
+    const [fx, fy] = forwardENU(ego.heading || 0);
+    const frontX = ego.x + fx * 1.5;
+    const frontY = ego.y + fy * 1.5;
 
     /* 1. 先把原始点转 THREE 坐标，截断跳变 */
     const raw3d = [];
@@ -188,6 +190,13 @@ export function createTrajectoryView(scene) {
       }
       raw3d.push(new THREE.Vector3(tx, ty, tz));
       raw3d[raw3d.length - 1].v = v;
+    }
+    /* 用车头实时位置替换轨迹起点（防脱节）。车头不参与上方跳变检查，
+     * 避免"车偏离轨迹点>10m"时误截断整条轨迹。 */
+    if (raw3d.length >= 1) {
+      const [tx0, ty0, tz0] = worldToThree(frontX, frontY, egoZ);
+      raw3d[0].set(tx0, ty0, tz0);
+      raw3d[0].v = trajPath[0][2] || 0;
     }
     if (raw3d.length < 2) return [];
 
