@@ -1850,24 +1850,33 @@ protected:
                     const double L = 50.0;  /* 变道纵向长度固定（投影鲁棒） */
                     const double absD = std::fabs(D);
                     if (absD > 0.2 && absD < 8.0) {  /* 有效变道范围 */
-                        const double R = (L * L + D * D) / (2.0 * absD);
+                        /* 五次多项式横向轨迹（Apollo LateralQPOptimizer 标准解，
+                         * 2026-08-04 用户认可的 Apollo 对齐路线第一步）：
+                         *   l(s) = a0 + a1·s + a2·s² + a3·s³ + a4·s⁴ + a5·s⁵
+                         * 边界条件：起点/终点横向位置 = l0/l1，横向速度、加速度
+                         * = 0（a1=a2=0）→ 车头渐进偏转（标准 S 曲线，jerk 连续），
+                         * 横向速度先增后减。替换手工 smoothstep/圆弧插值。 */
+                        const double L2 = L * L, L3 = L2 * L, L4 = L3 * L, L5 = L4 * L;
+                        const double a3 = 10.0 * D / L3;
+                        const double a4 = -15.0 * D / L4;
+                        const double a5 = 6.0 * D / L5;
                         for (int i = 0; i < n_wp; i++) {
                             const double t = (double)i / (double)(n_wp - 1);
                             const double s = t * L;
-                            /* sagitta：d_out = ego_ref_d + D·frac，frac∈[0,1]。
-                             * 圆弧凸高公式 frac = R/|D|·(1-cos(s/R))，恒正。
-                             * 旧实现 st 里乘了 sign(D)——D 本身已带符号，右变道
-                             * (D<0) 时 st<0 与 D 相乘得正 → 轨迹反向冲向 +y 侧，
-                             * 车变道必冲出对侧路面（2026-08-03 demo 实测
-                             * RIGHT_CHANGE 车冲到 y=+6.4 再反向回正）。 */
-                            const double frac = (R / absD) *
-                                              (1.0 - std::cos(s / R));
-                            d_out[i] = ego_ref_d + D * frac;
+                            const double s2 = s * s;
+                            d_out[i] = ego_ref_d
+                                     + a3 * s2 * s
+                                     + a4 * s2 * s2
+                                     + a5 * s2 * s2 * s;
                         }
-                        /* 圆弧曲率（固定方向盘 = 固定 kappa）存入全局，
-                         * 轨迹回填后填给变道段（control kappa 前馈用）。
-                         * 符号与 D 一致：右变道(D<0)曲率负（向右弯）。 */
-                        g.lane_change_kappa = (D >= 0.0) ? (1.0 / R) : -(1.0 / R);
+                        /* kappa 前馈：五次多项式曲率 l''/(1+l'²)^1.5，取中段
+                         * 曲率近似（l''(L/4) = 5.625·D/L²，端点 l''=0）——
+                         * 变道中段曲率最大，符号随 D（右变道曲率负）。 */
+                        const double sm = L * 0.25;
+                        const double kappa_m = 6.0 * a3 * sm
+                                             + 12.0 * a4 * sm * sm
+                                             + 20.0 * a5 * sm * sm * sm;
+                        g.lane_change_kappa = kappa_m;
                         g.lane_change_kappa_active = 1;
                     }
                 }
