@@ -828,7 +828,11 @@ TaskBase* prefix##_get_base(prefix##_Wrapper* w) {                            \
 }
 
 #else
+#if defined(_MSC_VER)
+#pragma message("coroutine_task.h requires C++20 or later")
+#else
 #warning "coroutine_task.h requires C++20 or later"
+#endif
 #endif /* C++20 */
 
 #endif /* COROUTINE_TASK_H */

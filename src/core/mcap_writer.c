@@ -20,7 +20,7 @@
 #include <inttypes.h>
 #include <time.h>
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 #include <arpa/inet.h>  /* htonl, htonll */
 #else
 /* 简单回退 */

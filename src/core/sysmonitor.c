@@ -18,6 +18,474 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+
+/* ── Windows 原生性能监控（替代 Linux 的 /proc 读取） ─────────────
+ * 采集映射：
+ *   系统 CPU      → GetSystemTimes（KernelTime 含 IdleTime，差分）
+ *   内存          → GlobalMemoryStatusEx + GetPerformanceInfo(SystemCache)
+ *   进程内存      → GetProcessMemoryInfo（WorkingSetSize= RSS, PagefileUsage= VMS）
+ *   磁盘 I/O      → GetProcessIoCounters（进程读写字节差分，作为吞吐近似）
+ *   负载          → Windows 无 1/5/15 分钟负载，用当前 CPU% 近似
+ *   运行时间      → GetTickCount64
+ *   线程/进程CPU  → GetThreadTimes / GetProcessTimes（100ns 差分）
+ *   线程枚举      → CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD)
+ *   线程名        → GetThreadDescription（Win10 1809+），失败回退 "t<tid>"
+ */
+
+#include "clock_service.h"
+#include "sysmonitor.h"
+#include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <stdio.h>
+#include <string.h>
+
+/* CPU 差分最小窗口（秒）：与 Linux 侧一致，避免高频采样把低占用线程
+ * 的 100ns 增量量化成 0%，每满一个窗口才提交新基线。 */
+#define SYSMON_CPU_WINDOW_S  3.0
+
+/* 线程/进程 CPU 时间以 100ns 为单位（GetThreadTimes / GetProcessTimes） */
+typedef struct {
+    DWORD     id;      /* tid 或 pid */
+    ULONGLONG kt;      /* kernel time (100ns) */
+    ULONGLONG ut;      /* user time (100ns) */
+} WinCpuHist;
+
+/* 进程 IO 差分基线（磁盘 IO 近似） */
+typedef struct {
+    ULONGLONG read_bytes;
+    ULONGLONG write_bytes;
+} WinIoHist;
+
+struct SysMonitor {
+    /* 系统 CPU 差分基线 */
+    FILETIME prev_idle;
+    FILETIME prev_kernel;
+    FILETIME prev_user;
+    int      has_prev_cpu;
+    int      cpu_count;
+
+    /* 进程 IO 差分基线 */
+    WinIoHist prev_io;
+    int       has_prev_io;
+
+    /* 线程差分历史（当前进程） */
+    WinCpuHist thread_hist[SYSMON_MAX_THREADS];
+    int        thread_hist_count;
+    uint64_t   prev_thread_ts_us;
+
+    /* 进程级差分历史 */
+    WinCpuHist proc_hist[SYSMON_MAX_PROCS];
+    int        proc_hist_count;
+    uint64_t   prev_proc_ts_us;
+
+    /* 单进程"线程作进程"独立历史 */
+    WinCpuHist proc_thread_hist[SYSMON_MAX_THREADS];
+    int        proc_thread_hist_count;
+    uint64_t   proc_thread_prev_ts_us;
+};
+
+/* 单调时钟微秒：复用 clock_now_us()（全系统一致，仿真/真实都正确） */
+static uint64_t win_mono_us(void) { return clock_now_us(); }
+
+/* 逻辑 CPU 核数 */
+static int win_cpu_count(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)si.dwNumberOfProcessors;
+}
+
+/* 线程 CPU 时间（100ns），返回 0 成功 */
+static int win_get_thread_cpu(DWORD tid, ULONGLONG* kt, ULONGLONG* ut) {
+    HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!h) return -1;
+    FILETIME create, exit, k, u;
+    int ok = GetThreadTimes(h, &create, &exit, &k, &u) ? 0 : -1;
+    CloseHandle(h);
+    if (ok == 0) {
+        ULARGE_INTEGER a, b;
+        a.LowPart = k.dwLowDateTime; a.HighPart = k.dwHighDateTime;
+        b.LowPart = u.dwLowDateTime; b.HighPart = u.dwHighDateTime;
+        *kt = a.QuadPart; *ut = b.QuadPart;
+    }
+    return ok;
+}
+
+/* 线程名：优先 GetThreadDescription（Win10 1809+），失败回退 "t<tid>" */
+static void win_get_thread_name(DWORD tid, char* name, int maxlen) {
+    name[0] = '\0';
+    HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, tid);
+    PWSTR desc = NULL;
+    if (h) {
+        if (GetThreadDescription(h, &desc) == S_OK && desc && desc[0]) {
+            WideCharToMultiByte(CP_UTF8, 0, desc, -1,
+                                name, maxlen, NULL, NULL);
+            name[maxlen - 1] = '\0';
+            LocalFree(desc);
+        }
+        CloseHandle(h);
+    }
+    if (!name[0])
+        snprintf(name, (size_t)maxlen, "t%lu", (unsigned long)tid);
+}
+
+/* 枚举指定进程的线程 tid（Toolhelp32），返回线程数 */
+static int win_enum_process_threads(DWORD target_pid, DWORD* tids, int max) {
+    int n = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(snap, &te)) {
+        do {
+            if (te.th32OwnerProcessID == target_pid && n < max)
+                tids[n++] = te.th32ThreadID;
+        } while (Thread32Next(snap, &te));
+    }
+    CloseHandle(snap);
+    return n;
+}
+
+/* 在历史数组中查找 id */
+static int win_find_hist(const WinCpuHist* hist, int n, DWORD id) {
+    for (int i = 0; i < n; i++)
+        if (hist[i].id == id) return i;
+    return -1;
+}
+
+/* 读单个进程 CPU 时间 + 工作集（供 sysmonitor_proc_snapshot） */
+static int win_get_proc_cpu(DWORD pid, ULONGLONG* kt, ULONGLONG* ut,
+                            uint64_t* rss_kb) {
+    /* 跨进程读工作集需 PROCESS_QUERY_INFORMATION|PROCESS_VM_READ（老系统上
+     * 仅 LIMITED 权限会让 GetProcessMemoryInfo 失败） */
+    HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                           FALSE, pid);
+    if (!h) return -1;
+    int ok = -1;
+    FILETIME create, exit, k, u;
+    if (GetProcessTimes(h, &create, &exit, &k, &u)) {
+        ULARGE_INTEGER a, b;
+        a.LowPart = k.dwLowDateTime; a.HighPart = k.dwHighDateTime;
+        b.LowPart = u.dwLowDateTime; b.HighPart = u.dwHighDateTime;
+        *kt = a.QuadPart; *ut = b.QuadPart;
+        ok = 0;
+    }
+    if (ok == 0 && rss_kb) {
+        PROCESS_MEMORY_COUNTERS pmc;
+        if (GetProcessMemoryInfo(h, &pmc, sizeof(pmc)))
+            *rss_kb = pmc.WorkingSetSize / 1024;
+        else
+            *rss_kb = 0;
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+SysMonitor* sysmonitor_create(void) {
+    SysMonitor* sm = (SysMonitor*)calloc(1, sizeof(SysMonitor));
+    if (!sm) return NULL;
+    sm->cpu_count = win_cpu_count();
+    uint64_t now = win_mono_us();
+    sm->prev_thread_ts_us = now;
+    sm->prev_proc_ts_us   = now;
+    sm->proc_thread_prev_ts_us = now;
+    return sm;
+}
+
+void sysmonitor_destroy(SysMonitor* sm) {
+    free(sm);
+}
+
+int sysmonitor_snapshot(SysMonitor* sm, SysMonitorSnapshot* out) {
+    if (!sm || !out) return -1;
+    memset(out, 0, sizeof(*out));
+
+    uint64_t now_us = win_mono_us();
+    double   dt_s   = (now_us > sm->prev_thread_ts_us)
+                      ? (double)(now_us - sm->prev_thread_ts_us) / 1e6
+                      : 0.0;
+    out->timestamp_us = now_us;
+    out->cpu_count    = sm->cpu_count;
+
+    /* ── 系统 CPU（GetSystemTimes 差分；KernelTime 含 IdleTime） ── */
+    FILETIME idle, kernel, user;
+    if (GetSystemTimes(&idle, &kernel, &user)) {
+        if (sm->has_prev_cpu && dt_s > 0.0) {
+            ULARGE_INTEGER i0,k0,u0,i1,k1,u1;
+            i0.LowPart=sm->prev_idle.dwLowDateTime; i0.HighPart=sm->prev_idle.dwHighDateTime;
+            k0.LowPart=sm->prev_kernel.dwLowDateTime; k0.HighPart=sm->prev_kernel.dwHighDateTime;
+            u0.LowPart=sm->prev_user.dwLowDateTime; u0.HighPart=sm->prev_user.dwHighDateTime;
+            i1.LowPart=idle.dwLowDateTime; i1.HighPart=idle.dwHighDateTime;
+            k1.LowPart=kernel.dwLowDateTime; k1.HighPart=kernel.dwHighDateTime;
+            u1.LowPart=user.dwLowDateTime; u1.HighPart=user.dwHighDateTime;
+            ULONGLONG d_idle   = i1.QuadPart - i0.QuadPart;
+            ULONGLONG d_kernel = k1.QuadPart - k0.QuadPart; /* 含 idle */
+            ULONGLONG d_user   = u1.QuadPart - u0.QuadPart;
+            ULONGLONG total    = d_kernel + d_user;
+            if (total > 0) {
+                double inv = 100.0 / (double)total;
+                out->cpu_idle_pct   = (double)d_idle * inv;
+                out->cpu_sys_pct    = (double)(d_kernel - d_idle) * inv;
+                out->cpu_user_pct   = (double)d_user * inv;
+                out->cpu_total_pct  = (double)(total - d_idle) * inv;
+                out->cpu_iowait_pct = 0.0;
+            }
+        }
+        sm->prev_idle = idle; sm->prev_kernel = kernel; sm->prev_user = user;
+        sm->has_prev_cpu = 1;
+    }
+
+    /* ── 内存（GlobalMemoryStatusEx） ── */
+    MEMORYSTATUSEX mem;
+    mem.dwLength = sizeof(mem);
+    if (GlobalMemoryStatusEx(&mem)) {
+        out->mem_total_kb     = mem.ullTotalPhys / 1024;
+        out->mem_available_kb = mem.ullAvailPhys / 1024;
+        out->mem_free_kb      = mem.ullAvailPhys / 1024;
+        out->mem_used_kb      = (mem.ullTotalPhys - mem.ullAvailPhys) / 1024;
+        out->mem_used_pct     = (double)mem.dwMemoryLoad;
+        /* 缓存：GetPerformanceInfo 的 SystemCache（页） */
+        PERFORMANCE_INFORMATION pi;
+        if (GetPerformanceInfo(&pi, sizeof(pi)))
+            out->mem_cached_kb = (uint64_t)pi.SystemCache * pi.PageSize / 1024;
+    }
+
+    /* ── 进程自身内存（GetProcessMemoryInfo） ── */
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        out->proc_rss_kb = pmc.WorkingSetSize / 1024;
+        out->proc_vms_kb = pmc.PagefileUsage / 1024;
+    }
+
+    /* ── 磁盘 I/O（进程读写字节差分，作为磁盘吞吐近似） ── */
+    IO_COUNTERS ioc;
+    if (GetProcessIoCounters(GetCurrentProcess(), &ioc)) {
+        if (sm->has_prev_io && dt_s > 0.0) {
+            out->disk_read_bps  = (double)(ioc.ReadTransferCount
+                                          - sm->prev_io.read_bytes) / dt_s;
+            out->disk_write_bps = (double)(ioc.WriteTransferCount
+                                          - sm->prev_io.write_bytes) / dt_s;
+        }
+        sm->prev_io.read_bytes  = ioc.ReadTransferCount;
+        sm->prev_io.write_bytes = ioc.WriteTransferCount;
+        sm->has_prev_io = 1;
+    }
+
+    /* ── 负载：Windows 无 1/5/15 分钟负载，用当前系统 CPU% 近似 ── */
+    out->load1 = out->load5 = out->load15 = out->cpu_total_pct;
+
+    /* ── 运行时间 ── */
+    out->uptime_sec = (double)GetTickCount64() / 1000.0;
+
+    /* ── 线程列表 ── */
+    int tc = sysmonitor_thread_snapshot(sm, out->threads, SYSMON_MAX_THREADS);
+    out->thread_count = tc < 0 ? 0 : tc;
+
+    return 0;
+}
+
+int sysmonitor_thread_snapshot(SysMonitor* sm,
+                               SysMonitorThreadSnapshot* threads,
+                               int max_threads) {
+    if (!sm || !threads || max_threads <= 0) return -1;
+
+    uint64_t now_us = win_mono_us();
+    double   dt_s   = (now_us > sm->prev_thread_ts_us)
+                      ? (double)(now_us - sm->prev_thread_ts_us) / 1e6
+                      : 0.0;
+    int commit = (dt_s >= SYSMON_CPU_WINDOW_S);
+
+    DWORD tids[SYSMON_MAX_THREADS];
+    int   ntids = win_enum_process_threads(GetCurrentProcessId(), tids,
+                                           SYSMON_MAX_THREADS);
+
+    WinCpuHist new_hist[SYSMON_MAX_THREADS];
+    int  new_n = 0, out_count = 0;
+
+    for (int i = 0; i < ntids && out_count < max_threads; i++) {
+        DWORD tid = tids[i];
+        ULONGLONG kt = 0, ut = 0;
+        if (win_get_thread_cpu(tid, &kt, &ut) != 0) continue;
+
+        SysMonitorThreadSnapshot* snap = &threads[out_count];
+        snap->tid        = (pid_t)tid;
+        snap->state      = 'R';
+        snap->utime_ticks = (uint64_t)ut;
+        snap->stime_ticks = (uint64_t)kt;
+        win_get_thread_name(tid, snap->name, SYSMON_THREAD_NAME_MAX);
+
+        int hi = win_find_hist(sm->thread_hist, sm->thread_hist_count, tid);
+        if (hi >= 0 && dt_s > 0.0) {
+            ULONGLONG d = (kt + ut) - (sm->thread_hist[hi].kt
+                                      + sm->thread_hist[hi].ut);
+            snap->cpu_pct = (double)d / 1e7 / dt_s * 100.0;
+        } else {
+            snap->cpu_pct = 0.0;
+        }
+
+        if (commit && new_n < SYSMON_MAX_THREADS) {
+            new_hist[new_n].id = tid; new_hist[new_n].kt = kt; new_hist[new_n].ut = ut;
+            new_n++;
+        }
+        out_count++;
+    }
+
+    if (commit) {
+        int copy_n = new_n < SYSMON_MAX_THREADS ? new_n : SYSMON_MAX_THREADS;
+        memcpy(sm->thread_hist, new_hist, (size_t)copy_n * sizeof(WinCpuHist));
+        sm->thread_hist_count = copy_n;
+        sm->prev_thread_ts_us = now_us;
+    }
+    return out_count;
+}
+
+int sysmonitor_proc_snapshot(SysMonitor* sm,
+                             const pid_t* pids,
+                             const char* const* names,
+                             int nprocs,
+                             SysMonitorProcSnapshot* out,
+                             int max_out) {
+    if (!sm || !pids || nprocs <= 0 || !out || max_out <= 0) return -1;
+    if (nprocs > SYSMON_MAX_PROCS) nprocs = SYSMON_MAX_PROCS;
+    if (max_out > SYSMON_MAX_PROCS) max_out = SYSMON_MAX_PROCS;
+
+    uint64_t now_us = win_mono_us();
+    double   dt_s   = (now_us > sm->prev_proc_ts_us)
+                      ? (double)(now_us - sm->prev_proc_ts_us) / 1e6
+                      : 0.0;
+
+    WinCpuHist new_hist[SYSMON_MAX_PROCS];
+    int  new_n = 0, written = 0;
+
+    for (int pi = 0; pi < nprocs && written < max_out; pi++) {
+        DWORD pid = (DWORD)pids[pi];
+        SysMonitorProcSnapshot* snap = &out[written];
+        memset(snap, 0, sizeof(*snap));
+        snap->pid = pids[pi];
+        if (names && names[pi] && names[pi][0]) {
+            snprintf(snap->name, sizeof(snap->name), "%s", names[pi]);
+        } else {
+            snprintf(snap->name, sizeof(snap->name), "pid%ld", (long)pid);
+        }
+
+        ULONGLONG kt = 0, ut = 0;
+        if (win_get_proc_cpu(pid, &kt, &ut, &snap->rss_kb) == 0) {
+            int hi = win_find_hist(sm->proc_hist, sm->proc_hist_count, pid);
+            if (hi >= 0 && dt_s > 0.0) {
+                ULONGLONG d = (kt + ut) - (sm->proc_hist[hi].kt
+                                          + sm->proc_hist[hi].ut);
+                snap->cpu_pct = (double)d / 1e7 / dt_s * 100.0;
+            }
+            if (new_n < SYSMON_MAX_PROCS) {
+                new_hist[new_n].id = pid; new_hist[new_n].kt = kt; new_hist[new_n].ut = ut;
+                new_n++;
+            }
+        }
+
+        /* 枚举该进程线程 */
+        DWORD tids[SYSMON_PROC_THREADS];
+        int ntids = win_enum_process_threads(pid, tids, SYSMON_PROC_THREADS);
+        for (int ti = 0; ti < ntids && snap->thread_count < SYSMON_PROC_THREADS; ti++) {
+            SysMonitorThreadSnapshot* th = &snap->threads[snap->thread_count];
+            memset(th, 0, sizeof(*th));
+            th->tid   = (pid_t)tids[ti];
+            th->state = 'R';
+            win_get_thread_name(tids[ti], th->name, SYSMON_THREAD_NAME_MAX);
+            ULONGLONG tkt = 0, tut = 0;
+            if (win_get_thread_cpu(tids[ti], &tkt, &tut) == 0) {
+                th->utime_ticks = (uint64_t)tut;
+                th->stime_ticks = (uint64_t)tkt;
+            }
+            snap->thread_count++;
+        }
+        written++;
+    }
+
+    memcpy(sm->proc_hist, new_hist, (size_t)new_n * sizeof(WinCpuHist));
+    sm->proc_hist_count = new_n;
+    sm->prev_proc_ts_us = now_us;
+    return written;
+}
+
+int sysmonitor_proc_thread_snapshots(SysMonitor* sm,
+                                     SysMonitorProcSnapshot* out,
+                                     int max_out) {
+    if (!sm || !out || max_out <= 0) return -1;
+
+    uint64_t now_us = win_mono_us();
+    double   dt_s   = (now_us > sm->proc_thread_prev_ts_us)
+                      ? (double)(now_us - sm->proc_thread_prev_ts_us) / 1e6
+                      : 0.0;
+    int commit = (dt_s >= SYSMON_CPU_WINDOW_S);
+
+    DWORD tids[SYSMON_MAX_THREADS];
+    int   ntids = win_enum_process_threads(GetCurrentProcessId(), tids,
+                                           SYSMON_MAX_THREADS);
+    if (ntids <= 0) return 0;
+
+    uint64_t self_rss = 0;
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+        self_rss = pmc.WorkingSetSize / 1024;
+
+    WinCpuHist new_hist[SYSMON_MAX_THREADS];
+    int new_n = 0, written = 0;
+
+    for (int i = 0; i < ntids && written < max_out; i++) {
+        DWORD tid = tids[i];
+        ULONGLONG kt = 0, ut = 0;
+        if (win_get_thread_cpu(tid, &kt, &ut) != 0) continue;
+
+        char name[SYSMON_PROC_NAME_MAX];
+        win_get_thread_name(tid, name, sizeof(name));
+
+        /* 过滤基础设施线程（与 Linux 侧一致） */
+        if (strcmp(name, "flow_launcher") == 0) continue;
+        if (strcmp(name, "sched-mon") == 0) continue;
+        if (strcmp(name, "httpd") == 0) continue;
+
+        SysMonitorProcSnapshot* snap = &out[written];
+        memset(snap, 0, sizeof(*snap));
+        snap->pid    = (pid_t)tid;
+        snprintf(snap->name, sizeof(snap->name), "%s", name);
+        snap->rss_kb = self_rss;
+
+        int hi = win_find_hist(sm->proc_thread_hist,
+                               sm->proc_thread_hist_count, tid);
+        if (hi >= 0 && dt_s > 0.0) {
+            ULONGLONG d = (kt + ut) - (sm->proc_thread_hist[hi].kt
+                                      + sm->proc_thread_hist[hi].ut);
+            snap->cpu_pct = (double)d / 1e7 / dt_s * 100.0;
+        }
+
+        snap->thread_count = 1;
+        snap->threads[0].tid   = (pid_t)tid;
+        snprintf(snap->threads[0].name, SYSMON_THREAD_NAME_MAX, "%.*s",
+                 SYSMON_THREAD_NAME_MAX - 1, name);
+        snap->threads[0].cpu_pct = snap->cpu_pct;
+        snap->threads[0].state   = 'R';
+
+        if (commit && new_n < SYSMON_MAX_THREADS) {
+            new_hist[new_n].id = tid; new_hist[new_n].kt = kt; new_hist[new_n].ut = ut;
+            new_n++;
+        }
+        written++;
+    }
+
+    if (commit) {
+        int copy_n = new_n < SYSMON_MAX_THREADS ? new_n : SYSMON_MAX_THREADS;
+        memcpy(sm->proc_thread_hist, new_hist,
+               (size_t)copy_n * sizeof(WinCpuHist));
+        sm->proc_thread_hist_count = copy_n;
+        sm->proc_thread_prev_ts_us = now_us;
+    }
+    return written;
+}
+
+#else
+
 #include <dirent.h>
 #include <unistd.h>
 #include <time.h>
@@ -992,3 +1460,4 @@ int sysmonitor_proc_thread_snapshots(SysMonitor* sm,
     }
     return written;
 }
+#endif /* _WIN32 */

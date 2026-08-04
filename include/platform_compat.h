@@ -125,4 +125,138 @@ static inline int flow_pthread_create(pthread_t* thread,
 
 #endif /* __APPLE__ */
 
+#if defined(_WIN32)
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <direct.h>
+#include <io.h>
+#include <process.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
+
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+
+static inline int flow_win_clock_gettime(int clock_id, struct timespec* ts) {
+    if (!ts) return -1;
+    if (clock_id == CLOCK_MONOTONIC) {
+        static LARGE_INTEGER freq;
+        LARGE_INTEGER now;
+        if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        ts->tv_sec = (time_t)(now.QuadPart / freq.QuadPart);
+        ts->tv_nsec = (long)(((now.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart);
+        return 0;
+    }
+
+    FILETIME ft;
+    ULARGE_INTEGER uli;
+    GetSystemTimePreciseAsFileTime(&ft);
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    uint64_t ns100 = uli.QuadPart - 116444736000000000ULL;
+    ts->tv_sec = (time_t)(ns100 / 10000000ULL);
+    ts->tv_nsec = (long)((ns100 % 10000000ULL) * 100ULL);
+    return 0;
+}
+#define clock_gettime(clock_id, ts) flow_win_clock_gettime((clock_id), (ts))
+
+#define getpid   _getpid
+#define mkdir(path, mode) _mkdir(path)
+#define access   _access
+#define unlink   _unlink
+#define strdup   _strdup
+#define strcasecmp  _stricmp
+#define strncasecmp _strnicmp
+#ifndef F_OK
+#define F_OK 0
+#endif
+typedef unsigned int useconds_t;
+
+static inline struct tm* flow_win_localtime_r(const time_t* t, struct tm* out) {
+    return (out && localtime_s(out, t) == 0) ? out : NULL;
+}
+#define localtime_r(t, out) flow_win_localtime_r((t), (out))
+
+static inline int flow_win_setenv(const char* name, const char* value, int overwrite) {
+    if (!overwrite) {
+        size_t len = 0;
+        getenv_s(&len, NULL, 0, name);
+        if (len > 0) return 0;
+    }
+    return _putenv_s(name, value ? value : "");
+}
+#define setenv(name, value, overwrite) flow_win_setenv((name), (value), (overwrite))
+
+static inline char* flow_win_strcasestr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char*)haystack;
+    size_t nlen = strlen(needle);
+    for (const char* p = haystack; *p; ++p) {
+        if (_strnicmp(p, needle, nlen) == 0) return (char*)p;
+    }
+    return NULL;
+}
+#define strcasestr(haystack, needle) flow_win_strcasestr((haystack), (needle))
+
+#ifndef __builtin_expect
+#define __builtin_expect(expr, value) (expr)
+#endif
+#ifndef __builtin_prefetch
+#define __builtin_prefetch(addr, ...) ((void)0)
+#endif
+#ifndef __builtin_ia32_pause
+#define __builtin_ia32_pause() YieldProcessor()
+#endif
+
+static inline int flow_win_readlink(const char* path, char* buf, size_t bufsz) {
+    (void)path;
+    if (!buf || bufsz == 0) return -1;
+    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)bufsz);
+    if (n == 0 || n >= bufsz) return -1;
+    return (int)n;
+}
+#define readlink(path, buf, bufsz) flow_win_readlink((path), (buf), (bufsz))
+
+static inline void flow_win_sleep_seconds(unsigned int seconds) {
+    Sleep(seconds * 1000U);
+}
+static inline void flow_win_usleep(unsigned int usec) {
+    Sleep((usec + 999U) / 1000U);
+}
+static inline int flow_win_nanosleep(const struct timespec* req, struct timespec* rem) {
+    (void)rem;
+    if (!req) return -1;
+    uint64_t ms = (uint64_t)req->tv_sec * 1000ULL + (uint64_t)((req->tv_nsec + 999999L) / 1000000L);
+    Sleep((DWORD)ms);
+    return 0;
+}
+#define sleep(sec)   (flow_win_sleep_seconds((unsigned int)(sec)), 0)
+#define usleep(usec) flow_win_usleep((unsigned int)(usec))
+#define nanosleep(req, rem) flow_win_nanosleep((req), (rem))
+
+#endif /* _WIN32 */
+
 #endif /* FLOWENGINE_PLATFORM_COMPAT_H */

@@ -3,6 +3,42 @@
  */
 
 #include "network_transport.h"
+
+#if defined(_WIN32)
+
+#include <cstring>
+
+struct NetworkTransport {
+    NetTransportStats stats;
+};
+
+extern "C" {
+
+NetworkTransport* net_transport_create(const char* bind_addr, uint16_t port,
+                                       MessageBus* bus, DiscoveryManager* dm) {
+    (void)bind_addr; (void)port; (void)bus; (void)dm;
+    return new NetworkTransport{};
+}
+
+void net_transport_destroy(NetworkTransport* t) { delete t; }
+int net_transport_start(NetworkTransport* t) { return t ? 0 : -1; }
+void net_transport_stop(NetworkTransport* t) { (void)t; }
+int net_transport_bridge_topic(NetworkTransport* t, const char* topic) { (void)t; (void)topic; return 0; }
+int net_transport_unbridge_topic(NetworkTransport* t, const char* topic) { (void)t; (void)topic; return 0; }
+int net_transport_connect(NetworkTransport* t, const char* host, uint16_t port) { (void)t; (void)host; (void)port; return -1; }
+int net_transport_disconnect(NetworkTransport* t, const char* host, uint16_t port) { (void)t; (void)host; (void)port; return -1; }
+int net_transport_connection_count(NetworkTransport* t) { (void)t; return 0; }
+void net_transport_get_stats(NetworkTransport* t, NetTransportStats* stats) {
+    if (stats) {
+        if (t) *stats = t->stats;
+        else std::memset(stats, 0, sizeof(*stats));
+    }
+}
+
+} /* extern "C" */
+
+#else
+
 #include <flowcoro/net.h>
 #include <flowcoro/thread_pool.h>
 
@@ -405,3 +441,5 @@ void net_transport_get_stats(NetworkTransport* t, NetTransportStats* stats) {
 }
 
 } /* extern "C" */
+
+#endif /* _WIN32 */

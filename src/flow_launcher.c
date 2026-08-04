@@ -158,10 +158,35 @@ static int run_dlopen_mode(int duration, int stagger_ms,
             /* 回退1: build/lib/<libname> */
             char alt[512];
             const char* basename = strrchr(nd->library, '/');
+#if defined(_WIN32)
+            const char* bslash = strrchr(nd->library, '\\');
+            if (!basename || (bslash && bslash > basename)) basename = bslash;
+#endif
             basename = basename ? basename + 1 : nd->library;
             snprintf(alt, sizeof(alt), "build/lib/%s", basename);
             nd->lib_handle = dlopen(alt, dlflags);
         }
+#if defined(_WIN32)
+        if (!nd->lib_handle) {
+            char dll_name[256];
+            const char* basename = strrchr(nd->library, '/');
+            const char* bslash = strrchr(nd->library, '\\');
+            if (!basename || (bslash && bslash > basename)) basename = bslash;
+            basename = basename ? basename + 1 : nd->library;
+            snprintf(dll_name, sizeof(dll_name), "%s", basename);
+            size_t n = strlen(dll_name);
+            if (n > 3 && strcmp(dll_name + n - 3, ".so") == 0) {
+                dll_name[n - 3] = '\0';
+                if (strncmp(dll_name, "lib", 3) == 0) {
+                    memmove(dll_name, dll_name + 3, strlen(dll_name + 3) + 1);
+                }
+                strncat(dll_name, ".dll", sizeof(dll_name) - strlen(dll_name) - 1);
+            }
+            char alt[512];
+            snprintf(alt, sizeof(alt), "build-win/lib/%s", dll_name);
+            nd->lib_handle = dlopen(alt, dlflags);
+        }
+#endif
         if (!nd->lib_handle) {
             LOG_WARN("launcher", "dlopen %s failed: %s (skipping)", nd->library, dlerror());
             continue;
@@ -267,6 +292,11 @@ static int run_dlopen_mode(int duration, int stagger_ms,
 
 static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe,
                                  const char* config_path, int duration) {
+#if defined(_WIN32)
+    (void)nd; (void)self_exe; (void)config_path; (void)duration;
+    LOG_WARN("launcher", "--multi is not supported on native Windows; use single-process mode");
+    return -1;
+#else
     pid_t pid = fork();
     if (pid < 0) { LOG_WARN("launcher", "fork %s: %s", nd->name, strerror(errno)); return -1; }
     if (pid == 0) {
@@ -294,10 +324,16 @@ static pid_t launch_node_process(const NodeDesc* nd, const char* self_exe,
         perror("execv"); _exit(1);
     }
     return pid;
+#endif
 }
 
 static int run_multi_process_mode(int duration, int stagger_ms,
                                   const char* self_exe, const char* config_path) {
+#if defined(_WIN32)
+    (void)duration; (void)stagger_ms; (void)self_exe; (void)config_path;
+    LOG_WARN("launcher", "--multi is not supported on native Windows; use single-process mode");
+    return 1;
+#else
     LOG_INFO("launcher", "mode: multi-process (fork+exec flow_node_host)");
     for (int i = 0; i < g_node_count && g_running; i++) {
         NodeDesc* nd = &g_nodes[i];
@@ -318,6 +354,7 @@ static int run_multi_process_mode(int duration, int stagger_ms,
     for (int i = 0; i < g_node_count; i++)
         if (g_nodes[i].pid > 0) { waitpid(g_nodes[i].pid, NULL, 0); g_nodes[i].pid = -1; }
     return 0;
+#endif
 }
 
 /* ── main ────────────────────────────────────────────────── */
@@ -354,12 +391,19 @@ int main(int argc, char** argv) {
 
     crash_handler_install();
 
+#if defined(_WIN32)
+    LOG_INFO("launcher", "FlowEngine Launcher v2");
+    LOG_INFO("launcher", "config: %s", config_path);
+    LOG_INFO("launcher", "mode: %s", multi_mode ? "multi-process (fork+exec)" : "single-process (dlopen)");
+    LOG_INFO("launcher", "duration: %ds", duration);
+#else
     LOG_INFO("launcher", "╔══════════════════════════════════════════╗");
     LOG_INFO("launcher", "║  FlowEngine Launcher v2                  ║");
     LOG_INFO("launcher", "║  config:   %-29s ║", config_path);
     LOG_INFO("launcher", "║  mode:     %-29s ║", multi_mode ? "multi-process (fork+exec)" : "single-process (dlopen)");
     LOG_INFO("launcher", "║  duration: %-29ds ║", duration);
     LOG_INFO("launcher", "╚══════════════════════════════════════════╝");
+#endif
 
     int stagger_ms = 300;
     if (parse_pipeline(config_path, &stagger_ms) <= 0) {
@@ -370,7 +414,9 @@ int main(int argc, char** argv) {
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
 
     if (multi_mode) {
+#if !defined(_WIN32)
         signal(SIGCHLD, SIG_DFL);
+#endif
         run_multi_process_mode(duration, stagger_ms, argv[0], config_path);
     } else {
         /* dlopen 模式: 需要初始化基础设施 */

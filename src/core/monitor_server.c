@@ -103,6 +103,15 @@ static char* read_file(const char* path, size_t* out_len) {
     return buf;
 }
 
+static char* path_last_sep(char* path) {
+    char* slash = strrchr(path, '/');
+#if defined(_WIN32)
+    char* bslash = strrchr(path, '\\');
+    if (!slash || (bslash && bslash > slash)) slash = bslash;
+#endif
+    return slash;
+}
+
 /* ── SSE 数据生成 (flowboard 兼容格式) ────────────────── */
 
 /**
@@ -644,9 +653,9 @@ static void resolve_tools_script_path(MonitorServer* ms, const char* script_name
     if (ms && ms->html_path[0]) {
         char dir[512];
         snprintf(dir, sizeof(dir), "%s", ms->html_path);
-        char* slash = strrchr(dir, '/');
+        char* slash = path_last_sep(dir);
         if (slash) *slash = '\0';
-        slash = strrchr(dir, '/');
+        slash = path_last_sep(dir);
         if (slash) *slash = '\0';
         snprintf(out, out_sz, "%s/%s", dir, script_name);
         return;
@@ -656,6 +665,12 @@ static void resolve_tools_script_path(MonitorServer* ms, const char* script_name
 
 static void exec_python_tool(int fd, const char* script_name, const char* cmd,
                              const char* json_body, MonitorServer* ms) {
+#if defined(_WIN32)
+    (void)script_name; (void)cmd; (void)json_body; (void)ms;
+    send_response(fd, "501 Not Implemented", "application/json",
+                  "{\"ok\":false,\"error\":\"python tool bridge is not available on native Windows\"}");
+    close(fd);
+#else
     int stdin_pipe[2];
     int stdout_pipe[2];
 
@@ -722,6 +737,7 @@ static void exec_python_tool(int fd, const char* script_name, const char* cmd,
                       "{\"ok\":false,\"error\":\"no output\"}");
     }
     close(fd);
+#endif
 }
 
 /* ── 执行 modelctl.py 子命令（训练管理的统一入口） ──────────
@@ -1068,10 +1084,10 @@ static bool dispatch_request(int fd, MonitorServer* ms,
         char parent[512];
         snprintf(parent, sizeof(parent), "%s", ms->html_path);
         /* Strip basename (index.html) */
-        char* slash = strrchr(parent, '/');
+        char* slash = path_last_sep(parent);
         if (slash) *slash = '\0';
         /* Strip flowboard/ */
-        slash = strrchr(parent, '/');
+        slash = path_last_sep(parent);
         if (slash) *slash = '\0'; else parent[0] = '\0';
         char filepath[768];
         const char* rel = path + 1;  /* "/js/app.js" → "js/app.js" */
@@ -1142,9 +1158,9 @@ static bool dispatch_request(int fd, MonitorServer* ms,
          * the tools/ directory where three.min.js / d3.v7.min.js live. */
         char dir[512];
         snprintf(dir, sizeof(dir), "%s", ms->html_path);
-        char* slash = strrchr(dir, '/');
+        char* slash = path_last_sep(dir);
         if (slash) *slash = '\0'; else dir[0] = '\0';
-        slash = strrchr(dir, '/');
+        slash = path_last_sep(dir);
         if (slash && strcmp(slash + 1, "flowboard") == 0)
             *slash = '\0';
 
@@ -1413,7 +1429,9 @@ void monitor_server_start(MonitorServer* ms) {
      * dashboard for every other connected tab too. Ignoring it here makes
      * write() return -1/EPIPE instead, which handle_sse()/handle_client()
      * already check for and handle by closing just that one connection. */
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     ms->running = true;
     pthread_create(&ms->server_thread, NULL, server_thread_fn, ms);

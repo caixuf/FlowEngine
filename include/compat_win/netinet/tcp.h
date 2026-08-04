@@ -1,0 +1,7 @@
+#ifndef FLOWENGINE_COMPAT_WIN_NETINET_TCP_H
+#define FLOWENGINE_COMPAT_WIN_NETINET_TCP_H
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#endif /* FLOWENGINE_COMPAT_WIN_NETINET_TCP_H */

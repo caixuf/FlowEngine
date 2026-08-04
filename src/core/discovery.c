@@ -375,6 +375,10 @@ DiscoveryManager* discovery_create(const char* node_name, uint8_t capabilities) 
 
     int reuse = 1;
     setsockopt(dm->sock_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#if defined(_WIN32)
+    u_long nb = 1;
+    ioctlsocket((SOCKET)dm->sock_fd, FIONBIO, &nb);
+#endif
 
     /* Bind to multicast port */
     memset(&dm->mcast_addr, 0, sizeof(dm->mcast_addr));

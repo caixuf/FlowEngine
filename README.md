@@ -94,6 +94,25 @@ bash build.sh release
 > **入口：** `flow_launcher config/pipeline.json` 是运行 pipeline 的标准、
 > 配置驱动方式（每个节点都是 `dlopen` 加载的 `.so` 插件）。
 
+### Windows（实验性原生支持）
+
+Windows 原生路径优先支持 **单进程插件模式**（等价默认 demo）。`--multi`
+依赖 POSIX `fork` + SHM IPC，Windows 下会明确拒绝；参数 AF_UNIX bridge、
+训练/ops 的 fork 子进程 bridge 也会降级为不可用，主仿真与 FlowBoard
+dashboard 不受影响。
+
+```powershell
+# 需要 CMake + Visual Studio Build Tools（可配 Ninja 使用）
+powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 15 -NoBrowser
+
+# 或手动
+cmake --preset windows-ninja
+cmake --build --preset windows-ninja
+cmake -S modules\adas_nodes -B build-win\modules\adas_nodes -DFLOWENGINE_BUILD="$PWD\build-win"
+cmake --build build-win\modules\adas_nodes --config Release
+build-win\bin\flow_launcher.exe config\pipeline.json --duration 15
+```
+
 ### 新手最短路径（复制即可跑）
 
 ```bash
@@ -124,6 +143,9 @@ bash scripts/demo.sh 30     # 30 秒演示
 bash scripts/demo.sh --multi      # 多进程模式（各节点独立 fork+exec）
 bash scripts/demo.sh --record     # 录制 Bag 文件
 bash scripts/demo.sh --no-browser # 不打开浏览器
+
+# Windows 原生单进程模式
+powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 30
 ```
 
 ```

@@ -33,6 +33,62 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#if defined(_WIN32)
+
+struct IpcChannel {
+    IpcRole role;
+    uint64_t drop_count;
+};
+
+IpcChannel* ipc_channel_open(const char* channel_name, IpcRole role,
+                              uint32_t queue_depth) {
+    (void)channel_name;
+    (void)queue_depth;
+    IpcChannel* ch = (IpcChannel*)calloc(1, sizeof(IpcChannel));
+    if (ch) ch->role = role;
+    return ch;
+}
+
+void ipc_channel_close(IpcChannel* ch) {
+    free(ch);
+}
+
+int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
+                        const void* data, uint32_t size) {
+    (void)ch; (void)topic; (void)sender; (void)data; (void)size;
+    return ERR_IO;
+}
+
+int ipc_channel_subscribe(IpcChannel* ch, MessageCallback callback, void* user_data) {
+    (void)ch; (void)callback; (void)user_data;
+    return ERR_IO;
+}
+
+int ipc_channel_start(IpcChannel* ch) {
+    (void)ch;
+    return ERR_IO;
+}
+
+void ipc_channel_stop(IpcChannel* ch) {
+    (void)ch;
+}
+
+int ipc_channel_recv_once(IpcChannel* ch, uint32_t timeout_ms) {
+    (void)ch; (void)timeout_ms;
+    return ERR_IO;
+}
+
+uint64_t ipc_channel_get_drop_count(IpcChannel* ch) {
+    return ch ? ch->drop_count : 0;
+}
+
+void ipc_channel_reset_drop_count(IpcChannel* ch) {
+    if (ch) ch->drop_count = 0;
+}
+
+#else
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -477,3 +533,5 @@ void ipc_channel_reset_drop_count(IpcChannel* ch) {
     ch->drop_count = 0;
     pthread_mutex_unlock(&hdr->mutex);
 }
+
+#endif /* _WIN32 */

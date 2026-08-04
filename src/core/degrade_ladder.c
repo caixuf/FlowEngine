@@ -12,6 +12,9 @@
 #include "degrade_ladder.h"
 #include <string.h>
 #include <stdio.h>
+#if defined(_WIN32)
+#include <pthread.h>
+#endif
 
 /* ── 原子读写(跨编译器) ─────────────────────────────────────────────────
  * GCC 与 Clang 对 C11 <stdatomic.h> 的 atomic_load/atomic_store 处理不同:
@@ -26,12 +29,21 @@
  * __typeof__ 与语句表达式 ({...}) 为 GCC/Clang 共有扩展。 */
 /* 临时量类型用 `*(ptr) + 0`:算术提升会去掉 volatile 限定,得到纯值类型,
  * 避免把 volatile 指针传给 __atomic_* 的非 volatile 输出/输入形参而告警。 */
+#if defined(_WIN32)
+static pthread_mutex_t g_degrade_atomic_mutex = PTHREAD_MUTEX_INITIALIZER;
+#define FLOW_ATOMIC_STORE(ptr, val)                                       \
+    do { pthread_mutex_lock(&g_degrade_atomic_mutex);                     \
+         *(ptr) = (val);                                                  \
+         pthread_mutex_unlock(&g_degrade_atomic_mutex); } while (0)
+#define FLOW_ATOMIC_LOAD(ptr) (*(ptr))
+#else
 #define FLOW_ATOMIC_STORE(ptr, val)                                       \
     do { __typeof__(*(ptr) + 0) _v = (val);                               \
          __atomic_store((ptr), &_v, __ATOMIC_SEQ_CST); } while (0)
 #define FLOW_ATOMIC_LOAD(ptr)                                             \
     ({ __typeof__(*(ptr) + 0) _r;                                         \
        __atomic_load((ptr), &_r, __ATOMIC_SEQ_CST); _r; })
+#endif
 
 /* ══════════════════════════════════════════════════════════ */
 /*  全局状态                                                     */
