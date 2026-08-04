@@ -12,7 +12,7 @@
  *   - 按点速度染色：巡航蓝 / 制动橙 / 加速青绿
  */
 
-import { worldToThree, forwardENU } from '../math/Coord.js';
+import { worldToThree } from '../math/Coord.js';
 
 const TRAJ_GROUND_OFFSET = 0.08;
 const MAX_PLAN_POINTS   = 64;             // 后端轨迹点上限
@@ -166,31 +166,20 @@ export function createTrajectoryView(scene) {
   function _buildSmoothPoints(trajPath, ego) {
     if (!trajPath || trajPath.length < 2) return [];
 
-    const egoX = ego.x || 0, egoY = ego.y || 0;
-    const egoHeading = ego.heading || 0;
     const egoZ = (ego.z || 0) + TRAJ_GROUND_OFFSET;
 
-    /* 坐标系检测 */
-    const p0 = trajPath[0];
-    const dxEgo = p0[0] - egoX, dyEgo = p0[1] - egoY;
-    const distToEgo = Math.sqrt(dxEgo * dxEgo + dyEgo * dyEgo);
-    const isVehicleFrame = distToEgo > 10 && Math.abs(p0[0]) < 50 && Math.abs(p0[1]) < 50;
-
-    const [fxE, fyE] = forwardENU(egoHeading);
-    const lxE = -fyE, lyE = fxE;
-    const vehicleToGlobal = (vx, vy) => [egoX + vx * fxE + vy * lxE, egoY + vx * fyE + vy * lyE];
+    /* 轨迹点始终是全局 ENU 坐标：planning 从 ego_x/ego_y 出发逐点积分
+     * （x += v·cos(h)·dt），monitor 按 [[x,y,v],...] 透传。曾用 isVehicleFrame
+     * 启发式（distToEgo>10 && |p0[0]|<50 && |p0[1]|<50）检测"是否车辆系"，
+     * 但轨迹从来都是全局坐标 → 该启发式在 ego 靠近世界原点（|x|<50）时把
+     * 全局点误判为车辆系、二次变换 → 轨迹跳变（"不跟着车"）。2026-08 移除，
+     * 恒按全局坐标渲染。 */
 
     /* 1. 先把原始点转 THREE 坐标，截断跳变 */
     const raw3d = [];
     for (let i = 0; i < trajPath.length; i++) {
       const p = trajPath[i];
-      let gx, gy;
-      if (isVehicleFrame) {
-        [gx, gy] = vehicleToGlobal(p[0], p[1]);
-      } else {
-        gx = p[0]; gy = p[1];
-      }
-      const [tx, ty, tz] = worldToThree(gx, gy, egoZ);
+      const [tx, ty, tz] = worldToThree(p[0], p[1], egoZ);
       const v = p[2] || 0;
       if (i > 0) {
         const prev = raw3d[raw3d.length - 1];

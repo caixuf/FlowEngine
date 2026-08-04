@@ -283,17 +283,42 @@ function _advanceState(s, dt, now) {
   if (s.lastTime > 0) {
     var elapsed = now - s.lastTime;
     if (elapsed > 2.0) elapsed = 2.0; // cap staleness
+    // 位置外推与 heading 外推必须**同构**（否则位置与朝向解耦 → 车身侧滑）。
+    // 旧实现：位置用 lastVx/lastVy 沿**切线直线**外推，heading 用 lastYawRate
+    // 做**旋转**外推。急弯/掉头（高 yaw_rate）时两块 SSE 包之间（~200ms）中心
+    // 沿切线走、车头却转 → 平滑后的位置与朝向收敛到不一致目标 → 车身侧滑
+    // （"屁股横移"）。2D 因车钉在屏中央只渲染旋转、看不到平移所以无感；
+    // 3D 真实平移到世界坐标才暴露。修复：把速度向量旋转到**弧中点**方向
+    // （圆弧/割线近似），让位置与朝向同步收敛。
+    var dHeading = s.hasYawRate ? s.lastYawRate * elapsed : 0;
     if (s.hasVel) {
       // 世界系速度外推：step_bicycle 的 vx/vy 是车辆中心速度，含绕后轴的
       // 切向分量 half_wb·yaw_rate·(-sin h, cos h)。只用 speed·(cos,sin)
-      // 会在掉头/急转弯时丢掉 ~34% 的横向速度 → 中心横向漂移 + 车身旋转
-      // 解耦 = "车屁股横移"。vx/vy 由后端直接发布，无需前端猜半轴距。
-      s.targetX = s.lastX + s.lastVx * elapsed;
-      s.targetZ = s.lastZ + s.lastVy * elapsed;
+      // 会在掉头/急转弯时丢掉 ~34% 的横向速度 → 中心横向漂移。vx/vy 由后端
+      // 直接发布，无需前端猜半轴距。
+      if (dHeading !== 0) {
+        var mid = dHeading * 0.5;
+        var c = Math.cos(mid), sn = Math.sin(mid);
+        var vx2 = s.lastVx * c - s.lastVy * sn;
+        var vy2 = s.lastVx * sn + s.lastVy * c;
+        s.targetX = s.lastX + vx2 * elapsed;
+        s.targetZ = s.lastZ + vy2 * elapsed;
+      } else {
+        s.targetX = s.lastX + s.lastVx * elapsed;
+        s.targetZ = s.lastZ + s.lastVy * elapsed;
+      }
     } else {
-      // 回退：无 vx/vy（旧 payload / vehicle-only 路径）时沿 lastHeading 直线外推。
-      s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
-      s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
+      // 回退：无 vx/vy（旧 payload / vehicle-only 路径）时沿 heading 圆弧外推
+      //（与 heading 旋转一致），无 yaw_rate 才退化为直线。
+      if (Math.abs(dHeading) > 1e-6) {
+        var th0 = s.lastHeading;
+        var R = s.lastSpeed / s.lastYawRate;
+        s.targetX = s.lastX + R * (Math.sin(th0 + dHeading) - Math.sin(th0));
+        s.targetZ = s.lastZ + R * (Math.cos(th0) - Math.cos(th0 + dHeading));
+      } else {
+        s.targetX = s.lastX + Math.cos(s.lastHeading) * s.lastSpeed * elapsed;
+        s.targetZ = s.lastZ + Math.sin(s.lastHeading) * s.lastSpeed * elapsed;
+      }
     }
     // heading 外推（与位置同构）：lastHeading + yawRate·elapsed。
     // 旧实现 targetHeading = lastHeading（每包阶跃）→ 指数平滑对"阶跃"
