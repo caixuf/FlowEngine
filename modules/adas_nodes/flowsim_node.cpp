@@ -239,6 +239,9 @@ static void reset_runtime_state() {
 static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || msg->data_size == 0) return;
+    /* 游戏模式（demo.sh --game）：玩家键盘操控，忽略自动驾驶指令
+     * （control_node 20Hz 会覆盖游戏输入 → 车"自己走"）。 */
+    if (access("/tmp/game_mode", F_OK) == 0) return;
 
     /* 二进制 ControlCmd 路径 */
     {

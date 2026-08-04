@@ -135,13 +135,14 @@ console.log('--- 3. headingToRotationY ---');
 // heading=0 → 车头朝 +X，rotationY=0
 eq('heading=0 → rotY=0', headingToRotationY(0), 0);
 
-// heading=π/2 → 车头朝 +Y(North)→THREE -Z，rotationY=-π/2
-eq('heading=π/2 → rotY=-π/2', headingToRotationY(Math.PI / 2), -Math.PI / 2);
+// 2026-08-04 修复（原 -heading 符号反 → 车头左右镜像）：
+// heading=π/2(North) → 车头朝 -Z，rotationY=+π/2
+eq('heading=π/2 → rotY=+π/2', headingToRotationY(Math.PI / 2), Math.PI / 2);
 
-// heading=-π/2 → 车头朝 -Y(South)→THREE +Z，rotationY=+π/2
-eq('heading=-π/2 → rotY=+π/2', headingToRotationY(-Math.PI / 2), Math.PI / 2);
+// heading=-π/2(South) → 车头朝 +Z，rotationY=-π/2
+eq('heading=-π/2 → rotY=-π/2', headingToRotationY(-Math.PI / 2), -Math.PI / 2);
 
-// heading=π → 车头朝 -X，rotationY=-π（或 π，等价）
+// heading=π → 车头朝 -X，rotationY=π（或 -π，等价）
 ok('heading=π → |rotY|=π', Math.abs(Math.abs(headingToRotationY(Math.PI)) - Math.PI) < 1e-10);
 
 // ═══════════════════════════════════════════════════════════
@@ -269,14 +270,16 @@ console.log('--- 6. directionToRotationY ---');
 // +X 方向 → rotationY=0
 eq('+X dir → rotY=0', directionToRotationY(1, 0), 0);
 
-// +Z 方向 → rotationY=π/2
-ok('+Z dir → rotY≈π/2', Math.abs(directionToRotationY(0, 1) - Math.PI / 2) < 1e-10);
+// 2026-08-04 修复（原符号反 → 车头左右镜像）：
+// THREE 绕 Y 旋转 θ 的 forward = (cosθ, -sinθ) → (dx,dz) 对应 θ = atan2(-dz,dx)
+// +Z 方向 → rotationY=-π/2
+ok('+Z dir → rotY≈-π/2', Math.abs(directionToRotationY(0, 1) + Math.PI / 2) < 1e-10);
 
 // -X 方向 → rotationY=π
 ok('-X dir → rotY≈π', Math.abs(Math.abs(directionToRotationY(-1, 0)) - Math.PI) < 1e-10);
 
-// -Z 方向 → rotationY=-π/2
-ok('-Z dir → rotY≈-π/2', Math.abs(directionToRotationY(0, -1) + Math.PI / 2) < 1e-10);
+// -Z 方向 → rotationY=π/2
+ok('-Z dir → rotY≈π/2', Math.abs(directionToRotationY(0, -1) - Math.PI / 2) < 1e-10);
 
 // forwardENU 与 headingToRotationY 一致性：
 // forwardENU 在 ENU 空间，但 directionToRotationY 在 THREE 空间。
