@@ -903,6 +903,7 @@ class UturnParams:
 
     mode='single': 单把匀速 U-turn（仅 phase0 生效，走恒定 steer 的圆弧）
     mode='three_point': 三把方向掉头（所有 phase 生效）
+    mode='multi': 多把方向掉头（N-point，角点约束退出，2026-08-04 新增）
     """
     def __init__(self, mode='single'):
         self.mode = mode
@@ -926,6 +927,21 @@ class UturnParams:
         self.phase2_throttle = 0.0
         self.phase2_duration = 0.0
 
+        # ── multi 模式（多把方向，角点约束退出）──
+        self.corner_limit = 6.5           # 前弧车身角点上限（路沿 7.0 − 0.5 余量）
+        self.reverse_corridor = 0.5       # 倒车回撤走廊（中心回到 |y|≤0.5 即收）
+        self.max_strokes = 5              # 最多前进弧把数
+        self.stroke_steer = 0.60          # 前弧满舵（掉头规范"向左打死"，去/返程同号）
+        self.reverse_steer = -0.60        # 倒车满舵（反打）
+        self.cruise_speed = 3.5           # 前弧速度 m/s
+        self.reverse_speed = -2.5         # 倒车速度 m/s（负值）
+        self.finish_heading_tol = 0.10    # 完成 heading 容差（rad）
+        self.finish_lane_tol = 1.75       # 完成 y 在目标车道半幅内
+        self.stroke_timeout_s = 4.0       # 每把超时
+        self.reverse_timeout_s = 3.0      # 倒车超时
+        self.reverse_h_guard = 0.30       # 倒车 heading 护栏（离目标 0.3 rad 内即收，
+                                          #   防止倒车把 heading 转过目标）
+
 
 class UturnResult:
     def __init__(self):
@@ -942,8 +958,16 @@ class UturnResult:
         self.lane_error = 999.0     # 目标车道偏差（目标 opposite lane y）
         self.success = False
         self.min_dist_to_center = 999.0  # 过程中离道路中心最近距离（评估是否压线）
+        self.corner_max = 0.0            # 全程车身角点 |y| 最大值（multi 模式，出路沿门禁）
+        self.strokes_used = 0            # 实际使用的把数（multi 模式）
 
     def print_phases(self, params):
+        if params.mode == 'multi':
+            print(f"  多把方向: corner_limit={params.corner_limit:.1f}m, "
+                  f"corridor={params.reverse_corridor:.1f}m, "
+                  f"max_strokes={params.max_strokes}, "
+                  f"v_fwd={params.cruise_speed:.1f} v_rev={params.reverse_speed:.1f}")
+            return
         print(f"  Phase 0: steer={params.phase0_steer:.2f}rad, "
               f"throttle={params.phase0_throttle:.2f}, duration={params.phase0_duration:.2f}s")
         print(f"  Phase 1: brake={params.phase1_brake:.1f} to stop, "
@@ -954,7 +978,7 @@ class UturnResult:
               f"throttle={params.phase2_throttle:.2f}, duration={params.phase2_duration:.2f}s")
 
 
-def run_uturn_simulation(params=None, start_lane_y=-1.75):
+def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
     """纯 Python 掉头仿真
 
     mode='single'（默认）: 单把匀速 U-turn
@@ -965,16 +989,23 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75):
       Phase 1: 先刹车停稳，再倒车右打 → 车尾摆正完成掉头
       Phase 2: 前进回正，进入对向车道
 
+    mode='multi': 多把方向掉头（N-point，2026-08-04 新增）
+      前进弧满舵（±0.6）以「车身角点」到达 corner_limit 为界（人手式不碰路边），
+      倒车反打回撤到 reverse_corridor 走廊，末把 heading 对准目标车道即收。
+      替代固定角度（130°/170°）退出 —— 固定角度几何本身就把角点甩出路沿 0.12m，
+      实测再叠加跟踪偏差出沿 2.1m（2026-08-04 长跑）。
+
     输入：
       start_lane_y: 起始车道 y（默认 -1.75 = 前进车道）
+      start_heading: 起始 heading（默认 0 = 前进端；返程传 π）
 
     输出：
-      UturnResult：含轨迹 + 最终 heading/y 偏差
+      UturnResult：含轨迹 + 最终 heading/y 偏差 + corner_max（全程角点门禁）
     """
     if params is None:
         params = UturnParams()
 
-    ego = VehicleState(x0=0.0, y0=start_lane_y, v0=params.init_speed, heading0=0.0)
+    ego = VehicleState(x0=0.0, y0=start_lane_y, v0=params.init_speed, heading0=start_heading)
     result = UturnResult()
 
     target_y = -start_lane_y  # 对向车道中心 y
@@ -990,7 +1021,7 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75):
             result.heading.append(ego.heading)
             result.steer.append(params.phase0_steer)
             ego.step(params.phase0_steer, params.phase0_throttle, 0.0, dt=DT)
-    else:
+    elif params.mode == 'three_point':
         # ── 三把方向掉头 ──
         # Phase 0: 前进左打
         n_steps0 = int(params.phase0_duration / DT)
@@ -1037,12 +1068,90 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75):
                 result.steer.append(params.phase2_steer)
                 ego.step(params.phase2_steer, params.phase2_throttle, 0.0, dt=DT)
 
+    elif params.mode == 'multi':
+        # ── 多把方向掉头（N-point，角点约束退出）──
+        # 与 C++ generate_uturn_trajectory stroke 循环完全一致：
+        #   * 前进弧 steer=+0.6（掉头规范"向左打死"，去/返程同号），1.2s 渐进 ramp
+        #   * 退出 = 车身角点达 corner_limit（方向相关的外侧角点）| 对准 | 超时
+        #   * 倒车 steer=-0.6（反打，heading 继续向目标转），回撤到 |y|≤corridor
+        #   * 末把对准（heading±0.1 且 y 在目标车道半幅）即收
+        # 车身角点公式（len=4.6, wid=2.0，与 C++/flowsim 一致）：
+        #   去程北角点: y + 2.3*sin(h) + 1.0*|cos(h)|
+        #   返程南角点: y + 2.3*sin(h) - 1.0*|cos(h)|
+        def _norm(h):
+            while h >  math.pi: h -= 2.0 * math.pi
+            while h < -math.pi: h += 2.0 * math.pi
+            return h
+        target_h = 0.0 if abs(_norm(start_heading)) > math.pi * 0.5 else math.pi
+        stroke_dir = -1.0 if target_h < 0.5 else 1.0   # 去程 +1（北侧约束）/ 返程 -1（南侧）
+        hb = WHEELBASE * 0.5  # half_wb 切向项
+        # 返程进入 heading 用 -π 表示（与 C 代码 norm 后积分一致）
+        if abs(_norm(start_heading)) > math.pi * 0.5:
+            ego.heading = -math.pi
+
+        def _record(steer, v):
+            result.t.append(len(result.t) * DT)
+            result.x.append(ego.x); result.y.append(ego.y)
+            result.v.append(ego.v); result.heading.append(ego.heading)
+            result.steer.append(steer)
+            corner = ego.y + 2.3 * math.sin(ego.heading) + stroke_dir * 1.0 * abs(math.cos(ego.heading))
+            result.corner_max = max(result.corner_max, abs(corner))
+
+        done = False
+        for stroke in range(params.max_strokes):
+            if done: break
+            result.strokes_used = stroke + 1
+            # ── 前进弧 ──
+            t_stroke = 0.0
+            while True:
+                ramp = min(1.0, t_stroke / 1.2)              # 1.2s 渐进打满（与 C++ 一致）
+                steer = params.stroke_steer * ramp
+                yaw_rate = (params.cruise_speed / WHEELBASE) * math.tan(steer)
+                ego.heading += yaw_rate * DT
+                ego.x += params.cruise_speed * math.cos(ego.heading) * DT - hb * math.sin(ego.heading) * yaw_rate * DT
+                ego.y += params.cruise_speed * math.sin(ego.heading) * DT + hb * math.cos(ego.heading) * yaw_rate * DT
+                ego.v = params.cruise_speed
+                _record(steer, ego.v)
+                corner = ego.y + 2.3 * math.sin(ego.heading) + stroke_dir * 1.0 * abs(math.cos(ego.heading))
+                corner_ok = (corner <= params.corner_limit) if stroke_dir > 0 else (corner >= -params.corner_limit)
+                aligned = (abs(_norm(ego.heading) - target_h) < params.finish_heading_tol
+                           and abs(ego.y - target_y) < params.finish_lane_tol)
+                t_stroke += DT
+                if (not corner_ok) or aligned or (t_stroke >= params.stroke_timeout_s):
+                    done = aligned
+                    break
+            if done: break
+            # ── 刹停点（换挡 D→R）──
+            ego.v = 0.0
+            _record(0.0, 0.0)
+            # ── 倒车（反打；outbound 继续向目标转 / return 回摆 heading）──
+            t_rev = 0.0
+            while True:
+                steer = params.reverse_steer
+                yaw_rate = (params.reverse_speed / WHEELBASE) * math.tan(steer)
+                ego.heading += yaw_rate * DT
+                ego.x += params.reverse_speed * math.cos(ego.heading) * DT - hb * math.sin(ego.heading) * yaw_rate * DT
+                ego.y += params.reverse_speed * math.sin(ego.heading) * DT + hb * math.cos(ego.heading) * yaw_rate * DT
+                ego.v = params.reverse_speed
+                _record(steer, ego.v)
+                t_rev += DT
+                # 回撤走廊（outbound: y≤+0.5 / return: y≥-0.5）或 heading 护栏或超时
+                corridor = (ego.y <= params.reverse_corridor) if stroke_dir > 0 \
+                           else (ego.y >= -params.reverse_corridor)
+                h_guard = ((ego.heading >= target_h - params.reverse_h_guard)
+                           if stroke_dir > 0 else (ego.heading <= -math.pi + params.reverse_h_guard))
+                if corridor or h_guard or (t_rev >= params.reverse_timeout_s):
+                    break
+            # ── 刹停点（换挡 R→D）──
+            ego.v = 0.0
+            _record(0.0, 0.0)
+
     # 评估
     result.final_heading = ego.heading
     result.final_y = ego.y
     result.final_x = ego.x
-    # 目标：heading ≈ π（180° 掉头），y ≈ -start_lane_y（对向车道）
-    target_heading = math.pi
+    # 目标 heading：前进端掉头 π / 返程掉头 0（2026-08-04 返程掉头修复同款语义）
+    target_heading = 0.0 if abs(start_heading) > math.pi * 0.5 else math.pi
     # 正确归一化到 [-π, π] 再取 abs
     he = ego.heading - target_heading
     while he >  math.pi: he -= 2.0 * math.pi
@@ -1051,21 +1160,31 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75):
     result.lane_error = abs(ego.y - target_y)
     # 判据：heading 偏差 < 1.0 rad + 车在路面上（未飞出）
     # 注意：lane_error 是到对向车道中心 y=1.75 的距离，但车只要在路面上就算成功
-    result.success = (result.heading_error < 1.0 and abs(ego.y) < 7.0)
+    if params.mode == 'multi':
+        # 多把方向：严格判据（角点全程 ≤ corner_limit + 对准 + 车道）
+        result.success = (result.corner_max <= params.corner_limit + 0.2
+                          and result.heading_error < 0.15
+                          and result.lane_error < params.finish_lane_tol)
+    else:
+        result.success = (result.heading_error < 1.0 and abs(ego.y) < 7.0)
 
     return result
 
 
-def print_uturn_result(result, params, label="", start_lane_y=-1.75):
+def print_uturn_result(result, params, label="", start_lane_y=-1.75, start_heading=0.0):
     target_y = -start_lane_y
+    target_h = 0.0 if abs(start_heading) > math.pi * 0.5 else math.pi
     print(f"\n{'='*60}")
     print(f"  {label}")
     print(f"{'='*60}")
     result.print_phases(params)
     print(f"  最终位置:         x={result.final_x:.1f}m, y={result.final_y:.2f}m")
     print(f"  最终 heading:     {result.final_heading:.2f} rad ({math.degrees(result.final_heading):.1f}°)")
-    print(f"  heading 偏差:     {result.heading_error:.2f} rad (目标 π={math.pi:.2f})")
+    print(f"  heading 偏差:     {result.heading_error:.2f} rad (目标 {target_h:.2f})")
     print(f"  车道偏差:         {result.lane_error:.2f} m (目标 y={target_y:.2f})")
+    if params.mode == 'multi':
+        print(f"  全程角点 max|y|:  {result.corner_max:.2f} m (路沿 7.0, 上限 {params.corner_limit:.1f})")
+        print(f"  实际把数:         {result.strokes_used}")
     status = "PASS" if result.success else "FAIL"
     print(f"  状态:             {status}")
 
@@ -1395,6 +1514,72 @@ class LongitudinalController:
             brake = min(self.max_brake, -speed_error * 0.1)
             return (0.0, min(brake, 0.3))
         return (0.0, 0.0)
+
+
+def tune_uturn_multi():
+    """扫描多把方向 U-turn 参数（角点约束退出），找最优组合
+
+    网格: corner_limit × init_speed × max_strokes，去程+返程各跑一遍。
+    判据（全 PASS）:
+      1. corner_max ≤ corner_limit + 0.2（全程车身角点不出沿 7.0）
+      2. 完成位姿: heading_error < 0.15 且 lane_error < 1.75
+      3. 总时长 ≤ 30s（behavior uturn_timeout_s=40 预算）
+    """
+    print("\n" + "=" * 60)
+    print("  多把方向 U-turn 参数扫描（角点约束退出）")
+    print("=" * 60)
+    print(f"  轴距 L={WHEELBASE}m, 路宽 14m (4车道, 路沿 ±7.0)")
+    print("  策略: 满舵前进弧（角点达限即收）→ 反打倒车回撤 → 末把对准")
+    print("  去程（y=-1.75→+1.75, h: 0→π）+ 返程（y=+1.75→-1.75, h: π→0）双跑")
+    print("=" * 60)
+
+    results = []
+    n_tried = 0
+    for corner_limit in [6.0, 6.3, 6.5, 6.7]:
+        for init_speed in [3.5, 5.0, 8.0]:
+            for max_strokes in [3, 5]:
+                for v_rev in [-2.0, -2.5, -3.0]:
+                    n_tried += 1
+                    p = UturnParams(mode='multi')
+                    p.corner_limit = corner_limit
+                    p.init_speed = init_speed
+                    p.max_strokes = max_strokes
+                    p.reverse_speed = v_rev
+                    r_fwd = run_uturn_simulation(p, start_lane_y=-1.75, start_heading=0.0)
+                    r_ret = run_uturn_simulation(p, start_lane_y=+1.75, start_heading=math.pi)
+                    both_pass = (r_fwd.success and r_ret.success)
+                    # 总时长 = 模拟步数 * DT（单边）
+                    dur_fwd = len(r_fwd.t) * DT
+                    dur_ret = len(r_ret.t) * DT
+                    ok = both_pass and max(dur_fwd, dur_ret) <= 30.0
+                    score = (r_fwd.corner_max + r_ret.corner_max) / 2.0 \
+                        + 0.1 * max(r_fwd.heading_error, r_ret.heading_error) \
+                        + 0.05 * max(dur_fwd, dur_ret)
+                    results.append((score, ok, corner_limit, init_speed, max_strokes, v_rev,
+                                    r_fwd, r_ret, dur_fwd, dur_ret))
+                    tag = "PASS" if ok else "fail"
+                    print(f"  corner={corner_limit:.1f} v_in={init_speed:.1f} "
+                          f"strokes={max_strokes} v_rev={v_rev:.1f} "
+                          f"→ {tag}  corner_max=({r_fwd.corner_max:.2f}/{r_ret.corner_max:.2f}) "
+                          f"h_err=({r_fwd.heading_error:.2f}/{r_ret.heading_error:.2f}) "
+                          f"lane=({r_fwd.lane_error:.2f}/{r_ret.lane_error:.2f}) "
+                          f"n=({r_fwd.strokes_used}/{r_ret.strokes_used}) "
+                          f"t=({dur_fwd:.1f}/{dur_ret:.1f}s)")
+
+    passed = [r for r in results if r[1]]
+    print(f"\n  尝试: {n_tried}, 通过: {len(passed)}")
+    if passed:
+        best = min(passed, key=lambda r: r[0])
+        (score, ok, cl, iv, ms, vr, rf, rr, tf, tr) = best
+        print(f"\n  {'='*50}")
+        print(f"  🏆 最优（评分={score:.2f}）: corner_limit={cl} init_speed={iv} "
+              f"max_strokes={ms} reverse_speed={vr}")
+        print(f"  去程: corner_max={rf.corner_max:.2f}m h_err={rf.heading_error:.2f} "
+              f"lane_err={rf.lane_error:.2f} 把数={rf.strokes_used} 时长={tf:.1f}s")
+        print(f"  返程: corner_max={rr.corner_max:.2f}m h_err={rr.heading_error:.2f} "
+              f"lane_err={rr.lane_error:.2f} 把数={rr.strokes_used} 时长={tr:.1f}s")
+    else:
+        print("  ❌ 网格内无通过组合 — 需调整策略/参数")
 
 
 # ── 场景 1: 曲线跟随（Curve following） ─────────────────────
@@ -2255,24 +2440,18 @@ def main():
     if args.tune_uturn:
         tune_uturn()
         tune_uturn_three_point()
+        tune_uturn_multi()
         return
 
     if args.uturn:
-        # 默认三把方向掉头，参数匹配 C 代码 flowsim_node.cpp
-        # 宽路打一圈多（~0.50rad），配合倒车调整
-        p = UturnParams(mode='three_point')
-        p.phase0_steer = 0.50
-        p.phase0_throttle = 0.22
-        p.phase0_duration = 2.0
-        p.phase1_steer = -0.55
-        p.phase1_reverse_throttle = -0.35
-        p.phase1_reverse_duration = 3.0
-        p.phase2_steer = 0.10
-        p.phase2_throttle = 0.24
-        p.phase2_duration = 0.5
-        p.init_speed = 4.0
-        r = run_uturn_simulation(p, start_lane_y=-1.75)
-        print_uturn_result(r, p, "三把方向掉头（C代码匹配参数）", start_lane_y=-1.75)
+        # 默认多把方向掉头（角点约束退出，2026-08-04 新增），去程+返程双跑
+        p = UturnParams(mode='multi')
+        r = run_uturn_simulation(p, start_lane_y=-1.75, start_heading=0.0)
+        print_uturn_result(r, p, "多把方向掉头·去程（y=-1.75, h=0 → +1.75, h=π）",
+                           start_lane_y=-1.75, start_heading=0.0)
+        r2 = run_uturn_simulation(p, start_lane_y=+1.75, start_heading=math.pi)
+        print_uturn_result(r2, p, "多把方向掉头·返程（y=+1.75, h=π → -1.75, h=0）",
+                           start_lane_y=+1.75, start_heading=math.pi)
         if args.csv:
             with open(args.csv, 'w', newline='') as f:
                 w = csv.writer(f)
