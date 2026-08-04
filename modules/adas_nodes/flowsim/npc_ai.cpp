@@ -64,7 +64,14 @@ static EntityId find_lead(const Entity& npc, const EntityPool& pool,
             // 沿 route 纵向：顺行看 route_s 更大者，对向(dir=-1)看更小者
             ahead = (o.route_s - npc.route_s) * (double)npc.route_dir;
         } else {
-            ahead = o.x - npc.x;  // 旧世界系：沿 x
+            /* 非 route 实体（如 ego，route_dir==0）沿本车车头方向投影。
+             * 旧实现 o.x - npc.x 只对顺行（车头朝 +x）正确——返程对向车
+             * （route_dir=-1，车头朝 -x）会把"身后 4.9m 的 ego"判成前方
+             * lead → IDM 追着本车道后车刹车 → 永久停住堵死 ego 返程
+             * （2026-08-04 实测 car14 @x=2870）。 */
+            const double fx = std::cos(npc.heading);
+            const double fy = std::sin(npc.heading);
+            ahead = (o.x - npc.x) * fx + (o.y - npc.y) * fy;
         }
         if (ahead <= 0) continue;
         if (ahead > cfg.look_ahead) continue;
@@ -415,7 +422,12 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
             npc.speed = 0.0;
             npc.throttle = 0.0;
             npc.brake = 1.0;
-            npc.target_vx = 0.0;
+            /* 注意：不写 npc.target_vx = 0.0 —— 掉头完成（ego_maneuvering
+             * 变 false）后 uturn_yield 不再压制，但 target_vx 是持久状态，
+             * 一旦被永久清零，NPC 掉头后永远以 target_vx=0 巡航/跟车 → 停在
+             * 掉头区（2026-08-04 实测：car14 停在返程车道 x=2870 不动，
+             * 堵死 ego 返程 25s+）。纵向压制由下方 v_desired=0 分支负责，
+             * 无需（也不应）污染 target_vx。 */
         }
     }
     if (in_crash_cooldown) {
@@ -465,7 +477,17 @@ void step_npc_vehicle(Entity& npc, const EntityPool& pool,
         // 防过冲：剩余距离不足一个 step 时直接收敛到目标
         double remain = npc.target_offset - npc.offset;
         if (std::fabs(step) > std::fabs(remain)) step = remain;
-        npc.offset += step;
+        /* CutIn 车头偏转（2026-08 修复"NPC 屁股先动"）：
+         * 旧实现 offset 直推平移 + world 回写把 heading 钉回路切线（零
+         * 偏航）→ 车身纯横移 = "屁股先"。自行车模型语义：横向速度由
+         * 车头偏转角产生（v_lat = v·sin(dh)）→ 车头先转、车身沿弧线。
+         * npc.steer 存偏转角（前端前轮转向 + world 回写保留偏转）。 */
+        const double npc_v = std::max(npc.speed, 0.5);
+        double dh = std::atan2(u, npc_v);
+        if (dh >  0.5) dh =  0.5;
+        if (dh < -0.5) dh = -0.5;
+        npc.steer = dh;
+        npc.offset += npc_v * std::sin(dh) * dt;
         /* 中心线硬 clamp（同 E2 分支）：CutIn 跨实线变道允许跨车道线，
          * 但严禁跨过道路中心线进入对向。 */
         if (npc.route_dir > 0 && npc.offset > -0.3) npc.offset = -0.3;

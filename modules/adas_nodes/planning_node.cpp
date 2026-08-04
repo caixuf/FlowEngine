@@ -638,6 +638,13 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
         v = uturn_speed;
         double phase2_t = 0.0;
         while (n < max_points) {
+            /* 转向渐进（2026-08 修复"屁股先扫 100°"观感）：
+             * 旧实现 Phase 2 首帧即满舵 → yaw_rate 0.87 rad/s（每秒转 50°）
+             * 低速下几乎原地突然旋转 → 观感"车屁股先旋转"。真车掉头是
+             * 渐进打方向（1-2s 打满），前轮角度渐进 → 车头渐进转。
+             * 前 1.2s steer 从 0 线性打到满舵。 */
+            double ramp = std::min(1.0, phase2_t / 1.2);
+            steer = steer_sign * uturn_steer * ramp;
             double yaw_rate = (v / wheelbase) * tan(steer);
             h += yaw_rate * dt;
             /* 车辆中心参考点（与 physics.cpp step_bicycle 一致） */
@@ -1495,22 +1502,38 @@ protected:
                 double lane_center = lane_center_y(cur_lane, g.lane_count, lane_w);
                 double min_gap = 1e9;
                 int gap_src = 0;  /* 0=none 1=perception 2=truth */
-                for (int i = 0; i < g.kMaxObs; i++) {
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx <= 0.0 || dx > 80.0) continue;
-                    if (g.obs_vx[i] < -2.0) continue;  /* 对向车不走此限速 */
-                    if (std::fabs(g.obs_y[i] - lane_center) > lane_w * 0.75) continue;
-                    if (dx < min_gap) { min_gap = dx; gap_src = 1; }
+                /* 前方 = 沿车头方向（2026-08-04 掉头返程撞车修复）：
+                 * 旧实现硬编码 dx>0（+x 前进方向）—— 返程（heading≈π 朝 -x）
+                 * 时前方车在 -x 被跳过 → 不减速 → 撞车。沿车头方向投影对
+                 * 前进/返程/任意 heading 正确。 */
+                {
+                    const double fwd_x = std::cos(g.ego_heading);
+                    const double fwd_y = std::sin(g.ego_heading);
+                    for (int i = 0; i < g.kMaxObs; i++) {
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        const double along = rx * fwd_x + ry * fwd_y;
+                        if (along <= 0.0 || along > 80.0) continue;
+                        if (g.obs_vx[i] < -2.0) continue;  /* 对向车不走此限速 */
+                        const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                        if (lat > lane_w * 0.75) continue;
+                        if (along < min_gap) { min_gap = along; gap_src = 1; }
+                    }
                 }
                 /* 真值兜底：感知链未提供本车道前车（漏检/停更）时，
                  * 用 flowsim 真值障碍物计算 gap——安全兜底不依赖感知链。 */
                 if (min_gap >= 1e8) {
+                    const double fwd_x = std::cos(g.ego_heading);
+                    const double fwd_y = std::sin(g.ego_heading);
                     for (int i = 0; i < g.truth_obs_count; i++) {
-                        double dx = g.truth_obs_x[i] - g.ego_x;
-                        if (dx <= 0.0 || dx > 80.0) continue;
+                        const double rx = g.truth_obs_x[i] - g.ego_x;
+                        const double ry = g.truth_obs_y[i] - g.ego_y;
+                        const double along = rx * fwd_x + ry * fwd_y;
+                        if (along <= 0.0 || along > 80.0) continue;
                         if (g.truth_obs_vx[i] < -2.0) continue;
-                        if (std::fabs(g.truth_obs_y[i] - lane_center) > lane_w * 0.75) continue;
-                        if (dx < min_gap) { min_gap = dx; gap_src = 2; }
+                        const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                        if (lat > lane_w * 0.75) continue;
+                        if (along < min_gap) { min_gap = along; gap_src = 2; }
                     }
                 }
                 if (min_gap < 80.0 && min_gap > 0.0) {
@@ -1856,24 +1879,33 @@ protected:
                     const double L = 50.0;  /* 变道纵向长度固定（投影鲁棒） */
                     const double absD = std::fabs(D);
                     if (absD > 0.2 && absD < 8.0) {  /* 有效变道范围 */
-                        const double R = (L * L + D * D) / (2.0 * absD);
+                        /* 五次多项式横向轨迹（Apollo LateralQPOptimizer 标准解，
+                         * 2026-08-04 用户认可的 Apollo 对齐路线第一步）：
+                         *   l(s) = a0 + a1·s + a2·s² + a3·s³ + a4·s⁴ + a5·s⁵
+                         * 边界条件：起点/终点横向位置 = l0/l1，横向速度、加速度
+                         * = 0（a1=a2=0）→ 车头渐进偏转（标准 S 曲线，jerk 连续），
+                         * 横向速度先增后减。替换手工 smoothstep/圆弧插值。 */
+                        const double L2 = L * L, L3 = L2 * L, L4 = L3 * L, L5 = L4 * L;
+                        const double a3 = 10.0 * D / L3;
+                        const double a4 = -15.0 * D / L4;
+                        const double a5 = 6.0 * D / L5;
                         for (int i = 0; i < n_wp; i++) {
                             const double t = (double)i / (double)(n_wp - 1);
                             const double s = t * L;
-                            /* sagitta：d_out = ego_ref_d + D·frac，frac∈[0,1]。
-                             * 圆弧凸高公式 frac = R/|D|·(1-cos(s/R))，恒正。
-                             * 旧实现 st 里乘了 sign(D)——D 本身已带符号，右变道
-                             * (D<0) 时 st<0 与 D 相乘得正 → 轨迹反向冲向 +y 侧，
-                             * 车变道必冲出对侧路面（2026-08-03 demo 实测
-                             * RIGHT_CHANGE 车冲到 y=+6.4 再反向回正）。 */
-                            const double frac = (R / absD) *
-                                              (1.0 - std::cos(s / R));
-                            d_out[i] = ego_ref_d + D * frac;
+                            const double s2 = s * s;
+                            d_out[i] = ego_ref_d
+                                     + a3 * s2 * s
+                                     + a4 * s2 * s2
+                                     + a5 * s2 * s2 * s;
                         }
-                        /* 圆弧曲率（固定方向盘 = 固定 kappa）存入全局，
-                         * 轨迹回填后填给变道段（control kappa 前馈用）。
-                         * 符号与 D 一致：右变道(D<0)曲率负（向右弯）。 */
-                        g.lane_change_kappa = (D >= 0.0) ? (1.0 / R) : -(1.0 / R);
+                        /* kappa 前馈：五次多项式曲率 l''/(1+l'²)^1.5，取中段
+                         * 曲率近似（l''(L/4) = 5.625·D/L²，端点 l''=0）——
+                         * 变道中段曲率最大，符号随 D（右变道曲率负）。 */
+                        const double sm = L * 0.25;
+                        const double kappa_m = 6.0 * a3 * sm
+                                             + 12.0 * a4 * sm * sm
+                                             + 20.0 * a5 * sm * sm * sm;
+                        g.lane_change_kappa = kappa_m;
                         g.lane_change_kappa_active = 1;
                     }
                 }

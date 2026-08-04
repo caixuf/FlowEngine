@@ -364,10 +364,21 @@ export function createSceneDirector(scene) {
     tickDeadReckon();
     if (store.ego && _dr.init) {
       const egoZ = store.ego.z;
-      store.ego.x = _dr.smoothX;
-      store.ego.y = _dr.smoothZ;
-      store.ego.heading = _dr.smoothHeading;
-      store.ego.speed = _dr.smoothSpeed;
+      /* 二分调试开关：URL ?raw=1 绕过硬推（死推算），直接用后端真值渲染。
+       * 用于定位"车屁股先动"在前端（死推算外推/平滑）还是后端（物理/
+       * 数据链）。正常模式用 smooth（平滑外推），?raw=1 用 last（真值）。 */
+      if (typeof window !== 'undefined' &&
+          new URLSearchParams(window.location.search).get('raw') === '1') {
+        store.ego.x = _dr.lastX;
+        store.ego.y = _dr.lastZ;
+        store.ego.heading = _dr.lastHeading;
+        store.ego.speed = _dr.lastSpeed;
+      } else {
+        store.ego.x = _dr.smoothX;
+        store.ego.y = _dr.smoothZ;
+        store.ego.heading = _dr.smoothHeading;
+        store.ego.speed = _dr.smoothSpeed;
+      }
       store.ego.z = egoZ;
     }
     /* 流畅专题：NPC 与 ego 同构的 dead reckon。

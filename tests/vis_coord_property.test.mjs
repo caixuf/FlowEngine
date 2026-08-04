@@ -135,13 +135,14 @@ console.log('--- 3. headingToRotationY ---');
 // heading=0 → 车头朝 +X，rotationY=0
 eq('heading=0 → rotY=0', headingToRotationY(0), 0);
 
-// heading=π/2 → 车头朝 +Y(North)→THREE -Z，rotationY=-π/2
-eq('heading=π/2 → rotY=-π/2', headingToRotationY(Math.PI / 2), -Math.PI / 2);
+// 2026-08-04 修复（原 -heading 符号反 → 车头左右镜像）：
+// heading=π/2(North) → 车头朝 -Z，rotationY=+π/2
+eq('heading=π/2 → rotY=+π/2', headingToRotationY(Math.PI / 2), Math.PI / 2);
 
-// heading=-π/2 → 车头朝 -Y(South)→THREE +Z，rotationY=+π/2
-eq('heading=-π/2 → rotY=+π/2', headingToRotationY(-Math.PI / 2), Math.PI / 2);
+// heading=-π/2(South) → 车头朝 +Z，rotationY=-π/2
+eq('heading=-π/2 → rotY=-π/2', headingToRotationY(-Math.PI / 2), -Math.PI / 2);
 
-// heading=π → 车头朝 -X，rotationY=-π（或 π，等价）
+// heading=π → 车头朝 -X，rotationY=π（或 -π，等价）
 ok('heading=π → |rotY|=π', Math.abs(Math.abs(headingToRotationY(Math.PI)) - Math.PI) < 1e-10);
 
 // ═══════════════════════════════════════════════════════════
@@ -269,14 +270,16 @@ console.log('--- 6. directionToRotationY ---');
 // +X 方向 → rotationY=0
 eq('+X dir → rotY=0', directionToRotationY(1, 0), 0);
 
-// +Z 方向 → rotationY=π/2
-ok('+Z dir → rotY≈π/2', Math.abs(directionToRotationY(0, 1) - Math.PI / 2) < 1e-10);
+// 2026-08-04 修复（原符号反 → 车头左右镜像）：
+// THREE 绕 Y 旋转 θ 的 forward = (cosθ, -sinθ) → (dx,dz) 对应 θ = atan2(-dz,dx)
+// +Z 方向 → rotationY=-π/2
+ok('+Z dir → rotY≈-π/2', Math.abs(directionToRotationY(0, 1) + Math.PI / 2) < 1e-10);
 
 // -X 方向 → rotationY=π
 ok('-X dir → rotY≈π', Math.abs(Math.abs(directionToRotationY(-1, 0)) - Math.PI) < 1e-10);
 
-// -Z 方向 → rotationY=-π/2
-ok('-Z dir → rotY≈-π/2', Math.abs(directionToRotationY(0, -1) + Math.PI / 2) < 1e-10);
+// -Z 方向 → rotationY=π/2
+ok('-Z dir → rotY≈π/2', Math.abs(directionToRotationY(0, -1) - Math.PI / 2) < 1e-10);
 
 // forwardENU 与 headingToRotationY 一致性：
 // forwardENU 在 ENU 空间，但 directionToRotationY 在 THREE 空间。
@@ -463,6 +466,37 @@ console.log('--- 9. placeOnRoad ---');
     ok('插值高度≈3.5', Math.abs(r.height - 3.5) < 1e-10);
     ok('插值位置 y≈3.5', Math.abs(r.pos[1] - 3.5) < 1e-10);
   }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 7. 物理自洽（2026-08-04 防再犯）：车头朝向与位置运动方向同向
+// 不依赖"约定"（ENU/THREE 符号是人肉推导，曾写反进 golden 测试）——
+// 这是物理事实：heading=h 的车以速度 v 沿 ENU 前向运动，映射到 THREE
+// 后，rotation.y 给出的车头方向必须与位置位移方向一致（点积>0.99）。
+// 任何一层符号反（headingToRotationY / worldToThree / directionToRotationY）
+// 都会让点积为负 → FAIL。
+// ═══════════════════════════════════════════════════════════
+console.log('--- 7. 物理自洽：车头朝向 vs 运动方向 ---');
+
+{
+  const H = headingToRotationY;
+  const W = worldToThree;
+  let allOk = true;
+  for (const h of [0, 0.3, 0.7, 1.2, Math.PI / 2, -0.5, Math.PI, -2.0]) {
+    // 车头 forward（THREE 空间）：rotation.y = H(h) 时模型 +X 车头指向
+    const ry = H(h);
+    const fwdX = Math.cos(ry), fwdZ = -Math.sin(ry);   // THREE forward
+    // 运动方向（THREE 空间）：ENU 前向 (cos h, sin h) → worldToThree
+    const [mvX, , mvZ] = W(Math.cos(h), Math.sin(h), 0);
+    // 归一化后点积
+    const dot = fwdX * mvX + fwdZ * mvZ;
+    allOk = allOk && dot > 0.99;
+    if (!(dot > 0.99)) {
+      console.log(`  FAIL h=${h.toFixed(2)}: fwd=(${fwdX.toFixed(2)},${fwdZ.toFixed(2)}) ` +
+                  `move=(${mvX.toFixed(2)},${mvZ.toFixed(2)}) dot=${dot.toFixed(3)}`);
+    }
+  }
+  ok('所有 heading 下车头方向与运动方向同向（点积>0.99，物理自洽）', allOk);
 }
 
 done();

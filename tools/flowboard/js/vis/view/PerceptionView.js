@@ -307,8 +307,10 @@ function _updateSweep(ego, frame, positions, edgePositions) {
   //  3. 轻微摆动（±8°）模拟扫描动画
   const heading = ego.heading || 0;
   const halfFov = Math.PI * 60 / 180;
-  const sweepAngle = (frame * 0.02) % (Math.PI * 2);
-  const wobble = ((sweepAngle * 10) % 0.6) - 0.3;  // 三角波摆动 ±0.3（避开裸 sin 门禁）
+  // 扫描摆动：三角波，约 1 秒一个完整来回（60 帧 @60fps），幅度 ±0.2（约 ±11°）。
+  // 旧实现 ((sweepAngle*10)%0.6)-0.3 是高频锯齿，每 3 帧跳变一次 ±17°，导致线条"抽搐/扫太快"。
+  const cycle = 60;
+  const wobble = (Math.abs((frame % cycle) - cycle / 2) / (cycle / 2)) * 0.4 - 0.2;
   const sweepStart = heading - halfFov + wobble;
   const sweepEnd = heading + halfFov + wobble;
 

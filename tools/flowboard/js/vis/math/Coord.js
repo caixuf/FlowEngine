@@ -59,12 +59,16 @@ export function toVec3(x, y, z = 0) {
 
 /** heading(rad) → THREE rotation.y（绕 Y 轴）。
  *  仿真 heading=0 朝 +X（车头朝 +X），THREE rotation.y=0 时 forward 朝 +X。
- *  推导：ENU 速度 (cosθ, sinθ) 经 [x, z, -y] → THREE (cosθ, 0, -sinθ)
- *  rotation.y = -θ 时 forward = (cos(-θ), 0, sin(-θ)) = (cosθ, 0, -sinθ) ✓
- *  验证：heading=0 → rotation=0 → 模型车头沿 +X（与 gen_models.py 一致）。
- *        heading=π/2(North) → rotation=-π/2 → 车头沿 -Z（ENU North→THREE -Z）✓ */
+ *  推导（2026-08-04 修复，原 -heading 符号反）：ENU 车头方向 (cosθ, sinθ)
+ *  经 [x, z, -y] → THREE (cosθ, -sinθ)。THREE 绕 Y 旋转 θ 的 forward =
+ *  (cosθ, 0, -sinθ)（右手系：x'=cosθ·x+sinθ·z, z'=-sinθ·x+cosθ·z）——
+ *  要匹配 (cosθ, -sinθ) 需 θ = +heading。
+ *  原 -heading 给 (cosθ, +sinθ) —— z 符号反 = 车头左右镜像反 —— 转向/
+ *  掉头时暴露（游戏模式实测"左转向车往右跑"、掉头"屁股先转"）。
+ *  验证：heading=0 → rotation=0 → 模型车头沿 +X ✓
+ *        heading=π/2(North) → rotation=π/2 → 车头沿 -Z ✓ */
 export function headingToRotationY(heading) {
-  return -heading;
+  return heading;
 }
 
 /** ENU heading → 单位前向向量（在 ENU 坐标系中）
@@ -102,7 +106,10 @@ export function distanceENU(x1, y1, x2, y2) {
  *  @param {number} dz  THREE Z 分量
  *  @returns {number} rotation.y（弧度） */
 export function directionToRotationY(dx, dz) {
-  return Math.atan2(dz, dx);
+  /* 2026-08-04 修复（与 headingToRotationY 同源）：THREE 绕 Y 旋转 θ 的
+   * forward = (cosθ, -sinθ) → 方向 (dx, dz) 对应 θ = atan2(-dz, dx)。
+   * 原 atan2(dz, dx) 符号反（镜像坐标系下车头左右反）。 */
+  return Math.atan2(-dz, dx);
 }
 
 // ═══════════════════════════════════════════════════════════
