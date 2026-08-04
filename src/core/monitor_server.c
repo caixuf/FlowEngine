@@ -805,6 +805,31 @@ static bool dispatch_request(int fd, MonitorServer* ms,
 
     /* POST: /api/training/start|promote → fork+exec modelctl.py */
     if (strcmp(method, "POST") == 0) {
+        /* POST /api/game/control → 游戏模式（demo.sh --game）操控注入：
+         * 浏览器键盘 → 本接口 → 写 /tmp/game_input.json → flowsim 主循环
+         * 读取当控制指令（绕过 control_node，玩家直接开仿真车）。 */
+        if (strcmp(path, "/api/game/control") == 0) {
+            char* body = read_post_body(fd, req, req_len, 1024);
+            if (body) {
+                FILE* f = fopen("/tmp/game_input.json", "w");
+                if (f) {
+                    fputs(body, f);
+                    fclose(f);
+                    send_response(fd, "200 OK", "application/json",
+                                  "{\"ok\":true}");
+                } else {
+                    send_response(fd, "500 Internal Server Error",
+                                  "application/json",
+                                  "{\"ok\":false,\"error\":\"write failed\"}");
+                }
+                free(body);
+            } else {
+                send_response(fd, "400 Bad Request", "application/json",
+                              "{\"ok\":false,\"error\":\"failed to read body\"}");
+            }
+            close(fd);
+            return false;
+        }
         if (strcmp(path, "/api/training/start") == 0 ||
             strcmp(path, "/api/training/promote") == 0) {
             char* body = read_post_body(fd, req, req_len, 8192);

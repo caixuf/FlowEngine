@@ -52,6 +52,7 @@ AUTO_DURATION_DEFAULT=0  # 0 = 不限时；改非零则恢复"无字段时默认
 OPEN_BROWSER=true
 MULTI_MODE=false
 RECORD_MODE=false
+GAME_MODE=false
 REPLAY_FILE=""
 SCENARIO=""  # 留空则用 DEFAULT_SCENARIO（旗舰场景）
 MANUAL_MODE=false
@@ -69,6 +70,7 @@ while [ $# -gt 0 ]; do
     --manual) MANUAL_MODE=true ;;
     --record) RECORD_MODE=true ;;
     --replay) REPLAY_FILE="$2"; shift ;;
+    --game) GAME_MODE=true ;;
     --scenario) SCENARIO="$2"; shift ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$1" ;;
@@ -281,6 +283,8 @@ cleanup() {
 
   # 保留拓扑文件供评估器/evaluator 事后分析（不删除）
   [ -f "$JSON_FILE" ] && cp "$JSON_FILE" "${JSON_FILE%.json}_$(date +%Y%m%d_%H%M%S).json" 2>/dev/null || true
+  # 退出游戏模式（flowsim 恢复正常 control_node 驱动）
+  rm -f /tmp/game_mode /tmp/game_input.json 2>/dev/null || true
 
   echo ""
   echo "  ╔══════════════════════════════════════╗"
@@ -309,6 +313,12 @@ LAUNCHER_ARGS=("$PIPELINE")
 if [ "$RECORD_MODE" = true ]; then
   LAUNCHER_ARGS+=(--bag "$BAG_FILE")
   echo "  Recording to: $BAG_FILE"
+fi
+if [ "$GAME_MODE" = true ]; then
+  # 游戏模式：flowsim 主循环读 /tmp/game_input.json 当控制指令（玩家键盘）
+  touch /tmp/game_mode
+  echo "  🎮 GAME MODE: 浏览器打开 http://localhost:8800/?game=1"
+  echo "     方向键/WASD 开车（↑油门 ↓刹车 ←→转向，空格手刹）"
 fi
 [ "$MULTI_MODE" = true ] && echo "  Multi-process mode: each node runs as a separate process"
 

@@ -1694,4 +1694,40 @@ window.flowboard = {
 // Boot
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════
+// 游戏模式（demo.sh --game）：玩家键盘操控仿真车
+// 方向键/WASD → POST /api/game/control → flowmond 写 /tmp/game_input.json
+// → flowsim 读文件当控制指令（绕过 control_node，玩家直接开仿真车）
+// 启用条件：URL 带 ?game=1
+// ═══════════════════════════════════════════════════════════
+(function() {
+  var isGame = typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('game') === '1';
+  if (!isGame) return;
+  var keys = {};
+  var lastSend = 0;
+  window.addEventListener('keydown', function(e) {
+    keys[e.key] = true;
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+         'w','W','a','A','s','S','d','D',' '].indexOf(e.key) >= 0) e.preventDefault();
+  });
+  window.addEventListener('keyup', function(e) { keys[e.key] = false; });
+  setInterval(function() {
+    var now = performance.now();
+    if (now - lastSend < 50) return;  // 20Hz 节流
+    lastSend = now;
+    var thr = (keys['ArrowUp'] || keys['w'] || keys['W']) ? 0.7 : 0;
+    var brk = (keys['ArrowDown'] || keys['s'] || keys['S']) ? 0.8 : 0;
+    var st = 0;
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) st += 0.35;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) st -= 0.35;
+    if (keys[' ']) { brk = 1.0; thr = 0; }  // 空格 = 手刹
+    fetch(location.origin + '/api/game/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ throttle: thr, brake: brk, steer: st })
+    }).catch(function() {});
+  }, 50);
+})();
+
 document.addEventListener('DOMContentLoaded', initAll);

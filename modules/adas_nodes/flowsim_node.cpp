@@ -1473,6 +1473,48 @@ protected:
                 }
             }
 
+            /* ── 游戏模式（demo.sh --game）：玩家键盘操控 ──
+             * /tmp/game_mode 存在 = 游戏模式：主循环从 /tmp/game_input.json
+             * 读 {throttle, brake, steer}（flowmond POST /api/game/control
+             * 写入，浏览器键盘 → HTTP）当控制指令，绕过 control_node。
+             * 同时刷新 last_control_cmd_us 避免 FSAFE 误触发。 */
+            if (access("/tmp/game_mode", F_OK) == 0) {
+                FILE* gf = fopen("/tmp/game_input.json", "r");
+                if (gf) {
+                    char gbuf[512] = {0};
+                    size_t gn = fread(gbuf, 1, sizeof(gbuf) - 1, gf);
+                    fclose(gf);
+                    if (gn > 0) {
+                        cJSON* gj = cJSON_Parse(gbuf);
+                        if (gj) {
+                            cJSON* gjt = cJSON_GetObjectItemCaseSensitive(gj, "throttle");
+                            cJSON* gjb = cJSON_GetObjectItemCaseSensitive(gj, "brake");
+                            cJSON* gjs = cJSON_GetObjectItemCaseSensitive(gj, "steer");
+                            if (cJSON_IsNumber(gjs)) {
+                                double st = gjs->valuedouble;
+                                if (st >  0.6) st =  0.6;
+                                if (st < -0.6) st = -0.6;
+                                g.ego_steer.store(st, std::memory_order_relaxed);
+                            }
+                            if (cJSON_IsNumber(gjt)) {
+                                double th = gjt->valuedouble;
+                                if (th >  1.0) th = 1.0;
+                                if (th <  0.0) th = 0.0;
+                                g.ego_throttle.store(th, std::memory_order_relaxed);
+                            }
+                            if (cJSON_IsNumber(gjb)) {
+                                double br = gjb->valuedouble;
+                                if (br >  1.0) br = 1.0;
+                                if (br <  0.0) br = 0.0;
+                                g.ego_brake.store(br, std::memory_order_relaxed);
+                            }
+                            cJSON_Delete(gj);
+                        }
+                    }
+                }
+                g.last_control_cmd_us.store(clock_now_us(), std::memory_order_relaxed);
+            }
+
             /* ── Step 1: ego 动力学 ──
              * 失效安全：控制指令陈旧（断流 >2000ms）时停车而非内置巡航——
              * 内置巡航用油门维持速度，会把"失去控制"伪装成"正常巡航"，
