@@ -48,8 +48,15 @@ export function createLabelView(scene) {
       entry = { sprite, lastSpeed: speed, lastState: aiState };
       _labelMap.set(id, entry);
     } else if (entry.lastSpeed !== speed || entry.lastState !== aiState) {
-      // 文本变了才换纹理（避免每帧 GC）
-      entry.sprite.material.map = makeLabelTexture(speed, aiState, { width: CANVAS_W, height: CANVAS_H });
+      // 文本变了才换纹理（避免每帧 GC）。
+      // 车速每帧都在变（20.01→20.02…）→ 这里几乎每帧都换 → 每次 makeLabelTexture
+      // 新建 CanvasTexture。**旧纹理必须 dispose**，否则 GPU/JS 内存无界泄漏
+      // （浏览器 5GB，2026-08-04 实测）；CanvasTextureFactory 的缓存也因 speed key
+      // 每帧新增条目而膨胀，故 label 纹理走 noCache 路径（见工厂）。
+      const oldMap = entry.sprite.material.map;
+      const newMap = makeLabelTexture(speed, aiState, { width: CANVAS_W, height: CANVAS_H, noCache: true });
+      if (oldMap && oldMap !== newMap) oldMap.dispose();
+      entry.sprite.material.map = newMap;
       entry.sprite.material.needsUpdate = true;
       entry.lastSpeed = speed;
       entry.lastState = aiState;

@@ -19,6 +19,9 @@ const FONT_SIGN = `'Microsoft YaHei', 'SimHei', 'Noto Sans SC', 'PingFang SC', s
 
 // ── 缓存 ──
 const _cache = new Map();
+/* 缓存上界：静态纹理（指示牌/条纹/低变化 label）数量有限，防止意外路径
+ * 把缓存撑到无界（label 的 speed 是典型高变 key，已走 noCache）。 */
+const _CACHE_MAX = 300;
 
 function _cacheKey(...args) {
   return args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join('|');
@@ -55,10 +58,27 @@ function _toTexture(canvas, wrapS = THREE.ClampToEdgeWrapping, wrapT = THREE.Cla
  * @returns {THREE.CanvasTexture}
  */
 export function makeLabelTexture(speed, aiState, opts = {}) {
-  const { width = 256, height = 64, fontSize = 28 } = opts;
-  const key = _cacheKey('label', speed, aiState, width, height, fontSize);
-  if (_cache.has(key)) return _cache.get(key);
+  const { width = 256, height = 64, fontSize = 28, noCache = false } = opts;
+  // 车速每帧在变（20.01→20.02…），若按 speed 进缓存则每帧新增一个 key →
+  // 缓存无界膨胀（浏览器 5GB 泄漏，2026-08-04 实测）。LabelView 换纹理时
+  // 会 dispose 旧纹理，所以 ephemeral label 直接 noCache，不进缓存。
+  if (!noCache) {
+    const key = _cacheKey('label', speed, aiState, width, height, fontSize);
+    if (_cache.has(key)) return _cache.get(key);
+    const tex = _buildLabelTexture(speed, aiState, width, height, fontSize);
+    // 缓存有界保护：只缓存静态 label（speed 不变才复用）；超限丢最旧。
+    if (_cache.size >= _CACHE_MAX) {
+      const oldest = _cache.keys().next().value;
+      _cache.delete(oldest);
+    }
+    _cache.set(key, tex);
+    return tex;
+  }
+  return _buildLabelTexture(speed, aiState, width, height, fontSize);
+}
 
+/** 实际构建 label 纹理（供 noCache 路径与缓存路径共用） */
+function _buildLabelTexture(speed, aiState, width, height, fontSize) {
   const c = _createCanvas(width, height);
   const ctx = c.getContext('2d');
 
@@ -115,9 +135,7 @@ export function makeLabelTexture(speed, aiState, opts = {}) {
     ctx.fillText(stateText, startX + speedW + gap, height / 2);
   }
 
-  const tex = _toTexture(c);
-  _cache.set(key, tex);
-  return tex;
+  return _toTexture(c);
 }
 
 // ═══════════════════════════════════════════════════════════
