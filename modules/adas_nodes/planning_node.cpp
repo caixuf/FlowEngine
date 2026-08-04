@@ -390,7 +390,20 @@ static bool frenet_to_cartesian(double s, double d,
         out_x = ref_x - d * sin(theta);
         out_y = ref_y + d * cos(theta);
         out_heading = theta;
+        /* kappa = 参考线切线转角差 / 段长（map_ref 是 ~5m 采样的 route centerline，
+         * 弯道处切线连续变化）。旧实现恒 0 → control 的 kappa 前馈 ff_term 丢失，
+         * 弯道全靠 heading 反馈追，横向误差大/抖动。 */
         out_kappa = 0.0;
+        if (idx > 0) {
+            double h_prev = atan2(ry0 - g.map_ref_y[idx - 1],
+                                  rx0 - g.map_ref_x[idx - 1]);
+            double h_cur = atan2(ry1 - ry0, rx1 - rx0);
+            double dh = h_cur - h_prev;
+            while (dh >  M_PI) dh -= 2.0 * M_PI;
+            while (dh < -M_PI) dh += 2.0 * M_PI;
+            double ds = (s1 - s0) > 1e-6 ? (s1 - s0) : 1e-6;
+            out_kappa = dh / ds;
+        }
         return true;
     }
     const int ref_n = 101;

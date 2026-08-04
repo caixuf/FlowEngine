@@ -148,10 +148,144 @@ def build_curve_road_from_profile(rid: int, name: str, profile: list[dict],
     return road, cur
 
 
+# ── nodes 折线 → 三次 Hermite 密采样折线 ─────────────────────
+
+def _node_tangents(pts: list) -> list:
+    """每个节点处的切线 = 相邻两段 chord 方向的归一化和（端点用单 chord）。
+
+    为什么不用 Catmull-Rom：coarse 节点（~200m 间距）+ 直道↔弯道切向不连续时，
+    CR 会在过渡处严重过冲（实测生成 R≈19m 的发卡弯，a_lat@20m/s≈21 m/s²，
+    车根本拐不过来）。Hermite 的端点切线取 chord 方向平均，过冲小一个量级
+    （S 弯实测 min R≈546m，a_lat≈0.7 m/s²），且 C¹ 连续无 kink。
+    """
+    n = len(pts)
+    tang: list[tuple] = []
+    for i in range(n):
+        if i == 0:
+            v = (pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+        elif i == n - 1:
+            v = (pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+        else:
+            a = (pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+            b = (pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+            v = (a[0] + b[0], a[1] + b[1])
+        L = math.hypot(v[0], v[1])
+        tang.append((v[0] / L, v[1] / L) if L > 1e-9 else (1.0, 0.0))
+    return tang
+
+
+def _hermite(p0: tuple, p1: tuple, m0: tuple, m1: tuple, t: float) -> tuple:
+    """三次 Hermite 插值，t∈[0,1]，m0/m1 为端点切线向量（含弦长缩放）。"""
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    x = h00 * p0[0] + h10 * m0[0] + h01 * p1[0] + h11 * m1[0]
+    y = h00 * p0[1] + h10 * m0[1] + h01 * p1[1] + h11 * m1[1]
+    return x, y
+
+
+def build_polyline_road(rid: int, name: str, nodes: list, lanes: int,
+                        lane_width: float, speed: float,
+                        state: RoadState) -> tuple[Road, RoadState]:
+    """按 nodes 折线（[x, y, z] 三元组）构建弯道 road。
+
+    nodes 是场景 JSON 里道路中心线的采样点 —— 前端 scene3d.js 与评估器
+    demo_evaluator 消费的正是同一份，物理层（esmini）此前却把它们丢弃，
+    只按 length_m 生成一条直线（curve_road 场景 S 弯变直道 → 车不跟弯）。
+
+    实现：三次 Hermite 样条（端点切线 = 相邻 chord 方向平均）过全部 nodes，
+    按 SPLINE_STEP 密采样后每段一条 <line> geometry。这样：
+    - 精确穿过每个节点（前端/评估器同点），直道段保持直道。
+    - C¹ 连续无 polyline kink；过冲小（S 弯 min R≈546m，20m/s 可安全通过）。
+    - ref_path 的 kappa 是 sample_ahead 对采样 heading 做中心差分得到的
+      （route.cpp），不读 planView 曲率属性 —— 折线密采样对 kappa 前馈
+      完全够用，不需要真 <arc>。
+    """
+    pts = [(float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0)
+           for p in nodes]
+    n = len(pts)
+    if n < 2:
+        # 退化：退回直线
+        return build_straight_road(rid, name, 1000.0, lanes, lane_width,
+                                   speed, state)
+
+    # 全共线（含 2 节点直道）：一条直线即可，不要密采样成 600 段。
+    collinear = True
+    for i in range(2, n):
+        v1 = (pts[i - 1][0] - pts[0][0], pts[i - 1][1] - pts[0][1])
+        v2 = (pts[i][0] - pts[0][0], pts[i][1] - pts[0][1])
+        if abs(v1[0] * v2[1] - v1[1] * v2[0]) > 1e-6:
+            collinear = False
+            break
+    if collinear:
+        chord = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+        hdg = math.atan2(pts[-1][1] - pts[0][1], pts[-1][0] - pts[0][0])
+        road = Road(rid, name, chord, lanes, lane_width, speed, [
+            GeometrySeg(0.0, pts[0][0], pts[0][1], hdg, chord, 0.0),
+        ])
+        end_state = RoadState(pts[-1][0], pts[-1][1], hdg)
+        return road, end_state
+
+    tang = _node_tangents(pts)
+    samples: list[tuple] = []  # (x, y, z)
+    for i in range(n - 1):
+        p0 = pts[i]
+        p1 = pts[i + 1]
+        L = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        m0 = (tang[i][0] * L, tang[i][1] * L)
+        m1 = (tang[i + 1][0] * L, tang[i + 1][1] * L)
+        nstep = max(1, int(math.ceil(L / SPLINE_STEP)))
+        for s in range(nstep):
+            t = s / nstep
+            x, y = _hermite((p0[0], p0[1]), (p1[0], p1[1]), m0, m1, t)
+            z = p0[2] + (p1[2] - p0[2]) * t
+            samples.append((x, y, z))
+    samples.append((pts[n - 1][0], pts[n - 1][1], pts[n - 1][2]))
+
+    # 去重（相邻采样点过近，避免零长段 / heading 差分噪声）
+    dedup: list[tuple] = []
+    for s in samples:
+        if dedup and math.hypot(s[0] - dedup[-1][0], s[1] - dedup[-1][1]) < 0.1:
+            continue
+        dedup.append(s)
+    samples = dedup
+
+    geoms: list[GeometrySeg] = []
+    s_acc = 0.0
+    elev: list = [{"s": 0.0, "h": samples[0][2]}]
+    for i in range(len(samples) - 1):
+        x0, y0, _ = samples[i]
+        x1, y1, z1 = samples[i + 1]
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if seg_len < 1e-9:
+            continue
+        hdg = math.atan2(y1 - y0, x1 - x0)
+        geoms.append(GeometrySeg(s_acc, x0, y0, hdg, seg_len, 0.0))
+        s_acc += seg_len
+        elev.append({"s": s_acc, "h": z1})
+
+    total = s_acc
+    road = Road(rid, name, total if total > 0 else 1.0, lanes, lane_width,
+                speed, geoms)
+    # z 全 0 时不生成 elevationProfile（与既有场景一致，向后兼容）
+    if any(abs(p[2]) > 1e-6 for p in pts) and len(elev) > 1:
+        road.elevation_profile = elev
+    end_hdg = geoms[-1].hdg if geoms else state.hdg
+    end_state = RoadState(samples[-1][0], samples[-1][1], end_hdg)
+    return road, end_state
+
+
 # ── 场景 JSON → Road 列表 ──────────────────────────────────
 
 DEFAULT_LANE_WIDTH = 3.5
 DEFAULT_SPEED = 13.89  # 50 km/h
+
+# nodes 折线 Hermite 密采样步长（m）。5m 一段 → 每段 Δh≈κ·5≈0.03 rad
+# （R≈200m），heading 连续无 kink，esmini 位置查询开销可忽略。
+SPLINE_STEP = 5.0
 
 def roads_from_legacy_road(road_cfg: dict) -> list[Road]:
     """旧格式 road{curve_start_x, curve_length_m, curve_offset_m} → 2 个 road。"""
@@ -225,7 +359,13 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
         sp = float(e.get("speed_limit", DEFAULT_SPEED))
         oneway = bool(e.get("oneway", False))
         profile = e.get("curvature_profile")
-        if profile:
+        nodes = e.get("nodes")
+        if nodes and len(nodes) >= 2:
+            # nodes 折线优先：前端/评估器用同一份 nodes 画路/判出路沿，
+            # 物理层必须跟随 nodes 而不是只看 length_m（否则 S 弯变直道）。
+            r, state = build_polyline_road(
+                eid, etype, nodes, lanes, lw, sp, state)
+        elif profile:
             r, state = build_curve_road_from_profile(
                 eid, etype, profile, lanes, lw, sp, state)
         else:
@@ -296,7 +436,11 @@ def roads_from_road_network(rn_cfg: dict) -> tuple[list[Road], list[Junction]]:
                     cr.predecessor = incoming
                     cend = end_states.get(cid, start_state)
                 else:
-                    if cprofile:
+                    c_nodes = c.get("nodes")
+                    if c_nodes and len(c_nodes) >= 2:
+                        cr, cend = build_polyline_road(
+                            cid, cname, c_nodes, clanes, clw, csp, start_state)
+                    elif cprofile:
                         cr, cend = build_curve_road_from_profile(
                             cid, cname, cprofile, clanes, clw, csp, start_state)
                     else:

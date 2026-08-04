@@ -82,9 +82,18 @@ const char* etc_gate_state_by_phase(int ps) {
 
 /* ── 道路网络采样 ─────────────────────────────────────────────── */
 
-/* 每条 road 沿参考线采样的节点数。前端用 CatmullRomCurve3 平滑插值，
- * 8 个点对直道/弯道都足够（200m 直道每 25m 一点；圆弧曲率变化清晰可见）。 */
-constexpr int ROAD_NODES_PER_EDGE = 8;
+/* 每条 road 沿参考线采样的节点数（按道路长度自适应，~25m 一点）。
+ * 前端用 CatmullRomCurve3 平滑插值、评估器 demo_evaluator 用弦长算出路沿偏差，
+ * 两者都直接消费这份 nodes —— 点太少（旧固定 8 点）在长弯道（如 curve_road
+ * 3000m S 弯）上会采样过疏：前端 CR 过 8 点严重过冲、评估器弦长偏离真值
+ * ~14m → 车明明在车道里却被判 road departure（2026-08-04 实测）。
+ * 25m 间距下 R≈500m 的 sagitta <0.2m，render/physics/evaluator 三方一致。 */
+static int road_nodes_per_edge(double length_m) {
+    int n = (int)(length_m / 25.0) + 1;
+    if (n < 8) n = 8;
+    if (n > 128) n = 128;
+    return n;
+}
 
 /* 无 esmini 时单条 legacy 道路的端点采样数（弯道用更多点保证平滑）。 */
 constexpr int LEGACY_ROAD_NODES = 8;
@@ -102,8 +111,9 @@ bool sample_road_nodes(FlowRoadNetwork& roads, int index,
     if (!roads.road_info(index, info) || info.length <= 0) return false;
 
     /* 沿 s 等距采样：lane_id=0（参考线）, offset=0 */
-    for (int i = 0; i < ROAD_NODES_PER_EDGE; ++i) {
-        double s = info.length * (double)i / (ROAD_NODES_PER_EDGE - 1);
+    const int n_nodes = road_nodes_per_edge(info.length);
+    for (int i = 0; i < n_nodes; ++i) {
+        double s = info.length * (double)i / (n_nodes - 1);
         WorldPos w;
         if (!roads.frenet_to_world(info.id, 0, s, 0.0, w)) {
             /* 中途采样失败：用最后成功点占位，保证 nodes 数组等长 */

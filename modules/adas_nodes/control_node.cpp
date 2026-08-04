@@ -585,30 +585,41 @@ protected:
             }
 
             /* 道路几何参数：仅来自 planning/trajectory 的 ref_path 参考点。
-             * 控制层不再独立计算 road_center_y，不做车道判定。 */
+             * 控制层不再独立计算 road_center_y，不做车道判定。
+             *
+             * 优先用 query_ref_at 返回的**本地**参考（离 ego 最近的轨迹点）：
+             * road_c/heading/kappa 都在 ego 当前位置，弯道处 lat_error 才是
+             * 真横向误差。旧实现一律覆盖成轨迹 0.5s 前视点（target_path_*）——
+             * 前视点在弯道上比 ego 当前位置高 → lat_error 虚高 → 车持续往
+             * 弯内侧漂，S 弯里稳态偏出 ~3m（贴着道路中心而非目标车道）。
+             * 只有本地查询失败（轨迹稀疏/ego 偏离>5m）才回退前视点。 */
             double ref_road_heading = 0.0;
             double ref_kappa = 0.0;
             double road_c = g.road_center_y;  /* 默认保持上一帧值 */
-            if (!query_ref_at(g.ego_x, g.ego_y,
-                              road_c, ref_road_heading, ref_kappa)) {
-                /* ref_path 不可用：road_c 保持上一帧值，heading/kappa 归零 */
+            bool ref_ok = query_ref_at(g.ego_x, g.ego_y,
+                                       road_c, ref_road_heading, ref_kappa);
+            if (!ref_ok) {
+                /* ref_path 不可用：回退到轨迹前视点几何，否则 heading/kappa 归零 */
                 ref_road_heading = 0.0;
                 ref_kappa = 0.0;
-            }
-            if (g.has_planning) {
-                road_c = g.target_road_center_y;
-                ref_road_heading = g.target_path_heading;
-                ref_kappa = g.target_path_kappa;
+                if (g.has_planning) {
+                    road_c = g.target_road_center_y;
+                    ref_road_heading = g.target_path_heading;
+                    ref_kappa = g.target_path_kappa;
+                }
             }
             g.road_center_y = road_c;
 
-            /* 车道保持目标：来自 planning/trajectory 的 lane_d。
-             * 控制层不做独立车道判定——committed_lane_side 已移到 planning。 */
-            double cruise_lane_y = g.has_planning ? g.target_path_y : (g.road_center_y + g.lane_d);
-            if (!g.has_planning) {
-                /* 无 planning 时保持当前 y，不自行推导目标车道 */
-                cruise_lane_y = g.ego_y;
-            }
+            /* 车道保持目标：本地道路中心 + 轨迹 lane_d。
+             * 控制层不做独立车道判定——committed_lane_side 已移到 planning。
+             *
+             * 目标用本地 road_c（query_ref_at 最近点），不用轨迹前视点
+             * target_path_y：弯道上前视点 y 高于 ego 当前位置，直用会让
+             * lat_error 虚高 → 车往弯内侧漂（S 弯稳态偏 ~3m）。本地
+             * road_c + lane_d·cos(h) 就是 ego 所在弧位处的车道中心。 */
+            double cruise_lane_y = g.has_planning
+                ? (g.road_center_y + g.lane_d * cos(ref_road_heading))
+                : g.ego_y;
             /* 出路沿恢复：不管有没有 planning，只要 |ego_y| >> 道路范围就强制回车道。
              * 出路沿后 Frenet 仍可能输出轨迹（投影到参考线外推），让 has_planning=1，
              * 旧 recovery 不触发。必须无条件拦截。 */

@@ -449,7 +449,8 @@ def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, f
     if not isinstance(edges, list):
         return None
 
-    best: tuple[float, float, int, float, float] | None = None
+    # (dist, signed_offset, lane_count, lane_width, margin, road_heading)
+    best: tuple[float, float, int, float, float, float] | None = None
     px = float(x)
     py = float(y)
     for edge in edges:
@@ -484,18 +485,21 @@ def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, f
             signed_offset = (px - cx) * nx + (py - cy) * ny
             dist = math.hypot(px - cx, py - cy)
             margin = lane_width * lane_count * 0.5 - abs(signed_offset) - 1.0
+            seg_heading = math.atan2(dy, dx)
             if (best is None or
                     margin > best[4] + 1e-9 or
                     (abs(margin - best[4]) <= 1e-9 and dist < best[0])):
-                best = (dist, signed_offset, lane_count, lane_width, margin)
+                best = (dist, signed_offset, lane_count, lane_width, margin, seg_heading)
 
     if best is None:
         return None
 
-    _, signed_offset, lane_count, lane_width, margin = best
+    _, signed_offset, lane_count, lane_width, margin, road_heading = best
     return (
         nearest_lane_error(signed_offset, lane_width, lane_count, 0.0),
         margin,
+        road_heading,
+        signed_offset,
     )
 
 
@@ -531,8 +535,10 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     center = road_center_y(x, road)
     y_rel = y - center
     cross_track = _road_network_cross_track(scene, x, y)
+    road_heading = None
+    road_signed_offset = None
     if cross_track is not None:
-        lane_error, road_edge_margin = cross_track
+        lane_error, road_edge_margin, road_heading, road_signed_offset = cross_track
     else:
         lane_error = nearest_lane_error(y_rel, lane_width, lane_count, 0.0)
         road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
@@ -584,6 +590,8 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "steer_signed": steer_signed,
         "lane_error": lane_error,
         "road_edge_margin": road_edge_margin,
+        "road_heading": road_heading,          # road_network 局部道路朝向（rad）或 None
+        "road_signed_offset": road_signed_offset,  # road_network 横向偏移（m）或 None
         "lane_count": lane_count,
         "y_rel": y_rel,
         "min_forward_gap": min_forward_gap,
@@ -1043,13 +1051,20 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # 直路双向车道约定：y_rel<0 侧朝东（heading≈0），y_rel>0 侧朝西（|heading|≈π）。
     # 运动中（speed>1.0）且车头与所在侧车道方向夹角 >120°、持续 >5s → FAIL。
     # 掉头/变道横穿期 heading≈±π/2（夹角≈90°<120°）不会误报。
+    # road_network 场景（弯道）：lane_dir 用节点段的局部道路朝向，不能再用
+    # y_rel 符号猜——S 弯的 ego y 可正可负而 heading 始终朝东（2026-08-04 实测
+    # curve_road 误报 WRONG-WAY 9s）。无 road_network 时退回 y_rel 符号启发。
     wrong_way_run = 0.0
     wrong_way_max = 0.0
     for i in range(1, len(series)):
         m = series[i]
         dt_s = max(0.0, timestamps[i] - timestamps[i - 1]) if i < len(timestamps) else 0.5
         hn = math.atan2(math.sin(m["heading"]), math.cos(m["heading"]))
-        lane_dir = 0.0 if m["y_rel"] < 0 else math.pi
+        rh = m.get("road_heading")
+        if rh is not None:
+            lane_dir = rh  # 弯道：局部道路朝向
+        else:
+            lane_dir = 0.0 if m["y_rel"] < 0 else math.pi
         dev = abs(math.atan2(math.sin(hn - lane_dir), math.cos(hn - lane_dir)))
         if m["speed"] > 1.0 and dev > math.radians(120.0) and abs(m["y_rel"]) < 20.0:
             wrong_way_run += dt_s
@@ -1390,8 +1405,15 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     # 4m 蛇形跨车道时车总"接近某条车道中心"，该值反而不大，度量选择错误。
     # 补充直接检查 y 坐标的峰峰值，>4.5m 即横向大幅扫动跨越多条车道；
     # >4.0m 为 WARN（多车道道路变道 y 范围天然可达 3.5m，含 overshoot 约 4.0m）。
+    # road_network 弯道场景：绝对 y 随道路走向扫动（S 弯 y 从 -3 到 +103），
+    # 必须改用 road_signed_offset（相对参考线的横向偏移）的峰峰值，否则弯道
+    # 合法行驶被误报为蛇形（2026-08-04 实测 curve_road）。直路仍用绝对 y。
+    offsets = [m.get("road_signed_offset") for m in series]
     if len(ys) >= 10:
-        y_range = max(ys) - min(ys)
+        if all(o is not None for o in offsets):
+            y_range = max(offsets) - min(offsets)
+        else:
+            y_range = max(ys) - min(ys)
         if y_range > 4.5:
             if uturn_detected:
                 # 掉头合法横穿整条路（本侧车道 y=-1.75 → 对向车道 y=+5.25），
