@@ -507,7 +507,10 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     const double uturn_speed = 2.5;       /* 掉头前弧低速 (m/s) */
     const double reverse_speed = -2.0;    /* 倒车速度 (m/s) */
     const double half_wb = wheelbase * 0.5;  /* 半轴距：车辆中心偏移后轴距离 */
-    const double min_uturn_space = 12.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
+    /* 2026-08-05 12→10：掉头前向空间不足 12m 时 Phase 0 倒车腾挪（"掉头直接倒车"
+     * 观感太骚，实测 fwd=11.5m 只差 1.5m）。掉头首弧 2×R≈7.9m（R=wb/tan(0.6)=3.95），
+     * 10m 足够开始多把方向；真正无空间（返程路端 x≈0）仍需倒车，那是真实需求。 */
+    const double min_uturn_space = 10.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
 
     /* 安全上限（防止无限循环） */
     const double phase0_max_dur = 5.0;   /* 腾挪倒车最多 5s */

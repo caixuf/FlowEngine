@@ -425,7 +425,13 @@ static bool query_ref_at(double ego_x, double ego_y,
     }
     double best_d2 = 1e18;
     const ControlContext::RefPt* best = nullptr;
-    for (const auto& p : g.ref_path) {
+    /* 2026-08-05 跳过 index 0（车自身点）：变道时 planning 把轨迹首点 heading 设为
+     * ego_heading（修 ribbon"脱离车头"），若 query_ref_at 取到首点 → ref_road_heading
+     * = 车头朝向 → 横向 heading 阻尼项被清零 → 纯 P 控制 → 车一顿一顿（横向振荡）。
+     * 从 index 1 起取最近点，参考 heading = 轨迹切线（S 曲线），阻尼保留。
+     * A/B 确认：此改动不影响掉头落点（掉头用 maneuver tracker，不走 query_ref_at）。 */
+    for (size_t i = 1; i < g.ref_path.size(); i++) {
+        const auto& p = g.ref_path[i];
         double dx = p.x - ego_x;
         double dy = p.y - ego_y;
         double d2 = dx * dx + dy * dy;
