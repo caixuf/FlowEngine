@@ -70,8 +70,25 @@ def build_windows(samples: list[dict], feat_dim: int = V2_DIM) -> tuple[list[lis
     输出: Y = [throttle, brake, steer, lane_change, confidence]
     """
     X, Y = [], []
+    n_skip_src = 0  # 跨源窗口跳过计数
     for i in range(WINDOW - 1, len(samples)):
         window = samples[i - WINDOW + 1 : i + 1]
+
+        # 2026-08-05 修复：窗口不跨样本源（real/synthetic/dagger）。
+        # auto_train 把三种来源 append 进同一 dataset，按文件顺序开窗会
+        # 把 DAgger 离散帧和采集连续帧混进同一窗口 → 特征序列无意义 →
+        # 模型学「有前车就刹」（lead 40m brk=0.48 实测）。源切换即跳过。
+        src = set()
+        for s in window:
+            if s.get("dagger"):
+                src.add("dagger")
+            elif s.get("synthetic"):
+                src.add("synthetic")
+            else:
+                src.add("real")
+        if len(src) > 1:
+            n_skip_src += 1
+            continue
 
         # 构建输入向量
         x = []

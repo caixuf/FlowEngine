@@ -75,7 +75,10 @@ def make_sample(v: float, front_x: float, front_vx: float,
 def gen_grid() -> list[dict]:
     """网格: 速度(5) × 距离(10) × 前车速度(5) = 250 条"""
     out = []
-    for v in [5, 8, 12, 16, 20]:
+    # 2026-08-05 加 v=0 起步瞬态：模型没学「起步+前车该加速接近」→
+    # lead/emergency 起步就刹死（progress=0 实测）。v=0 起步样本教
+    # 「远前车(≥25m) → 油门起步，近前车 → 刹」。
+    for v in [0, 3, 5, 8, 12, 16, 20]:
         for dist in [5, 8, 12, 18, 25, 35, 50, 80, 150, 300]:
             for fv in [0, 4, 8, 12, 16]:
                 out.append(make_sample(v, dist, fv))
