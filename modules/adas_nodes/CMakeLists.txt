@@ -62,7 +62,10 @@ include_directories(
 # ── 链接主框架库 ──────────────────────────────────────────────
 find_library(FLOWENGINE_CORE
     NAMES flowengine_core
-    HINTS ${FLOWENGINE_BUILD}/lib
+    HINTS
+        ${FLOWENGINE_BUILD}/lib
+        ${FLOWENGINE_BUILD}/lib/Release
+        ${FLOWENGINE_BUILD}/lib/Debug
     REQUIRED
 )
 message(STATUS "libflowengine_core: ${FLOWENGINE_CORE}")
@@ -76,7 +79,10 @@ message(STATUS "libflowengine_core: ${FLOWENGINE_CORE}")
 # cmake 仍可配置（错误在 link 阶段更明显）。
 find_library(SCHEDULER_CPP
     NAMES scheduler_cpp
-    HINTS ${FLOWENGINE_BUILD}/lib
+    HINTS
+        ${FLOWENGINE_BUILD}/lib
+        ${FLOWENGINE_BUILD}/lib/Release
+        ${FLOWENGINE_BUILD}/lib/Debug
 )
 if(SCHEDULER_CPP)
     message(STATUS "libscheduler_cpp: ${SCHEDULER_CPP}")
@@ -122,6 +128,8 @@ if(NOT CJSON_FOUND)
         NAMES cjson libcjson
         HINTS
             ${FLOWENGINE_BUILD}/lib
+            ${FLOWENGINE_BUILD}/lib/Release
+            ${FLOWENGINE_BUILD}/lib/Debug
             ${FLOWENGINE_BUILD}/_deps/cjson-build
             ${FLOWENGINE_BUILD}/_deps/cjson-build/Debug
             ${FLOWENGINE_BUILD}/_deps/cjson-build/Release
@@ -148,7 +156,7 @@ endif()
 # ── 编译选项 ──────────────────────────────────────────────────
 set(CMAKE_C_STANDARD 11)
 if(MSVC)
-    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996)
+    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996 /UERROR)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
@@ -363,11 +371,13 @@ endif()
 # 消息总线分发线程导致 drops，故改用线程池 resume。
 find_library(FRENET_BRIDGE
     NAMES frenet_bridge
-    HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
+    HINTS ${FLOWENGINE_BUILD}/lib ${FLOWENGINE_BUILD}/lib/Release ${FLOWENGINE_BUILD}/lib/Debug
+          ${FLOW_ROOT}/build-algo/lib
 )
 find_library(FRENET_PLANNER
     NAMES frenet_planner
-    HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
+    HINTS ${FLOWENGINE_BUILD}/lib ${FLOWENGINE_BUILD}/lib/Release ${FLOWENGINE_BUILD}/lib/Debug
+          ${FLOW_ROOT}/build-algo/lib
 )
 add_library(planning_node SHARED planning_node.cpp st_graph.c)
 target_compile_definitions(planning_node PRIVATE FLOWCORO_INTEGRATION)
@@ -378,6 +388,7 @@ if(FRENET_BRIDGE AND FRENET_PLANNER)
     target_include_directories(planning_node PRIVATE
         ${FLOW_ROOT}/third_party/frenet_planner/src
         ${FLOW_ROOT}/third_party/frenet_planner/src/FrenetOptimalTrajectory
+        ${FLOWENGINE_BUILD}/_deps/eigen-src   # Eigen3 headers (downloaded)
     )
     target_compile_definitions(planning_node PRIVATE HAVE_FRENET)
     message(STATUS "planning_node: frenet_bridge found at ${FRENET_BRIDGE}")

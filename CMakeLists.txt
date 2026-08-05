@@ -20,7 +20,7 @@ endif()
 
 # 设置编译选项
 if(MSVC)
-    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996)
+    add_compile_options(/W4 /utf-8 /Zc:__cplusplus /experimental:c11atomics /wd4200 /wd4201 /wd4996 /UERROR)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 else()
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -fPIC -D_GNU_SOURCE")
@@ -300,9 +300,11 @@ if(Eigen3_FOUND)
     set(FLOWENGINE_HAVE_EIGEN TRUE)
     message(STATUS "Eigen found (system) — frenet planner will be built")
 elseif(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
-    # Add Eigen as interface library without building its tests/docs
+    # Eigen is header-only: just expose the include dir, no need to add_subdirectory
+    # (Eigen's CMakeLists.txt creates an "uninstall" target that conflicts with cJSON's)
     if(NOT TARGET Eigen3::Eigen)
-        add_subdirectory("${_EIGEN_SRC_DIR}" "${CMAKE_BINARY_DIR}/_deps/eigen-build" EXCLUDE_FROM_ALL)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+        target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_SRC_DIR}")
     endif()
     set(FLOWENGINE_HAVE_EIGEN TRUE)
     message(STATUS "Eigen found (downloaded) — frenet planner will be built")
@@ -610,9 +612,14 @@ endif()
 # 多进程模式的正确载体: 每个进程 dlopen 一个 NodePlugin .so, 走 IPC 桥接。
 # 让「进程模式」与「线程/dlopen 模式」复用同一份节点 .so。
 add_executable(flow_node_host src/flow_node_host.c)
-target_link_libraries(flow_node_host flowengine_core m ${CMAKE_DL_LIBS})
-# FLOW_IGNORE_UNDEF_LINKOPT: Linux=--unresolved-symbols=ignore, macOS=-undefined,dynamic_lookup
-target_link_options(flow_node_host PRIVATE ${FLOW_IGNORE_UNDEF_LINKOPT})
+if(WIN32)
+    target_link_libraries(flow_node_host
+        flowengine_core scheduler_cpp ${CMAKE_DL_LIBS} ${CJSON_LIBRARIES} ws2_32)
+else()
+    target_link_libraries(flow_node_host flowengine_core m ${CMAKE_DL_LIBS})
+    # FLOW_IGNORE_UNDEF_LINKOPT: Linux=--unresolved-symbols=ignore, macOS=-undefined,dynamic_lookup
+    target_link_options(flow_node_host PRIVATE ${FLOW_IGNORE_UNDEF_LINKOPT})
+endif()
 
 # ── Node Plugins 有独立 cmake 子项目: modules/adas_nodes/ ──
 # 节点不依赖主项目的 FetchContent 依赖，只 link 已编译的 libflowengine_core.a。

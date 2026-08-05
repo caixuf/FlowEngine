@@ -39,6 +39,10 @@
 #ifdef HAVE_FRENET
 #include "frenet_bridge.h"
 #include "st_graph.h"   /* ST 图 + DP 速度规划（planning 重生 M1，替代线性斜坡+override 堆） */
+#else
+#ifndef STG_A_LAT_MAX
+#define STG_A_LAT_MAX 5.0  /* fallback constant when st_graph.h unavailable */
+#endif
 #endif
 
 #include <stdlib.h>
@@ -2089,6 +2093,7 @@ protected:
                     }
                 }
 
+#ifdef HAVE_FRENET
                 /* ── ST 图 + DP 速度规划（planning 重生 M1）──
                  * 替换 1961 行的线性斜坡（spd_out = v0*(1-t)+command_speed*t）：
                  * 那个斜坡无曲率/制动/红灯距离自适应，所有场景靠 override 堆
@@ -2214,6 +2219,7 @@ protected:
                         }
                     }
                 }
+#endif /* HAVE_FRENET */
             } else {
                 /* 规划失败 → 停车（Apollo 原则：不能规划就停）
                  * 用 ego 当前位置 + v=0，control PID 会匀减速到 0。

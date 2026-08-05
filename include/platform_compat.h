@@ -190,6 +190,7 @@ static inline int flow_win_clock_gettime(int clock_id, struct timespec* ts) {
 #define strdup   _strdup
 #define strcasecmp  _stricmp
 #define strncasecmp _strnicmp
+#define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
 #ifndef F_OK
 #define F_OK 0
 #endif

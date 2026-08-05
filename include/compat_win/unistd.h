@@ -58,4 +58,9 @@ static inline int close(int fd) {
 #define usleep(usec) flow_win_usleep((unsigned int)(usec))
 #endif
 
+/* strtok_r is POSIX; MSVC provides strtok_s with compatible signature */
+#ifndef strtok_r
+#define strtok_r strtok_s
+#endif
+
 #endif /* FLOWENGINE_COMPAT_WIN_UNISTD_H */
