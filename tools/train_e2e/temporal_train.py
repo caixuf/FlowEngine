@@ -43,11 +43,21 @@ OUT_DIM = 5      # throttle, brake, steer, lane_change, confidence
 
 def load_jsonl(path: str | Path) -> list[dict]:
     samples = []
+    n_bad = 0
     with open(path) as f:
         for line in f:
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 samples.append(json.loads(line))
+            except json.JSONDecodeError:
+                # 2026-08-05 容错：demo 采集被中断会产生截断行（data_recorder
+                # 写一半被杀）。坏行跳过而非整体失败 —— 否则累积数据集一坏
+                # 就全盘训练失败。
+                n_bad += 1
+    if n_bad:
+        print(f"  (load_jsonl: 跳过 {n_bad} 条损坏行)", file=sys.stderr)
     return samples
 
 
@@ -86,6 +96,14 @@ def build_windows(samples: list[dict], feat_dim: int = V2_DIM) -> tuple[list[lis
         steer    = float(ctrl.get("steering", 0.0))
         lc       = 1.0 if abs(steer) > 0.12 else 0.0
         conf     = 1.0
+        # 2026-08-05 标签互斥归一：真实采集(planning 输出) throttle/brake
+        # 重叠，而 eval_closed_loop 执行端 brake>0.05 优先、throttle 归零。
+        # 标签不互斥 → 模型学「双非零」→ 执行端 brake 优先 → 车永不动
+        # （实测 progress=0）。与执行端一致的互斥：brake 优先，否则 throttle。
+        if brake > 0.05:
+            throttle = 0.0
+        else:
+            brake = 0.0
 
         # 过滤停滞数据
         ego_v = float(target.get("ego", {}).get("v", 0.0))
