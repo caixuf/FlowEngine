@@ -119,15 +119,20 @@ def make_red_wall(stopline_s, t_red_remaining):
     return Obstacle(stopline_s - WALL_MARGIN, 0.0, half_len=0.3, label="red_wall"), t_red_remaining
 
 
-def occupied_at(obstacles, walls, s, t):
-    """任一障碍/墙占据 (s,t) → True。墙在变绿后消失。"""
+def occupied_at(obstacles, walls, s, t, t0=0.0):
+    """任一障碍/墙占据 (s,t) → True。墙在变绿后消失。
+
+    时间基准：障碍位置从规划时刻起算 → 用相对时间 (t - t0)。
+    若用全局 t 会把规划时刻的 s0 再叠加 v*t0 的位移（double-count）：
+    对向车 (v<0) 被算到车后 → 剖面全巡航 → 撞车（M2 仿真抓到）。
+    墙的变绿判定用全局 t（t_red 是真实时刻）。"""
     for w, t_red in walls:
         if t_red is not None and t >= t_red:
             continue
         if w.occupied(s, t):
             return True
     for o in obstacles:
-        if o.occupied(s, t):
+        if o.occupied(s, t - t0):
             return True
     return False
 
@@ -165,7 +170,7 @@ def dp_speed_profile(v0, v_target, s_list, v_lim, obstacles, walls,
     dp[0] = []
     for k in range(len(c0)):
         v = c0[k]
-        if occupied_at(obstacles, walls, s_list[0], t0) and v > 0:
+        if occupied_at(obstacles, walls, s_list[0], t0, t0) and v > 0:
             dp[0].append(None)
         else:
             dp[0].append((abs(v - v_target) * w1, None, t0, v))
@@ -188,7 +193,7 @@ def dp_speed_profile(v0, v_target, s_list, v_lim, obstacles, walls,
                     continue
                 dt = 2.0 * ds / (vj + vk) if (vj + vk) > 1e-6 else dt_min
                 t = t_prev + dt
-                if occupied_at(obstacles, walls, s_list[i], t) and vk > 0:
+                if occupied_at(obstacles, walls, s_list[i], t, t0):
                     continue
                 cost = cost_prev + w1 * (vk - v_target) ** 2 + w2 * a * a
                 if best is None or cost < best[0]:
@@ -198,8 +203,10 @@ def dp_speed_profile(v0, v_target, s_list, v_lim, obstacles, walls,
             j_min = min(range(len(cj)), key=lambda j: dp[i - 1][j][0]
                        if dp[i - 1][j] is not None else 1e18)
             if dp[i - 1][j_min] is not None:
-                dp[i][j_min] = (dp[i - 1][j_min][0] + w1 * cj[j_min] * cj[j_min],
-                                j_min, dp[i - 1][j_min][2], cj[j_min])
+                # 索引防护：j_min 是前一列索引，当前列候选数可能更少
+                k_fill = min(j_min, len(ck) - 1)
+                dp[i][k_fill] = (dp[i - 1][j_min][0] + w1 * cj[j_min] * cj[j_min],
+                                 j_min, dp[i - 1][j_min][2], cj[j_min])
 
     last_idx = min(range(len(dp[n - 1])), key=lambda k: dp[n - 1][k][0]
                    if dp[n - 1][k] is not None else 1e18)
@@ -207,7 +214,7 @@ def dp_speed_profile(v0, v_target, s_list, v_lim, obstacles, walls,
     t_out = [0.0] * n
     k = last_idx
     for i in range(n - 1, -1, -1):
-        if dp[i][k] is None:
+        if k < 0 or k >= len(dp[i]) or dp[i][k] is None:
             break
         v_out[i] = dp[i][k][3]
         t_out[i] = dp[i][k][2]
@@ -305,8 +312,9 @@ def run_loop(planner, ego, duration, lon_target, lead_update=None,
         thr, brk = lon.compute(ego.v, lead_dist=lead_dist, lead_v=lead_v)
         # 强制跟踪规划器目标（避免 ACC 巡航自持）
         # 低速停稳：target≈0 时控制器死区 (speed_error>-0.5) 不刹车，
-        # 车以 ~0.18 蠕行撞线（停稳锁死需求，与 v=0 闭锁是两回事）
-        if target_v <= 0.05 and ego.v > 0.05:
+        # 车以 ~0.18 蠕行撞线（停稳锁死需求，与 v=0 闭锁是两回事）。
+        # 阈值 0.05 与蠕行速度相等会漏 → 用 0.15 覆盖控制器死区
+        if target_v <= 0.15 and ego.v > 0.001:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
         elif target_v < ego.v - 0.2:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
@@ -366,7 +374,7 @@ def scene_curve(kappa=0.08, v0=12.0, curve_start=25.0):
         lon.target_speed = max(target_v, 0.0)
         thr, brk = lon.compute(ego.v)
         # 低速停稳：target≈0 时控制器死区不刹车 → 蠕行撞线
-        if target_v <= 0.05 and ego.v > 0.05:
+        if target_v <= 0.15 and ego.v > 0.001:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
         elif target_v < ego.v - 0.2:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
@@ -431,7 +439,7 @@ def scene_follow(v0=15.0, lead_s0=30.0, lead_v=6.0):
         lon.target_speed = max(target_v, 0.0)
         # ACC 跟车（真实架构：control 层读 lead 距离/速度）
         thr, brk = lon.compute(ego.v, lead_dist=lead.s0 - ego.x, lead_v=lead_v)
-        if target_v <= 0.05 and ego.v > 0.05:
+        if target_v <= 0.15 and ego.v > 0.001:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
         elif target_v < ego.v - 0.2:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
@@ -466,7 +474,7 @@ def scene_uturn(kappa=0.18, v0=8.0, curve_start=12.0):
         lon.target_speed = max(target_v, 0.0)
         thr, brk = lon.compute(ego.v)
         # 低速停稳：target≈0 时控制器死区不刹车 → 蠕行撞线
-        if target_v <= 0.05 and ego.v > 0.05:
+        if target_v <= 0.15 and ego.v > 0.001:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
         elif target_v < ego.v - 0.2:
             brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
@@ -479,6 +487,44 @@ def scene_uturn(kappa=0.18, v0=8.0, curve_start=12.0):
     result.success = (min_v_enter <= v_curve + 0.5)
     result.summary = (f"uturn(κ={kappa}): 进弯 v_min={min_v_enter:.1f} "
                       f"(≤{v_curve:.1f}) — 曲率约束替代兜底")
+    return result
+
+
+def scene_oncoming(v0=15.0, oc_s0=40.0, oc_v=-8.0, oc_lat=5.25):
+    """场景7(M2): 分隔车道对向车不误触发（1221fad 回归）。
+    对向车在相邻对向车道（lat=5.25m > 0.65×路宽），不是同车道头对头：
+    ST 图只画本车道 ± 半路宽内障碍 → 分隔车道对向车不进占据 → 巡航通过，
+    不触发让行/减速。验证 1221fad 修掉的「掉头返程对向车幽灵刹车」不回归。
+    同车道头对头（逆行异常）由 planning 会车让行 override（0.4× 降速给
+    对向车绕行空间）负责 —— 停车让行模型被仿真证伪（对向车会撞停着的
+    车），故对向车不进 ST 图（横向决策是 behavior 职责）。"""
+    ego = VehicleState(x0=0.0, v0=v0)
+    # 对向车在 lat 处，ST 图不投影它（本车道外）
+    planner = StPlanner(v_target=v0)
+    oc_x = oc_s0
+    result = ScenarioResult()
+    min_speed = 1e9
+    for step in range(int(10.0 / DT)):
+        t = step * DT
+        oc_x += oc_v * DT  # 对向车靠近（相邻车道）
+        if step % int(0.5 / DT) == 0:
+            planner.plan(ego.x, ego.v)
+        target_v = planner.target_speed_at(ego.x, ego.v)
+        lon = LongitudinalController(target_speed=v0, time_gap=1.0, min_gap=2.5)
+        lon.target_speed = max(target_v, 0.0)
+        thr, brk = lon.compute(ego.v)
+        if target_v <= 0.15 and ego.v > 0.001:
+            brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
+        elif target_v < ego.v - 0.2:
+            brk = max(brk, min(1.0, (ego.v - target_v) * 0.4))
+        elif target_v > ego.v + 0.2:
+            thr = max(thr, min(0.5, (target_v - ego.v) * 0.1))
+        min_speed = min(min_speed, ego.v)
+        ego.step(0.0, thr, brk, dt=DT)
+    # 不误触发：巡航通过，速度保持 ≥ 90% 巡航
+    result.success = min_speed >= v0 * 0.9
+    result.summary = (f"oncoming_separated(v0={v0}, oc_v={oc_v}, lat={oc_lat}): "
+                      f"min_speed={min_speed:.1f} (≥{v0*0.9:.1f}) — 无幽灵刹车")
     return result
 
 
@@ -571,6 +617,10 @@ def main():
         r = scene_light_cycle()
         print_scene_result(r, "light_cycle")
         results.append(("light_cycle", r))
+        print("\n  ── 场景 7: 对向车会车（M2）──")
+        r = scene_oncoming()
+        print_scene_result(r, "oncoming")
+        results.append(("oncoming", r))
         pass_count = sum(1 for _, r in results if r.success)
         print(f"\n  {'='*50}")
         print(f"  全量汇总: {pass_count}/{len(results)} PASS")

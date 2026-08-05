@@ -27,9 +27,13 @@ static int occupied_at(const StgInput* in, double s, double t)
         double ws = w->stopline_s - w->wall_margin;  /* 墙中心 */
         if (fabs(s - ws) <= 0.3) return 1;           /* 墙半宽 0.3 */
     }
+    /* 障碍物：位置从规划时刻起算 → 相对时间 (t - in->t0)。
+     * 用全局 t 会把规划时刻的 s0 再叠加 v*t0 位移（double-count）：
+     * 对向车 (v<0) 被算到车后 → 剖面全巡航 → 撞车（仿真 M2 抓到） */
     for (int i = 0; i < in->n_obstacles; i++) {
         const StgObstacle* o = &in->obstacles[i];
-        if (fabs(s - (o->s0 + o->v * t)) <= o->half_len) return 1;
+        double t_rel = t - in->t0;
+        if (fabs(s - (o->s0 + o->v * t_rel)) <= o->half_len) return 1;
     }
     return 0;
 }
@@ -164,7 +168,9 @@ int st_graph_plan(const StgInput* in, StgResult* out)
                 if (vj + vk > 1e-6) dt = 2.0 * STG_S_RES / (vj + vk);
                 else dt = 0.05;  /* 静止点时间下限 */
                 double t = p->t + dt;
-                if (occupied_at(in, s_list[i], t) && vk > 0.0) continue;
+                /* 占据区无条件禁止（含 v=0）：移动障碍（对向/同向）会撞停着的车。
+                 * 旧 `&& vk > 0` 允许停在占据区里 → 对向车开过来撞停着的 ego */
+                if (occupied_at(in, s_list[i], t)) continue;
                 double cost = p->cost
                             + STG_W1 * (vk - in->v_target) * (vk - in->v_target)
                             + STG_W2 * a * a;
@@ -192,13 +198,14 @@ int st_graph_plan(const StgInput* in, StgResult* out)
             int j_min = 0;
             for (int j = 1; j < cj_n; j++)
                 if (s_dp[i - 1][j].cost < s_dp[i - 1][j_min].cost) j_min = j;
-            for (int k = 0; k < ck_n; k++) {
-                s_dp[i][k].cost = s_dp[i - 1][j_min].cost
-                                + STG_W1 * s_cand[i][k] * s_cand[i][k];
-                s_dp[i][k].prev_k = j_min;
-                s_dp[i][k].t = s_dp[i - 1][j_min].t;
-                s_dp[i][k].v = s_cand[i][k];
-            }
+            /* 与 Python 对齐：只填一个状态（索引防护：j_min 是前一列
+             * 索引，当前列候选数可能更少 → k_fill clamp） */
+            int k_fill = j_min < ck_n ? j_min : ck_n - 1;
+            s_dp[i][k_fill].cost = s_dp[i - 1][j_min].cost
+                                 + STG_W1 * s_cand[i][k_fill] * s_cand[i][k_fill];
+            s_dp[i][k_fill].prev_k = j_min;
+            s_dp[i][k_fill].t = s_dp[i - 1][j_min].t;
+            s_dp[i][k_fill].v = s_cand[i][k_fill];
         }
     }
 

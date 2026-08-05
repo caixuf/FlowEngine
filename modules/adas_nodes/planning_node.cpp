@@ -2134,6 +2134,34 @@ protected:
                         }
                     }
 
+                    /* 同向/静止障碍 → ST 图移动/静止占据（M2，planning 重生）。
+                     * 只画本车道 ± 半路宽内（跨车道决策是 behavior 职责）：
+                     * 对向车（沿向速度 < -2）不进图 —— 同车道头对头是逆行
+                     * 异常，由会车让行 override（0.4× 降速给对向车绕行空间）
+                     * 负责；停车让行模型已被仿真证伪（对向车会撞停着的车）。
+                     * 占据检查含移动障碍：fabs(s - (s0 + v·(t-t0))) ≤ half_len
+                     * —— 前车减速/静止时 DP 自然压速跟随，替代 TTC override
+                     * 的标量限速（TTC 兜底保留作感知漏检安全网）。 */
+                    if (g.has_vstate && stg.n_obstacles < STG_MAX_OBS) {
+                        const double fwd_x = std::cos(g.ego_heading);
+                        const double fwd_y = std::sin(g.ego_heading);
+                        const double lane_half = g.lane_width * 0.5;
+                        for (int i = 0; i < g.kMaxObs && stg.n_obstacles < STG_MAX_OBS; i++) {
+                            const double rx = g.obs_x[i] - g.ego_x;
+                            const double ry = g.obs_y[i] - g.ego_y;
+                            const double along = rx * fwd_x + ry * fwd_y;       /* 沿车头前方 */
+                            const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                            if (along <= 0.0 || along > 80.0) continue;
+                            if (lat > lane_half) continue;                        /* 本车道外 */
+                            const double rel_v = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
+                            if (rel_v < -2.0) continue;                           /* 对向车不进图 */
+                            stg.obstacles[stg.n_obstacles].s0 = along;
+                            stg.obstacles[stg.n_obstacles].v = rel_v;
+                            stg.obstacles[stg.n_obstacles].half_len = 2.5;        /* 车长/2+0.25 */
+                            stg.n_obstacles++;
+                        }
+                    }
+
                     /* kappa 剖面：用轨迹已回填的 kappa（含变道固定曲率）。
                      * 轨迹点 s 是 Frenet 弧长，直接作为 ST 图 s 轴 */
                     double kappa_at[STG_MAX_GRID];
