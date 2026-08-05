@@ -232,7 +232,11 @@ inline ManeuverResult ManeuverTracker::tick(double ego_x, double ego_y,
                           (double)pts_[i + 1].y - (double)pts_[i].y);
         bool next_rev = (double)pts_[i + 1].v < -p_.segment_v_threshold;
         if (arc > p_.speed_scan_m || next_rev != exec_rev) break;
-        mag = std::min(mag, std::fabs((double)pts_[i + 1].v));
+        // 与 updateGear 一致：跳过 v≈0 的换挡刹停/驻停点，否则 min|v| 被
+        // 压成 floor，车在短前进段里 0.5m/s 爬行，200 tick 到不了 D/R 边界
+        // 进不了倒挡（parking/parallel CI 失败，2026-08-05 实测）。
+        if (std::fabs((double)pts_[i + 1].v) > p_.gear_v_threshold)
+            mag = std::min(mag, std::fabs((double)pts_[i + 1].v));
     }
     mag = std::max(mag, p_.speed_floor_mps);
     double target_speed = exec_rev ? -mag : mag;
