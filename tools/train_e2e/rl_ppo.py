@@ -114,8 +114,12 @@ def compute_gae(R, D, V, gamma=GAMMA, lam=GAE_LAMBDA):
 
 
 def ppo_update(model, opt, S, A, LOGP, ADV, V_old, clip_eps=CLIP_EPS,
-               k_epochs=K_EPOCHS):
-    """PPO 裁剪目标更新（多 epoch 小步长）。"""
+               k_epochs=K_EPOCHS, ent_coef=0.01):
+    """PPO 裁剪目标更新（多 epoch 小步长）。
+
+    ent_coef: 熵奖励权重（2026-08-05 可调——后期漂移根因之一：
+    熵奖励 0.01 恒定，训练后期还在探索 → 策略从最优滑开）。
+    """
     S = torch.cat(S)
     A = torch.cat(A)
     LOGP = torch.cat(LOGP)
@@ -139,10 +143,10 @@ def ppo_update(model, opt, S, A, LOGP, ADV, V_old, clip_eps=CLIP_EPS,
         v_loss = torch.max((v - ADV.detach() - V_old) ** 2,
                            (v_clip - ADV.detach() - V_old) ** 2).mean()
 
-        # 熵奖励(鼓励探索)
+        # 熵奖励(鼓励探索，权重可调/衰减)
         entropy = dist.entropy().mean()
 
-        loss = actor_loss + 0.5 * v_loss - 0.01 * entropy
+        loss = actor_loss + 0.5 * v_loss - ent_coef * entropy
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -194,15 +198,35 @@ def main() -> int:
         n_updates = max(1, args.episodes // BATCH_EPISODES)
         print(f"[train] {args.episodes} episodes / {n_updates} updates "
               f"(batch={BATCH_EPISODES})")
+        # 2026-08-05 稳定性调参：
+        # ① lr 线性衰减(后期小步长, 防破坏已学策略)
+        # ② 熵权重衰减(前期 0.01 探索 → 后期 0.001 收敛, 防漂移)
+        # ③ 早停最优: 每 upd 评估, 保存「碰撞 0 且刹停最近」权重
+        best_coll, best_gap = 99, 1e9
         for upd in range(n_updates):
+            frac = upd / max(n_updates - 1, 1)
+            lr_now = LR * (1.0 - 0.9 * frac)          # lr 衰减 10 倍
+            ent_now = 0.01 - 0.009 * frac             # 熵 0.01→0.001
+            for pg in opt.param_groups:
+                pg["lr"] = lr_now
             S, A, LOGP, R, D, V = collect_episodes(
                 model, BATCH_EPISODES, seed=args.seed + upd)
             ADV = compute_gae(R, D, V)
-            ppo_update(model, opt, S, A, LOGP, ADV, V)
+            ppo_update(model, opt, S, A, LOGP, ADV, V, ent_coef=ent_now)
             if upd % 5 == 0 or upd == n_updates - 1:
                 coll, _, gap = evaluate_torch(model, n=20, seed_base=3000 + upd)
                 print(f"  upd {upd+1:4d}/{n_updates}: 碰撞率 {coll}/20, "
-                      f"刹停距离 {gap:.1f}m")
+                      f"刹停距离 {gap:.1f}m (lr={lr_now:.5f} ent={ent_now:.4f})")
+                # 早停最优：碰撞 0 且刹停更近（效率优先）
+                if coll == 0 and gap < best_gap:
+                    best_coll, best_gap = coll, gap
+                    torch.save(model.state_dict(), "/tmp/rl_ppo_best.pt")
+                    print(f"    ★ 新最优: 刹停 {gap:.1f}m → /tmp/rl_ppo_best.pt")
+        # 载入最优权重（防后期漂移）
+        import os
+        if os.path.exists("/tmp/rl_ppo_best.pt"):
+            model.load_state_dict(torch.load("/tmp/rl_ppo_best.pt"))
+            print(f"  载入最优权重 (刹停 {best_gap:.1f}m, 碰撞 {best_coll}/20)")
 
     # 对比
     print("\n[对比] emergency 场景 (无探索, 各 50 次)")
