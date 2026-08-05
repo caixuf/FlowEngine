@@ -38,6 +38,7 @@
 
 #ifdef HAVE_FRENET
 #include "frenet_bridge.h"
+#include "st_graph.h"   /* ST 图 + DP 速度规划（planning 重生 M1，替代线性斜坡+override 堆） */
 #endif
 
 #include <stdlib.h>
@@ -2020,55 +2021,13 @@ protected:
                 if (command_speed > g.cfg_max_speed) command_speed = g.cfg_max_speed;
                 if (command_speed < 0.0) command_speed = 0.0;
 
-                /* ── 红绿灯速度强制 override ──
-                 * Frenet 轨迹的第一个点速度 spd_out[0] ≈ 当前车速，control 节点
-                 * 只读 target_speed 做速度 PID，不读 path 内的减速曲线。因此必须
-                 * 在此显式置 0，否则 control 一直追当前车速，直接闯红灯。 */
-                if (g.has_traffic_lights) {
-                    double v = g.ego_v;
-                    if (v < 0.0) v = 0.0;
-                    double brake_dist = v * v / 8.0 + 3.0;
-                    if (brake_dist < 5.0) brake_dist = 5.0;
-                    for (int ti = 0; ti < g.tl_count; ti++) {
-                        if (g.tl_state[ti] == 0) continue;  /* 绿灯 */
-                        double dx_tl = g.tl_x[ti] - g.ego_x;
-                        /* 方向感知（2026-08-04 掉头后对向灯误停修复）：与上方
-                         * 红灯墙注入同款——返程翻转 dx + 只响应本侧车道灯。
-                         * 旧实现返程越过灯线后 dx 翻正，把已过的灯当"前方红灯"
-                         * 强制停车（实测返程停在对向灯后 15m）。 */
-                        /* 行进方向 = flowsim road/ref_path.reverse 同式推导
-                         * （u_turn_active = |hn| > π/2，见 flowsim_node.cpp），
-                         * planning 未订阅 ref_path 故本地同式计算，与权威一致 */
-                        double hn_r = g.ego_heading;
-                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
-                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
-                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
-                        if (tl_on_return) {
-                            dx_tl = -dx_tl;
-                            if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
-                        }
-                        if (dx_tl <= 0.0 || dx_tl > 60.0) continue;
-                        if (dx_tl > brake_dist + 20.0) continue;  /* 还很远（fusion 滞后补 20m 余量） */
-                        /* 刹停范围内 → 强制停车
-                         * 用 brake_dist + 20m 大余量补 fusion 定位滞后，
-                         * 见 control_node.cpp boost_target 注释。 */
-                        command_speed = 0.0;
-                        /* 2026-07-31 修复：spd_out 在此前已按旧 command_speed 生成，
-                         * 只改 command_speed 进不了轨迹（points[].v 读的是 spd_out），
-                         * control 拿到的还是巡航速度 → 直接闯红灯（实测红灯前
-                         * 只从 12 缓到 6.2 就冲过去）。必须同步重建 spd_out：
-                         * 当前速度 → 0 的减速斜坡，轨迹末点归零 control 才刹停。 */
-                        if (n_wp > 2) {
-                            double v0 = g.ego_v;
-                            if (v0 < 0.0) v0 = 0.0;
-                            for (int i = 0; i < n_wp; i++) {
-                                double t = (double)i / (double)(n_wp - 1);
-                                spd_out[i] = v0 * (1.0 - t);  /* command_speed=0 → 斜坡到 0 */
-                            }
-                        }
-                        break;
-                    }
-                }
+                /* ── 红绿灯速度 override 已删除（planning 重生 M1）──
+                 * 旧实现在此按 brake_dist+20m 提前触发重建 spd_out 斜坡到 0，
+                 * 是「线性斜坡 + override 堆」的典型成员（每场景一个 override，
+                 * 各有边界 bug：闯灯/停后不走/返程误停对向灯）。
+                 * 现由 ST 图 + DP 统一处理：红灯作为 StgRedWall 约束进
+                 * st_graph_plan()（下方），制动自洽 v≤sqrt(2·a_max·(stop_s-s))
+                 * 自动提前压速，变绿后墙消失剖面自然恢复 —— 无 override。 */
                 for (int i = 0; i < n_wp && n_pts < 64; i++) {
                     points[n_pts].t_rel_us = (uint32_t)(i * 100000);  /* 100ms per point (10Hz trajectory), in µs */
                     points[n_pts].x = 0.0f;   /* 占位，下面 Frenet→Cartesian 回填 */
@@ -2123,6 +2082,104 @@ protected:
                 if (g.lane_change_kappa_active) {
                     for (int i = 0; i < n_pts; i++) {
                         points[i].kappa = (float)g.lane_change_kappa;
+                    }
+                }
+
+                /* ── ST 图 + DP 速度规划（planning 重生 M1）──
+                 * 替换 1961 行的线性斜坡（spd_out = v0*(1-t)+command_speed*t）：
+                 * 那个斜坡无曲率/制动/红灯距离自适应，所有场景靠 override 堆
+                 * 打补丁。这里用轨迹自身 kappa 剖面（已回填）+ 红绿灯墙 +
+                 * 制动自洽解出沿 s 的速度剖面，反填 points[].v。
+                 * 设计文档：docs/PLANNING_SPEED_UPGRADE_DESIGN.md */
+                if (n_pts > 2) {
+                    StgInput stg;
+                    memset(&stg, 0, sizeof(stg));
+                    stg.v0 = g.ego_v;
+                    if (stg.v0 < 0.0) stg.v0 = 0.0;
+                    stg.v_target = command_speed;  /* 行为指令是优化目标，非硬约束 */
+                    stg.t0 = (double)clock_now_us() / 1e6;  /* 全局时间：墙变绿才消失 */
+                    stg.stop_s = -1.0;
+                    stg.kappa_fn = nullptr;
+                    stg.kappa_user = nullptr;
+                    stg.n_obstacles = 0;
+
+                    /* 红绿灯 → ST 图墙（方向感知沿用 1221fad 同式推导：
+                     * 返程翻转 dx + 只响应本侧车道灯。掉头后对向灯不再误停） */
+                    if (g.has_traffic_lights) {
+                        double hn_r = g.ego_heading;
+                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
+                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
+                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
+                        for (int ti = 0; ti < g.tl_count && stg.n_walls < 4; ti++) {
+                            if (g.tl_state[ti] == 0) continue;  /* 绿灯 */
+                            double dx_tl = g.tl_x[ti] - g.ego_x;
+                            if (tl_on_return) {
+                                dx_tl = -dx_tl;
+                                if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
+                            }
+                            if (dx_tl <= 0.0 || dx_tl > 80.0) continue;  /* 视界内才参与 */
+                            stg.walls[stg.n_walls].stopline_s = g.tl_x[ti];
+                            stg.walls[stg.n_walls].t_red = -1.0;  /* 红/黄=一直红（阶段 1 简化） */
+                            stg.walls[stg.n_walls].wall_margin = 1.0;
+                            stg.n_walls++;
+                        }
+                        /* 最近红墙 → 硬停点（制动自洽从墙前开始压速） */
+                        double nearest = 1e9;
+                        for (int w = 0; w < stg.n_walls; w++) {
+                            double d = stg.walls[w].stopline_s - stg.walls[w].wall_margin - g.ego_x;
+                            if (d > 0.0 && d < nearest) nearest = d;
+                        }
+                        if (nearest < 1e8) {
+                            stg.stop_s = nearest;  /* ego 系：墙距 */
+                        }
+                    }
+
+                    /* kappa 剖面：用轨迹已回填的 kappa（含变道固定曲率）。
+                     * 轨迹点 s 是 Frenet 弧长，直接作为 ST 图 s 轴 */
+                    double kappa_at[STG_MAX_GRID];
+                    double s_pts[STG_MAX_GRID];
+                    int nk = n_pts < STG_MAX_GRID ? n_pts : STG_MAX_GRID;
+                    for (int i = 0; i < nk; i++) {
+                        s_pts[i] = (double)points[i].s - (double)points[0].s;  /* ego 系 */
+                        kappa_at[i] = (double)points[i].kappa;
+                    }
+                    /* 线性插值查询 κ(s) */
+                    struct { int n; double s[STG_MAX_GRID]; double k[STG_MAX_GRID]; } kctx;
+                    kctx.n = nk;
+                    for (int i = 0; i < nk; i++) { kctx.s[i] = s_pts[i]; kctx.k[i] = kappa_at[i]; }
+                    stg.kappa_fn = [](double s, void* user) -> double {
+                        auto* c = (decltype(kctx)*)user;
+                        if (c->n < 2) return 0.0;
+                        if (s <= c->s[0]) return c->k[0];
+                        if (s >= c->s[c->n - 1]) return c->k[c->n - 1];
+                        for (int i = 1; i < c->n; i++) {
+                            if (s <= c->s[i]) {
+                                double f = (c->s[i] - c->s[i - 1]) > 1e-9
+                                         ? (s - c->s[i - 1]) / (c->s[i] - c->s[i - 1]) : 0.0;
+                                return c->k[i - 1] + f * (c->k[i] - c->k[i - 1]);
+                            }
+                        }
+                        return c->k[c->n - 1];
+                    };
+                    stg.kappa_user = &kctx;
+
+                    StgResult stg_res;
+                    if (st_graph_plan(&stg, &stg_res) == 0) {
+                        /* 反填 points[].v：取轨迹点 s 处剖面速度。
+                         * 前视对齐 control 0.5s 前视点：lookahead = 0.3·v0 */
+                        double lookahead = 0.3 * stg.v0;
+                        for (int i = 0; i < n_pts; i++) {
+                            double s_i = (double)points[i].s - (double)points[0].s + lookahead;
+                            int idx = (int)(s_i / STG_S_RES);
+                            if (idx < 0) idx = 0;
+                            if (idx >= stg_res.n) idx = stg_res.n - 1;
+                            points[i].v = (float)stg_res.v_out[idx];
+                        }
+                    } else {
+                        /* ST 图失败 → 保留 1961 线性斜坡（已在 spd_out） */
+                        for (int i = 0; i < n_pts; i++) {
+                            points[i].v = (float)spd_out[i];
+                        }
                     }
                 }
             } else {

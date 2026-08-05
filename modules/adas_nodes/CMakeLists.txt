@@ -342,7 +342,7 @@ find_library(FRENET_PLANNER
     NAMES frenet_planner
     HINTS ${FLOWENGINE_BUILD}/lib ${FLOW_ROOT}/build-algo/lib
 )
-add_library(planning_node SHARED planning_node.cpp)
+add_library(planning_node SHARED planning_node.cpp st_graph.c)
 target_compile_definitions(planning_node PRIVATE FLOWCORO_INTEGRATION)
 target_compile_options(planning_node PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fcoroutines>)
 if(FRENET_BRIDGE AND FRENET_PLANNER)
