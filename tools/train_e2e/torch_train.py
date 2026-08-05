@@ -100,12 +100,19 @@ def load_init_checkpoint(torch, init_from: Path) -> dict:
     return torch.load(model_path, map_location="cpu")
 
 
-def validate_init_checkpoint(checkpoint: dict, feature_names: list[str], label_names: list[str], hidden: int) -> None:
+def validate_init_checkpoint(checkpoint: dict, feature_names: list[str], label_names: list[str], hidden: list[int]) -> None:
     if checkpoint.get("feature_names") != feature_names:
         raise SystemExit("error: init artifact feature_names do not match the target dataset")
     if checkpoint.get("label_names") != label_names:
         raise SystemExit("error: init artifact label_names do not match the target dataset")
-    if int(checkpoint.get("hidden", -1)) != hidden:
+    # 2026-08-05 修复：--hidden 支持多隐层字符串后，checkpoint 存字符串
+    # "4,32"，旧比较 int("4,32") 抛 ValueError。统一转 list 比较。
+    ckpt_hidden = checkpoint.get("hidden", -1)
+    if isinstance(ckpt_hidden, str):
+        ckpt_hidden = parse_hidden(ckpt_hidden)
+    elif isinstance(ckpt_hidden, int):
+        ckpt_hidden = [ckpt_hidden]
+    if ckpt_hidden != hidden:
         raise SystemExit("error: init artifact hidden size does not match --hidden")
 
 
