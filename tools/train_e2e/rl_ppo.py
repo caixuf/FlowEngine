@@ -192,6 +192,9 @@ def main() -> int:
     random.seed(args.seed)
     model = ActorCritic()
     opt = optim.Adam(model.parameters(), lr=LR)
+    # 2026-08-05 修复：best 路径带 seed，防跨 seed 污染
+    # （seed 8/42 曾载入 seed 7 留下的 /tmp/rl_ppo_best.pt → 虚假「超越」）
+    BEST_PATH = f"/tmp/rl_ppo_best_s{args.seed}.pt"
     print("=== PPO: 纵向 RL vs IDM（目标: 刹停距离 < IDM 5.5m）===")
 
     if not args.no_train:
@@ -220,12 +223,12 @@ def main() -> int:
                 # 早停最优：碰撞 0 且刹停更近（效率优先）
                 if coll == 0 and gap < best_gap:
                     best_coll, best_gap = coll, gap
-                    torch.save(model.state_dict(), "/tmp/rl_ppo_best.pt")
-                    print(f"    ★ 新最优: 刹停 {gap:.1f}m → /tmp/rl_ppo_best.pt")
+                    torch.save(model.state_dict(), BEST_PATH)
+                    print(f"    ★ 新最优: 刹停 {gap:.1f}m → {BEST_PATH}")
         # 载入最优权重（防后期漂移）
         import os
-        if os.path.exists("/tmp/rl_ppo_best.pt"):
-            model.load_state_dict(torch.load("/tmp/rl_ppo_best.pt"))
+        if os.path.exists(BEST_PATH):
+            model.load_state_dict(torch.load(BEST_PATH))
             print(f"  载入最优权重 (刹停 {best_gap:.1f}m, 碰撞 {best_coll}/20)")
 
     # 对比
