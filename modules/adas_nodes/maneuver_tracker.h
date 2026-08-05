@@ -192,15 +192,23 @@ private:
         return target;
     }
 
-    /// 挡位：从执行点向前扫第一个 |v|>threshold 取符号（Python _update_gear）。
-    /// v=0 刹停点被跳过——它是换挡的物理刹停前提，不是挡位意图。
+    /// 挡位：默认跟随执行点当前段；若前视 speed_scan_m 内出现相反挡段，
+    /// 则提前请求刹停换挡。这样短机动（倒库/侧方）不会因为 s 逼近太慢而错过换挡。
     bool updateGear(int base_i, double current_speed) {
         int want = gear_;
-        for (int i = base_i; i < n_; i++) {
-            if (std::fabs((double)pts_[i].v) > p_.gear_v_threshold) {
-                want = ((double)pts_[i].v < 0) ? -1 : 1;
-                break;
-            }
+        const double base_v = (double)pts_[base_i].v;
+        const bool has_base_motion = (std::fabs(base_v) > p_.gear_v_threshold);
+        if (has_base_motion) want = (base_v < 0) ? -1 : 1;
+
+        double arc = 0.0;
+        for (int i = base_i; i < n_ - 1 && arc <= p_.speed_scan_m; i++) {
+            arc += std::hypot((double)pts_[i + 1].x - (double)pts_[i].x,
+                              (double)pts_[i + 1].y - (double)pts_[i].y);
+            const double v = (double)pts_[i + 1].v;
+            if (std::fabs(v) <= p_.gear_v_threshold) continue;
+            const int candidate = (v < 0) ? -1 : 1;
+            if (!has_base_motion) { want = candidate; break; }
+            if (candidate != want) { want = candidate; break; }
         }
         if (want != gear_ && std::fabs(current_speed) > p_.gear_pending_speed)
             return true;   // gear_pending：带速想换挡，本帧刹停
