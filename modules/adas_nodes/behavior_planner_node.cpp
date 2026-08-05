@@ -1127,8 +1127,7 @@ protected:
                         new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason),
                                  "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
-                    } else if (worthwhile && adj_idx >= 0 && target_lane_useful &&
-                               !uturn_approach_active && g.cooldown <= 0.0 &&
+                    } else if (worthwhile && adj_idx >= 0 && target_lane_useful && g.cooldown <= 0.0 &&
                                !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
@@ -1143,18 +1142,8 @@ protected:
                          * 这条分支是跟车期间的常驻路径 —— 原来这里也是
                          * `= lead_speed`，所以即使入口帧算对了间距，稳态下
                          * 又退回纯速度跟随，gap 依然无人闭环。 */
-                        if (uturn_approach_active) {
-                            /* 掉头 approach 区：跟车目标被掉头减速覆盖（2026-08-05）。
-                             * 否则 ego 被前车拖着接近路端，触发时前向空间不足 →
-                             * Phase 0 倒车腾挪（"掉头直接倒车"，不真实）。approach
-                             * 区尽早减速到 uturn_max_trigger_speed，提前触发掉头，
-                             * 留足前向空间（≥12m 免倒车）。 */
-                            new_target_speed = g.uturn_max_trigger_speed;
-                            new_follow_id = 0;
-                        } else {
-                            new_target_speed = follow_speed;
-                            new_follow_id = lead_id;
-                        }
+                        new_target_speed = follow_speed;
+                        new_follow_id = lead_id;
                     }
                 } else if (cur == BEH_ST_LEFT_CHANGE || cur == BEH_ST_RIGHT_CHANGE) {
                     /* 变道进行中：target_speed 保持进入时的超车速度
