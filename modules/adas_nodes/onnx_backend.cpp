@@ -59,9 +59,15 @@ extern "C" int onnx_backend_load(OnnxBackend* b, const char* path) {
         h->input_name  = in_nm.get();
         h->output_name = out_nm.get();
 
-        /* 读输入/输出形状与元素类型。 */
-        auto in_ti  = h->session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
-        auto out_ti = h->session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        /* 读输入/输出形状与元素类型。
+         * 2026-08-05 修复：GetTensorTypeAndShapeInfo() 返回的 info 持有指向
+         * GetInputTypeInfo() 临时 TypeInfo 内部数据的指针，临时对象语句结束
+         * 即析构 → info 悬空 → 读野内存（实测 elem type=717024375、rank=0）。
+         * 必须把 TypeInfo 存成具名变量保活，再取 TensorTypeAndShapeInfo。 */
+        Ort::TypeInfo in_tti  = h->session.GetInputTypeInfo(0);
+        Ort::TypeInfo out_tti = h->session.GetOutputTypeInfo(0);
+        auto in_ti  = in_tti.GetTensorTypeAndShapeInfo();
+        auto out_ti = out_tti.GetTensorTypeAndShapeInfo();
         auto in_shape  = in_ti.GetShape();
         auto out_shape = out_ti.GetShape();
 

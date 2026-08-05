@@ -63,7 +63,7 @@ def describe_artifact(artifact_dir: Path, manifest: dict) -> str:
     dataset = manifest.get("dataset", {}) if isinstance(manifest.get("dataset"), dict) else {}
     sample_count = dataset.get("sample_count", "?")
     scenario = dataset.get("scenario", "unknown")
-    runtime_note = "runtime-promotable" if backend == "tiny_mlp" else "sidecar/eval only"
+    runtime_note = "runtime-promotable" if backend in ("tiny_mlp", "onnx") else "sidecar/eval only"
     exists = "ok" if model_path.exists() else "missing-model"
     return (
         f"  {artifact_dir.name:<28} backend={backend:<9} format={model_format:<22} "
@@ -235,9 +235,12 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
     manifest = load_manifest(artifact_dir)
     backend = manifest.get("backend")
-    if backend != "tiny_mlp":
+    # 2026-08-05: backend=onnx 也可 promote —— 训练侧导出 ONNX（含输入归一化
+    # + 输出反归一化折叠），inference_node 用 onnx_backend 加载（HAVE_ONNXRUNTIME）。
+    # pytorch/temporal 仍需 torch_sidecar（不进 C runtime）。
+    if backend not in ("tiny_mlp", "onnx"):
         raise SystemExit(
-            f"error: only backend=tiny_mlp artifacts can be promoted to C runtime; got {backend!r}. "
+            f"error: only backend=tiny_mlp/onnx artifacts can be promoted to C runtime; got {backend!r}. "
             "Use torch_sidecar.py for PyTorch artifacts."
         )
 
@@ -258,6 +261,14 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
     runtime_model.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, runtime_model)
+    # ONNX 外置权重：torch.onnx.export 可能把权重写 model.onnx.data
+    #（实测 23→64→32 模型 14KB 权重外置）。不拷则 runtime 加载报
+    # "External data path does not exist"。文件名保持 .onnx.data 后缀。
+    if source.suffix == ".onnx":
+        data_src = source.with_suffix(".onnx.data")
+        if data_src.exists():
+            shutil.copyfile(data_src, runtime_model.with_suffix(".onnx.data"))
+            print(f"promoted {data_src} -> {runtime_model.with_suffix('.onnx.data')}")
     print(f"promoted {source} -> {runtime_model}")
     return 0
 

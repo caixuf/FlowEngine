@@ -53,13 +53,20 @@ def load_artifact(model_dir: Path):
     checkpoint = torch.load(model_path, map_location="cpu")
     feature_names = checkpoint.get("feature_names", ["ego_v", "ego_y", "ego_heading", "ego_yaw_rate"])
     label_names = checkpoint.get("label_names", ["target_speed"])
-    hidden = int(checkpoint.get("hidden", 32))
+    # 2026-08-05: 支持多隐层 "64,32"（torch_train --hidden 升级后）
+    hidden_spec = checkpoint.get("hidden", 32)
+    if isinstance(hidden_spec, int):
+        hidden = [hidden_spec]
+    else:
+        hidden = [int(x) for x in str(hidden_spec).split(",") if x.strip()]
 
-    model = nn.Sequential(
-        nn.Linear(len(feature_names), hidden),
-        nn.Tanh(),
-        nn.Linear(hidden, len(label_names)),
-    )
+    layers = []
+    prev = len(feature_names)
+    for h in hidden:
+        layers += [nn.Linear(prev, h), nn.Tanh()]
+        prev = h
+    layers.append(nn.Linear(prev, len(label_names)))
+    model = nn.Sequential(*layers)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     return torch, model, checkpoint, manifest
@@ -94,9 +101,23 @@ def build_shadow_frame(torch, model, checkpoint: dict, manifest: dict, state: di
     )
 
 
+# 2026-08-05: 累积 shadow 统计（promote 门禁消费 shadow_speed_mae/n，
+# 与 C runtime inference_node 的 sidecar 同构）
+_stats = {"abs": 0.0, "sq": 0.0, "n": 0}
+
+
 def run_once(torch, model, checkpoint: dict, manifest: dict, state_file: Path, output: Path) -> None:
     state = read_state(state_file)
     frame = build_shadow_frame(torch, model, checkpoint, manifest, state)
+    delta = frame.get("shadow_delta", 0.0)
+    _stats["abs"] += abs(delta)
+    _stats["sq"] += delta * delta
+    _stats["n"] += 1
+    n = _stats["n"]
+    frame["shadow_n"] = n
+    frame["shadow_speed_mae"] = round(_stats["abs"] / n, 4) if n else 0.0
+    frame["shadow_speed_rmse"] = round((_stats["sq"] / n) ** 0.5, 4) if n else 0.0
+    frame["source"] = "pytorch-sidecar"
     write_json_atomic(output, frame)
 
 

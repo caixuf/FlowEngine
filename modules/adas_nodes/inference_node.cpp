@@ -432,7 +432,11 @@ static bool path_has_suffix(const char* path, const char* suffix) {
  * 亦然，故 ONNX 门禁对齐为 out_dim>=1（旧版只收 {1,2,4,5,9}，与 onnx_backend.h
  * 声明的"可切换、语义一致"契约不符——同一 out_dim=3/6/7/8 模型 tiny 能跑 ONNX 被拒）。 */
 static bool dims_supported(int in_dim, int out_dim) {
-    bool in_ok  = (in_dim == 4 || in_dim == 16 || in_dim == 80 || in_dim == 115);
+    /* 2026-08-05: 加 23（V3 特征）。V3 含场景上下文（前车/灯/曲率/限速），
+     * GPU 训练的多层模型用它（训练集 MAE 0.33 m/s，V2 单帧不可达）。
+     * 80 = 5 帧 V2 时序窗口, 115 = 5 帧 V3 时序窗口。 */
+    bool in_ok  = (in_dim == 4 || in_dim == 16 || in_dim == 23 ||
+                   in_dim == 80 || in_dim == 115);
     bool out_ok = (out_dim >= 1);
     return in_ok && out_ok;
 }
@@ -684,7 +688,8 @@ protected:
                          * 一次，不重算会让 build_frame 按旧列数写缓冲、新模型读满
                          * 23 列 → 场景上下文维度恒 0/陈旧。同时重置时序窗口，避免
                          * 新旧维度帧混在 5×23 缓冲里。 */
-                        g.frame_dim = (g.onnx.in_dim >= 115) ? V3_DIM : V2_DIM;
+                        g.frame_dim = (g.onnx.in_dim == 23 || g.onnx.in_dim == 115)
+                                      ? V3_DIM : V2_DIM;
                         g.frame_head = 0;
                         g.frame_count = 0;
                         LOG_INFO("inference", "OTA hot-reload #%d ONNX from %s (in=%d out=%d)",
@@ -700,7 +705,7 @@ protected:
                         g.use_onnx = false;
                         g.reload_count++;
                         /* 同上：重载跨维度边界时重算 frame_dim + 重置时序窗口 */
-                        g.frame_dim = (g.model.in_dim >= 115) ? V3_DIM : V2_DIM;
+                        g.frame_dim = (g.model.in_dim == 23 || g.model.in_dim == 115) ? V3_DIM : V2_DIM;
                         g.frame_head = 0;
                         g.frame_count = 0;
                         LOG_INFO("inference", "OTA hot-reload #%d from %s (in=%d hid=%d out=%d)",
@@ -987,7 +992,7 @@ static int inference_init(MessageBus* bus, Transport* transport,
 
     /* 根据活跃后端的输入维度自动选择帧维度 */
     int active_in = g.use_onnx ? g.onnx.in_dim : g.model.in_dim;
-    g.frame_dim = (active_in >= 115) ? V3_DIM : V2_DIM;
+    g.frame_dim = (active_in == 23 || active_in == 115) ? V3_DIM : V2_DIM;
 
     /* sidecar 默认策略：加载了真实模型才写（heuristic 的 delta 不该进 shadow 门禁）。
      * evaluator 的 SHADOW_INFERENCE_FILES 已包含 /tmp/flow_tiny_inference.json。 */

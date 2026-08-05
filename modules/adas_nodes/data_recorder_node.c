@@ -112,16 +112,18 @@ static void on_fusion(const Message* msg, void* user_data) {
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;
-    const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
-    if (root) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
-        if (cJSON_IsNumber(j)) {
-            g.planning_target_speed = j->valuedouble;
-        }
-        cJSON_Delete(root);
+    /* 2026-08-05 修复：planning/trajectory 是二进制 Trajectory 序列化，
+     * 旧实现用 cJSON_Parse 解析二进制必然失败 → planning_target_speed 恒 0
+     * → data_recorder 全部样本 label=0 → 模型学「→0」→ 影子评估 MAE 5.34
+     * （学习闭环真正用起来的第一步）。改为 Trajectory_deserialize，
+     * 取轨迹首点速度作模仿学习目标（与 inference_node on_planning 一致）。 */
+    Trajectory traj;
+    memset(&traj, 0, sizeof(traj));
+    if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) == 0
+        && traj.point_count > 0) {
+        g.planning_target_speed = (double)traj.points[0].v;
+        g.has_planning = 1;
     }
-    g.has_planning = 1;
 }
 
 static void on_obstacles(const Message* msg, void* user_data) {

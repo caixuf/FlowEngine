@@ -403,8 +403,10 @@ if(ENABLE_ONNX)
         message(STATUS "inference_node: HAVE_ONNXRUNTIME enabled (onnxruntime CONFIG package)")
     else()
         find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+                  HINTS $ENV{HOME}/.local/onnxruntime/include
                   PATH_SUFFIXES onnxruntime onnxruntime/core/session)
-        find_library(ONNXRUNTIME_LIB NAMES onnxruntime)
+        find_library(ONNXRUNTIME_LIB NAMES onnxruntime
+                     HINTS $ENV{HOME}/.local/onnxruntime/lib)
         if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIB)
             target_compile_definitions(inference_node PRIVATE HAVE_ONNXRUNTIME)
             target_include_directories(inference_node PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
