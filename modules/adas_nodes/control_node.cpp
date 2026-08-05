@@ -742,6 +742,28 @@ protected:
                 }
             }
 
+            /* ── target 加速限幅（2026-08-05，planning 重生后）──
+             * ST 图每 0.5s 重规划 + behavior 状态切换会让 target_speed 突跳
+             * （实测 Δ17-20 m/s），PID 直接追 → 油门/刹车突变 → 车一顿一顿。
+             * 不对称限幅：正向(加速)限 2 m/s²（平滑起步，防冲），负向(减速)
+             * 不限（红灯/障碍的急刹是安全必需，不能平滑掉）。
+             * g.target_slew_v 跨帧保持，仅限 planning 轨迹目标（acc_target）。 */
+            {
+                static double target_slew_v = 0.0;   /* 上一帧平滑后的目标 */
+                static int    target_slew_init = 0;
+                if (!target_slew_init) {
+                    target_slew_v = acc_target;
+                    target_slew_init = 1;
+                }
+                double dv = acc_target - target_slew_v;
+                const double MAX_ACCEL = 2.0;        /* m/s² 正向限幅 */
+                if (dv > MAX_ACCEL * CONTROL_DT_S)
+                    dv = MAX_ACCEL * CONTROL_DT_S;
+                /* 负向不限（急刹必需） */
+                target_slew_v += dv;
+                acc_target = target_slew_v;
+            }
+
             double error = acc_target - g.current_speed;
             double lat_error = effective_target_y - g.ego_y;
             /* 横向误差投影到参考线左法向：n̂=(−sinθ,cosθ)，y 差分量 = cosθ。
