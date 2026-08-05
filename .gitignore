@@ -147,3 +147,4 @@ build_*/
 
 # 运行时拓扑产物（flow_launcher dump，勿提交）
 _topo.json
+!models_released/

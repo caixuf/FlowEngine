@@ -1,0 +1,7 @@
+{
+  "schema": "flowengine.shadow_eval.v1",
+  "shadow_speed_mae": 1.9451685112513852,
+  "shadow_speed_rmse": 3.38408697928882,
+  "shadow_n": 890,
+  "model": "onnx"
+}

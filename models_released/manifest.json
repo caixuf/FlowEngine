@@ -1,0 +1,56 @@
+{
+  "artifact_version": "flowengine.e2e_artifact.v1",
+  "created_unix_ms": 1785904446306,
+  "model_format": "onnx-v1",
+  "model_path": "model.onnx",
+  "backend": "onnx",
+  "input_schema": {
+    "features": [
+      "ego_v",
+      "ego_y",
+      "ego_heading",
+      "ego_yaw_rate",
+      "front0_x",
+      "front0_y",
+      "front0_vx",
+      "front0_type",
+      "front0_confidence",
+      "front1_x",
+      "front1_y",
+      "front1_vx",
+      "front1_type",
+      "front1_confidence",
+      "control_brake",
+      "control_emergency_stop",
+      "tl_state",
+      "tl_distance",
+      "road_curvature",
+      "road_speed_limit",
+      "lane_count",
+      "lane_width",
+      "ego_lane_offset"
+    ]
+  },
+  "output_schema": {
+    "labels": [
+      "target_speed"
+    ]
+  },
+  "dataset": {
+    "path": "/tmp/torch_ds",
+    "schema_version": "flowengine.e2e_dataset.v1",
+    "sample_count": 835,
+    "scenario": "unknown"
+  },
+  "training": {
+    "hidden": "64,32",
+    "epochs": 300,
+    "lr": 0.001,
+    "seed": 7,
+    "init_from": null,
+    "final_mse_norm": 0.05343921482563019,
+    "device": "cuda",
+    "window": 0
+  },
+  "onnx_path": "model.onnx"
+}
