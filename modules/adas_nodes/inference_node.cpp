@@ -239,7 +239,17 @@ static void on_obstacles(const Message* msg, void* user_data) {
         }
     }
 
-    /* Fallback: 文本 JSON 解析 */
+    /* Fallback: 文本 JSON 解析。
+     * 2026-08-05 修复：deserialize 失败的消息不一定是文本（可能是格式
+     * 异常的二进制），直接 strstr+sscanf 会在随机字节上解析 → sscanf
+     * 内部 strtod 断言崩溃（glibc 必现，CI integration smoke 偶发）。
+     * 先用 cJSON_Parse 验证合法 JSON，失败则安全跳过（占位保持远处无车）。 */
+    cJSON* jroot = cJSON_Parse((const char*)msg->data);
+    if (!jroot) {
+        g.has_obstacles = 1;  /* 保持远处占位 */
+        return;
+    }
+    cJSON_Delete(jroot);
     const char* d = (const char*)msg->data;
     /* 默认"远处无车"占位（type=1, conf=1），避免未知障碍物 type/conf=0 归一化爆炸 */
     g.front0_x = g.ego_x + 500.0; g.front0_y = 0; g.front0_vx = 0; g.front0_type = 1; g.front0_confidence = 1;
