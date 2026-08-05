@@ -622,9 +622,14 @@ protected:
                 : g.ego_y;
             /* 出路沿恢复：不管有没有 planning，只要 |ego_y| >> 道路范围就强制回车道。
              * 出路沿后 Frenet 仍可能输出轨迹（投影到参考线外推），让 has_planning=1，
-             * 旧 recovery 不触发。必须无条件拦截。 */
+             * 旧 recovery 不触发。必须无条件拦截。
+             * 2026-08-05 去硬编码：旧实现 -1.75 写死"前进车道"，掉头返程（西行）
+             * 出路沿时把车拽向对向侧（方向盲）。改为恢复 ego 所在侧的第一条车道
+             * （road_center ± 半车道宽），前进/返程自洽。control 刻意不订阅
+             * lane_width（保持独立），1.75 = 标准 3.5m 车道半宽。 */
             if (fabs(g.ego_y - g.road_center_y) > 15.0) {
-                cruise_lane_y = -1.75;
+                const double side = (g.ego_y >= g.road_center_y) ? 1.0 : -1.0;
+                cruise_lane_y = g.road_center_y + side * 1.75;
                 g.integral = 0;  /* 出路沿时清零积分，防止恢复后积分饱和 */
             }
 
@@ -810,6 +815,14 @@ protected:
                     g.integral -= pid_error * 0.05;
                 if (g.integral > 0 && brake >= 1.0 && pid_error < 0)
                     g.integral += pid_error * 0.05;
+            }
+            /* 2026-08-05 掉头卡死修复（负积分对称清除）：Phase 1 刹停到 0 时
+             * error<0 使积分转负，目标翻正（驻停/慢转 target>0）后负积分残留把车
+             * 钉在原地 —— 掉头返程实测 spd=0 target=0.5 brk=0.13 卡死 30s timeout。
+             * 机动模式下车近停且 target 为正时清负积分，让车能起步继续轨迹。 */
+            if (g.maneuver_mode && g.integral < 0 &&
+                pid_error > 0.2 && fabs(g.current_speed) < 1.0) {
+                g.integral = 0;
             }
             g.prev_error = pid_error;
 

@@ -36,7 +36,9 @@ struct ManeuverTrackerParams {
     double diverge_guard_rad   = 1.2;   // |dh| vs exec heading > 此值 => 暂停 s
     double lookahead_m         = 2.0;   // 横向前视弧长（同挡段）
     double speed_scan_m        = 6.0;   // 目标速度 min|v| 扫描窗口
-    double speed_floor_mps     = 1.5;   // 目标速度下限
+    double speed_floor_mps     = 0.5;   // 目标速度下限（2026-08-05 1.5→0.5：掉头
+                                        // Phase 1 刹停 + 驻停段能真正把车停到近 0，
+                                        // 旧 1.5 会覆盖 v=0 让车停不住）
     double gear_v_threshold    = 0.3;   // 向前扫第一个 |v|>此值 => gear 意图
     double gear_pending_speed  = 0.8;   // |speed|>此值 => 换挡前刹停
     double lat_gain_dh         = 0.8;   // heading 误差反馈增益
