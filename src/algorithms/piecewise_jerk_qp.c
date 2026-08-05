@@ -281,29 +281,35 @@ int pjqp_speed_solve(double* s_out, double* v_out, double* a_out,
     }
 
     /* Acceleration penalty: w_a * Σ (v_{i+1} - v_i)² / dt²
-     * Each term contributes to v_i and v_{i+1}:
-     *   H[i][i]   += w_a/dt²
-     *   H[i+1][i+1] += w_a/dt²
-     *   H[i][i+1] = H[i+1][i] = -w_a/dt²
+     * 展开 (v_{i+1}-v_i)² = v_{i+1}² - 2v_i·v_{i+1} + v_i²：
+     *   对角: 每项对 v_i 和 v_{i+1} 各 +2（∂²/∂v_i² = 2）
+     *   交叉: -2
+     * 旧实现对角只加 w_a/dt² —— 内部点靠两项累计凑够 2w_a/dt²，
+     * 但端点只有一项 → 对角(1+w_a/dt²) < |交叉|(2w_a/dt²) →
+     * 非对角占优 → 矩阵非正定 → LDLᵀ 数值崩溃（输出全 0）。
+     * N=2 最小复现：H=[[101,-200],[-200,101]] 对角 101 < 交叉 200。
      */
     for (int i = 0; i < N - 1; i++) {
-        LD[0][i]     += w_a / dt2;
-        LD[0][i+1]   += w_a / dt2;
-        LD[1][i+1]   -= w_a / dt2;  /* sub-diagonal (symmetric) */
+        LD[0][i]     += 2.0 * w_a / dt2;
+        LD[0][i+1]   += 2.0 * w_a / dt2;
+        LD[1][i+1]   -= 2.0 * w_a / dt2;  /* sub-diagonal (symmetric) */
     }
 
-    /* Jerk penalty (二阶差分, 三对角近似): w_j * Σ (v_{i+2}-2v_{i+1}+v_i)² / dt⁴
-     * Simplified: v_i appears in up to 3 jerk terms.
-     * Diagonal contribution per v_i: w_j * (1 + 4 + 1) / dt⁴ = 6w_j/dt⁴
-     * Off-diagonal (i, i+1): w_j * (-2) / dt⁴
-     */
+    /* Jerk penalty (二阶差分): w_j * Σ (v_{i+2}-2v_{i+1}+v_i)² / dt⁴
+     * 展开 (a-2b+c)² = a²+4b²+c²-4ab+2ac-4bc：
+     *   对角（v_i 出现在 term_i/term_{i-1}/term_{i-2}）: 1+4+1 = 6
+     *   相邻交叉 A[i][i+1] = -4（term_i 的 v_i·v_{i+1}）
+     *   二阶交叉 A[i][i+2] = +2（term_i 的 v_i·v_{i+2}）→ 五对角，放 LD[2]
+     * 旧实现把 -4 加到对角两次（对角 6-8 = -2 负定 → LDLᵀ 输出全 0），
+     * 交叉符号反（+2 当 -4），二阶项错放 LD[1]。修：五对角完整展开。 */
     for (int i = 0; i < N; i++) {
         LD[0][i] += 6.0 * w_j / dt4;
     }
     for (int i = 0; i < N - 1; i++) {
-        LD[0][i]     += -4.0 * w_j / dt4;
-        LD[0][i+1]   += -4.0 * w_j / dt4;
-        LD[1][i+1]   += 2.0 * w_j / dt4;  /* 修正 off-diagonal */
+        LD[1][i+1] += -4.0 * w_j / dt4;   /* A[i+1][i] = A[i][i+1] = -4 */
+    }
+    for (int i = 0; i < N - 2; i++) {
+        LD[2][i+2] += 2.0 * w_j / dt4;    /* A[i+2][i] = A[i][i+2] = +2 */
     }
 
     /* ── 使用五对角 LDLᵀ 求解 ── */
