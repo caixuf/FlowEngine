@@ -53,6 +53,11 @@ SCENARIOS = {
     "multi_light": "scenarios/multi_light.json",
     "lane_change_traffic": "scenarios/lane_change_traffic.json",
     "curve_road": "scenarios/curve_road.json",
+    "dense_npc": "scenarios/dense_npc.json",
+    "oncoming": "scenarios/oncoming.json",
+    "urban_challenge": "scenarios/urban_challenge.json",
+    "uturn_test": "scenarios/uturn_test.json",
+    "traffic_rules_exam": "scenarios/traffic_rules_exam.json",
 }
 COLLECT_FILE = Path("/tmp/flow_train_samples.jsonl")
 CLOSED_LOOP_EVAL = "tools/train_e2e/eval_closed_loop.py"
@@ -199,8 +204,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="学习闭环后台持续训练")
     ap.add_argument("--rounds", type=int, default=10)
     ap.add_argument("--collect-duration", type=int, default=60)
-    ap.add_argument("--scenarios", default="straight_road,multi_light,lane_change_traffic",
-                    help="场景轮换列表（逗号分隔）")
+    ap.add_argument("--scenarios",
+                    default="straight_road,multi_light,lane_change_traffic,dense_npc,oncoming,urban_challenge",
+                    help="场景轮换列表（逗号分隔），默认覆盖 5 类能力域")
     ap.add_argument("--run-dir", default=None, help="运行目录（默认 runs/auto_train_<ts>）")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
