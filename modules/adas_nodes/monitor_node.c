@@ -267,8 +267,10 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     g.last_planning_us = clock_now_us();
 
-    /* driver_mode 从 behavior/state 获取，不再依赖 trajectory 尾部文本 */
-    g.route_lane = 0;
+    /* route_lane 唯一属主 = planning/debug（on_planning_debug）。
+     * 旧文本解析（trajectory 尾部 "route_lane="）删除时这里曾遗留
+     * g.route_lane = 0 每帧清零，与 2Hz 的 debug 回填打拍 → 仪表盘
+     * NOA 车道指示 0↔2 闪烁（2026-08-05 实测 100 采样 99 次翻转）。 */
 
     /* ── 二进制 Trajectory 反序列化（主路径） ── */
     Trajectory traj;
