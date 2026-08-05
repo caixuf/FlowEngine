@@ -137,13 +137,42 @@ class Recorder:
         return self.x[-1] - start_x if self.x else 0.0
 
 
-def run_scenario(model_path: str, name: str) -> tuple[Recorder, dict]:
-    """Run one closed-loop scenario, return (recorder, metrics)."""
+def dagger_oracle(name: str, ego, lead) -> tuple[float, float, float]:
+    """DAgger oracle：IDM 规则安全动作（与 synth_data.py 一致）。
+
+    模型自己开时，oracle 给出「该状态下的安全动作」；模型输出与 oracle
+    显著不同的帧（模型犯错处）回灌训练集 —— 让模型学会在自己开出的
+    状态分布上给安全动作（超越 planning 轨迹分布的关键）。
+    """
+    if name == "emergency":
+        return 0.0, 1.0, 0.0  # 障碍前全力刹
+    if lead:
+        gap = lead["x"] - ego.x - 2.25
+        dv = ego.v - lead["vx"]
+        safe = 5.0 + ego.v * 1.5
+        if gap < safe and dv > 0:
+            brake = min(1.0, 0.4 + (safe - gap) * 0.15 + dv * 0.08)
+            return 0.0, brake, 0.0
+        if gap < 8:
+            return 0.0, min(1.0, 0.6 + (8 - gap) * 0.1), 0.0
+    # cruise / lead 安全距离外：巡航油门
+    thr = min(1.0, max(0.0, 0.25 + (20 - ego.v) * 0.04))
+    return thr, 0.0, 0.0
+
+
+def run_scenario(model_path: str, name: str,
+                 dagger_out=None) -> tuple[Recorder, dict]:
+    """Run one closed-loop scenario, return (recorder, metrics).
+
+    dagger_out: 可选路径，收集 DAgger 回灌样本（模型犯错帧的
+    (特征, oracle 安全动作) 对），append 到该文件。
+    """
     cfg = SCENARIO_GATES[name]
     runner = ModelRunner(model_path)
     start_y = lane_center_y(cfg["start_lane"])
     ego = VehicleState(x0=0.0, y0=start_y, v0=cfg["start_v"], heading0=0.0)
     rec = Recorder(cfg["start_lane"])
+    dagger_f = open(dagger_out, "a") if dagger_out else None
 
     # scenario lead vehicle (absolute frame)
     lead = None
@@ -192,6 +221,25 @@ def run_scenario(model_path: str, name: str) -> tuple[Recorder, dict]:
         if abs(ego.y) > ROAD_HALF_WIDTH + OFFROAD_MARGIN:
             rec.off_road = True
             break
+
+        # ── DAgger 采样（2026-08-05）：模型犯错帧回灌 ──
+        # oracle 给出安全动作；模型输出与 oracle 显著不同 = 模型犯错处
+        # （刹车不足/该刹没刹/该走没走），记录 (特征, oracle 动作) 供
+        # 下一轮训练 —— 让模型学会在自己开出的状态分布上给安全动作。
+        if dagger_f:
+            o_thr, o_brk, o_st = dagger_oracle(name, ego, lead)
+            # 犯错判定：刹车差 >0.3 或油门差 >0.3（执行端互斥后比较）
+            model_brake = brake if brake > 0.05 else 0.0
+            model_thr = throttle if brake <= 0.05 else 0.0
+            if (abs(model_brake - o_brk) > 0.3 or
+                    abs(model_thr - o_thr) > 0.3):
+                control = {"throttle": o_thr, "brake": o_brk,
+                           "steering": o_st, "emergency_stop": False}
+                sample = {"features_v3": list(features),
+                          "control": control, "label": 0.0,
+                          "dagger": True, "dagger_scene": name,
+                          "dagger_step": step}
+                dagger_f.write(json.dumps(sample) + "\n")
 
         ego.step(steer, throttle, brake, dt=DT, v_max=SPEED_LIMIT)
 
@@ -267,6 +315,8 @@ def main() -> int:
                         help="write closed_loop_eval.json to this path")
     parser.add_argument("--json", action="store_true",
                         help="print machine-readable JSON to stdout")
+    parser.add_argument("--dagger-out", default=None,
+                        help="收集 DAgger 回灌样本（模型犯错帧的 IDM oracle 动作）到该文件")
     args = parser.parse_args()
 
     model_path = Path(args.model)
@@ -280,8 +330,10 @@ def main() -> int:
 
     results = {}
     all_pass = True
+    dagger_n = 0
     for name in scenarios:
-        rec, metrics = run_scenario(str(model_path), name)
+        rec, metrics = run_scenario(str(model_path), name,
+                                    dagger_out=args.dagger_out)
         passed, gates = score_scenario(name, metrics)
         results[name] = {
             "result": "PASS" if passed else "FAIL",
@@ -290,10 +342,14 @@ def main() -> int:
         }
         if not passed:
             all_pass = False
+        if args.dagger_out and Path(args.dagger_out).exists():
+            dagger_n = sum(1 for _ in open(args.dagger_out))
 
     print_report(str(model_path), results)
     overall = "PASS" if all_pass else "FAIL"
     print(f"  总体: {overall}")
+    if args.dagger_out:
+        print(f"  DAgger 回灌样本: {dagger_n} 条（模型犯错帧）→ {args.dagger_out}")
 
     summary = {
         "schema_version": "flowengine.e2e_closed_loop.v1",

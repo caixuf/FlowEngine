@@ -133,18 +133,34 @@ def stage_train(dataset: Path, run_dir: Path) -> Path:
 
 
 def stage_closed_loop(model: Path, run_dir: Path) -> dict:
-    """闭环评估三场景"""
+    """闭环评估三场景 + DAgger 回灌收集"""
     print("[closed_loop]", flush=True)
     out_json = run_dir / "closed_loop_eval.json"
+    dagger_file = run_dir / "dagger_tmp.jsonl"
+    dagger_file.unlink(missing_ok=True)
     rc = run(["python3", CLOSED_LOOP_EVAL, "--model", str(model),
-              "--output", str(out_json)])
-    if rc != 0 or not out_json.exists():
+              "--output", str(out_json), "--dagger-out", str(dagger_file)])
+    # 注意：评估 FAIL（rc=1）不能阻止 DAgger 回灌——FAIL 正是模型犯错
+    # 最多、最该回灌的时刻。只有评估器本身崩溃（无 out_json）才算失败。
+    if not out_json.exists():
         return {"overall": "ERROR"}
     d = json.loads(out_json.read_text())
     # 提取三场景结果
     result = {"overall": d.get("overall", "?"),
               "scenarios": d.get("scenarios", {})}
     print(f"  → {result['overall']}", flush=True)
+    # DAgger 回灌：模型犯错帧 → 累积数据集（供下轮训练）。
+    # 关键：样本特征是「模型自己开出的状态」（≠ planning 轨迹分布），
+    # oracle 动作是 IDM 安全解 → 模型学会在自己状态上给安全动作。
+    if dagger_file.exists() and dagger_file.stat().st_size > 0:
+        dataset = run_dir / "dataset.jsonl"
+        n_dagger = 0
+        with dagger_file.open() as src, dataset.open("a") as dst:
+            for line in src:
+                dst.write(line)
+                n_dagger += 1
+        print(f"  +{n_dagger} DAgger 回灌样本 → {dataset}（下轮训练用）", flush=True)
+        dagger_file.unlink(missing_ok=True)
     return result
 
 
