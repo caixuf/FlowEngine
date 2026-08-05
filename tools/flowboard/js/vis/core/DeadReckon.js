@@ -54,6 +54,34 @@ export function getDeadReckonConfig() {
   return { lambdaPos: _cfg.lambdaPos, lambdaHeading: _cfg.lambdaHeading };
 }
 
+// ── 仿真时钟同步（数据时间轴 — NPC 顿挫根治，2026-08）────────────
+// 真根因：SSE 交付节拍抖动（实测 100ms+10ms 突发成对），而外推时间轴
+// 用的是"帧到达墙钟"（lastTime = performance.now()）→ 交付抖 ±50ms
+// 直接变成 ±1m 的目标位置抖动 → NPC 以 ~9Hz 冲-停节拍顿挫。
+// 根治：后端在 scene.t_us 导出仿真时间戳（严格均匀 60Hz），前端用
+// min-tracking 估计 offset = 墙钟 − 仿真钟（取历史最小=交付延迟最小的
+// 那帧），外推 elapsed = (墙钟 − offset) − 帧仿真时间。交付什么时候到
+// 不再影响时间轴，只要内容带的 t_us 均匀，外推就均匀。
+// offset 缓慢上漂（~6ms/s 上限）防时钟漂移让 min 卡死；跳变 >1s 视为
+// 仿真重启，直接重置。
+var _simClock = { offset: null };
+
+function _syncSimClock(dataTs, wallNow) {
+  var cand = wallNow - dataTs;
+  if (_simClock.offset === null || Math.abs(cand - _simClock.offset) > 1.0) {
+    _simClock.offset = cand;
+  } else if (cand < _simClock.offset) {
+    _simClock.offset = cand;
+  } else {
+    _simClock.offset += Math.min(cand - _simClock.offset, 0.005) * 0.02;
+  }
+}
+
+/** simNow — 当前仿真时间估计（秒）；无同步数据时返回 null。 */
+function _simNow(wallNow) {
+  return _simClock.offset === null ? null : wallNow - _simClock.offset;
+}
+
 // ── Dead-reckoning state ─────────────────────────────────────────
 // last*     : updateDeadReckon() 喂入的最新真值
 // target*   : 用 last speed 外推出的预测位置
@@ -73,6 +101,7 @@ export var _dr = {
   lastYawRate: 0,
   hasYawRate: false,
   lastTime: 0,
+  dataTime: null,
   targetX: 0,
   targetZ: 0,
   targetHeading: 0,
@@ -99,6 +128,8 @@ export function initDeadReckon() {
   _dr.lastYawRate = 0;
   _dr.hasYawRate = false;
   _dr.lastTime = 0;
+  _dr.dataTime = null;
+  _simClock.offset = null;
   _dr.targetX = 0;
   _dr.targetZ = 0;
   _dr.targetHeading = 0;
@@ -131,9 +162,13 @@ export function initDeadReckon() {
  * @param {number} [vy]    world Z (lateral) velocity (m/s)
  * @param {number} [yawRate] 横摆角速度 (rad/s) — heading 外推用，与位置外推
  *                         同构（斜坡 vs 阶跃的平滑滞后差异消除，2026-08）
+ * @param {number} [dataTs] 帧仿真时间戳 (秒, scene.t_us/1e6) — 提供时外推
+ *                         时间轴切到数据时钟，SSE 交付抖动不再影响平滑
  */
-export function updateDeadReckon(x, z, speed, heading, vx, vy, yawRate) {
+export function updateDeadReckon(x, z, speed, heading, vx, vy, yawRate, dataTs) {
   var now = performance.now() / 1000;
+  var hasTs = (typeof dataTs === 'number' && isFinite(dataTs) && dataTs > 0);
+  if (hasTs) _syncSimClock(dataTs, now);
   var hasVel = (typeof vx === 'number' && isFinite(vx) &&
                 typeof vy === 'number' && isFinite(vy));
   var hasYaw = (typeof yawRate === 'number' && isFinite(yawRate));
@@ -155,6 +190,7 @@ export function updateDeadReckon(x, z, speed, heading, vx, vy, yawRate) {
     _dr.hasYawRate = hasYaw;
     if (hasYaw) { _dr.lastYawRate = yawRate; }
     _dr.lastTime = now;
+    _dr.dataTime = hasTs ? dataTs : null;
     if (!_dr.init) {
       // First sample: snap smooth to truth so we do not lerp from (0,0).
       _dr.smoothX = x;
@@ -214,13 +250,14 @@ export function getDeadReckonState() {
 export const _entities = new Map();  // id -> drState
 let _entLastFrame = 0;
 
-function _newState(x, y, speed, heading, now, vx, vy) {
+function _newState(x, y, speed, heading, now, vx, vy, dataTs) {
   var hasVel = (typeof vx === 'number' && isFinite(vx) &&
                 typeof vy === 'number' && isFinite(vy));
   return {
     lastX: x, lastZ: y, lastSpeed: speed, lastHeading: heading,
     lastVx: hasVel ? vx : 0, lastVy: hasVel ? vy : 0, hasVel: hasVel,
     lastTime: now,
+    dataTime: (typeof dataTs === 'number' && isFinite(dataTs) && dataTs > 0) ? dataTs : null,
     targetX: x, targetZ: y, targetHeading: heading,
     smoothX: x, smoothZ: y, smoothHeading: heading, smoothSpeed: speed,
     init: true
@@ -233,11 +270,13 @@ function _newState(x, y, speed, heading, now, vx, vy) {
  * 与 ego 同样做心跳去重（位移 < 1cm 且速度变化 < 0.1m/s 视为重复帧，
  * 不刷新 lastTime，避免外推时钟被重置）。
  */
-export function updateEntityDeadReckon(id, x, y, speed, heading, vx, vy) {
+export function updateEntityDeadReckon(id, x, y, speed, heading, vx, vy, dataTs) {
   var now = performance.now() / 1000;
+  var hasTs = (typeof dataTs === 'number' && isFinite(dataTs) && dataTs > 0);
+  if (hasTs) _syncSimClock(dataTs, now);
   var s = _entities.get(id);
   if (!s) {
-    _entities.set(id, _newState(x, y, speed, heading, now, vx, vy));
+    _entities.set(id, _newState(x, y, speed, heading, now, vx, vy, dataTs));
     return;
   }
   var hasVel = (typeof vx === 'number' && isFinite(vx) &&
@@ -256,6 +295,7 @@ export function updateEntityDeadReckon(id, x, y, speed, heading, vx, vy) {
     s.hasVel = hasVel;
     if (hasVel) { s.lastVx = vx; s.lastVy = vy; }
     s.lastTime = now;
+    s.dataTime = hasTs ? dataTs : null;
   }
 }
 
@@ -281,7 +321,17 @@ export function tickEntityDeadReckon(nowSec) {
 function _advanceState(s, dt, now) {
   // 1. 外推 target（真 dead reckoning）。
   if (s.lastTime > 0) {
-    var elapsed = now - s.lastTime;
+    // 时间轴选择：帧带仿真时间戳（dataTime）且时钟已同步 → 用数据时间轴
+    // （elapsed = 仿真当前时间 − 帧仿真时间，SSE 交付抖动完全不影响）；
+    // 否则回退到达墙钟轴（旧行为）。
+    var elapsed;
+    var simNow = (s.dataTime !== null && s.dataTime !== undefined) ? _simNow(now) : null;
+    if (simNow !== null) {
+      elapsed = simNow - s.dataTime;
+      if (elapsed < 0) elapsed = 0;
+    } else {
+      elapsed = now - s.lastTime;
+    }
     if (elapsed > 2.0) elapsed = 2.0; // cap staleness
     // 位置外推与 heading 外推必须**同构**（否则位置与朝向解耦 → 车身侧滑）。
     // 旧实现：位置用 lastVx/lastVy 沿**切线直线**外推，heading 用 lastYawRate

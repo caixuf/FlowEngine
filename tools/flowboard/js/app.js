@@ -1686,7 +1686,8 @@ function sync2DTarget() {
       scn.ego.heading || 0,
       scn.ego.vx,
       scn.ego.vy,
-      scn.ego.yaw_rate || 0
+      scn.ego.yaw_rate || 0,
+      scn.t_us ? scn.t_us / 1e6 : undefined  // 仿真时间轴（交付抖动解耦）
     );
   } else if (v) {
     // Vehicle-only payload has no heading → derive from GPS history.

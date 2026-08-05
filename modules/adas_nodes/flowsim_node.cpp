@@ -2,7 +2,7 @@
  * flowsim_node.cpp — FlowSim v2 仿真世界节点 (C++20 + flowcoro + esmini)
  *
  * 替换 sim_world_node.c。集成 Phase 1 组件（road_network / entity / physics /
- * npc_ai / collision / scene_events）为一个完整的 20Hz 仿真主循环节点。
+ * npc_ai / collision / scene_events）为一个完整的 60Hz 仿真主循环节点。
  *
  * 架构（见 docs/FLOWSIM_ARCHITECTURE.md）：
  *   - esmini RoadManager 处理道路网络（Frenet↔World / 限速 / 车道）
@@ -61,20 +61,20 @@ namespace {
 
 /* ── 仿真常量（与 sim_world_node.c 一致，保证下游节点兼容） ───── */
 
-#define FLOWSIM_FREQUENCY_HZ   20.0
-#define FLOWSIM_DT_SEC         (1.0 / FLOWSIM_FREQUENCY_HZ)   /* 0.05s */
-#define FLOWSIM_DT_US          ((uint64_t)(FLOWSIM_DT_SEC * 1e6))  /* 50000 */
+#define FLOWSIM_FREQUENCY_HZ   60.0
+#define FLOWSIM_DT_SEC         (1.0 / FLOWSIM_FREQUENCY_HZ)   /* ~0.0167s */
+#define FLOWSIM_DT_US          ((uint64_t)(FLOWSIM_DT_SEC * 1e6))  /* 16666 */
 
 /* control/cmd 陈旧超时：2000ms 未收到则回退 FSAFE 停车。
  * 原 500ms 在高负载（15 tasks, ~34% 丢包率）下过于激进：
  * 消息总线偶尔拥塞导致 2-3 帧连续丢失 → 500ms 内无新消息 → FSAFE 误触发
  * → brake=1.0 与间歇到达的 throttle 形成"走/停"振荡 → 车速恒为 0
- * （2026-08-03 事故链）。改为 2000ms（40 帧 @20Hz），给传输层恢复窗口。 */
+ * （2026-08-03 事故链）。改为 2000ms（120 帧 @60Hz），给传输层恢复窗口。 */
 #define CONTROL_STALE_TIMEOUT_US  2000000ULL
 
-/* road/geometry 周期性重发：50 cycle = 2.5s @ 20Hz。
+/* road/geometry 周期性重发：150 cycle = 2.5s @ 60Hz。
  * 另：路段/车道数变化时会立即补发，避免 planning/behavior 在新 road 上继续用旧 lane_count。 */
-#define ROAD_GEOMETRY_REPUBLISH_CYCLES 50
+#define ROAD_GEOMETRY_REPUBLISH_CYCLES 150
 
 /* topic type IDs（与 sim_world_node.c 一致） */
 #define VEHICLE_STATE_TYPE_ID       0x1C0E5A7Eu
@@ -240,7 +240,7 @@ static void on_control_cmd(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg || msg->data_size == 0) return;
     /* 游戏模式（demo.sh --game）：玩家键盘操控，忽略自动驾驶指令
-     * （control_node 20Hz 会覆盖游戏输入 → 车"自己走"）。 */
+     * （control_node 会覆盖游戏输入 → 车"自己走"）。 */
     if (access("/tmp/game_mode", F_OK) == 0) return;
 
     /* 二进制 ControlCmd 路径 */
@@ -430,7 +430,7 @@ static void apply_actor_override(flowsim::Entity& e,
  * 性能优化：ego.road_pos 是本地 esmini position handle，frenet() 查询是 O(1)
  * 本地操作；而 world_to_frenet 是 O(roads) 全网扫描（遍历所有 road 找最近）。
  * 主循环每帧原本调用 world_to_frenet 3 次（apply_scenario_scripts /
- * publish_ref_path / Step 3 NPC AI），20Hz 下 = 60 次/s 冗余全网扫描。
+ * publish_ref_path / Step 3 NPC AI），60Hz 下冗余全网扫描。
  *
  * 此 helper 优先用 ego.road_pos.frenet()（road_pos.ok() 时），仅在 road_pos
  * 未初始化或查询失败时回退到 world_to_frenet。返回 -1.0 表示 ego 不在 route 上。 */
@@ -1087,7 +1087,7 @@ static bool should_publish_road_geometry_now(void) {
  * 中心线；planning 再叠 target_lane_offset 时会出现双重偏移，右转/支路场景下
  * control 只会忠实跟踪一条已经偏到路肩上的坏轨迹。
  *
- * 每 cycle 发布（20Hz），与 control_node 控制周期对齐。
+ * 每 cycle 发布（60Hz），control_node 按需消费。
  * 无 route / esmini 加载失败时发布空数组（control_node 检测到空数组回退 curve_*）。
  */
 static void publish_ref_path(void) {
@@ -1313,7 +1313,7 @@ public:
 
 protected:
     Task run() override {
-        LOG_INFO("flowsim", "FlowCoro flowsim started (20Hz, roads=%s)",
+        LOG_INFO("flowsim", "FlowCoro flowsim started (60Hz, roads=%s)",
                  g.roads_loaded ? "esmini" : "fallback");
 
         flowsim::Entity& ego = g.pool[0];
@@ -1345,7 +1345,7 @@ protected:
 
             /* 每 tick：桥取最新控制指令（若有）并解析到 atomics。
              * 固定 50ms 周期（sleep_us），不再依赖消息唤醒——即使
-             * 消息迟到/丢失，主循环仍以 20Hz 稳定推进。
+             * 消息迟到/丢失，主循环仍以 60Hz 稳定推进。
              * 解析成功即置 use_internal_cruise=false（直接路径，不依赖
              * 陈旧检查——仿真时钟同 tick 内 now==last）。 */
             {
@@ -1388,7 +1388,7 @@ protected:
                                 std::memory_order_relaxed);
                         } else {
                             /* 两种解析路径都失败 → 诊断日志 */
-                            if (g.cycle % 100 == 0) {
+                            if (g.cycle % 300 == 0) {
                                 LOG_WARN("flowsim",
                                          "[DESER_FAIL] control/cmd msg %uB "
                                          "neither binary nor JSON — "
@@ -1441,7 +1441,7 @@ protected:
                 /* 桥自愈检查：状态用 g 字段（reset_runtime_state 场景切换清零），
                  * 旧实现是函数内 static —— 跨场景残留 + 与 g 字段双份状态
                  * （2026-08 修复）。 */
-                if (g.cycle % 200 == 0) {
+                if (g.cycle % 600 == 0) {
                     uint64_t last = g.last_control_cmd_us.load(std::memory_order_relaxed);
                     uint64_t now  = clock_now_us();
                     uint64_t cur_cb = cmd_bridge.cb_count;
@@ -1543,7 +1543,7 @@ protected:
                     ego.throttle = 0.0;
                     ego.brake    = 1.0;
                     ego.steer    = 0.0;
-                    if (g.cycle % 100 == 0) {
+                    if (g.cycle % 300 == 0) {
                         LOG_WARN("flowsim",
                                  "[FSAFE] control cmd stale %.0fms — fail-safe stop "
                                  "(was cruise fallback: throttle ramp)",
@@ -1690,7 +1690,7 @@ protected:
                     g.off_rails = false;
                     LOG_WARN("flowsim", "[OFFRAILS] exit: x=%.1f y=%.2f h=%.2f v=%.1f fold=%.1fdeg lat=%.2fm",
                              ego.x, ego.y, ego.heading, ego.speed, exit_fold_deg, exit_lat_m);
-                } else if (g.cycle % 100 == 0) {
+                } else if (g.cycle % 300 == 0) {
                     LOG_WARN("flowsim", "[OFFRAILS] active: x=%.1f y=%.2f h=%.2f v=%.1f steer=%.3f",
                              ego.x, ego.y, ego.heading, ego.speed, ego.steer);
                 }
@@ -1885,14 +1885,14 @@ protected:
             publish_ref_path();
             publish_traffic_lights();
             publish_vehicle_state(sim_time_us);
-            /* scene/frame：完整场景帧 20Hz 给 3D 前端（Phase 2.2） */
+            /* scene/frame：完整场景帧 60Hz 给 3D 前端（Phase 2.2） */
             flowsim::publish_scene_frame(g.transport, g.pool, g.scene_pub_cfg,
                                          sim_time_us, g.cycle);
 
-            /* 固定 20Hz 节拍：原 select_for 的消息/超时唤醒由 BusQueueBridge
+            /* 固定 60Hz 节拍：原 select_for 的消息/超时唤醒由 BusQueueBridge
              * + 固定周期取代——主循环不依赖消息到达即可稳定推进。
              *
-             * 自适应 sleep：减去本帧工作时间，维持稳定 20Hz。
+             * 自适应 sleep：减去本帧工作时间，维持稳定 60Hz。
              * 旧代码 sleep_us(FLOWSIM_DT_US) 固定 50ms，不扣除工作时间，
              * 实际帧率 = 1/(T_work + 50ms)，T_work 越大帧率越低——
              * 场景跑到一半 T_work 从 5ms 涨到 55ms 时 FPS 从 18 跌到 9.5。 */
@@ -1903,7 +1903,7 @@ protected:
             } else {
                 sleep_us_val = 0;  /* 帧超时：不休眠，下一帧立即开始追 */
             }
-            if (g.cycle % 200 == 0) {
+            if (g.cycle % 600 == 0) {
                 LOG_INFO("flowsim", "[PERF] cycle=%u frame_time=%llu us (%.1f ms) sleep=%llu us",
                          g.cycle, (unsigned long long)t_frame_us,
                          (double)t_frame_us / 1000.0,
@@ -1912,7 +1912,7 @@ protected:
             co_await sleep_us(sleep_us_val);
 
             g.cycle++;
-            if (g.cycle % 200 == 0) {
+            if (g.cycle % 600 == 0) {
                 uint64_t last_cmd = g.last_control_cmd_us.load(std::memory_order_relaxed);
                 double cmd_age_ms = last_cmd > 0
                     ? (double)(clock_now_us() - last_cmd) / 1000.0 : -1.0;
@@ -1930,7 +1930,7 @@ protected:
             /* 低速急刹诊断：speed>2 且 brake>0.5 且速度未降 → 每 50 帧打一次，
              * 抓"指令全刹但物理速度不掉"的执行断点（2026-07 追尾事故）。
              * 旧频率每 5 帧（250ms）过于密集，配合 fflush 阻塞主循环。 */
-            if (ego.speed > 2.0 && ego.brake > 0.5 && g.cycle % 50 == 0) {
+            if (ego.speed > 2.0 && ego.brake > 0.5 && g.cycle % 150 == 0) {
                 LOG_WARN("flowsim", "[BRK] cyc=%u spd=%.2f thr=%.2f brk=%.2f last_cmd_us_age=%.0fms",
                          g.cycle, ego.speed, ego.throttle, ego.brake,
                          g.last_control_cmd_us.load(std::memory_order_relaxed) > 0
@@ -1942,7 +1942,7 @@ protected:
             /* ── 仿真基础层：每帧 digest + invariant 检查 ──
              * 每 20 帧（~1s）跑一次完整 invariant，避免每帧序列化开销过大。
              * 时序 invariant 需要连续两帧，从第 2 帧开始。 */
-            if (g.cycle % 20 == 0 && g.digest_initialized) {
+            if (g.cycle % 60 == 0 && g.digest_initialized) {
                 /* ego_maneuver：掉头机动期豁免 lane-keeping invariant
                  * （倒车/横穿/heading 扫过 ±π 是机动路径本身，非"横着/倒着开"故障）。
                  * 2026-08-04 多把方向掉头后豁免窗口扩宽：
@@ -1982,7 +1982,7 @@ protected:
                      * Δpos/accel 检查误报。旧代码用固定 FLOWSIM_DT_SEC*20=1.0s，
                      * 但实际帧间隔可能因系统负载偏移。 */
                     double inv_dt = dd.sim_time - g.prev_dynamic_digest.sim_time;
-                    if (inv_dt < 0.01) inv_dt = FLOWSIM_DT_SEC * 20;  // fallback
+                    if (inv_dt < 0.01) inv_dt = FLOWSIM_DT_SEC * 60;  // fallback（digest 周期 = 60 cycle ≈ 1s）
                     auto temporal = flowsim::check_temporal_invariants(
                         g.prev_dynamic_digest, dd, inv_dt);
                     if (temporal.failed > 0) {
@@ -1996,7 +1996,7 @@ protected:
                 // ASCII 俯视图：3D 运行时自动生成，写到 /tmp/flow_ascii_overhead.txt
                 // 供 dashboard / 终端 cat 查看。每 100 帧（5s）更新一次，
                 // 避免高频文件 I/O 阻塞主循环。
-                if (g.cycle % 100 == 0) {
+                if (g.cycle % 300 == 0) {
                     std::string ascii = flowsim::render_ascii_overhead(g.static_digest, dd, 80, 40);
                     FILE* fp = fopen("/tmp/flow_ascii_overhead.txt", "w");
                     if (fp) {
@@ -2191,7 +2191,7 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
     transport_advertise(transport, TOPIC_ROAD_TRAFFIC_LIGHTS, ROAD_TRAFFIC_LIGHTS_TYPE_ID);
     transport_advertise(transport, TOPIC_SIM_TICK,            SIM_TICK_TYPE_ID);
     transport_advertise(transport, TOPIC_SIM_COLLISION,       SIM_COLLISION_TYPE_ID);
-    /* scene/frame：20Hz 完整场景帧，给 3D 前端用（Phase 2.2 新增） */
+    /* scene/frame：60Hz 完整场景帧，给 3D 前端用（Phase 2.2 新增） */
     transport_advertise(transport, TOPIC_SCENE_FRAME,         SCENE_FRAME_TYPE_ID);
     discovery_advertise(discovery, TOPIC_SCENE_FRAME,         SCENE_FRAME_TYPE_ID, CAP_PUBLISHER, 20.0);
 

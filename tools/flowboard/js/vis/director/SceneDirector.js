@@ -324,8 +324,11 @@ export function createSceneDirector(scene) {
          * 会用平滑后的 x/y/heading/speed 覆盖上面的真值，让 NPC 在 SSE
          * 5Hz 离散帧之间平滑插值，不再每帧 snap 跳变。
          * vx/vy（世界系，含切向分量）：转弯/掉头时只用 speed·(cos,sin) 外推
-         * 会丢 ~34% 横向速度导致车体横移。 */
-        updateEntityDeadReckon(entityDrKey(ent), ent.x, ent.y, ent.speed, ent.heading, ent.vx, ent.vy);
+         * 会丢 ~34% 横向速度导致车体横移。
+         * t_us：仿真时间轴 — 外推 elapsed 基于帧自带时间戳而非 SSE 到达
+         * 墙钟，交付节拍抖动（实测 100+10ms 突发成对）不再变成位置抖动。 */
+        updateEntityDeadReckon(entityDrKey(ent), ent.x, ent.y, ent.speed, ent.heading, ent.vx, ent.vy,
+                               frame.t_us ? frame.t_us / 1e6 : undefined);
         return ent;
       });
       /* 清理消失的 NPC，防止 Map 无限增长。 */

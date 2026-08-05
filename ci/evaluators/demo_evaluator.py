@@ -1057,6 +1057,18 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     heading_norm = [math.atan2(math.sin(h), math.cos(h)) for h in headings]
     uturn_detected = any(abs(h) > math.pi / 2.0 for h in heading_norm)
     maneuver_mask = [abs(h) > math.pi / 2.0 for h in heading_norm]
+    # 掉头是连续机动：三把方向（倒车/停车回正/前进满舵）中 heading 已进入
+    # ±90° 以内但仍未回正（实测 -88°→-11° 段满舵 0.60 是执行掉头弧的唯一
+    # 方式）。从 |heading|>90° 帧向前后邻帧扩散掩码，直到 heading 回正
+    # （|h|<10°）——掉头没回正就不算巡航。掉头自身正确性仍由 wrong-way +
+    # uturn-oscillation 门禁兜底。
+    if uturn_detected:
+        realigned = math.radians(10.0)
+        for rng in (range(1, len(maneuver_mask)), range(len(maneuver_mask) - 2, -1, -1)):
+            for i in rng:
+                prev = i - 1 if i >= 1 and rng.step == 1 else i + 1
+                if maneuver_mask[prev] and abs(heading_norm[i]) > realigned:
+                    maneuver_mask[i] = True
 
     # ── 逆行检测（防回归：2026-08-03 掉头死锁把 ego 定格在对向车道朝东行驶）──
     # 直路双向车道约定：y_rel<0 侧朝东（heading≈0），y_rel>0 侧朝西（|heading|≈π）。

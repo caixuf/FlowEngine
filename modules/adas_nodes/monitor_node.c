@@ -109,7 +109,7 @@ static struct {
     char   scene_ego_json[4096];        /* ego 实体 JSON（含 lights/brake/vx/vy，~1.5KB 实测） */
     char   scene_construction_json[1024]; /* construction_zones（施工区几何，后端单一事实源，透传给前端） */
 
-#define MAX_SAMPLES 200  /* samples 环形缓冲长度：20Hz × 200 = 10s 窗口 */
+#define MAX_SAMPLES 200  /* samples 环形缓冲长度：50ms 采样 × 200 = 10s 窗口 */
     /* ── samples 环形缓冲：最近 ~10s 的 ego 快照 ── */
     struct {
         double t;       /* UNIX 时间戳 (秒) */
@@ -120,6 +120,7 @@ static struct {
     } samples[MAX_SAMPLES];
     int samples_head;   /* 下一个写入位置 */
     int samples_count;  /* 已写入的有效帧数 */
+    double last_sample_t; /* 上次采样时间（50ms 降采样节流） */
 
     /* ── 流水线延迟监控 ── */
     uint64_t last_perception_us;     /* 最新 perception/obstacles 到达时间 */
@@ -128,6 +129,7 @@ static struct {
     uint64_t last_control_us;        /* 最新 control/raw_cmd 到达时间 */
 
     volatile int has_scene_frame;
+    volatile double scene_t_us;         /* scene/frame 仿真时间戳（前端时间轴） */
     /* P3 修复：scene_frame 缓存 mutex。on_scene_frame 在消息总线线程 memcpy
      * scene_entities_json，export_dashboard_json 在主线程 cJSON_Parse 同一 buffer。
      * 无锁时 cJSON_Parse 可能读到半新半旧的 JSON（memcpy 写到一半），产生
@@ -463,6 +465,13 @@ static void on_scene_frame(const Message* msg, void* user_data) {
             pthread_mutex_unlock(&g.scene_frame_mutex);
             free(ego_str);
         }
+    }
+
+    /* 缓存仿真时间戳 t_us：前端 DeadReckon 用它做数据时间轴外推
+     * （交付抖动解耦——SSE 到达墙钟抖 ±50ms 时,仿真时间轴仍严格均匀）。 */
+    cJSON* tus = cJSON_GetObjectItem(root, "t_us");
+    if (tus && cJSON_IsNumber(tus)) {
+        g.scene_t_us = tus->valuedouble;
     }
 
     g.has_scene_frame = 1;
@@ -899,19 +908,25 @@ static void export_dashboard_json(void) {
     double hdg   = json_extract_double(g.latest_vehicle_state, "hdg");
     double steer = json_extract_double(g.latest_vehicle_state, "st");
 
-    /* ── samples 环形缓冲：追加当前帧 ego 快照，供 evaluator 时序分析 ── */
-    g.samples[g.samples_head].t = timestamp;
-    g.samples[g.samples_head].x = ego_x;
-    g.samples[g.samples_head].y = ego_y;
-    g.samples[g.samples_head].heading = hdg;
-    g.samples[g.samples_head].speed = spd;
-    g.samples[g.samples_head].steer = steer;
-    g.samples_head = (g.samples_head + 1) % MAX_SAMPLES;
-    if (g.samples_count < MAX_SAMPLES) g.samples_count++;
+    /* ── samples 环形缓冲：按时间 50ms 降采样（评估器期望 20Hz 时序），
+     * 导出频率升到 60Hz 后不随之膨胀——窗口恒为 200×50ms = 10s。 */
+    if (timestamp - g.last_sample_t >= 0.0499 || g.samples_count == 0) {
+        g.last_sample_t = timestamp;
+        g.samples[g.samples_head].t = timestamp;
+        g.samples[g.samples_head].x = ego_x;
+        g.samples[g.samples_head].y = ego_y;
+        g.samples[g.samples_head].heading = hdg;
+        g.samples[g.samples_head].speed = spd;
+        g.samples[g.samples_head].steer = steer;
+        g.samples_head = (g.samples_head + 1) % MAX_SAMPLES;
+        if (g.samples_count < MAX_SAMPLES) g.samples_count++;
+    }
 
     cJSON* scene = cJSON_AddObjectToObject(metrics, "scene");
     /* schema_version 供前端做兼容性检查，见 docs/FLOWBOARD_SCENE_CONTRACT.md §6 */
     cJSON_AddStringToObject(scene, "schema_version", "1.0.0");
+    /* 仿真时间戳：前端 DeadReckon 数据时间轴（解耦 SSE 交付抖动） */
+    if (g.scene_t_us > 0) cJSON_AddNumberToObject(scene, "t_us", g.scene_t_us);
     cJSON* ego_o = cJSON_AddObjectToObject(scene, "ego");
     cJSON_AddNumberToObject(ego_o, "x", ego_x);
     cJSON_AddNumberToObject(ego_o, "y", ego_y);
@@ -1387,9 +1402,10 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     /* samples 环形缓冲初始态 */
     g.samples_head = 0;
     g.samples_count = 0;
+    g.last_sample_t = 0.0;
 
     /* 解析参数 */
-    g.frequency_hz = 20.0;  /* 20Hz: §11.1 从 5Hz 提频，与控制对齐 */
+    g.frequency_hz = 60.0;  /* 60Hz: 与 flowsim 60Hz 对齐，前端满帧插值 */
     g.lane_width   = 3.5;
     g.lane_count   = 2;
     if (params_json) {
