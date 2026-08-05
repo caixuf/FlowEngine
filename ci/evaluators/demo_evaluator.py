@@ -115,11 +115,14 @@ TRUTH_LAYER_FOR_TYPE = {
 
 
 def _load_shadow_delta() -> tuple[float | None, float | None]:
-    """Read the latest shadow_delta and shadow_speed_mae from any active sidecar file.
+    """Read the latest shadow_delta and shadow speed MAE from any active sidecar file.
 
     Returns (shadow_delta_latest, shadow_speed_mae) where either may be None.
-    Prefers shadow_speed_mae (aggregate MAE over the whole run) for threshold checks;
-    shadow_delta_latest is returned for display purposes only.
+    Prefers shadow_speed_mae for threshold checks; shadow_delta_latest for display.
+    2026-08-05 合并两处修复：
+      - 云端: 用全量 MAE 做阈值(单帧 delta 在瞬态被拉爆 -14~-19 误报)
+      - 本机: 优先稳态窗 MAE(shadow_speed_mae_settled, 仅 |target−ego_v|
+        小时统计, 消除 stop-and-go 每次误报), 回退全量 shadow_speed_mae
     """
     best_path: Path | None = None
     best_mtime = -1.0
@@ -137,7 +140,10 @@ def _load_shadow_delta() -> tuple[float | None, float | None]:
         with best_path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
         delta = data.get("shadow_delta")
-        mae = data.get("shadow_speed_mae")
+        # 稳态窗 MAE 优先（消除瞬态误报），回退全量 MAE
+        mae = data.get("shadow_speed_mae_settled")
+        if mae is None:
+            mae = data.get("shadow_speed_mae")
         delta_val = float(delta) if delta is not None else None
         mae_val = float(mae) if mae is not None else None
         return delta_val, mae_val
@@ -1639,14 +1645,13 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             f"< {INFERENCE_TOPIC_MIN_FREQ:.1f} Hz"
         )
 
-    # ── shadow delta check (read latest sidecar output for current-frame validation) ──
-    # Prefer shadow_speed_mae (aggregate MAE over the whole run) for threshold checks —
-    # a single instantaneous sample can be large during braking/stopping scenarios and is
-    # not representative of overall model quality.  Fall back to |shadow_delta_latest| only
-    # when the aggregate is not yet available (model run too short to accumulate stats).
+    # ── shadow delta check ──
+    # 优先 shadow_speed_mae（稳态窗 settled 优先，回退全量）做阈值；
+    # 仅当 MAE 不可用（run 太短）才用 |单帧 delta|。单帧 delta 在起步/
+    # 急刹瞬态会被拉爆（-14~-19），不具代表性。
     shadow_delta, shadow_mae = _load_shadow_delta()
-    # Choose the best available metric for threshold checks
-    shadow_check_val = shadow_mae if shadow_mae is not None else (abs(shadow_delta) if shadow_delta is not None else None)
+    shadow_check_val = (shadow_mae if shadow_mae is not None
+                        else (abs(shadow_delta) if shadow_delta is not None else None))
     if shadow_check_val is not None:
         if shadow_check_val > SHADOW_DELTA_FAIL:
             metric_label = "shadow_speed_mae" if shadow_mae is not None else "shadow_delta"
@@ -1747,7 +1752,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "topic_freq_hz": {topic: float(topics.get(topic, {}).get("freq", 0.0) or 0.0) for topic in TOPIC_MIN_FREQ},
         "inference_topic_active": inference_topic_active,
         "inference_freq_hz": inference_freq,
-        "shadow_delta_latest": shadow_delta,
+        "shadow_speed_mae_settled": shadow_mae,
         "has_traffic_lights": bool(scenario_lights),
         "red_light_violation": red_light_violation,
         "green_phase_max_stop_s": green_phase_max_stop_s,

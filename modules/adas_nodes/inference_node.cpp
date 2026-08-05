@@ -143,6 +143,13 @@ struct InferenceContext {
     double shadow_abs_sum{0};      /* Σ|delta| */
     double shadow_sq_sum{0};       /* Σ delta² */
     long   shadow_n{0};            /* 有 planning 参照的样本数 */
+    /* 稳态窗（仅 |planning_target - ego_v| < SETTLED_BAND 的帧）统计：
+     * 增量式模型（pred=ego+(thr-brk)*5，上限 ego+5）在起步/急加速瞬间
+     * 无法表达绝对目标速度，|delta| 被瞬态拉大（实测 -14~-19 m/s），
+     * 但稳态巡航 delta≈0。门禁应评稳态 MAE，否则 stop-and-go 场景每次误报。 */
+    double shadow_settled_abs_sum{0};
+    double shadow_settled_sq_sum{0};
+    long   shadow_settled_n{0};
     uint64_t sidecar_last_us{0};   /* 上次落盘时间（限频 1Hz） */
 
     /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
@@ -472,6 +479,14 @@ static void write_shadow_sidecar(double shadow_delta, double pred_speed,
         cJSON_AddNumberToObject(root, "shadow_speed_mae", g.shadow_abs_sum / (double)g.shadow_n);
         cJSON_AddNumberToObject(root, "shadow_speed_rmse", sqrt(g.shadow_sq_sum / (double)g.shadow_n));
     }
+    /* 稳态窗 MAE：门禁主口径（避免起步瞬态把增量模型 delta 拉爆）。 */
+    if (g.shadow_settled_n > 0) {
+        cJSON_AddNumberToObject(root, "shadow_settled_n", (double)g.shadow_settled_n);
+        cJSON_AddNumberToObject(root, "shadow_speed_mae_settled",
+                                g.shadow_settled_abs_sum / (double)g.shadow_settled_n);
+        cJSON_AddNumberToObject(root, "shadow_speed_rmse_settled",
+                                sqrt(g.shadow_settled_sq_sum / (double)g.shadow_settled_n));
+    }
     char* s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!s) return;
@@ -739,6 +754,15 @@ protected:
                 g.shadow_abs_sum += fabs(shadow_delta);
                 g.shadow_sq_sum  += shadow_delta * shadow_delta;
                 g.shadow_n++;
+                /* 稳态窗：仅当自车速度已接近 planning 目标（|plan−ego| 小）时，
+                 * delta 才是"模型想不想跟上车"的公平度量；起步/急加速瞬态
+                 * （ego 远低于 plan）增量模型表达不了绝对目标，剔除不纳入。 */
+                const double SETTLED_BAND = 4.0;  /* m/s */
+                if (fabs(g.planning_target_speed - g.ego_v) < SETTLED_BAND) {
+                    g.shadow_settled_abs_sum += fabs(shadow_delta);
+                    g.shadow_settled_sq_sum  += shadow_delta * shadow_delta;
+                    g.shadow_settled_n++;
+                }
             }
 
             const char* model_name = g.use_onnx ? (g.onnx.loaded ? "onnx" : "heuristic")

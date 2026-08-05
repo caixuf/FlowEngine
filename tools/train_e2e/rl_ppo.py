@@ -40,6 +40,11 @@ K_EPOCHS = 4          # 每次更新内 epoch
 BATCH_EPISODES = 128  # 每次更新收集的 episode 数
 COLLISION_PENALTY = -100.0
 
+# 2026-08-05 标准 PPO 实践（第一版全跳过 → 4 seed 2 崩溃）：
+# ① updates 数: 23 → 可配置 200+（PPO 收敛要 100+ updates）
+# ② 状态归一化: running mean/std（gap 0-50 vs ego_v 0-20 尺度差 2.5 倍）
+# ③ 每 upd 评估 + best 保存（防错过「刚好学会」窗口）
+
 
 # ══════════════════════════════════════════════════════════════
 #  策略网络：Actor(μ) + Critic(V)
@@ -70,6 +75,30 @@ class ActorCritic(nn.Module):
         dist = torch.distributions.Normal(mu, sigma)
         a = dist.sample().clamp(-1.0, 1.0)
         return a, dist.log_prob(a).sum(-1), v
+
+
+# ══════════════════════════════════════════════════════════════
+#  状态归一化（标准 PPO 必做）
+# ══════════════════════════════════════════════════════════════
+
+class RunningNorm:
+    """running mean/std 归一化。gap(0-50) vs ego_v(0-20) 尺度差 2.5 倍，
+    不归一化网络训练不稳定（PPO 崩溃经典原因）。"""
+    def __init__(self, dim=2):
+        self.n = 0
+        self.mean = torch.zeros(dim)
+        self.var = torch.ones(dim)
+
+    def update(self, s):
+        s = s.clone().reshape(-1)  # [1,2] → [2]
+        self.n += 1
+        delta = s - self.mean
+        self.mean += delta / self.n
+        self.var += delta * (s - self.mean)
+
+    def __call__(self, s):
+        std = self.var.clamp(min=1e-3).sqrt()
+        return (s - self.mean) / std
 
 
 # ══════════════════════════════════════════════════════════════
@@ -156,8 +185,8 @@ def ppo_update(model, opt, S, A, LOGP, ADV, V_old, clip_eps=CLIP_EPS,
 #  评估（复用 rl_step1 的刹停位置指标）
 # ══════════════════════════════════════════════════════════════
 
-def evaluate_torch(model, n=50, seed_base=2000):
-    """无探索评估：碰撞率 + 平均刹停距离。"""
+def evaluate_torch(model, n=50, seed_base=2000, norm=None):
+    """无探索评估：碰撞率 + 平均刹停距离。norm: RunningNorm(可空)。"""
     coll = 0
     gaps = []
     for i in range(n):
@@ -166,6 +195,8 @@ def evaluate_torch(model, n=50, seed_base=2000):
         done = False
         while not done:
             s_t = torch.tensor([s], dtype=torch.float32)
+            if norm is not None:
+                s_t = norm(s_t)
             mu, _ = model(s_t)
             a = mu.detach().numpy()[0]
             s, _, done, info = env.step(a)
@@ -183,9 +214,12 @@ def evaluate_torch(model, n=50, seed_base=2000):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="PPO 纵向 RL（Step2 效率超越）")
-    ap.add_argument("--episodes", type=int, default=3000)
+    ap.add_argument("--episodes", type=int, default=30000,
+                    help="总 episode 数（标准 PPO 需 3 万+，23 updates 太少）")
     ap.add_argument("--no-train", action="store_true")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--eval-every", type=int, default=1,
+                    help="每 N updates 评估一次（默认每 upd）")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -196,15 +230,18 @@ def main() -> int:
     # （seed 8/42 曾载入 seed 7 留下的 /tmp/rl_ppo_best.pt → 虚假「超越」）
     BEST_PATH = f"/tmp/rl_ppo_best_s{args.seed}.pt"
     print("=== PPO: 纵向 RL vs IDM（目标: 刹停距离 < IDM 5.5m）===")
+    norm = None  # no-train 时无归一化
 
     if not args.no_train:
         n_updates = max(1, args.episodes // BATCH_EPISODES)
         print(f"[train] {args.episodes} episodes / {n_updates} updates "
               f"(batch={BATCH_EPISODES})")
-        # 2026-08-05 稳定性调参：
-        # ① lr 线性衰减(后期小步长, 防破坏已学策略)
-        # ② 熵权重衰减(前期 0.01 探索 → 后期 0.001 收敛, 防漂移)
-        # ③ 早停最优: 每 upd 评估, 保存「碰撞 0 且刹停最近」权重
+        # 2026-08-05 标准 PPO 实践（第二版）：
+        # ① 状态归一化（gap 0-50 vs ego_v 0-20 尺度差 2.5 倍）
+        # ② updates 数 = episodes/batch（3 万 ep → 234 updates）
+        # ③ lr 线性衰减 + 熵衰减
+        # ④ 每 upd 评估 + best 保存（防错过「刚好学会」窗口）
+        norm = RunningNorm()
         best_coll, best_gap = 99, 1e9
         for upd in range(n_updates):
             frac = upd / max(n_updates - 1, 1)
@@ -212,15 +249,22 @@ def main() -> int:
             ent_now = 0.01 - 0.009 * frac             # 熵 0.01→0.001
             for pg in opt.param_groups:
                 pg["lr"] = lr_now
+            # 收集 + 归一化状态（更新 running stats）
             S, A, LOGP, R, D, V = collect_episodes(
                 model, BATCH_EPISODES, seed=args.seed + upd)
+            S_n = []
+            for s in S:
+                norm.update(s)
+                S_n.append(norm(s))
             ADV = compute_gae(R, D, V)
-            ppo_update(model, opt, S, A, LOGP, ADV, V, ent_coef=ent_now)
-            if upd % 5 == 0 or upd == n_updates - 1:
-                coll, _, gap = evaluate_torch(model, n=20, seed_base=3000 + upd)
-                print(f"  upd {upd+1:4d}/{n_updates}: 碰撞率 {coll}/20, "
-                      f"刹停距离 {gap:.1f}m (lr={lr_now:.5f} ent={ent_now:.4f})")
-                # 早停最优：碰撞 0 且刹停更近（效率优先）
+            ppo_update(model, opt, S_n, A, LOGP, ADV, V, ent_coef=ent_now)
+            # 每 upd 评估 + best 保存
+            if upd % args.eval_every == 0 or upd == n_updates - 1:
+                coll, _, gap = evaluate_torch(model, n=10, seed_base=3000 + upd,
+                                              norm=norm)
+                if upd % 10 == 0 or upd == n_updates - 1 or (coll == 0 and gap < 10):
+                    print(f"  upd {upd+1:4d}/{n_updates}: 碰撞率 {coll}/10, "
+                          f"刹停距离 {gap:.1f}m (lr={lr_now:.5f})")
                 if coll == 0 and gap < best_gap:
                     best_coll, best_gap = coll, gap
                     torch.save(model.state_dict(), BEST_PATH)
@@ -233,7 +277,8 @@ def main() -> int:
 
     # 对比
     print("\n[对比] emergency 场景 (无探索, 各 50 次)")
-    rl_coll, _, rl_gap = evaluate_torch(model, n=50)
+    rl_coll, _, rl_gap = evaluate_torch(model, n=50,
+                                        norm=norm if "norm" in dir() else None)
     print(f"  RL(PPO): 碰撞率 {rl_coll}/50, 刹停距离 {rl_gap:.1f}m")
     # IDM 基线
     idm_coll = 0
