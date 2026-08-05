@@ -673,15 +673,24 @@ static void export_dashboard_json(void) {
     }
 
     /* ── 进程级快照：枚举全网存活节点 + 自身，采集每进程 CPU/RSS/线程 ── */
-    /* 进程级快照数组放堆：每进程可含 SYSMON_PROC_THREADS 个线程，栈上会偏大 */
-    SysMonitorProcSnapshot* psnaps = (SysMonitorProcSnapshot*)calloc(
-        SYSMON_MAX_PROCS, sizeof(SysMonitorProcSnapshot));
-    int pproc_count = 0;
+    /* 进程级快照数组放堆：每进程可含 SYSMON_PROC_THREADS 个线程，栈上会偏大。
+     * 节流到 ~1Hz：/proc 全量进程+线程扫描耗时数 ms，20Hz 采集会把导出周期
+     * 从 50ms 拖到 ~56ms，与 scene 20Hz 产生拍频混叠（前端 ego 顿挫根因），
+     * perf 面板 1Hz 刷新足够；非扫描周期复用上次快照缓存。 */
+    static SysMonitorProcSnapshot* psnaps = NULL;  /* 常驻缓存，随进程退出释放 */
+    static int pproc_count = 0;
+    static uint64_t psnaps_last_scan_us = 0;
     if (!psnaps) {
-        /* 堆分配失败则跳过进程级采集 */
-        psnaps = NULL;
+        /* 堆分配失败则本周期跳过进程级采集，下周期重试 */
+        psnaps = (SysMonitorProcSnapshot*)calloc(
+            SYSMON_MAX_PROCS, sizeof(SysMonitorProcSnapshot));
     }
-    if (g.sysmon) {
+    uint64_t psnaps_now_us = clock_now_us();
+    bool psnaps_scan = psnaps && g.sysmon &&
+        (psnaps_last_scan_us == 0 ||
+         psnaps_now_us - psnaps_last_scan_us >= 1000000ULL);
+    if (psnaps_scan) {
+        psnaps_last_scan_us = psnaps_now_us;
         pid_t      ppids[SYSMON_MAX_PROCS];
         const char* pnames[SYSMON_MAX_PROCS];
         char       namebuf[SYSMON_MAX_PROCS][SYSMON_PROC_NAME_MAX];
@@ -1198,7 +1207,7 @@ static void export_dashboard_json(void) {
         }
         cJSON_AddItemToArray(procs_arr, pj);
     }
-    if (psnaps) { free(psnaps); psnaps = NULL; }
+    /* psnaps 为静态缓存（1Hz 节流复用），不在此释放 */
 
     /* ── samples 数组（环形缓冲 -> JSON，供 evaluator 时序分析） ── */
     cJSON* samples_arr = cJSON_AddArrayToObject(root, "samples");
@@ -1251,6 +1260,12 @@ static int monitor_execute(TaskBase* task) {
     fp_env_init();  /* FTZ/DAZ：线程入口兜底，防 denormal 进 JSON 触发 glibc strtod 断言（CI integration smoke 必现） */
     pthread_setname_np(pthread_self(), "monitor");
     long period_us = (long)(1.0 / g.frequency_hz * 1e6);
+    /* 绝对节拍调度：deadline += period，睡"剩余时间"而非固定 period。
+     * 旧的 usleep(period)+work 模式会把工作耗时（JSON 构建 / proc 扫描等
+     * 数 ms）累加进周期：20Hz 配置实跑 ~18Hz(56ms)，与 scene 20Hz(50ms)
+     * 拍频混叠，导出流每 ~0.5s 出现一次双步跳变，被前端死推算放大为
+     * 可见顿挫。绝对节拍保证导出周期恒 = period，不受工作耗时影响。 */
+    uint64_t next_deadline_us = clock_now_us() + (uint64_t)period_us;
     /* stats bridge subscriber 重试计数器：多进程启动顺序不定，若 monitor
      * 先于其它节点 publisher 启动，subscriber_open 返回 NULL。在主循环里
      * 重试，直到连上其它进程创建的共享内存通道（限 120 周期，2Hz≈60s）。 */
@@ -1261,7 +1276,14 @@ static int monitor_execute(TaskBase* task) {
     /* RateControl/LatencyTracker not yet implemented — use simple usleep */
 
     while (!task->should_stop) {
-        usleep((unsigned long)period_us);
+        uint64_t sleep_now_us = clock_now_us();
+        if (sleep_now_us < next_deadline_us)
+            usleep((unsigned long)(next_deadline_us - sleep_now_us));
+        next_deadline_us += (uint64_t)period_us;
+        /* 落后超过一个整周期（调试暂停/瞬时过载）则重置节拍，避免追赶风暴 */
+        sleep_now_us = clock_now_us();
+        if (sleep_now_us > next_deadline_us + (uint64_t)period_us)
+            next_deadline_us = sleep_now_us + (uint64_t)period_us;
         if (task->should_stop) break;
 
         /* RateControl 门控：若距上次执行不足 period_us，跳过本次 */
