@@ -234,30 +234,21 @@ double nearest_same_lane_gap(const VehicleState& state, const SafetyParams& para
 double pedestrian_collision_gap(const VehicleState& state) {
     int pi = state.ped_index;
     if (pi < 0 || !state.obs_valid[pi]) return 1e9;
-    /* 方向感知（2026-08-05）：旧实现用世界 dx = obs_x-ego_x，掉头返程（heading≈π
-     * 朝西）时前方行人 dx<0 被当"后方"、后方行人被当"前方" → 方向反。沿车头方向
-     * 投影 along 后前进/返程统一。行人在 ego 后方（along ≤ 0）无前向碰撞风险。 */
-    const double fwd_x = std::cos(state.heading);
-    const double fwd_y = std::sin(state.heading);
-    const double ex = state.obs_x[pi] - state.x;
-    const double ey = state.obs_y[pi] - state.y;
-    const double along = ex * fwd_x + ey * fwd_y;            /* 沿车头前方距离 */
-    const double lat = std::fabs(-ex * fwd_y + ey * fwd_x);  /* 横向（车体系） */
-    if (along <= 0.0 || along > 70.0 || lat > 4.5) return 1e9;
-    return along - 2.8;
+    double dx = state.obs_x[pi] - state.x;
+    double dy = std::fabs(state.obs_y[pi] - state.y);
+    /* 行人位于 ego 后方（dx <= 0）时无前向碰撞风险：ego 不会倒车。
+     * 此前用 fabs(dx) 会让后方行人也触发刹车，导致 ego 已驶过行人后仍误刹。
+     * dx > 0（行人在前方）时返回 dx - 2.8 作为碰撞间隙。 */
+    if (dx <= 0.0 || dx > 70.0 || dy > 4.5) return 1e9;
+    return dx - 2.8;
 }
 
 double pedestrian_crossing_hold_gap(const VehicleState& state) {
     int pi = state.ped_index;
     if (pi < 0 || !state.obs_valid[pi]) return 1e9;
 
-    /* 方向感知（2026-08-05）：同 pedestrian_collision_gap，沿车头投影，返程自适应 */
-    const double fwd_x = std::cos(state.heading);
-    const double fwd_y = std::sin(state.heading);
-    const double ex = state.obs_x[pi] - state.x;
-    const double ey = state.obs_y[pi] - state.y;
-    const double along = ex * fwd_x + ey * fwd_y;
-    const double dy = std::fabs(-ex * fwd_y + ey * fwd_x);
+    const double dx = state.obs_x[pi] - state.x;
+    const double dy = std::fabs(state.obs_y[pi] - state.y);
     const double vyy = std::fabs(state.obs_vy[pi]);
 
     /* Guard zone: if pedestrian is crossing (or very close to lane center),
@@ -269,10 +260,10 @@ double pedestrian_crossing_hold_gap(const VehicleState& state) {
      * Otherwise        → pedestrian is parked at curb → NOT crossing, release hold */
     const bool crossing_active = (dy < 3.0) || (vyy > 0.05 && dy < 6.5);
     if (!crossing_active) return 1e9;
-    if (along < -2.0 || along > 35.0) return 1e9;
+    if (dx < -2.0 || dx > 35.0) return 1e9;
 
     constexpr double kCrossingBufferM = 6.0;
-    return along - kCrossingBufferM;
+    return dx - kCrossingBufferM;
 }
 
 double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, double* out_dy = nullptr) {
@@ -309,21 +300,21 @@ double min_vehicle_ttc(const VehicleState& state, double* out_dx = nullptr, doub
     return best_ttc;
 }
 
-/* Phase 5: 对向来车 TTC（2026-08-05 同车道头对头修复）。
- * 只把**同一条车道**、迎面驶来（沿车头方向速度 < -2）的车当迎头威胁 —— 这才是
- * 真正的头对头碰撞风险。旧逻辑 2.0<|dy|≤6.0 把**相邻对向车道**（间隔 3.5m 的
- * 分隔车道）也当迎头：掉头返程（heading≈π 朝西）时 lane2 的东行对向车距 ego
- * 3.5m、不在同一条车道，每次接近都 head-on TTC 硬刹 = 幽灵刹车（用户实测）。
+/* Phase 5: 对向来车 TTC.
+ * 检查相邻对向车道 (2.0 < |dy| ≤ 6.0m) 是否有迎面驶来的车辆。
+ * head-on closing speed = ego_speed + |obs_v_along|, 比同向 closing speed 大得多。
  *
- * 同车道头对头在此保留 60m 提前预警；35m 内另有 min_vehicle_ttc 双保险。
- * 跨线/并线风险由 nearest_vehicle_lateral_cross_risk + 机动硬碰撞保护兜底，
- * 不因缩小此窗口而失去保护。
+ * |dy| 上界 6.0m ≈ 1.5×标准车道宽：只把**相邻车道**的对向车当迎头威胁。
+ * 旧逻辑 |dy|>2.0 把对向任意车道都算上，多车道高速上 ego 在 lane3、对向车
+ * 在 lane0（横向 10.5m，中间隔两条车道）也触发 → 巡航被压到 0.5~1.0 全刹
+ * （2026-07-31 实跑：合并回 lane2 途中遇 2 车道外对向车刹停到 0）。
  *
- * head-on closing = ego_speed + |obs_v_along|，比同向大得多，需更早刹车。
- * 方向感知：沿车头方向投影 ahead + 沿向速度，前进/返程/任意 heading 统一，
- * 不用世界坐标（方向通用）。
+ * 方向感知（2026-08-04 掉头返程幽灵刹车）：旧实现用世界 obs_v < -2 判"迎面"，
+ * 掉头返程 ego 向西（世界 vx<0）时，**同向车**（世界 vx 也 <0）被误判为迎头 →
+ * head-on TTC 用 speed+|obs_v| 硬刹 → 不敢超旁边车道同向车。改为沿车头方向
+ * 投影沿向速度 along_v：沿向为负（朝 ego 靠近）才算迎头，同向车沿向恒为正。
  */
-static constexpr double kOncomingSameLaneLatMax = 2.3;  /* 同车道横向容差（车宽半幅+余量） */
+static constexpr double kOncomingAdjacentDyMax = 6.0;
 double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
     double best_ttc = 1e9;
     double best_dx = 0.0;
@@ -333,11 +324,11 @@ double min_oncoming_ttc(const VehicleState& state, double* out_dx = nullptr) {
         if (!state.obs_valid[i]) continue;
         const double dx = state.obs_x[i] - state.x;
         const double dy = state.obs_y[i] - state.y;
-        const double along = dx * fwd_x + dy * fwd_y;          /* 沿车头前方距离 */
-        if (along < 0.0 || along > 60.0) continue;
-        const double lat = std::fabs(-dx * fwd_y + dy * fwd_x); /* 横向（车体系投影） */
-        if (lat > kOncomingSameLaneLatMax) continue;           /* 只在同车道才算迎头 */
-        /* 沿车头方向速度：负 = 朝 ego 驶来（迎头）。同向/静止车沿向恒 ≥ -2，不算迎头 */
+        /* 相邻对向车道: 2.0 < |dy| ≤ 6.0m, 前方 60m（沿车头方向，返程自适应） */
+        const double along = dx * fwd_x + dy * fwd_y;
+        if (along < 0.0 || along > 60.0 || std::fabs(dy) < 2.0 ||
+            std::fabs(dy) > kOncomingAdjacentDyMax) continue;
+        /* 沿车头方向速度：负 = 朝 ego 驶来（迎头）。同向车沿向恒为正（远离）。 */
         const double along_v = state.obs_v[i] * fwd_x + state.obs_vy[i] * fwd_y;
         if (along_v > -2.0) continue;
 

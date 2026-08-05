@@ -217,8 +217,6 @@ struct BehaviorContext {
     double rear_safe_min_m{15.0};       /* 后向安全最小距离 (m) */
     double rear_safe_time_s{3.0};       /* 后向安全时距 (s) */
     double same_lane_tol_offset{0.6};   /* 车道归属横向容差偏移 (m)，半车道宽 + offset */
-    double overtake_useful_margin{2.0}; /* 目标车道前车速度 ≥ 本车道前车 + 此值才算
-                                         * 变道"有用"（防变进同样慢的车道 → 3→2→3 循环） */
 
     /* ── 掉头触发参数 ── */
     double uturn_approach_dist_m{120.0};  /* 距路端此距离触发掉头 (m)，含刹车距离。
@@ -609,7 +607,6 @@ protected:
             g.rear_safe_min_m           = param_get_float("behavior.rear_safe_min_m");
             g.rear_safe_time_s          = param_get_float("behavior.rear_safe_time_s");
             g.same_lane_tol_offset      = param_get_float("behavior.same_lane_tol_offset");
-            g.overtake_useful_margin    = param_get_float("behavior.overtake_useful_margin");
             g.uturn_approach_dist_m     = param_get_float("behavior.uturn_approach_dist_m");
             g.uturn_max_trigger_speed   = param_get_float("behavior.uturn_max_trigger_speed");
             g.uturn_timeout_s           = param_get_float("behavior.uturn_timeout_s");
@@ -795,8 +792,6 @@ protected:
              * 之前只检查 current_idx>0 / current_idx<lc-1，导致 lane 2→lane 1
              * 被判定为合法变道，ego 冲入对向车道逆行。 */
             int adj_idx = -1;
-            double adj_gap = 1e9;         /* 选定目标车道前车距离 */
-            double adj_lead_v = g.target_speed;  /* 选定目标车道前车速度（空旷=巡航基准） */
             double adj_speed = g.target_speed;
 
             /* 道路中心 y（双向道路用0，单向road/geometry可传side_offset） */
@@ -911,28 +906,15 @@ protected:
             }
 
             if (left_ok && right_ok) {
-                if (left_gap >= right_gap) {
-                    adj_idx = current_idx - 1; adj_gap = left_gap; adj_lead_v = left_lead_v;
-                } else {
-                    adj_idx = current_idx + 1; adj_gap = right_gap; adj_lead_v = right_lead_v;
-                }
+                adj_idx = (left_gap >= right_gap) ? current_idx - 1 : current_idx + 1;
+                adj_speed = (left_gap >= right_gap) ? left_lead_v : right_lead_v;
             } else if (left_ok) {
-                adj_idx = current_idx - 1; adj_gap = left_gap; adj_lead_v = left_lead_v;
+                adj_idx = current_idx - 1;
+                adj_speed = left_lead_v;
             } else if (right_ok) {
-                adj_idx = current_idx + 1; adj_gap = right_gap; adj_lead_v = right_lead_v;
+                adj_idx = current_idx + 1;
+                adj_speed = right_lead_v;
             }
-            /* 变道目标速度：目标车道前车速度限幅（空旷时 adj_lead_v=巡航基准）。
-             * 2026-08-05 尝试"目标车道空旷即用巡航加速"——实测变道加速到 20 逼近
-             * 远处前车（min_forward_gap 8.7m<阈值）+ 高速变道横向过冲（评估器 y 范围
-             * FAIL）。回退为 max(adj_speed, ego_v) 平速/按前车限速：不会减速变道，
-             * 也不会加速冲向前车。 */
-            adj_speed = adj_lead_v;
-            /* 变道"有用"门（2026-08-05）：目标车道前车速度 ≥ 本车道前车 + margin
-             * 才值得变（防变进同样慢/更慢的车道 → 实测 3→2→3 循环、变道后又
-             * FOLLOW 减速）。目标车道空旷时 adj_lead_v = 巡航基准 → 自动满足。
-             * 与归位分支的 left_lead_v ≥ 0.7×巡航 门互补。 */
-            bool target_lane_useful = (adj_idx < 0) ||
-                (adj_lead_v >= lead_speed + g.overtake_useful_margin);
 
             /* ── 事件计算与状态转移 ──
              * 基于当前条件计算该发什么事件给状态机。
@@ -1068,7 +1050,7 @@ protected:
                         snprintf(reason, sizeof(reason),
                                  "uturn approach active: hold %.1f m/s (x=%.1f)",
                                  g.uturn_max_trigger_speed, g.ego_x);
-                    } else if (worthwhile && adj_idx >= 0 && target_lane_useful &&
+                    } else if (worthwhile && adj_idx >= 0 &&
                         !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
@@ -1127,7 +1109,7 @@ protected:
                         new_target_speed = g.cfg_cruise_speed;
                         snprintf(reason, sizeof(reason),
                                  "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
-                    } else if (worthwhile && adj_idx >= 0 && target_lane_useful && g.cooldown <= 0.0 &&
+                    } else if (worthwhile && adj_idx >= 0 && g.cooldown <= 0.0 &&
                                !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
@@ -1520,8 +1502,6 @@ static int behavior_init(MessageBus* bus, Transport* transport,
                          "后向安全时距 (s)：min_rd = max(min_m, rrs*time_s)");
     param_register_float("behavior.same_lane_tol_offset",   g.same_lane_tol_offset,   0.1, 2.0,
                          "车道归属横向容差偏移 (m)：半车道宽+offset");
-    param_register_float("behavior.overtake_useful_margin", g.overtake_useful_margin, 0.0, 8.0,
-                         "目标车道前车速度 ≥ 本车道前车+此值才算变道有用");
     param_register_float("behavior.uturn_approach_dist_m",  g.uturn_approach_dist_m,  20.0, 200.0,
                          "掉头触发距离阈值 (m)：ego_x 距路端此距离时触发掉头");
     param_register_float("behavior.uturn_max_trigger_speed", g.uturn_max_trigger_speed, 3.0, 12.0,
