@@ -340,11 +340,18 @@ def mse_loss(pred: list[float], target: list[float]) -> float:
 
 
 def train(model: TinyMLP, X: list[list[float]], Y: list[list[float]],
-          epochs: int, lr: float) -> list[float]:
-    """手写 BP 训练（支持多隐层）"""
+          epochs: int, lr: float, early_stop: int = 0) -> list[float]:
+    """手写 BP 训练（支持多隐层）。
+
+    early_stop: 连续 N epochs loss 无改善则提前停（默认 0=不启用）。
+    2026-08-05：auto_train 累积数据集增长后 300 epochs 训练超 300s 被
+    超时杀掉 —— early_stop=30 让 loss 收敛后自动停，时间随数据自适应。
+    """
     n = len(X)
     losses = []
     nl = model.hidden_count
+    best_loss = 1e18
+    best_epoch = 0
 
     for epoch in range(epochs):
         total_loss = 0.0
@@ -432,6 +439,20 @@ def train(model: TinyMLP, X: list[list[float]], Y: list[list[float]],
         losses.append(avg_loss)
         if epoch % 50 == 0 or epoch == epochs - 1:
             print(f"  epoch {epoch:4d}  mse={avg_loss:.6f}", file=sys.stderr)
+
+        # early stop：loss 收敛后提前停（auto_train 大数据集防超时）。
+        # 2026-08-05 阈值修正：绝对 1e-6 太严 —— loss 0.008 量级每 epoch
+        # 改善 ~2e-5 > 1e-6 永不触发（实测 24 分钟跑满 300 epochs）。
+        # 改用相对改善：best_loss 的 0.5% 以下视为无改善。
+        if early_stop > 0:
+            if avg_loss < best_loss * (1.0 - 0.005):
+                best_loss = avg_loss
+                best_epoch = epoch
+            elif epoch - best_epoch >= early_stop:
+                print(f"  early stop @epoch {epoch} (loss 连续 {early_stop} "
+                      f"epochs 无改善, best={best_loss:.6f} @{best_epoch})",
+                      file=sys.stderr)
+                break
 
     return losses
 

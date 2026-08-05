@@ -27,6 +27,8 @@ def main() -> int:
     parser.add_argument("--hidden", type=str, default="32")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--early-stop", type=int, default=30,
+                        help="loss 连续 N epochs 无改善提前停（auto_train 大数据集防超时）")
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset)
@@ -68,7 +70,8 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     model_path = output_dir / "model.txt"
 
-    train(model, X_norm, Y_norm, args.epochs, args.lr)
+    train(model, X_norm, Y_norm, args.epochs, args.lr,
+          early_stop=args.early_stop)
     model.save(model_path, x_mean, x_scale, y_mean, y_scale)
 
     manifest = {

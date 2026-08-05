@@ -123,9 +123,27 @@ def stage_train(dataset: Path, run_dir: Path) -> Path:
         json.dumps({"feature_names": "v3", "schema_version": "flowengine.e2e_sample.v2"})
     )
     out = run_dir / "model"
+    # 2026-08-05 修复（数据链路三连）：
+    #   ① 数据集滑动窗口：只留最近 MAX_DS 条（最新场景/DAgger），
+    #      训练时长稳定，不随累积无限增长
+    #   ② epochs 按样本数自适应：训练时长 = 样本×epochs×3.9ms/样本，
+    #      目标 ≤ ~270s（< run timeout 300s）。1500 样本只跑 70 epochs
+    #      而非 300（纯 Python BP 5.8s/epoch × 300 = 24min 必超时）
+    #   ③ early-stop 30：loss 相对收敛提前停（0.5% 阈值）
+    MAX_DS = 700
+    lines = dataset.read_text().splitlines()
+    if len(lines) > MAX_DS:
+        lines = lines[-MAX_DS:]
+        print(f"  (数据集滑动窗口: 保留尾部 {MAX_DS} 条)", flush=True)
+        (ds_dir / "samples.jsonl").write_text("\n".join(lines) + "\n")
+    n_samples = len(lines)
+    epochs = max(30, min(100, int(270.0 / (n_samples * 3.9e-3))))
+    print(f"  (训练: {n_samples} 样本 × {epochs} epochs ≈ {n_samples*epochs*3.9e-3:.0f}s)", flush=True)
     rc = run(["python3", "tools/train_e2e/train.py",
               "--dataset", str(ds_dir), "--output", str(out),
-              "--hidden", "64 32", "--epochs", "300"])
+              "--hidden", "64 32", "--epochs", str(epochs),
+              "--early-stop", "30"],
+             timeout=600)
     if rc != 0 or not (out / "model.txt").exists():
         print("  !! train failed", flush=True)
         return Path()
