@@ -38,6 +38,13 @@ fi
 # ── 3. 运行 launcher 一小段时间 ───────────────────────────────
 # 外层 timeout 是安全网（节点插件构建后 8 节点按 300ms 错峰加载 + DURATION 运行
 # + 优雅退出），取固定 90s 上限，独立于较小的 DURATION。
+# 2026-08-05 修复：launcher 日志经 f412132 模块化后写到
+# ${FLOW_LOG_DIR:-/tmp/flow_logs}/launcher.log，不再出现在 stdout ——
+# 旧实现 grep 捕获的 stdout 恒为 0，smoke 从日志模块化起必挂（CI e2e_smoke/
+# flow_launcher_smoke 复现）。改数日志文件里**本次 run 的增量**（文件追加式
+# 写入，跨 run 累积，必须在 run 前取 before 再取差值）。
+LOGDIR="${FLOW_LOG_DIR:-/tmp/flow_logs}"
+loaded_before=$(grep -c "loaded  " "$LOGDIR/launcher.log" 2>/dev/null || echo 0)
 echo "INFO: running flow_launcher (duration=${DURATION}s) ..."
 timeout 90 "$BUILD_DIR/bin/flow_launcher" config/pipeline.json --duration "$DURATION" \
     > "$LOG" 2>&1
@@ -52,7 +59,8 @@ if [ $rc -ne 0 ]; then
 fi
 
 # 至少加载的节点数（planning_node 依赖 Eigen，可能缺失，故用下限 6）。
-loaded=$(grep -c "loaded  " "$LOG")
+loaded_after=$(grep -c "loaded  " "$LOGDIR/launcher.log" 2>/dev/null || echo 0)
+loaded=$((loaded_after - loaded_before))
 if [ "$loaded" -lt 6 ]; then
     echo "FAIL: only $loaded nodes loaded (expected >= 6)"
     fail=1
