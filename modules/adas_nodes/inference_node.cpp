@@ -31,6 +31,7 @@
  */
 
 #include "node_plugin.h"
+#include "fp_env.h"          /* FTZ/DAZ 防 denormal → strtod 断言崩溃 */
 #include "state_machine.h"
 #include "adas_msgs_gen.h"
 #include "coroutine_task.h"
@@ -691,6 +692,7 @@ public:
 
 protected:
     Task run() override {
+        fp_env_init();  /* FTZ/DAZ：防 denormal 进 JSON 触发 glibc strtod 断言 */
 
         while (!should_stop()) {
             /* 替代 usleep：sleep_us 自动注入 cancel_token_，stop() 可立即唤醒 */

@@ -11,6 +11,7 @@
 #define _GNU_SOURCE
 #endif
 #include "node_plugin.h"
+#include "fp_env.h"          /* FTZ/DAZ 防 denormal → strtod 断言崩溃 */
 #include "scheduler.h"       /* scheduler_task_count() — clang 视隐式声明为错误 */
 #include "sysmonitor.h"
 #include "flow_registry.h"
@@ -1247,6 +1248,7 @@ static void export_dashboard_json(void) {
 /* ── 任务主循环（托管模式 execute） ──────────────────────────── */
 
 static int monitor_execute(TaskBase* task) {
+    fp_env_init();  /* FTZ/DAZ：线程入口兜底，防 denormal 进 JSON 触发 glibc strtod 断言（CI integration smoke 必现） */
     pthread_setname_np(pthread_self(), "monitor");
     long period_us = (long)(1.0 / g.frequency_hz * 1e6);
     /* stats bridge subscriber 重试计数器：多进程启动顺序不定，若 monitor
