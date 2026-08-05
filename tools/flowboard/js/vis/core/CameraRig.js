@@ -28,16 +28,24 @@ export function createCameraRig(canvas) {
   orbitControls.target.set(0, 0, 0);
   orbitControls.update();
 
-  /* 相机跟随平滑（2026-08 修复"变道时路跟着动/看不清"）：
-   * 旧实现相机位置每帧直接 set 到 ego 显示位置 —— 车横移（变道/掉头）
-   * 时相机瞬移 → 画面里路相对晃动。指数平滑（λ=12，~80ms 响应）让
-   * 相机平滑跟随，路平滑移动不晃。ex/ez/eh 一起平滑（位置+朝向一致）。 */
-  let _camSX = 0, _camSZ = 0, _camSH = 0, _camInit = false;
+  /* 相机跟随（2026-08 顿挫复盘重写）：
+   * 位置**刚性锁定** ego 显示位姿，不做二次平滑。
+   * 旧实现对"已被 DeadReckon λ=8 平滑过的 ego"再叠一层 λ=12 指数平滑,
+   * 车 mesh 与相机变成两个时间常数不同的低通——SSE 到达抖动/外推回拉
+   * 先打到车、再打到相机,相位差全部表现为"车相对画面前后蹿"(顿挫感
+   * 的直接来源:人眼盯车时以画面为参照,残余高频全集中在车上)。
+   * 刚性锁定后车在 chase 画面里像素级固定,顿挫在光学上不可能出现;
+   * 抖动转移到均匀纹理的路面滚动上,人眼不敏感。
+   * 变道横移由 DeadReckon 本身平滑(旧注释担心的"路跟着晃"针对的是
+   * 平滑前的 5Hz 原始跳变,现已不存在)。
+   * heading 保留轻量平滑(λ=12):转向瞬态里相机滞后车头一点,能看清
+   * 打轮动作,且避免朝向噪声直接晃动整个画面。 */
+  let _camSH = 0, _camInit = false;
   let _camLastT = 0;
 
   function update(ego, roadGroup, now) {
     let ex = ego ? ego.x : 0;
-    const ezRaw = ego ? -(ego.y) : 0;
+    const ez = ego ? -(ego.y) : 0;
     const ehRaw = ego ? ego.heading || 0 : 0;
     const eg = ego ? ego.z || 0 : 0;
 
@@ -45,21 +53,17 @@ export function createCameraRig(canvas) {
     const tSec = (now != null && now > 0) ? now : 0;
     const dt = _camLastT > 0 ? Math.min(0.1, Math.max(0.001, tSec - _camLastT)) : 0.016;
     _camLastT = tSec;
-    if (!_camInit) { _camSX = ex; _camSZ = ezRaw; _camSH = ehRaw; _camInit = true; }
+    if (!_camInit) { _camSH = ehRaw; _camInit = true; }
     const alpha = 1 - Math.exp(-12 * dt);
-    _camSX += (ex - _camSX) * alpha;
-    _camSZ += (ezRaw - _camSZ) * alpha;
     /* heading 最短角插值 */
     let dh = ehRaw - _camSH;
     while (dh > Math.PI) dh -= 2 * Math.PI;
     while (dh < -Math.PI) dh += 2 * Math.PI;
     _camSH += dh * alpha;
-    ex = _camSX;
-    const sEZ = _camSZ;
     const sEH = _camSH;
 
     // D-2: 每帧更新 orbitControls.target 跟随 ego
-    orbitControls.target.set(ex, eg, sEZ);
+    orbitControls.target.set(ex, eg, ez);
 
     // 流畅专题：原先这里每帧 const c = getCenter(roadGroup) 但 c 在所有
     // switch 分支里都被各自的 const c 覆盖，属于死代码 + 白算一次 Box3。
@@ -77,7 +81,6 @@ export function createCameraRig(canvas) {
       else if (ex > maxX) ex = maxX;
     }
 
-    const ez = sEZ;
     const eh = sEH;
     switch (mode) {
       case 'chase': {

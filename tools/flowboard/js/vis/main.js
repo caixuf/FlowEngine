@@ -225,7 +225,6 @@ let _lastRenderErr = null;
 
 function _startRenderLoop() {
   let _lastFrameTime = 0;
-  const _TARGET_FPS_MS = 1000 / 60; // 60fps 目标帧间隔
 
   function loop(timestamp) {
     requestAnimationFrame(loop);
@@ -237,8 +236,14 @@ function _startRenderLoop() {
     // 3D 不可见（非 observe，主动降帧省 GPU）时，PHM 不参与降档判定，
     // 否则"主动降帧的低 FPS"会被误判为卡顿 → 自动降档关后处理 → 画质永久变差。
     if (_perfMonitor) _perfMonitor.setActive(isObserve);
-    const minInterval = isObserve ? _TARGET_FPS_MS : 100; // 10fps when hidden
-    if (timestamp - _lastFrameTime < minInterval) return;
+    /* 可见时不做帧率节流：跟随显示器刷新率（60/100/144Hz）满帧渲染。
+     * 旧的 minInterval=16.67ms 节流在 60Hz 屏上与 rAF 帧间隔(~16.6ms)
+     * 临界竞争——delta 略小于阈值的帧被跳过 → 下一帧间隔变 33ms →
+     * 规律性半帧率抖动（"一顿一顿"的前端成分之一）；在 100Hz+ 屏上
+     * 则把帧率封死在 ~50fps。节流只保留给 3D 不可见的工作区。 */
+    if (!isObserve && timestamp - _lastFrameTime < 100) return; // 10fps when hidden
+    const dtSec = _lastFrameTime > 0
+      ? Math.min(0.1, (timestamp - _lastFrameTime) / 1000) : 1 / 60;
     _lastFrameTime = timestamp;
 
     if (!_ready) return;
@@ -261,8 +266,8 @@ function _startRenderLoop() {
 
       _cameraRig.update(store.ego, roadGroup, now);
 
-      // 天空穹顶跟随相机 + 雨粒子动画
-      _skyEnv.tick(1 / 60);
+      // 天空穹顶跟随相机 + 雨粒子动画（真实帧间 dt，高刷屏下速度不失真）
+      _skyEnv.tick(dtSec);
 
       // low/ultra 档：禁用 composer 直接渲染（旁路后处理管线，GPU 压力骤降）
       const noPost = _perfTier === 'low' || _perfTier === 'ultra';
