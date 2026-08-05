@@ -136,9 +136,11 @@ def stage_train(dataset: Path, run_dir: Path) -> Path:
         lines = lines[-MAX_DS:]
         print(f"  (数据集滑动窗口: 保留尾部 {MAX_DS} 条)", flush=True)
         (ds_dir / "samples.jsonl").write_text("\n".join(lines) + "\n")
-    n_samples = len(lines)
-    epochs = max(30, min(100, int(270.0 / (n_samples * 3.9e-3))))
-    print(f"  (训练: {n_samples} 样本 × {epochs} epochs ≈ {n_samples*epochs*3.9e-3:.0f}s)", flush=True)
+    # 2026-08-05 实测修正：700 样本 × 98 epochs = 40s（0.58ms/样本-epoch，
+    # 之前 3.9ms 估计偏差 7 倍——那 24min 是机器负载/损坏行干扰）。
+    # 700 样本 × 300 epochs ≈ 2min，远小于 timeout。固定 300 epochs：
+    # 98 epochs loss=0.11 不收敛（300 epochs 到 0.007），模型没学会。
+    epochs = 300
     rc = run(["python3", "tools/train_e2e/train.py",
               "--dataset", str(ds_dir), "--output", str(out),
               "--hidden", "64 32", "--epochs", str(epochs),
