@@ -234,6 +234,9 @@ function _startRenderLoop() {
     // observe 工作区不可见时降帧到 10fps（Analyze/Operate 工作区）
     const isObserve = document.body.getAttribute('data-workspace') !== 'analyze' &&
                       document.body.getAttribute('data-workspace') !== 'operate';
+    // 3D 不可见（非 observe，主动降帧省 GPU）时，PHM 不参与降档判定，
+    // 否则"主动降帧的低 FPS"会被误判为卡顿 → 自动降档关后处理 → 画质永久变差。
+    if (_perfMonitor) _perfMonitor.setActive(isObserve);
     const minInterval = isObserve ? _TARGET_FPS_MS : 100; // 10fps when hidden
     if (timestamp - _lastFrameTime < minInterval) return;
     _lastFrameTime = timestamp;

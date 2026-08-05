@@ -24,6 +24,16 @@
 #include <errno.h>
 #include <sys/types.h>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#include <mach/task.h>
+#include <mach/thread_info.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
+#include <libproc.h>
+#endif
+
 /* ── 内部辅助宏 ──────────────────────────────────────────────── */
 
 #define PROC_STAT_PATH       "/proc/stat"
@@ -55,6 +65,24 @@ typedef struct {
     uint64_t stime;
 } ThreadRaw;
 
+/* 每进程历史计数器（用于进程 CPU 差分） */
+typedef struct {
+    pid_t    pid;
+    uint64_t utime;
+    uint64_t stime;
+} ProcRaw;
+
+/* 每进程线程历史计数器（用于进程内线程 CPU 差分，键为 pid+tid） */
+typedef struct {
+    pid_t    pid;
+    pid_t    tid;
+    uint64_t utime;
+    uint64_t stime;
+} PThreadRaw;
+
+/* 进程级线程差分历史容量 */
+#define SYSMON_PTH_HIST_MAX (SYSMON_MAX_PROCS * SYSMON_PROC_THREADS)
+
 /* /proc/diskstats 汇总（只关心读/写扇区，所有设备求和） */
 typedef struct {
     uint64_t read_sectors;
@@ -79,6 +107,13 @@ struct SysMonitor {
     ThreadRaw  thread_hist[SYSMON_MAX_THREADS];
     int        thread_hist_count;
     uint64_t   prev_thread_ts_us;
+
+    /* 进程级差分历史 */
+    ProcRaw    proc_hist[SYSMON_MAX_PROCS];
+    int        proc_hist_count;
+    PThreadRaw pth_hist[SYSMON_PTH_HIST_MAX];
+    int        pth_hist_count;
+    uint64_t   prev_proc_ts_us;
 };
 
 /* ── 内部工具函数 ─────────────────────────────────────────────── */
@@ -91,6 +126,22 @@ static uint64_t mono_us(void) {
 
 /* 解析 /proc/stat 第一行 "cpu  ..." */
 static int read_cpu_raw(CpuRaw* out) {
+#if defined(__APPLE__)
+    host_cpu_load_info_data_t cpu;
+    mach_msg_type_number_t count = HOST_CPU_LOAD_INFO_COUNT;
+    kern_return_t k = host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO,
+                                      (host_info_t)&cpu, &count);
+    if (k != KERN_SUCCESS) return -1;
+    out->user    = cpu.cpu_ticks[CPU_STATE_USER];
+    out->nice    = 0;
+    out->system  = cpu.cpu_ticks[CPU_STATE_SYSTEM];
+    out->idle    = cpu.cpu_ticks[CPU_STATE_IDLE];
+    out->iowait  = 0;
+    out->irq     = 0;
+    out->softirq = 0;
+    out->steal   = 0;
+    return 0;
+#else
     FILE* f = fopen(PROC_STAT_PATH, "r");
     if (!f) return -1;
     char label[16];
@@ -106,6 +157,7 @@ static int read_cpu_raw(CpuRaw* out) {
                    (unsigned long long*)&out->steal);
     fclose(f);
     return (r == 9) ? 0 : -1;
+#endif
 }
 
 /* 计算逻辑 CPU 核数（读 /proc/stat 中 "cpuN" 行数） */
@@ -153,6 +205,23 @@ static void calc_cpu_pct(const CpuRaw* prev, const CpuRaw* cur,
 /* 一次读取所需全部 meminfo 字段 */
 static void read_meminfo(uint64_t* total, uint64_t* free_kb,
                          uint64_t* cached, uint64_t* available) {
+#if defined(__APPLE__)
+    *total = *free_kb = *cached = *available = 0;
+    size_t len = sizeof(uint64_t);
+    uint64_t phys = 0;
+    if (sysctlbyname("hw.memsize", &phys, &len, NULL, 0) == 0)
+        *total = phys / 1024;
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t cnt = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                          (host_info64_t)&vm, &cnt) != KERN_SUCCESS)
+        return;
+    uint64_t page = (uint64_t)getpagesize();
+    uint64_t free_bytes = (vm.free_count + vm.inactive_count) * page;
+    *free_kb   = free_bytes / 1024;
+    *cached    = (vm.inactive_count) * page / 1024;
+    *available = (vm.free_count + vm.inactive_count) * page / 1024;
+#else
     FILE* f = fopen(PROC_MEMINFO_PATH, "r");
     *total = *free_kb = *cached = *available = 0;
     if (!f) return;
@@ -169,10 +238,16 @@ static void read_meminfo(uint64_t* total, uint64_t* free_kb,
         }
     }
     fclose(f);
+#endif
 }
 
 /* 读取 /proc/diskstats，对所有物理设备（sda/nvme0n1/vda等）求和 */
 static int read_disk_raw(DiskRaw* out) {
+#if defined(__APPLE__)
+    /* macOS 无统一磁盘计数器，磁盘 I/O 标记不可用 */
+    (void)out;
+    return -1;
+#else
     FILE* f = fopen(PROC_DISKSTATS_PATH, "r");
     if (!f) return -1;
     out->read_sectors = 0;
@@ -211,10 +286,16 @@ static int read_disk_raw(DiskRaw* out) {
     }
     fclose(f);
     return 0;
+#endif
 }
 
 /* 读取 /proc/loadavg */
 static void read_loadavg(double* l1, double* l5, double* l15) {
+#if defined(__APPLE__)
+    double v[3] = { 0.0, 0.0, 0.0 };
+    if (getloadavg(v, 3) == 3) { *l1 = v[0]; *l5 = v[1]; *l15 = v[2]; }
+    else { *l1 = *l5 = *l15 = 0.0; }
+#else
     FILE* f = fopen(PROC_LOADAVG_PATH, "r");
     *l1 = *l5 = *l15 = 0.0;
     if (!f) return;
@@ -222,20 +303,40 @@ static void read_loadavg(double* l1, double* l5, double* l15) {
         *l1 = *l5 = *l15 = 0.0;
     }
     fclose(f);
+#endif
 }
 
 /* 读取 /proc/uptime (第一字段，秒) */
 static double read_uptime(void) {
+#if defined(__APPLE__)
+    struct timeval boot;
+    size_t len = sizeof(boot);
+    int mib[2] = { CTL_KERN, KERN_BOOTTIME };
+    if (sysctl(mib, 2, &boot, &len, NULL, 0) != 0) return 0.0;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    return now.tv_sec - boot.tv_sec;
+#else
     FILE* f = fopen(PROC_UPTIME_PATH, "r");
     if (!f) return 0.0;
     double up = 0.0;
     if (fscanf(f, "%lf", &up) < 1) up = 0.0;
     fclose(f);
     return up;
+#endif
 }
 
 /* 读取进程自身 RSS / VmSize (kB) */
 static void read_proc_mem(uint64_t* rss_kb, uint64_t* vms_kb) {
+#if defined(__APPLE__)
+    *rss_kb = *vms_kb = 0;
+    proc_taskinfo ti;
+    int sz = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &ti, sizeof(ti));
+    if (sz == (int)sizeof(ti)) {
+        *rss_kb = (uint64_t)(ti.pti_resident_size / 1024);
+        *vms_kb = (uint64_t)(ti.pti_virtual_size / 1024);
+    }
+#else
     FILE* f = fopen(PROC_SELF_STATUS, "r");
     *rss_kb = *vms_kb = 0;
     if (!f) return;
@@ -250,6 +351,7 @@ static void read_proc_mem(uint64_t* rss_kb, uint64_t* vms_kb) {
         }
     }
     fclose(f);
+#endif
 }
 
 /* 读取单个线程 stat: utime/stime/state
@@ -328,6 +430,156 @@ static int find_thread_hist(const ThreadRaw* hist, int n, pid_t tid) {
     return -1;
 }
 
+/* ── 进程级采集辅助函数（支持任意 pid，供 sysmonitor_proc_snapshot 使用） ── */
+
+/* 读 /proc/<pid>/stat：进程 utime/stime(14/15) + rss 页数(24)。
+ * format: "pid (comm) state(3) ... utime(14) stime(15) ... rss(24)"。
+ * 返回 0 成功；至少读到 utime/stime 才成功，rss 可选。 */
+static int read_proc_stat(pid_t pid, uint64_t* utime, uint64_t* stime,
+                          uint64_t* rss_kb) {
+#if defined(__APPLE__)
+    proc_taskinfo ti;
+    int sz = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, sizeof(ti));
+    if (sz != (int)sizeof(ti)) return -1;
+    *utime = (uint64_t)ti.pti_total_user;
+    *stime = (uint64_t)ti.pti_total_system;
+    if (rss_kb) *rss_kb = (uint64_t)(ti.pti_resident_size / 1024);
+    return 0;
+#else
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char line[512];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    fclose(f);
+
+    char* rp = strrchr(line, ')');
+    if (!rp) return -1;
+    rp++;
+
+    char         st;
+    int          ppid, pgrp, session, tty, tpgid;
+    unsigned int flags;
+    uint64_t     minflt, cminflt, majflt, cmajflt, ut, st2, cutime, cstime;
+    long         priority, nice, num_threads, itrealvalue, rss_pages;
+    uint64_t     starttime, vsize;
+    int r = sscanf(rp,
+                   " %c %d %d %d %d %d %u"
+                   " %llu %llu %llu %llu"
+                   " %llu %llu %llu %llu"
+                   " %ld %ld %ld %ld %llu %llu %ld",
+                   &st, &ppid, &pgrp, &session, &tty, &tpgid, &flags,
+                   (unsigned long long*)&minflt,
+                   (unsigned long long*)&cminflt,
+                   (unsigned long long*)&majflt,
+                   (unsigned long long*)&cmajflt,
+                   (unsigned long long*)&ut,
+                   (unsigned long long*)&st2,
+                   (unsigned long long*)&cutime,
+                   (unsigned long long*)&cstime,
+                   &priority, &nice, &num_threads, &itrealvalue,
+                   (unsigned long long*)&starttime,
+                   (unsigned long long*)&vsize,
+                   &rss_pages);
+    if (r < 13) return -1;
+    *utime = ut;
+    *stime = st2;
+    if (rss_kb) {
+        if (r >= 22 && rss_pages > 0) {
+            uint64_t page_b = (uint64_t)sysconf(_SC_PAGESIZE);
+            *rss_kb = (uint64_t)rss_pages * (page_b / 1024);
+        } else {
+            *rss_kb = 0;
+        }
+    }
+    return 0;
+#endif
+}
+
+#if !defined(__APPLE__)
+/* 读 /proc/<pid>/task/<tid>/stat：utime/stime/state（格式同 /proc/<pid>/stat） */
+static int read_task_stat(pid_t pid, pid_t tid, uint64_t* utime,
+                          uint64_t* stime, char* state) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", (int)pid, (int)tid);
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char line[512];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    fclose(f);
+
+    char* rp = strrchr(line, ')');
+    if (!rp) return -1;
+    rp++;
+
+    char         st;
+    int          ppid, pgrp, session, tty, tpgid;
+    unsigned int flags;
+    uint64_t     minflt, cminflt, majflt, cmajflt, ut, st2;
+    int r = sscanf(rp,
+                   " %c %d %d %d %d %d %u"
+                   " %llu %llu %llu %llu"
+                   " %llu %llu",
+                   &st, &ppid, &pgrp, &session, &tty, &tpgid, &flags,
+                   (unsigned long long*)&minflt,
+                   (unsigned long long*)&cminflt,
+                   (unsigned long long*)&majflt,
+                   (unsigned long long*)&cmajflt,
+                   (unsigned long long*)&ut,
+                   (unsigned long long*)&st2);
+    if (r < 13) return -1;
+    *utime = ut;
+    *stime = st2;
+    if (state) *state = st;
+    return 0;
+}
+
+/* 读 /proc/<pid>/task/<tid>/comm 线程名 */
+static void read_task_name(pid_t pid, pid_t tid, char* name, int maxlen) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/comm", (int)pid, (int)tid);
+    FILE* f = fopen(path, "r");
+    if (!f || !fgets(name, maxlen, f)) {
+        if (!f) snprintf(name, (size_t)maxlen, "t%d", (int)tid);
+        return;
+    }
+    fclose(f);
+    size_t l = strlen(name);
+    if (l > 0 && name[l - 1] == '\n') name[l - 1] = '\0';
+}
+
+/* 枚举 /proc/<pid>/task/ 下的线程 tid */
+static int enum_task(pid_t pid, pid_t* tids, int max) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task", (int)pid);
+    DIR* d = opendir(path);
+    if (!d) return 0;
+    int count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL && count < max) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        tids[count++] = (pid_t)atoi(ent->d_name);
+    }
+    closedir(d);
+    return count;
+}
+#endif /* !__APPLE__ */
+
+/* 在进程历史中查找 pid */
+static int find_proc_hist(const ProcRaw* hist, int n, pid_t pid) {
+    for (int i = 0; i < n; i++)
+        if (hist[i].pid == pid) return i;
+    return -1;
+}
+
+/* 在进程线程历史中查找 (pid,tid) */
+static int find_pth_hist(const PThreadRaw* hist, int n, pid_t pid, pid_t tid) {
+    for (int i = 0; i < n; i++)
+        if (hist[i].pid == pid && hist[i].tid == tid) return i;
+    return -1;
+}
+
 /* ── 公开 API ─────────────────────────────────────────────────── */
 
 SysMonitor* sysmonitor_create(void) {
@@ -339,6 +591,7 @@ SysMonitor* sysmonitor_create(void) {
     sm->thread_hist_count = 0;
     sm->prev_ts_us     = mono_us();
     sm->prev_thread_ts_us = sm->prev_ts_us;
+    sm->prev_proc_ts_us   = sm->prev_ts_us;
     return sm;
 }
 
@@ -475,4 +728,162 @@ int sysmonitor_thread_snapshot(SysMonitor* sm,
     sm->prev_thread_ts_us  = now_us;
 
     return out_count;
+}
+
+int sysmonitor_proc_snapshot(SysMonitor* sm,
+                             const pid_t* pids,
+                             const char* const* names,
+                             int nprocs,
+                             SysMonitorProcSnapshot* out,
+                             int max_out) {
+    if (!sm || !pids || nprocs <= 0 || !out || max_out <= 0) return -1;
+    if (nprocs > SYSMON_MAX_PROCS) nprocs = SYSMON_MAX_PROCS;
+    if (max_out > SYSMON_MAX_PROCS) max_out = SYSMON_MAX_PROCS;
+
+    uint64_t now_us = mono_us();
+    double   dt_s   = (now_us > sm->prev_proc_ts_us)
+                      ? (double)(now_us - sm->prev_proc_ts_us) / 1e6
+                      : 0.0;
+
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) hz = 100;
+
+    /* 新历史数组（本轮结束后原子替换）。
+     * new_pth 可能很大（SYSMON_MAX_PROCS × SYSMON_PROC_THREADS），放堆避免大栈。 */
+    ProcRaw new_proc[SYSMON_MAX_PROCS];
+    PThreadRaw* new_pth = (PThreadRaw*)malloc(SYSMON_PTH_HIST_MAX * sizeof(PThreadRaw));
+    if (!new_pth) return -1;
+    int new_proc_n = 0, new_pth_n = 0;
+
+    int written = 0;
+    for (int pi = 0; pi < nprocs && written < max_out; pi++) {
+        pid_t pid   = pids[pi];
+        SysMonitorProcSnapshot* snap = &out[written];
+        memset(snap, 0, sizeof(*snap));
+        snap->pid   = pid;
+        if (names && names[pi]) {
+            snprintf(snap->name, sizeof(snap->name), "%s", names[pi]);
+        } else {
+            /* 读 /proc/<pid>/comm 作为进程名 */
+            char p[64];
+            snprintf(p, sizeof(p), "/proc/%d/comm", (int)pid);
+            FILE* f = fopen(p, "r");
+            if (f) {
+                if (!fgets(snap->name, sizeof(snap->name), f))
+                    snprintf(snap->name, sizeof(snap->name), "pid%d", (int)pid);
+                fclose(f);
+                size_t l = strlen(snap->name);
+                if (l > 0 && snap->name[l - 1] == '\n') snap->name[l - 1] = '\0';
+            } else {
+                snprintf(snap->name, sizeof(snap->name), "pid%d", (int)pid);
+            }
+        }
+
+        /* 进程 CPU/RSS（差分） */
+        uint64_t ut = 0, st = 0, rss_kb = 0;
+        if (read_proc_stat(pid, &ut, &st, &rss_kb) == 0) {
+            snap->rss_kb = rss_kb;
+            int hi = find_proc_hist(sm->proc_hist, sm->proc_hist_count, pid);
+            if (hi >= 0 && dt_s > 0.0) {
+                uint64_t d_ticks = (ut + st)
+                                   - (sm->proc_hist[hi].utime
+                                      + sm->proc_hist[hi].stime);
+                snap->cpu_pct = (double)d_ticks / (double)hz / dt_s * 100.0;
+            }
+            if (new_proc_n < SYSMON_MAX_PROCS) {
+                new_proc[new_proc_n].pid   = pid;
+                new_proc[new_proc_n].utime = ut;
+                new_proc[new_proc_n].stime = st;
+                new_proc_n++;
+            }
+        }
+
+        /* 枚举并采集该进程线程（差分需 (pid,tid) 键） */
+#if defined(__APPLE__)
+        /* macOS：task_for_pid + task_threads + thread_info（瞬时 cpu_usage，不差分） */
+        mach_port_t task;
+        if (task_for_pid(mach_task_self(), pid, &task) == KERN_SUCCESS) {
+            thread_act_array_t tlist = NULL;
+            mach_msg_type_number_t tcnt = 0;
+            if (task_threads(task, &tlist, &tcnt) == KERN_SUCCESS) {
+                int n = (int)tcnt;
+                if (n > SYSMON_PROC_THREADS) n = SYSMON_PROC_THREADS;
+                for (int ti = 0; ti < n; ti++) {
+                    SysMonitorThreadSnapshot* th = &snap->threads[snap->thread_count];
+                    th->tid          = (pid_t)tlist[ti];
+                    th->utime_ticks  = 0;
+                    th->stime_ticks  = 0;
+                    thread_basic_info tb;
+                    mach_msg_type_number_t cc = THREAD_BASIC_INFO_COUNT;
+                    if (thread_info(tlist[ti], THREAD_BASIC_INFO,
+                                    (thread_info_t)&tb, &cc) == KERN_SUCCESS) {
+                        th->cpu_pct = (double)tb.cpu_usage / 10.0; /* 千分比→% */
+                        th->state   = (tb.flags & TH_FLAGS_IDLE) ? 'I'
+                                    : (tb.run_state == TH_STATE_RUNNING) ? 'R' : 'S';
+                    }
+                    thread_extended_info te;
+                    mach_msg_type_number_t ec = THREAD_EXTENDED_INFO_COUNT;
+                    if (thread_info(tlist[ti], THREAD_EXTENDED_INFO,
+                                    (thread_info_t)&te, &ec) == KERN_SUCCESS
+                        && te.pth_name[0]) {
+                        snprintf(th->name, sizeof(th->name), "%s", te.pth_name);
+                    } else {
+                        snprintf(th->name, sizeof(th->name), "thread%d", (int)tlist[ti]);
+                    }
+                    snap->thread_count++;
+                }
+                for (mach_msg_type_number_t i = 0; i < tcnt; i++)
+                    mach_port_deallocate(mach_task_self(), tlist[i]);
+                vm_deallocate(mach_task_self(), (vm_address_t)tlist,
+                              tcnt * sizeof(thread_t));
+            }
+            mach_port_deallocate(mach_task_self(), task);
+        }
+#else
+        pid_t tids[SYSMON_PROC_THREADS];
+        int   ntids = enum_task(pid, tids, SYSMON_PROC_THREADS);
+        for (int ti = 0; ti < ntids && ti < SYSMON_PROC_THREADS; ti++) {
+            pid_t tid = tids[ti];
+            uint64_t tut = 0, tst = 0;
+            char     tstate = '?';
+            if (read_task_stat(pid, tid, &tut, &tst, &tstate) != 0) continue;
+
+            SysMonitorThreadSnapshot* th = &snap->threads[snap->thread_count];
+            th->tid        = tid;
+            th->state      = tstate;
+            th->utime_ticks = tut;
+            th->stime_ticks = tst;
+            read_task_name(pid, tid, th->name, SYSMON_THREAD_NAME_MAX);
+
+            int hi = find_pth_hist(sm->pth_hist, sm->pth_hist_count, pid, tid);
+            if (hi >= 0 && dt_s > 0.0) {
+                uint64_t d_ticks = (tut + tst)
+                                   - (sm->pth_hist[hi].utime
+                                      + sm->pth_hist[hi].stime);
+                th->cpu_pct = (double)d_ticks / (double)hz / dt_s * 100.0;
+            }
+
+            if (new_pth_n < SYSMON_PTH_HIST_MAX) {
+                new_pth[new_pth_n].pid   = pid;
+                new_pth[new_pth_n].tid   = tid;
+                new_pth[new_pth_n].utime = tut;
+                new_pth[new_pth_n].stime = tst;
+                new_pth_n++;
+            }
+            snap->thread_count++;
+        }
+#endif /* !__APPLE__ */
+
+        written++;
+    }
+
+    /* 原子替换历史 */
+    memcpy(sm->proc_hist, new_proc, (size_t)new_proc_n * sizeof(ProcRaw));
+    sm->proc_hist_count = new_proc_n;
+    memcpy(sm->pth_hist, new_pth, (size_t)new_pth_n * sizeof(PThreadRaw));
+    sm->pth_hist_count  = new_pth_n;
+    sm->prev_proc_ts_us = now_us;
+
+    free(new_pth);
+    return written;
 }

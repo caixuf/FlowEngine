@@ -118,6 +118,28 @@
     </div>
   </div>
 
+  <div class="card" id="perf-card" style="display:none"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>📈 性能分析</h2><span class="toggle">▼</span></div>
+    <div class="card-body">
+      <div class="view-toggle" id="perf-view-toggle">
+        <button class="toggle-btn active" data-view="sys" onclick="flowboard.switchPerfView('sys')">🌐 系统</button>
+        <button class="toggle-btn" data-view="proc" onclick="flowboard.switchPerfView('proc')">⚙️ 进程</button>
+      </div>
+      <div id="perf-view-sys"><div class="metric-grid">
+        <div class="mini-stat"><div class="val" id="p-cpu" style="color:#58a6ff">--</div><div class="lbl">CPU %</div></div>
+        <div class="mini-stat"><div class="val" id="p-mem" style="color:#d29922">--</div><div class="lbl">内存 %</div></div>
+        <div class="mini-stat"><div class="val" id="p-load" style="color:#bc8cff">--</div><div class="lbl">负载</div></div>
+        <div class="mini-stat"><div class="val" id="p-proc" style="color:#3fb950">--</div><div class="lbl">进程</div></div>
+      </div>
+      <div style="font-size:10px;color:#484f58;margin-top:6px;padding:0 2px" id="p-detail"></div>
+      </div>
+      <div id="perf-view-proc" style="display:none">
+        <div id="proc-list" style="font-size:11px;max-height:150px;overflow-y:auto"><span style="color:#484f58">等待进程数据...</span></div>
+        <div style="font-size:10px;color:#484f58;margin:6px 0 4px 0;padding:0 2px" id="proc-header">点击进程查看其线程</div>
+        <div id="proc-threads" style="font-size:11px;max-height:180px;overflow-y:auto"><span style="color:#484f58">—</span></div>
+      </div>
+    </div>
+  </div>
+
   <div style="font-size:10px;color:#30363d;margin-top:auto;line-height:1.8">
     节点: <b id="node-n">0</b> · 线程: <b id="thread-cnt">0</b> · 帧: <b id="frame-n">0</b>
     <div style="margin-top:2px">快捷键: <span class="kbd">1-6</span> 视角 <span class="kbd">R</span> 重置 <span class="kbd">F</span> 全屏 <span class="kbd">P</span> 性能 <span class="kbd">G</span> 道路 <span class="kbd">T</span> 红绿灯 <span class="kbd">L</span> 标签 <span class="kbd">Esc</span></div>

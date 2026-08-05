@@ -702,6 +702,100 @@ function switchSysView(view) {
   document.getElementById('sys-view-threads').style.display = (view === 'threads' ? '' : 'none');
 }
 
+// ── 性能分析面板：系统/进程 视图切换 + 进程选择 ──
+var perfViewMode = 'sys';      // sys | proc
+var selectedProcPid = -1;      // 当前选中查看线程的进程 pid
+
+function switchPerfView(view) {
+  perfViewMode = view;
+  document.querySelectorAll('#perf-view-toggle .toggle-btn').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  document.getElementById('perf-view-sys').style.display = (view === 'sys' ? '' : 'none');
+  document.getElementById('perf-view-proc').style.display = (view === 'proc' ? '' : 'none');
+}
+
+function selectProc(pid) {
+  selectedProcPid = pid;
+  renderProcThreads();
+}
+
+function updatePerf() {
+  var sm = (topoData.metrics||{}).sysmon;
+  if (!sm) { showEl('perf-card', false); return; }
+  showEl('perf-card', true);
+
+  // 系统负载概览
+  var cpu = sm.cpu_total_pct || 0, memp = sm.mem_used_pct || 0;
+  setText('p-cpu', cpu.toFixed(1));
+  setStyle('p-cpu', 'color', cpu > 80 ? '#f85149' : (cpu > 50 ? '#d29922' : '#58a6ff'));
+  setText('p-mem', memp.toFixed(1));
+  setStyle('p-mem', 'color', memp > 85 ? '#f85149' : '#d29922');
+  setText('p-load', (sm.load1||0).toFixed(2));
+  var procs = sm.procs || [];
+  setText('p-proc', procs.length);
+  setText('p-detail',
+    '核心 '+(sm.cpu_count||0)+' · 内存 '+
+    Math.round((sm.mem_used_kb||0)/1024)+'/'+Math.round((sm.mem_total_kb||0)/1024)+'MB · '+
+    '负载 '+(sm.load1||0).toFixed(2)+'/'+(sm.load5||0).toFixed(2)+'/'+(sm.load15||0).toFixed(2));
+
+  // 进程列表
+  var pl = document.getElementById('proc-list');
+  if (!procs.length) {
+    pl.innerHTML = '<span style="color:#484f58">暂无可监控进程</span>';
+  } else {
+    pl.innerHTML = procs.map(function(p) {
+      var cpuColor = p.cpu_pct > 50 ? '#f85149' : (p.cpu_pct > 20 ? '#d29922' : '#3fb950');
+      var rssMb = Math.round((p.rss_kb||0)/1024);
+      var active = p.pid === selectedProcPid;
+      return '<div class="proc-row" data-pid="'+p.pid+'" onclick="flowboard.selectProc('+p.pid+')" '+
+        'style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;'+
+        (active ? 'background:rgba(88,166,255,.12)' : '')+'">'+
+        '<span style="color:'+cpuColor+';font-weight:bold;min-width:44px;text-align:right">'+p.cpu_pct.toFixed(1)+'%</span>'+
+        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+p.name+'</span>'+
+        '<span class="th-tid" style="color:#484f58">'+p.pid+'</span>'+
+        '<span class="th-tid" style="color:#484f58">'+rssMb+'MB</span>'+
+        '<span class="th-tid" style="color:#484f58">'+p.thread_count+'🧵</span>'+
+        '</div>';
+    }).join('');
+  }
+
+  // 若当前选中进程已消失，重置选择
+  if (selectedProcPid >= 0 && !procs.some(function(p){ return p.pid === selectedProcPid; })) {
+    selectedProcPid = -1;
+  }
+  renderProcThreads();
+}
+
+function renderProcThreads() {
+  var ph = document.getElementById('proc-header');
+  var th = document.getElementById('proc-threads');
+  if (perfViewMode !== 'proc') return;
+  var procs = (topoData.metrics||{}).sysmon && (topoData.metrics||{}).sysmon.procs || [];
+  var proc = selectedProcPid >= 0 ? procs.find(function(p){ return p.pid === selectedProcPid; }) : null;
+  if (!proc) {
+    ph.textContent = '点击进程查看其线程';
+    th.innerHTML = '<span style="color:#484f58">—</span>';
+    return;
+  }
+  ph.innerHTML = '<b style="color:#58a6ff">'+proc.name+'</b> · PID '+proc.pid+' · '+
+    'CPU '+proc.cpu_pct.toFixed(1)+'% · RSS '+Math.round((proc.rss_kb||0)/1024)+'MB · '+
+    proc.thread_count+' 线程';
+  var arr = proc.threads || [];
+  th.innerHTML = arr.length ? arr.map(function(t) {
+    var cpuColor = t.cpu_pct > 50 ? '#f85149' : (t.cpu_pct > 20 ? '#d29922' : '#3fb950');
+    var barPct = Math.min(100, t.cpu_pct * 2);
+    var stateIcon = t.state === 'R' ? '🟢' : (t.state === 'S' ? '💤' : '⏸');
+    return '<div class="thread-row" style="padding:2px 4px">'+
+      '<span class="th-state" title="'+t.state+'">'+stateIcon+'</span>'+
+      '<span class="th-name">'+t.name+'</span>'+
+      '<span class="th-tid">TID '+t.tid+'</span>'+
+      '<span class="th-cpu" style="color:'+cpuColor+'">'+t.cpu_pct.toFixed(1)+'%</span>'+
+      '<div class="th-bar"><div class="th-bar-fill" style="width:'+barPct+'%;background:'+cpuColor+'"></div></div>'+
+      '</div>';
+  }).join('') : '<span style="color:#484f58">无线程数据</span>';
+}
+
 function updateMetrics() {
   var m = topoData.metrics || {}, b = m.bus || {}, l = m.latency || {};
   document.getElementById('m-pub').textContent = (b.published||0).toLocaleString();
@@ -793,6 +887,9 @@ function updateMetrics() {
       '<span style="color:'+(n.alive===false?'#f85149':'#3fb950')+';cursor:pointer" onclick="showNodeDetail(\''+(n.name||'')+'\')">'+
       (n.alive===false?'💀 离线':'🟢 PID '+(n.pid||'—'))+'</span></div>';
   }).join('') || '<span style="color:#484f58">暂无节点</span>';
+
+  // 性能分析面板
+  updatePerf();
 }
 
 function updateFrames() {
@@ -1636,6 +1733,9 @@ window.flowboard = {
   closeDetail: closeDetail,
   // sysmon view switch
   switchSysView: switchSysView,
+  // perf panel
+  switchPerfView: switchPerfView,
+  selectProc: selectProc,
   // scene view switch
   switchSceneView: function (mode) {
     // delegated to scene2d module

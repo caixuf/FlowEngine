@@ -671,6 +671,48 @@ static void export_dashboard_json(void) {
         }
     }
 
+    /* ── 进程级快照：枚举全网存活节点 + 自身，采集每进程 CPU/RSS/线程 ── */
+    /* 进程级快照数组放堆：每进程可含 SYSMON_PROC_THREADS 个线程，栈上会偏大 */
+    SysMonitorProcSnapshot* psnaps = (SysMonitorProcSnapshot*)calloc(
+        SYSMON_MAX_PROCS, sizeof(SysMonitorProcSnapshot));
+    int pproc_count = 0;
+    if (!psnaps) {
+        /* 堆分配失败则跳过进程级采集 */
+        psnaps = NULL;
+    }
+    if (g.sysmon) {
+        pid_t      ppids[SYSMON_MAX_PROCS];
+        const char* pnames[SYSMON_MAX_PROCS];
+        char       namebuf[SYSMON_MAX_PROCS][SYSMON_PROC_NAME_MAX];
+        int        np = 0;
+        /* 从 discovery 拓扑收集存活节点 */
+        if (topo) {
+            for (uint32_t i = 0; i < topo->node_count && np < SYSMON_MAX_PROCS; i++) {
+                const NodeInfo* nn = &topo->nodes[i];
+                if (!nn->alive || nn->pid <= 0) continue;
+                ppids[np] = nn->pid;
+                snprintf(namebuf[np], sizeof(namebuf[np]), "%s", nn->name);
+                pnames[np] = namebuf[np];
+                np++;
+            }
+        }
+        /* 补上自身（monitor_node 进程），避免 topology 不含自身时漏采集 */
+        pid_t self = getpid();
+        bool has_self = false;
+        for (int i = 0; i < np; i++) if (ppids[i] == self) { has_self = true; break; }
+        if (!has_self && np < SYSMON_MAX_PROCS) {
+            ppids[np] = self;
+            snprintf(namebuf[np], sizeof(namebuf[np]), "monitor_node");
+            pnames[np] = namebuf[np];
+            np++;
+        }
+        if (np > 0) {
+            pproc_count = sysmonitor_proc_snapshot(g.sysmon, ppids, pnames, np,
+                                                   psnaps, SYSMON_MAX_PROCS);
+            if (pproc_count < 0) pproc_count = 0;
+        }
+    }
+
     /* ── metrics sub-object ── */
     cJSON* metrics = cJSON_AddObjectToObject(root, "metrics");
 
@@ -1124,6 +1166,31 @@ static void export_dashboard_json(void) {
         cJSON_AddStringToObject(thr, "state", state_str);
         cJSON_AddItemToArray(threads_arr, thr);
     }
+
+    /* 进程级列表（系统负载 + 各进程 CPU/RSS + 每进程线程） */
+    cJSON* procs_arr = cJSON_AddArrayToObject(sysmon_o, "procs");
+    for (int pi = 0; pi < pproc_count; pi++) {
+        SysMonitorProcSnapshot* ps = &psnaps[pi];
+        cJSON* pj = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pj, "pid", (double)(int)ps->pid);
+        cJSON_AddStringToObject(pj, "name", ps->name);
+        cJSON_AddNumberToObject(pj, "cpu_pct", ps->cpu_pct);
+        cJSON_AddNumberToObject(pj, "rss_kb", (double)ps->rss_kb);
+        cJSON_AddNumberToObject(pj, "thread_count", ps->thread_count);
+        cJSON* pth = cJSON_AddArrayToObject(pj, "threads");
+        for (int ti = 0; ti < ps->thread_count && ti < SYSMON_PROC_THREADS; ti++) {
+            SysMonitorThreadSnapshot* th2 = &ps->threads[ti];
+            cJSON* thr = cJSON_CreateObject();
+            cJSON_AddNumberToObject(thr, "tid", (double)(int)th2->tid);
+            cJSON_AddStringToObject(thr, "name", th2->name);
+            cJSON_AddNumberToObject(thr, "cpu_pct", th2->cpu_pct);
+            char st2[2] = { th2->state, '\0' };
+            cJSON_AddStringToObject(thr, "state", st2);
+            cJSON_AddItemToArray(pth, thr);
+        }
+        cJSON_AddItemToArray(procs_arr, pj);
+    }
+    if (psnaps) { free(psnaps); psnaps = NULL; }
 
     /* ── samples 数组（环形缓冲 -> JSON，供 evaluator 时序分析） ── */
     cJSON* samples_arr = cJSON_AddArrayToObject(root, "samples");

@@ -35,6 +35,7 @@ export class PerfMonitor {
     this._consecutive = 0;     // 连续低帧窗口数
     this._timer = null;        // setInterval 句柄
     this._paused = false;      // 手动设档后暂停自动降级
+    this._active = true;       // 3D 可见才参与降档；3D 隐藏（工作区切换降帧）时置 false
     this._fps = 0;             // 最近窗口 FPS
     this._drawCalls = 0;       // 最近窗口 draw calls
     this._jank = 0;            // 累计卡顿窗口数
@@ -54,6 +55,14 @@ export class PerfMonitor {
 
   /** 恢复自动降级 */
   resume() { this._paused = false; }
+
+  /** 设置是否参与降档判定。
+   *  3D 场景不可见（如切到 analyze/operate 工作区被降帧到 10fps）时，
+   *  降帧是主动省 GPU 的行为，不是 GPU 卡死 —— 此时必须置 false，
+   *  否则 PHM watchdog 会把"主动降帧的低 FPS"误判为卡顿，连续几秒后
+   *  自动降档关掉后处理，切回 3D 时画质已永久变差。
+   *  置 true 恢复正常监控（3D 真正卡顿仍会正确降档）。 */
+  setActive(active) { this._active = !!active; }
 
   /** 启动 watchdog（独立 setInterval，不依赖 rAF） */
   start() {
@@ -88,6 +97,9 @@ export class PerfMonitor {
 
     // 自动降级：仅在未手动暂停时生效
     if (this._paused) { this._consecutive = 0; return; }
+
+    // 3D 不可见（主动降帧省 GPU）时不计入低帧，避免误降画质
+    if (!this._active) { this._consecutive = 0; return; }
 
     if (fps < this._lowFps) {
       this._consecutive++;

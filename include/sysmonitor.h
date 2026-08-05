@@ -41,9 +41,25 @@ typedef struct {
     uint64_t stime_ticks;                    /**< 累计内核态 ticks (原始) */
 } SysMonitorThreadSnapshot;
 
+/* ── 进程级快照 ─────────────────────────────────────────────── */
+
+#define SYSMON_PROC_NAME_MAX 64
+#define SYSMON_MAX_PROCS     32   /**< 一次最多监控的进程数（多进程模式下各节点独立进程） */
+#define SYSMON_PROC_THREADS  256  /**< 每进程最多采集的线程数 */
+
+/* 单进程快照：进程级 CPU/RSS + 该进程线程列表 */
+typedef struct {
+    pid_t    pid;
+    char     name[SYSMON_PROC_NAME_MAX];
+    double   cpu_pct;                        /**< 进程 CPU% (差分, 0–100×N_CPU) */
+    uint64_t rss_kb;                         /**< 进程 RSS (kB) */
+    int      thread_count;                   /**< 实际线程数 */
+    SysMonitorThreadSnapshot threads[SYSMON_PROC_THREADS];
+} SysMonitorProcSnapshot;
+
 /* ── 进程+系统整体快照 ───────────────────────────────────────── */
 
-#define SYSMON_MAX_THREADS 128
+#define SYSMON_MAX_THREADS 512
 
 typedef struct {
     /* ── CPU ── */
@@ -119,6 +135,24 @@ int sysmonitor_snapshot(SysMonitor* sm, SysMonitorSnapshot* out);
 int sysmonitor_thread_snapshot(SysMonitor* sm,
                                SysMonitorThreadSnapshot* threads,
                                int max_threads);
+
+/**
+ * 采集多进程级快照：对每个指定 pid，读取进程 CPU/RSS 并枚举其全部线程，
+ * 线程与进程 CPU 均按 (pid) / (pid,tid) 做差分计算。
+ * @param sm         实例
+ * @param pids       待监控进程 pid 数组，长度 @p nprocs
+ * @param names      与 pids 对应的进程显示名（可为空指针数组，则读 /proc/<pid>/comm）
+ * @param nprocs     进程个数（<= SYSMON_MAX_PROCS）
+ * @param out        输出数组，长度至少为 @p max_out
+ * @param max_out    输出容量
+ * @return 实际写入的进程快照数，-1 失败
+ */
+int sysmonitor_proc_snapshot(SysMonitor* sm,
+                             const pid_t* pids,
+                             const char* const* names,
+                             int nprocs,
+                             SysMonitorProcSnapshot* out,
+                             int max_out);
 
 /**
  * 销毁实例并释放所有内部资源。
