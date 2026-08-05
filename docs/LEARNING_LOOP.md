@@ -507,3 +507,23 @@ python3 tools/modelctl.py ota status
 - **不做 TensorRT**：NVIDIA 专有、CI 无法通用覆盖，故仅提供 ONNX 一条可移植路径。
 - 车端算力有限，建议从小模型 / 端到端小网络起步；把工程闭环跑通比追求模型规模更有价值。
 - 学习模型的任何输出，都必须经过 `safety_control_node` 的安全校验后才允许下发执行。
+
+## 超越 planning：DAgger 自我对弈（2026-08-05）
+
+模仿学习（behavior cloning）上限 = planning 的水平：训练数据只覆盖 planning
+开过的状态，模型自开时遇到新状态无应对（场景外退化）；planning 的保守/迟钝
+被照抄（错误无反馈）。
+
+**DAgger 打破数据锁死**：模型自己开（eval_closed_loop）→ 产生 planning 从未
+开过的状态 → IDM oracle 给安全动作 → 模型犯错帧（输出与 oracle 显著不同）
+回灌训练集 → 下轮学会在自己状态上给安全动作。数据覆盖超越 planning 轨迹
+分布，且自然收敛（模型学会后犯错帧递减）。
+
+- `tools/train_e2e/eval_closed_loop.py --dagger-out`：收集犯错帧
+- `tools/train_e2e/auto_train_loop.py`：评估后回灌累积数据集（下轮训练用）；
+  评估 FAIL 不阻止回灌（FAIL 正是犯错最多的时刻）
+- oracle = `dagger_oracle`（IDM 规则，与 `synth_data.py` 一致）
+
+后续路线（超越 planning 的第二步）：物理/约束自监督（安全距离/制动自洽/
+曲率约束作学习信号）→ RL 微调（`tools/control_sim.py` 纯 Python 仿真训练，
+reward = 速度 − 碰撞 − jerk）。
