@@ -320,3 +320,24 @@ def features_from_sample(sample: dict, feature_names: list[str] | None = None) -
         )
 
     raise ValueError(f"unsupported feature schema: {names!r}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  执行端语义唯一事实源（2026-08-05 收敛，禁止三处各自写阈值）
+# ══════════════════════════════════════════════════════════════
+
+# throttle/brake 互斥阈值：brake 超过此值才 brake 优先、throttle 归零。
+# 历史：0.05 太敏感（模型输出 brk=0.09 噪声被当刹车 → 油门禁 → cruise
+# 永不动）；0.2 只认真刹车。训练标签 / 执行端 / DAgger 采样必须同值。
+BRAKE_PRIORITY_THRESHOLD = 0.2
+
+
+def brake_throttle_exclusive(throttle: float, brake: float) -> tuple[float, float]:
+    """执行端互斥归一（唯一实现）。
+
+    训练标签（build_windows）、闭环执行（eval_closed_loop）、DAgger 采样
+    三处都调它 —— 语义收敛，杜绝「训练 0.05 / 执行 0.2」不同步反复修。
+    """
+    if brake > BRAKE_PRIORITY_THRESHOLD:
+        return 0.0, brake
+    return throttle, 0.0

@@ -32,6 +32,8 @@ import json
 import math
 import random
 import sys
+
+from feature_schema import brake_throttle_exclusive  # noqa: E402
 from pathlib import Path
 
 WINDOW = 5       # 时序滑窗帧数
@@ -96,19 +98,22 @@ def build_windows(samples: list[dict], feat_dim: int = V2_DIM) -> tuple[list[lis
         steer    = float(ctrl.get("steering", 0.0))
         lc       = 1.0 if abs(steer) > 0.12 else 0.0
         conf     = 1.0
-        # 2026-08-05 标签互斥归一：真实采集(planning 输出) throttle/brake
-        # 重叠，而 eval_closed_loop 执行端 brake>0.05 优先、throttle 归零。
-        # 标签不互斥 → 模型学「双非零」→ 执行端 brake 优先 → 车永不动
-        # （实测 progress=0）。与执行端一致的互斥：brake 优先，否则 throttle。
-        if brake > 0.05:
-            throttle = 0.0
-        else:
-            brake = 0.0
+        # 标签互斥归一（唯一实现 brake_throttle_exclusive，见 feature_schema）：
+        # 真实采集(planning 输出) throttle/brake 重叠，执行端 brake 优先。
+        # 标签不互斥 → 模型学「双非零」→ 执行端 brake 优先 → 车永不动。
+        throttle, brake = brake_throttle_exclusive(throttle, brake)
 
-        # 过滤停滞数据
-        ego_v = float(target.get("ego", {}).get("v", 0.0))
-        if ego_v < 0.5:
-            continue
+        # 过滤停滞数据（2026-08-05 修复：合成/DAgger 样本没有 ego 字段，
+        # 旧逻辑 ego_v=0 < 0.5 全被过滤 → 训练集 throttle 非零仅 5% →
+        # 模型学「几乎不踩油门」→ 闭环永不动。合成/DAgger 是精心构造的
+        # 样本（含 v=0 起步态），不参与停滞过滤；ego_v 用特征首维）。
+        is_curated = bool(target.get("synthetic") or target.get("dagger"))
+        if is_curated:
+            ego_v = float(target.get("features_v3", [0.0])[0])
+        else:
+            ego_v = float(target.get("ego", {}).get("v", 0.0))
+            if ego_v < 0.5:
+                continue
 
         X.append(x)
         Y.append([throttle, brake, steer, lc, conf])

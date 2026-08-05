@@ -38,12 +38,22 @@ def make_sample(v: float, front_x: float, front_vx: float,
     dv = v - front_vx
     safe = 5.0 + v * 1.5  # IDM 安全间距
     # 严格互斥：危险→刹车(0 油门)；否则→油门(0 刹车)
+    # 2026-08-05 提前减速：中距离(≤2×safe)就开始轻刹/收油 —— 模型只学
+    # 「近距才刹」→ 40m 前车从 15.7m/s 刹不住（实测 lead 碰撞）。提前量
+    # 按 TTC：gap/v_rel < 4s 就开始收油，< 2.5s 轻刹。
+    ttc = gap / max(dv, 0.1)
     if gap < safe and dv > 0:
         brake = min(1.0, 0.4 + (safe - gap) * 0.15 + dv * 0.08)
         throttle = 0.0
     elif gap < 8:
         brake = min(1.0, 0.6 + (8 - gap) * 0.1)
         throttle = 0.0
+    elif ttc < 2.5:  # 提前减速：TTC<2.5s 轻刹（40m@15.7→12m/s 撞前车前刹住）
+        brake = min(1.0, 0.25 + (2.5 - ttc) * 0.15)
+        throttle = 0.0
+    elif ttc < 4.0:  # 收油不刹（预减速，planning 的 TTC 提前压速）
+        throttle = min(0.5, max(0.0, 0.15 + (20 - v) * 0.02))
+        brake = 0.0
     else:
         throttle = min(1.0, max(0.0, 0.25 + (20 - v) * 0.04))
         brake = 0.0
@@ -53,7 +63,12 @@ def make_sample(v: float, front_x: float, front_vx: float,
              "speed_limit": 30.0, "lane_count": 4, "lane_width": 3.5,
              "ego_lane_offset": ego_y}
     feats = build_v3_features(ego, obstacles, control, None, scene, [])
+    # 2026-08-05 样本同构：补 ego 字段（真实采集格式）。
+    # 旧合成样本无 ego → build_windows 停滞过滤 ego_v=0 全被跳过 →
+    # 训练集 throttle 非零仅 5% → 模型学「不踩油门」→ 闭环永不动。
     return {"features_v3": feats, "control": control, "label": 0.0,
+            "ego": {"x": 0.0, "y": ego_y, "v": v, "heading": 0.0,
+                    "yaw_rate": 0.0},
             "synthetic": True, "synth_v": v, "synth_gap": gap}
 
 

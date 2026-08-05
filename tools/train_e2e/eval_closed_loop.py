@@ -51,6 +51,10 @@ from test_model_sim import (  # noqa: E402
     LANE_CENTER_REF,
 )
 from control_sim import VehicleState, DT, WHEELBASE  # noqa: E402
+from feature_schema import (  # noqa: E402
+    BRAKE_PRIORITY_THRESHOLD,
+    brake_throttle_exclusive,
+)
 
 # ── 场景与阈值 ────────────────────────────────────────────────
 # 每个场景可覆盖启动参数；阈值与 C 侧 demo_evaluator 语义对齐。
@@ -150,11 +154,16 @@ def dagger_oracle(name: str, ego, lead) -> tuple[float, float, float]:
         gap = lead["x"] - ego.x - 2.25
         dv = ego.v - lead["vx"]
         safe = 5.0 + ego.v * 1.5
+        ttc = gap / max(dv, 0.1)
         if gap < safe and dv > 0:
             brake = min(1.0, 0.4 + (safe - gap) * 0.15 + dv * 0.08)
             return 0.0, brake, 0.0
         if gap < 8:
             return 0.0, min(1.0, 0.6 + (8 - gap) * 0.1), 0.0
+        if ttc < 2.5:  # 提前减速（与 synth_data 一致）：TTC<2.5s 轻刹
+            return 0.0, min(1.0, 0.25 + (2.5 - ttc) * 0.15), 0.0
+        if ttc < 4.0:  # 收油不刹（预减速）
+            return min(0.5, max(0.0, 0.15 + (20 - ego.v) * 0.02)), 0.0, 0.0
     # cruise / lead 安全距离外：巡航油门
     thr = min(1.0, max(0.0, 0.25 + (20 - ego.v) * 0.04))
     return thr, 0.0, 0.0
@@ -200,15 +209,9 @@ def run_scenario(model_path: str, name: str,
         throttle = max(-1.0, min(1.0, throttle))
         brake = max(0.0, min(1.0, brake))
         steer = max(-0.96, min(0.96, steer))
-        # 执行端互斥（2026-08-05）：训练数据 control.throttle/brake 同时非零
-        # （真实 control 的重叠输出），而 VehicleState.step 里 brake 分支先于
-        # throttle → 双非零时车被刹死永不动（实测 progress=0）。
-        # 互斥归一：任一 brake > 0.05 就 brake 优先、throttle 归零（安全），
-        # 否则 throttle 生效。旧差值法在 thr≈brk 时两者抵消 → 车仍不动。
-        if brake > 0.05:
-            throttle = 0.0
-        else:
-            brake = 0.0
+        # 执行端互斥（唯一实现 brake_throttle_exclusive，见 feature_schema）：
+        # 训练标签 / 执行端 / DAgger 三处同阈值，杜绝不同步反复修。
+        throttle, brake = brake_throttle_exclusive(throttle, brake)
 
         rec.record(t, ego.x, ego.y, ego.v, ego.heading, steer, throttle, brake)
 
@@ -229,8 +232,8 @@ def run_scenario(model_path: str, name: str,
         if dagger_f:
             o_thr, o_brk, o_st = dagger_oracle(name, ego, lead)
             # 犯错判定：刹车差 >0.3 或油门差 >0.3（执行端互斥后比较）
-            model_brake = brake if brake > 0.05 else 0.0
-            model_thr = throttle if brake <= 0.05 else 0.0
+            model_brake = brake if brake > BRAKE_PRIORITY_THRESHOLD else 0.0
+            model_thr = throttle if brake <= BRAKE_PRIORITY_THRESHOLD else 0.0
             if (abs(model_brake - o_brk) > 0.3 or
                     abs(model_thr - o_thr) > 0.3):
                 control = {"throttle": o_thr, "brake": o_brk,
