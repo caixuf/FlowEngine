@@ -1036,9 +1036,22 @@ function updateMetrics() {
     var modeTop = driverMode.split(':')[0];
     setText('v-mode', driverMode);
     setStyle('v-mode', 'color', modeColors[modeTop] || '#bc8cff');
-    var routeLane = (topoData.metrics||{}).route_lane || 0;
-    setText('v-route', routeLane === 0 ? '--' : (routeLane > 0 ? '→ 右变道' : '← 左变道'));
-    setStyle('v-route', 'color', routeLane === 0 ? '#484f58' : '#f0883e');
+    /* NOA 车道：route_lane 是"导航目标车道索引"（lane_change 步骤触发后
+     * 永久保持，如 =2），不是方向信号——旧代码 `>0 → 右变道` 把它当方向用，
+     * 变道完成后卡片永远挂着"→ 右变道"。正在变道与否由 behavior.state
+     * (LEFT_CHANGE/RIGHT_CHANGE) 判定；平时显示当前车道号。 */
+    var bhv = (topoData.metrics||{}).behavior || {};
+    var bhvState = bhv.state || '';
+    var curLane = (typeof bhv.committed_lane === 'number' && bhv.committed_lane >= 0)
+      ? bhv.committed_lane
+      : ((topoData.metrics||{}).route_lane >= 0 ? (topoData.metrics||{}).route_lane : -1);
+    if (bhvState === 'LEFT_CHANGE' || bhvState === 'RIGHT_CHANGE') {
+      setText('v-route', bhvState === 'LEFT_CHANGE' ? '← 左变道' : '→ 右变道');
+      setStyle('v-route', 'color', '#f0883e');
+    } else {
+      setText('v-route', curLane >= 0 ? ('L' + curLane) : '--');
+      setStyle('v-route', 'color', curLane >= 0 ? '#3fb950' : '#484f58');
+    }
   } else {
     showEl('vehicle-card', false);
   }
