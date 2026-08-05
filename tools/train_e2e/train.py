@@ -13,7 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[0]
 sys.path.insert(0, str(ROOT))
 
-from temporal_train import TinyMLP, load_jsonl, build_windows, column_stats, normalize, train  # noqa: E402
+from temporal_train import (TinyMLP, load_jsonl, build_windows, column_stats,
+                            normalize, train, V2_DIM, V3_DIM)  # noqa: E402
 
 
 OUT_DIM = 5
@@ -43,7 +44,10 @@ def main() -> int:
     if not samples:
         raise SystemExit(f"error: no samples in {samples_path}")
 
-    X_raw, Y_raw = build_windows(samples)
+    # 2026-08-05: metadata.feature_names 决定特征维度（v3=23 帧内），
+    # 旧实现固定 build_windows 默认 16 维 → v3 数据被拒（维度校验硬报错）
+    feat_dim = V3_DIM if dataset_meta.get("feature_names") == "v3" else V2_DIM
+    X_raw, Y_raw = build_windows(samples, feat_dim=feat_dim)
     if len(X_raw) < 10:
         raise SystemExit(f"error: too few samples ({len(X_raw)}) in {samples_path}")
 

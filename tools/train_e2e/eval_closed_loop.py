@@ -171,6 +171,15 @@ def run_scenario(model_path: str, name: str) -> tuple[Recorder, dict]:
         throttle = max(-1.0, min(1.0, throttle))
         brake = max(0.0, min(1.0, brake))
         steer = max(-0.96, min(0.96, steer))
+        # 执行端互斥（2026-08-05）：训练数据 control.throttle/brake 同时非零
+        # （真实 control 的重叠输出），而 VehicleState.step 里 brake 分支先于
+        # throttle → 双非零时车被刹死永不动（实测 progress=0）。
+        # 互斥归一：任一 brake > 0.05 就 brake 优先、throttle 归零（安全），
+        # 否则 throttle 生效。旧差值法在 thr≈brk 时两者抵消 → 车仍不动。
+        if brake > 0.05:
+            throttle = 0.0
+        else:
+            brake = 0.0
 
         rec.record(t, ego.x, ego.y, ego.v, ego.heading, steer, throttle, brake)
 
