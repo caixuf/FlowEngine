@@ -527,3 +527,37 @@ python3 tools/modelctl.py ota status
 后续路线（超越 planning 的第二步）：物理/约束自监督（安全距离/制动自洽/
 曲率约束作学习信号）→ RL 微调（`tools/control_sim.py` 纯 Python 仿真训练，
 reward = 速度 − 碰撞 − jerk）。
+
+## RL 换老师路线（2026-08-05 设计）
+
+模仿学习 + DAgger 的上限 = 老师（planning / IDM 规则）水平。超越需换老师：
+reward 函数取代规则成为新老师，模型自己探索最优策略。
+
+**为什么 control_sim 是 RL 训练场**：纯 Python（~0.1s/episode，万次探索分钟级，
+无崩溃风险），VehicleState 可重置/全观测/可积分，评估器 score 提供 reward 组件。
+
+**状态/动作/奖励**：
+```
+状态 s = [ego_v, gap, 前车v, 距障碍, ...]   （与训练特征同构）
+动作 a = [throttle, brake, steer]           （连续，互斥执行）
+奖励 r = +速度效率 − 碰撞(大罚) − jerk(舒适) − 偏离车道
+```
+reward 是「开得好不好」，不是「像不像 planning」——RL 能发现比 IDM 更晚刹车
+更高效、比 planning 更平滑的策略。
+
+**脑容量分析（学生能否承载）**：
+- 当前 115→64→32→5（9.5k 参数，<1ms CPU）：纵向三场景够用（低维决策边界）
+- 全场景需升级：放大 10x（100k 参数，~1ms）+ 可选 LSTM（~2ms，真时序记忆）
+- 真实边界是车端 CPU 推理（20Hz 预算 50ms），不是训练端 GPU
+- **先证明 RL 机制成立（小模型），再换大模型**——RL 学不动通常是探索不够
+  不是容量不够
+
+**路线**：
+```
+Step 1: 纵向 RL MVP（cruise+emergency）→ 验证 RL 能否超越 IDM
+        （碰撞率 0 + 平均速度 ≥ IDM = 老师升级成功）
+Step 2: 加 lead 跟车
+Step 3: 加 steer → 变道/避障
+Step 4: 策略导出 → 闭环评估 → 与模仿模型 A/B
+```
+每步统一验收：closed_loop 三场景 + demo_evaluator 评分。
