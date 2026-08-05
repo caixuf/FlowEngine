@@ -114,10 +114,12 @@ TRUTH_LAYER_FOR_TYPE = {
 }
 
 
-def _load_shadow_delta() -> float | None:
-    """Read the latest shadow_delta value from any active sidecar output file.
+def _load_shadow_delta() -> tuple[float | None, float | None]:
+    """Read the latest shadow_delta and shadow_speed_mae from any active sidecar file.
 
-    Returns the most recently written shadow_delta, or None if no sidecar file exists.
+    Returns (shadow_delta_latest, shadow_speed_mae) where either may be None.
+    Prefers shadow_speed_mae (aggregate MAE over the whole run) for threshold checks;
+    shadow_delta_latest is returned for display purposes only.
     """
     best_path: Path | None = None
     best_mtime = -1.0
@@ -130,14 +132,17 @@ def _load_shadow_delta() -> float | None:
         except FileNotFoundError:
             pass
     if best_path is None:
-        return None
+        return None, None
     try:
         with best_path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
         delta = data.get("shadow_delta")
-        return float(delta) if delta is not None else None
+        mae = data.get("shadow_speed_mae")
+        delta_val = float(delta) if delta is not None else None
+        mae_val = float(mae) if mae is not None else None
+        return delta_val, mae_val
     except (json.JSONDecodeError, OSError, ValueError):
-        return None
+        return None, None
 
 
 def _pipeline_nodes(pipeline: dict) -> list:
@@ -1635,16 +1640,23 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         )
 
     # ── shadow delta check (read latest sidecar output for current-frame validation) ──
-    shadow_delta = _load_shadow_delta()
-    shadow_delta_abs = abs(shadow_delta) if shadow_delta is not None else None
-    if shadow_delta_abs is not None:
-        if shadow_delta_abs > SHADOW_DELTA_FAIL:
+    # Prefer shadow_speed_mae (aggregate MAE over the whole run) for threshold checks —
+    # a single instantaneous sample can be large during braking/stopping scenarios and is
+    # not representative of overall model quality.  Fall back to |shadow_delta_latest| only
+    # when the aggregate is not yet available (model run too short to accumulate stats).
+    shadow_delta, shadow_mae = _load_shadow_delta()
+    # Choose the best available metric for threshold checks
+    shadow_check_val = shadow_mae if shadow_mae is not None else (abs(shadow_delta) if shadow_delta is not None else None)
+    if shadow_check_val is not None:
+        if shadow_check_val > SHADOW_DELTA_FAIL:
+            metric_label = "shadow_speed_mae" if shadow_mae is not None else "shadow_delta"
             failures.append(
-                f"shadow_delta too large: {shadow_delta:+.2f} m/s (threshold {SHADOW_DELTA_FAIL:.1f} m/s)"
+                f"{metric_label} too large: {shadow_check_val:+.2f} m/s (threshold {SHADOW_DELTA_FAIL:.1f} m/s)"
             )
-        elif shadow_delta_abs > SHADOW_DELTA_WARN:
+        elif shadow_check_val > SHADOW_DELTA_WARN:
+            metric_label = "shadow_speed_mae" if shadow_mae is not None else "shadow_delta"
             warnings.append(
-                f"shadow_delta elevated: {shadow_delta:+.2f} m/s (warn threshold {SHADOW_DELTA_WARN:.1f} m/s)"
+                f"{metric_label} elevated: {shadow_check_val:+.2f} m/s (warn threshold {SHADOW_DELTA_WARN:.1f} m/s)"
             )
 
     # ── Task 5：分层识别率 / 预警提前量 ──
