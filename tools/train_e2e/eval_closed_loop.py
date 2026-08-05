@@ -229,7 +229,11 @@ def run_scenario(model_path: str, name: str,
         # oracle 给出安全动作；模型输出与 oracle 显著不同 = 模型犯错处
         # （刹车不足/该刹没刹/该走没走），记录 (特征, oracle 动作) 供
         # 下一轮训练 —— 让模型学会在自己开出的状态分布上给安全动作。
-        if dagger_f:
+        # 2026-08-05 修复：只在模型「在动」(v>1) 时采样 —— 模型不动时
+        # 全是「v=0 原地」帧，oracle 在远距离给巡航油门，回灌教模型
+        # 「原地刹/原地油门」→ 模型学「有障碍就停」（lead/emergency
+        # progress=0 实测）。v>1 的犯错帧才是「行驶中决策错」的真样本。
+        if dagger_f and ego.v > 1.0:
             o_thr, o_brk, o_st = dagger_oracle(name, ego, lead)
             # 犯错判定：刹车差 >0.3 或油门差 >0.3（执行端互斥后比较）
             model_brake = brake if brake > BRAKE_PRIORITY_THRESHOLD else 0.0
