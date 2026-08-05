@@ -14,7 +14,7 @@
 | M1 | b5fd449 | ST 图 + DP 替代线性斜坡与红灯 override；视界动态扩展；全局时间 |
 | M2 | 8ab7327 | 同向/静止障碍占据；时间基准 double-count 修复；占据区无条件禁止 |
 | M4 | ed3136c | 掉头曲率-速度约束防线（κ=0.2534 → 4.22 m/s 极限） |
-| M3 | — | QP 精修（`include/piecewise_jerk_qp.h` 已有 `pjqp_speed_solve`，待接） |
+| M3 | efae86d | **决策：QP 平滑不接入**。修复 `pjqp_speed_solve` 三处矩阵 bug（首次可用），但实测 QP 时间域平滑破坏 s 域约束（末段偏差 3.1 m/s），DP 的 a_max 约束已产生平滑剖面（jerk 0.4 达标），负收益 |
 
 **仿真证伪的三个设计假设**（Python 先行抓到的真 bug，见各 commit）：
 1. 占据检查时间基准 double-count：障碍位置用全局 t 会把 s0 再叠加 v·t0 位移，
