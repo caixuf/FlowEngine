@@ -101,13 +101,15 @@ export function draw2D() {
   if (!_2d.active || !_2d.ctx) return;
   var ctx = _2d.ctx, W = _2d.w, H = _2d.h;
   var carX = W / 2, carY = H * 0.65, s = _2d.scale;
-  // Read smoothed ego state from the central dead-reckoning engine.
-  // 2D uses (x=forward, y=lateral) which maps to _dr (smoothX, smoothZ).
+  // Read ego state from the central dead-reckoning engine.
+  // 顿挫复盘（2026-08）：与 3D 一致走**真值直采**（last*），不叠 smooth，
+  // 避免 τ=125ms 滞后 + SSE 节拍抖动放大成周期顿挫（详见 SceneDirector）。
+  // 2D uses (x=forward, y=lateral) which maps to _dr (lastX, lastZ).
   var e = {
-    x: _dr.smoothX,
-    y: _dr.smoothZ,
-    heading: _dr.smoothHeading,
-    speed: _dr.smoothSpeed
+    x: _dr.lastX,
+    y: _dr.lastZ,
+    heading: _dr.lastHeading,
+    speed: _dr.lastSpeed
   };
 
   // ── Background (dark ADAS display) ──

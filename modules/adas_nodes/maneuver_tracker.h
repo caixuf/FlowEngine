@@ -36,7 +36,9 @@ struct ManeuverTrackerParams {
     double diverge_guard_rad   = 1.2;   // |dh| vs exec heading > 此值 => 暂停 s
     double lookahead_m         = 2.0;   // 横向前视弧长（同挡段）
     double speed_scan_m        = 6.0;   // 目标速度 min|v| 扫描窗口
-    double speed_floor_mps     = 1.5;   // 目标速度下限
+    double speed_floor_mps     = 0.5;   // 目标速度下限（2026-08-05 1.5→0.5：掉头
+                                        // Phase 1 刹停 + 驻停段能真正把车停到近 0，
+                                        // 旧 1.5 会覆盖 v=0 让车停不住）
     double gear_v_threshold    = 0.3;   // 向前扫第一个 |v|>此值 => gear 意图
     double gear_pending_speed  = 0.8;   // |speed|>此值 => 换挡前刹停
     double lat_gain_dh         = 0.8;   // heading 误差反馈增益
@@ -198,8 +200,14 @@ private:
         const bool has_base_motion = (std::fabs(base_v) > p_.gear_v_threshold);
         if (has_base_motion) want = (base_v < 0) ? -1 : 1;
 
+        // 前视窗口按刹车距离收缩（v²/4+0.5，下限 1.0），别用固定 6m：
+        // 掉头前进弧总长才 ~8-10m，车刚进弧 2m 时固定 6m 前视就能扫到倒车段 →
+        // gear_pending 过早刹停（实测 h=1.05 就停，远没到 corner），换 R 挡后
+        // 执行点还卡在前进弧内 → steer 前馈取错方向 → 倒车画圆死锁。低速时窗口
+        // 缩短到 < 到倒车段的弧长，只有真正能刹住时才请求换挡。
+        double scan = std::max(1.0, current_speed * current_speed / (2.0 * 2.0) + 0.5);
         double arc = 0.0;
-        for (int i = base_i; i < n_ - 1 && arc <= p_.speed_scan_m; i++) {
+        for (int i = base_i; i < n_ - 1 && arc <= std::min(p_.speed_scan_m, scan); i++) {
             arc += std::hypot((double)pts_[i + 1].x - (double)pts_[i].x,
                               (double)pts_[i + 1].y - (double)pts_[i].y);
             const double v = (double)pts_[i + 1].v;
@@ -224,6 +232,19 @@ inline ManeuverResult ManeuverTracker::tick(double ego_x, double ego_y,
     int exec_i = 0;
     TrackPoint exec_pt = exec(&exec_i);
     bool gear_pending = updateGear(exec_i, current_speed);
+
+    // 修：换挡已落定但执行点仍卡在相反挡段 → 倒车画圆死锁。
+    // 掉头前视窗口过早扫到倒车段，gear_ 已置 -1，但 exec 点还在前进弧内
+    // （pts_[exec_i].v > 0）→ 前馈 ff 取前进弧 kappa（+0.6），倒挡下 steer 方向
+    // 反 → yaw_rate 反向、heading 一路减 → advanceS 的 diverge_guard 永久冻结 s。
+    // 这里把 s_ 直接跳到下一倒车段边界并重取执行点，让前馈/反馈方向与挡位一致，
+    // 车头才能正确转升向 π，dh 收敛后 advanceS 恢复推进，后续点自然衔接。
+    if (gear_ == -1 && (double)pts_[exec_i].v > p_.segment_v_threshold) {
+        for (int i = exec_i; i < n_ - 1; i++) {
+            if ((double)pts_[i + 1].v < -p_.segment_v_threshold) { s_ = cum_s_[i]; break; }
+        }
+        exec_pt = exec(&exec_i);   // 重取执行点 → ff 取倒车段 kappa，方向正确
+    }
 
     // 目标速度方向跟随「已落定的 gear」，而非插值 exec v：
     // D/R 边界处 exec 在 v=-3 与 v=+3.5 间插值，v 符号在边界模糊（可能跨 0），

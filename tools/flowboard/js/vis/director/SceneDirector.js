@@ -364,21 +364,17 @@ export function createSceneDirector(scene) {
     tickDeadReckon();
     if (store.ego && _dr.init) {
       const egoZ = store.ego.z;
-      /* 二分调试开关：URL ?raw=1 绕过硬推（死推算），直接用后端真值渲染。
-       * 用于定位"车屁股先动"在前端（死推算外推/平滑）还是后端（物理/
-       * 数据链）。正常模式用 smooth（平滑外推），?raw=1 用 last（真值）。 */
-      if (typeof window !== 'undefined' &&
-          new URLSearchParams(window.location.search).get('raw') === '1') {
-        store.ego.x = _dr.lastX;
-        store.ego.y = _dr.lastZ;
-        store.ego.heading = _dr.lastHeading;
-        store.ego.speed = _dr.lastSpeed;
-      } else {
-        store.ego.x = _dr.smoothX;
-        store.ego.y = _dr.smoothZ;
-        store.ego.heading = _dr.smoothHeading;
-        store.ego.speed = _dr.smoothSpeed;
-      }
+      /* 顿挫复盘（2026-08 定案）：ego 一律**真值直采**（last*），不再走
+       * smooth（指数平滑+速度外推）。相机在 CameraRig 已刚性锁定 ego
+       * （chase 下车相对画面固定），ego 的平滑是画蛇添足——τ=125ms 相位
+       * 滞后 + SSE 20Hz 节拍抖动被放大成"忽快忽慢"的周期顿挫。raw 对比已
+       * 证实：?raw=1（last* 直采）无顿挫，默认（smooth*）顿挫。NPC 仍走
+       * tickEntityDeadReckon 平滑插值（它们不锁相机，需要 20Hz→60fps
+       * 插值）。 */
+      store.ego.x = _dr.lastX;
+      store.ego.y = _dr.lastZ;
+      store.ego.heading = _dr.lastHeading;
+      store.ego.speed = _dr.lastSpeed;
       store.ego.z = egoZ;
     }
     /* 流畅专题：NPC 与 ego 同构的 dead reckon。

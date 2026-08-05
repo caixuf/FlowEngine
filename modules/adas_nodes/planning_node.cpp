@@ -500,10 +500,17 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                            * 旧值 0.45（wheelbase=2.8 模型下 Python 扫参最优）转弯慢，
                                            * 64 点轨迹截断在 Phase 3 前；满舵 yaw_rate 提高 38%，
                                            * 弧段缩短，轨迹可覆盖全部相位。 */
-    const double uturn_speed = 3.5;       /* 掉头目标低速 (m/s) */
-    const double reverse_speed = -3.0;    /* 倒车速度 (m/s) */
+    /* 2026-08-05 慢转（用户规范"先停下来然后慢慢多把转"）：3.5→2.5 / -3.0→-2.0。
+     * Python 仿真验证：corner_limit=6.0 + v_fwd=2.5 + v_rev=2.0 → corner_max=6.00
+     * （距路沿 1.0m 余量）、2 把完成、车道对准良好。速度不影响运动学几何，
+     * 只增加可控性、降低撞路沿风险。 */
+    const double uturn_speed = 2.5;       /* 掉头前弧低速 (m/s) */
+    const double reverse_speed = -2.0;    /* 倒车速度 (m/s) */
     const double half_wb = wheelbase * 0.5;  /* 半轴距：车辆中心偏移后轴距离 */
-    const double min_uturn_space = 12.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
+    /* 2026-08-05 12→10：掉头前向空间不足 12m 时 Phase 0 倒车腾挪（"掉头直接倒车"
+     * 观感太骚，实测 fwd=11.5m 只差 1.5m）。掉头首弧 2×R≈7.9m（R=wb/tan(0.6)=3.95），
+     * 10m 足够开始多把方向；真正无空间（返程路端 x≈0）仍需倒车，那是真实需求。 */
+    const double min_uturn_space = 10.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
 
     /* 安全上限（防止无限循环） */
     const double phase0_max_dur = 5.0;   /* 腾挪倒车最多 5s */
@@ -588,12 +595,17 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                  reversed, x, y);
     }
 
-    /* ═══ Phase 1: 直线重刹 → 掉头低速 ═══ */
+    /* ═══ Phase 1: 直线重刹 → 先停稳再进弯（2026-08-05 用户规范"先停下来然后
+     * 慢慢多把转"）═══
+     * 旧实现只刹到 uturn_speed 就直接进弯，进弯仍带初速、撞护栏风险。改为刹到
+     * 0 并驻停 0.5s，配合 maneuver_tracker.speed_floor_mps 降到 0.5，车在进弯前
+     * 真正停稳。停稳后 Phase 2 前弧从静止加速到 2.5 m/s，更稳、角点余量更大。 */
     {
         const double brake_decel = -8.0;  /* 急刹减速度 (m/s²) */
-        while (v > uturn_speed + 0.1 && n < max_points) {
+        const double stop_hold_s = 0.5;   /* 停稳驻留时长 (s) */
+        while (v > 0.05 && n < max_points) {
             v += brake_decel * dt;
-            if (v < uturn_speed) v = uturn_speed;
+            if (v < 0.0) v = 0.0;
             x += v * cos(h) * dt;
             y += v * sin(h) * dt;
 
@@ -607,11 +619,28 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             n++;
             t_us += (uint32_t)(dt * 1e6);
         }
-        /* 确保至少发布一个刹车点 */
+        v = 0.0;
+        /* 驻停点：v=0 保持 stop_hold_s，让 control 真正刹停（换挡 D→R 另有
+         * gear_pending 的 SHIFT_STOP 兜底）再进弯 */
+        {
+            double held = 0.0;
+            while (n < max_points && held < stop_hold_s) {
+                points[n].t_rel_us = t_us;
+                points[n].x = (float)x;  points[n].y = (float)y;
+                points[n].heading = (float)h;  points[n].v = 0.0f;
+                points[n].kappa = 0.0f;
+                points[n].a = 0.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+                points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+                n++;
+                held += dt;
+                t_us += (uint32_t)(dt * 1e6);
+            }
+        }
+        /* 确保至少发布一个驻停点 */
         if (n == 0) {
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
-            points[n].heading = (float)h;  points[n].v = (float)v;
+            points[n].heading = (float)h;  points[n].v = 0.0f;
             points[n].kappa = 0.0f;  points[n].a = 0.0f;
             points[n].jerk = 0.0f;  points[n].s = 0.0f;
             points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
@@ -642,9 +671,15 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
     const double uturn_reverse_h_guard = 0.30;     /* 倒车 heading 护栏（离目标 0.3 rad 内收）*/
     const double half_body_len = 2.3;              /* 车身半长 */
     const double half_body_wid = 1.0;              /* 车身半宽 */
-    /* 目标车道中心：去程 +1.75（对向）/ 返程 -1.75（前进车道） */
+    /* 目标车道中心：去程 → 对向内侧车道 / 返程 → 前进内侧车道。
+     * 2026-08-05 泛化：旧实现 ±lane_width*0.5 硬编码（只对 4 车道对称路成立）。
+     * 用 lane_center_y 从真实车道布局推导——4 车道时去程 lane1(y=+1.75)/
+     * 返程 lane2(y=-1.75)，2 车道时 ±1.75，任意车道数自洽。 */
+    const int lc = (g.lane_count >= 2) ? g.lane_count : 2;
     const double target_lane_center_y =
-        (uturn_target_h < 0.5) ? -g.lane_width * 0.5 : g.lane_width * 0.5;
+        (uturn_target_h < 0.5)
+            ? lane_center_y(lc / 2, lc, g.lane_width)         /* 返程 → 前进车道（内道） */
+            : lane_center_y(lc / 2 - 1, lc, g.lane_width);    /* 去程 → 对向车道（内道） */
     const double stroke_dir = (uturn_target_h < 0.5) ? -1.0 : 1.0;  /* 去程 +1 / 返程 -1 */
 
     bool uturn_done = false;
@@ -1538,40 +1573,38 @@ protected:
                 int oncoming = 0;
                 double min_clearance_left  = 1e9;  /* 左侧最近障碍横向距离 */
                 double min_clearance_right = 1e9;  /* 右侧最近障碍横向距离 */
-                /* 会车横向判定上限：相邻车道范围内才算迎头，2+ 车道外的
-                 * 对向车不是直接威胁。多车道高速上 ego 在 lane3、对向车在
-                 * lane0（横向 10.5m）时，旧逻辑 |dy|>2.0 也触发让行，把
-                 * 巡航压到 0.4× 刹停——2026-07-31 实跑。 */
-                double oncoming_dy_max = (g.lane_width > 1.0 ? g.lane_width : 3.5) * 1.5;
-
+                /* 会车横向判定上限：只在**同一条车道**才算迎头（2026-08-05 与
+                 * safety min_oncoming_ttc 对齐）。旧逻辑 2.0<|dy|≤1.5×路宽把
+                 * 相邻对向车道（3.5m 外）也当迎头 → 掉头返程每次接近对向车
+                 * 都 0.4× 让行 = 幽灵刹车（用户实测）。同车道头对头才是真风险，
+                 * 分隔车道不是。 */
+                const double oncoming_lat_max = (g.lane_width > 1.0 ? g.lane_width : 3.5) * 0.65;
+                /* 方向感知（2026-08-04 返程修复 + 2026-08-05 移除世界 dx 预筛）：
+                 * 旧世界 dx 窗口 (-10,80] 在返程朝 -x 时前方车 dx<−10 被跳过
+                 * （方向盲，该侧无对向保护）。沿车头方向投影后前进/返程统一：
+                 * 同向车沿向速度恒为正（远离）、对向车为负（接近）。 */
+                const double fwd_x = std::cos(g.ego_heading);
+                const double fwd_y = std::sin(g.ego_heading);
                 for (int i = 0; i < g.kMaxObs; i++) {
-                    double dx = g.obs_x[i] - g.ego_x;
-                    if (dx < -10.0 || dx > 80.0) continue;
-                    double dy = g.obs_y[i] - g.ego_y;  /* 相对 ego 的横向偏移 */
+                    const double rx = g.obs_x[i] - g.ego_x;
+                    const double ry = g.obs_y[i] - g.ego_y;
+                    const double along = rx * fwd_x + ry * fwd_y;       /* 沿车头前方 */
+                    const double lat_signed = -rx * fwd_y + ry * fwd_x; /* 左为正 */
 
-                    /* 会车检测: 对向车道且横向相邻 (2.0 < |dy| ≤ 1.5×路宽),
-                     * 迎面驶来 (vx < -2 m/s), 前方 60m 内 */
-                    /* 方向感知（2026-08-04 返程速度退化修复）：前方/对向判定
-                     * 从世界 +x/世界 vx 改为沿车头方向投影——旧实现返程把
-                     * 同向车（世界 vx<0）误判为迎头对向，相邻车道同向车每辆
-                     * 都触发 0.4× 让行 → 掉头后速度跑不到目标（实测返程被
-                     * 压到 10-14 m/s，全跑程复现）。投影后同向车沿向速度
-                     * 恒为正（远离）、对向车为负（接近），前进/返程统一。 */
-                    double fwd_x = std::cos(g.ego_heading);
-                    double fwd_y = std::sin(g.ego_heading);
-                    double along = dx * fwd_x + dy * fwd_y;  /* 沿车头方向距离 */
-                    double rel_v = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
-                    if (std::fabs(dy) > 2.0 && std::fabs(dy) <= oncoming_dy_max &&
+                    /* 会车检测: 同车道头对头（lat ≤ 0.65×路宽）、迎面驶来
+                     * （rel_v < -2）、前方 60m 内 */
+                    const double rel_v = g.obs_vx[i] * fwd_x + g.obs_vy[i] * fwd_y;
+                    if (std::fabs(lat_signed) <= oncoming_lat_max &&
                         along > 0.0 && along < 60.0 && rel_v < -2.0) {
                         oncoming = 1;
                     }
 
                     /* 窄路检测: 统计左右两侧最近障碍物横向距离（前瞻窗沿车头方向）*/
                     if (along > 0.0 && along < 20.0) {  /* 20m 前瞻窗 */
-                        if (dy < 0.0 && fabs(dy) < min_clearance_right)
-                            min_clearance_right = fabs(dy);
-                        if (dy > 0.0 && dy < min_clearance_left)
-                            min_clearance_left = dy;
+                        if (lat_signed < 0.0 && fabs(lat_signed) < min_clearance_right)
+                            min_clearance_right = fabs(lat_signed);
+                        if (lat_signed > 0.0 && lat_signed < min_clearance_left)
+                            min_clearance_left = lat_signed;
                     }
                 }
 
