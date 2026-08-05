@@ -128,19 +128,16 @@ static void on_fusion(const Message* msg, void* user_data) {
 static void on_planning(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (root) {
-        cJSON* j = cJSON_GetObjectItemCaseSensitive(root, "target_speed");
-        if (cJSON_IsNumber(j))
-            g.planning_target_speed = j->valuedouble;
-        else {
-            j = cJSON_GetObjectItemCaseSensitive(root, "speed");
-            if (cJSON_IsNumber(j))
-                g.planning_target_speed = j->valuedouble;
-        }
-        cJSON_Delete(root);
+    /* planning/trajectory 是二进制 Trajectory 序列化，不是 JSON。
+     * 用 cJSON_Parse 解析二进制数据会触发 strtod_l 断言崩溃（堆损坏）。
+     * 改为 Trajectory_deserialize，与 inference_node / data_recorder_node 一致。 */
+    Trajectory traj;
+    memset(&traj, 0, sizeof(traj));
+    if (Trajectory_deserialize(&traj, (const uint8_t*)msg->data, msg->data_size) == 0
+        && traj.point_count > 0) {
+        g.planning_target_speed = (double)traj.points[0].v;
+        g.has_planning = 1;
     }
-    g.has_planning = 1;
 }
 
 static void on_obstacles(const Message* msg, void* user_data) {
