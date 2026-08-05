@@ -1,8 +1,30 @@
 # Planning 速度规划升级设计 — ST 图 + DP/QP（2026-08）
 
-> 状态：**设计稿，待评审**。本机只出计划，实现交给云端。
+> 状态：**M1/M2/M4 已实施**（b5fd449 / 8ab7327 / ed3136c）。M3（QP 精修）待做。
 > 配套路线：`ALGORITHM_INTEGRATION.md`「规划-速度：自研 ST 图 + DP/QP」条目落地。
 > 前置阅读：`CLAUDE.md` 故障模式表（本设计引用其中 10+ 条 planning 层根因）。
+> 实现：`modules/adas_nodes/st_graph.{h,c}` + `tools/speed_planner_sim.py`（12/12 PASS）。
+
+## 0. 实施记录（2026-08-05）
+
+已落地（每个 milestone 独立可回退，见各 commit message）：
+
+| 里程碑 | commit | 内容 |
+|--------|--------|------|
+| M1 | b5fd449 | ST 图 + DP 替代线性斜坡与红灯 override；视界动态扩展；全局时间 |
+| M2 | 8ab7327 | 同向/静止障碍占据；时间基准 double-count 修复；占据区无条件禁止 |
+| M4 | ed3136c | 掉头曲率-速度约束防线（κ=0.2534 → 4.22 m/s 极限） |
+| M3 | — | QP 精修（`include/piecewise_jerk_qp.h` 已有 `pjqp_speed_solve`，待接） |
+
+**仿真证伪的三个设计假设**（Python 先行抓到的真 bug，见各 commit）：
+1. 占据检查时间基准 double-count：障碍位置用全局 t 会把 s0 再叠加 v·t0 位移，
+   对向车 (v<0) 被算到车后 → 剖面全巡航 → 撞车。修复：障碍用相对时间 (t−t0)。
+2. 占据区允许 v=0 停在里面：移动障碍会撞停着的车 → 占据区无条件禁止。
+3. 同车道头对头「停车让行」模型错误：对向车会撞停着的车 → 对向车不进 ST 图
+   （横向决策是 behavior 职责），会车 override（0.4× 降速）保留；
+   behavior 掉头兜底（v≤5 触发）是触发事件不是速度 override，保留。
+   Python 仿真数学验证：掉头弧 κ=0.2534 → 极限 4.22 m/s，behavior 兜底 v=5
+   时 a_lat=6.33 超限 —— 2026-08-04 撞护栏根因的数学解释。
 
 ## 1. 背景与动机
 
