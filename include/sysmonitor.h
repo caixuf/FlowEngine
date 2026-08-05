@@ -155,6 +155,19 @@ int sysmonitor_proc_snapshot(SysMonitor* sm,
                              int max_out);
 
 /**
+ * 单进程(dlopen)模式下以"线程作进程"采集快照：把当前进程的每个业务
+ * 节点线程当作一条进程输出（pid=tid，name=线程名，CPU=该线程差分）。
+ * 用于单进程部署下按 AD 节点查看 CPU 占用。
+ * @param sm        实例
+ * @param out       输出数组，长度至少为 @p max_out
+ * @param max_out   输出容量
+ * @return 实际写入的节点数，-1 失败
+ */
+int sysmonitor_proc_thread_snapshots(SysMonitor* sm,
+                                     SysMonitorProcSnapshot* out,
+                                     int max_out);
+
+/**
  * 销毁实例并释放所有内部资源。
  */
 void sysmonitor_destroy(SysMonitor* sm);

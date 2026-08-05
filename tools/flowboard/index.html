@@ -118,28 +118,6 @@
     </div>
   </div>
 
-  <div class="card" id="perf-card" style="display:none"><div class="card-header" onclick="flowboard.toggleCard(this)"><h2>📈 性能分析</h2><span class="toggle">▼</span></div>
-    <div class="card-body">
-      <div class="view-toggle" id="perf-view-toggle">
-        <button class="toggle-btn active" data-view="sys" onclick="flowboard.switchPerfView('sys')">🌐 系统</button>
-        <button class="toggle-btn" data-view="proc" onclick="flowboard.switchPerfView('proc')">⚙️ 进程</button>
-      </div>
-      <div id="perf-view-sys"><div class="metric-grid">
-        <div class="mini-stat"><div class="val" id="p-cpu" style="color:#58a6ff">--</div><div class="lbl">CPU %</div></div>
-        <div class="mini-stat"><div class="val" id="p-mem" style="color:#d29922">--</div><div class="lbl">内存 %</div></div>
-        <div class="mini-stat"><div class="val" id="p-load" style="color:#bc8cff">--</div><div class="lbl">负载</div></div>
-        <div class="mini-stat"><div class="val" id="p-proc" style="color:#3fb950">--</div><div class="lbl">进程</div></div>
-      </div>
-      <div style="font-size:10px;color:#484f58;margin-top:6px;padding:0 2px" id="p-detail"></div>
-      </div>
-      <div id="perf-view-proc" style="display:none">
-        <div id="proc-list" style="font-size:11px;max-height:150px;overflow-y:auto"><span style="color:#484f58">等待进程数据...</span></div>
-        <div style="font-size:10px;color:#484f58;margin:6px 0 4px 0;padding:0 2px" id="proc-header">点击进程查看其线程</div>
-        <div id="proc-threads" style="font-size:11px;max-height:180px;overflow-y:auto"><span style="color:#484f58">—</span></div>
-      </div>
-    </div>
-  </div>
-
   <div style="font-size:10px;color:#30363d;margin-top:auto;line-height:1.8">
     节点: <b id="node-n">0</b> · 线程: <b id="thread-cnt">0</b> · 帧: <b id="frame-n">0</b>
     <div style="margin-top:2px">快捷键: <span class="kbd">1-6</span> 视角 <span class="kbd">R</span> 重置 <span class="kbd">F</span> 全屏 <span class="kbd">P</span> 性能 <span class="kbd">G</span> 道路 <span class="kbd">T</span> 红绿灯 <span class="kbd">L</span> 标签 <span class="kbd">Esc</span></div>
@@ -151,6 +129,7 @@
     <button class="ws-btn active" data-ws="observe" onclick="flowboard.switchWorkspace('observe')">🛰 观察</button>
     <button class="ws-btn" data-ws="analyze" onclick="flowboard.switchWorkspace('analyze')">📈 分析</button>
     <button class="ws-btn" data-ws="operate" onclick="flowboard.switchWorkspace('operate')">🛠 运维</button>
+    <button class="ws-btn" data-ws="perf" onclick="flowboard.switchWorkspace('perf')">📊 性能分析</button>
   </div>
 
   <div class="row ws-block ws-observe-analyze" style="display:flex;gap:12px;flex-shrink:0">
@@ -205,6 +184,33 @@
         </div>
       </div>
       <div class="ops-hint">💡 建议流程：先在「观察」页面查看场景运行状态，再切换到「运维」执行操作，最后到「分析」页面查看指标回归结果。</div>
+    </div>
+  </div>
+
+  <div class="card ws-block ws-perf">
+    <div class="card-header"><h2><span class="dot" style="background:#bc8cff"></span>性能分析 <span style="font-weight:400;color:#484f58">— 系统 / 进程 / 线程占用</span></h2></div>
+    <div class="card-body perf-body">
+      <div class="perf-sys-row">
+        <div class="chart-box perf-chart"><canvas id="perf-cpu"></canvas><div class="chart-tooltip" id="tt-perf-cpu"></div></div>
+        <div class="chart-box perf-chart"><canvas id="perf-mem"></canvas><div class="chart-tooltip" id="tt-perf-mem"></div></div>
+      </div>
+      <div class="perf-toggle">
+        <button class="perf-tab active" id="perf-tab-proc" onclick="flowboard.setPerfMode('proc')">进程</button>
+        <button class="perf-tab" id="perf-tab-thread" onclick="flowboard.setPerfMode('thread')">线程</button>
+        <span class="perf-sel" id="perf-sel-name">点击左侧列表选择查看</span>
+      </div>
+      <div class="perf-grid">
+        <div class="perf-col">
+          <div class="perf-subtitle" id="perf-list-title">进程列表</div>
+          <div id="perf-list" class="perf-scroll"><span style="color:#484f58">等待进程数据...</span></div>
+        </div>
+        <div class="perf-col" style="flex:2">
+          <div class="perf-sys-row">
+            <div class="chart-box perf-chart-lg"><canvas id="perf-pcpu"></canvas><div class="chart-tooltip" id="tt-perf-pcpu"></div></div>
+            <div class="chart-box perf-chart-lg"><canvas id="perf-prss"></canvas><div class="chart-tooltip" id="tt-perf-prss"></div></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>

@@ -41,6 +41,33 @@ body[data-workspace="analyze"] .ws-operate{display:none!important}
 body[data-workspace="operate"] .ws-observe,
 body[data-workspace="operate"] .ws-analyze,
 body[data-workspace="operate"] .ws-observe-analyze{display:none!important}
+body[data-workspace="perf"] .ws-observe,
+body[data-workspace="perf"] .ws-analyze,
+body[data-workspace="perf"] .ws-operate,
+body[data-workspace="perf"] .ws-observe-analyze{display:none!important}
+body[data-workspace="observe"] .ws-perf,
+body[data-workspace="analyze"] .ws-perf,
+body[data-workspace="operate"] .ws-perf{display:none!important}
+/* 性能分析窗口布局 */
+.perf-body{display:flex;flex-direction:column;gap:12px}
+.perf-sys-row{display:flex;gap:12px;flex-wrap:wrap}
+.perf-chart{flex:1;min-width:220px;height:200px}
+.perf-grid{display:flex;gap:12px;flex-wrap:wrap}
+.perf-col{flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px}
+.perf-subtitle{font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.3px}
+.perf-scroll{max-height:220px;overflow-y:auto;font-size:11px;display:flex;flex-direction:column;gap:2px}
+.perf-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer;border:1px solid transparent}
+.perf-row:hover{background:#111a2b}
+.perf-row.active{background:rgba(88,166,255,.12);border-color:#1f6feb55}
+.perf-row .pct{min-width:46px;text-align:right;font-weight:700;font-family:'JetBrains Mono',monospace}
+.perf-row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c9d1d9}
+.perf-row .meta{color:#484f58;font-family:'JetBrains Mono',monospace;font-size:10px}
+.perf-toggle{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.perf-tab{padding:5px 18px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#8b949e;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
+.perf-tab:hover{color:#c9d1d9;border-color:#484f58}
+.perf-tab.active{background:#1f6feb;color:#fff;border-color:#1f6feb}
+.perf-sel{font-size:12px;color:#58a6ff;font-weight:700;margin-left:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.perf-chart-lg{flex:1;min-width:300px;height:300px}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.3px}
 .pill-live{background:linear-gradient(135deg,#0d3320,#1a4d30);color:#3fb950;border:1px solid#1a5c38}
 .pill-dead{background:linear-gradient(135deg,#330d0d,#4d1a1a);color:#f85149;border:1px solid#5c1a1a}

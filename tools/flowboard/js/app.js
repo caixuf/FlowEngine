@@ -179,7 +179,7 @@ function saveState() {
 }
 
 function switchWorkspace(mode) {
-  if (['observe','analyze','operate'].indexOf(mode) < 0) mode = 'observe';
+  if (['observe','analyze','operate','perf'].indexOf(mode) < 0) mode = 'observe';
   workspaceMode = mode;
   document.body.setAttribute('data-workspace', mode);
   var nav = document.getElementById('workspace-nav');
@@ -189,6 +189,7 @@ function switchWorkspace(mode) {
     });
   }
   if (mode === 'observe') setTimeout(resize3D, 120);
+  if (mode === 'perf') setTimeout(updatePerf, 50);
   saveState();
 }
 
@@ -477,38 +478,111 @@ function doSimulate() {
   topoData = {
     source: 'demo',
     nodes: [
-      {name:"perception",pid:1001,alive:true,caps:1,topics:[{topic:"sensor/lidar",freq:20},{topic:"sensor/camera",freq:20},{topic:"sensor/gps",freq:10}]},
-      {name:"fusion",pid:1002,alive:true,caps:9,topics:[{topic:"sensor/lidar",freq:0},{topic:"sensor/gps",freq:0},{topic:"fusion/localization",freq:20}]},
-      {name:"planning",pid:1004,alive:true,caps:2,topics:[{topic:"fusion/localization",freq:0},{topic:"planning/trajectory",freq:10}]},
-      {name:"control",pid:1003,alive:true,caps:2,topics:[{topic:"fusion/localization",freq:0},{topic:"planning/trajectory",freq:0},{topic:"control/cmd",freq:100}]},
-      {name:"monitor",pid:1005,alive:true,caps:0,topics:[]}
+      {name:"monitor",pid:9001,alive:true,caps:0,topics:[{topic:"monitor/sysmon",freq:5}]},
+      {name:"flowsim",pid:9002,alive:true,caps:1,topics:[{topic:"sim/state",freq:100},{topic:"perception/raw",freq:20}]},
+      {name:"sensor_sim",pid:9003,alive:true,caps:1,topics:[{topic:"sensor/lidar",freq:20},{topic:"sensor/camera",freq:20},{topic:"sensor/gps",freq:10}]},
+      {name:"perception",pid:9004,alive:true,caps:9,topics:[{topic:"sensor/lidar",freq:0},{topic:"sensor/camera",freq:0},{topic:"perception/detection",freq:20}]},
+      {name:"object_tracker",pid:9005,alive:true,caps:1,topics:[{topic:"perception/detection",freq:0},{topic:"perception/tracked_objects",freq:20}]},
+      {name:"situation",pid:9006,alive:true,caps:2,topics:[{topic:"perception/tracked_objects",freq:0},{topic:"situation/assessment",freq:10}]},
+      {name:"behavior",pid:9007,alive:true,caps:2,topics:[{topic:"situation/assessment",freq:0},{topic:"behavior/command",freq:10}]},
+      {name:"planning",pid:9008,alive:true,caps:2,topics:[{topic:"behavior/command",freq:0},{topic:"planning/trajectory",freq:10}]},
+      {name:"control",pid:9009,alive:true,caps:2,topics:[{topic:"planning/trajectory",freq:0},{topic:"control/cmd",freq:100}]},
+      {name:"safety_guard",pid:9010,alive:true,caps:1,topics:[{topic:"control/cmd",freq:0},{topic:"safety/alert",freq:10}]}
     ],
     metrics: {
       bus:{published:1250,delivered:2480,dropped:0},
       transport:{local_pub:1250,remote_pub:0},
-      scheduler:{tasks:5,mode:"CHOREO"},
+      scheduler:{tasks:10,mode:"CHOREO"},
       latency:{avg_us:145,p50_us:120,p99_us:450},
       driver_mode:"ACC",
       vehicle:{speed:28.5,target_speed:33.0,throttle:0.92,brake:0,x:65.0,error:4.5},
+      sysmon:{
+        cpu_total_pct:38.4, mem_used_pct:58.2,
+        mem_used_kb:19500000, mem_total_kb:33554432,
+        load1:2.1, load5:1.9, load15:1.7, cpu_count:16,
+        procs:[
+          {pid:9001,name:"monitor",cpu_pct:3.2,rss_kb:122880,thread_count:3,threads:[
+            {tid:91001,name:"main",cpu_pct:1.0,state:"R"},
+            {tid:91002,name:"sysmon",cpu_pct:1.4,state:"S"},
+            {tid:91003,name:"httpd",cpu_pct:0.8,state:"S"}]},
+          {pid:9002,name:"flowsim",cpu_pct:12.5,rss_kb:870400,thread_count:4,threads:[
+            {tid:92001,name:"sim_loop",cpu_pct:6.0,state:"R"},
+            {tid:92002,name:"physics",cpu_pct:4.2,state:"R"},
+            {tid:92003,name:"render",cpu_pct:1.5,state:"S"},
+            {tid:92004,name:"io",cpu_pct:0.8,state:"S"}]},
+          {pid:9003,name:"sensor_sim",cpu_pct:8.0,rss_kb:307200,thread_count:3,threads:[
+            {tid:93001,name:"lidar",cpu_pct:4.0,state:"R"},
+            {tid:93002,name:"camera",cpu_pct:3.0,state:"R"},
+            {tid:93003,name:"gps",cpu_pct:1.0,state:"S"}]},
+          {pid:9004,name:"perception",cpu_pct:22.0,rss_kb:1228800,thread_count:4,threads:[
+            {tid:94001,name:"lidar_pipe",cpu_pct:8.0,state:"R"},
+            {tid:94002,name:"camera_pipe",cpu_pct:7.0,state:"R"},
+            {tid:94003,name:"bev",cpu_pct:5.0,state:"R"},
+            {tid:94004,name:"fusion",cpu_pct:2.0,state:"S"}]},
+          {pid:9005,name:"object_tracker",cpu_pct:9.5,rss_kb:512000,thread_count:3,threads:[
+            {tid:95001,name:"tracker",cpu_pct:5.0,state:"R"},
+            {tid:95002,name:"kalman",cpu_pct:3.0,state:"R"},
+            {tid:95003,name:"gating",cpu_pct:1.5,state:"S"}]},
+          {pid:9006,name:"situation",cpu_pct:6.2,rss_kb:409600,thread_count:3,threads:[
+            {tid:96001,name:"rule_match",cpu_pct:3.0,state:"R"},
+            {tid:96002,name:"risk_net",cpu_pct:2.2,state:"R"},
+            {tid:96003,name:"assess",cpu_pct:1.0,state:"S"}]},
+          {pid:9007,name:"behavior",cpu_pct:4.8,rss_kb:358400,thread_count:3,threads:[
+            {tid:97001,name:"fsm",cpu_pct:2.0,state:"R"},
+            {tid:97002,name:"route",cpu_pct:1.6,state:"S"},
+            {tid:97003,name:"cmd",cpu_pct:1.2,state:"S"}]},
+          {pid:9008,name:"planning",cpu_pct:15.0,rss_kb:921600,thread_count:3,threads:[
+            {tid:98001,name:"traj_opt",cpu_pct:9.0,state:"R"},
+            {tid:98002,name:"rule_check",cpu_pct:4.0,state:"R"},
+            {tid:98003,name:"pub",cpu_pct:2.0,state:"S"}]},
+          {pid:9009,name:"control",cpu_pct:5.5,rss_kb:256000,thread_count:3,threads:[
+            {tid:99001,name:"pid",cpu_pct:2.5,state:"R"},
+            {tid:99002,name:"stanley",cpu_pct:2.0,state:"R"},
+            {tid:99003,name:"safety_mon",cpu_pct:1.0,state:"S"}]},
+          {pid:9010,name:"safety_guard",cpu_pct:3.0,rss_kb:153600,thread_count:3,threads:[
+            {tid:91010,name:"guard_main",cpu_pct:1.2,state:"R"},
+            {tid:91011,name:"ttc_mon",cpu_pct:1.0,state:"S"},
+            {tid:91012,name:"lane_mon",cpu_pct:0.8,state:"S"}]}
+        ]
+      },
       topics: [
-        {topic:"sensor/lidar",pub:500,del:1000,drop:0,lat_us:145,freq:20.0,subs:2,reliability:"best_effort",deadline_ms:0,transport:"shm"},
-        {topic:"sensor/camera",pub:500,del:500,drop:0,lat_us:95,freq:20.0,subs:1,reliability:"best_effort",deadline_ms:0,transport:"shm"},
-        {topic:"fusion/localization",pub:500,del:1000,drop:0,lat_us:120,freq:20.0,subs:2,reliability:"reliable",deadline_ms:100,transport:"shm"},
-        {topic:"planning/trajectory",pub:200,del:200,drop:0,lat_us:85,freq:10.0,subs:1,reliability:"reliable",deadline_ms:20,transport:"dds"}
+        {topic:"monitor/sysmon",pub:5,del:50,drop:0,lat_us:30,freq:5.0,subs:1,reliability:"reliable",deadline_ms:0,transport:"shm"},
+        {topic:"sim/state",pub:100,del:100,drop:0,lat_us:20,freq:100,subs:1,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"perception/raw",pub:500,del:500,drop:0,lat_us:90,freq:20,subs:1,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"sensor/lidar",pub:500,del:1000,drop:0,lat_us:145,freq:20,subs:2,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"sensor/camera",pub:500,del:500,drop:0,lat_us:95,freq:20,subs:1,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"sensor/gps",pub:250,del:250,drop:0,lat_us:40,freq:10,subs:1,reliability:"reliable",deadline_ms:0,transport:"shm"},
+        {topic:"perception/detection",pub:500,del:1000,drop:0,lat_us:130,freq:20,subs:2,reliability:"best_effort",deadline_ms:0,transport:"shm"},
+        {topic:"perception/tracked_objects",pub:500,del:1500,drop:0,lat_us:110,freq:20,subs:3,reliability:"reliable",deadline_ms:100,transport:"shm"},
+        {topic:"situation/assessment",pub:250,del:500,drop:0,lat_us:80,freq:10,subs:2,reliability:"reliable",deadline_ms:100,transport:"shm"},
+        {topic:"behavior/command",pub:250,del:500,drop:0,lat_us:75,freq:10,subs:1,reliability:"reliable",deadline_ms:20,transport:"dds"},
+        {topic:"planning/trajectory",pub:200,del:200,drop:0,lat_us:85,freq:10,subs:1,reliability:"reliable",deadline_ms:20,transport:"dds"},
+        {topic:"control/cmd",pub:1000,del:1000,drop:0,lat_us:35,freq:100,subs:1,reliability:"reliable",deadline_ms:10,transport:"dds"},
+        {topic:"safety/alert",pub:250,del:250,drop:0,lat_us:25,freq:10,subs:1,reliability:"reliable",deadline_ms:0,transport:"shm"}
       ]
     },
     endpoints: [
-      {node:"perception",topic:"sensor/lidar",role:"pub",type_id:"0xd712aa51",freq:20.0},
-      {node:"perception",topic:"sensor/camera",role:"pub",type_id:"0x4A1B0C2D",freq:20.0},
-      {node:"perception",topic:"sensor/gps",role:"pub",type_id:"0x0596b0b7",freq:10.0},
-      {node:"fusion",topic:"sensor/lidar",role:"sub",type_id:"0xd712aa51",freq:0},
-      {node:"fusion",topic:"sensor/gps",role:"sub",type_id:"0x0596b0b7",freq:0},
-      {node:"fusion",topic:"fusion/localization",role:"pub",type_id:"0xf0ed10c0",freq:20.0},
-      {node:"planning",topic:"fusion/localization",role:"sub",type_id:"0xf0ed10c0",freq:0},
-      {node:"planning",topic:"planning/trajectory",role:"pub",type_id:"0x3A7B1C2D",freq:10.0},
-      {node:"control",topic:"fusion/localization",role:"sub",type_id:"0xf0ed10c0",freq:0},
+      {node:"monitor",topic:"monitor/sysmon",role:"pub",type_id:"0x000000a1",freq:5.0},
+      {node:"flowsim",topic:"sim/state",role:"pub",type_id:"0x000000a2",freq:100},
+      {node:"flowsim",topic:"perception/raw",role:"pub",type_id:"0x000000a3",freq:20},
+      {node:"sensor_sim",topic:"sensor/lidar",role:"pub",type_id:"0xd712aa51",freq:20},
+      {node:"sensor_sim",topic:"sensor/camera",role:"pub",type_id:"0x4A1B0C2D",freq:20},
+      {node:"sensor_sim",topic:"sensor/gps",role:"pub",type_id:"0x0596b0b7",freq:10},
+      {node:"perception",topic:"sensor/lidar",role:"sub",type_id:"0xd712aa51",freq:0},
+      {node:"perception",topic:"sensor/camera",role:"sub",type_id:"0x4A1B0C2D",freq:0},
+      {node:"perception",topic:"perception/detection",role:"pub",type_id:"0x000000b1",freq:20},
+      {node:"object_tracker",topic:"perception/detection",role:"sub",type_id:"0x000000b1",freq:0},
+      {node:"object_tracker",topic:"perception/tracked_objects",role:"pub",type_id:"0x000000b2",freq:20},
+      {node:"situation",topic:"perception/tracked_objects",role:"sub",type_id:"0x000000b2",freq:0},
+      {node:"situation",topic:"situation/assessment",role:"pub",type_id:"0x000000c1",freq:10},
+      {node:"behavior",topic:"situation/assessment",role:"sub",type_id:"0x000000c1",freq:0},
+      {node:"behavior",topic:"behavior/command",role:"pub",type_id:"0x000000c2",freq:10},
+      {node:"planning",topic:"behavior/command",role:"sub",type_id:"0x000000c2",freq:0},
+      {node:"planning",topic:"planning/trajectory",role:"pub",type_id:"0x3A7B1C2D",freq:10},
       {node:"control",topic:"planning/trajectory",role:"sub",type_id:"0x3A7B1C2D",freq:0},
-      {node:"control",topic:"control/cmd",role:"pub",type_id:"0x2d95c6d2",freq:100.0}
+      {node:"control",topic:"control/cmd",role:"pub",type_id:"0x2d95c6d2",freq:100},
+      {node:"safety_guard",topic:"control/cmd",role:"sub",type_id:"0x2d95c6d2",freq:0},
+      {node:"safety_guard",topic:"safety/alert",role:"pub",type_id:"0x000000d1",freq:10}
     ]
   };
   updateAll();
@@ -702,98 +776,231 @@ function switchSysView(view) {
   document.getElementById('sys-view-threads').style.display = (view === 'threads' ? '' : 'none');
 }
 
-// ── 性能分析面板：系统/进程 视图切换 + 进程选择 ──
-var perfViewMode = 'sys';      // sys | proc
-var selectedProcPid = -1;      // 当前选中查看线程的进程 pid
+// ── 性能分析窗口：系统/进程/线程 时序占用图 + 列表选择 ──
+var PERF_HIST_MAX = 150;     // 时序点数（~25s @6Hz）
+var perfMode = 'proc';        // 'proc' | 'thread'：下方列表/两大表展示对象
+var perfSelPid = -1;          // 进程模式选中 pid
+var perfSelTid = -1;          // 线程模式选中 tid
+var perfHistSysCpu = [], perfHistSysMem = [];
+var perfHistCpu = [], perfHistMem = [];   // 选中对象（进程或线程）的两大表
+// 列表"原地更新"缓存：集合不变时只改数值，不重建 DOM，避免闪烁与点击丢失。
+var _perfListSig = '', _perfListRows = {};
 
-function switchPerfView(view) {
-  perfViewMode = view;
-  document.querySelectorAll('#perf-view-toggle .toggle-btn').forEach(function(b) {
-    b.classList.toggle('active', b.dataset.view === view);
-  });
-  document.getElementById('perf-view-sys').style.display = (view === 'sys' ? '' : 'none');
-  document.getElementById('perf-view-proc').style.display = (view === 'proc' ? '' : 'none');
+function _perfPush(arr, v) {
+  arr.push({ v: v });
+  if (arr.length > PERF_HIST_MAX) arr.shift();
 }
 
-function selectProc(pid) {
-  selectedProcPid = pid;
-  renderProcThreads();
+function _perfRowKey(kind, it) { return kind === 'proc' ? it.pid : it.tid; }
+
+function _perfRowHTML(kind, it) {
+  var color = it.cpu_pct > 50 ? '#f85149' : (it.cpu_pct > 20 ? '#d29922' : '#3fb950');
+  var key = _perfRowKey(kind, it);
+  var active = kind === 'proc' ? (key === perfSelPid) : (key === perfSelTid);
+  var meta;
+  if (kind === 'proc') {
+    meta = key+' · '+Math.round((it.rss_kb||0)/1024)+'MB · '+(it.thread_count||0)+'🧵';
+  } else {
+    var st = it.state === 'R' ? '运行' : (it.state === 'S' ? '睡眠' : '阻塞');
+    meta = 'TID '+key+' · '+st;
+  }
+  var fn = kind === 'proc' ? 'selectPerfProc' : 'selectPerfThread';
+  return '<div class="perf-row'+(active ? ' active' : '')+'" data-key="'+key+'" '+
+    'onclick="flowboard.'+fn+'('+key+')">'+
+    '<span class="pct" style="color:'+color+'">'+(it.cpu_pct||0).toFixed(1)+'%</span>'+
+    '<span class="nm">'+it.name+'</span>'+
+    '<span class="meta">'+meta+'</span></div>';
+}
+
+// 统一列表渲染：集合变化才重建 DOM，否则原地更新数值/高亮
+function _renderPerfList(kind, items) {
+  var el = document.getElementById('perf-list');
+  if (!el) return;
+  var sig = items.map(function(it){ return _perfRowKey(kind, it); }).join(',');
+  if (sig !== _perfListSig) {
+    _perfListSig = sig; _perfListRows = {};
+    el.innerHTML = items.length
+      ? items.map(function(it){ return _perfRowHTML(kind, it); }).join('')
+      : '<span style="color:#484f58">暂无数据</span>';
+    el.querySelectorAll('.perf-row').forEach(function(row) {
+      _perfListRows[Number(row.getAttribute('data-key'))] = row;
+    });
+  }
+  items.forEach(function(it) {
+    var key = _perfRowKey(kind, it);
+    var row = _perfListRows[key]; if (!row) return;
+    var color = it.cpu_pct > 50 ? '#f85149' : (it.cpu_pct > 20 ? '#d29922' : '#3fb950');
+    var pct = row.querySelector('.pct');
+    if (pct) { pct.textContent = (it.cpu_pct||0).toFixed(1)+'%'; pct.style.color = color; }
+    var meta = row.querySelector('.meta');
+    if (meta) {
+      meta.textContent = kind === 'proc'
+        ? (key+' · '+Math.round((it.rss_kb||0)/1024)+'MB · '+(it.thread_count||0)+'🧵')
+        : ('TID '+key);
+    }
+    row.classList.toggle('active', kind === 'proc' ? (key === perfSelPid) : (key === perfSelTid));
+  });
+}
+
+function _syncPerfTabs() {
+  var pt = document.getElementById('perf-tab-proc');
+  var tt = document.getElementById('perf-tab-thread');
+  if (pt) pt.classList.toggle('active', perfMode === 'proc');
+  if (tt) tt.classList.toggle('active', perfMode === 'thread');
+  var lt = document.getElementById('perf-list-title');
+  if (lt) lt.textContent = perfMode === 'proc' ? '进程列表' : '线程列表';
+}
+
+function setPerfMode(mode) {
+  if (mode !== 'proc' && mode !== 'thread') return;
+  perfMode = mode;
+  perfSelPid = -1; perfSelTid = -1;
+  perfHistCpu = []; perfHistMem = [];
+  _perfListSig = ''; _perfListRows = {};
+  var sel = document.getElementById('perf-sel-name');
+  if (sel) sel.textContent = '点击左侧列表选择查看';
+  _syncPerfTabs();
+  updatePerf();
+}
+
+function selectPerfProc(pid) {
+  perfMode = 'proc';
+  perfSelPid = pid; perfSelTid = -1;
+  perfHistCpu = []; perfHistMem = [];
+  _syncPerfTabs();
+  updatePerf();
+}
+
+function selectPerfThread(tid) {
+  perfMode = 'thread';
+  perfSelTid = tid; perfSelPid = -1;
+  perfHistCpu = []; perfHistMem = [];
+  _syncPerfTabs();
+  updatePerf();
 }
 
 function updatePerf() {
   var sm = (topoData.metrics||{}).sysmon;
-  if (!sm) { showEl('perf-card', false); return; }
-  showEl('perf-card', true);
-
-  // 系统负载概览
-  var cpu = sm.cpu_total_pct || 0, memp = sm.mem_used_pct || 0;
-  setText('p-cpu', cpu.toFixed(1));
-  setStyle('p-cpu', 'color', cpu > 80 ? '#f85149' : (cpu > 50 ? '#d29922' : '#58a6ff'));
-  setText('p-mem', memp.toFixed(1));
-  setStyle('p-mem', 'color', memp > 85 ? '#f85149' : '#d29922');
-  setText('p-load', (sm.load1||0).toFixed(2));
+  if (!sm) return;
   var procs = sm.procs || [];
-  setText('p-proc', procs.length);
-  setText('p-detail',
-    '核心 '+(sm.cpu_count||0)+' · 内存 '+
-    Math.round((sm.mem_used_kb||0)/1024)+'/'+Math.round((sm.mem_total_kb||0)/1024)+'MB · '+
-    '负载 '+(sm.load1||0).toFixed(2)+'/'+(sm.load5||0).toFixed(2)+'/'+(sm.load15||0).toFixed(2));
+  var threads = sm.threads || [];
+  _syncPerfTabs();
 
-  // 进程列表
-  var pl = document.getElementById('proc-list');
-  if (!procs.length) {
-    pl.innerHTML = '<span style="color:#484f58">暂无可监控进程</span>';
-  } else {
-    pl.innerHTML = procs.map(function(p) {
-      var cpuColor = p.cpu_pct > 50 ? '#f85149' : (p.cpu_pct > 20 ? '#d29922' : '#3fb950');
-      var rssMb = Math.round((p.rss_kb||0)/1024);
-      var active = p.pid === selectedProcPid;
-      return '<div class="proc-row" data-pid="'+p.pid+'" onclick="flowboard.selectProc('+p.pid+')" '+
-        'style="cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;'+
-        (active ? 'background:rgba(88,166,255,.12)' : '')+'">'+
-        '<span style="color:'+cpuColor+';font-weight:bold;min-width:44px;text-align:right">'+p.cpu_pct.toFixed(1)+'%</span>'+
-        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+p.name+'</span>'+
-        '<span class="th-tid" style="color:#484f58">'+p.pid+'</span>'+
-        '<span class="th-tid" style="color:#484f58">'+rssMb+'MB</span>'+
-        '<span class="th-tid" style="color:#484f58">'+p.thread_count+'🧵</span>'+
-        '</div>';
-    }).join('');
+  // ── 系统级时序图（保持） ──
+  _perfPush(perfHistSysCpu, sm.cpu_total_pct || 0);
+  _perfPush(perfHistSysMem, sm.mem_used_pct || 0);
+  drawPerfChart('perf-cpu', perfHistSysCpu, '#58a6ff',
+    '系统 CPU · 负载 '+(sm.load1||0).toFixed(2), '%', 100);
+  var memTxt = '系统内存';
+  if (sm.mem_total_kb) {
+    memTxt += ' · '+Math.round((sm.mem_used_kb||0)/1024)+'/'+Math.round(sm.mem_total_kb/1024)+'MB';
   }
+  drawPerfChart('perf-mem', perfHistSysMem, '#d29922', memTxt, '%', 100);
 
-  // 若当前选中进程已消失，重置选择
-  if (selectedProcPid >= 0 && !procs.some(function(p){ return p.pid === selectedProcPid; })) {
-    selectedProcPid = -1;
-  }
-  renderProcThreads();
+  // ── 下方：按模式切换列表 + 两大表 ──
+  if (perfMode === 'thread') updatePerfThreads(threads, procs);
+  else updatePerfProcs(procs);
 }
 
-function renderProcThreads() {
-  var ph = document.getElementById('proc-header');
-  var th = document.getElementById('proc-threads');
-  if (perfViewMode !== 'proc') return;
-  var procs = (topoData.metrics||{}).sysmon && (topoData.metrics||{}).sysmon.procs || [];
-  var proc = selectedProcPid >= 0 ? procs.find(function(p){ return p.pid === selectedProcPid; }) : null;
-  if (!proc) {
-    ph.textContent = '点击进程查看其线程';
-    th.innerHTML = '<span style="color:#484f58">—</span>';
+function updatePerfProcs(procs) {
+  _renderPerfList('proc', procs);
+  var sel = document.getElementById('perf-sel-name');
+  if (perfSelPid < 0) { if (sel) sel.textContent = '点击左侧进程查看其 CPU / 内存'; return; }
+  var p = procs.find(function(x){ return x.pid === perfSelPid; });
+  if (!p) {
+    perfSelPid = -1; perfHistCpu = []; perfHistMem = [];
+    if (sel) sel.textContent = '点击左侧进程查看其 CPU / 内存';
     return;
   }
-  ph.innerHTML = '<b style="color:#58a6ff">'+proc.name+'</b> · PID '+proc.pid+' · '+
-    'CPU '+proc.cpu_pct.toFixed(1)+'% · RSS '+Math.round((proc.rss_kb||0)/1024)+'MB · '+
-    proc.thread_count+' 线程';
-  var arr = proc.threads || [];
-  th.innerHTML = arr.length ? arr.map(function(t) {
-    var cpuColor = t.cpu_pct > 50 ? '#f85149' : (t.cpu_pct > 20 ? '#d29922' : '#3fb950');
-    var barPct = Math.min(100, t.cpu_pct * 2);
-    var stateIcon = t.state === 'R' ? '🟢' : (t.state === 'S' ? '💤' : '⏸');
-    return '<div class="thread-row" style="padding:2px 4px">'+
-      '<span class="th-state" title="'+t.state+'">'+stateIcon+'</span>'+
-      '<span class="th-name">'+t.name+'</span>'+
-      '<span class="th-tid">TID '+t.tid+'</span>'+
-      '<span class="th-cpu" style="color:'+cpuColor+'">'+t.cpu_pct.toFixed(1)+'%</span>'+
-      '<div class="th-bar"><div class="th-bar-fill" style="width:'+barPct+'%;background:'+cpuColor+'"></div></div>'+
-      '</div>';
-  }).join('') : '<span style="color:#484f58">无线程数据</span>';
+  _perfPush(perfHistCpu, p.cpu_pct || 0);
+  _perfPush(perfHistMem, (p.rss_kb||0)/1024);
+  if (sel) sel.textContent = p.name;
+  drawPerfChart('perf-pcpu', perfHistCpu, '#58a6ff', p.name+' CPU', '%', 100);
+  drawPerfChart('perf-prss', perfHistMem, '#3fb950', p.name+' 内存', 'MB', null);
+}
+
+function updatePerfThreads(threads, procs) {
+  _renderPerfList('thread', threads);
+  var sel = document.getElementById('perf-sel-name');
+  if (perfSelTid < 0) { if (sel) sel.textContent = '点击左侧线程查看其 CPU'; return; }
+  var t = threads.find(function(x){ return x.tid === perfSelTid; });
+  if (!t) {
+    perfSelTid = -1; perfHistCpu = []; perfHistMem = [];
+    if (sel) sel.textContent = '点击左侧线程查看其 CPU';
+    return;
+  }
+  // 线程无独立内存，内存图表取同名进程的 RSS 作为参考
+  var rss = 0;
+  for (var i = 0; i < procs.length; i++) {
+    if (procs[i].name === t.name) { rss = procs[i].rss_kb; break; }
+  }
+  _perfPush(perfHistCpu, t.cpu_pct || 0);
+  _perfPush(perfHistMem, rss/1024);
+  if (sel) sel.textContent = t.name;
+  drawPerfChart('perf-pcpu', perfHistCpu, '#bc8cff', t.name+' CPU', '%', 100);
+  drawPerfChart('perf-prss', perfHistMem, '#3fb950', t.name+' 进程内存', 'MB', null);
+}
+
+// 简单 Canvas 折线图（面积 + 折线 + avg，可选固定 y 轴上限）
+function drawPerfChart(canvasId, data, color, title, unit, fixedMax) {
+  var c = document.getElementById(canvasId);
+  if (!c) return;
+  var box = c.parentElement;
+  var W = box.clientWidth, H = box.clientHeight;
+  if (W < 10 || H < 10) return;
+  c.width = W * 2; c.height = H * 2; c.style.width = W + 'px'; c.style.height = H + 'px';
+  var ctx = c.getContext('2d'); ctx.setTransform(2, 0, 0, 2, 0, 0);
+  var pad = { t: 34, r: 56, b: 30, l: 46 }, w = W - pad.l - pad.r, h = H - pad.t - pad.b;
+  ctx.fillStyle = '#090c10'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#8b949e'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'left';
+  ctx.fillText(title, pad.l, pad.t - 10);
+  if (!data || data.length < 2) {
+    ctx.fillStyle = '#30363d'; ctx.font = '11px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('等待数据...', W / 2, H / 2);
+    return;
+  }
+  var vals = data.map(function(d){ return d.v; });
+  var maxV = fixedMax || Math.max.apply(null, vals.concat([1]));
+  var minV = fixedMax ? 0 : Math.min.apply(null, vals.concat([0]));
+  var range = (maxV - minV) || 1;
+  var latest = vals[vals.length - 1];
+  var avg = vals.reduce(function(a, b){ return a + b; }, 0) / vals.length;
+  var xs = w / Math.max(data.length - 1, 1), ys = h / range;
+  // grid
+  ctx.strokeStyle = '#161b22'; ctx.lineWidth = 0.5;
+  for (var i = 0; i <= 4; i++) {
+    var gy = pad.t + (h * i) / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, gy); ctx.lineTo(W - pad.r, gy); ctx.stroke();
+    ctx.fillStyle = '#484f58'; ctx.font = '9px system-ui'; ctx.textAlign = 'right';
+    ctx.fillText((minV + (range * i) / 4).toFixed(1), pad.l - 6, gy + 3);
+  }
+  // avg 线
+  var avgY = pad.t + (maxV - avg) * ys;
+  ctx.strokeStyle = color + '44'; ctx.lineWidth = 1; ctx.setLineDash([4, 6]);
+  ctx.beginPath(); ctx.moveTo(pad.l, avgY); ctx.lineTo(W - pad.r, avgY); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = color + '88'; ctx.font = '9px system-ui'; ctx.textAlign = 'right';
+  ctx.fillText('avg ' + avg.toFixed(1), W - pad.r, avgY - 3);
+  // 面积
+  ctx.fillStyle = color + '18'; ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t + h);
+  data.forEach(function(d, ii) {
+    ctx.lineTo(pad.l + ii * xs, pad.t + (maxV - d.v) * ys);
+  });
+  ctx.lineTo(pad.l + xs * (data.length - 1), pad.t + h);
+  ctx.closePath(); ctx.fill();
+  // 折线
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  data.forEach(function(d, ii) {
+    var x = pad.l + ii * xs, y = pad.t + (maxV - d.v) * ys;
+    if (ii === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  // 最新值 + 标记
+  var lx = pad.l + xs * (data.length - 1), ly = pad.t + (maxV - latest) * ys;
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(lx, ly, 2.5, 0, 6.2832); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'right';
+  ctx.fillText(latest.toFixed(1) + (unit || ''), W - pad.r, ly - 6);
 }
 
 function updateMetrics() {
@@ -1613,6 +1820,18 @@ function initAll() {
       b.dropped = Math.random() < 0.05 ? (b.dropped||0) + 1 : (b.dropped||0);
       l.avg_us = Math.max(80, (l.avg_us||150) + Math.floor(Math.random()*20 - 10));
       l.p99_us = Math.max(200, (l.p99_us||400) + Math.floor(Math.random()*60 - 30));
+      // 演示模式：让系统负载与各进程/线程 CPU 小幅波动，性能分析面板呈现实时变化
+      var sm = m.sysmon;
+      if (sm) {
+        sm.cpu_total_pct = Math.max(2, Math.min(96, (sm.cpu_total_pct||0) + (Math.random()*6 - 3)));
+        sm.load1 = Math.max(0.1, (sm.load1||0) + (Math.random()*0.4 - 0.2));
+        (sm.procs||[]).forEach(function(p) {
+          p.cpu_pct = Math.max(0.1, Math.min(95, (p.cpu_pct||0) + (Math.random()*4 - 2)));
+          (p.threads||[]).forEach(function(t) {
+            t.cpu_pct = Math.max(0.05, Math.min(90, (t.cpu_pct||0) + (Math.random()*2.5 - 1.25)));
+          });
+        });
+      }
       updateAll();
       // 显式同步水印/状态（之前漏调，导致 demo 数据下 watermark 状态不稳定）
       applyLiveStatus(topoData);
@@ -1733,9 +1952,10 @@ window.flowboard = {
   closeDetail: closeDetail,
   // sysmon view switch
   switchSysView: switchSysView,
-  // perf panel
-  switchPerfView: switchPerfView,
-  selectProc: selectProc,
+  // perf window
+  setPerfMode: setPerfMode,
+  selectPerfProc: selectPerfProc,
+  selectPerfThread: selectPerfThread,
   // scene view switch
   switchSceneView: function (mode) {
     // delegated to scene2d module

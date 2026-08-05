@@ -706,7 +706,14 @@ static void export_dashboard_json(void) {
             pnames[np] = namebuf[np];
             np++;
         }
-        if (np > 0) {
+        if (np <= 1) {
+            /* 单进程(dlopen)模式：discovery 拓扑采不到独立进程（所有节点
+             * 在 flow_launcher 一个进程里的线程里）。改以"节点线程作进程"
+             * 输出，让 perf 面板按 AD 节点展示真实 CPU 占用。 */
+            pproc_count = sysmonitor_proc_thread_snapshots(g.sysmon, psnaps,
+                                                           SYSMON_MAX_PROCS);
+            if (pproc_count < 0) pproc_count = 0;
+        } else if (np > 0) {
             pproc_count = sysmonitor_proc_snapshot(g.sysmon, ppids, pnames, np,
                                                    psnaps, SYSMON_MAX_PROCS);
             if (pproc_count < 0) pproc_count = 0;
@@ -1156,7 +1163,7 @@ static void export_dashboard_json(void) {
     cJSON_AddNumberToObject(sysmon_o, "thread_count", ssnap.thread_count);
 
     cJSON* threads_arr = cJSON_AddArrayToObject(sysmon_o, "threads");
-    for (int ti = 0; ti < ssnap.thread_count && ti < 16; ti++) {
+    for (int ti = 0; ti < ssnap.thread_count && ti < 64; ti++) {
         SysMonitorThreadSnapshot* th = &ssnap.threads[ti];
         cJSON* thr = cJSON_CreateObject();
         cJSON_AddNumberToObject(thr, "tid", (double)(int)th->tid);

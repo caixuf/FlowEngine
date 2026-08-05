@@ -44,6 +44,11 @@
 #define PROC_SELF_STATUS     "/proc/self/status"
 #define PROC_SELF_TASK       "/proc/self/task"
 
+/* CPU 差分最小窗口（秒）：monitor 高频采样时，若直接对相邻两次做差分，
+ * 低占用线程（1~5%）的 tick 增量会被量化成 0。改为"窗口内累计差分"，
+ * 每满一个窗口才提交新基线，保证轻负载线程也显示非 0 的真实占比。 */
+#define SYSMON_CPU_WINDOW_S  3.0
+
 /* ── 内部数据结构 ─────────────────────────────────────────────── */
 
 /* /proc/stat 单行 CPU 计数器 */
@@ -114,6 +119,11 @@ struct SysMonitor {
     PThreadRaw pth_hist[SYSMON_PTH_HIST_MAX];
     int        pth_hist_count;
     uint64_t   prev_proc_ts_us;
+
+    /* 单进程模式"以线程作进程"的独立差分历史（避免与 thread_hist 争抢时间戳） */
+    ThreadRaw  proc_thread_hist[SYSMON_MAX_THREADS];
+    int        proc_thread_hist_count;
+    uint64_t   proc_thread_prev_ts_us;
 };
 
 /* ── 内部工具函数 ─────────────────────────────────────────────── */
@@ -592,6 +602,8 @@ SysMonitor* sysmonitor_create(void) {
     sm->prev_ts_us     = mono_us();
     sm->prev_thread_ts_us = sm->prev_ts_us;
     sm->prev_proc_ts_us   = sm->prev_ts_us;
+    sm->proc_thread_hist_count = 0;
+    sm->proc_thread_prev_ts_us = sm->prev_ts_us;
     return sm;
 }
 
@@ -687,6 +699,10 @@ int sysmonitor_thread_snapshot(SysMonitor* sm,
     ThreadRaw new_hist[SYSMON_MAX_THREADS];
     int       out_count = 0;
 
+    /* 窗口未满时不更新基线历史：只对既有基线做累计差分，
+     * 避免高频采样把低占用线程量化成 0%。窗口满才提交新基线。 */
+    int commit = (dt_s >= SYSMON_CPU_WINDOW_S);
+
     for (int i = 0; i < ntids && out_count < max_threads; i++) {
         pid_t tid = tids[i];
         uint64_t ut = 0, st = 0;
@@ -712,8 +728,8 @@ int sysmonitor_thread_snapshot(SysMonitor* sm,
             snap->cpu_pct = 0.0;
         }
 
-        /* 保存到新历史 */
-        if (out_count < SYSMON_MAX_THREADS) {
+        /* 仅窗口满时保存到新历史（提交基线） */
+        if (commit && out_count < SYSMON_MAX_THREADS) {
             new_hist[out_count].tid   = tid;
             new_hist[out_count].utime = ut;
             new_hist[out_count].stime = st;
@@ -721,11 +737,13 @@ int sysmonitor_thread_snapshot(SysMonitor* sm,
         out_count++;
     }
 
-    /* 更新历史 */
-    int copy_n = out_count < SYSMON_MAX_THREADS ? out_count : SYSMON_MAX_THREADS;
-    memcpy(sm->thread_hist, new_hist, (size_t)copy_n * sizeof(ThreadRaw));
-    sm->thread_hist_count  = copy_n;
-    sm->prev_thread_ts_us  = now_us;
+    /* 窗口满才更新历史基线；否则保留旧基线，次数越长累计差分越准 */
+    if (commit) {
+        int copy_n = out_count < SYSMON_MAX_THREADS ? out_count : SYSMON_MAX_THREADS;
+        memcpy(sm->thread_hist, new_hist, (size_t)copy_n * sizeof(ThreadRaw));
+        sm->thread_hist_count  = copy_n;
+        sm->prev_thread_ts_us  = now_us;
+    }
 
     return out_count;
 }
@@ -885,5 +903,92 @@ int sysmonitor_proc_snapshot(SysMonitor* sm,
     sm->prev_proc_ts_us = now_us;
 
     free(new_pth);
+    return written;
+}
+
+/* ── 单进程(dlopen)模式：节点即线程，以线程作进程快照 ──────────
+ * 单进程模式下所有 AD 节点跑在 flow_launcher 一个进程里，每个节点
+ * 是独立命名线程（pthread_setname_np）。把每个节点线程当作一条
+ * "进程"输出，即可按节点查看真实 CPU 占用。
+ * 过滤调度器/主线程等基础设施线程，只保留业务节点线程。 */
+int sysmonitor_proc_thread_snapshots(SysMonitor* sm,
+                                     SysMonitorProcSnapshot* out,
+                                     int max_out) {
+    if (!sm || !out || max_out <= 0) return -1;
+
+    uint64_t now_us = mono_us();
+    double   dt_s   = (now_us > sm->proc_thread_prev_ts_us)
+                      ? (double)(now_us - sm->proc_thread_prev_ts_us) / 1e6
+                      : 0.0;
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) hz = 100;
+
+    pid_t tids[SYSMON_MAX_THREADS];
+    int   ntids = enum_threads(tids, SYSMON_MAX_THREADS);
+    if (ntids <= 0) return 0;
+
+    uint64_t prss = 0, pvms = 0;
+    read_proc_mem(&prss, &pvms);
+
+    ThreadRaw new_hist[SYSMON_MAX_THREADS];
+    int new_n = 0, written = 0;
+
+    /* 窗口未满时不更新基线历史，避免高频采样把轻负载节点量化成 0% */
+    int commit = (dt_s >= SYSMON_CPU_WINDOW_S);
+
+    for (int i = 0; i < ntids && written < max_out; i++) {
+        pid_t  tid = tids[i];
+        uint64_t ut = 0, st = 0;
+        char     state = '?';
+        if (read_thread_stat(tid, &ut, &st, &state) != 0) continue;
+
+        char name[SYSMON_PROC_NAME_MAX];
+        read_thread_name(tid, name, sizeof(name));
+
+        /* 过滤基础设施线程：调度 worker / 主控 / HTTP 服务 */
+        if (strcmp(name, "flow_launcher") == 0) continue;
+        if (strcmp(name, "sched-mon") == 0) continue;
+        if (strcmp(name, "httpd") == 0) continue;
+
+        SysMonitorProcSnapshot* snap = &out[written];
+        memset(snap, 0, sizeof(*snap));
+        snap->pid           = tid;   /* 用 tid 作唯一 pid，便于前端区分/点选 */
+        snprintf(snap->name, sizeof(snap->name), "%s", name);
+        snap->rss_kb        = prss;  /* 同进程共享 RSS */
+
+        int hi = find_thread_hist(sm->proc_thread_hist,
+                                  sm->proc_thread_hist_count, tid);
+        if (hi >= 0 && dt_s > 0.0) {
+            uint64_t d_ticks = (ut + st)
+                               - (sm->proc_thread_hist[hi].utime
+                                  + sm->proc_thread_hist[hi].stime);
+            snap->cpu_pct = (double)d_ticks / (double)hz / dt_s * 100.0;
+        }
+
+        /* 该节点线程自身作为一条线程 */
+        snap->thread_count = 1;
+        snap->threads[0].tid    = tid;
+        snprintf(snap->threads[0].name, SYSMON_THREAD_NAME_MAX,
+                 "%.*s", SYSMON_THREAD_NAME_MAX - 1, name);
+        snap->threads[0].cpu_pct = snap->cpu_pct;
+        snap->threads[0].state   = state;
+
+        /* 仅窗口满时保存到新历史（提交基线） */
+        if (commit && new_n < SYSMON_MAX_THREADS) {
+            new_hist[new_n].tid   = tid;
+            new_hist[new_n].utime = ut;
+            new_hist[new_n].stime = st;
+            new_n++;
+        }
+        written++;
+    }
+
+    /* 窗口满才更新历史基线；否则保留旧基线累计差分 */
+    if (commit) {
+        int copy_n = new_n < SYSMON_MAX_THREADS ? new_n : SYSMON_MAX_THREADS;
+        memcpy(sm->proc_thread_hist, new_hist, (size_t)copy_n * sizeof(ThreadRaw));
+        sm->proc_thread_hist_count  = copy_n;
+        sm->proc_thread_prev_ts_us  = now_us;
+    }
     return written;
 }
