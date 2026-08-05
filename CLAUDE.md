@@ -59,6 +59,10 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `src/core/dashboard_bridge.c` | 跨进程仪表盘 JSON IPC 桥接（分块传输协议） |
 | `modules/adas_nodes/sensor_model_node.c` | 传感器模型（LiDAR/GPS/Camera，FOV/遮挡/噪声） |
 | `modules/adas_nodes/safety_control_node.cpp` | FlowCoro 协程安全控制（TTC/横向交叉/行人防护） |
+| `modules/adas_nodes/behavior_planner_node.cpp` | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
+| `modules/adas_nodes/navigation_node.c` | 路由步骤 + 行进方向（消费 flowsim `ref_path.reverse`） |
+| `modules/adas_nodes/st_graph.c` | ST 图 + DP 速度规划（红灯墙/动态障碍/曲率限速，移植自 speed_planner_sim.py 11/11 PASS） |
+| `modules/adas_nodes/maneuver_tracker.h` | 机动跟随器（掉头/泊车：弧长推进 + D/R 挡位 + 倒挡横向反号，header-only 可单测） |
 | `tools/flowboard/index.html` | 前端仪表盘（3D+2D+图表+D3 拓扑，ES modules） |
 | `tools/foxglove_bridge.py` | Foxglove Studio WebSocket 桥接 |
 | `ci/evaluators/demo_evaluator.py` | 回归评估器：采样 JSON 并自动评分（碰撞/偏航/停滞/频率） |
@@ -75,7 +79,7 @@ sim_world → sensor_model → perception → fusion → planning → control �
 | `include/platform_compat.h` | 跨平台兼容层（macOS⇄Linux，CMake force-include，仅 APPLE 生效）：pthread 命名签名、robust mutex、condvar 时钟降级 |
 | `modules/adas_nodes/flowsim/physics.cpp` | 运动学自行车模型；dynamics 桩（未实现，降级到运动学） |
 | `modules/adas_nodes/flowsim/entity.h` | 仿真实体（含 v_x_body/v_y_body/yaw_rate/F_yf/F_yr 动力学桩字段，运行时未使用） |
-| `scenarios/straight_road.json` | 直道场景（默认，唯一） |
+| `scenarios/straight_road.json` | 直道导航场景（默认；另有 curve_road/dense_npc/multi_light/oncoming/泊车/驾考科目一~四等共 13 个场景 + suite.json 场景矩阵） |
 | `modules/adas_nodes/data_recorder_node.c` | 训练样本采集（Learning Loop Stage 0） |
 | `modules/adas_nodes/inference_node.cpp` | tiny-MLP 影子推理（Learning Loop Stage 2） |
 | `modules/adas_nodes/tiny_mlp.h` | 纯 C 单隐层 MLP 推理内核 |

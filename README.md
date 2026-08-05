@@ -28,10 +28,10 @@
 | **数据** | 类型安全序列化（IDL + 代码生成）、Bag v2 录制/回放、MCAP 格式、数据融合（EKF）、Schema 校验；全链路 `timestamp_us` 统一为 `uint64`（GNSS 采集时刻优先、主机钟回退） |
 | **QoS** | Per-topic QoS（深度 + 丢弃策略 + deadline + reliability）、Topic 统计（频率、延迟 p50/p99、订阅者） |
 | **感知** | DBSCAN LiDAR 聚类、Kalman 跟踪、EKF 传感器融合、NMEA 0183 GPS 解析器（RMC/GGA，GNSS UTC → epoch μs 采集时刻）、IMU ASCII 行解析、nuScenes 数据集加载器 |
-| **规划** | Frenet 最优轨迹（变道/超车）、PID 控制（纵向 + 横向） |
+| **规控** | 行为 FSM（跟车/变道/让行/掉头）、Frenet 最优轨迹、ST 图 + DP 速度规划（红灯墙/动态障碍/曲率限速）、N 把方向掉头与泊车（ManeuverTracker）、Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 |
 | **安全** | 基于 FlowCoro 协程的安全包络（TTC / 横向交叉 / 行人保护） |
 | **运维** | 统一日志器（毫秒时间戳）、flowctl CLI、FlowBoard Dashboard（Three.js 3D + 2D）、flowmond 监控守护进程（IPC 桥接 + 文件桥接）、跨进程 IPC Stats Bridge + Topic Bridge、CI/CD |
-| **学习** | 仿真内学习闭环：数据采集 → 离线训练（scikit-learn MLP / PyTorch）→ 影子模式 tiny-MLP 推理 + 车端 SGD 微调 + 模型 OTA 与 A-B 对比。详见 [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
+| **学习** | 仿真内学习闭环：数据采集 → 离线训练（tiny-MLP / PyTorch）→ DAgger 自我对弈回灌 → PPO 强化学习（换老师路线）→ ONNX 导出 + 等价性门禁 → 影子评估 + promote 门禁 + 模型 OTA 与 A-B 对比。详见 [docs/LEARNING_LOOP.md](docs/LEARNING_LOOP.md) |
 
 ---
 
@@ -56,9 +56,10 @@
 │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └────────────┘ │
 ├──────────────────────────────────────────────────────────────────────┤
 │                     ADAS Pipeline (dlopen plugins)                     │
-│  flowsim → sensor_model → perception → fusion → planning → control   │
-│    → safety_control → inference → data_recorder → learner → model_ota│
-│    → monitor                                                         │
+│  flowsim → sensor_model → perception → object_tracker → fusion       │
+│    → behavior_planner ⇄ navigation → planning → control              │
+│    → safety_control → monitor                                        │
+│  旁路: inference / data_recorder / learner / model_ota（学习闭环）     │
 └──────────────────────────────────────────────────────────────────────┘
                                                                          │
                       ════════════════════┼════════════════════
@@ -183,18 +184,21 @@ powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 30
 
 ## Pipeline
 
-默认配置（`config/pipeline.json`）启动 **12 个插件节点**，默认场景为平路直路（`scenarios/straight_road.json`，10km 双向 4 车道平路，含 NPC/行人/红绿灯）：
+默认配置（`config/pipeline.json`）启动 **15 个插件节点**，默认场景为直路导航（`scenarios/straight_road.json`，3000m 双向 4 车道，含 NPC/行人/红绿灯/路尾掉头）：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
-| `flowsim` | `libflowsim_node.so` | 50Hz | 车辆动力学 + 障碍物模拟 + 场景加载（原 `sim_world` 已合并升级） |
+| `flowsim` | `libflowsim_node.so` | 50Hz | 车辆动力学 + NPC（IDM）+ 场景加载 + 真值发布 |
 | `sensor_model` | `libsensor_model.so` | 20Hz | LiDAR/GPS/Camera 传感器模型（FOV/遮挡/噪声） |
 | `perception` | `libperception_node.so` | 10Hz | DBSCAN 点云聚类 + 目标检测 |
+| `object_tracker` | `libobject_tracker.so` | 20Hz | 卡尔曼多目标跟踪 |
 | `fusion` | `libfusion_node.so` | 20Hz | EKF 传感器融合（定位 + 时间对齐） |
-| `planning` | `libplanning_node.so` | 20Hz | Frenet 最优轨迹规划（变道/超车） |
-| `control` | `libcontrol_node.so` | 50Hz | PID 纵向控制 + 横向 Stanley 转向 |
-| `safety_control` | `libsafety_control_node.so` | 协程 | FlowCoro 安全包络（TTC / 横向交叉 / 行人保护） |
-| `inference` | `libinference_node.so` | 20Hz | tiny-MLP 影子推理（shadow mode，不执行） |
+| `behavior_planner` | `libbehavior_planner.so` | 10Hz | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
+| `navigation` | `libnavigation_node.so` | 10Hz | 路由步骤 + 行进方向（消费 `ref_path.reverse`） |
+| `planning` | `libplanning_node.so` | 20Hz | Frenet 轨迹 + ST 图 DP 速度规划 + N 把方向掉头 |
+| `control` | `libcontrol_node.so` | 50Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker 机动 |
+| `safety_control` | `libsafety_control_node.so` | 协程 | FlowCoro 安全闸门（TTC / 横向交叉 / 行人保护 / MRM） |
+| `inference` | `libinference_node.so` | 20Hz | tiny-MLP/ONNX 影子推理（shadow mode，不执行） |
 | `data_recorder` | `libdata_recorder_node.so` | 20Hz | 训练样本采集（模仿学习 JSONL） |
 | `learner` | `liblearner_node.so` | 0.5Hz | 车端增量 SGD 微调（full/partial） |
 | `model_ota` | `libmodel_ota_node.so` | 1Hz | 模型 OTA + 版本管理 + A-B 对比 |
@@ -419,13 +423,20 @@ TaskBase* create_task(const TaskConfig* cfg) {
 
 ## 场景套件
 
-当前仓库提供 1 个参考场景，场景系统正在扩展中：
+`scenarios/` 提供 13 个场景 + 1 个场景矩阵（`suite.json`，故障表中每类高频 bug 至少一个场景兜底）：
 
-| 场景 | 描述 |
+| 场景 | 覆盖 |
 |------|------|
-| `straight_road.json` | 直路综合场景：10km 平路双向 4 车道（Y=0），含 NPC 慢车/cutin、行人横穿、红绿灯停车，用于验证感知-融合-规划-控制链路与 FlowBoard 3D 渲染 |
+| `straight_road.json`（默认） | 直路导航：3000m 双向 4 车道，NPC/行人/红绿灯，路尾物理掉头到对向车道 |
+| `curve_road.json` | S 弯（Hermite 平滑）：曲率限速 + MPC kappa 前馈 |
+| `dense_npc.json` | 密集 NPC：跟车 / 变道决策 / 变道纠结回归 |
+| `lane_change_traffic.json` | 密集车流 + NPC MOBIL 自主变道下的规控鲁棒性 |
+| `multi_light.json` | 连续 3 盏错相红绿灯：红灯闯行 / 停稳不走闭锁 / 绿灯卡死 |
+| `oncoming.json` | 对向会车：迎头误判 / 幽灵刹车回归 |
+| `urban_challenge.json` | 城市综合：急刹 + 行人横穿 + 红绿灯 + cut-in |
+| `auto_parking.json` / `right_turn_side_parking.json` | 自动泊车 / 右转支路 + 路侧车位 |
+| `traffic_rules_exam.json` ~ `safe_driving_exam.json` | 驾考科目一~四：交规 / 侧方停车 / 道路驾驶 / 安全文明 |
 
-更多典型场景（弯道、超车、行人横穿、cut-in、鬼探头、高速出口、无保护路口等）将逐步补全。
 场景矩阵回归见 `ci/evaluators/scenario_regression.py`（与基线对比），
 单次运行在线评分见 `ci/evaluators/demo_evaluator.py`。
 
@@ -450,8 +461,8 @@ FlowEngine 实现了完整的车端学习闭环：
 ```
 
 - **Stage 0:** `data_recorder_node` — 采集人类/规则驾驶样本（JSONL）
-- **Stage 1:** 离线训练 — `tools/train_demo_model.py`（顶层入口，调度 `tools/train_e2e/{train,torch_train,temporal_train}.py`）
-- **Stage 2:** `inference_node` — tiny-MLP 影子推理，与规则控制器并行评估
+- **Stage 1:** 离线训练 — `tools/train_demo_model.py`（顶层入口，调度 `tools/train_e2e/{train,torch_train,temporal_train}.py`）；进阶：DAgger 自我对弈回灌（模型犯错帧回灌训练集）、PPO 强化学习换老师路线（`tools/train_e2e/rl_ppo.py`，4-seed 验证）
+- **Stage 2:** `inference_node` — tiny-MLP/ONNX 影子推理（ONNX 导出带数值等价性门禁），与规则控制器并行评估
 - **Stage 3:** `learner_node` — 车端增量 SGD 微调（全量/部分更新）
 - **Stage 4:** `model_ota_node` — 模型版本管理 + A-B 效果对比 + 动态切换
 
@@ -561,8 +572,9 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 | [Vis Module Guide](docs/VIS_MODULE_GUIDE.md) | vis/ 模块接口契约 + 设计 AI 提示词模板 |
 | [Monitoring Architecture](docs/MONITORING_ARCHITECTURE.md) | flowmond + stats bridge |
 | [Pipeline Architecture](docs/PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
-| [Algorithm Stack](docs/ALGORITHM_STACK.md) | 算法总览 |
+| [Algorithm Stack](docs/ALGORITHM_STACK.md) | 算法总览（各模块真实算法 × 文件对照） |
 | [Algorithm Integration](docs/ALGORITHM_INTEGRATION.md) | 算法集成指南 |
+| [Planning Speed Upgrade](docs/PLANNING_SPEED_UPGRADE_DESIGN.md) | ST 图 + DP 速度规划设计 |
 | [FlowBoard Contract](docs/FLOWBOARD_CONTRACT.md) | 仪表盘数据契约 |
 | [FlowBoard Scene Contract](docs/FLOWBOARD_SCENE_CONTRACT.md) | scene 数据契约 |
 | [FlowSim 仿真指南](docs/SIMULATION_GUIDE.md) | flowsim 仿真模式对照 |

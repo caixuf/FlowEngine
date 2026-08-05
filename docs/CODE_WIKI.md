@@ -29,11 +29,11 @@ FlowEngine 是一个从零搭建的自动驾驶中间件，灵感来自 Apollo C
 | 内核语言 | C11（轻量、可嵌入） |
 | 外壳语言 | C++20（协程、类型安全） |
 | 插件机制 | `dlopen` 加载 `.so`，节点间仅通过 Message Bus 通信 |
-| 节点数 | 默认 pipeline 12 个插件节点 |
-| 默认场景 | `scenarios/straight_road.json`（10km 双向 4 车道直路） |
+| 节点数 | 默认 pipeline 15 个插件节点 |
+| 默认场景 | `scenarios/straight_road.json`（3000m 双向 4 车道直路，路尾掉头） |
 | 许可证 | MIT |
 
-核心能力一览：Pub/Sub 消息总线（零拷贝）、IPC 共享内存、TCP/网络传输、C++20 协程调度器、反射式状态机、UDP 服务发现、Bag v2/MCAP 录制回放、EKF 传感器融合、Frenet 最优轨迹规划、PID 控制（原 MPC 已废弃）、FlowCoro 安全包络、FlowBoard 3D 仪表盘、车端学习闭环（数据采集→训练→影子推理→SGD 微调→OTA）。
+核心能力一览：Pub/Sub 消息总线（零拷贝）、IPC 共享内存、TCP/网络传输、C++20 协程调度器、反射式状态机、UDP 服务发现、Bag v2/MCAP 录制回放、EKF 传感器融合、行为 FSM、Frenet 最优轨迹规划、ST 图 + DP 速度规划、N 把方向掉头/泊车（ManeuverTracker）、Stanley 横向（可选 LTV MPC）+ PID 纵向、FlowCoro 安全包络、FlowBoard 3D 仪表盘、车端学习闭环（数据采集→训练/DAgger/PPO→影子推理→SGD 微调→OTA）。
 
 ---
 
@@ -123,20 +123,23 @@ flowctl param set control.k_vy 0.5     # 下一帧生效，无需重启
 
 ## 4. ADAS Pipeline
 
-### 4.1 12 节点概览
+### 4.1 15 节点概览
 
-默认配置 [pipeline.json](file:///workspace/config/pipeline.json) 启动 12 个插件节点：
+默认配置 [pipeline.json](file:///workspace/config/pipeline.json) 启动 15 个插件节点：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
-| `flowsim` | libflowsim_node.so | 20Hz | 车辆动力学 + 障碍物模拟 + 场景加载 |
+| `flowsim` | libflowsim_node.so | 50Hz | 车辆动力学 + NPC（IDM）+ 场景加载 + 真值发布 |
 | `sensor_model` | libsensor_model.so | 20Hz | LiDAR/GPS/Camera 传感器模型（FOV/遮挡/噪声） |
 | `perception` | libperception_node.so | 10Hz | DBSCAN 点云聚类 + 目标检测 |
+| `object_tracker` | libobject_tracker.so | 20Hz | 卡尔曼多目标跟踪 |
 | `fusion` | libfusion_node.so | 20Hz | EKF 传感器融合（定位 + 时间对齐） |
-| `planning` | libplanning_node.so | 20Hz | Frenet 最优轨迹规划（变道/超车） |
-| `control` | libcontrol_node.so | 20Hz | PID 纵向 + 横向 Stanley（原 MPC 已废弃） |
-| `safety_control` | libsafety_control_node.so | 协程 | FlowCoro 安全包络（TTC/横向交叉/行人） |
-| `inference` | libinference_node.so | 20Hz | tiny-MLP 影子推理（shadow mode） |
+| `behavior_planner` | libbehavior_planner.so | 10Hz | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
+| `navigation` | libnavigation_node.so | 10Hz | 路由步骤 + 行进方向（消费 `ref_path.reverse`） |
+| `planning` | libplanning_node.so | 20Hz | Frenet 轨迹 + ST 图 DP 速度规划 + N 把方向掉头 |
+| `control` | libcontrol_node.so | 50Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker |
+| `safety_control` | libsafety_control_node.so | 协程 | FlowCoro 安全包络（TTC/横向交叉/行人/MRM） |
+| `inference` | libinference_node.so | 20Hz | tiny-MLP/ONNX 影子推理（shadow mode） |
 | `data_recorder` | libdata_recorder_node.so | 20Hz | 训练样本采集（模仿学习 JSONL） |
 | `learner` | liblearner_node.so | 0.5Hz | 车端增量 SGD 微调 |
 | `model_ota` | libmodel_ota_node.so | 1Hz | 模型 OTA + 版本管理 + A-B 对比 |
@@ -239,7 +242,9 @@ PID（L1402）:
 
 #### 5.1.4 横向控制：Stanley（[L1428](file:///workspace/modules/adas_nodes/control_node.cpp#L1428)）
 
-横向控制只有 Stanley 路径（原 MPC 代码已删除）：
+巡航横向默认走 Stanley；`use_ltv_mpc` 参数可启用 **LTV MPC**（线性时变模型预测，
+求解失败回退 Stanley；机动模式跳过 MPC——满舵弧 + 倒挡在其线性化域外，由
+ManeuverTracker 负责）。原 iLQR MPC 已删除。
 
 **Stanley + 横向速度规划（变道 `lc_active`，[L1513](file:///workspace/modules/adas_nodes/control_node.cpp#L1513)）**
 
@@ -293,20 +298,22 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 
 ### 5.2 mpc_controller — iLQR MPC 【已废弃，代码已删除】
 
-MPC 控制器已从 control_node 中移除。横向控制统一使用 Stanley 路径。
+原 iLQR MPC 已移除。现横向控制 = Stanley（默认）+ LTV MPC（`ltv_mpc.h`，参数
+`use_ltv_mpc` 启用）+ ManeuverTracker（机动模式：掉头/倒车/泊车，`maneuver_tracker.h`）。
 
-### 5.3 planning_node — Frenet 轨迹规划
+### 5.3 planning_node — Frenet 轨迹 + ST 图速度规划
 
-**文件**：[planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp)（1136 行），20Hz 协程节点
+**文件**：[planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp)（~2700 行），20Hz 协程节点
 **订阅**：`fusion/localization`、`perception/obstacles`、`road/geometry`、`road/traffic_lights`、`scene/frame`
 **发布**：`planning/trajectory`（type_id `0x3A7B1C2D`）
 
-| 关键结构/函数 | 行号 | 说明 |
-|----------------|------|------|
-| `PlanningContext` | L57 | 节点状态：双状态机（反射式 + 驾驶模式 NA/ACC/CP/NP/NOA）、Frenet 句柄、ego、障碍物 128 槽 |
-| `update_reference_path()` | L230 | 构建 101 点参考路径沿道路中心线 |
-| `PlanningTask::run()` | L420 | 20Hz 主循环 |
-| `on_scene_frame()` | L330 | NOA merge 闭环：算主线来车前后 gap |
+| 关键结构/函数 | 说明 |
+|----------------|------|
+| `PlanningContext` | 节点状态：双状态机（反射式 + 驾驶模式 NA/ACC/CP/NP/NOA）、Frenet 句柄、ego、障碍物 128 槽 |
+| `frenet_plan()` | Frenet 最优轨迹（横向路径） |
+| `st_graph.c` `stg_plan()` | **ST 图 + DP 速度规划**：红灯墙 + 动态障碍占据 + 曲率限速，90×101 DP 表（142KB 静态）。1:1 移植自 `tools/speed_planner_sim.py`（11/11 场景 PASS 后冻结），替代旧线性斜坡 + 红灯 override 堆 |
+| `generate_uturn_trajectory()` | N 把方向掉头：前进满舵弧 → 刹停换 R → 倒车反打 → 循环（≤5 把）；512 点细生成 + 段感知下采样 64；生成一次即缓存重放防重规划抖动 |
+| `project_to_reference_path()` | ego 投影到 map_ref 参考线 Frenet 弧长（右转/支路场景） |
 
 **驾驶模式状态机**：NA→ACC→CP→NP→NOA 逐级升级（guard 检查 fusion/vstate/路线就绪），fusion 超 1.5s 未更新降级回 NA。
 
@@ -316,7 +323,10 @@ MPC 控制器已从 control_node 中移除。横向控制统一使用 Stanley �
 不再是 JSON `{"type":"frenet", "path":[[s,d,speed],...]}`。
 下游用 `Trajectory_deserialize()` 反序列化，见 `planning_node.cpp` 的发布端和 `inference_node.cpp` 的消费端。
 
-> **重要澄清 — 梯形速度剖面不存在**：全仓库搜索 `trapezoidal/梯形` 仅命中前端渲染几何，**planning_node 没有显式梯形速度剖面模块**。速度剖面由开源 Frenet Optimal Trajectory (FOT) 规划器在 `frenet_plan()` 内部通过代价函数（`kv/ka/kj/klat/klon` 权重）优化产生；fallback 路径是恒速剖面（所有点统一 `command_speed`）。若需要"梯形减速"语义，需在 planning 层新增独立模块。
+> **速度剖面演进**：早期速度剖面由 FOT 代价函数隐式产生 + 红灯 override 补丁堆，
+> 无显式减速语义。现由 `st_graph.c`（ST 图 + DP）统一生成：红灯墙、动态障碍占据、
+> 曲率限速全部进 DP 代价，替代了旧 override 堆。设计见
+> [PLANNING_SPEED_UPGRADE_DESIGN.md](file:///workspace/docs/PLANNING_SPEED_UPGRADE_DESIGN.md)。
 
 > **已修复 bug — 停稳死锁**（[L787](file:///workspace/modules/adas_nodes/planning_node.cpp#L787)）：旧版 `command_speed = spd_out[0]`（≈当前车速）覆盖导致 `v=0→target=0→油门=0→v=0` 自维持闭锁。已改为 `if (spd_out[0] > command_speed) command_speed = spd_out[0]`（取 max）。
 
