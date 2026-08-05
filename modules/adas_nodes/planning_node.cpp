@@ -1838,6 +1838,22 @@ protected:
                 g.uturn_cache_ego_y = g.ego_y;
                 LOG_INFO("planning", "[UTURN] planner generated %d pts (ego_x=%.1f y=%.2f h=%.2f v=%.1f fwd=%.1fm) — cached, replay until exit",
                          n_pts, g.ego_x, g.ego_y, g.ego_heading, g.ego_v, forward_space_m);
+                /* ── 掉头曲率-速度约束校验（M4，planning 重生）──
+                 * 掉头弧 κ≈0.18 → 进弯 v ≤ sqrt(a_lat_max/κ) ≈ 5.3 m/s。
+                 * 当前生成器已「刹 0 + uturn_speed=2.5 进弯」满足，此为防线：
+                 * 未来掉头速度调高时 ST 图曲率约束自动压速，不依赖 behavior
+                 * 兜底（v≤5 触发）。与 §8.5 可行性检查同式（v²·κ ≤ 5）。 */
+                for (int i = 0; i < n_pts; i++) {
+                    double k = fabs((double)points[i].kappa);
+                    if (k > 1e-6) {
+                        double v_lim = 0.95 * sqrt(STG_A_LAT_MAX / k);
+                        if ((double)points[i].v > v_lim) {
+                            LOG_WARN("planning", "[UTURN] pt %d κ=%.3f v=%.1f > 曲率限 %.1f — 压速",
+                                     i, k, (double)points[i].v, v_lim);
+                            points[i].v = (float)v_lim;
+                        }
+                    }
+                }
                 /* 跳过 stitch（掉头是全新轨迹，不与上帧拼接） */
                 use_stitch = false;
                 /* 跳过下方所有 Frenet 规划逻辑 */
