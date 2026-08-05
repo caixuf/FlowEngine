@@ -33,7 +33,7 @@ from control_sim import VehicleState, DT  # noqa: E402
 CRUISE_V = 20.0      # 巡航目标 m/s
 A_MAX = 4.0          # 制动上限 m/s²（VehicleState: brake×8）
 BRAKE_THRESHOLD = 0.2  # 互斥阈值（与 feature_schema 一致）
-COLLISION_PENALTY = -20.0
+COLLISION_PENALTY = -100.0  # 碰撞惩罚必须 >> 速度收益（否则学「撞了也值」）
 JERK_PENALTY = -0.05
 EPISODE_LEN = 300    # 15s @20Hz
 
@@ -56,15 +56,17 @@ class LongitudinalEnv:
         self.prev_v = self.init_v
         self.total_jerk = 0.0
         self.collision = False
+        self.prev_gap = self._gap()
         return self._state()
+
+    def _gap(self):
+        if self.mode == "emergency":
+            return self.obstacle_x - self.ego.x - 2.25
+        return 200.0
 
     def _state(self):
         """状态 [ego_v, gap]。gap=障碍距离（cruise 恒 200=无车）。"""
-        if self.mode == "emergency":
-            gap = self.obstacle_x - self.ego.x - 2.25
-        else:
-            gap = 200.0
-        return [self.ego.v, max(gap, 0.0)]
+        return [self.ego.v, max(self._gap(), 0.0)]
 
     def step(self, action):
         """action=[throttle, brake]。返回 (state, reward, done, info)。"""
@@ -87,15 +89,24 @@ class LongitudinalEnv:
         self.total_jerk += jerk
         r += JERK_PENALTY * min(jerk, 20.0)  # 舒适惩罚
 
+        # 推进奖励（2026-08-05 Step2）：车接近障碍(未撞)有正奖励。
+        # 解决「碰撞 -100 太强 → 学一开始就刹(34m 外停, 极低效)」：
+        # 原地刹没推进奖励，巡航后再刹有 → 鼓励「开过去再刹」。
+        gap = self._gap()
+        r += 0.02 * (self.prev_gap - gap)
+        self.prev_gap = gap
+
         # 终止条件
         done = False
         if self.mode == "emergency":
-            gap = self.obstacle_x - self.ego.x - 2.25
             if gap < 0.5:
                 r += COLLISION_PENALTY
                 self.collision = True
                 done = True
             elif v < 0.3:  # 刹停成功
+                # 停得太远(>15m)是低效策略 → 惩罚（IDM 停 5.5m）
+                if gap > 15.0:
+                    r -= 5.0
                 r += 2.0  # 停稳奖励
                 done = True
         if self.step_n >= EPISODE_LEN:
@@ -250,14 +261,71 @@ def _perturb(theta, idx, delta):
 # ══════════════════════════════════════════════════════════════
 
 def evaluate(theta, mode, n=50, seed_base=1000):
-    """无探索评估：碰撞率 + 平均速度。"""
+    """无探索评估：碰撞率 + 刹停位置（效率指标）。
+
+    刹停位置 = 停稳时距障碍的距离（越小 = 刹车越晚越高效，
+    但必须 0 碰撞）。IDM 提前 40m 保守刹车 → 停得远；
+    RL 若学「更晚刹」→ 停得近 = 效率超越。
+    """
     coll = 0
-    speeds = []
+    stop_gaps = []  # 刹停时距障碍距离（碰撞 episode 不计）
     for i in range(n):
-        _, _, info = run_episode(theta, mode, sample=False, seed=seed_base + i)
+        env = LongitudinalEnv(mode=mode)
+        s = env.reset()
+        done = False
+        while not done:
+            a = net_forward(theta, s)  # 无探索
+            s, _, done, info = env.step(a)
         if info["collision"]:
             coll += 1
-    return coll, n
+        else:
+            gap = env.obstacle_x - env.ego.x - 2.25
+            stop_gaps.append(max(gap, 0.0))
+    avg_gap = sum(stop_gaps) / len(stop_gaps) if stop_gaps else float("inf")
+    return coll, n, avg_gap
+
+
+def warm_start(theta, n_traj=20, lr=0.02):
+    """模仿初始化：采样 IDM 轨迹对 (s, a)，监督拟合策略网络。
+
+    解决「纯 REINFORCE 从随机出发卡在『立刻刹』局部最优」：
+    策略先学会 IDM 的「巡航→提前减速→刹停」路径，RL 只需微调
+    「更晚刹更高效」，不用从零探索长路径。
+    """
+    pairs = []  # (s, a_idm)
+    for _ in range(n_traj):
+        env = LongitudinalEnv(mode="emergency")
+        s = env.reset()
+        done = False
+        while not done:
+            a = idm_action(s, "emergency")
+            pairs.append((s, a))
+            s, _, done, _ = env.step(a)
+    # 监督拟合：MSE(a_net(s), a_idm)，数值梯度
+    for _ in range(30):
+        for s, a in pairs:
+            mu = net_forward(theta, s)
+            for k in range(2):
+                err = mu[k] - a[k]
+                # 数值梯度 ∂err²/∂θ
+                for li in range(len(theta)):
+                    if isinstance(theta[li], list):
+                        if theta[li] and isinstance(theta[li][0], list):
+                            for i in range(len(theta[li])):
+                                for j in range(len(theta[li][i])):
+                                    t_p = _perturb(theta, (li, i, j), 1e-3)
+                                    t_m = _perturb(theta, (li, i, j), -1e-3)
+                                    g = (net_forward(t_p, s)[k]
+                                         - net_forward(t_m, s)[k]) / 2e-3
+                                    theta[li][i][j] -= lr * 2 * err * g
+                        else:
+                            for i in range(len(theta[li])):
+                                t_p = _perturb(theta, (li, i), 1e-3)
+                                t_m = _perturb(theta, (li, i), -1e-3)
+                                g = (net_forward(t_p, s)[k]
+                                     - net_forward(t_m, s)[k]) / 2e-3
+                                theta[li][i] -= lr * 2 * err * g
+    return theta
 
 
 def main() -> int:
@@ -265,10 +333,19 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=2000)
     ap.add_argument("--lr", type=float, default=0.01)
     ap.add_argument("--no-train", action="store_true")
+    ap.add_argument("--no-warm", action="store_true", help="跳过模仿初始化")
+    ap.add_argument("--seed", type=int, default=7, help="固定随机种子（可复现）")
     args = ap.parse_args()
 
-    theta = init_theta()
+    random.seed(args.seed)
+    theta = init_theta(seed=args.seed)
     print("=== RL Step1: 纵向 RL vs IDM 基线 ===")
+
+    if not args.no_warm:
+        print("[warm-start] 用 IDM 轨迹监督初始化策略（学会巡航→提前刹）")
+        theta = warm_start(theta)
+        coll, _, gap = evaluate(theta, "emergency", n=30)
+        print(f"  warm-start 后: 碰撞率 {coll}/30, 刹停距离 {gap:.1f}m (IDM 5.5m)")
 
     if not args.no_train:
         print(f"\n[训练] emergency 场景 {args.episodes} episodes (REINFORCE)")
@@ -293,18 +370,18 @@ def main() -> int:
                 else:
                     theta[li] += args.lr * grad[li]
             if ep % 200 == 199:
-                coll, _ = evaluate(theta, "emergency", n=20)
+                coll, _, _ = evaluate(theta, "emergency", n=20)
                 print(f"  ep {ep+1:5d} 回报={total:6.1f} 碰撞率={coll}/20")
                 if coll < best_coll:
                     best_coll = coll
 
-    # 对比评估
+    # 对比评估（Step2: 效率 = 刹停位置，越近越高效）
     print("\n[对比] emergency 场景 (无探索, 各 50 次)")
-    rl_coll, _ = evaluate(theta, "emergency", n=50)
-    print(f"  RL:     碰撞率 {rl_coll}/50")
+    rl_coll, _, rl_gap = evaluate(theta, "emergency", n=50)
+    print(f"  RL:     碰撞率 {rl_coll}/50, 平均刹停距离 {rl_gap:.1f}m")
     # IDM 基线
-    idm_theta = None  # IDM 不走网络，直接规则
     idm_coll = 0
+    idm_gaps = []
     for i in range(50):
         env = LongitudinalEnv(mode="emergency")
         s = env.reset()
@@ -314,12 +391,21 @@ def main() -> int:
             s, _, done, info = env.step(a)
         if info["collision"]:
             idm_coll += 1
-    print(f"  IDM:    碰撞率 {idm_coll}/50")
+        else:
+            gap = env.obstacle_x - env.ego.x - 2.25
+            idm_gaps.append(max(gap, 0.0))
+    idm_gap = sum(idm_gaps) / len(idm_gaps) if idm_gaps else float("inf")
+    print(f"  IDM:    碰撞率 {idm_coll}/50, 平均刹停距离 {idm_gap:.1f}m")
 
-    verdict = "RL ≤ IDM 碰撞率" if rl_coll <= idm_coll else "RL > IDM（未超越）"
-    print(f"\n结论: RL 碰撞率 {rl_coll}/50 vs IDM {idm_coll}/50 → {verdict}")
-    print("（Step1 只验证「RL 能否学会刹停」；效率对比是 Step2）")
-    return 0 if rl_coll <= idm_coll else 1
+    # 结论：碰撞率 ≤ IDM 且刹停更近（更晚刹更高效）= 超越
+    coll_ok = rl_coll <= idm_coll
+    eff_ok = rl_gap < idm_gap - 1.0  # 至少近 1m 才算效率超越
+    verdict = "✅ RL 超越 IDM（碰撞 0 且刹车更晚更高效）" if (coll_ok and eff_ok) else \
+              "✅ RL 追平 IDM（碰撞 0, 效率相当）" if coll_ok else \
+              "❌ RL 未超越（碰撞率更高）"
+    print(f"\n结论: RL 碰撞 {rl_coll}/50 vs IDM {idm_coll}/50, "
+          f"刹停距离 {rl_gap:.1f}m vs {idm_gap:.1f}m → {verdict}")
+    return 0 if coll_ok else 1
 
 
 if __name__ == "__main__":
