@@ -130,11 +130,38 @@ def stage_train(dataset: Path, run_dir: Path) -> Path:
     #      目标 ≤ ~270s（< run timeout 300s）。1500 样本只跑 70 epochs
     #      而非 300（纯 Python BP 5.8s/epoch × 300 = 24min 必超时）
     #   ③ early-stop 30：loss 相对收敛提前停（0.5% 阈值）
-    MAX_DS = 700
+    # 2026-08-05 窗口采样改「类别均衡」（修灾难性遗忘）：
+    # 纯尾部窗口被每轮采集(1000+ 条当前场景)占满 → DAgger/合成的
+    # 刹停样本被挤出 → 模型学最新场景忘了刹停（emergency 从 PASS
+    # 退步到 16.2m/s 实测）。均衡采样：real/synthetic/dagger 各留
+    # 比例，刹停边界样本永不被挤出。
+    MAX_DS = 900
+    BUDGET = {"real": 0.45, "synthetic": 0.25, "dagger": 0.30}
     lines = dataset.read_text().splitlines()
     if len(lines) > MAX_DS:
-        lines = lines[-MAX_DS:]
-        print(f"  (数据集滑动窗口: 保留尾部 {MAX_DS} 条)", flush=True)
+        buckets = {"real": [], "synthetic": [], "dagger": []}
+        for ln in lines:
+            try:
+                d = json.loads(ln)
+                if d.get("dagger"):
+                    buckets["dagger"].append(ln)
+                elif d.get("synthetic"):
+                    buckets["synthetic"].append(ln)
+                else:
+                    buckets["real"].append(ln)
+            except Exception:
+                pass
+        picked = []
+        for kind, ratio in BUDGET.items():
+            pool = buckets[kind]
+            n = int(MAX_DS * ratio)
+            if len(pool) > n:
+                pool = pool[-n:]  # 每类内部留尾部(最新)
+            picked.extend(pool)
+        lines = picked
+        print(f"  (窗口均衡: real {sum(1 for l in lines if '\"synthetic\"' not in l and '\"dagger\"' not in l)}"
+              f" + synthetic {sum(1 for l in lines if '\"synthetic\": true' in l)}"
+              f" + dagger {sum(1 for l in lines if '\"dagger\": true' in l)})", flush=True)
         (ds_dir / "samples.jsonl").write_text("\n".join(lines) + "\n")
     # 2026-08-05 实测修正：700 样本 × 98 epochs = 40s（0.58ms/样本-epoch，
     # 之前 3.9ms 估计偏差 7 倍——那 24min 是机器负载/损坏行干扰）。
