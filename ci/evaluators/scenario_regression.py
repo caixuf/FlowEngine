@@ -150,6 +150,15 @@ def compare_summary(baseline: dict, current: dict, tolerances: dict) -> list[str
     return regressions
 
 
+def scenario_tolerances(suite_tolerances: dict, entry: dict) -> dict:
+    """Merge suite-wide numeric gates with optional per-scenario overrides."""
+    merged = dict(suite_tolerances)
+    overrides = entry.get("baseline_tolerances")
+    if isinstance(overrides, dict):
+        merged.update(overrides)
+    return merged
+
+
 def print_report(rows: list[dict]) -> None:
     print("\n==================== Regression Matrix ====================")
     header = f"{'scenario':<26} {'result':<6} {'regress':<8} notes"
@@ -225,7 +234,7 @@ def main() -> int:
                 regressions.append("no baseline recorded for this scenario")
             else:
                 base_summary = baseline_payload.get("summary", {})
-                regressions = compare_summary(base_summary, summary, tolerances)
+                regressions = compare_summary(base_summary, summary, scenario_tolerances(tolerances, entry))
 
         rows.append({
             "scenario": key,

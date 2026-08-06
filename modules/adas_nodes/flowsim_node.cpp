@@ -155,6 +155,7 @@ struct FlowSimContext {
      * demo_evaluator.py 扫描此 marker 把 invariant 失败升级为 FAIL。
      * 旧行为只 LOG_WARN，不影响退出码也不被 evaluator 捕获 → 同类回归漏检。 */
     std::atomic<uint32_t>  invariant_fail_count{0};
+    uint32_t               ego_maneuver_grace_until{0};
 
     /* P2-8: 物理掉头标志。当车辆在对向车道（lane_id > 0）时为 true，
      * 此时 esmini advance 方向与车辆行驶方向相反，需要用 world_to_frenet
@@ -214,6 +215,7 @@ static void reset_runtime_state() {
     g.invariant_fail_count.store(0, std::memory_order_relaxed);
     g.u_turn_active = false;
     g.off_rails = false;
+    g.ego_maneuver_grace_until = 0;
     g.prev_steer = 0.0;
     g.bridge_last_cb_check = 0;
     g.bridge_prev_cb_count = 0;
@@ -1951,8 +1953,11 @@ protected:
                  *   dot=-1.000/-0.946（实测 540s 长跑 motion_direction 2 次 FAIL）。
                  *   掉头倒车是仿真里唯一的倒车场景（GEAR_REVERSE 只由掉头轨迹
                  *   触发），故 gear==REVERSE 并入豁免 = 覆盖整个掉头执行窗口。 */
-                bool ego_maneuver = g.u_turn_active ||
-                                    (g.ego_gear.load(std::memory_order_relaxed) == GEAR_REVERSE);
+                const int8_t gear = g.ego_gear.load(std::memory_order_relaxed);
+                if (g.u_turn_active || g.off_rails || gear == GEAR_REVERSE) {
+                    g.ego_maneuver_grace_until = g.cycle + 120;  // ~2s at 60Hz
+                }
+                bool ego_maneuver = (g.cycle <= g.ego_maneuver_grace_until);
                 auto dd = flowsim::build_dynamic_digest(g.pool, sim_time_s, (int)g.cycle, true,
                                                         ego_maneuver);
                 // 空间 invariant

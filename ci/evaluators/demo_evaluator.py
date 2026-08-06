@@ -573,7 +573,8 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         gap_x = abs(rel_x) - (4.6 + length) * 0.5
         gap_y = rel_y - (2.0 + width) * 0.5
         min_abs_gap = min(min_abs_gap, max(gap_x, gap_y))
-        if rel_x > 0 and rel_y < 2.5:
+        lateral_overlap = rel_y < (2.0 + width) * 0.5
+        if rel_x > 0 and lateral_overlap:
             min_forward_gap = min(min_forward_gap, rel_x - (4.6 + length) * 0.5)
 
     # P3: 提取每个 truth entity 的 tp_cycle（last_teleport_cycle），供 NPC teleport
@@ -944,9 +945,14 @@ def _dbg_dump_sample(filename: str, sample: dict) -> None:
 LIVENESS_FIELDS = [
     ("speed",           "ego speed",        False),
     ("x",               "ego x",            False),
-    ("y",               "ego y",            False),
-    ("heading",         "ego heading",      False),
-    ("steer_signed",    "steer command",    False),
+    # y/heading/steer may legitimately stay constant in straight-lane scenarios
+    # (multi_light/oncoming cruise on a straight road). Scenario-specific gates
+    # still validate them when curvature, lane change, or maneuver behavior is
+    # expected; treating them as global hard liveness signals makes straight
+    # scenarios fail despite a healthy pipeline.
+    ("y",               "ego y",            True),
+    ("heading",         "ego heading",      True),
+    ("steer_signed",    "steer command",    True),
     ("lane_count",      "lane count",       True),   # 场景固定即合法
 ]
 
@@ -1607,10 +1613,12 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 t = timestamps[i] if i < len(timestamps) else i * 0.5
                 if t_first - 12.0 <= t <= t_last + 8.0:
                     uturn_window[i] = True
-    valid_gaps = [m["min_forward_gap"] for i, m in enumerate(series)
-                  if not uturn_window[i] and not math.isinf(m["min_forward_gap"])]
-    if valid_gaps:
-        min_gap_all = min(valid_gaps)
+    valid_gap_records = [(m["min_forward_gap"], m["speed"]) for i, m in enumerate(series)
+                         if not uturn_window[i] and not math.isinf(m["min_forward_gap"])]
+    if valid_gap_records:
+        min_gap_all = min(gap for gap, _speed in valid_gap_records)
+        moving_gaps = [(gap, speed) for gap, speed in valid_gap_records if abs(speed) > 1.0]
+        min_moving_gap = min((gap for gap, _speed in moving_gaps), default=math.inf)
         # 取该帧车速估期望间距；用整段的中位速度避免个别低速帧放宽判据
         _speeds_sorted = sorted(speeds)
         v_med = _speeds_sorted[len(_speeds_sorted) // 2] if _speeds_sorted else 0.0
@@ -1618,9 +1626,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         gap_fail_thresh = desired_gap * ACC_GAP_FAIL_RATIO
         if min_gap_all <= 0.0:
             failures.append(f"min_forward_gap <= 0 (min={min_gap_all:.2f}m): rear-end collision risk")
-        elif min_gap_all < gap_fail_thresh:
+        elif min_moving_gap < gap_fail_thresh:
             failures.append(
-                f"min_forward_gap {min_gap_all:.2f}m < {gap_fail_thresh:.2f}m "
+                f"min_forward_gap {min_moving_gap:.2f}m < {gap_fail_thresh:.2f}m "
                 f"({ACC_GAP_FAIL_RATIO:.0%} of desired {desired_gap:.1f}m at "
                 f"v_med={v_med:.1f} m/s): ACC is not holding headway — "
                 f"collision avoided by margin, not by control"

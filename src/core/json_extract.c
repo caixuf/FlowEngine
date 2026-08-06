@@ -31,10 +31,39 @@ static const char* find_value_start(const char* json, const char* key) {
     return p;
 }
 
+static double parse_json_number_no_subnormal(const char* p) {
+    if (!p) return 0.0;
+    const char* s = p;
+    if (*s == '-' || *s == '+') s++;
+    int has_digit = 0;
+    while ((*s >= '0' && *s <= '9') || *s == '.') {
+        if (*s >= '0' && *s <= '9') has_digit = 1;
+        s++;
+    }
+    if (!has_digit) return 0.0;
+    if (*s == 'e' || *s == 'E') {
+        s++;
+        int neg = 0;
+        if (*s == '-') { neg = 1; s++; }
+        else if (*s == '+') s++;
+        long ev = 0;
+        int has_exp = 0;
+        while (*s >= '0' && *s <= '9') {
+            has_exp = 1;
+            if (ev < 100000) ev = ev * 10 + (*s - '0');
+            s++;
+        }
+        if (has_exp && neg && ev >= 308) {
+            return 0.0;
+        }
+    }
+    return strtod(p, NULL);
+}
+
 double json_extract_double(const char* json, const char* key) {
     const char* p = find_value_start(json, key);
     if (!p) return 0.0;
-    return atof(p);
+    return parse_json_number_no_subnormal(p);
 }
 
 int json_extract_int(const char* json, const char* key) {
@@ -84,15 +113,15 @@ int json_extract_vec3(const char* json, const char* key,
      * consolidates). A 4-element array silently ignores the extra value;
      * an array with fewer than 3 elements (missing comma before the 2nd or
      * 3rd value) returns -1 without modifying a, b, or c. */
-    double va = atof(p);
+    double va = parse_json_number_no_subnormal(p);
     p = strchr(p, ',');
     if (!p) return -1;
     p++;
-    double vb = atof(p);
+    double vb = parse_json_number_no_subnormal(p);
     p = strchr(p, ',');
     if (!p) return -1;
     p++;
-    double vc = atof(p);
+    double vc = parse_json_number_no_subnormal(p);
 
     *a = va;
     *b = vb;

@@ -50,6 +50,20 @@ terminate_pids() {
   for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; done
 }
 
+process_alive() {
+  local pid="$1"
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  local stat
+  stat="$(ps -p "$pid" -o stat= 2>/dev/null | awk '{print $1}' || true)"
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 record_pid() {
   case "${1:-}" in
     ''|*[!0-9]*) return 0 ;;
@@ -372,6 +386,7 @@ fi
 "$LAUNCHER_BIN" "${LAUNCHER_ARGS[@]}" \
   > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
 LAUNCHER_PID=$!
+LAUNCHER_STARTED_AT=$(date +%s)
 record_pid "$LAUNCHER_PID" flow_launcher
 sleep 1
 if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
@@ -478,10 +493,28 @@ echo ""
 
 ELAPSED=0
 BEH_LINECOUNT=0
+PIPELINE_EXITED_EARLY=false
+LAUNCHER_RC=""
 # 持续运行: DURATION=0 时无限循环，直到脚本被 Ctrl+C 终止
 while true; do
   # 限时模式: 达到时长后退出循环
   if [ "$DURATION" -gt 0 ] 2>/dev/null && [ $ELAPSED -ge $DURATION ]; then break; fi
+  if ! process_alive "$LAUNCHER_PID"; then
+    set +e
+    wait "$LAUNCHER_PID"
+    LAUNCHER_RC=$?
+    set -e
+    LAUNCHER_RUNTIME=$(( $(date +%s) - LAUNCHER_STARTED_AT ))
+    # flow_launcher exits by itself when --duration elapses. Compare against
+    # launcher wall time, not the live-monitor counter: dashboard setup happens
+    # after launcher start and can make ELAPSED several seconds behind.
+    if [ "$LAUNCHER_RC" -ne 0 ] || [ "$DURATION" -le 0 ] 2>/dev/null || [ $LAUNCHER_RUNTIME -lt $((DURATION - 2)) ]; then
+      PIPELINE_EXITED_EARLY=true
+      echo ""
+      echo "  ✗ Pipeline exited before demo duration completed (PID $LAUNCHER_PID, rc=$LAUNCHER_RC, runtime=${LAUNCHER_RUNTIME}s)"
+    fi
+    break
+  fi
 
   # ── 显示新增的 [BEH] / [SM] 日志行 ──
   if [ -f "$BEH_LOG" ]; then
@@ -560,3 +593,7 @@ if [ "$RECORD_MODE" = true ] && [ -f "$BAG_FILE" ]; then
   echo "  Bag        : $BAG_FILE ($BAG_SIZE)"
 fi
 echo "  CI Status  : github.com/caixuf/FlowEngine/actions"
+
+if [ "$PIPELINE_EXITED_EARLY" = true ]; then
+  exit 1
+fi

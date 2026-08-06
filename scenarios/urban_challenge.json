@@ -52,7 +52,7 @@
     "beats": [
       {"t": 8.0,  "actor": "1",  "act": "brake", "vx": 2.0},
       {"t": 8.0,  "actor": "2",  "act": "brake", "vx": 4.0},
-      {"t": 16.0, "actor": "10", "act": "cross", "vx": 1.5},
+      {"t": 12.0, "actor": "10", "act": "cross", "vx": 1.5},
       {"t": 32.0, "actor": "1",  "act": "brake", "vx": 14.0},
       {"t": 32.0, "actor": "2",  "act": "brake", "vx": 10.0},
       {"t": 40.0, "actor": "tl", "phase": "red"},

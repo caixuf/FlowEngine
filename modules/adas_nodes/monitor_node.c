@@ -248,12 +248,17 @@ static void on_obstacles(const Message* msg, void* user_data) {
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
-    pthread_mutex_lock(&g.vehicle_state_mutex);
+    char sanitized[sizeof(g.latest_vehicle_state)];
     size_t copy = msg->data_size < sizeof(g.latest_vehicle_state) - 1
                   ? msg->data_size : sizeof(g.latest_vehicle_state) - 1;
-    memcpy(g.latest_vehicle_state, msg->data, copy);
-    g.latest_vehicle_state[copy] = '\0';
-    sanitize_subnormal_literals(g.latest_vehicle_state);  /* 摄入即钳 subnormal：json_extract_double(atof→strtod) 也读这份 buffer */
+    memcpy(sanitized, msg->data, copy);
+    sanitized[copy] = '\0';
+    sanitize_subnormal_literals(sanitized);
+    /* 先在栈上清洗，再发布到共享缓存。旧实现先写 g.latest_vehicle_state 再原地
+     * sanitize，monitor 主线程可能在窗口内 json_extract_double(atof→strtod)
+     * 读到 subnormal，触发 glibc strtod_l 断言 abort。 */
+    pthread_mutex_lock(&g.vehicle_state_mutex);
+    memcpy(g.latest_vehicle_state, sanitized, strlen(sanitized) + 1);
     g.has_vehicle_state = 1;
     /* 提取 ego 所在 road_id，供 trajectory_edge_id 用 */
     g.ego_road_id = json_extract_int(g.latest_vehicle_state, "road_id");
