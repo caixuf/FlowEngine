@@ -184,7 +184,7 @@ static void reset_runtime_state() {
         g.scenario = nullptr;
     }
 
-    g.roads.close();
+    g.roads.release();
     g.pool.clear();
     g.route = flowsim::Route();
     g.scene_pub_cfg = flowsim::ScenePubConfig();
@@ -2283,7 +2283,7 @@ static void flowsim_cleanup(void) {
     for (int i = 0; i < flowsim::MAX_ENTITIES; ++i) {
         g.pool[i].road_pos = flowsim::RoadPosition{};
     }
-    g.roads.close();
+    g.roads.release();
     g.roads_loaded = false;
     if (g.scenario) {
         scenario_free(g.scenario);

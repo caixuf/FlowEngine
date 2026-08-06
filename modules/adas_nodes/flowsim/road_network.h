@@ -75,7 +75,7 @@ public:
     bool load(const std::string& xodr_path);
 
     /** 释放路网（析构会自动调用，也可显式释放）。 */
-    void close();
+    void release();
 
     /** 是否已加载路网。 */
     bool loaded() const { return loaded_; }

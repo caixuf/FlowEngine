@@ -94,6 +94,12 @@ if(WIN32)
         add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     endif()
     include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/compat_win)
+    # mingw/gcc:flowcoro 的 std::atomic<非 lock-free 大对象> 会下沉到 libatomic
+    # 的 __atomic_load/__atomic_store 运行时符号。MSVC 用 Interlocked 内建、无此
+    # 依赖,故仅 GNU Windows 工具链(mingw)显式链接 libatomic;MSVC 分支不受影响。
+    if(NOT MSVC)
+        link_libraries(atomic)
+    endif()
 elseif(APPLE)
     add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     # epoll/eventfd 平替：把 include/compat 抢在系统头之前,让 flowcoro/net 的
@@ -171,6 +177,14 @@ if(NOT CJSON_FOUND)
     set(ENABLE_CJSON_TEST   OFF CACHE BOOL "" FORCE)
     set(ENABLE_CJSON_UTILS  OFF CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS   OFF CACHE BOOL "" FORCE)
+    # cJSON 默认(ENABLE_CUSTOM_COMPILER_FLAGS=ON)注入一大串 -Werror -Wcast-qual
+    # -Wconversion 等严苛标志。在 Windows 工具链(mingw)下,cJSON 自身的
+    # isnan/isinf 宏展开触发 -Werror=float-conversion,force-include 的
+    # platform_compat.h strcasestr 触发 -Werror=cast-qual —— 都把第三方构建打断。
+    # 关掉这组"上游自定义严苛标志",仅影响 cjson 子项目,不改本工程告警级别。
+    if(WIN32)
+        set(ENABLE_CUSTOM_COMPILER_FLAGS OFF CACHE BOOL "" FORCE)
+    endif()
     # cJSON v1.7.17 的 CMakeLists 声明 cmake_minimum_required(VERSION 2.8.x)，
     # CMake 4.x 已移除对 < 3.5 的兼容会直接报错。用此变量放宽下限，让上游
     # 老项目按 3.5 策略配置通过（仅影响 FetchContent 子项目，不改本项目行为）。
