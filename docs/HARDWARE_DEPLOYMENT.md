@@ -391,7 +391,7 @@ pipeline_car.json 里 `waypoint_follower` 节点的 params：
 | LiDAR 协议格式 | [lidar_driver_node.c](../modules/adas_nodes/lidar_driver_node.c) `read_lidar_frame()` | 改代码（~50 行） |
 | IMU 协议格式 | [imu_driver_node.c](../modules/adas_nodes/imu_driver_node.c) `parse_imu_line()` | 改代码（~30 行） |
 | SLAM 算法选择 | pipeline_car.json params `algo` | 改配置（算法库需预编译） |
-| SLAM 算法接入 | [slam_node.c](../modules/adas_nodes/slam_node.cpp) `slam_update()` | 改代码（按算法 SDK） |
+| SLAM 算法接入 | [slam_node.cpp](../modules/adas_nodes/slam_node.cpp) `slam_update()` | 改代码（按算法 SDK） |
 | OAK-D 参数（baseline/fov/fps） | pipeline_car.json params | 改配置 |
 | DIY 双目采集 | [stereo_camera_node.c](../modules/adas_nodes/stereo_camera_node.c) `read_stereo_frame()` | 改代码（接 OpenCV stereoBM） |
 | CAN 接口名 | pipeline_car.json params | 改配置 |
@@ -526,9 +526,9 @@ cmake .. && make -j
 # 产出 libfast_lio2.a（路径如 ~/FAST_LIO/build/libfast_lio2.a）
 ```
 
-### 步骤 2：把 slam_node.c 改名为 .cpp 并填充占位
+### 步骤 2：填充 slam_node.cpp 占位函数
 
-FAST-LIO2 是 C++ 模板库（ESKF），不能用 C 编译。把 [modules/adas_nodes/slam_node.c](../modules/adas_nodes/slam_node.cpp) 重命名为 `slam_node.cpp`，并填三个占位函数（位置见源码 `#ifdef HAVE_FAST_LIO2` 块）：
+FAST-LIO2 是 C++ 模板库（ESKF），不能用 C 编译。仓库已提供 [modules/adas_nodes/slam_node.cpp](../modules/adas_nodes/slam_node.cpp)，在其中填三个占位函数（位置见源码 `#ifdef HAVE_FAST_LIO2` 块）：
 
 ```cpp
 // 文件顶部加 include
