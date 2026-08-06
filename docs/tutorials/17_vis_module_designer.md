@@ -22,7 +22,7 @@ SceneDirector
 - **插件化** — 新增 View 只需 `register + addView`，不动 SceneDirector 主体
 - **递归 dispose** — Layer 树自动递归清理所有 View 资源
 
-完整架构见 [docs/VISUALIZATION_ARCHITECTURE.md](../docs/VISUALIZATION_ARCHITECTURE.md)。
+完整架构见 [VISUALIZATION_ARCHITECTURE.md](../VISUALIZATION_ARCHITECTURE.md)。
 
 ## 何时使用
 

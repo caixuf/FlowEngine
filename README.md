@@ -584,6 +584,8 @@ NPC 瞬移跳变以及消息丢帧。对 pipeline 链路做任何改动后都应
 
 ## 文档
 
+> 📖 **完整文档索引见 [docs/README.md](docs/README.md)** —— 按主题分组的全部文档 + 17 篇教程入口。
+
 | 文档 | 主题 |
 |-----|-------|
 | [Quick Start](docs/QUICK_START.md) | 30 分钟教程 |

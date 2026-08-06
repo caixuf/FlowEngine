@@ -187,7 +187,7 @@ function update3D() {
 
 ## 参考
 
-- 实现：[deadreckon.js](file:///workspace/tools/flowboard/js/deadreckon.js)
-- 使用方：[scene3d.js](file:///workspace/tools/flowboard/js/scene3d.js)、[scene2d.js](file:///workspace/tools/flowboard/js/scene2d.js)
-- 馈入点：[app.js sync2DTarget()](file:///workspace/tools/flowboard/js/app.js)
-- 架构文档：[VISUALIZATION_ARCHITECTURE.md](file:///workspace/docs/VISUALIZATION_ARCHITECTURE.md)
+- 实现：[DeadReckon.js](../../tools/flowboard/js/vis/core/DeadReckon.js)
+- 使用方：[SceneDirector.js](../../tools/flowboard/js/vis/director/SceneDirector.js)、[scene2d.js](../../tools/flowboard/js/scene2d.js)
+- 馈入点：[app.js sync2DTarget()](../../tools/flowboard/js/app.js)
+- 架构文档：[VISUALIZATION_ARCHITECTURE.md](../VISUALIZATION_ARCHITECTURE.md)

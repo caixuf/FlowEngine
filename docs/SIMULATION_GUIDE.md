@@ -112,7 +112,7 @@ open http://localhost:8800
 `scene` 数据结构与坐标系约定详见
 [VISUALIZATION_ARCHITECTURE.md](VISUALIZATION_ARCHITECTURE.md#scene-数据结构真实-3d-仿真)。
 完整的离线问题根因分析与鲁棒性设计详见
-[E2E_SIMULATION_DESIGN.md](E2E_SIMULATION_DESIGN.md)。
+[tutorials/12_demo_evaluator.md](tutorials/12_demo_evaluator.md)。
 
 ## 场景矩阵回归（仿真即测试）
 

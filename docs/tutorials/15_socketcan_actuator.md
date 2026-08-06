@@ -164,11 +164,11 @@ ip -details link show can0
 
 ## actuator_node 代码走读
 
-源码：[modules/adas_nodes/actuator_node.c](../modules/adas_nodes/actuator_node.c)
+源码：[modules/adas_nodes/actuator_node.c](../../modules/adas_nodes/actuator_node.c)
 
 ### 1. 打开 CAN socket
 
-[actuator_node.c:117-150](../modules/adas_nodes/actuator_node.c#L117) 的 `can_open()` 函数封装了上面那段 socket 创建流程：
+[actuator_node.c:117-150](../../modules/adas_nodes/actuator_node.c#L117) 的 `can_open()` 函数封装了上面那段 socket 创建流程：
 
 ```c
 static int can_open(const char* ifname) {
@@ -179,7 +179,7 @@ static int can_open(const char* ifname) {
 }
 ```
 
-关键点：**失败不致命**。[actuator_node.c:371-380](../modules/adas_nodes/actuator_node.c#L371) 在 init 里检查 `can_open` 返回值，失败就自动切到 `dry_run` 模式：
+关键点：**失败不致命**。[actuator_node.c:371-380](../../modules/adas_nodes/actuator_node.c#L371) 在 init 里检查 `can_open` 返回值，失败就自动切到 `dry_run` 模式：
 
 ```c
 g.can_sock = can_open(g.can_interface);
@@ -193,7 +193,7 @@ if (g.can_sock < 0) {
 
 ### 2. CAN 帧编码
 
-[actuator_node.c:182-219](../modules/adas_nodes/actuator_node.c#L182) 把 `ControlRaw`（浮点数）编码成 CAN 帧（字节）：
+[actuator_node.c:182-219](../../modules/adas_nodes/actuator_node.c#L182) 把 `ControlRaw`（浮点数）编码成 CAN 帧（字节）：
 
 **油门/刹车帧**（CAN ID `0x100`，8 字节）：
 
@@ -216,7 +216,7 @@ if (g.can_sock < 0) {
 
 ### 3. 订阅回调
 
-[actuator_node.c:222-256](../modules/adas_nodes/actuator_node.c#L222) 的 `on_control_raw_cmd` 是核心回调：
+[actuator_node.c:222-256](../../modules/adas_nodes/actuator_node.c#L222) 的 `on_control_raw_cmd` 是核心回调：
 
 ```c
 static void on_control_raw_cmd(const Message* msg, void* user_data) {
@@ -241,7 +241,7 @@ static void on_control_raw_cmd(const Message* msg, void* user_data) {
 
 ### 4. 心跳线程
 
-[actuator_node.c:257-271](../modules/adas_nodes/actuator_node.c#L257) 有个独立线程定期发 status 帧：
+[actuator_node.c:257-271](../../modules/adas_nodes/actuator_node.c#L257) 有个独立线程定期发 status 帧：
 
 ```c
 static void* heartbeat_thread(void* arg) {
@@ -260,7 +260,7 @@ static void* heartbeat_thread(void* arg) {
 
 ### 5. 配置参数
 
-[actuator_node.c:353-364](../modules/adas_nodes/actuator_node.c#L353) 从 `pipeline.json` 的 `params` 读配置：
+[actuator_node.c:353-364](../../modules/adas_nodes/actuator_node.c#L353) 从 `pipeline.json` 的 `params` 读配置：
 
 ```json
 {
@@ -278,7 +278,7 @@ static void* heartbeat_thread(void* arg) {
 }
 ```
 
-CAN ID 支持 `0x` 十六进制写法（[actuator_node.c:275-289](../modules/adas_nodes/actuator_node.c#L275) 的 `parse_hex_int`），符合 CAN 协议手册的惯例。
+CAN ID 支持 `0x` 十六进制写法（[actuator_node.c:275-289](../../modules/adas_nodes/actuator_node.c#L275) 的 `parse_hex_int`），符合 CAN 协议手册的惯例。
 
 ## 动手实验
 
