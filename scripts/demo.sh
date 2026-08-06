@@ -24,14 +24,78 @@ NPROC="$( (command -v nproc >/dev/null 2>&1 && nproc) \
 # 可用 --scenario 覆盖；不指定时 patch pipeline.json 指向此场景。
 DEFAULT_SCENARIO="${FLOWENGINE_SCENARIO:-scenarios/straight_road.json}"
 
-# Kill any stale processes from previous runs (node hosts + servers + bridges)
-{ pkill -9 -f flowboard; pkill -9 -f flow_launcher; pkill -9 -f flow_node_host; \
-  pkill -9 -f flowmond; pkill -9 -f foxglove_bridge; \
-  pkill -9 -f "tail -F /tmp/flow_logs/launcher.log"; \
-  pkill -9 -f "tail -F /tmp/flow_launcher_stderr.txt"; } 2>/dev/null || true
-sleep 1
-# Clean up old per-module log files from previous run
 LOG_DIR="${FLOW_LOG_DIR:-/tmp/flow_logs}"
+PID_FILE="${FLOWENGINE_DEMO_PID_FILE:-/tmp/flowengine_demo.pids}"
+
+terminate_pids() {
+  local pids=()
+  local pid
+  for pid in "$@"; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+      "$$") continue ;;
+    esac
+    kill -0 "$pid" 2>/dev/null && pids+=("$pid")
+  done
+  [ ${#pids[@]} -eq 0 ] && return 0
+
+  for pid in "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  for _ in 1 2 3 4 5 6; do
+    local alive=()
+    for pid in "${pids[@]}"; do kill -0 "$pid" 2>/dev/null && alive+=("$pid"); done
+    [ ${#alive[@]} -eq 0 ] && return 0
+    pids=("${alive[@]}")
+    sleep 0.5
+  done
+  for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; done
+}
+
+record_pid() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s %s\n' "$1" "${2:-unknown}" >> "$PID_FILE"
+}
+
+pid_matches_label() {
+  local pid="$1"
+  local label="$2"
+  local args
+  args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  [ -z "$args" ] && return 1
+  case "$label" in
+    flow_launcher) [[ "$args" == *flow_launcher* ]] ;;
+    flowmond) [[ "$args" == *flowmond* ]] ;;
+    foxglove_bridge) [[ "$args" == *foxglove_bridge.py* ]] ;;
+    beh_log_watcher) [[ "$args" == *flow_beh_monitor.txt* ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+terminate_recorded_pids() {
+  [ -f "$PID_FILE" ] || return 0
+  local pid label
+  local pids=()
+  while read -r pid label _; do
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if pid_matches_label "$pid" "$label"; then
+      pids+=("$pid")
+    fi
+  done < "$PID_FILE"
+  terminate_pids "${pids[@]}"
+}
+
+# Kill stale children recorded by the previous demo run. Avoid process-name
+# sweeps: this environment may be shared, so only PIDs created by demo.sh are
+# eligible for cleanup.
+if [ -f "$PID_FILE" ]; then
+  terminate_recorded_pids
+  rm -f "$PID_FILE"
+fi
+sleep 0.5
+# Clean up old per-module log files from previous run
 rm -rf "$LOG_DIR" 2>/dev/null || true
 mkdir -p "$LOG_DIR"
 for port in 8800 8765; do
@@ -41,7 +105,7 @@ for port in 8800 8765; do
   else
     pid=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | head -1)
   fi
-  [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
+  [ -n "$pid" ] && terminate_pids "$pid"
 done
 sleep 0.5
 
@@ -257,34 +321,17 @@ cleanup() {
   echo ""
   echo "───[Cleanup] Shutting down..."
 
-  # 1) Ask our direct children to stop.
-  for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
-    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
-  done
-
-  # 2) Give them up to ~3s to exit gracefully, without blocking indefinitely.
-  #    (6 iterations × 0.5s sleep = 3s grace period.)
-  for _ in 1 2 3 4 5 6; do
-    still=""
-    for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
-      [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && still="$still $pid"
-    done
-    [ -z "$still" ] && break
-    sleep 0.5
-  done
-
-  # 3) Force-kill any survivors, then sweep stragglers (multi-process node
-  #    hosts, an orphaned bridge, or a previous run's server) by name.
-  for pid in $LAUNCHER_PID $BRIDGE_PID $SERVER_PID; do
-    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
-  done
-  { pkill -9 -f flow_node_host; pkill -9 -f flow_launcher; \
-    pkill -9 -f flowmond; pkill -9 -f flowboard_server; pkill -9 -f foxglove_bridge; } 2>/dev/null || true
+  terminate_pids "${TAIL_BEH_PID:-}" "${LAUNCHER_PID:-}" "${BRIDGE_PID:-}" "${SERVER_PID:-}"
+  if [ -f "$PID_FILE" ]; then
+    terminate_recorded_pids
+    rm -f "$PID_FILE"
+  fi
 
   # 保留拓扑文件供评估器/evaluator 事后分析（不删除）
   [ -f "$JSON_FILE" ] && cp "$JSON_FILE" "${JSON_FILE%.json}_$(date +%Y%m%d_%H%M%S).json" 2>/dev/null || true
   # 退出游戏模式（flowsim 恢复正常 control_node 驱动）
   rm -f /tmp/game_mode /tmp/game_input.json 2>/dev/null || true
+  cleanup_pipeline_tmp
 
   echo ""
   echo "  ╔══════════════════════════════════════╗"
@@ -325,6 +372,7 @@ fi
 "$LAUNCHER_BIN" "${LAUNCHER_ARGS[@]}" \
   > /tmp/flow_launcher_stdout.txt 2>/tmp/flow_launcher_stderr.txt &
 LAUNCHER_PID=$!
+record_pid "$LAUNCHER_PID" flow_launcher
 sleep 1
 if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
   echo "  ✗ Pipeline failed! Check /tmp/flow_launcher_stderr.txt"
@@ -348,6 +396,7 @@ fi
 "$BUILD_DIR/bin/flowmond" --port 8800 --html-path "$ROOT/tools/flowboard/index.html" \
   > /tmp/flowmond.log 2>&1 &
 SERVER_PID=$!
+record_pid "$SERVER_PID" flowmond
 sleep 2
 if kill -0 $SERVER_PID 2>/dev/null; then
     # Self-check: verify the server actually responds
@@ -367,38 +416,60 @@ fi
 python3 "$ROOT/tools/foxglove_bridge.py" --port 8765 --json-file "$JSON_FILE" \
   > /tmp/foxglove_bridge.log 2>&1 &
 BRIDGE_PID=$!
+record_pid "$BRIDGE_PID" foxglove_bridge
 echo "  ✓ 3D Bridge at ws://localhost:8765 (Foxglove Studio)"
 
 # ── Live monitor ────────────────────────────────────────────
 echo "───[4/4] Live monitor (${DURATION}s)..."
 echo ""
 
-# 准备行为日志过滤（tail launcher 日志，筛选 [BEH]、[SM] 和 [INV] 日志行）
+# 准备行为日志过滤（筛选 [BEH]、[SM] 和 [INV] 日志行）
 BEH_LOG="/tmp/flow_beh_monitor.txt"
 : > "$BEH_LOG"  # 清空
 sleep 1  # 等日志文件就绪
-# GNU tail 支持 --pid=$$：主 shell 退出后 tail 自动退出 → grep 收 EOF → 整条
-# 管道终止。没有它，EXIT trap 只能 kill 子 shell，tail/grep 孙子进程泄漏
-# （grep 持有评估器捕获管道写端 → demo_evaluator 的 stdout.read() 等 EOF 挂死）。
-# BSD tail（macOS）不支持 --pid，探测失败则不传，靠下方 trap kill 兜底。
-TAIL_PID_FLAG=""
-if tail --pid=$$ --version >/dev/null 2>&1; then
-  TAIL_PID_FLAG="--pid=$$"
-fi
-{
-  # 优先 tail 按模块分文件的日志；fallback 到旧 stderr 文件
-  if [ -f "$LOG_DIR/launcher.log" ]; then
-    exec tail -F $TAIL_PID_FLAG "$LOG_DIR/launcher.log" 2>/dev/null
-  else
-    exec tail -F $TAIL_PID_FLAG /tmp/flow_launcher_stderr.txt 2>/dev/null
-  fi
-} | grep --line-buffered -E '\[(BEH|SM|INV)\]' \
-  > "$BEH_LOG" &
+# 旧实现是 `tail -F | grep &`：EXIT trap 只能杀到管道最后一个进程，
+# macOS 又没有 GNU tail --pid，tail 孙进程会泄漏并持有评估器 stdout 管道。
+# 用一个 Python watcher 轮询文件，cleanup 只需按 PID 杀一个进程。
+python3 - "$LOG_DIR/launcher.log" /tmp/flow_launcher_stderr.txt "$BEH_LOG" <<'PY' &
+import os
+import re
+import sys
+import time
+
+primary, fallback, out_path = sys.argv[1:4]
+pat = re.compile(r"\[(BEH|SM|INV)\]")
+path = None
+fp = None
+pos = 0
+
+def select_path():
+    return primary if os.path.exists(primary) else fallback
+
+while True:
+    wanted = select_path()
+    try:
+        st = os.stat(wanted)
+    except OSError:
+        time.sleep(0.2)
+        continue
+    if wanted != path or fp is None:
+        if fp:
+            fp.close()
+        path = wanted
+        fp = open(path, "r", encoding="utf-8", errors="replace")
+        pos = 0
+    if st.st_size < pos:
+        fp.seek(0)
+    for line in fp:
+        if pat.search(line):
+            with open(out_path, "a", encoding="utf-8") as out:
+                out.write(line)
+                out.flush()
+    pos = fp.tell()
+    time.sleep(0.2)
+PY
 TAIL_BEH_PID=$!
-# cleanup 时 kill tail（--pid=$$ 使 tail 在主 shell 退出后自动清理，这里双保险）
-trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup" EXIT
-trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 130" INT
-trap "kill $TAIL_BEH_PID 2>/dev/null; cleanup; exit 143" TERM
+record_pid "$TAIL_BEH_PID" beh_log_watcher
 
 echo "  ┌─ FlowSim ─→ Perception ─→ Behavior ─→ Planning ─→ Control ┐"
 echo "  │  dynamics      DBSCAN        SM        Frenet       PID      │"

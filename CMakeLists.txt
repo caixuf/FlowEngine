@@ -242,17 +242,26 @@ if(WIN32 AND flowcoro_SOURCE_DIR AND EXISTS "${flowcoro_SOURCE_DIR}/src/c_api.cp
     file(WRITE "${flowcoro_SOURCE_DIR}/src/c_api.cpp" "${_flowcoro_c_api}")
 endif()
 
-# flowcoro 的 CMakeLists 用 `CACHE ... FORCE` 往全局塞了 GNU/x86 专属的构建标志
-# (-march=native -flto=auto -Wl,--as-needed -Wl,-O1),这些在 Apple clang/ld64 下
-# 要么非法(--as-needed)要么无意义。FORCE 会泄漏到本工程所有目标,故在 flowcoro
-# 之后、本工程目标定义之前,于 APPLE 平台把它们复位为 Apple 安全值。Linux 不进
-# 此分支,flowcoro 原有优化标志完全保留、行为零变化。
-if(APPLE)
-    set(CMAKE_C_FLAGS_RELEASE        "-O2 -DNDEBUG" CACHE STRING "" FORCE)
-    set(CMAKE_CXX_FLAGS_RELEASE      "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+# flowcoro 的 CMakeLists 用 `CACHE ... FORCE` 往全局塞了 GNU/x86/Linux 专属构建
+# 标志(-march=native -flto=auto -Wl,--as-needed -Wl,-O1)。这些在 Apple ld64/MSVC
+# 下非法,且 FORCE 会泄漏到本工程所有目标。Linux 保留 flowcoro 原有优化标志;
+# Apple/Windows 在 flowcoro add_subdirectory 后立即复位为本工程安全值。
+if(APPLE OR WIN32)
+    if(MSVC)
+        set(CMAKE_C_FLAGS_RELEASE        "/O2 /DNDEBUG" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_FLAGS_RELEASE      "/O2 /DNDEBUG" CACHE STRING "" FORCE)
+    else()
+        set(CMAKE_C_FLAGS_RELEASE        "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+        set(CMAKE_CXX_FLAGS_RELEASE      "-O2 -DNDEBUG" CACHE STRING "" FORCE)
+    endif()
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE    "" CACHE STRING "" FORCE)
     set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "" CACHE STRING "" FORCE)
     set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "" CACHE STRING "" FORCE)
+endif()
+if(WIN32 AND TARGET flowcoro_net)
+    # flowcoro_net 当前仍是 epoll/eventfd 实现;Windows 原生 demo 只用
+    # rt_executor(header-only) 驱动节点协程,不要让默认 ALL 构建被网络库卡死。
+    set_target_properties(flowcoro_net PROPERTIES EXCLUDE_FROM_ALL TRUE)
 endif()
 
 # flowcoro main 新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
@@ -562,22 +571,38 @@ target_compile_options(scheduler_cpp PRIVATE
 
 # ── 协程任务插件（动态库，供 launcher 动态加载）────────────
 add_library(flowcoro_task SHARED src/plugins/flowcoro_task.cpp)
-target_link_libraries(flowcoro_task flowengine_core flowcoro_headers flowcoro_net scheduler_cpp)
+if(WIN32)
+    target_link_libraries(flowcoro_task flowengine_core flowcoro_headers scheduler_cpp)
+else()
+    target_link_libraries(flowcoro_task flowengine_core flowcoro_headers flowcoro_net scheduler_cpp)
+endif()
 target_compile_definitions(flowcoro_task PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程 + 消息总线综合演示程序 ───────────────────────────
 add_executable(flow_coro src/coro_bus_demo.cpp)
-target_link_libraries(flow_coro flowengine_core flowcoro_headers flowcoro_net scheduler_cpp)
+if(WIN32)
+    target_link_libraries(flow_coro flowengine_core flowcoro_headers scheduler_cpp)
+else()
+    target_link_libraries(flow_coro flowengine_core flowcoro_headers flowcoro_net scheduler_cpp)
+endif()
 target_compile_definitions(flow_coro PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程路径性能基准测试程序 ──────────────────────────────
 add_executable(benchmark_coro src/benchmark_coro.cpp)
-target_link_libraries(benchmark_coro flowengine_core flowcoro_headers flowcoro_net m)
+if(WIN32)
+    target_link_libraries(benchmark_coro flowengine_core flowcoro_headers m)
+else()
+    target_link_libraries(benchmark_coro flowengine_core flowcoro_headers flowcoro_net m)
+endif()
 target_compile_definitions(benchmark_coro PRIVATE FLOWCORO_INTEGRATION)
 
 # ── 协程集成层正确性测试程序 ──────────────────────────────
 add_executable(coro_correctness_test tests/coro_correctness_test.cpp)
-target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers flowcoro_net)
+if(WIN32)
+    target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers)
+else()
+    target_link_libraries(coro_correctness_test flowengine_core flowcoro_headers flowcoro_net)
+endif()
 target_compile_definitions(coro_correctness_test PRIVATE FLOWCORO_INTEGRATION)
 
 # ── Config-driven Launcher ──

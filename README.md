@@ -99,8 +99,9 @@ bash build.sh release
 
 Windows 原生路径优先支持 **单进程插件模式**（等价默认 demo）。`--multi`
 依赖 POSIX `fork` + SHM IPC，Windows 下会明确拒绝；参数 AF_UNIX bridge、
-训练/ops 的 fork 子进程 bridge 也会降级为不可用，主仿真与 FlowBoard
-dashboard 不受影响。
+训练/ops 的 fork 子进程 bridge 也会降级为不可用。flowcoro 节点使用
+header-only `rt_executor` 路径；epoll/eventfd 版 `flowcoro_net` 不进入
+Windows 默认构建，主仿真与 FlowBoard dashboard 不受影响。
 
 ```powershell
 # 需要 CMake + Visual Studio Build Tools（可配 Ninja 使用）
