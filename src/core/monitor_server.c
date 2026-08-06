@@ -46,8 +46,8 @@
 #define MONITOR_MAX_CLIENTS       8
 #define MONITOR_HTTP_BUF_SIZE     131072  /* 128 KB: 含 samples ~200 帧 (67916 bytes), 留余量给 scene.entities + obstacles */
 #define MONITOR_MAX_REMOTE_SRCS   8
-#define DASHBOARD_CACHE_STALE_SEC 3   /* seconds before cached JSON is flagged stale */
-#define DASHBOARD_CACHE_DROP_SEC  30  /* seconds before cached JSON is dropped entirely */
+#define DASHBOARD_CACHE_STALE_SEC 15  /* tolerate short IPC jitter before marking stale */
+#define DASHBOARD_CACHE_DROP_SEC  300 /* keep last snapshot longer to avoid topology flicker */
 
 /* ── Remote source entry (stats from another process via IPC) */
 typedef struct {

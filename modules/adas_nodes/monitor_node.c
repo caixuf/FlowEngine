@@ -209,6 +209,7 @@ static struct {
 
     /* 跨进程 stats bridge */
     IpcChannel* stats_ch;
+    uint64_t stats_retry_after_us;
     /* stats bridge subscriber：聚合其它进程的 bus/topic 统计，
      * 供 export_dashboard_json 输出全局指标（而非仅本进程）。
      * 注意：本节点也会 publish stats，subscriber 回调里按 source_name
@@ -225,12 +226,37 @@ static struct {
 
     /* 跨进程 dashboard JSON bridge */
     IpcChannel* dashboard_ch;
+    uint64_t dashboard_retry_after_us;
 
     /* 配置 */
     double frequency_hz;
     double lane_width;
     int    lane_count;
 } g;
+
+static void monitor_try_reopen_ipc_bridges(void) {
+    uint64_t now_us = clock_now_us();
+
+    if (!g.stats_ch && now_us >= g.stats_retry_after_us) {
+        g.stats_ch = stats_bridge_publisher_open();
+        if (g.stats_ch) {
+            LOG_INFO("monitor", "stats bridge publisher reopened");
+            g.stats_retry_after_us = 0;
+        } else {
+            g.stats_retry_after_us = now_us + 1000000ULL;
+        }
+    }
+
+    if (!g.dashboard_ch && now_us >= g.dashboard_retry_after_us) {
+        g.dashboard_ch = dashboard_bridge_publisher_open();
+        if (g.dashboard_ch) {
+            LOG_INFO("monitor", "dashboard bridge publisher reopened");
+            g.dashboard_retry_after_us = 0;
+        } else {
+            g.dashboard_retry_after_us = now_us + 1000000ULL;
+        }
+    }
+}
 
 /* ── 订阅回调 ────────────────────────────────────────────────── */
 
@@ -1341,7 +1367,12 @@ static void export_dashboard_json(void) {
     /* Publish via IPC dashboard bridge for flowmond.
      * 直接用 json_str，无需再次从磁盘读取——消除双重 I/O。 */
     if (g.dashboard_ch) {
-        dashboard_bridge_publish(g.dashboard_ch, json_str, strlen(json_str));
+        if (dashboard_bridge_publish(g.dashboard_ch, json_str, strlen(json_str)) != 0) {
+            LOG_WARN("monitor", "dashboard bridge publish failed, will reopen channel");
+            ipc_channel_close(g.dashboard_ch);
+            g.dashboard_ch = NULL;
+            g.dashboard_retry_after_us = clock_now_us() + 1000000ULL;
+        }
     }
     cJSON_free(json_str);
     free(topo_json);
@@ -1369,6 +1400,8 @@ static int monitor_execute(TaskBase* task) {
     /* RateControl/LatencyTracker not yet implemented — use simple usleep */
 
     while (!task->should_stop) {
+        monitor_try_reopen_ipc_bridges();
+
         uint64_t sleep_now_us = clock_now_us();
         if (sleep_now_us < next_deadline_us)
             usleep((unsigned long)(next_deadline_us - sleep_now_us));
@@ -1401,7 +1434,12 @@ static int monitor_execute(TaskBase* task) {
 
         /* Publish stats via IPC bridge for flowmond */
         if (g.stats_ch) {
-            stats_bridge_publish(g.stats_ch, g.bus, "monitor_node");
+            if (stats_bridge_publish(g.stats_ch, g.bus, "monitor_node") != 0) {
+                LOG_WARN("monitor", "stats bridge publish failed, will reopen channel");
+                ipc_channel_close(g.stats_ch);
+                g.stats_ch = NULL;
+                g.stats_retry_after_us = clock_now_us() + 1000000ULL;
+            }
         }
 
         /* Record latency */
@@ -1545,8 +1583,10 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.stats_ch = stats_bridge_publisher_open();
     if (!g.stats_ch) {
         LOG_WARN("monitor", "stats bridge publisher open failed (flowmond not running yet)");
+        g.stats_retry_after_us = clock_now_us() + 1000000ULL;
     } else {
         LOG_INFO("monitor", "stats bridge publisher opened");
+        g.stats_retry_after_us = 0;
     }
 
     /* 同时订阅 stats bridge，聚合其它进程的 bus/topic 统计。
@@ -1572,8 +1612,10 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.dashboard_ch = dashboard_bridge_publisher_open();
     if (!g.dashboard_ch) {
         LOG_WARN("monitor", "dashboard bridge publisher open failed (flowmond not running yet)");
+        g.dashboard_retry_after_us = clock_now_us() + 1000000ULL;
     } else {
         LOG_INFO("monitor", "dashboard bridge publisher opened");
+        g.dashboard_retry_after_us = 0;
     }
 
     /* 托管模式：初始化嵌入的 TaskBase 并挂上 vtable。s_plugin.taskbase 在

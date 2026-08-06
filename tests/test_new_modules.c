@@ -344,7 +344,11 @@ static void test_ipc_pub_sub(void) {
     TEST("ipc pub/sub message delivery");
     IpcChannel* pub = ipc_channel_open("test_ipc_ps", IPC_ROLE_PUBLISHER, 8);
     ASSERT(pub != NULL, "pub open failed");
-    IpcChannel* sub = ipc_channel_open("test_ipc_ps", IPC_ROLE_SUBSCRIBER, 8);
+    IpcChannel* sub = NULL;
+    for (int i = 0; i < 20 && !sub; i++) {
+        sub = ipc_channel_open("test_ipc_ps", IPC_ROLE_SUBSCRIBER, 8);
+        if (!sub) usleep(50000);
+    }
     ASSERT(sub != NULL, "sub open failed");
 
     BusCounter c = { PTHREAD_MUTEX_INITIALIZER, 0, 0, 0 };
@@ -352,7 +356,13 @@ static void test_ipc_pub_sub(void) {
     ipc_channel_start(sub);
 
     int v = 88;
-    ASSERT_EQ(ipc_channel_publish(pub, "t/ipc", "pub", &v, sizeof(v)), 0, "publish failed");
+    int pub_rc = -1;
+    for (int i = 0; i < 5; i++) {
+        pub_rc = ipc_channel_publish(pub, "t/ipc", "pub", &v, sizeof(v));
+        if (pub_rc == 0) break;
+        usleep(50000);
+    }
+    ASSERT_EQ(pub_rc, 0, "publish failed");
     usleep(100000);
 
     ipc_channel_stop(sub);

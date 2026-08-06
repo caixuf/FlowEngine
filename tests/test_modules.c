@@ -34,9 +34,15 @@ static int g_failed = 0;
 
 #define TEST(name)  printf("  %-50s ", name)
 #define PASS()      do { printf("✅ PASS\n"); g_passed++; } while(0)
-#define FAIL(fmt, ...) do { printf("❌ FAIL: " fmt "\n", ##__VA_ARGS__); g_failed++; } while(0)
-#define ASSERT(cond, fmt, ...) if (!(cond)) { FAIL(fmt, ##__VA_ARGS__); return; }
-#define ASSERT_EQ(a, b, fmt, ...) if ((a) != (b)) { FAIL(fmt " (got %d, expected %d)", ##__VA_ARGS__, (int)(a), (int)(b)); return; }
+#define FAIL(...) do { printf("❌ FAIL: "); printf(__VA_ARGS__); printf("\n"); g_failed++; } while(0)
+#define ASSERT(cond, ...) if (!(cond)) { FAIL(__VA_ARGS__); return; }
+#define ASSERT_EQ(a, b, ...) if ((a) != (b)) { \
+        printf("❌ FAIL: "); \
+        printf(__VA_ARGS__); \
+        printf(" (got %d, expected %d)\n", (int)(a), (int)(b)); \
+        g_failed++; \
+        return; \
+    }
 
 /* ══════════════════════════════════════════════════════════ */
 /* Serializer Tests                                          */

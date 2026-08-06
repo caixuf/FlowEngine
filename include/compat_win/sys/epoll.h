@@ -1,12 +1,27 @@
 #ifndef FLOWENGINE_COMPAT_WIN_SYS_EPOLL_H
 #define FLOWENGINE_COMPAT_WIN_SYS_EPOLL_H
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <winsock2.h>
 #include <sys/socket.h>
+
+/* wingdi.h (pulled in by windows.h) defines ERROR=0, READ, WRITE etc. as macros;
+   undef them to avoid conflicts with enum member names in C++ code. */
+#ifdef ERROR
+#undef ERROR
+#endif
+#ifdef READ
+#undef READ
+#endif
+#ifdef WRITE
+#undef WRITE
+#endif
 
 #define EPOLLIN      0x001u
 #define EPOLLPRI     0x002u
@@ -136,6 +151,13 @@ static inline int epoll_wait(int epfd, struct epoll_event* events,
         ++out;
     }
     return out;
+}
+
+static inline int epoll_close(int epfd) {
+    if (epfd <= 0 || epfd >= FLOW_WIN_EPOLL_MAX) return -1;
+    free(flow_epoll_sets[epfd]);
+    flow_epoll_sets[epfd] = NULL;
+    return 0;
 }
 
 #endif /* FLOWENGINE_COMPAT_WIN_SYS_EPOLL_H */

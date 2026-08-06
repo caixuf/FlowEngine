@@ -128,8 +128,10 @@ export function resize(renderer, composer, camera, width, height) {
   const h = Math.max(1, Math.floor(height * _resScale));
   renderer.setSize(w, h, false);
   if (composer) composer.setSize(w, h);
-  camera.aspect = width / height;  // 用原始容器宽高比，避免拉伸变形
-  camera.updateProjectionMatrix();
+  if (camera) {
+    camera.aspect = width / height;  // 用原始容器宽高比，避免拉伸变形
+    camera.updateProjectionMatrix();
+  }
 }
 
 /* 当前渲染分辨率缩放（默认 1，ultra 档降为 0.5） */

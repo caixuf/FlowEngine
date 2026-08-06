@@ -15,6 +15,15 @@ typedef intptr_t ssize_t;
 #ifndef MSG_DONTWAIT
 #define MSG_DONTWAIT 0
 #endif
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0  /* Windows doesn't send SIGPIPE on broken connections */
+#endif
+#ifndef SOCK_NONBLOCK
+#define SOCK_NONBLOCK 0x4000  /* marker consumed by accept4/flow_socket shims */
+#endif
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC  0x8000  /* no close-on-exec on Windows; silently ignored */
+#endif
 
 static inline int flow_wsa_errno(void) {
     switch (WSAGetLastError()) {
@@ -55,6 +64,21 @@ static inline int flow_accept(int s, struct sockaddr* addr, socklen_t* addrlen) 
     SOCKET c = accept((SOCKET)s, addr, addrlen);
     if (c == INVALID_SOCKET) { errno = flow_wsa_errno(); return -1; }
     return (int)c;
+}
+/* accept4: accept + optionally set non-blocking; CLOEXEC has no Windows equiv */
+static inline int flow_accept4(int s, struct sockaddr* addr, socklen_t* addrlen, int flags) {
+    SOCKET c = accept((SOCKET)s, addr, addrlen);
+    if (c == INVALID_SOCKET) { errno = flow_wsa_errno(); return -1; }
+    if (flags & SOCK_NONBLOCK) {
+        u_long nb = 1;
+        ioctlsocket(c, FIONBIO, &nb);
+    }
+    return (int)c;
+}
+static inline int flow_getsockopt(int s, int level, int optname, void* optval, socklen_t* optlen) {
+    int rc = getsockopt((SOCKET)s, level, optname, (char*)optval, optlen);
+    if (rc == SOCKET_ERROR) { errno = flow_wsa_errno(); return -1; }
+    return rc;
 }
 static inline int flow_connect(int s, const struct sockaddr* name, socklen_t namelen) {
     int rc = connect((SOCKET)s, name, namelen);
@@ -98,12 +122,14 @@ static inline int flow_shutdown(int s, int how) {
 #define bind      flow_bind
 #define listen    flow_listen
 #define accept    flow_accept
+#define accept4   flow_accept4
 #define connect   flow_connect
 #define send      flow_send
 #define recv      flow_recv
 #define recvfrom  flow_recvfrom
 #define sendto    flow_sendto
 #define setsockopt flow_setsockopt
+#define getsockopt flow_getsockopt
 #define shutdown  flow_shutdown
 
 #endif /* FLOWENGINE_COMPAT_WIN_SYS_SOCKET_H */

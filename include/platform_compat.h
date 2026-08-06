@@ -258,6 +258,16 @@ static inline int flow_win_nanosleep(const struct timespec* req, struct timespec
 #define usleep(usec) flow_win_usleep((unsigned int)(usec))
 #define nanosleep(req, rem) flow_win_nanosleep((req), (rem))
 
+/* posix_memalign: map to _aligned_malloc; <stdlib.h> already included above */
+#ifndef posix_memalign
+static inline int flow_win_posix_memalign(void** memptr, size_t alignment, size_t size) {
+    *memptr = _aligned_malloc(size, alignment);
+    return *memptr ? 0 : 12; /* 12 = ENOMEM */
+}
+#define posix_memalign(memptr, alignment, size) \
+    flow_win_posix_memalign((memptr), (alignment), (size))
+#endif
+
 #endif /* _WIN32 */
 
 #endif /* FLOWENGINE_PLATFORM_COMPAT_H */

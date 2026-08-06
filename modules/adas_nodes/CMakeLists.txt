@@ -40,6 +40,7 @@ endif()
 # flowcoro 路径优先级：1. 同级目录本地仓库 2. third_party 3. FetchContent下载
 set(_FLOWCORO_INCLUDE_CANDIDATES
     "${FLOW_ROOT}/../flowcoro/include"
+    "${FLOW_ROOT}/../flowcoro-main/include"
     "${FLOW_ROOT}/third_party/flowcoro/include"
     "${FLOWENGINE_BUILD}/_deps/flowcoro-src/include"
 )
@@ -100,6 +101,11 @@ endif()
 # 故这两个库名不存在，替换为 c++（libc++）。
 if(WIN32)
     set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} ws2_32)
+    # flowengine_core was compiled with ZLIB; all node DLLs that pull in core must link it
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        list(APPEND NODE_LINK_LIBS ZLIB::ZLIB)
+    endif()
     set(NODE_CXX_RT "")
 elseif(APPLE)
     set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread c++)

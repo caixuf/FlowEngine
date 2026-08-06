@@ -9,6 +9,7 @@
 #ifdef FLOWENGINE_USE_PROTOBUF
 
 #include "serializer.h"
+#include "error_codes.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
