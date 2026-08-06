@@ -114,6 +114,7 @@ static struct {
     /* 订阅数据缓存 */
     char latest_obstacles_json[8192];
     char latest_vehicle_state[8192];
+    pthread_mutex_t vehicle_state_mutex; /* protects latest_vehicle_state + ego_road_id */
     double fusion_lat_avg_us;
     double fusion_lat_p50_us;
     double fusion_lat_p99_us;
@@ -247,6 +248,7 @@ static void on_obstacles(const Message* msg, void* user_data) {
 static void on_vehicle_state(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
+    pthread_mutex_lock(&g.vehicle_state_mutex);
     size_t copy = msg->data_size < sizeof(g.latest_vehicle_state) - 1
                   ? msg->data_size : sizeof(g.latest_vehicle_state) - 1;
     memcpy(g.latest_vehicle_state, msg->data, copy);
@@ -255,6 +257,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
     g.has_vehicle_state = 1;
     /* 提取 ego 所在 road_id，供 trajectory_edge_id 用 */
     g.ego_road_id = json_extract_int(g.latest_vehicle_state, "road_id");
+    pthread_mutex_unlock(&g.vehicle_state_mutex);
 }
 
 /* 收集其他节点的自描述广播 */
@@ -700,6 +703,12 @@ static void export_dashboard_json(void) {
     if (g.sysmon) sysmonitor_snapshot(g.sysmon, &ssnap);
 
     char* topo_json = g.discovery ? discovery_export_json(g.discovery) : NULL;
+    char vehicle_state_snap[sizeof(g.latest_vehicle_state)];
+    pthread_mutex_lock(&g.vehicle_state_mutex);
+    size_t vs_len = strnlen(g.latest_vehicle_state, sizeof(g.latest_vehicle_state) - 1);
+    memcpy(vehicle_state_snap, g.latest_vehicle_state, vs_len);
+    vehicle_state_snap[vs_len] = '\0';
+    pthread_mutex_unlock(&g.vehicle_state_mutex);
 
     /* ── Build cJSON tree ── */
     cJSON* root = cJSON_CreateObject();
@@ -951,11 +960,11 @@ static void export_dashboard_json(void) {
     }
 
     /* 车辆状态 */
-    double spd = json_extract_double(g.latest_vehicle_state, "spd");
-    double tgt = json_extract_double(g.latest_vehicle_state, "tgt");
-    double thr = json_extract_double(g.latest_vehicle_state, "thr");
-    double brk = json_extract_double(g.latest_vehicle_state, "brk");
-    double vx  = json_extract_double(g.latest_vehicle_state, "x");
+    double spd = json_extract_double(vehicle_state_snap, "spd");
+    double tgt = json_extract_double(vehicle_state_snap, "tgt");
+    double thr = json_extract_double(vehicle_state_snap, "thr");
+    double brk = json_extract_double(vehicle_state_snap, "brk");
+    double vx  = json_extract_double(vehicle_state_snap, "x");
     cJSON* vehicle_o = cJSON_AddObjectToObject(metrics, "vehicle");
     cJSON_AddNumberToObject(vehicle_o, "speed", spd);
     cJSON_AddNumberToObject(vehicle_o, "target_speed", tgt);
@@ -965,10 +974,10 @@ static void export_dashboard_json(void) {
     cJSON_AddNumberToObject(vehicle_o, "error", tgt - spd);
 
     /* 3D 场景（从 vehicle/state 提取） */
-    double ego_x = json_extract_double(g.latest_vehicle_state, "x");
-    double ego_y = json_extract_double(g.latest_vehicle_state, "y");
-    double hdg   = json_extract_double(g.latest_vehicle_state, "hdg");
-    double steer = json_extract_double(g.latest_vehicle_state, "st");
+    double ego_x = json_extract_double(vehicle_state_snap, "x");
+    double ego_y = json_extract_double(vehicle_state_snap, "y");
+    double hdg   = json_extract_double(vehicle_state_snap, "hdg");
+    double steer = json_extract_double(vehicle_state_snap, "st");
 
     /* ── samples 环形缓冲：按时间 50ms 降采样（评估器期望 20Hz 时序），
      * 导出频率升到 60Hz 后不随之膨胀——窗口恒为 200×50ms = 10s。 */
@@ -1143,7 +1152,7 @@ static void export_dashboard_json(void) {
     }
 
     /* 障碍物（从 vehicle/state 动态读取） */
-    int n_obs = json_extract_int(g.latest_vehicle_state, "n_obs");
+    int n_obs = json_extract_int(vehicle_state_snap, "n_obs");
     if (n_obs < 0 || n_obs > 128) n_obs = 0;
 
 #define MAX_OBS_SCENE 128
@@ -1157,26 +1166,26 @@ static void export_dashboard_json(void) {
     char kn[20];
     for (int i = 0; i < n_obs; i++) {
         snprintf(kn, sizeof(kn), "oid%d", i);
-        oid[i] = json_extract_int(g.latest_vehicle_state, kn);
+        oid[i] = json_extract_int(vehicle_state_snap, kn);
         snprintf(kn, sizeof(kn), "ox%d", i);
-        ox[i] = json_extract_double(g.latest_vehicle_state, kn);
+        ox[i] = json_extract_double(vehicle_state_snap, kn);
         snprintf(kn, sizeof(kn), "oy%d", i);
-        oy[i] = json_extract_double(g.latest_vehicle_state, kn);
+        oy[i] = json_extract_double(vehicle_state_snap, kn);
         snprintf(kn, sizeof(kn), "ov%d", i);
-        ovx[i] = json_extract_double(g.latest_vehicle_state, kn);
+        ovx[i] = json_extract_double(vehicle_state_snap, kn);
         snprintf(kn, sizeof(kn), "ovy%d", i);
-        ovy[i] = json_extract_double(g.latest_vehicle_state, kn);
+        ovy[i] = json_extract_double(vehicle_state_snap, kn);
         snprintf(kn, sizeof(kn), "ot%d", i);
-        json_extract_string(g.latest_vehicle_state, kn, otype[i], sizeof(otype[i]));
+        json_extract_string(vehicle_state_snap, kn, otype[i], sizeof(otype[i]));
         if (otype[i][0] == '\0') {
             snprintf(otype[i], sizeof(otype[i]), "car");
         }
         int is_ped = strcmp(otype[i], "pedestrian") == 0;
         snprintf(kn, sizeof(kn), "ol%d", i);
-        olen[i] = json_extract_double(g.latest_vehicle_state, kn);
+        olen[i] = json_extract_double(vehicle_state_snap, kn);
         if (olen[i] < 0.1) olen[i] = is_ped ? OBS_FALLBACK_PED_SIZE : OBS_FALLBACK_CAR_LEN;
         snprintf(kn, sizeof(kn), "ow%d", i);
-        owid[i] = json_extract_double(g.latest_vehicle_state, kn);
+        owid[i] = json_extract_double(vehicle_state_snap, kn);
         if (owid[i] < 0.1) owid[i] = is_ped ? OBS_FALLBACK_PED_SIZE : OBS_FALLBACK_CAR_WID;
     }
     cJSON* obs_arr = cJSON_AddArrayToObject(scene, "obstacles");
@@ -1541,6 +1550,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
      * 注意：subscriber 必须在 publisher 之后 open，否则 publisher 端的
      * ipc_channel_publish 会因无 subscriber 而丢弃早期包（可接受，启动竞态）。 */
     pthread_mutex_init(&g.remote_stats_mutex, NULL);
+    pthread_mutex_init(&g.vehicle_state_mutex, NULL);
     /* P3 修复：初始化 scene_frame 缓存 mutex，避免未初始化锁行为未定义。
      * on_scene_frame（消息总线线程）写 scene_entities_json，
      * export_dashboard_json（主线程）读同一 buffer。 */
@@ -1608,6 +1618,8 @@ static void monitor_cleanup(void) {
     if (g.stats_ch) { ipc_channel_close(g.stats_ch); g.stats_ch = NULL; }
     if (g.dashboard_ch) { ipc_channel_close(g.dashboard_ch); g.dashboard_ch = NULL; }
     pthread_mutex_destroy(&g.remote_stats_mutex);
+    pthread_mutex_destroy(&g.vehicle_state_mutex);
+    pthread_mutex_destroy(&g.scene_frame_mutex);
     LOG_INFO("monitor", "cleanup done");
 }
 static int  monitor_health(void)        { return 0; }
