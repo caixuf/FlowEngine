@@ -36,6 +36,67 @@
 #include <time.h>
 #include <sys/stat.h>
 
+/* ── subnormal(denormal) 字面量兜底 ─────────────────────────
+ * glibc strtod 对 subnormal（<~2.2e-308）科学计数数字存在已知断言 bug
+ * （strtod_l.c:1496 `numsize==1 && n<d`，整进程 SIGABRT）。fp_env_init
+ * (FTZ/DAZ) 从生成侧刷掉绝大多数，但仍有发布线程可能漏配（长跑随机触发）。
+ * 这里在 cJSON_Parse 前把指数 <= -308 的科学计数数字原地重写为 0，
+ * 作为宿 main 解析侧最后一层防线 —— 彻底杜绝 subnormal 字面量进 strtod。
+ * 自动驾驶场景 <1e-308 的量无物理意义，钳零无副作用。 */
+static void sanitize_subnormal_literals(char* s) {
+    if (!s) return;
+    char* p = s;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p) {
+                if (*p == '\\' && p[1]) { p += 2; continue; }
+                if (*p == '"') { p++; break; }
+                p++;
+            }
+            continue;
+        }
+        char* num = p;
+        if (*p == '-' || *p == '+') p++;
+        int has_digit = 0;
+        while ((*p >= '0' && *p <= '9') || *p == '.') {
+            if (*p >= '0' && *p <= '9') has_digit = 1;
+            p++;
+        }
+        if (!has_digit) { p = num + 1; continue; }
+        if (*p != 'e' && *p != 'E') continue;   /* 普通数字，外层 while 靠 has_digit==0 推进 */
+        char* epos = p;
+        p++;
+        int neg = 0;
+        if (*p == '-') { neg = 1; p++; }
+        else if (*p == '+') p++;
+        if (!(*p >= '0' && *p <= '9')) { p = epos + 1; continue; }
+        long ev = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (ev < 100000) ev = ev * 10 + (*p - '0');
+            p++;
+        }
+        if (neg && ev >= 308) {
+            /* 数 < 1e-308 = subnormal → 改写为 "0"，尾部左移 */
+            size_t tail = strlen(p) + 1;
+            *num = '0';
+            memmove(num + 1, p, tail);
+            p = num + 1;
+        }
+    }
+}
+
+/* cJSON_Parse 包装：解析前先钳掉 subnormal 字面量，防 strtod 断言崩溃。 */
+static cJSON* monitor_cJSON_Parse(const char* json) {
+    if (!json) return NULL;
+    char* buf = strdup(json);
+    if (!buf) return NULL;
+    sanitize_subnormal_literals(buf);
+    cJSON* r = cJSON_Parse(buf);
+    free(buf);
+    return r;
+}
+
 /* ── 节点本地状态 ───────────────────────────────────────────── */
 
 static struct {
@@ -190,6 +251,7 @@ static void on_vehicle_state(const Message* msg, void* user_data) {
                   ? msg->data_size : sizeof(g.latest_vehicle_state) - 1;
     memcpy(g.latest_vehicle_state, msg->data, copy);
     g.latest_vehicle_state[copy] = '\0';
+    sanitize_subnormal_literals(g.latest_vehicle_state);  /* 摄入即钳 subnormal：json_extract_double(atof→strtod) 也读这份 buffer */
     g.has_vehicle_state = 1;
     /* 提取 ego 所在 road_id，供 trajectory_edge_id 用 */
     g.ego_road_id = json_extract_int(g.latest_vehicle_state, "road_id");
@@ -304,7 +366,7 @@ static void on_planning_trajectory(const Message* msg, void* user_data) {
     }
 
     /* ── 回退：旧版 JSON 路径（trajectory 消息仍是 JSON 格式时） ── */
-    cJSON* root = cJSON_Parse((const char*)msg->data);
+    cJSON* root = monitor_cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* path = cJSON_GetObjectItem(root, "path");
         if (path && cJSON_IsArray(path)) {
@@ -330,7 +392,7 @@ static void on_road_geometry(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
+    cJSON* root = monitor_cJSON_Parse(d);
     if (root) {
         cJSON* item;
         if ((item = cJSON_GetObjectItem(root, "curve_start_x")))  g.road_curve_start_x = item->valuedouble;
@@ -353,7 +415,7 @@ static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
     const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
+    cJSON* root = monitor_cJSON_Parse(d);
     if (!root) return;
 
     /* 缓存 road_network */
@@ -495,7 +557,7 @@ static void on_fusion_latency(const Message* msg, void* user_data) {
 
     /* Fallback: text JSON parsing */
     const char* d = (const char*)msg->data;
-    cJSON* root = cJSON_Parse(d);
+    cJSON* root = monitor_cJSON_Parse(d);
     if (root) {
         cJSON* item;
         if ((item = cJSON_GetObjectItem(root, "avg_us"))) g.fusion_lat_avg_us = item->valuedouble;
@@ -510,7 +572,7 @@ static void on_control_cte(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
 
-    cJSON* root = cJSON_Parse((const char*)msg->data);
+    cJSON* root = monitor_cJSON_Parse((const char*)msg->data);
     if (root) {
         cJSON* item = cJSON_GetObjectItem(root, "cte");
         if (cJSON_IsNumber(item)) g.latest_cte = item->valuedouble;
@@ -547,7 +609,7 @@ static void on_planning_debug(const Message* msg, void* user_data) {
     memcpy(g.planning_debug_json, msg->data, copy);
     g.planning_debug_json[copy] = '\0';
 
-    cJSON* pd = cJSON_Parse(g.planning_debug_json);
+    cJSON* pd = monitor_cJSON_Parse(g.planning_debug_json);
     if (!pd) return;
     cJSON* item = cJSON_GetObjectItemCaseSensitive(pd, "driver_mode");
     if (cJSON_IsString(item) && item->valuestring) {
@@ -672,13 +734,13 @@ static void export_dashboard_json(void) {
                 }
             }
             if (!dup) {
-                cJSON* ni = cJSON_Parse(g.node_info_json[i]);
+                cJSON* ni = monitor_cJSON_Parse(g.node_info_json[i]);
                 if (ni) cJSON_AddItemToArray(nodes, ni);
             }
         }
     } else {
         for (int i = 0; i < g.node_info_count; i++) {
-            cJSON* ni = cJSON_Parse(g.node_info_json[i]);
+            cJSON* ni = monitor_cJSON_Parse(g.node_info_json[i]);
             if (ni) cJSON_AddItemToArray(nodes, ni);
         }
     }
@@ -770,7 +832,7 @@ static void export_dashboard_json(void) {
 
     /* 行为规划状态 */
     if (g.behavior_state_json[0]) {
-        cJSON* bs = cJSON_Parse(g.behavior_state_json);
+        cJSON* bs = monitor_cJSON_Parse(g.behavior_state_json);
         if (bs) {
             cJSON_AddItemToObject(metrics, "behavior", bs);
         } else {
@@ -792,7 +854,7 @@ static void export_dashboard_json(void) {
 
     /* 控制层 debug（横向控制链全链路变量） */
     if (g.control_debug_json[0]) {
-        cJSON* cd = cJSON_Parse(g.control_debug_json);
+        cJSON* cd = monitor_cJSON_Parse(g.control_debug_json);
         if (cd) {
             cJSON_AddItemToObject(metrics, "control_debug", cd);
         }
@@ -800,7 +862,7 @@ static void export_dashboard_json(void) {
 
     /* 规划层 debug（Frenet规划全链路变量） */
     if (g.planning_debug_json[0]) {
-        cJSON* pd = cJSON_Parse(g.planning_debug_json);
+        cJSON* pd = monitor_cJSON_Parse(g.planning_debug_json);
         if (pd) {
             cJSON_AddItemToObject(metrics, "planning_debug", pd);
         }
@@ -954,7 +1016,7 @@ static void export_dashboard_json(void) {
         memcpy(ego_snap, g.scene_ego_json, ego_snap_len);
         ego_snap[ego_snap_len] = '\0';
         pthread_mutex_unlock(&g.scene_frame_mutex);
-        cJSON* ego_src = cJSON_Parse(ego_snap);
+        cJSON* ego_src = monitor_cJSON_Parse(ego_snap);
         if (ego_src) {
             /* 从 scene/frame ego 补充的字段清单（不在 vehicle/state 中） */
             const char* merge_fields[] = {
@@ -1001,7 +1063,7 @@ static void export_dashboard_json(void) {
         memcpy(rn_snap, g.scene_road_network_json, rn_snap_len);
         rn_snap[rn_snap_len] = '\0';
         pthread_mutex_unlock(&g.scene_frame_mutex);
-        cJSON* rn = cJSON_Parse(rn_snap);
+        cJSON* rn = monitor_cJSON_Parse(rn_snap);
         if (rn) {
             cJSON_AddItemToObject(scene, "road_network", rn);
         } else {
@@ -1028,7 +1090,7 @@ static void export_dashboard_json(void) {
         memcpy(cz_snap, g.scene_construction_json, cz_snap_len);
         cz_snap[cz_snap_len] = '\0';
         pthread_mutex_unlock(&g.scene_frame_mutex);
-        cJSON* czs = cJSON_Parse(cz_snap);
+        cJSON* czs = monitor_cJSON_Parse(cz_snap);
         if (czs) {
             cJSON_AddItemToObject(scene, "construction_zones", czs);
         }
@@ -1052,7 +1114,7 @@ static void export_dashboard_json(void) {
             ent_snap[ent_snap_len] = '\0';
         }
         pthread_mutex_unlock(&g.scene_frame_mutex);
-        cJSON* ents = ent_snap ? cJSON_Parse(ent_snap) : NULL;
+        cJSON* ents = ent_snap ? monitor_cJSON_Parse(ent_snap) : NULL;
         if (ents) {
             cJSON_AddItemToObject(scene, "entities", ents);
         } else {
@@ -1073,7 +1135,7 @@ static void export_dashboard_json(void) {
      * Frenet→World 转换（有 edge_id 时精确定位，否则搜索最近 edge）。
      * trajectory_edge_id 来自 vehicle/state 的 ego.road_id，指示轨迹所属道路段。 */
     if (g.has_planning && g.trajectory_path_json[0] != '\0') {
-        cJSON* path = cJSON_Parse(g.trajectory_path_json);
+        cJSON* path = monitor_cJSON_Parse(g.trajectory_path_json);
         if (path) {
             cJSON_AddItemToObject(scene, "trajectory_path", path);
         }
@@ -1160,7 +1222,7 @@ static void export_dashboard_json(void) {
     /* Registry */
     char* reg_json = flow_registry_export_json();
     if (reg_json) {
-        cJSON* reg = cJSON_Parse(reg_json);
+        cJSON* reg = monitor_cJSON_Parse(reg_json);
         if (reg) {
             cJSON_AddItemToObject(metrics, "registry", reg);
         }
@@ -1409,7 +1471,7 @@ static int monitor_init(MessageBus* bus, Transport* transport,
     g.lane_width   = 3.5;
     g.lane_count   = 2;
     if (params_json) {
-        cJSON* root = cJSON_Parse(params_json);
+        cJSON* root = monitor_cJSON_Parse(params_json);
         if (root) {
             cJSON* item;
             if ((item = cJSON_GetObjectItem(root, "state_file")) && cJSON_IsString(item)) {
