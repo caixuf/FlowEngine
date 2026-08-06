@@ -2275,6 +2275,14 @@ static void flowsim_cleanup(void) {
     uint32_t inv_fails = g.invariant_fail_count.load(std::memory_order_relaxed);
     fprintf(stderr, "[INV] summary total=%u (spatial+motion+temporal)\n", inv_fails);
     fflush(stderr);
+    /* 在 RM_Close 之前释放所有 entity 的 road_pos handle。
+     * g.pool/Entity 是静态对象，dlclose 后它们的 dtor 还会跑一次，
+     * 若 RoadPosition::handle_ 仍有效，dtor 调 RM_DeletePosition 时
+     * RM 已经 close → crash (SIGABRT)。先把所有 handle 清零，dtor
+     * 就变成 no-op。 */
+    for (int i = 0; i < flowsim::MAX_ENTITIES; ++i) {
+        g.pool[i].road_pos = flowsim::RoadPosition{};
+    }
     g.roads.close();
     g.roads_loaded = false;
     if (g.scenario) {

@@ -1082,12 +1082,24 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     for i in range(1, len(series)):
         m = series[i]
         dt_s = max(0.0, timestamps[i] - timestamps[i - 1]) if i < len(timestamps) else 0.5
+        # 机动帧（掉头执行期）跳过逆行计时：掉头过程中 heading 穿越 ±π/2，
+        # 加之 y_rel 仍在对向侧，会触发假阳性。真正的掉头死锁持续远超掉头正常
+        # 时间，非机动帧累计 >5s 仍能被抓住。
+        if maneuver_mask[i]:
+            wrong_way_run = 0.0
+            continue
         hn = math.atan2(math.sin(m["heading"]), math.cos(m["heading"]))
         rh = m.get("road_heading")
         if rh is not None:
             lane_dir = rh  # 弯道：局部道路朝向
         else:
             lane_dir = 0.0 if m["y_rel"] < 0 else math.pi
+        # 掉头场景过渡帧豁免：掉头检测到后，heading 已回正（朝东 |hn|<π/4）但
+        # y_rel 还在西行侧（>0）——车已经完成转向但物理上尚未归位到东行车道，
+        # 这是合法过渡状态，不是逆行。
+        if uturn_detected and m["y_rel"] > 0 and abs(hn) < math.pi / 4.0:
+            wrong_way_run = 0.0
+            continue
         dev = abs(math.atan2(math.sin(hn - lane_dir), math.cos(hn - lane_dir)))
         if m["speed"] > 1.0 and dev > math.radians(120.0) and abs(m["y_rel"]) < 20.0:
             wrong_way_run += dt_s
