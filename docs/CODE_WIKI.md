@@ -90,24 +90,24 @@ flowsim/physics ← step_bicycle ← flowsim_node (20Hz tick, 闭环 ego)
 
 | 模块 | 关键文件 | 职责 |
 |------|----------|------|
-| 消息总线 | [message_bus.c](file:///workspace/src/core/message_bus.c) / [message_bus.h](file:///workspace/include/message_bus.h) | 进程内 Pub/Sub + 请求/应答 + 零拷贝 |
-| 传输层 | [transport.c](file:///workspace/src/core/transport.c) / [transport.h](file:///workspace/include/transport.h) | 统一传输抽象（local/IPC/TCP），per-topic QoS（深度+丢弃策略+deadline+reliability） |
-| IPC | [ipc_channel.c](file:///workspace/src/core/ipc_channel.c) | POSIX SHM 跨进程通信 |
-| 调度器 | [scheduler.c](file:///workspace/src/core/scheduler.c) / [scheduler_cpp.cpp](file:///workspace/src/cpp/scheduler_cpp.cpp) | classic/choreo DAG 模式，CPU 亲和+限频 |
-| 协程 | [coroutine_task.h](file:///workspace/include/coroutine_task.h) | C++20 协程原语（sleep/await/select/timer/req-reply，可取消） |
-| 状态机 | [state_machine.c](file:///workspace/src/core/state_machine.c) | 反射式状态机（INITIALIZED→RUNNING→STOPPING→STOPPED） |
-| 元信息 | [flow_registry.c](file:///workspace/src/core/flow_registry.c) | 统一注册中心（Task/Topic/Type/Plugin/Schema） |
-| 参数 | [param_registry.c](file:///workspace/src/core/param_registry.c) / [param_bridge.c](file:///workspace/src/core/param_bridge.c) | int/float/bool/string 参数，范围校验，**hot-reload**（`flowctl param set` 边跑边调，AF_UNIX 跨进程通道） |
-| 时钟 | [clock_service.c](file:///workspace/src/core/clock_service.c) | `clock_now_us()`（MONOTONIC，仿真/回放可注入）/ `clock_now_realtime_us()`（REALTIME） |
-| 序列化 | [serializer.c](file:///workspace/src/core/serializer.c) / [msg_schema.c](file:///workspace/src/core/msg_schema.c) | IDL + 代码生成 + FNV 类型哈希；全链路 `timestamp_us` 统一 `uint64`（GNSS 采集时刻优先） |
-| 录制 | [bag.c](file:///workspace/src/core/bag.c) / [mcap_writer.c](file:///workspace/src/core/mcap_writer.c) | Bag v2 + MCAP 格式录制/回放 |
-| 服务发现 | [discovery.c](file:///workspace/src/core/discovery.c) | UDP 服务发现 + 拓扑追踪 |
-| 监控 | [monitor_server.c](file:///workspace/src/core/monitor_server.c) / [stats_bridge.c](file:///workspace/src/core/stats_bridge.c) / [dashboard_bridge.c](file:///workspace/src/core/dashboard_bridge.c) | 内嵌 HTTP 服务器、跨进程统计/仪表盘 IPC 桥接 |
-| 插件宿主 | [node_plugin.h](file:///workspace/include/node_plugin.h) / [node_context.c](file:///workspace/src/core/node_context.c) | NodePlugin 接口，节点 `.so` 的统一 ABI |
+| 消息总线 | [message_bus.c](../src/core/message_bus.c) / [message_bus.h](../include/message_bus.h) | 进程内 Pub/Sub + 请求/应答 + 零拷贝 |
+| 传输层 | [transport.c](../src/core/transport.c) / [transport.h](../include/transport.h) | 统一传输抽象（local/IPC/TCP），per-topic QoS（深度+丢弃策略+deadline+reliability） |
+| IPC | [ipc_channel.c](../src/core/ipc_channel.c) | POSIX SHM 跨进程通信 |
+| 调度器 | [scheduler.c](../src/core/scheduler.c) / [scheduler_cpp.cpp](../src/cpp/scheduler_cpp.cpp) | classic/choreo DAG 模式，CPU 亲和+限频 |
+| 协程 | [coroutine_task.h](../include/coroutine_task.h) | C++20 协程原语（sleep/await/select/timer/req-reply，可取消） |
+| 状态机 | [state_machine.c](../src/core/state_machine.c) | 反射式状态机（INITIALIZED→RUNNING→STOPPING→STOPPED） |
+| 元信息 | [flow_registry.c](../src/core/flow_registry.c) | 统一注册中心（Task/Topic/Type/Plugin/Schema） |
+| 参数 | [param_registry.c](../src/core/param_registry.c) / [param_bridge.c](../src/core/param_bridge.c) | int/float/bool/string 参数，范围校验，**hot-reload**（`flowctl param set` 边跑边调，AF_UNIX 跨进程通道） |
+| 时钟 | [clock_service.c](../src/core/clock_service.c) | `clock_now_us()`（MONOTONIC，仿真/回放可注入）/ `clock_now_realtime_us()`（REALTIME） |
+| 序列化 | [serializer.c](../src/core/serializer.c) / [msg_schema.c](../src/core/msg_schema.c) | IDL + 代码生成 + FNV 类型哈希；全链路 `timestamp_us` 统一 `uint64`（GNSS 采集时刻优先） |
+| 录制 | [bag.c](../src/core/bag.c) / [mcap_writer.c](../src/core/mcap_writer.c) | Bag v2 + MCAP 格式录制/回放 |
+| 服务发现 | [discovery.c](../src/core/discovery.c) | UDP 服务发现 + 拓扑追踪 |
+| 监控 | [monitor_server.c](../src/core/monitor_server.c) / [stats_bridge.c](../src/core/stats_bridge.c) / [dashboard_bridge.c](../src/core/dashboard_bridge.c) | 内嵌 HTTP 服务器、跨进程统计/仪表盘 IPC 桥接 |
+| 插件宿主 | [node_plugin.h](../include/node_plugin.h) / [node_context.c](../src/core/node_context.c) | NodePlugin 接口，节点 `.so` 的统一 ABI |
 
 ### 参数系统（控制调参的核心基础设施）
 
-参数热重载是控制调优的关键。**新增一个可调参数必须三处都通**（见 [CLAUDE.md](file:///workspace/CLAUDE.md) 调参章节）：
+参数热重载是控制调优的关键。**新增一个可调参数必须三处都通**（见 [CLAUDE.md](../CLAUDE.md) 调参章节）：
 
 1. `params_json` 里加 `cJSON_GetObjectItemCaseSensitive` 解析分支
 2. `param_register_*` 的默认值用 `g.<字段>` 而非硬编码字面量
@@ -125,7 +125,7 @@ flowctl param set control.k_vy 0.5     # 下一帧生效，无需重启
 
 ### 4.1 15 节点概览
 
-默认配置 [pipeline.json](file:///workspace/config/pipeline.json) 启动 15 个插件节点：
+默认配置 [pipeline.json](../config/pipeline.json) 启动 15 个插件节点：
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
@@ -147,7 +147,7 @@ flowctl param set control.k_vy 0.5     # 下一帧生效，无需重启
 
 ### 4.2 节点插件接口
 
-所有节点实现 `NodePlugin` 接口（[node_plugin.h](file:///workspace/include/node_plugin.h)），编译为 `.so`，由 `flow_launcher`（[flow_launcher.c](file:///workspace/src/flow_launcher.c)）读取 `pipeline.json` 后 `dlopen` 加载。C 节点用 `TaskBase` + `TaskInterface` vtable，C++ 节点用 `CoroutineTask` 协程。
+所有节点实现 `NodePlugin` 接口（[node_plugin.h](../include/node_plugin.h)），编译为 `.so`，由 `flow_launcher`（[flow_launcher.c](../src/flow_launcher.c)）读取 `pipeline.json` 后 `dlopen` 加载。C 节点用 `TaskBase` + `TaskInterface` vtable，C++ 节点用 `CoroutineTask` 协程。
 
 ```c
 // C 插件 ABI
@@ -167,7 +167,7 @@ class MyTask : public CoroutineTask {
 };
 ```
 
-> **节点线程规范**（见 [CLAUDE.md](file:///workspace/CLAUDE.md)）：禁止裸 `while(!stop) ex.run();`（忙等自旋占满核），必须用 `node_pump(ex, []{return g.should_stop;})`。
+> **节点线程规范**（见 [CLAUDE.md](../CLAUDE.md)）：禁止裸 `while(!stop) ex.run();`（忙等自旋占满核），必须用 `node_pump(ex, []{return g.should_stop;})`。
 
 ---
 
@@ -177,12 +177,12 @@ class MyTask : public CoroutineTask {
 
 ### 5.1 control_node — 控制核心
 
-**文件**：[control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp)（~2100 行）
+**文件**：[control_node.cpp](../modules/adas_nodes/control_node.cpp)（~2100 行）
 **插件**：`libcontrol_node.so`，20Hz 协程节点
 **订阅**：`fusion/localization`、`planning/trajectory`、`vehicle/state`、`road/geometry`、`scene/frame`
 **发布**：`control/raw_cmd`（ControlRaw，QoS: drop_oldest / best_effort / 100ms deadline）
 
-#### 5.1.1 核心结构 `ControlContext`（[L112](file:///workspace/modules/adas_nodes/control_node.cpp#L112)）
+#### 5.1.1 核心结构 `ControlContext`（[L112](../modules/adas_nodes/control_node.cpp#L112)）
 
 节点全局状态，关键字段分组：
 
@@ -195,7 +195,7 @@ class MyTask : public CoroutineTask {
 | 障碍物 | `obs_x/y/vx[128]`、`obs_valid[128]`、`ped_index` | 128 槽位（0-3 来自 vehicle/state，4-7 来自 scene/frame） |
 | 变道状态机 | `lc_state`、`lc_target_y`、`lc_target_idx`、`committed_lane_side`、`lc_timer/wait/cooldown` | 0=巡航 1=左变道 2=稳定 3=回切 |
 
-#### 5.1.2 主循环 `ControlTask::run()`（[L837](file:///workspace/modules/adas_nodes/control_node.cpp#L837)）
+#### 5.1.2 主循环 `ControlTask::run()`（[L837](../modules/adas_nodes/control_node.cpp#L837)）
 
 ```cpp
 class ControlTask : public CoroutineTask {
@@ -220,7 +220,7 @@ class ControlTask : public CoroutineTask {
 
 > **为何用 CoroutineTask 而非 FlowCoroTask**（文件头注释）：control 是延迟敏感闭环控制，周期精度直接影响横向稳定性。FlowCoroTask 线程池 resume 会引入调度抖动，导致 20Hz 周期不一致、prev_steer 低通滤波间隔波动、steer 小幅振荡。CoroutineTask 同步 resume 周期精确。
 
-#### 5.1.3 纵向控制：PID + ACC（[L1392](file:///workspace/modules/adas_nodes/control_node.cpp#L1392)）
+#### 5.1.3 纵向控制：PID + ACC（[L1392](../modules/adas_nodes/control_node.cpp#L1392)）
 
 纵向**始终用 PID+ACC**，横向用 Stanley（原 MPC 已删除）。
 
@@ -240,13 +240,13 @@ PID（L1402）:
   output < 0 → brake    = -output / 8000  (clamp [0,1])
 ```
 
-#### 5.1.4 横向控制：Stanley（[L1428](file:///workspace/modules/adas_nodes/control_node.cpp#L1428)）
+#### 5.1.4 横向控制：Stanley（[L1428](../modules/adas_nodes/control_node.cpp#L1428)）
 
 巡航横向默认走 Stanley；`use_ltv_mpc` 参数可启用 **LTV MPC**（线性时变模型预测，
 求解失败回退 Stanley；机动模式跳过 MPC——满舵弧 + 倒挡在其线性化域外，由
 ManeuverTracker 负责）。原 iLQR MPC 已删除。
 
-**Stanley + 横向速度规划（变道 `lc_active`，[L1513](file:///workspace/modules/adas_nodes/control_node.cpp#L1513)）**
+**Stanley + 横向速度规划（变道 `lc_active`，[L1513](../modules/adas_nodes/control_node.cpp#L1513)）**
 
 这是用户调参纠结的核心。变道时启用「横向速度规划 PD」：
 
@@ -268,7 +268,7 @@ steer = clamp(±steer_limit_for_speed)                                  // L1615
 steer = filter_new*steer + (1-filter_new)*prev_steer                   // L1618 一阶低通
 ```
 
-变道时增益调整（[L1542](file:///workspace/modules/adas_nodes/control_node.cpp#L1542)）：`lat_kd *= 0.8`、`lat_kp *= 2.5`、`lat_accel_max=8.0`、`filter_new=0.7`。
+变道时增益调整（[L1542](../modules/adas_nodes/control_node.cpp#L1542)）：`lat_kd *= 0.8`、`lat_kp *= 2.5`、`lat_accel_max=8.0`、`filter_new=0.7`。
 
 **动态行为解读**（注释 L1555-1559）：
 - 起步（v_lat=0）：`v_y_des = k_vy*lat_error`（全力推）
@@ -276,16 +276,16 @@ steer = filter_new*steer + (1-filter_new)*prev_steer                   // L1618 
 - 近目标（lat_error→0, v_lat>0）：`v_y_des = -k_d*v_lat`（纯制动）
 - 到目标（都=0）：`v_y_des = 0`（稳定）
 
-#### 5.1.5 Safety Overrides（[L1624](file:///workspace/modules/adas_nodes/control_node.cpp#L1624)）
+#### 5.1.5 Safety Overrides（[L1624](../modules/adas_nodes/control_node.cpp#L1624)）
 
 对 Stanley 和 PID 回退都生效的硬保护：
 - **接近路沿增强拉回**（|y|>4.5）：steer_limit 降到 0.165，但拉回力矩≈8.8 m/s² 对抗残余过冲
 - **超速限幅**：speed > cruise+1 → throttle=0 + 比例刹车
 - **全域速度死锁恢复**（`SPEED_ZERO_RECOVER_S=5.0`）：速度持续为 0 超阈值 → 小油门 thr=0.15
 - **ROAD_GUARD**（偏离过远）：steer 强制满限幅回正 + 低速给油/高速刹车
-- **转向灯/双闪**（[L1678](file:///workspace/modules/adas_nodes/control_node.cpp#L1678)）：变道意图先行，提前亮灯
+- **转向灯/双闪**（[L1678](../modules/adas_nodes/control_node.cpp#L1678)）：变道意图先行，提前亮灯
 
-#### 5.1.6 变道状态机（[L1295](file:///workspace/modules/adas_nodes/control_node.cpp#L1295)）
+#### 5.1.6 变道状态机（[L1295](../modules/adas_nodes/control_node.cpp#L1295)）
 
 ```
 lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
@@ -303,7 +303,7 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 
 ### 5.3 planning_node — Frenet 轨迹 + ST 图速度规划
 
-**文件**：[planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp)（~2700 行），20Hz 协程节点
+**文件**：[planning_node.cpp](../modules/adas_nodes/planning_node.cpp)（~2700 行），20Hz 协程节点
 **订阅**：`fusion/localization`、`perception/obstacles`、`road/geometry`、`road/traffic_lights`、`scene/frame`
 **发布**：`planning/trajectory`（type_id `0x3A7B1C2D`）
 
@@ -326,13 +326,13 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 > **速度剖面演进**：早期速度剖面由 FOT 代价函数隐式产生 + 红灯 override 补丁堆，
 > 无显式减速语义。现由 `st_graph.c`（ST 图 + DP）统一生成：红灯墙、动态障碍占据、
 > 曲率限速全部进 DP 代价，替代了旧 override 堆。设计见
-> [PLANNING_SPEED_UPGRADE_DESIGN.md](file:///workspace/docs/PLANNING_SPEED_UPGRADE_DESIGN.md)。
+> [PLANNING_SPEED_UPGRADE_DESIGN.md](PLANNING_SPEED_UPGRADE_DESIGN.md)。
 
-> **已修复 bug — 停稳死锁**（[L787](file:///workspace/modules/adas_nodes/planning_node.cpp#L787)）：旧版 `command_speed = spd_out[0]`（≈当前车速）覆盖导致 `v=0→target=0→油门=0→v=0` 自维持闭锁。已改为 `if (spd_out[0] > command_speed) command_speed = spd_out[0]`（取 max）。
+> **已修复 bug — 停稳死锁**（[L787](../modules/adas_nodes/planning_node.cpp#L787)）：旧版 `command_speed = spd_out[0]`（≈当前车速）覆盖导致 `v=0→target=0→油门=0→v=0` 自维持闭锁。已改为 `if (spd_out[0] > command_speed) command_speed = spd_out[0]`（取 max）。
 
 ### 5.4 safety_control_node — 安全闸门（in-line）
 
-**文件**：[safety_control_node.cpp](file:///workspace/modules/adas_nodes/safety_control_node.cpp)（642 行），FlowCoro 协程
+**文件**：[safety_control_node.cpp](../modules/adas_nodes/safety_control_node.cpp)（642 行），FlowCoro 协程
 **订阅**：`control/raw_cmd`、`fusion/localization`、`perception/obstacles`
 **发布**：`control/cmd`（ControlCmd 二进制，type_id `0x2D95C6D2`，100Hz）
 
@@ -355,7 +355,7 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 
 ### 5.5 guardian_node — 熔断器（off-line）
 
-**文件**：[guardian_node.c](file:///workspace/modules/adas_nodes/guardian_node.c)（589 行），20Hz，TASK_PRIORITY_HIGH
+**文件**：[guardian_node.c](../modules/adas_nodes/guardian_node.c)（589 行），20Hz，TASK_PRIORITY_HIGH
 **订阅**：`vehicle/state`、`control/raw_cmd/text`、`fusion/localization`、`perception/obstacles`
 **发布**：`control/emergency_stop`（旁路正常链路）
 
@@ -382,17 +382,17 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 
 两个二选一节点，都订阅 safety_control 限幅后的 `control/cmd`，都有 3s 看门狗（超时强制中位）。
 
-**actuator_node**（[actuator_node.c](file:///workspace/modules/adas_nodes/actuator_node.c)，523 行）：SocketCAN 真车执行器。`can_open`/`can_send` 编码 CAN 帧（throttle→uint16 LE ×throttle_scale，steer→ `steering/0.22` 归一化 ×steering_scale）。非 Linux 或接口不存在自动降级 dry_run。10Hz 心跳。
+**actuator_node**（[actuator_node.c](../modules/adas_nodes/actuator_node.c)，523 行）：SocketCAN 真车执行器。`can_open`/`can_send` 编码 CAN 帧（throttle→uint16 LE ×throttle_scale，steer→ `steering/0.22` 归一化 ×steering_scale）。非 Linux 或接口不存在自动降级 dry_run。10Hz 心跳。
 
-**actuator_pwm_node**（[actuator_pwm_node.c](file:///workspace/modules/adas_nodes/actuator_pwm_node.c)，581 行）：RC 小车 PWM 执行器。三后端：PCA9685 I2C（主）/ GPIO sysfs / dry_run。映射：`esc_us=1500+throttle*scale`，`steer_us=1500+steer_norm*scale`，脉宽硬钳位[1000,2000]μs。
+**actuator_pwm_node**（[actuator_pwm_node.c](../modules/adas_nodes/actuator_pwm_node.c)，581 行）：RC 小车 PWM 执行器。三后端：PCA9685 I2C（主）/ GPIO sysfs / dry_run。映射：`esc_us=1500+throttle*scale`，`steer_us=1500+steer_norm*scale`，脉宽硬钳位[1000,2000]μs。
 
 > pipeline 二选一：真车 ESC 用 actuator_node（CAN），RC 小车用 actuator_pwm_node（PWM）。
 
 ### 5.7 flowsim/physics — 车辆动力学仿真真值
 
-**文件**：[physics.cpp](file:///workspace/modules/adas_nodes/flowsim/physics.cpp)（104 行）/ [entity.h](file:///workspace/modules/adas_nodes/flowsim/entity.h)（258 行）/ [flowsim_node.cpp](file:///workspace/modules/adas_nodes/flowsim_node.cpp)
+**文件**：[physics.cpp](../modules/adas_nodes/flowsim/physics.cpp)（104 行）/ [entity.h](../modules/adas_nodes/flowsim/entity.h)（258 行）/ [flowsim_node.cpp](../modules/adas_nodes/flowsim_node.cpp)
 
-**`step_bicycle()`**（[L29](file:///workspace/modules/adas_nodes/flowsim/physics.cpp#L29)）：运动学自行车模型前向欧拉积分。
+**`step_bicycle()`**（[L29](../modules/adas_nodes/flowsim/physics.cpp#L29)）：运动学自行车模型前向欧拉积分。
 ```
 纵向: drive=throttle*5000, brake=brake*8000, drag=drag_coeff*v², accel=net/mass
 横向: heading += (speed/wheelbase)*tan(steer)*dt   (steer 限幅 ±0.25)
@@ -400,17 +400,17 @@ lc_state: 0=巡航  1=变道中  2=稳定巡航  3=回切中
 速度: vx=v*cos(h), vy=v*sin(h)
 ```
 
-**`step_bicycle_dynamic()`**（[L67](file:///workspace/modules/adas_nodes/flowsim/physics.cpp#L67)）：**动力学桩（未实现）**。首次调用打 LOG_WARN 后 fallback 到 step_bicycle。entity.h 的 `v_x_body/v_y_body/yaw_rate/F_yf/F_yr/tire_stiffness/yaw_inertia` 字段运行时恒 0。
+**`step_bicycle_dynamic()`**（[L67](../modules/adas_nodes/flowsim/physics.cpp#L67)）：**动力学桩（未实现）**。首次调用打 LOG_WARN 后 fallback 到 step_bicycle。entity.h 的 `v_x_body/v_y_body/yaw_rate/F_yf/F_yr/tire_stiffness/yaw_inertia` 字段运行时恒 0。
 
-> **heading 重置逻辑 — 文档/代码漂移**：[CLAUDE.md L415](file:///workspace/CLAUDE.md) 与 flowsim_node.cpp:1185 注释声称"运动学模式每帧重置 heading 为道路切线"，但 [L1240](file:///workspace/modules/adas_nodes/flowsim_node.cpp#L1240) 实现已改为**保留 bicycle 自由积分 heading**（仅归一化），靠 `sin(heading - road_heading)` 驱动横向位移构成负反馈闭环。**以代码为准**。这一改动直接影响 control 的 v_lat_damp 是否生效——旧实现 heading 被道路切线拽回→heading_err≈0→横向 PD 退化为纯 P。
+> **heading 重置逻辑 — 文档/代码漂移**：[CLAUDE.md L415](../CLAUDE.md) 与 flowsim_node.cpp:1185 注释声称"运动学模式每帧重置 heading 为道路切线"，但 [L1240](../modules/adas_nodes/flowsim_node.cpp#L1240) 实现已改为**保留 bicycle 自由积分 heading**（仅归一化），靠 `sin(heading - road_heading)` 驱动横向位移构成负反馈闭环。**以代码为准**。这一改动直接影响 control 的 v_lat_damp 是否生效——旧实现 heading 被道路切线拽回→heading_err≈0→横向 PD 退化为纯 P。
 
-**`internal_cruise_control()`**（[L1029](file:///workspace/modules/adas_nodes/flowsim_node.cpp#L1029)）：无 control/cmd 时的 ego 闭环 fallback。纵向 P 控制追 target_vx，横向 `steer=heading_err*0.3+y_err*0.03`（cap ±0.15）。
+**`internal_cruise_control()`**（[L1029](../modules/adas_nodes/flowsim_node.cpp#L1029)）：无 control/cmd 时的 ego 闭环 fallback。纵向 P 控制追 target_vx，横向 `steer=heading_err*0.3+y_err*0.03`（cap ±0.15）。
 
-**EPS 转向低通**（[L1170](file:///workspace/modules/adas_nodes/flowsim_node.cpp#L1170)）：`steer=0.4*raw+0.6*prev`，模拟电动助力转向惯性，滤掉 Stanley 小幅振荡。
+**EPS 转向低通**（[L1170](../modules/adas_nodes/flowsim_node.cpp#L1170)）：`steer=0.4*raw+0.6*prev`，模拟电动助力转向惯性，滤掉 Stanley 小幅振荡。
 
 ### 5.8 frenet_bridge — FOT 包装
 
-**文件**：[frenet_bridge.cpp](file:///workspace/src/algorithms/frenet_bridge.cpp)（177 行）/ [frenet_bridge.h](file:///workspace/src/algorithms/frenet_bridge.h)
+**文件**：[frenet_bridge.cpp](../src/algorithms/frenet_bridge.cpp)（177 行）/ [frenet_bridge.h](../src/algorithms/frenet_bridge.h)
 
 C wrapper 封装开源 Frenet Optimal Trajectory (FOT) 规划器（Apache-2.0）。planning_node 是唯一调用方。
 
@@ -427,7 +427,7 @@ C wrapper 封装开源 Frenet Optimal Trajectory (FOT) 规划器（Apache-2.0）
 
 ### 5.9 waypoint_follower — Pure Pursuit（替代规划）
 
-**文件**：[waypoint_follower_node.c](file:///workspace/modules/adas_nodes/waypoint_follower_node.c)（678 行），L2 级 RC 小车航点跟随。
+**文件**：[waypoint_follower_node.c](../modules/adas_nodes/waypoint_follower_node.c)（678 行），L2 级 RC 小车航点跟随。
 
 **关键澄清**：waypoint_follower 是 **planning 层替代品**（发布 `planning/trajectory`，与 planning_node 同 topic，pipeline 二选一），**不是 control 层替代品**。control_node 仍是唯一控制层。Pure Pursuit 找前瞻点→车体坐标 path→cruise 减速。避障只减速不绕行（绕行交 control/safety）。
 
@@ -439,30 +439,30 @@ C wrapper 封装开源 Frenet Optimal Trajectory (FOT) 规划器（Apache-2.0）
 
 | 类/函数 | 文件 | 作用 |
 |---------|------|------|
-| `ControlContext` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 控制节点全局状态（PID/横向/障碍物/变道） |
-| `ControlTask::run()` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 20Hz 协程主循环 |
-| `control_init()` | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) | 节点初始化（参数解析+注册+状态机） |
+| `ControlContext` | [control_node.cpp](../modules/adas_nodes/control_node.cpp) | 控制节点全局状态（PID/横向/障碍物/变道） |
+| `ControlTask::run()` | [control_node.cpp](../modules/adas_nodes/control_node.cpp) | 20Hz 协程主循环 |
+| `control_init()` | [control_node.cpp](../modules/adas_nodes/control_node.cpp) | 节点初始化（参数解析+注册+状态机） |
 | `steer_limit_for_speed()` | control_node.cpp | speed-dependent 转向限幅（lat_accel 约束） |
 | `lane_center_y()` / `lane_idx_from_y()` | control_node.cpp | N 车道模型：y↔车道索引互转 |
-| `PlanningContext` / `PlanningTask` | [planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp) | 规划节点 |
-| `FrenetHandle` / `frenet_plan()` | [frenet_bridge.cpp](file:///workspace/src/algorithms/frenet_bridge.cpp) | FOT 包装 |
-| `step_bicycle()` | [physics.cpp](file:///workspace/modules/adas_nodes/flowsim/physics.cpp) | 运动学自行车积分 |
-| `Entity` / `EntityPool` | [entity.h](file:///workspace/modules/adas_nodes/flowsim/entity.h) | 仿真实体固定池（128，Ego=index 0） |
-| `apply_safety()` | [safety_control_node.cpp](file:///workspace/modules/adas_nodes/safety_control_node.cpp) | 安全包络总入口（限幅+TTC+行人+横向交叉） |
-| `publish_emergency_stop()` | [guardian_node.c](file:///workspace/modules/adas_nodes/guardian_node.c) | 熔断紧急制动 |
+| `PlanningContext` / `PlanningTask` | [planning_node.cpp](../modules/adas_nodes/planning_node.cpp) | 规划节点 |
+| `FrenetHandle` / `frenet_plan()` | [frenet_bridge.cpp](../src/algorithms/frenet_bridge.cpp) | FOT 包装 |
+| `step_bicycle()` | [physics.cpp](../modules/adas_nodes/flowsim/physics.cpp) | 运动学自行车积分 |
+| `Entity` / `EntityPool` | [entity.h](../modules/adas_nodes/flowsim/entity.h) | 仿真实体固定池（128，Ego=index 0） |
+| `apply_safety()` | [safety_control_node.cpp](../modules/adas_nodes/safety_control_node.cpp) | 安全包络总入口（限幅+TTC+行人+横向交叉） |
+| `publish_emergency_stop()` | [guardian_node.c](../modules/adas_nodes/guardian_node.c) | 熔断紧急制动 |
 
 ### 核心中间件
 
 | 类/函数 | 文件 | 作用 |
 |---------|------|------|
-| `MessageBus` | [message_bus.h](file:///workspace/include/message_bus.h) | Pub/Sub 总线 |
-| `Transport` / `transport_publish()` | [transport.h](file:///workspace/include/transport.h) | 统一传输抽象 |
-| `Scheduler` | [scheduler.h](file:///workspace/include/scheduler.h) | 任务调度器 |
-| `CoroutineTask` / `node_pump()` | [coroutine_task.h](file:///workspace/include/coroutine_task.h) | C++20 协程基类 |
-| `StateMachine` / `statem_send_event()` | [state_machine.h](file:///workspace/include/state_machine.h) | 反射式状态机 |
-| `param_register_float()` / `param_get_float()` | [param_registry.h](file:///workspace/include/param_registry.h) | 参数热重载 |
-| `clock_now_us()` | [clock_service.h](file:///workspace/include/clock_service.h) | 统一时间戳 |
-| `NodePlugin` | [node_plugin.h](file:///workspace/include/node_plugin.h) | 节点插件 ABI |
+| `MessageBus` | [message_bus.h](../include/message_bus.h) | Pub/Sub 总线 |
+| `Transport` / `transport_publish()` | [transport.h](../include/transport.h) | 统一传输抽象 |
+| `Scheduler` | [scheduler.h](../include/scheduler.h) | 任务调度器 |
+| `CoroutineTask` / `node_pump()` | [coroutine_task.h](../include/coroutine_task.h) | C++20 协程基类 |
+| `StateMachine` / `statem_send_event()` | [state_machine.h](../include/state_machine.h) | 反射式状态机 |
+| `param_register_float()` / `param_get_float()` | [param_registry.h](../include/param_registry.h) | 参数热重载 |
+| `clock_now_us()` | [clock_service.h](../include/clock_service.h) | 统一时间戳 |
+| `NodePlugin` | [node_plugin.h](../include/node_plugin.h) | 节点插件 ABI |
 
 ---
 
@@ -499,7 +499,7 @@ flowsim ─► esminiRMLib (RoadPosition) ─► road_network / route
 
 ### 7.3 第三方
 
-- [third_party/frenet_planner/](file:///workspace/third_party/frenet_planner) — Frenet Optimal Trajectory（含 CubicSpline1D/2D、QuarticPolynomial、QuinticPolynomial）
+- [third_party/frenet_planner/](../third_party/frenet_planner) — Frenet Optimal Trajectory（含 CubicSpline1D/2D、QuarticPolynomial、QuinticPolynomial）
 - `third_party/esmini`（git submodule）— OpenDRIVE 道路位置
 
 ---
@@ -590,7 +590,7 @@ v_y_des = k_vy * lat_error - k_vy_damp * v_lat_actual
 steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 ```
 
-默认值（[pipeline.json](file:///workspace/config/pipeline.json)）：`k_vy=0.35`、`k_vy_damp=0.6`、`lat_kp=0.5`、`lat_kd_heading=3.5`、`yaw_damping=0.28`。
+默认值（[pipeline.json](../config/pipeline.json)）：`k_vy=0.35`、`k_vy_damp=0.6`、`lat_kp=0.5`、`lat_kd_heading=3.5`、`yaw_damping=0.28`。
 
 ### 9.2 参数矛盾矩阵（用户痛点）
 
@@ -619,16 +619,16 @@ steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 
 **C. 若需真正的梯形速度剖面**：当前代码**不存在**该模块。需在 planning 层新增：规划变道横向位移的梯形速度曲线（加速段→匀速段→减速段），下发 `v_y_des` 时间序列给 control 跟踪，把"规划"与"控制"剥离。这样调参维度从三维（P/D/限幅）降为一维（减速时机）。
 
-### 9.5 常见故障速查（来自 [CLAUDE.md](file:///workspace/CLAUDE.md) 故障表）
+### 9.5 常见故障速查（来自 [CLAUDE.md](../CLAUDE.md) 故障表）
 
 | 现象 | 根因 | 位置 |
 |------|------|------|
 | MPC 输出每帧翻符号（bang-bang）【已删除】 | 求解器 max_steer=0.35 与外部限幅差 12.9 倍，平滑项失效 | 原 `control_node.cpp` |
-| 变道冲出车道 | Stanley heading 阻尼硬编码，`lat_kd_heading` 未生效 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
-| 车身左右晃（1-2Hz 极限环） | heading 重置逻辑使 v_lat_damp 失效，退化为纯 P | [flowsim_node.cpp](file:///workspace/modules/adas_nodes/flowsim_node.cpp) |
-| steer 打到硬限幅抖动 | heading 漂移撞 clamp，`lc_lat_accel_max` 2.4→4.5，`steer_min_clamp` 0.016→0.030 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
-| 红灯停稳后转绿不走 | planning 用 spd_out[0] 覆盖 command_speed 自维持闭锁 | [planning_node.cpp](file:///workspace/modules/adas_nodes/planning_node.cpp) |
-| 车速降到 0 永久卡死 | ROAD_GUARD 恢复条件盲区，改为 speed<2.5 给小油门 | [control_node.cpp](file:///workspace/modules/adas_nodes/control_node.cpp) |
+| 变道冲出车道 | Stanley heading 阻尼硬编码，`lat_kd_heading` 未生效 | [control_node.cpp](../modules/adas_nodes/control_node.cpp) |
+| 车身左右晃（1-2Hz 极限环） | heading 重置逻辑使 v_lat_damp 失效，退化为纯 P | [flowsim_node.cpp](../modules/adas_nodes/flowsim_node.cpp) |
+| steer 打到硬限幅抖动 | heading 漂移撞 clamp，`lc_lat_accel_max` 2.4→4.5，`steer_min_clamp` 0.016→0.030 | [control_node.cpp](../modules/adas_nodes/control_node.cpp) |
+| 红灯停稳后转绿不走 | planning 用 spd_out[0] 覆盖 command_speed 自维持闭锁 | [planning_node.cpp](../modules/adas_nodes/planning_node.cpp) |
+| 车速降到 0 永久卡死 | ROAD_GUARD 恢复条件盲区，改为 speed<2.5 给小油门 | [control_node.cpp](../modules/adas_nodes/control_node.cpp) |
 
 ---
 
@@ -636,10 +636,10 @@ steer   = cte_term - heading_term - yaw_damp + ff + delta_ff
 
 | 文档 | 主题 |
 |-----|------|
-| [QUICK_START.md](file:///workspace/docs/QUICK_START.md) | 30 分钟教程 |
-| [TECHNICAL_DESIGN.md](file:///workspace/docs/TECHNICAL_DESIGN.md) | 架构设计 |
-| [PIPELINE_ARCHITECTURE.md](file:///workspace/docs/PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
-| [ALGORITHM_STACK.md](file:///workspace/docs/ALGORITHM_STACK.md) | 算法总览 |
-| [CALIBRATION_GUIDE.md](file:///workspace/docs/CALIBRATION_GUIDE.md) | 标定指南（含 k_vy 等） |
-| [LEARNING_LOOP.md](file:///workspace/docs/LEARNING_LOOP.md) | 车端学习闭环 |
+| [QUICK_START.md](QUICK_START.md) | 30 分钟教程 |
+| [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) | 架构设计 |
+| [PIPELINE_ARCHITECTURE.md](PIPELINE_ARCHITECTURE.md) | Pipeline 设计 |
+| [ALGORITHM_STACK.md](ALGORITHM_STACK.md) | 算法总览 |
+| [CALIBRATION_GUIDE.md](CALIBRATION_GUIDE.md) | 标定指南（含 k_vy 等） |
+| [LEARNING_LOOP.md](LEARNING_LOOP.md) | 车端学习闭环 |
 | `docs/tutorials/` 目录 | 17 篇深度教程（OOP in C、插件、消息总线、IPC、协程、Fusion 等） |
