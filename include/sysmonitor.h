@@ -22,7 +22,7 @@
  */
 
 #include <stdint.h>
-#if defined(_WIN32)
+#if defined(_MSC_VER)
 typedef int pid_t;
 #else
 #include <sys/types.h>

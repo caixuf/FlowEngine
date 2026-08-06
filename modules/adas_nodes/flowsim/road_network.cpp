@@ -29,7 +29,7 @@ FlowRoadNetwork::FlowRoadNetwork() {
 }
 
 FlowRoadNetwork::~FlowRoadNetwork() {
-    close();
+    release();
 }
 
 FlowRoadNetwork::FlowRoadNetwork(FlowRoadNetwork&& o) noexcept
@@ -40,7 +40,7 @@ FlowRoadNetwork::FlowRoadNetwork(FlowRoadNetwork&& o) noexcept
 
 FlowRoadNetwork& FlowRoadNetwork::operator=(FlowRoadNetwork&& o) noexcept {
     if (this != &o) {
-        close();
+        release();
         loaded_ = o.loaded_;
         pos_handle_ = o.pos_handle_;
         o.loaded_ = false;
@@ -50,7 +50,7 @@ FlowRoadNetwork& FlowRoadNetwork::operator=(FlowRoadNetwork&& o) noexcept {
 }
 
 bool FlowRoadNetwork::load(const std::string& xodr_path) {
-    close();
+    release();
     if (RM_Init(xodr_path.c_str()) != 0) {
         std::fprintf(stderr, "FlowRoadNetwork::load failed: %s\n", xodr_path.c_str());
         return false;
@@ -66,7 +66,7 @@ bool FlowRoadNetwork::load(const std::string& xodr_path) {
     return true;
 }
 
-void FlowRoadNetwork::close() {
+void FlowRoadNetwork::release() {
     if (pos_handle_ >= 0) {
         RM_DeletePosition(pos_handle_);
         pos_handle_ = -1;
