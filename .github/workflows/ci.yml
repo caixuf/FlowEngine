@@ -116,7 +116,39 @@ jobs:
   #     - uses: actions/checkout@v4
   #     ...
 
-  # ── Integration test: plugins + pipeline smoke ──────────────
+  # ── Windows cross-compile gate (mingw-w64) ─────────────────
+  # Cross-compiles the whole core project to native Windows x86_64 PE
+  # binaries using mingw-w64 on a Linux runner — no Windows runner needed.
+  # This is the reproducible regression gate for the Windows target: it
+  # catches compat-layer / _WIN32-path breakage (header conflicts, missing
+  # POSIX shims, atomic link deps) at PR time. MSVC-native builds still go
+  # through CMakePresets (windows-vs / windows-ninja) on developer machines.
+  build-windows-mingw:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64 toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 ninja-build python3
+      - name: Configure (mingw-w64 cross)
+        run: |
+          cmake -S . -B build-mingw -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-mingw -j$(nproc)
+      - name: Verify PE32+ Windows binaries were produced
+        run: |
+          set -e
+          for exe in flow_launcher flowmond flowctl; do
+            f="build-mingw/bin/${exe}.exe"
+            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
+            file "$f" | grep -q "PE32+ executable" || { echo "::error::$f is not a Windows PE binary"; exit 1; }
+            echo "✓ $f"
+          done
+
+
   # Builds the separate adas_nodes .so plugin subproject and verifies that
   # flow_launcher loads every node (dlopen + ABI check), runs the pipeline
   # under a 15-second stress budget, and passes the ctest integration smoke.

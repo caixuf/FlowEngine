@@ -115,6 +115,27 @@ cmake --build build-win\modules\adas_nodes --config Release
 build-win\bin\flow_launcher.exe config\pipeline.json --duration 15
 ```
 
+**mingw-w64 交叉编译（Linux → Windows，CI 门禁用）**
+
+除 MSVC 原生构建外，核心工程也可在 Linux 上用 mingw-w64 交叉编译出原生
+Windows PE 二进制。这是 Windows 目标的**可复现回归门禁**（CI 无需 Windows
+runner 即可拦截 `_WIN32` 路径 / 兼容层编译回归，见 `build-windows-mingw` job）：
+
+```bash
+sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 ninja-build
+
+cmake -S . -B build-mingw -G Ninja \
+      -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build-mingw -j
+file build-mingw/bin/flow_launcher.exe   # → PE32+ executable ... for MS Windows
+```
+
+> 交叉编译覆盖核心工程（`flow_launcher` / `flowmond` / `flowctl` / 总线 / IPC /
+> bag 等）；`modules/adas_nodes` 的 `flowsim_node` 依赖 esmini RoadManager，需先
+> 构建 esmini（或在 Windows 上用预构建库）。兼容层实现见
+> `include/platform_compat.h`（`_WIN32` 段）与 `include/compat_win/`（POSIX 头平替）。
+
 ### 新手最短路径（复制即可跑）
 
 ```bash
