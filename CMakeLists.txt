@@ -94,12 +94,6 @@ if(WIN32)
         add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     endif()
     include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/compat_win)
-    # mingw/gcc:flowcoro 的 std::atomic<非 lock-free 大对象> 会下沉到 libatomic
-    # 的 __atomic_load/__atomic_store 运行时符号。MSVC 用 Interlocked 内建、无此
-    # 依赖,故仅 GNU Windows 工具链(mingw)显式链接 libatomic;MSVC 分支不受影响。
-    if(NOT MSVC)
-        link_libraries(atomic)
-    endif()
 elseif(APPLE)
     add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     # epoll/eventfd 平替：把 include/compat 抢在系统头之前,让 flowcoro/net 的
@@ -276,6 +270,15 @@ if(WIN32 AND TARGET flowcoro_net)
     # flowcoro_net 当前仍是 epoll/eventfd 实现;Windows 原生 demo 只用
     # rt_executor(header-only) 驱动节点协程,不要让默认 ALL 构建被网络库卡死。
     set_target_properties(flowcoro_net PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
+
+# mingw/gcc:flowcoro 的 std::atomic<非 lock-free 大对象> 会下沉到 libatomic 的
+# __atomic_load/__atomic_store 运行时符号。MSVC 用 Interlocked 内建、无此依赖,故
+# 仅 GNU Windows 工具链(mingw)显式链接 libatomic;MSVC 分支不受影响。
+# 放在第三方(cJSON/flowcoro FetchContent)之后:link_libraries 是目录作用域,只对
+# 其后定义的 FlowEngine 自有 target 生效,不污染第三方 target 的链接标志。
+if(WIN32 AND NOT MSVC)
+    link_libraries(atomic)
 endif()
 
 # flowcoro main 新增 C ABI：include/flowcoro/c_api.h + src/c_api.cpp。
