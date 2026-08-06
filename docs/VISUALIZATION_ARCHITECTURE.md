@@ -743,3 +743,65 @@ HTML inline `onclick` 全部改走 `window.flowboard.X()`，集中式重命名�
 - `setDrawRange` 控制可见顶点数，避免空实体浪费 draw call
 - 角标框 4 个角 × 每个角 2 条线段（竖 + 横）= 8 条线段 × 2 端点 = 16 顶点/实体
 - 检测射线使用 `vertexColors` 材质，一次 draw call 包含多条射线
+
+---
+
+## 综合 3D 场景展示（Scenario Showcase）
+
+`tools/flowboard/showcase.html` 是一个**综合展示页**：无需启动 C 管道，直接在
+浏览器里 3D 预览 `scenarios/*.json` 里的**全部场景**，左侧列表点选切换。
+
+### 为什么可行
+
+3D 渲染（`SceneDirector`）完全数据驱动，只消费一帧 `metrics.scene`
+（`road_network` + `ego` + `entities` + `construction_zones` + `lighting`）。
+而每个 `scenarios/*.json` 已携带 `road_network` / `ego` / `actors` /
+`traffic_lights` / `construction_zones`——与后端 flowsim 运行时发布的 scene 帧
+**同源**。因此把「静态场景定义」转成「一帧快照」即可复用整条渲染链路。
+
+### 数据链路
+
+```
+scenarios/*.json  ──build_showcase.py──►  tools/flowboard/showcase/scenes.json
+                                                   │ (浏览器 fetch)
+                                                   ▼
+                          js/showcase/sceneAdapter.scenarioToTopoData(raw)
+                                                   │
+                                                   ▼
+                              vis/main.js update3D({metrics:{scene}})
+                                                   │
+                                                   ▼
+                                        SceneDirector 渲染
+```
+
+### 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `tools/flowboard/showcase.html` | 展示页（场景列表 + 3D 画布 + 相机切换） |
+| `tools/flowboard/js/showcase/sceneAdapter.js` | **转换唯一事实源**：场景 JSON → scene 帧（纯函数） |
+| `tools/flowboard/js/showcase/main.js` | 展示控制器：拉清单、建列表、点选渲染 |
+| `tools/build_showcase.py` | 由 scenarios + suite 生成 `showcase/scenes.json` |
+| `tests/vis_showcase_scenes.test.mjs` | 门禁：每个场景都能无异常 update+tick，且 scenes.json 未过期 |
+
+### 静态快照约定
+
+展示页不跑仿真，`sceneAdapter` 把 actor/ego 的速度分量 `vx/vy` 归零——否则
+死推算（`DeadReckon`）会用速度逐帧外推位置，车辆会永久漂走。车头 `heading`
+在归零前由速度向量（或显式字段）算好并写入，保证朝向正确。
+
+### 用法
+
+```bash
+python3 tools/build_showcase.py         # 场景改动后重新生成清单
+# 启动 flowmond（scripts/demo.sh 或 ./build/bin/flowmond --html-path ...）后：
+#   浏览器打开 http://localhost:8800/tools/flowboard/showcase.html
+#   （或从主面板 FlowBoard 左上角「🎬 综合 3D 场景展示」入口进入）
+```
+
+### 门禁
+
+`tests/vis_showcase_scenes.test.mjs` 已并入 `npm run vis:check:smoke` /
+`vis:check:all`：逐个把磁盘上的 `scenarios/*.json` 经 `sceneAdapter` 喂进
+`SceneDirector` 做 update + 连续 tick，任一帧抛错即 FAIL；并校验
+`showcase/scenes.json` 内嵌 raw 与磁盘一致（防 `build_showcase.py` 忘跑）。
