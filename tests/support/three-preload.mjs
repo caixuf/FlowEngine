@@ -29,7 +29,7 @@ function _makeCanvas() {
     textAlign: 'left', textBaseline: 'alphabetic',
     globalAlpha: 1, lineDashOffset: 0, lineJoin: 'miter',
     shadowBlur: 0, shadowColor: 'rgba(0,0,0,0)',
-    clearRect() {}, fillRect() {}, strokeRect() {}, fillText() {},
+    clearRect() {}, fillRect() {}, strokeRect() {}, fillText() {}, strokeText() {},
     beginPath() {}, closePath() {}, moveTo() {}, lineTo() {},
     stroke() {}, fill() {}, arc() {}, roundRect() {},
     quadraticCurveTo() {}, save() {}, restore() {},

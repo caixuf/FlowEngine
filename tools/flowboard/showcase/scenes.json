@@ -2044,7 +2044,7 @@
               "vx": 4.0
             },
             {
-              "t": 16.0,
+              "t": 12.0,
               "actor": "10",
               "act": "cross",
               "vx": 1.5
@@ -2793,7 +2793,7 @@
       "name": "traffic_rules_exam",
       "description": "科目一：交通规则遵守考试。连续5盏错相红绿灯 + 施工区绕行 + 限速区 + 停止线。覆盖：红灯停、绿灯行、黄灯减速、施工变道、限速遵守、车道纪律。",
       "duration_s": 120,
-      "enabled": true,
+      "enabled": false,
       "raw": {
         "name": "traffic_rules_exam",
         "description": "科目一：交通规则遵守考试。连续5盏错相红绿灯 + 施工区绕行 + 限速区 + 停止线。覆盖：红灯停、绿灯行、黄灯减速、施工变道、限速遵守、车道纪律。",
@@ -3039,7 +3039,7 @@
       "name": "parallel_parking_exam",
       "description": "科目二：侧方停车考试。路侧连续停放3辆车形成空位，ego需靠边减速并停在目标车位内。覆盖：靠边变道、低速控制、车位对准、精确停车。",
       "duration_s": 60,
-      "enabled": true,
+      "enabled": false,
       "raw": {
         "name": "parallel_parking_exam",
         "description": "科目二：侧方停车考试。路侧连续停放3辆车形成空位，ego需靠边减速并停在目标车位内。覆盖：靠边变道、低速控制、车位对准、精确停车。",
@@ -3170,7 +3170,7 @@
       "name": "road_driving_exam",
       "description": "科目三：道路驾驶技能考试。双向4车道城市道路，包含：行人横穿、前车急刹避让、红绿灯路口、对向来车、邻道cut-in、施工区绕行。覆盖实际道路驾驶核心能力。",
       "duration_s": 120,
-      "enabled": true,
+      "enabled": false,
       "raw": {
         "name": "road_driving_exam",
         "description": "科目三：道路驾驶技能考试。双向4车道城市道路，包含：行人横穿、前车急刹避让、红绿灯路口、对向来车、邻道cut-in、施工区绕行。覆盖实际道路驾驶核心能力。",
@@ -3470,7 +3470,7 @@
       "name": "safe_driving_exam",
       "description": "科目四：安全文明驾驶考试。覆盖：前车紧急制动（AEB）、行人鬼探头、邻车突然cut-in、对向车道越线侵占、夜间/施工区预警。验证安全驾驶与危险预判能力。",
       "duration_s": 120,
-      "enabled": true,
+      "enabled": false,
       "raw": {
         "name": "safe_driving_exam",
         "description": "科目四：安全文明驾驶考试。覆盖：前车紧急制动（AEB）、行人鬼探头、邻车突然cut-in、对向车道越线侵占、夜间/施工区预警。验证安全驾驶与危险预判能力。",
