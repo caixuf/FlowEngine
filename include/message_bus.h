@@ -50,12 +50,15 @@ typedef enum {
     MSG_TYPE_REPLY          /**< 回复消息（内部使用） */
 } MessageType;
 
-typedef struct {
+typedef struct Message {
     char        topic[MSG_BUS_MAX_TOPIC_LEN];    /**< 主题 */
     char        sender[MSG_BUS_MAX_SENDER_LEN];  /**< 发送者名称 */
     uint32_t    msg_id;                           /**< 消息唯一ID */
     MessageType type;                             /**< 消息类型 */
     uint64_t    timestamp_us;                     /**< 发布时间戳（微秒，CLOCK_MONOTONIC 墙钟，不受仿真模式影响） */
+    int32_t     topic_idx;                        /**< 进程内路由元数据：发布时定位到的 topic_entries 索引
+                                                    *   （-1=未知/未登记）。仅分发线程内部使用，免去热路径
+                                                    *   加锁扫描订阅/统计表。不参与序列化（payload 为 data[]）。*/
     uint32_t    data_size;                        /**< 有效数据字节数 */
 
     /* ── 类型安全序列化字段 (Phase 1) ─────────────────────── */
@@ -65,6 +68,11 @@ typedef struct {
     uint8_t     _reserved[6];     /**< 对齐保留，便于后续扩展 */
 
     uint8_t     data[MSG_BUS_MAX_DATA_SIZE];      /**< 负载数据 */
+
+    /* ── 内部使用：空闲 Message 池链指针 ─────────────────────
+     * 仅当消息处于空闲池中时有意义；入队/分发/序列化期间不使用。
+     * 复用已消费的 64KB Message 块，避免每消息 malloc/free 一次 64KB。*/
+    struct Message* _pool_next;
 } Message;
 
 /* ── 回调类型 ────────────────────────────────────────────── */

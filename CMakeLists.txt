@@ -499,6 +499,10 @@ add_dependencies(flowctl msg_codegen)
 if(NOT APPLE AND NOT WIN32)
     add_executable(benchmark src/benchmark.c)
     target_link_libraries(benchmark flowengine_core m)
+
+    # 消息总线压测（对标 ROS2/CyberRT 高并发：多生产者 × 多订阅者扇出）
+    add_executable(stress_test src/stress_test.c)
+    target_link_libraries(stress_test flowengine_core m)
 endif()
 
 # 消息总线可执行程序
