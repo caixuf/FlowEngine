@@ -31,6 +31,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "clock_service.h"
+#include "construction_zones.h"
 #include <cjson/cJSON.h>
 
 #include <stdlib.h>
@@ -576,26 +577,8 @@ static void on_scene_frame(const Message* msg, void* user_data) {
     if (!msg || msg->data_size == 0) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
-    g.cz_count = 0;
-    cJSON* czs = cJSON_GetObjectItemCaseSensitive(root, "construction_zones");
-    if (cJSON_IsArray(czs)) {
-        const int n = cJSON_GetArraySize(czs);
-        for (int i = 0; i < n && g.cz_count < g.kMaxCz; ++i) {
-            cJSON* z = cJSON_GetArrayItem(czs, i);
-            if (!z) continue;
-            cJSON* jx = cJSON_GetObjectItemCaseSensitive(z, "x");
-            cJSON* jy = cJSON_GetObjectItemCaseSensitive(z, "y");
-            cJSON* jl = cJSON_GetObjectItemCaseSensitive(z, "length");
-            cJSON* jw = cJSON_GetObjectItemCaseSensitive(z, "width");
-            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jl) || !cJSON_IsNumber(jw)) continue;
-            if (jl->valuedouble <= 0.0 || jw->valuedouble <= 0.0) continue;
-            g.cz_x[g.cz_count]   = jx->valuedouble;
-            g.cz_y[g.cz_count]   = cJSON_IsNumber(jy) ? jy->valuedouble : 0.0;
-            g.cz_len[g.cz_count] = jl->valuedouble;
-            g.cz_wid[g.cz_count] = jw->valuedouble;
-            g.cz_count++;
-        }
-    }
+    g.cz_count = construction_zones_parse_from_scene_root(
+        root, g.cz_x, g.cz_y, g.cz_len, g.cz_wid, g.kMaxCz);
     cJSON_Delete(root);
 }
 
@@ -1054,7 +1037,7 @@ protected:
                             }
                         }
                         for (int i = 0; i < g.cz_count; ++i) {
-                            const double front = g.cz_x[i] - 0.5 * g.cz_len[i];
+                            const double front = construction_zone_front_x(g.cz_x[i], g.cz_len[i]);
                             if (front <= g.ego_x || front >= uturn_ref_x) continue;
                             /* 横向覆盖 ego 车道才算挡路（半宽施工可从外侧绕） */
                             const double half_w = 0.5 * g.cz_wid[i] + 1.0;

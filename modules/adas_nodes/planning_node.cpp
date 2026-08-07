@@ -36,6 +36,7 @@
 #include "degrade_ladder.h"
 #include <cjson/cJSON.h>
 
+#include "construction_zones.h"
 #ifdef HAVE_FRENET
 #include "frenet_bridge.h"
 #include "st_graph.h"   /* ST 图 + DP 速度规划（planning 重生 M1，替代线性斜坡+override 堆） */
@@ -542,7 +543,7 @@ static bool uturn_body_hits_construction(double x, double y, double h,
 static double construction_forward_space(double ego_x, double ego_y, double clearance) {
     double best = 1e9;
     for (int z = 0; z < g.cz_count; ++z) {
-        const double front = g.cz_x[z] - 0.5 * g.cz_len[z];
+        const double front = construction_zone_front_x(g.cz_x[z], g.cz_len[z]);
         if (front <= ego_x) continue;
         /* 横向：施工带覆盖 ego 所在 y（半宽 + 车半宽 1m）才算挡路 */
         const double half_w = 0.5 * g.cz_wid[z] + 1.0;
@@ -1316,26 +1317,8 @@ static void on_scene_frame(const Message* msg, void* user_data) {
     if (!root) return;
 
     /* 施工区：始终解析（掉头可通行域不依赖 merge 状态 / 感知链路） */
-    g.cz_count = 0;
-    cJSON* czs = cJSON_GetObjectItemCaseSensitive(root, "construction_zones");
-    if (cJSON_IsArray(czs)) {
-        const int n = cJSON_GetArraySize(czs);
-        for (int i = 0; i < n && g.cz_count < g.kMaxCz; ++i) {
-            cJSON* z = cJSON_GetArrayItem(czs, i);
-            if (!z) continue;
-            cJSON* jx = cJSON_GetObjectItemCaseSensitive(z, "x");
-            cJSON* jy = cJSON_GetObjectItemCaseSensitive(z, "y");
-            cJSON* jl = cJSON_GetObjectItemCaseSensitive(z, "length");
-            cJSON* jw = cJSON_GetObjectItemCaseSensitive(z, "width");
-            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jl) || !cJSON_IsNumber(jw)) continue;
-            if (jl->valuedouble <= 0.0 || jw->valuedouble <= 0.0) continue;
-            g.cz_x[g.cz_count]   = jx->valuedouble;
-            g.cz_y[g.cz_count]   = cJSON_IsNumber(jy) ? jy->valuedouble : 0.0;
-            g.cz_len[g.cz_count] = jl->valuedouble;
-            g.cz_wid[g.cz_count] = jw->valuedouble;
-            g.cz_count++;
-        }
-    }
+    g.cz_count = construction_zones_parse_from_scene_root(
+        root, g.cz_x, g.cz_y, g.cz_len, g.cz_wid, g.kMaxCz);
 
     if (g.route_type != ROUTE_MERGE) {
         /* 非 merge：施工区已更新，跳过 entities 解析（省 CPU） */
