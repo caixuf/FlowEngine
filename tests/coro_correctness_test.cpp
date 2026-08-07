@@ -92,7 +92,7 @@ private:
 };
 
 static void test_buschannel_no_loss() {
-    printf("\n[Test 1] BusChannel 消息不丢失\n");
+    printf("\n[Test 1] BusChannel 消息不丢失\n"); fflush(stdout);
 
     const int N = 100;
     std::atomic<int> counter{0};
@@ -106,7 +106,7 @@ static void test_buschannel_no_loss() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&task]{ return task.should_stop(); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -187,7 +187,7 @@ private:
 };
 
 static void test_when_any_fires_once() {
-    printf("\n[Test 2] when_any_bus 只唤醒一次（原子 CAS 语义）\n");
+    printf("\n[Test 2] when_any_bus 只唤醒一次（原子 CAS 语义）\n"); fflush(stdout);
 
     const int ROUNDS = 20;
     std::atomic<int>  resume_count{0};
@@ -203,7 +203,7 @@ static void test_when_any_fires_once() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&task]{ return task.should_stop(); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -292,7 +292,7 @@ private:
 };
 
 static void test_graceful_stop() {
-    printf("\n[Test 3] CoroutineTask 优雅停止（rt 周期醒查 stop，无需外发消息）\n");
+    printf("\n[Test 3] CoroutineTask 优雅停止（rt 周期醒查 stop，无需外发消息）\n"); fflush(stdout);
 
     std::atomic<int>  loop_count{0};
     std::atomic<bool> exited_cleanly{false};
@@ -308,7 +308,7 @@ static void test_graceful_stop() {
         g_node_exec = &ex;
         CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-        while (!task.should_stop()) ex.run();
+        node_pump(ex, [&exited_cleanly]{ return exited_cleanly.load(std::memory_order_acquire); });
         ex.shutdown();
         g_node_exec = nullptr;
         execute_returned.store(true, std::memory_order_release);
@@ -383,7 +383,7 @@ private:
 };
 
 static void test_recv_timeout() {
-    printf("\n[Test 4] recv_for 超时\n");
+    printf("\n[Test 4] recv_for 超时\n"); fflush(stdout);
 
     std::atomic<bool> timed_out{false};
     std::atomic<bool> done{false};
@@ -397,7 +397,7 @@ static void test_recv_timeout() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&done]{ return done.load(std::memory_order_acquire); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -453,7 +453,7 @@ private:
 };
 
 static void test_delay() {
-    printf("\n[Test 5] delay/sleep_ms 定时挂起\n");
+    printf("\n[Test 5] delay/sleep_ms 定时挂起\n"); fflush(stdout);
 
     std::atomic<long> elapsed_ms{0};
     std::atomic<bool> done{false};
@@ -467,7 +467,7 @@ static void test_delay() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&done]{ return done.load(std::memory_order_acquire); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -530,7 +530,7 @@ private:
 };
 
 static void test_request() {
-    printf("\n[Test 6] request 请求/应答 awaitable\n");
+    printf("\n[Test 6] request 请求/应答 awaitable\n"); fflush(stdout);
 
     std::atomic<bool> ok{false};
     std::atomic<int>  value{0};
@@ -547,7 +547,7 @@ static void test_request() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&done]{ return done.load(std::memory_order_acquire); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -610,7 +610,7 @@ private:
 };
 
 static void test_stress_concurrency() {
-    printf("\n[Test 7] 并发压力（消息/超时/取消 竞争，ASAN/TSAN 关注）\n");
+    printf("\n[Test 7] 并发压力（消息/超时/取消 竞争，ASAN/TSAN 关注）\n"); fflush(stdout);
 
     const int CYCLES = 8;
     long total_iters = 0;
@@ -630,7 +630,7 @@ static void test_stress_concurrency() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            while (!task.should_stop()) ex.run();
+            node_pump(ex, [&done]{ return done.load(std::memory_order_acquire); });
             ex.shutdown();
             g_node_exec = nullptr;
         });
