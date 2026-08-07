@@ -143,6 +143,12 @@ struct BehaviorContext {
     double raw_obs_vx[BEH_MAX_OBS]{}, raw_obs_vy[BEH_MAX_OBS]{};
     int raw_obs_count{0};
 
+    /* 施工区权威几何（scene/frame）：掉头触发点缩短的第三路事实源。
+     * 感知/ tracker 都丢墙时，仍能按施工前缘提前触发，避免开进施工区再掉头。 */
+    static constexpr int kMaxCz = 8;
+    double cz_x[kMaxCz]{}, cz_y[kMaxCz]{}, cz_len[kMaxCz]{}, cz_wid[kMaxCz]{};
+    int cz_count{0};
+
     /* 道路几何（从 road/geometry JSON 解析） */
     int    lane_count{2};
     double lane_width{3.5};
@@ -559,6 +565,35 @@ static void on_ref_path(const Message* msg, void* user_data) {
                 /* 封顶检测已废弃（2026-08-03）：低速起步误判 → 启动即掉头。
                  * 路端判定改用 flowsim 权威 road_end_x 字段（见触发处）。 */
             }
+        }
+    }
+    cJSON_Delete(root);
+}
+
+/* scene/frame：缓存施工区权威几何（掉头触发点缩短，不依赖感知）。 */
+static void on_scene_frame(const Message* msg, void* user_data) {
+    (void)user_data;
+    if (!msg || !msg->data || msg->data_size == 0) return;
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+    g.cz_count = 0;
+    cJSON* czs = cJSON_GetObjectItemCaseSensitive(root, "construction_zones");
+    if (cJSON_IsArray(czs)) {
+        const int n = cJSON_GetArraySize(czs);
+        for (int i = 0; i < n && g.cz_count < g.kMaxCz; ++i) {
+            cJSON* z = cJSON_GetArrayItem(czs, i);
+            if (!z) continue;
+            cJSON* jx = cJSON_GetObjectItemCaseSensitive(z, "x");
+            cJSON* jy = cJSON_GetObjectItemCaseSensitive(z, "y");
+            cJSON* jl = cJSON_GetObjectItemCaseSensitive(z, "length");
+            cJSON* jw = cJSON_GetObjectItemCaseSensitive(z, "width");
+            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jl) || !cJSON_IsNumber(jw)) continue;
+            if (jl->valuedouble <= 0.0 || jw->valuedouble <= 0.0) continue;
+            g.cz_x[g.cz_count]   = jx->valuedouble;
+            g.cz_y[g.cz_count]   = cJSON_IsNumber(jy) ? jy->valuedouble : 0.0;
+            g.cz_len[g.cz_count] = jl->valuedouble;
+            g.cz_wid[g.cz_count] = jw->valuedouble;
+            g.cz_count++;
         }
     }
     cJSON_Delete(root);
@@ -997,12 +1032,13 @@ protected:
                      * 提前触发掉头（实测启动即 U_TURN）。 */
                     if (at_road_end &&
                         g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 3.0) {
-                        /* 合并 raw + tracked 静止障碍（2026-08-07 脆弱点修复）：
+                        /* 合并 raw + tracked 静止障碍 + 施工区权威前缘
+                         * （2026-08-07 脆弱点修复 / 可通行域收口）：
                          * obs_* 可能被 tracked 覆盖且 tracker 丢点（施工区因轨迹容量
                          * 或覆盖丢失从 tracked 消失），此时若只看 obs_* 则施工区不再
-                         * 缩短触发点 → 撞施工。raw 缓存每帧无条件刷新、施工区恒在，
-                         * 故两路都扫，取最近的前方静止障碍。重复（同一障碍两路都有）
-                         * 无副作用——min 单调。 */
+                         * 缩短触发点 → 撞施工。raw 缓存每帧无条件刷新；scene/frame
+                         * construction_zones 是 flowsim 权威几何，感知全丢时仍生效。
+                         * 三路都扫，取最近前方硬边界。重复无副作用——min 单调。 */
                         for (int i = 0; i < g.obs_count; ++i) {
                             if (std::fabs(g.obs_vx[i]) < 0.5 &&
                                 std::fabs(g.obs_vy[i]) < 0.5 &&
@@ -1016,6 +1052,14 @@ protected:
                                 g.raw_obs_x[i] > g.ego_x && g.raw_obs_x[i] < uturn_ref_x) {
                                 uturn_ref_x = g.raw_obs_x[i];
                             }
+                        }
+                        for (int i = 0; i < g.cz_count; ++i) {
+                            const double front = g.cz_x[i] - 0.5 * g.cz_len[i];
+                            if (front <= g.ego_x || front >= uturn_ref_x) continue;
+                            /* 横向覆盖 ego 车道才算挡路（半宽施工可从外侧绕） */
+                            const double half_w = 0.5 * g.cz_wid[i] + 1.0;
+                            if (std::fabs(g.ego_y - g.cz_y[i]) > half_w) continue;
+                            uturn_ref_x = front;
                         }
                     }
                     /* 掉头自然减速目标（Fix B）：在触发区前沿（距离 uturn_ref_x
@@ -1668,6 +1712,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     transport_subscribe(transport, TOPIC_ROAD_GEOMETRY,               on_road_geometry,      nullptr);
     transport_subscribe(transport, TOPIC_ROAD_TRAFFIC_LIGHTS,         on_traffic_lights,     nullptr);
     transport_subscribe(transport, TOPIC_ROAD_REF_PATH,               on_ref_path,           nullptr);
+    transport_subscribe(transport, TOPIC_SCENE_FRAME,                 on_scene_frame,        nullptr);
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION,       0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_PERCEPTION_TRACKED_OBJECTS, 0u, CAP_SUBSCRIBER,  0);

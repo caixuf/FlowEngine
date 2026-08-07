@@ -49,6 +49,17 @@ LC_TRIGGER_TIME  = 3.0     # 变道触发时间 s
 ROAD_GUARD_THRESHOLD = 3.0  # m
 
 
+def _rect_corners(x, y, h, half_len=2.3, half_wid=1.0):
+    """整车矩形 4 角点世界坐标（与 C++ generate_uturn_trajectory 一致）。"""
+    sh, ch = math.sin(h), math.cos(h)
+    return [
+        (x + half_len * ch - half_wid * sh, y + half_len * sh + half_wid * ch),
+        (x + half_len * ch + half_wid * sh, y + half_len * sh - half_wid * ch),
+        (x - half_len * ch - half_wid * sh, y - half_len * sh + half_wid * ch),
+        (x - half_len * ch + half_wid * sh, y - half_len * sh - half_wid * ch),
+    ]
+
+
 def _rect_max_abs_y(y, h, half_len=2.3, half_wid=1.0):
     """整车矩形 4 角点 |y| 最大值（2026-08-07 Fix A 占据空间）。
 
@@ -56,12 +67,23 @@ def _rect_max_abs_y(y, h, half_len=2.3, half_wid=1.0):
     4 角点的 |y| 都落在路沿内，任意角越界即收（人手式"不碰路边"），
     替代旧实现只看单个"外侧角点"。
     """
-    sh, ch = math.sin(h), math.cos(h)
-    c = [y + half_len * sh + half_wid * ch,
-         y + half_len * sh - half_wid * ch,
-         y - half_len * sh + half_wid * ch,
-         y - half_len * sh - half_wid * ch]
-    return max(abs(v) for v in c)
+    return max(abs(cy) for _, cy in _rect_corners(0.0, y, h, half_len, half_wid))
+
+
+def _rect_hits_construction(x, y, h, cz_x, cz_y, cz_len, cz_wid, margin=0.5):
+    """车身 4 角点是否侵入施工区 AABB（可通行域硬约束）。
+
+    施工段世界坐标占 [cz_x±len/2] × [cz_y±wid/2]；margin 为车身外扩安全余量。
+    掉头旧实现只认路沿 |y|，不认施工墙 → 满舵弧可扫进施工区（可通行域故障）。
+    """
+    if cz_len <= 0.0 or cz_wid <= 0.0:
+        return False
+    half_l = 0.5 * cz_len + margin
+    half_w = 0.5 * cz_wid + margin
+    for cx, cy in _rect_corners(x, y, h):
+        if abs(cx - cz_x) <= half_l and abs(cy - cz_y) <= half_w:
+            return True
+    return False
 
 
 
@@ -961,6 +983,16 @@ class UturnParams:
         self.reverse_timeout_s = 3.0      # 倒车超时
         self.reverse_h_guard = 0.30       # 倒车 heading 护栏（离目标 0.3 rad 内即收，
                                           #   防止倒车把 heading 转过目标）
+        # ── 施工区可通行域（2026-08-07）：None/≤0 表示无施工约束 ──
+        # 与 scenario construction_zones 一致：中心 (cz_x, cz_y)，长 cz_len，宽 cz_wid。
+        # 掉头轨迹任意角点侵入该 AABB（+margin）即判不可通行、收弧/失败。
+        self.cz_x = None
+        self.cz_y = 0.0
+        self.cz_len = 0.0
+        self.cz_wid = 0.0
+        self.cz_margin = 0.5
+        self.min_uturn_space = 10.0       # Phase 0 倒车腾挪门槛（与 C++ 一致）
+        self.wall_clearance = 2.0        # 前缘安全裕度（forward_space 扣减）
 
 
 class UturnResult:
@@ -980,6 +1012,8 @@ class UturnResult:
         self.min_dist_to_center = 999.0  # 过程中离道路中心最近距离（评估是否压线）
         self.corner_max = 0.0            # 全程车身角点 |y| 最大值（multi 模式，出路沿门禁）
         self.strokes_used = 0            # 实际使用的把数（multi 模式）
+        self.hit_construction = False    # 是否侵入施工区（可通行域门禁）
+        self.phase0_reversed = 0.0       # Phase 0 倒车距离
 
     def print_phases(self, params):
         if params.mode == 'multi':
@@ -1092,12 +1126,10 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
         # ── 多把方向掉头（N-point，角点约束退出）──
         # 与 C++ generate_uturn_trajectory stroke 循环完全一致：
         #   * 前进弧 steer=+0.6（掉头规范"向左打死"，去/返程同号），1.2s 渐进 ramp
-        #   * 退出 = 车身角点达 corner_limit（方向相关的外侧角点）| 对准 | 超时
+        #   * 退出 = 车身角点达 corner_limit | 侵入施工区 | 对准 | 超时
         #   * 倒车 steer=-0.6（反打，heading 继续向目标转），回撤到 |y|≤corridor
         #   * 末把对准（heading±0.1 且 y 在目标车道半幅）即收
-        # 车身角点公式（len=4.6, wid=2.0，与 C++/flowsim 一致）：
-        #   去程北角点: y + 2.3*sin(h) + 1.0*|cos(h)|
-        #   返程南角点: y + 2.3*sin(h) - 1.0*|cos(h)|
+        # 可通行域 = 路沿 |y|≤corner_limit ∩ 施工区 AABB 外（2026-08-07）
         def _norm(h):
             while h >  math.pi: h -= 2.0 * math.pi
             while h < -math.pi: h += 2.0 * math.pi
@@ -1109,6 +1141,18 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
         if abs(_norm(start_heading)) > math.pi * 0.5:
             ego.heading = -math.pi
 
+        has_cz = (params.cz_x is not None and params.cz_len > 0.0 and params.cz_wid > 0.0)
+
+        def _in_cz(x=None, y=None, h=None):
+            if not has_cz:
+                return False
+            return _rect_hits_construction(
+                ego.x if x is None else x,
+                ego.y if y is None else y,
+                ego.heading if h is None else h,
+                params.cz_x, params.cz_y, params.cz_len, params.cz_wid,
+                params.cz_margin)
+
         def _record(steer, v):
             result.t.append(len(result.t) * DT)
             result.x.append(ego.x); result.y.append(ego.y)
@@ -1116,6 +1160,27 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
             result.steer.append(steer)
             corner = _rect_max_abs_y(ego.y, ego.heading)   # Fix A：整车 4 角点扫掠
             result.corner_max = max(result.corner_max, corner)
+            if _in_cz():
+                result.hit_construction = True
+
+        # ── Phase 0：前向空间不足时直线倒车腾挪（施工墙/路端）──
+        if has_cz and abs(_norm(start_heading)) <= math.pi * 0.5:
+            front_x = params.cz_x - 0.5 * params.cz_len
+            fwd = front_x - ego.x - params.wall_clearance
+            if 0.0 < fwd < params.min_uturn_space:
+                need = params.min_uturn_space - fwd + 1.0
+                reversed_m = 0.0
+                t0 = 0.0
+                while reversed_m < need and t0 < 5.0:
+                    ego.x += params.reverse_speed * math.cos(ego.heading) * DT
+                    ego.y += params.reverse_speed * math.sin(ego.heading) * DT
+                    ego.v = params.reverse_speed
+                    reversed_m += abs(params.reverse_speed) * DT
+                    t0 += DT
+                    _record(0.0, ego.v)
+                result.phase0_reversed = reversed_m
+                ego.v = 0.0
+                _record(0.0, 0.0)
 
         done = False
         for stroke in range(params.max_strokes):
@@ -1134,11 +1199,12 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
                 _record(steer, ego.v)
                 corner = _rect_max_abs_y(ego.y, ego.heading)   # Fix A：整车 4 角点扫掠
                 corner_ok = corner <= params.corner_limit      # 双向统一按 |y| 判越界
+                cz_ok = not _in_cz()                          # 施工区可通行域
                 aligned = (abs(_norm(ego.heading) - target_h) < params.finish_heading_tol
                            and abs(ego.y - target_y) < params.finish_lane_tol)
                 t_stroke += DT
-                if (not corner_ok) or aligned or (t_stroke >= params.stroke_timeout_s):
-                    done = aligned
+                if (not corner_ok) or (not cz_ok) or aligned or (t_stroke >= params.stroke_timeout_s):
+                    done = aligned and cz_ok
                     break
             if done: break
             # ── 刹停点（换挡 D→R）──
@@ -1160,7 +1226,7 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
                            else (ego.y >= -params.reverse_corridor)
                 h_guard = ((ego.heading >= target_h - params.reverse_h_guard)
                            if stroke_dir > 0 else (ego.heading <= -math.pi + params.reverse_h_guard))
-                if corridor or h_guard or (t_rev >= params.reverse_timeout_s):
+                if corridor or h_guard or (t_rev >= params.reverse_timeout_s) or _in_cz():
                     break
             # ── 刹停点（换挡 R→D）──
             ego.v = 0.0
@@ -1181,12 +1247,14 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
     # 判据：heading 偏差 < 1.0 rad + 车在路面上（未飞出）
     # 注意：lane_error 是到对向车道中心 y=1.75 的距离，但车只要在路面上就算成功
     if params.mode == 'multi':
-        # 多把方向：严格判据（角点全程 ≤ corner_limit + 对准 + 车道）
+        # 多把方向：严格判据（角点全程 ≤ corner_limit + 对准 + 车道 + 不进施工）
         result.success = (result.corner_max <= params.corner_limit + 0.2
                           and result.heading_error < 0.15
-                          and result.lane_error < params.finish_lane_tol)
+                          and result.lane_error < params.finish_lane_tol
+                          and not result.hit_construction)
     else:
-        result.success = (result.heading_error < 1.0 and abs(ego.y) < 7.0)
+        result.success = (result.heading_error < 1.0 and abs(ego.y) < 7.0
+                          and not result.hit_construction)
 
     return result
 
@@ -1198,6 +1266,12 @@ def print_uturn_result(result, params, label="", start_lane_y=-1.75, start_headi
     print(f"  {label}")
     print(f"{'='*60}")
     result.print_phases(params)
+    if params.mode == 'multi' and params.cz_x is not None and params.cz_len > 0:
+        front = params.cz_x - 0.5 * params.cz_len
+        print(f"  施工区: center=({params.cz_x:.1f},{params.cz_y:.1f}) "
+              f"L={params.cz_len:.1f} W={params.cz_wid:.1f} front_x={front:.1f}")
+        print(f"  施工侵入: {'YES' if result.hit_construction else 'no'}  "
+              f"Phase0 reverse={result.phase0_reversed:.2f}m")
     print(f"  最终位置:         x={result.final_x:.1f}m, y={result.final_y:.2f}m")
     print(f"  最终 heading:     {result.final_heading:.2f} rad ({math.degrees(result.final_heading):.1f}°)")
     print(f"  heading 偏差:     {result.heading_error:.2f} rad (目标 {target_h:.2f})")
@@ -2472,6 +2546,23 @@ def main():
         r2 = run_uturn_simulation(p, start_lane_y=+1.75, start_heading=math.pi)
         print_uturn_result(r2, p, "多把方向掉头·返程（y=+1.75, h=π → -1.75, h=0）",
                            start_lane_y=+1.75, start_heading=math.pi)
+        # 施工墙可通行域：起点 x=0，施工前缘 12m（与 straight_road 近墙掉头同构）
+        pw = UturnParams(mode='multi')
+        pw.cz_x, pw.cz_y, pw.cz_len, pw.cz_wid = 27.0, 0.0, 30.0, 14.0  # front=12
+        rw = run_uturn_simulation(pw, start_lane_y=-1.75, start_heading=0.0)
+        print_uturn_result(rw, pw, "多把方向掉头·施工墙 front=12m（可通行域）",
+                           start_lane_y=-1.75, start_heading=0.0)
+        if rw.hit_construction or not rw.success:
+            print("  FAIL: uturn entered construction or failed near wall")
+            sys.exit(1)
+        # 回归：无施工约束时不得误报 hit_construction
+        if r.hit_construction or r2.hit_construction:
+            print("  FAIL: open-road uturn falsely hit construction")
+            sys.exit(1)
+        if not (r.success and r2.success):
+            print("  FAIL: open-road multi uturn did not pass")
+            sys.exit(1)
+        print("\n  uturn construction-wall gate: PASS")
         if args.csv:
             with open(args.csv, 'w', newline='') as f:
                 w = csv.writer(f)

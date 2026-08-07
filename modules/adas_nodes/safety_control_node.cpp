@@ -198,6 +198,7 @@ void on_perception_obstacles(const Message* msg, void*) {
             switch (o->type) {
                 case OBJ_TYPE_PEDESTRIAN: strncpy(state->obs_type[i], "pedestrian", sizeof(state->obs_type[i])-1); break;
                 case OBJ_TYPE_CYCLIST:    strncpy(state->obs_type[i], "cyclist", sizeof(state->obs_type[i])-1); break;
+                case OBJ_TYPE_CONSTRUCTION: strncpy(state->obs_type[i], "construction", sizeof(state->obs_type[i])-1); break;
                 default:                  strncpy(state->obs_type[i], "car", sizeof(state->obs_type[i])-1); break;
             }
             if (o->type == OBJ_TYPE_PEDESTRIAN && state->ped_index < 0)

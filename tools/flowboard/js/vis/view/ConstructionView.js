@@ -94,9 +94,12 @@ export function createConstructionView(scene) {
   }
 
   // 渲染单个施工区：constructionStartX=前缘 THREE x，bufferLen=纵向长度，halfW=半路宽。
+  // 围栏必须落在施工前缘（与 flowsim 注入的 construction 障碍物 / planning 可通行域
+  // 一致）。旧实现 barrierX = front - 5m，视觉墙比感知墙靠前 5m → 掉头弧在感知
+  // 合法区内仍会"穿围栏"，被误判为进了施工区（可通行域观感故障）。
   function _renderZone(constructionStartX, bufferLen, halfW) {
-    const barrierX = constructionStartX - BARRIER_BUFFER;  // 围栏位置
-    const signX = barrierX - 5.0;                           // 指示牌位置（围栏前5m）
+    const barrierX = constructionStartX;                    // 围栏 = 施工前缘（权威）
+    const signX = barrierX - BARRIER_BUFFER - 5.0;           // 指示牌仍在围栏前
 
     // ── 1. 围栏（横跨整个路面，BoxGeometry 分段） ──
     const barrierTex = makeStripeTexture('#ff6600', '#f0f0f0', { width: 64, height: 256, stripeCount: 8 });

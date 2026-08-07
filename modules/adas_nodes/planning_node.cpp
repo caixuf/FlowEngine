@@ -205,6 +205,17 @@ struct PlanningContext {
     int    uturn_cache_n{0};
     double uturn_cache_ego_x{0.0}, uturn_cache_ego_y{0.0};  /* 生成时的 ego 位置 */
 
+    /* 施工区（scene/frame 权威几何，可通行域硬约束）。
+     * 旧实现掉头只认路沿 |y| + 感知前向静止障碍：感知丢墙 / 横向 |dy|<3 漏检时
+     * forward_space 虚高 → 满舵弧扫进施工区。这里直接消费 flowsim 透传的
+     * construction_zones，不依赖感知链路。 */
+    static constexpr int kMaxCz = 8;
+    double cz_x[kMaxCz]{};
+    double cz_y[kMaxCz]{};
+    double cz_len[kMaxCz]{};
+    double cz_wid[kMaxCz]{};
+    int    cz_count{0};
+
     /* TaskBase 包装器（由 EXPORT_COROUTINE_TASK 宏创建） */
     struct planning_Wrapper* task_wrapper{nullptr};
 };
@@ -495,6 +506,54 @@ static double lane_center_y(int lane_idx, int n_lanes, double lane_w) {
  *   x += speed * cos(heading) * dt
  *   y += speed * sin(heading) * dt
  * ═══════════════════════════════════════════════════════════════ */
+/* 车身矩形 4 角点是否侵入任一施工区 AABB（可通行域硬约束，margin 外扩）。
+ * 与 tools/control_sim.py _rect_hits_construction 一致。 */
+static bool uturn_body_hits_construction(double x, double y, double h,
+                                         double half_body_len, double half_body_wid,
+                                         double margin) {
+    if (g.cz_count <= 0) return false;
+    const double sh = sin(h), ch = cos(h);
+    const double cxs[4] = {
+        x + half_body_len * ch - half_body_wid * sh,
+        x + half_body_len * ch + half_body_wid * sh,
+        x - half_body_len * ch - half_body_wid * sh,
+        x - half_body_len * ch + half_body_wid * sh,
+    };
+    const double cys[4] = {
+        y + half_body_len * sh + half_body_wid * ch,
+        y + half_body_len * sh - half_body_wid * ch,
+        y - half_body_len * sh + half_body_wid * ch,
+        y - half_body_len * sh - half_body_wid * ch,
+    };
+    for (int z = 0; z < g.cz_count; ++z) {
+        const double half_l = 0.5 * g.cz_len[z] + margin;
+        const double half_w = 0.5 * g.cz_wid[z] + margin;
+        for (int k = 0; k < 4; ++k) {
+            if (fabs(cxs[k] - g.cz_x[z]) <= half_l &&
+                fabs(cys[k] - g.cz_y[z]) <= half_w) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* 前方最近施工前缘相对 ego 的可用前向空间（顺行 heading≈0）；无则 1e9。 */
+static double construction_forward_space(double ego_x, double ego_y, double clearance) {
+    double best = 1e9;
+    for (int z = 0; z < g.cz_count; ++z) {
+        const double front = g.cz_x[z] - 0.5 * g.cz_len[z];
+        if (front <= ego_x) continue;
+        /* 横向：施工带覆盖 ego 所在 y（半宽 + 车半宽 1m）才算挡路 */
+        const double half_w = 0.5 * g.cz_wid[z] + 1.0;
+        if (fabs(ego_y - g.cz_y[z]) > half_w) continue;
+        double d = front - ego_x - clearance;
+        if (d < 0.0) d = 0.0;
+        if (d < best) best = d;
+    }
+    return best;
+}
+
 static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
                                      double ego_x, double ego_y, double ego_heading,
                                      double ego_speed, double wheelbase,
@@ -515,6 +574,7 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      * 观感太骚，实测 fwd=11.5m 只差 1.5m）。掉头首弧 2×R≈7.9m（R=wb/tan(0.6)=3.95），
      * 10m 足够开始多把方向；真正无空间（返程路端 x≈0）仍需倒车，那是真实需求。 */
     const double min_uturn_space = 10.0;  /* 最小掉头前向空间 (m)：2×转弯半径 + 余量 */
+    const double cz_margin = 0.5;        /* 施工区 AABB 外扩安全余量 (m) */
 
     /* 安全上限（防止无限循环） */
     const double phase0_max_dur = 5.0;   /* 腾挪倒车最多 5s */
@@ -721,7 +781,9 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             /* ── 整车矩形 4 角点扫掠占据（2026-08-07 Fix A）──
              * 旧实现只看单个"外侧角点"（y + a·sin(h) + b·|cos(h)|），车尾
              * 另一侧角或倒车段仍可能越界。改为校验车身矩形全部 4 角点的 |y|
-             * 都落在路沿内，任意角越界即收（人手式"不碰路边"）。 */
+             * 都落在路沿内，任意角越界即收（人手式"不碰路边"）。
+             * 2026-08-07 可通行域：施工区 AABB 同样是硬边界——只认路沿时满舵
+             * 弧可扫进施工墙（感知丢墙时更甚）。 */
             auto rect_max_abs_y = [&](double hh) {
                 double c[4] = {
                     y + half_body_len * sin(hh) + half_body_wid * cos(hh),
@@ -735,11 +797,13 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             };
             double corner_y = rect_max_abs_y(h);
             bool corner_ok = (corner_y <= uturn_corner_limit);
+            bool cz_ok = !uturn_body_hits_construction(
+                x, y, h, half_body_len, half_body_wid, cz_margin);
             /* 对准目标车道即收（末把自然对齐，残差方向收敛由全锁弧完成）*/
             bool aligned = (fabs(norm_h(h - uturn_target_h)) < 0.10)
                         && (fabs(y - target_lane_center_y) < 1.75);
-            if (!corner_ok || aligned || stroke_t >= uturn_stroke_timeout_s) {
-                uturn_done = aligned;
+            if (!corner_ok || !cz_ok || aligned || stroke_t >= uturn_stroke_timeout_s) {
+                uturn_done = aligned && cz_ok;
                 break;
             }
         }
@@ -789,7 +853,9 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             double hn = norm_h(h);
             bool h_guard = (stroke_dir > 0) ? (hn >= uturn_target_h - uturn_reverse_h_guard)
                                             : (hn <= -M_PI + uturn_reverse_h_guard);
-            if (corridor || h_guard || rev_t >= uturn_reverse_timeout_s) break;
+            bool cz_hit = uturn_body_hits_construction(
+                x, y, h, half_body_len, half_body_wid, cz_margin);
+            if (corridor || h_guard || cz_hit || rev_t >= uturn_reverse_timeout_s) break;
         }
 
         /* 倒车→前进交界: 刹停点 v=0（换挡 R→D）*/
@@ -813,13 +879,28 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      * x += v·cos(h)·dt 已自动朝 -x 推进。旧实现 heading 反向时取
      * v=-cfg_target_speed 是双重取负——整段返程被标成"倒车 -20"
      * → control gear 推 REVERSE、末点 target=-20、"truncated in
-     * reverse" 警告，掉头后狂倒车冲出路面（2026-08-03 demo6 y=-11）。 */
+     * reverse" 警告，掉头后狂倒车冲出路面（2026-08-03 demo6 y=-11）。
+     * 可通行域：未完成掉头且车头仍朝施工墙时，禁止用巡航点把轨迹填进
+     * 施工区（否则 control 会忠实地开进墙里）。 */
     {
         steer = 0.0;
         v = g.cfg_target_speed;
         while (n < max_points) {
-            x += v * cos(h) * dt;
-            y += v * sin(h) * dt;
+            double nx = x + v * cos(h) * dt;
+            double ny = y + v * sin(h) * dt;
+            if (uturn_body_hits_construction(nx, ny, h, half_body_len, half_body_wid, cz_margin)) {
+                /* 停在施工前缘：末点 v=0，避免冲墙 */
+                points[n].t_rel_us = t_us;
+                points[n].x = (float)x;  points[n].y = (float)y;
+                points[n].heading = (float)h;
+                points[n].v = 0.0f;
+                points[n].kappa = 0.0f;
+                points[n].a = -5.0f;  points[n].jerk = 0.0f;  points[n].s = 0.0f;
+                points[n].l = (float)(y - road_center_y(x, g.curve_start_x, g.curve_length_m, g.curve_offset_m));
+                n++;
+                break;
+            }
+            x = nx; y = ny;
 
             points[n].t_rel_us = t_us;
             points[n].x = (float)x;  points[n].y = (float)y;
@@ -1214,8 +1295,9 @@ static void on_navigation_path(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
-/* ── scene/frame 订阅回调（NOA Phase 6 merge 闭环） ─────────── */
-/* 从 flowsim_node 发布的 scene/frame 提取主线来车，缓存前后 gap 供 merge 决策。
+/* ── scene/frame 订阅回调 ─────────────────────────────────── */
+/* 1) 施工区权威几何（每帧，掉头可通行域）
+ * 2) NOA Phase 6 merge 闭环：主线来车前后 gap（仅 ROUTE_MERGE）
  *
  * entities 是世界坐标(x/y/vx/vy)，无 segment_id 字段。主线筛选启发式：
  *   - 类型为 car/suv/truck（排除 ego/pedestrian/tl/etc_gate/stop_line）
@@ -1228,16 +1310,46 @@ static void on_navigation_path(const Message* msg, void* user_data) {
  * 同时考虑相对速度：前车比 ego 慢则 gap 会缩小，用 TTC 加权 min_gap。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
+    if (!msg || !msg->data || msg->data_size == 0) return;
+
+    cJSON* root = cJSON_Parse((const char*)msg->data);
+    if (!root) return;
+
+    /* 施工区：始终解析（掉头可通行域不依赖 merge 状态 / 感知链路） */
+    g.cz_count = 0;
+    cJSON* czs = cJSON_GetObjectItemCaseSensitive(root, "construction_zones");
+    if (cJSON_IsArray(czs)) {
+        const int n = cJSON_GetArraySize(czs);
+        for (int i = 0; i < n && g.cz_count < g.kMaxCz; ++i) {
+            cJSON* z = cJSON_GetArrayItem(czs, i);
+            if (!z) continue;
+            cJSON* jx = cJSON_GetObjectItemCaseSensitive(z, "x");
+            cJSON* jy = cJSON_GetObjectItemCaseSensitive(z, "y");
+            cJSON* jl = cJSON_GetObjectItemCaseSensitive(z, "length");
+            cJSON* jw = cJSON_GetObjectItemCaseSensitive(z, "width");
+            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jl) || !cJSON_IsNumber(jw)) continue;
+            if (jl->valuedouble <= 0.0 || jw->valuedouble <= 0.0) continue;
+            g.cz_x[g.cz_count]   = jx->valuedouble;
+            g.cz_y[g.cz_count]   = cJSON_IsNumber(jy) ? jy->valuedouble : 0.0;
+            g.cz_len[g.cz_count] = jl->valuedouble;
+            g.cz_wid[g.cz_count] = jw->valuedouble;
+            g.cz_count++;
+        }
+    }
+
     if (g.route_type != ROUTE_MERGE) {
-        /* 非 merge 状态无需每帧解析 entities（省 CPU） */
+        /* 非 merge：施工区已更新，跳过 entities 解析（省 CPU） */
+        g.has_scene_frame = 1;
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON* entities = cJSON_GetObjectItem(root, "entities");
+    if (!entities || !cJSON_IsArray(entities)) {
+        cJSON_Delete(root);
         g.has_scene_frame = 1;
         return;
     }
-    cJSON* root = cJSON_Parse((const char*)msg->data);
-    if (!root) return;
-    cJSON* entities = cJSON_GetObjectItem(root, "entities");
-    if (!entities || !cJSON_IsArray(entities)) { cJSON_Delete(root); return; }
 
     double gap_front = 1e9, gap_rear = 1e9;
     double ego_x = g.ego_x, ego_y = g.ego_y;
@@ -1827,7 +1939,7 @@ protected:
                     use_stitch = false;
                     goto publish_trajectory;
                 }
-                /* 计算前向可用空间：到路端/障碍物的距离，用于倒车腾挪决策 */
+                /* 计算前向可用空间：到路端/施工墙/障碍物的距离，用于倒车腾挪决策 */
                 double forward_space_m = 1e9;  /* 默认无限（无路端信息） */
                 if (has_fresh_map_ref() && g.map_ref_count >= 2) {
                     /* 参考路径最后一点是路端（flowsim 前向采样在路端停止） */
@@ -1835,10 +1947,16 @@ protected:
                     forward_space_m = road_end_x - g.ego_x;
                     if (forward_space_m < 0.0) forward_space_m = 0.0;
                 }
+                /* 施工区权威前缘（scene/frame）：不依赖感知。感知丢墙或
+                 * |dy|<3 横向漏检时旧链路会虚高 fwd → 满舵扫进施工。 */
+                {
+                    double cz_fwd = construction_forward_space(g.ego_x, g.ego_y, 2.0);
+                    if (cz_fwd < forward_space_m) forward_space_m = cz_fwd;
+                }
                 /* 前方静止障碍（施工区/停放车）同样占据掉头空间：只看路端会在
                  * 施工区前 1.3m 处误判 fwd=30m → 跳过 Phase 0 倒车腾挪直接
                  * 前进满舵 → 撞墙被 safety 拦停（2026-08-03 实测）。取
-                 * min(路端, 本车道前方最近静止障碍距离-安全裕度)。 */
+                 * min(路端, 施工前缘, 本车道前方最近静止障碍距离-安全裕度)。 */
                 for (int i = 0; i < g.kMaxObs; i++) {
                     /* 空槽 (0,0)：on_perception_obstacles 清零未用槽位 */
                     if (g.obs_x[i] == 0.0 && g.obs_y[i] == 0.0) continue;
@@ -2538,6 +2656,7 @@ static int planning_init(MessageBus* bus, Transport* transport,
     g.target_lane_offset = 0.0;
 
     g.ego_x = g.ego_y = g.ego_v = g.ego_heading = 0.0;
+    g.cz_count = 0;
     for (int i = 0; i < g.kMaxObs; i++) { 
         g.obs_x[i] = g.obs_y[i] = g.obs_vx[i] = g.obs_vy[i] = 0.0;
         g.obs_lane_id[i] = -1;
