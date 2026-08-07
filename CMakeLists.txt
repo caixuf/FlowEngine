@@ -157,7 +157,10 @@ include(FetchContent)
 
 # 查找cjson库 — 优先使用系统版本，否则从源码构建
 # PKG_CONFIG_FOUND 为假时(如 macOS 无 pkg-config)跳过探测,直接走 FetchContent。
-if(PKG_CONFIG_FOUND)
+# 交叉编译(mingw 目标 Windows, WIN32=TRUE)时宿主 pkg-config 返回 Linux 路径
+# (/usr/include, /usr/include/cjson)并注入 mingw 编译,令 <stdint.h> 解析到 glibc
+# 头 → bits/libc-header-start.h 缺失。故 Windows 目标一律跳过宿主探测,内置 cjson。
+if(PKG_CONFIG_FOUND AND NOT WIN32)
     pkg_check_modules(CJSON libcjson)
 endif()
 if(NOT CJSON_FOUND)
