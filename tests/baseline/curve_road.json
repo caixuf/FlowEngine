@@ -3,53 +3,55 @@
   "result": "PASS",
   "failures": [],
   "warnings": [
-    "large lane-center deviation during maneuver: 1.73 m",
-    "lateral wobble: y range=2.92 m > 2.0 m"
+    "message drops detected: 16 (rate 0.07%)"
   ],
   "summary": {
     "scenario": "curve_road",
-    "samples": 279,
-    "duration_s": 58.95019793510437,
-    "x_delta_m": 429.3943358461694,
-    "avg_speed_mps": 7.4831819729682,
-    "max_speed_mps": 10.295328958457237,
-    "max_lane_error_m": 1.734308480504236,
-    "max_lane_error_at_s": 12.583908796310425,
-    "max_lane_error_y": -3.515691519495764,
-    "max_lane_error_speed_mps": 8.28099586470693,
-    "min_road_margin_m": 1.3369783633075585,
-    "min_road_margin_at_s": 26.195481777191162,
+    "samples": 97,
+    "duration_s": 44.8999400138855,
+    "x_delta_m": 823.9033141257498,
+    "avg_speed_mps": 18.766228551823396,
+    "max_speed_mps": 20.401932248373,
+    "max_lane_error_m": 1.7487018253028928,
+    "max_lane_error_at_s": 1.510941982269287,
+    "max_lane_error_y": -1.7615025063046006,
+    "max_lane_error_speed_mps": 5.44021041470793,
+    "min_road_margin_m": 4.569216026714308,
+    "min_road_margin_at_s": 42.10617780685425,
     "steer_saturation_ratio": 0.0,
-    "yaw_rate_rms_radps": 0.08679209681829808,
-    "max_yaw_rate_radps": 0.24080806662492188,
-    "heading_flip_rate_hz": 0.6106849724174088,
-    "low_speed_ratio": 0.07885304659498207,
-    "stagnation_duration_s": 3.832146167755127,
-    "lane_change_count": 12,
+    "yaw_rate_rms_radps": 0.00979476438218371,
+    "max_yaw_rate_radps": 0.02309595078386658,
+    "heading_flip_rate_hz": 0.08908697870783308,
+    "low_speed_ratio": 0.041237113402061855,
+    "stagnation_duration_s": 1.510941982269287,
+    "lane_change_count": 2,
     "has_noa_route": false,
     "driver_modes_seen": [
-      "NA"
+      "ACC",
+      "CP",
+      "NA",
+      "NP"
     ],
     "reached_noa": false,
-    "route_lane_active": false,
-    "steer_rate_rms_per_s": 0.11354592485578627,
-    "max_steer_rate_per_s": 0.4347458654913695,
-    "steer_flip_rate_hz": 0.3392694291207827,
+    "route_lane_active": true,
+    "steer_rate_rms_per_s": 0.0057590340958901965,
+    "max_steer_rate_per_s": 0.01610850249850695,
+    "steer_flip_rate_hz": 0.0,
     "max_npc_speed_mps": 0.0,
     "max_npc_lateral_speed_mps": 0.0,
     "collision_topic_pub": 0,
     "topic_freq_hz": {
-      "vehicle/state": 19.65956855302558,
-      "sensor/lidar": 19.914839693352036,
-      "sensor/gps": 9.951626580296997,
-      "fusion/localization": 19.903985364594046,
-      "planning/trajectory": 19.5263744662305,
-      "control/raw_cmd": 22.923008622801646,
-      "control/cmd": 22.657411400037514
+      "vehicle/state": 59.353,
+      "sensor/lidar": 19.967,
+      "sensor/gps": 9.981,
+      "fusion/localization": 19.969,
+      "planning/trajectory": 14.822,
+      "control/raw_cmd": 26.586,
+      "control/cmd": 22.329
     },
     "inference_topic_active": true,
-    "inference_freq_hz": 19.868014478734384,
-    "shadow_delta_latest": null,
+    "inference_freq_hz": 19.889,
+    "shadow_speed_mae_settled": 1.288946454017148,
     "has_traffic_lights": false,
     "red_light_violation": false,
     "green_phase_max_stop_s": 0.0,
@@ -63,27 +65,27 @@
     "warning_lead_avg_s": 0.0,
     "warning_lead_min_s": 0.0,
     "critical_event_count": 0,
-    "min_ttc_s": 3.885257106538734,
-    "perceived_track_count": 2,
+    "min_ttc_s": null,
+    "perceived_track_count": 0,
     "liveness": {
       "speed": {
-        "unique": 239,
+        "unique": 91,
         "dead": false
       },
       "x": {
-        "unique": 239,
+        "unique": 91,
         "dead": false
       },
       "y": {
-        "unique": 239,
+        "unique": 91,
         "dead": false
       },
       "heading": {
-        "unique": 239,
+        "unique": 79,
         "dead": false
       },
       "steer_signed": {
-        "unique": 239,
+        "unique": 58,
         "dead": false
       },
       "lane_count": {
@@ -95,14 +97,14 @@
       "vehicle": 0,
       "vru": 0
     },
-    "behavior_state": "FOLLOW",
-    "behavior_obs_count": 2,
-    "best_gap_m": 39.51665920754084,
-    "lead_speed_mps": 8.69533261375044,
-    "desired_gap_m": 18.13459606723965,
-    "committed_lane": 2,
+    "behavior_state": "NA",
+    "behavior_obs_count": 0,
+    "best_gap_m": -1.0,
+    "lead_speed_mps": 0.0,
+    "desired_gap_m": 0.0,
+    "committed_lane": -1,
     "target_lane": -1,
-    "blocked": true,
-    "worthwhile": true
+    "blocked": false,
+    "worthwhile": false
   }
 }
