@@ -573,7 +573,7 @@ static void on_ref_path(const Message* msg, void* user_data) {
 /* scene/frame：缓存施工区权威几何（掉头触发点缩短，不依赖感知）。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || msg->data_size == 0) return;
+    if (!msg || msg->data_size == 0) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
     g.cz_count = 0;
