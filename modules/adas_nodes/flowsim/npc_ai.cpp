@@ -27,6 +27,36 @@
 
 namespace flowsim {
 
+/* ── 稳定道路切线航向 ──
+ * esmini 对 lane_id=0（type="none" 参考线）RM_SetLanePosition/world 可能返回
+ * h=0 或 h=π（无行驶方向），对向 NPC 路径又强制 +π → heading 每帧在 0/π 间翻转，
+ * motion_direction / temporal Δheading invariant 必炸（弯道 road_network 场景必现）。
+ * 用中心线两点差分的几何切线，再按 route_dir 取 ±s 方向，与 lane 驾驶方向解耦。 */
+static bool road_tangent_heading(FlowRoadNetwork& roads, int rid, double s,
+                                 double offset, int route_dir, double& out_h) {
+    WorldPos w0, w1;
+    const double ds = 0.5;
+    if (!roads.frenet_to_world(rid, 0, s, offset, w0)) return false;
+    double hx = 0.0, hy = 0.0;
+    if (roads.frenet_to_world(rid, 0, s + ds, offset, w1)) {
+        hx = w1.x - w0.x;
+        hy = w1.y - w0.y;
+    } else if (roads.frenet_to_world(rid, 0, std::max(0.0, s - ds), offset, w1)) {
+        /* 末端：用后向采样，仍表示 +s 切线 */
+        hx = w0.x - w1.x;
+        hy = w0.y - w1.y;
+    } else {
+        return false;
+    }
+    if (hx * hx + hy * hy < 1e-10) return false;
+    double h = std::atan2(hy, hx);
+    if (route_dir < 0) h += M_PI;
+    while (h >  M_PI) h -= 2.0 * M_PI;
+    while (h < -M_PI) h += 2.0 * M_PI;
+    out_h = h;
+    return true;
+}
+
 /* ── 判断两车是否同车道 ── */
 static bool same_lane(const Entity& a, const Entity& b, const NpcAiConfig& cfg) {
     // route 模式：同方向 + 横向偏移接近（沿车道行驶，offset 就是车道横向位置）
@@ -392,8 +422,17 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
                 npc.x = wp.x;
                 npc.y = wp.y;
                 double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
-                while (h >  M_PI) h -= 2.0 * M_PI;
-                while (h < -M_PI) h += 2.0 * M_PI;
+                /* 对向：lane/参考线 h 不稳，改用几何切线 */
+                if (npc.route_dir < 0) {
+                    int rid = 0, ridx = -1;
+                    double s_local = 0.0;
+                    route.locate(npc.route_s, rid, s_local, ridx);
+                    (void)road_tangent_heading(*roads, rid, s_local, npc.offset,
+                                               npc.route_dir, h);
+                } else {
+                    while (h >  M_PI) h -= 2.0 * M_PI;
+                    while (h < -M_PI) h += 2.0 * M_PI;
+                }
                 npc.heading = h;
                 /* vx/vy 已在上面清零，保持 0 即可（speed=0） */
             }
@@ -898,9 +937,15 @@ mobil_done: ;
         if (roads->frenet_to_world(rid, 0, s_local, npc.offset, wp)) {
             npc.x = wp.x;
             npc.y = wp.y;
+            /* 位置用 lane0+offset（横向正确）；航向不用 esmini lane0 的 h
+             * （type=none 参考线 h 在 0/π 间跳 → 对向 +π 后仍翻转），
+             * 改用中心线两点几何切线 × route_dir。 */
             double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
-            while (h >  M_PI) h -= 2.0 * M_PI;
-            while (h < -M_PI) h += 2.0 * M_PI;
+            if (!road_tangent_heading(*roads, rid, s_local, npc.offset,
+                                     npc.route_dir, h)) {
+                while (h >  M_PI) h -= 2.0 * M_PI;
+                while (h < -M_PI) h += 2.0 * M_PI;
+            }
             npc.heading = h;
             npc.vx = npc.speed * std::cos(h);
             npc.vy = npc.speed * std::sin(h);

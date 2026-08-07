@@ -600,9 +600,14 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                 }
             }
         } else {
-            /* 旧格式：全局 x/y 坐标 + 弯道中心线偏移 */
+            /* 旧格式：全局 x/y 坐标。
+             * road_network/esmini 已加载时 x/y 视为世界坐标（弯道场景把 NPC
+             * 投到路中心线附近，再 world_to_frenet snap）；未加载时回退
+             * pipeline 参数弯道：y = road_center_y(x) + 横向偏移（vy==0 约定）。 */
             e.x = a->x;
-            if (a->vy == 0.0) {
+            if (g.roads_loaded) {
+                e.y = a->y;
+            } else if (a->vy == 0.0) {
                 e.y = road_center_y(a->x, g.curve_start_x, g.curve_length_m, g.curve_offset_m) + a->y;
             } else {
                 e.y = a->y;
