@@ -646,8 +646,18 @@ static void test_stress_concurrency() {
             g_node_exec = nullptr;
         });
 
-        while (!started.load(std::memory_order_acquire))
+        auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!started.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= start_deadline) {
+                fprintf(stderr, "  [FAIL] cycle %d: 协程 3s 内未进入压力循环\n", c);
+                fflush(stderr);
+                task.set_stop();
+                done.store(true, std::memory_order_release);
+                if (runner.joinable()) runner.detach();
+                std::_Exit(EXIT_FAILURE);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
 
         /* 发布线程：高频灌两个 topic */
         std::thread publisher([&]{
@@ -671,10 +681,15 @@ static void test_stress_concurrency() {
                 fprintf(stderr, "  [FAIL] cycle %d: 协程 500ms 内未退出 (iters=%ld)\n",
                         c, iters.load());
                 all_done = false;
-                /* runner 仍在 node_pump(ex, done-only) 中等待 done；若这里继续走
-                 * join()，真实协程失败会被放大成外层 CTest Timeout，丢失当前诊断。 */
+                /* runner/publisher 仍可能卡在 join 前；这里直接 _Exit，避免把真实
+                 * 协程失败放大成外层 CTest Timeout，并保留当前 cycle 诊断。 */
                 fflush(stderr);
-                std::abort();
+                pub_stop.store(true, std::memory_order_release);
+                task.set_stop();
+                done.store(true, std::memory_order_release);
+                if (publisher.joinable()) publisher.detach();
+                if (runner.joinable()) runner.detach();
+                std::_Exit(EXIT_FAILURE);
             }
         }
         pub_stop.store(true, std::memory_order_release);
