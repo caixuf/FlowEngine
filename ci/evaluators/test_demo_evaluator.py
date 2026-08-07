@@ -170,5 +170,37 @@ class DemoEvaluatorTest(unittest.TestCase):
         self.assertGreater(metrics["road_edge_margin"], 0.7)
 
 
+    def test_pipeline_declares_behavior_planner_flowsim_edges(self):
+        """Regression: behavior_planner must subscribe to vehicle/state and scene/frame
+        (both published by flowsim).  Missing these in config/pipeline.json or in the
+        s_inputs metadata causes the evaluator's topology check to emit:
+            missing topology edge flowsim --vehicle/state--> behavior_planner
+            missing topology edge flowsim --scene/frame--> behavior_planner
+        This test catches the config-level half of that regression (CI run 31196721920).
+        """
+        import json
+
+        evaluator = load_evaluator()
+        pipeline_path = ROOT / "config" / "pipeline.json"
+        with pipeline_path.open(encoding="utf-8") as f:
+            pipeline = json.load(f)
+
+        edges = evaluator.expected_edges_from_pipeline(pipeline)
+        edge_set = {(pub, topic, sub) for pub, topic, sub in edges}
+
+        self.assertIn(
+            ("flowsim", "vehicle/state", "behavior_planner"),
+            edge_set,
+            "pipeline.json must declare flowsim publishing vehicle/state "
+            "and behavior_planner subscribing to it",
+        )
+        self.assertIn(
+            ("flowsim", "scene/frame", "behavior_planner"),
+            edge_set,
+            "pipeline.json must declare flowsim publishing scene/frame "
+            "and behavior_planner subscribing to it",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
