@@ -1583,8 +1583,11 @@ static const char* s_inputs[]  = {
     TOPIC_FUSION_LOCALIZATION,
     TOPIC_PERCEPTION_TRACKED_OBJECTS,
     TOPIC_PERCEPTION_OBSTACLES,
+    TOPIC_VEHICLE_STATE,       /* flowsim 真值，优先于 fusion */
     TOPIC_ROAD_GEOMETRY,
     TOPIC_ROAD_TRAFFIC_LIGHTS,
+    TOPIC_ROAD_REF_PATH,       /* reverse / 返程方向 */
+    TOPIC_SCENE_FRAME,         /* 施工区权威几何 */
     nullptr
 };
 static const char* s_outputs[] = {
@@ -1699,8 +1702,12 @@ static int behavior_init(MessageBus* bus, Transport* transport,
 
     discovery_advertise(discovery, TOPIC_FUSION_LOCALIZATION,       0u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_PERCEPTION_TRACKED_OBJECTS, 0u, CAP_SUBSCRIBER,  0);
+    discovery_advertise(discovery, TOPIC_PERCEPTION_OBSTACLES,       0x0B5A010Eu, CAP_SUBSCRIBER,  0);
+    discovery_advertise(discovery, TOPIC_VEHICLE_STATE,             0x1C0E5A7Eu, CAP_SUBSCRIBER,  0);  /* flowsim 真值优先 */
     discovery_advertise(discovery, TOPIC_ROAD_GEOMETRY,             0x80AD5C12u, CAP_SUBSCRIBER,  0);
     discovery_advertise(discovery, TOPIC_ROAD_TRAFFIC_LIGHTS,       0x7E5C0FFEu, CAP_SUBSCRIBER,  0);  /* 归位决策 */
+    discovery_advertise(discovery, TOPIC_ROAD_REF_PATH,             0u, CAP_SUBSCRIBER,  0);          /* reverse/返程 */
+    discovery_advertise(discovery, TOPIC_SCENE_FRAME,               0x5CE4E011u, CAP_SUBSCRIBER,  0);  /* 施工区权威几何 */
     discovery_advertise(discovery, TOPIC_PLANNING_BEHAVIOR,    BEHAVIOR_TYPE_ID, CAP_PUBLISHER, 20.0);
     discovery_advertise(discovery, "behavior/state",            0u, CAP_PUBLISHER, 0.4);  /* 每 2.5s */
 
