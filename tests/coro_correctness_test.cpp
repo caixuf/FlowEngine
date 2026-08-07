@@ -575,7 +575,8 @@ static void test_request() {
  * 安全（无 use-after-free / data race）。
  *
  * 每个 cycle：
- *   - 协程循环 co_await select_for({a,b}, 2ms)，混合命中消息与超时；
+ *   - 协程循环 co_await bridge.recv_any_for({a,b}, 2ms)（BusQueueBridge 常驻订阅，
+ *     无反复注册/退订竞态）；
  *   - 发布线程高频向两个 topic 灌消息；
  *   - 主线程在随机时刻 stop()，要求协程迅速取消退出。
  * ══════════════════════════════════════════════════════════ */
@@ -588,11 +589,13 @@ public:
 
 protected:
     Task run() override {
+        /* BusQueueBridge 在 run() 内构造，持久订阅整个协程生命周期，
+         * 避免每次 co_await 反复注册/退订导致的订阅生命周期竞态 */
+        BusQueueBridge bridge(bus(), {"stress/a", "stress/b"});
         while (!should_stop()) {
-            /* 2ms 超时的竞争等待：消息 / 超时 / 取消 三路并发恢复 */
-            auto r = co_await select_for(bus(), {"stress/a", "stress/b"}, 2000);
+            /* 2ms 超时的竞争等待：消息 / 超时并发恢复 */
+            (void)co_await bridge.recv_any_for(2000);
             iters_.fetch_add(1, std::memory_order_relaxed);
-            if (should_stop()) break;
         }
         done_.store(true, std::memory_order_release);
         {
@@ -630,7 +633,10 @@ static void test_stress_concurrency() {
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            node_pump(ex, [&done]{ return done.load(std::memory_order_acquire); });
+            /* 停止条件：done（协程正常退出）或 task 已请求停止（安全保底） */
+            node_pump(ex, [&done, &task]{
+                return done.load(std::memory_order_acquire) || task.should_stop();
+            });
             ex.shutdown();
             g_node_exec = nullptr;
         });
@@ -648,12 +654,14 @@ static void test_stress_concurrency() {
         /* 让它跑一小会，混合命中消息与超时 */
         std::this_thread::sleep_for(std::chrono::milliseconds(15 + c * 3));
 
-        /* 取消：协程应迅速退出，无需外发特殊消息 */
+        /* 取消：协程应迅速退出（recv_any_for 2ms 超时兜底） */
         task.set_stop();
         {
             std::unique_lock<std::mutex> lk(mtx);
-            if (!cv.wait_for(lk, std::chrono::seconds(3),
+            if (!cv.wait_for(lk, std::chrono::milliseconds(500),
                              [&]{ return done.load(std::memory_order_acquire); })) {
+                fprintf(stderr, "  [FAIL] cycle %d: 协程 500ms 内未退出 (iters=%ld)\n",
+                        c, iters.load());
                 all_done = false;
             }
         }
@@ -662,8 +670,8 @@ static void test_stress_concurrency() {
         runner.join();
         /* runner.join() 后协程已结束，统计稳定，可安全读取 */
         total_iters += iters.load();
-        /* coroutine frame already destroyed by ~RtExecutor, no explicit reset needed */
         message_bus_destroy(bus);
+        printf("  [INFO] cycle %d: iters=%ld\n", c, iters.load()); fflush(stdout);
     }
 
     CHECK(all_done, "8 个 cycle 的协程在 set_stop() 后均迅速取消退出");

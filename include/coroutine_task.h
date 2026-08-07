@@ -517,6 +517,20 @@ inline WhenAnyBusAwaitableT<false> when_any_bus(MessageBus* bus,
         bus, std::vector<std::string>(topics.begin(), topics.end())};
 }
 
+/* DEPRECATED — when_any_bus_for / select_for
+ *
+ * 每次 co_await 都会订阅/退订一次消息总线。在高频发布（>1kHz）或反复循环
+ * 时，订阅生命周期竞态会导致消息路径与超时路径同时失效，协程永久挂起。
+ *
+ * 迁移指南：
+ *   旧：co_await select_for(bus(), {"a","b"}, timeout_us)
+ *   新：BusQueueBridge bridge(bus(), {"a","b"});
+ *       co_await bridge.recv_any_for(timeout_us)
+ *   bridge 对象应在循环体之前构造，整个 run() 期间复用同一份常驻订阅。
+ *
+ * 以下两个函数保留仅供已知低频（<1kHz）旧路径兼容，不得用于新代码。
+ */
+[[deprecated("Use BusQueueBridge::recv_any_for() instead; see comment above")]]
 inline WhenAnyBusAwaitableT<true> when_any_bus_for(MessageBus* bus,
                                                    std::initializer_list<const char*> topics,
                                                    uint64_t timeout_us) {
@@ -524,7 +538,7 @@ inline WhenAnyBusAwaitableT<true> when_any_bus_for(MessageBus* bus,
         bus, std::vector<std::string>(topics.begin(), topics.end()), timeout_us};
 }
 
-// 兼容旧 CoroutineTask::select_for() 的别名（需显式传入 bus）
+[[deprecated("Use BusQueueBridge::recv_any_for() instead; see comment above")]]
 inline WhenAnyBusAwaitableT<true> select_for(MessageBus* bus,
                                              std::initializer_list<const char*> topics,
                                              uint64_t timeout_us) {
@@ -656,24 +670,138 @@ public:
         return false;
     }
 
+    /* ── recv_any_for ───────────────────────────────────────────────────────
+     * co_await bridge.recv_any_for(timeout_us)
+     *
+     * 等待任意一个 topic 收到消息，或超时后返回 AwaitResult{Timeout, ...}。
+     * 使用 BusQueueBridge 自身的常驻订阅（不反复注册/退订），彻底消除
+     * WhenAnyBusAwaitableT 的订阅生命周期竞态。
+     *
+     * 替代 select_for(bus(), {...}, timeout_us)：API 兼容，语义相同，更安全。
+     * ──────────────────────────────────────────────────────────────────────*/
+    struct RecvAnyAwaitable {
+        BusQueueBridge*           bridge;
+        uint64_t                  timeout_us;
+        std::shared_ptr<AwaitCtl> ctl{std::make_shared<AwaitCtl>()};
+        uint64_t                  timer_id{0};
+        flowcoro::rt::RtExecutor* exec_{nullptr};
+
+        RecvAnyAwaitable(BusQueueBridge* b, uint64_t t) : bridge(b), timeout_us(t) {}
+        ~RecvAnyAwaitable() {
+            if (timer_id) TimerService::instance().cancel(timer_id);
+            /* 强拆（coroutine frame 析构）时清除 waiter，防止 on_message 残留引用 */
+            std::lock_guard<std::mutex> lk(bridge->mtx_);
+            if (bridge->waiter_ctl_ == ctl) {
+                bridge->waiter_      = {};
+                bridge->waiter_ctl_  = {};
+                bridge->waiter_exec_ = nullptr;
+            }
+        }
+        RecvAnyAwaitable(const RecvAnyAwaitable&) = delete;
+        RecvAnyAwaitable& operator=(const RecvAnyAwaitable&) = delete;
+
+        bool await_ready() {
+            std::lock_guard<std::mutex> lk(bridge->mtx_);
+            for (auto& [t, slot] : bridge->slots_)
+                if (slot.has) return true;
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<> h) {
+            exec_ = g_node_exec;
+            bool already_ready = false;
+            {
+                std::lock_guard<std::mutex> lk(bridge->mtx_);
+                for (auto& [t, slot] : bridge->slots_)
+                    if (slot.has) { already_ready = true; break; }
+                if (!already_ready) {
+                    bridge->waiter_      = h;
+                    bridge->waiter_ctl_  = ctl;
+                    bridge->waiter_exec_ = exec_;
+                }
+            }
+            if (already_ready) {
+                if (ctl->try_fire(AwaitStatus::Ready)) exec_->post_ready(h);
+                return;
+            }
+            if (timeout_us > 0) {
+                auto c   = ctl;
+                auto* ex = exec_;
+                timer_id = TimerService::instance().add(timeout_us, [c, ex, h] {
+                    if (c->try_fire(AwaitStatus::Timeout)) ex->post_ready(h);
+                });
+            }
+        }
+
+        AwaitResult await_resume() {
+            if (timer_id) TimerService::instance().cancel(timer_id);
+            Message     msg{};
+            AwaitStatus status = ctl->status;
+            {
+                std::lock_guard<std::mutex> lk(bridge->mtx_);
+                if (bridge->waiter_ctl_ == ctl) {
+                    bridge->waiter_      = {};
+                    bridge->waiter_ctl_  = {};
+                    bridge->waiter_exec_ = nullptr;
+                }
+                /* 取走第一个可用消息（与 try_take_any 语义一致） */
+                for (auto& [t, slot] : bridge->slots_) {
+                    if (slot.has) {
+                        msg    = slot.msg;
+                        slot.has = false;
+                        status = AwaitStatus::Ready;
+                        break;
+                    }
+                }
+            }
+            return AwaitResult{status, msg};
+        }
+    };
+
+    auto recv_any_for(uint64_t timeout_us) {
+        return RecvAnyAwaitable{this, timeout_us};
+    }
+
 private:
     static void on_message(const Message* msg, void* user_data) {
         g_cb_count.fetch_add(1, std::memory_order_relaxed);
         auto* self = static_cast<BusQueueBridge*>(user_data);
         self->cb_count++;
-        std::lock_guard<std::mutex> lk(self->mtx_);
-        for (auto& [t, slot] : self->slots_) {
-            if (t == msg->topic) {
-                slot.msg = *msg;
-                slot.has = true;  /* 覆盖旧值：depth=1 drop_oldest */
-                return;
+
+        std::coroutine_handle<>   waiter;
+        std::shared_ptr<AwaitCtl> ctl;
+        flowcoro::rt::RtExecutor* exec = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(self->mtx_);
+            for (auto& [t, slot] : self->slots_) {
+                if (t == msg->topic) {
+                    slot.msg = *msg;
+                    slot.has = true;  /* 覆盖旧值：depth=1 drop_oldest */
+                    break;
+                }
             }
+            /* 取走 waiter 引用（转移所有权），避免 on_message 期间 waiter 被析构 */
+            waiter = self->waiter_;
+            ctl    = self->waiter_ctl_;
+            exec   = self->waiter_exec_;
+            self->waiter_      = {};
+            self->waiter_ctl_  = {};
+            self->waiter_exec_ = nullptr;
+        }
+        /* 在锁外 fire，避免 try_fire→post_ready→executor→await_resume 时重入 mtx_ */
+        if (waiter && ctl && exec) {
+            if (ctl->try_fire(AwaitStatus::Ready)) exec->post_ready(waiter);
         }
     }
 
     MessageBus* bus_;
     std::mutex  mtx_;
     std::vector<std::pair<std::string, SlotMsg>> slots_;
+
+    /* recv_any_for 挂起时记录的一次性等待者（mtx_ 保护） */
+    std::coroutine_handle<>   waiter_{};
+    std::shared_ptr<AwaitCtl> waiter_ctl_{};
+    flowcoro::rt::RtExecutor* waiter_exec_{nullptr};
 };
 
 /* ─────────────────────────────────────────────────────────
