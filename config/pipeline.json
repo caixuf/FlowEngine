@@ -69,7 +69,7 @@
           }
         }
       ],
-      "params": "{\"init_speed\": 5.0, \"target_speed\": 20.0, \"random_seed\": 42, \"scenario_file\": \"scenarios/straight_road.json\", \"physics_model\": \"kinematic\"}"
+      "params": "{\"init_speed\": 5.0, \"target_speed\": 20.0, \"random_seed\": 42, \"scenario_file\": \"scenarios/curve_road.json\", \"physics_model\": \"kinematic\"}"
     },
     {
       "name": "sensor_model",
@@ -213,7 +213,7 @@
           }
         }
       ],
-      "params": "{\"rate_hz\": 10.0, \"scenario_file\": \"scenarios/straight_road.json\"}"
+      "params": "{\"rate_hz\": 10.0, \"scenario_file\": \"scenarios/curve_road.json\"}"
     },
     {
       "name": "planning",
@@ -237,7 +237,7 @@
           }
         }
       ],
-      "params": "{\"target_speed\": 20.0, \"max_speed\": 20.0, \"max_accel\": 4.0, \"ref_path_length_m\": 5000.0, \"highway_speed_mps\": 10.0, \"scenario_file\": \"scenarios/straight_road.json\"}"
+      "params": "{\"target_speed\": 20.0, \"max_speed\": 20.0, \"max_accel\": 4.0, \"ref_path_length_m\": 5000.0, \"highway_speed_mps\": 10.0, \"scenario_file\": \"scenarios/curve_road.json\"}"
     },
     {
       "name": "control",
@@ -261,7 +261,7 @@
           }
         }
       ],
-      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 20.0, \"lat_kp\": 0.6, \"lat_kd_heading\": 1.5, \"yaw_damping\": 0.35, \"k_v_lat\": 0.22, \"k_vy\": 0.4, \"k_vy_damp\": 0.4, \"mpc_horizon\": 0, \"scenario_file\": \"scenarios/straight_road.json\"}"
+      "params": "{\"pid_kp\": 800.0, \"pid_ki\": 50.0, \"pid_kd\": 100.0, \"target_speed\": 20.0, \"lat_kp\": 0.6, \"lat_kd_heading\": 1.5, \"yaw_damping\": 0.35, \"k_v_lat\": 0.22, \"k_vy\": 0.4, \"k_vy_damp\": 0.4, \"mpc_horizon\": 0, \"scenario_file\": \"scenarios/curve_road.json\"}"
     },
     {
       "name": "safety_control",
