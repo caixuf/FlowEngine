@@ -1310,7 +1310,7 @@ static void on_navigation_path(const Message* msg, void* user_data) {
  * 同时考虑相对速度：前车比 ego 慢则 gap 会缩小，用 TTC 加权 min_gap。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
-    if (!msg || !msg->data || msg->data_size == 0) return;
+    if (!msg || msg->data_size == 0) return;
 
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
