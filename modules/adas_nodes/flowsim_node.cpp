@@ -897,13 +897,20 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
  * 障碍物写进 vehicle/state，供 perception 识别为 type="construction"（前方封路）。
  * 位置 = 施工段前缘 front_x = center_x - length/2（ego 顺行 +x 从低 x 侧接近），
  * 横向铺满施工宽度。这些障碍物不入实体池（不参与碰撞/NPC AI），仅作感知目标。
+ *
+ * 2026-08-07：围栏厚度 2→4m，中心放在 front_x + 0.5*ol，使障碍物前表面贴齐
+ * 施工前缘（与 ConstructionView 围栏 / planning 可通行域一致）。旧 ol=2 中心
+ * 落在 front → 前表面在 front-1，且薄墙在 FOV 边缘易被遮挡/跟踪丢掉，
+ * 表现为"感知没看到那面墙"。
  * 返回追加后的障碍物总数 n_obs。 */
 static int append_construction_obstacles(cJSON* vstate, int n_obs) {
     if (!g.scenario) return n_obs;
     const double lw = (g.lane_width > 0.5) ? g.lane_width : 3.5;
+    const double wall_ol = 4.0;  /* 围栏纵向厚度：覆盖薄墙漏检 */
     for (int z = 0; z < g.scenario->construction_zone_count; ++z) {
         const ScenarioConstructionZone* cz = &g.scenario->construction_zones[z];
         const double front_x = cz->x - cz->length * 0.5;
+        const double ox = front_x + 0.5 * wall_ol;  /* 中心：前表面贴齐 front_x */
         const double width = (cz->width > 0.0) ? cz->width : (lw * 4.0);
         int lanes = (int)std::ceil(width / lw);
         if (lanes < 1) lanes = 1;
@@ -915,7 +922,7 @@ static int append_construction_obstacles(cJSON* vstate, int n_obs) {
             snprintf(key, sizeof(key), "oid%d", n_obs);
             cJSON_AddNumberToObject(vstate, key, (double)(9000 + cz->id * 10 + k));
             snprintf(key, sizeof(key), "ox%d", n_obs);
-            cJSON_AddNumberToObject(vstate, key, front_x);
+            cJSON_AddNumberToObject(vstate, key, ox);
             snprintf(key, sizeof(key), "oy%d", n_obs);
             cJSON_AddNumberToObject(vstate, key, oy);
             snprintf(key, sizeof(key), "ov%d", n_obs);
@@ -925,7 +932,7 @@ static int append_construction_obstacles(cJSON* vstate, int n_obs) {
             snprintf(key, sizeof(key), "ot%d", n_obs);
             cJSON_AddStringToObject(vstate, key, "construction");
             snprintf(key, sizeof(key), "ol%d", n_obs);
-            cJSON_AddNumberToObject(vstate, key, 2.0);   /* 围栏段纵向厚度 */
+            cJSON_AddNumberToObject(vstate, key, wall_ol);
             snprintf(key, sizeof(key), "ow%d", n_obs);
             cJSON_AddNumberToObject(vstate, key, lw);     /* 单段宽 ≈ 车道宽 */
             n_obs++;

@@ -174,8 +174,12 @@
       "subscribe": [
         "fusion/localization",
         "perception/tracked_objects",
+        "perception/obstacles",
+        "vehicle/state",
         "road/geometry",
-        "road/traffic_lights"
+        "road/traffic_lights",
+        "road/ref_path",
+        "scene/frame"
       ],
       "publish": [
         {
