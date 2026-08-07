@@ -851,7 +851,11 @@ add_test(NAME coro_correctness_test
     COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/coro_correctness_test
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(coro_correctness_test PROPERTIES TIMEOUT 60)
+set(coro_correctness_test_timeout 60)
+if(ENABLE_ASAN)
+    set(coro_correctness_test_timeout 120)
+endif()
+set_tests_properties(coro_correctness_test PROPERTIES TIMEOUT ${coro_correctness_test_timeout})
 
 # ── Unit tests ────────────────────────────────────────────
 # Rename to .cpp for C++ compilation (uses lambdas in tests)
