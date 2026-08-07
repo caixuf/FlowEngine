@@ -31,6 +31,7 @@
 #include "message_bus.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <thread>
@@ -583,15 +584,16 @@ static void test_request() {
 
 class StressTask : public CoroutineTask {
 public:
-    StressTask(MessageBus* bus, std::atomic<long>& iters,
+    StressTask(MessageBus* bus, std::atomic<bool>& started, std::atomic<long>& iters,
                std::atomic<bool>& done, std::mutex& mtx, std::condition_variable& cv)
-        : CoroutineTask(bus), iters_(iters), done_(done), mtx_(mtx), cv_(cv) {}
+        : CoroutineTask(bus), started_(started), iters_(iters), done_(done), mtx_(mtx), cv_(cv) {}
 
 protected:
     Task run() override {
         /* BusQueueBridge 在 run() 内构造，持久订阅整个协程生命周期，
          * 避免每次 co_await 反复注册/退订导致的订阅生命周期竞态 */
         BusQueueBridge bridge(bus(), {"stress/a", "stress/b"});
+        started_.store(true, std::memory_order_release);
         while (!should_stop()) {
             /* 2ms 超时的竞争等待：消息 / 超时并发恢复 */
             (void)co_await bridge.recv_any_for(2000);
@@ -606,6 +608,7 @@ protected:
     }
 
 private:
+    std::atomic<bool>&       started_;
     std::atomic<long>&       iters_;
     std::atomic<bool>&       done_;
     std::mutex&              mtx_;
@@ -620,6 +623,7 @@ static void test_stress_concurrency() {
     bool all_done = true;
 
     for (int c = 0; c < CYCLES; ++c) {
+        std::atomic<bool> started{false};
         std::atomic<long> iters{0};
         std::atomic<bool> done{false};
         std::atomic<bool> pub_stop{false};
@@ -627,19 +631,23 @@ static void test_stress_concurrency() {
         std::condition_variable cv;
 
         MessageBus* bus = message_bus_create("t7");
-        StressTask task(bus, iters, done, mtx, cv);
+        StressTask task(bus, started, iters, done, mtx, cv);
         std::thread runner([&]{
             flowcoro::rt::RtExecutor ex{{ .pin_cpu=-1, .idle_sleep_us=200 }};
             g_node_exec = &ex;
             CoroutineTask& ct = task;
             ex.spawn(ct.run(), "test1");
-            /* 停止条件：done（协程正常退出）或 task 已请求停止（安全保底） */
-            node_pump(ex, [&done, &task]{
-                return done.load(std::memory_order_acquire) || task.should_stop();
+            /* set_stop() 只是协作式取消：继续 pump，直到 recv_any_for() 醒来、
+             * 观察到 stop 并走完退出路径后再由 done 结束。 */
+            node_pump(ex, [&done]{
+                return done.load(std::memory_order_acquire);
             });
             ex.shutdown();
             g_node_exec = nullptr;
         });
+
+        while (!started.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
         /* 发布线程：高频灌两个 topic */
         std::thread publisher([&]{
@@ -663,6 +671,10 @@ static void test_stress_concurrency() {
                 fprintf(stderr, "  [FAIL] cycle %d: 协程 500ms 内未退出 (iters=%ld)\n",
                         c, iters.load());
                 all_done = false;
+                /* runner 仍在 node_pump(ex, done-only) 中等待 done；若这里继续走
+                 * join()，真实协程失败会被放大成外层 CTest Timeout，丢失当前诊断。 */
+                fflush(stderr);
+                std::abort();
             }
         }
         pub_stop.store(true, std::memory_order_release);
