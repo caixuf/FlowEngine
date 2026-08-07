@@ -209,6 +209,9 @@ set(FLOWCORO_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_BUILD_DOCS      OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_ENABLE_DATABASE OFF CACHE BOOL "" FORCE)
 set(FLOWCORO_BUILD_V3        OFF CACHE BOOL "" FORCE)
+if(WIN32)
+    set(FLOWENGINE_COMPAT_WIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include/compat_win" CACHE PATH "" FORCE)
+endif()
 
 # 候选路径：同级目录 > third_party > FetchContent
 set(_FLOWCORO_CANDIDATES
@@ -420,8 +423,9 @@ set(ALGORITHM_SOURCES
 )
 
 # ── Optional: Protobuf support ────────────────────────────
-find_package(ProtobufC QUIET)
-if(ProtobufC_FOUND)
+find_package(protobuf-c QUIET)
+if(protobuf-c_FOUND)
+    set(ProtobufC_FOUND TRUE)
     message(STATUS "Protobuf-C found: enabling FLOWENGINE_USE_PROTOBUF")
 else()
     message(STATUS "Protobuf-C not found — protobuf support disabled (install libprotobuf-c-dev)")
@@ -465,8 +469,7 @@ target_compile_options(flowengine_core PUBLIC ${CJSON_CFLAGS_OTHER})
 # ── 在 flowengine_core 创建后才能 target_link_libraries ──
 if(ProtobufC_FOUND)
     target_compile_definitions(flowengine_core PUBLIC FLOWENGINE_USE_PROTOBUF)
-    target_link_libraries(flowengine_core ${ProtobufC_LIBRARIES})
-    target_include_directories(flowengine_core PUBLIC ${ProtobufC_INCLUDE_DIRS})
+    target_link_libraries(flowengine_core protobuf-c::protobuf-c)
 endif()
 if(ZLIB_FOUND)
     target_compile_definitions(flowengine_core PUBLIC FLOWENGINE_USE_ZLIB)
@@ -964,30 +967,40 @@ add_test(NAME demo_evaluator_tools
 set_tests_properties(demo_evaluator_tools PROPERTIES TIMEOUT 10)
 
 # ── Smoke test: flow_launcher short integration run ──
-add_test(NAME e2e_smoke
-    COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
-            bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
+find_program(BASH_EXECUTABLE bash)
+if(BASH_EXECUTABLE AND NOT WIN32)
+    add_test(NAME e2e_smoke
+        COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
+                ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(e2e_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
+
+    # ── Integration smoke: flow_launcher loads all node plugins & runs pipeline ──
+    # Labeled "integration" so the standard build jobs (which don't build the
+    # separate adas_nodes .so subproject) skip it; a dedicated CI job runs it.
+    add_test(NAME flow_launcher_smoke
+        COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
+                ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(flow_launcher_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
+else()
+    message(STATUS "skip e2e_smoke/flow_launcher_smoke tests (bash unavailable or WIN32)")
+endif()
 
 # ── Stability test: long-running pipeline (10 min, optional/manual) ──
-add_test(NAME e2e_stability
-    COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_launcher
-            ${CMAKE_CURRENT_SOURCE_DIR}/config/pipeline.json --duration 600
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual;integration")
-
-# ── Integration smoke: flow_launcher loads all node plugins & runs pipeline ──
-# Labeled "integration" so the standard build jobs (which don't build the
-# separate adas_nodes .so subproject) skip it; a dedicated CI job runs it.
-add_test(NAME flow_launcher_smoke
-    COMMAND ${CMAKE_COMMAND} -E env BUILD_DIR=${CMAKE_BINARY_DIR}
-            bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/launcher_smoke.sh 3
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-set_tests_properties(flow_launcher_smoke PROPERTIES TIMEOUT 150 LABELS "integration")
+option(FLOW_ENABLE_LONG_TESTS "Enable long-running stability tests" OFF)
+if(FLOW_ENABLE_LONG_TESTS)
+    add_test(NAME e2e_stability
+        COMMAND ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/flow_launcher
+                ${CMAKE_CURRENT_SOURCE_DIR}/config/pipeline.json --duration 600
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(e2e_stability PROPERTIES TIMEOUT 660 LABELS "stability;manual;integration")
+else()
+    message(STATUS "FLOW_ENABLE_LONG_TESTS=OFF: skip e2e_stability")
+endif()
 
 # 打印构建信息
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

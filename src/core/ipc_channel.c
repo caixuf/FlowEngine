@@ -36,47 +36,317 @@
 
 #if defined(_WIN32)
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <process.h>
+
+typedef struct {
+    uint32_t queue_depth;
+    uint32_t _pad;
+    uint64_t head;
+} WinShmHeader;
+
+typedef struct {
+    uint64_t seq;
+    Message  msg;
+} WinShmSlot;
+
 struct IpcChannel {
     IpcRole role;
+    char channel_name[64];
+    char map_name[96];
+    char mutex_name[96];
+    char event_name[96];
+
+    HANDLE map_handle;
+    HANDLE mutex_handle;
+    HANDLE event_handle;
+
+    void* shm_ptr;
+    size_t shm_size;
+    uint32_t queue_depth;
+
+    uint64_t read_cursor;
+    bool cursor_init;
+
+    MessageCallback callbacks[8];
+    void* callback_data[8];
+    int cb_count;
+
+    HANDLE recv_thread;
+    volatile LONG recv_running;
+
     uint64_t drop_count;
 };
 
+static WinShmHeader* win_get_header(IpcChannel* ch) {
+    return (WinShmHeader*)ch->shm_ptr;
+}
+
+static WinShmSlot* win_get_slots(IpcChannel* ch) {
+    return (WinShmSlot*)((char*)ch->shm_ptr + sizeof(WinShmHeader));
+}
+
+static size_t win_shm_total_size(uint32_t depth) {
+    return sizeof(WinShmHeader) + (size_t)depth * sizeof(WinShmSlot);
+}
+
+static bool win_mutex_wait_ok(DWORD wait_result) {
+    return wait_result == WAIT_OBJECT_0 || wait_result == WAIT_ABANDONED;
+}
+
+static bool win_ipc_debug_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        char buf[8];
+        DWORD n = GetEnvironmentVariableA("FLOW_IPC_DEBUG", buf, (DWORD)sizeof(buf));
+        cached = (n > 0 && buf[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+static void win_make_names(IpcChannel* ch, const char* channel_name) {
+    snprintf(ch->channel_name, sizeof(ch->channel_name), "%s", channel_name);
+    snprintf(ch->map_name, sizeof(ch->map_name), "Local\\flowipc_%s_map", channel_name);
+    snprintf(ch->mutex_name, sizeof(ch->mutex_name), "Local\\flowipc_%s_mtx", channel_name);
+    snprintf(ch->event_name, sizeof(ch->event_name), "Local\\flowipc_%s_evt", channel_name);
+}
+
+static int win_try_read_one(IpcChannel* ch, Message* out) {
+    if (!ch || !out) return ERR_IO;
+    WinShmHeader* hdr = win_get_header(ch);
+    if (!win_mutex_wait_ok(WaitForSingleObject(ch->mutex_handle, INFINITE))) return ERR_IO;
+
+    uint64_t head = hdr->head;
+    uint32_t depth = hdr->queue_depth;
+    WinShmSlot* slots = win_get_slots(ch);
+
+    if (!ch->cursor_init) {
+        ch->read_cursor = (head > depth) ? (head - depth) : 0;
+        ch->cursor_init = true;
+    }
+
+    if (head - ch->read_cursor > depth) {
+        ch->drop_count += (head - depth) - ch->read_cursor;
+        ch->read_cursor = head - depth;
+    }
+
+    if (ch->read_cursor >= head) {
+        ReleaseMutex(ch->mutex_handle);
+        return ERR_IO;
+    }
+
+    WinShmSlot* slot = &slots[ch->read_cursor % depth];
+    *out = slot->msg;
+    ch->read_cursor++;
+    ReleaseMutex(ch->mutex_handle);
+    return ERR_OK;
+}
+
+static unsigned __stdcall win_recv_thread_fn(void* arg) {
+    IpcChannel* ch = (IpcChannel*)arg;
+    while (InterlockedCompareExchange(&ch->recv_running, 0, 0) != 0) {
+        Message msg;
+        int delivered = 0;
+        while (win_try_read_one(ch, &msg) == ERR_OK) {
+            delivered = 1;
+            for (int i = 0; i < ch->cb_count; i++) {
+                if (ch->callbacks[i]) ch->callbacks[i](&msg, ch->callback_data[i]);
+            }
+        }
+        if (delivered) continue;
+
+        (void)WaitForSingleObject(ch->event_handle, 50);
+    }
+    return 0;
+}
+
 IpcChannel* ipc_channel_open(const char* channel_name, IpcRole role,
                               uint32_t queue_depth) {
-    (void)channel_name;
-    (void)queue_depth;
+    if (!channel_name || queue_depth == 0) return NULL;
+
     IpcChannel* ch = (IpcChannel*)calloc(1, sizeof(IpcChannel));
-    if (ch) ch->role = role;
+    if (!ch) return NULL;
+
+    ch->role = role;
+    ch->queue_depth = queue_depth;
+    ch->map_handle = NULL;
+    ch->mutex_handle = NULL;
+    ch->event_handle = NULL;
+    ch->recv_thread = NULL;
+    ch->recv_running = 0;
+    win_make_names(ch, channel_name);
+
+    ch->shm_size = win_shm_total_size(queue_depth);
+
+    if (role == IPC_ROLE_PUBLISHER) {
+        ch->map_handle = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                            0, (DWORD)ch->shm_size, ch->map_name);
+        if (!ch->map_handle) { free(ch); return NULL; }
+        DWORD map_last_error = GetLastError();
+        ch->mutex_handle = CreateMutexA(NULL, FALSE, ch->mutex_name);
+        if (!ch->mutex_handle) { CloseHandle(ch->map_handle); free(ch); return NULL; }
+        ch->event_handle = CreateEventA(NULL, FALSE, FALSE, ch->event_name);
+        if (!ch->event_handle) {
+            CloseHandle(ch->mutex_handle);
+            CloseHandle(ch->map_handle);
+            free(ch);
+            return NULL;
+        }
+
+        ch->shm_ptr = MapViewOfFile(ch->map_handle, FILE_MAP_ALL_ACCESS, 0, 0, ch->shm_size);
+        if (!ch->shm_ptr) {
+            CloseHandle(ch->event_handle);
+            CloseHandle(ch->mutex_handle);
+            CloseHandle(ch->map_handle);
+            free(ch);
+            return NULL;
+        }
+
+        /* Initialize memory if freshly created. */
+        if (map_last_error != ERROR_ALREADY_EXISTS) {
+            memset(ch->shm_ptr, 0, ch->shm_size);
+            WinShmHeader* hdr = win_get_header(ch);
+            hdr->queue_depth = queue_depth;
+            hdr->head = 0;
+        }
+    } else {
+        ch->map_handle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, ch->map_name);
+        if (!ch->map_handle) { free(ch); return NULL; }
+        ch->mutex_handle = OpenMutexA(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, ch->mutex_name);
+        if (!ch->mutex_handle) { CloseHandle(ch->map_handle); free(ch); return NULL; }
+        ch->event_handle = OpenEventA(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, ch->event_name);
+        if (!ch->event_handle) {
+            CloseHandle(ch->mutex_handle);
+            CloseHandle(ch->map_handle);
+            free(ch);
+            return NULL;
+        }
+
+        ch->shm_ptr = MapViewOfFile(ch->map_handle, FILE_MAP_ALL_ACCESS, 0, 0, ch->shm_size);
+        if (!ch->shm_ptr) {
+            CloseHandle(ch->event_handle);
+            CloseHandle(ch->mutex_handle);
+            CloseHandle(ch->map_handle);
+            free(ch);
+            return NULL;
+        }
+    }
+
     return ch;
 }
 
 void ipc_channel_close(IpcChannel* ch) {
+    if (!ch) return;
+
+    ipc_channel_stop(ch);
+
+    if (ch->shm_ptr) UnmapViewOfFile(ch->shm_ptr);
+    if (ch->event_handle) CloseHandle(ch->event_handle);
+    if (ch->mutex_handle) CloseHandle(ch->mutex_handle);
+    if (ch->map_handle) CloseHandle(ch->map_handle);
     free(ch);
 }
 
 int ipc_channel_publish(IpcChannel* ch, const char* topic, const char* sender,
                         const void* data, uint32_t size) {
-    (void)ch; (void)topic; (void)sender; (void)data; (void)size;
-    return ERR_IO;
+    if (!ch || ch->role != IPC_ROLE_PUBLISHER) {
+        if (win_ipc_debug_enabled()) fprintf(stderr, "[ipc_channel_win] publish invalid channel/role\n");
+        return ERR_IO;
+    }
+    if (!topic || size > MSG_BUS_MAX_DATA_SIZE) {
+        if (win_ipc_debug_enabled()) fprintf(stderr, "[ipc_channel_win] publish invalid topic/size topic=%p size=%u max=%u channel=%s\n",
+                                             (void*)topic, size, (unsigned)MSG_BUS_MAX_DATA_SIZE, ch->channel_name);
+        return ERR_IO;
+    }
+
+    DWORD wait_result = WaitForSingleObject(ch->mutex_handle, INFINITE);
+    if (!win_mutex_wait_ok(wait_result)) {
+        if (win_ipc_debug_enabled()) fprintf(stderr, "[ipc_channel_win] mutex wait failed result=%lu gle=%lu channel=%s topic=%s\n",
+                                             (unsigned long)wait_result, (unsigned long)GetLastError(), ch->channel_name, topic);
+        return ERR_IO;
+    }
+
+    WinShmHeader* hdr = win_get_header(ch);
+    if (!hdr || hdr->queue_depth == 0) {
+        if (win_ipc_debug_enabled()) fprintf(stderr, "[ipc_channel_win] invalid header hdr=%p depth=%u channel=%s topic=%s\n",
+                                             (void*)hdr, hdr ? hdr->queue_depth : 0, ch->channel_name, topic);
+        ReleaseMutex(ch->mutex_handle);
+        return ERR_IO;
+    }
+    WinShmSlot* slots = win_get_slots(ch);
+    uint64_t idx = hdr->head;
+    WinShmSlot* slot = &slots[idx % hdr->queue_depth];
+
+    memset(&slot->msg, 0, sizeof(slot->msg));
+    snprintf(slot->msg.topic, MSG_BUS_MAX_TOPIC_LEN, "%s", topic);
+    if (sender) snprintf(slot->msg.sender, MSG_BUS_MAX_SENDER_LEN, "%s", sender);
+    slot->msg.type = MSG_TYPE_PUBLISH;
+    slot->msg.data_size = size;
+    slot->msg.timestamp_us = (uint64_t)GetTickCount64() * 1000ULL;
+    if (data && size > 0) memcpy(slot->msg.data, data, size);
+
+    slot->seq = idx + 1;
+    hdr->head = idx + 1;
+    ReleaseMutex(ch->mutex_handle);
+    SetEvent(ch->event_handle);
+    return ERR_OK;
 }
 
 int ipc_channel_subscribe(IpcChannel* ch, MessageCallback callback, void* user_data) {
-    (void)ch; (void)callback; (void)user_data;
-    return ERR_IO;
+    if (!ch || !callback) return ERR_IO;
+    if (ch->cb_count >= 8) return ERR_IO;
+    ch->callbacks[ch->cb_count] = callback;
+    ch->callback_data[ch->cb_count] = user_data;
+    ch->cb_count++;
+    return ERR_OK;
 }
 
 int ipc_channel_start(IpcChannel* ch) {
-    (void)ch;
-    return ERR_IO;
+    if (!ch) return ERR_IO;
+    if (ch->recv_running) return ERR_OK;
+    InterlockedExchange(&ch->recv_running, 1);
+    uintptr_t h = _beginthreadex(NULL, 0, win_recv_thread_fn, ch, 0, NULL);
+    if (!h) {
+        InterlockedExchange(&ch->recv_running, 0);
+        return ERR_IO;
+    }
+    ch->recv_thread = (HANDLE)h;
+    return ERR_OK;
 }
 
 void ipc_channel_stop(IpcChannel* ch) {
-    (void)ch;
+    if (!ch || !ch->recv_running) return;
+    InterlockedExchange(&ch->recv_running, 0);
+    SetEvent(ch->event_handle);
+    if (ch->recv_thread) {
+        WaitForSingleObject(ch->recv_thread, INFINITE);
+        CloseHandle(ch->recv_thread);
+        ch->recv_thread = NULL;
+    }
 }
 
 int ipc_channel_recv_once(IpcChannel* ch, uint32_t timeout_ms) {
-    (void)ch; (void)timeout_ms;
-    return ERR_IO;
+    if (!ch) return ERR_IO;
+    Message msg;
+    if (win_try_read_one(ch, &msg) == ERR_OK) {
+        for (int i = 0; i < ch->cb_count; i++) {
+            if (ch->callbacks[i]) ch->callbacks[i](&msg, ch->callback_data[i]);
+        }
+        return ERR_OK;
+    }
+
+    DWORD wait_ms = timeout_ms == 0 ? INFINITE : timeout_ms;
+    DWORD wr = WaitForSingleObject(ch->event_handle, wait_ms);
+    if (wr != WAIT_OBJECT_0) return ERR_IO;
+    if (win_try_read_one(ch, &msg) != ERR_OK) return ERR_IO;
+
+    for (int i = 0; i < ch->cb_count; i++) {
+        if (ch->callbacks[i]) ch->callbacks[i](&msg, ch->callback_data[i]);
+    }
+    return ERR_OK;
 }
 
 uint64_t ipc_channel_get_drop_count(IpcChannel* ch) {

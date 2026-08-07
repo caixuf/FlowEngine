@@ -167,6 +167,17 @@ typedef struct {
     StatsPacket last;
 } StatsSink;
 
+static void stats_sink_cb(const Message* msg, void* ud);
+
+static IpcChannel* open_stats_subscriber_retry(StatsSink* s) {
+    for (int i = 0; i < 20; i++) {
+        IpcChannel* sub = stats_bridge_subscriber_open(stats_sink_cb, s);
+        if (sub) return sub;
+        usleep(50000);
+    }
+    return NULL;
+}
+
 static void stats_sink_cb(const Message* msg, void* ud) {
     StatsSink* s = (StatsSink*)ud;
     if (msg->data_size < sizeof(StatsPacket)) return;
@@ -184,7 +195,7 @@ static void test_stats_bridge_open(void) {
     StatsSink s;
     memset(&s, 0, sizeof(s));
     pthread_mutex_init(&s.m, NULL);
-    IpcChannel* sub = stats_bridge_subscriber_open(stats_sink_cb, &s);
+    IpcChannel* sub = open_stats_subscriber_retry(&s);
     ASSERT(sub != NULL, "subscriber open failed (publisher must exist first)");
 
     ipc_channel_close(sub);
@@ -200,9 +211,10 @@ static void test_stats_bridge_roundtrip(void) {
     StatsSink s;
     memset(&s, 0, sizeof(s));
     pthread_mutex_init(&s.m, NULL);
-    IpcChannel* sub = stats_bridge_subscriber_open(stats_sink_cb, &s);
+    IpcChannel* sub = open_stats_subscriber_retry(&s);
     ASSERT(sub != NULL, "subscriber open failed");
     ipc_channel_start(sub);
+    usleep(50000);
 
     /* Generate some real bus traffic so stats are non-empty */
     MessageBus* bus = message_bus_create("t_statsbus");
@@ -257,6 +269,17 @@ typedef struct {
     size_t last_len;
 } JsonSink;
 
+static void json_sink_cb(const char* json, size_t len, void* ud);
+
+static IpcChannel* open_dashboard_subscriber_retry(JsonSink* s) {
+    for (int i = 0; i < 20; i++) {
+        IpcChannel* sub = dashboard_bridge_subscriber_open(json_sink_cb, s);
+        if (sub) return sub;
+        usleep(50000);
+    }
+    return NULL;
+}
+
 static void json_sink_cb(const char* json, size_t len, void* ud) {
     JsonSink* s = (JsonSink*)ud;
     pthread_mutex_lock(&s->m);
@@ -279,9 +302,10 @@ static void test_dashboard_bridge_single_chunk(void) {
     JsonSink s;
     memset(&s, 0, sizeof(s));
     pthread_mutex_init(&s.m, NULL);
-    IpcChannel* sub = dashboard_bridge_subscriber_open(json_sink_cb, &s);
+    IpcChannel* sub = open_dashboard_subscriber_retry(&s);
     ASSERT(sub != NULL, "subscriber open failed");
     ipc_channel_start(sub);
+    usleep(50000);
 
     const char* json = "{\"vehicle\":{\"x\":1.5,\"y\":2.0},\"ok\":true}";
     ASSERT(dashboard_bridge_publish(pub, json, strlen(json)) == 0,
@@ -312,9 +336,10 @@ static void test_dashboard_bridge_multi_chunk(void) {
     JsonSink s;
     memset(&s, 0, sizeof(s));
     pthread_mutex_init(&s.m, NULL);
-    IpcChannel* sub = dashboard_bridge_subscriber_open(json_sink_cb, &s);
+    IpcChannel* sub = open_dashboard_subscriber_retry(&s);
     ASSERT(sub != NULL, "subscriber open failed");
     ipc_channel_start(sub);
+    usleep(50000);
 
     /* Build a JSON payload larger than the legacy 4096 stack buffer to
      * exercise the single-chunk path with a large payload.

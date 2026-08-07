@@ -50,7 +50,7 @@ var topoData = {nodes:[], metrics:{}};
 var frames = [];
 var paused = false;
 var frameCount = 0;
-var serverUrl = 'http://localhost:8800';
+var serverUrl = 'http://127.0.0.1:8800';
 var eventSource = null;
 var selectedNode = null;
 var reconnectTimer = null;
@@ -65,8 +65,10 @@ var lastNodeNames = '';
 // ── 性能节流：低频 DOM 更新时间戳 ──
 var _lastTableUpdateMs = 0;   // updateTopicStats / updateProcessTopics 上次更新时间
 var _lastChartUpdateMs = 0;   // updateCharts 上次更新时间
+var _lastDomUpdateMs = 0;     // 指标卡 / frames / 计数器等高频 DOM 上次更新时间
 var _TABLE_THROTTLE_MS = 1000; // 表格最多 1Hz
 var _CHART_THROTTLE_MS = 1000; // 图表最多 1Hz
+var _DOM_THROTTLE_MS = 200;    // 高频 DOM 最多 5Hz；3D 数据仍按 rAF 合并后实时喂入
 
 // SSE / data freshness state
 var _lastDataTime = 0;          // 上次收到数据的时间戳（performance.now()）
@@ -83,6 +85,8 @@ try {
   if (saved.workspace) workspaceMode = saved.workspace;
 } catch(e) {}
 
+serverUrl = normalizeServerUrl(serverUrl);
+
 // ═══════════════════════════════════════════════════════════════
 // Utility helpers (not in utils.js because they depend on app state)
 // ═══════════════════════════════════════════════════════════════
@@ -91,6 +95,17 @@ function setConnStatus(cls, text) {
   var el = document.getElementById('conn-dot');
   if (!el) return;
   el.className = 'pill pill-'+cls; el.textContent = text;
+}
+
+function normalizeServerUrl(raw) {
+  var url = (raw || '').trim();
+  if (!url) return 'http://127.0.0.1:8800';
+  if (!/^https?:\/\//i.test(url)) url = 'http://' + url;
+  // Windows 本机部署下优先 IPv4，规避部分环境 localhost 走 ::1 导致连接不稳。
+  url = url.replace(/^https?:\/\/localhost(?=[:\/]|$)/i, function(m) {
+    return m.toLowerCase().startsWith('https') ? 'https://127.0.0.1' : 'http://127.0.0.1';
+  });
+  return url;
 }
 
 function _set3DStaleMessage(show, text) {
@@ -137,7 +152,7 @@ function applyLiveStatus(d) {
   if (wm) wm.style.display='none';
   if (d.stale === true) {
     var age = (typeof d.age_sec === 'number') ? (' '+Math.round(d.age_sec)+'秒') : '';
-    setConnStatus('warn','● 超时'+age);
+    setConnStatus('warn','● 缓存'+age);
   } else {
     setConnStatus('live','● 已连接');
   }
@@ -773,7 +788,8 @@ function tryReconnect() {
 }
 
 async function doConnect() {
-  serverUrl = document.getElementById('url').value.trim();
+  serverUrl = normalizeServerUrl(document.getElementById('url').value);
+  document.getElementById('url').value = serverUrl;
   saveState();
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -831,9 +847,13 @@ function updateAll() {
   const in3D = workspaceMode === 'observe';
   // 当前不在 analyze 工作区时跳过图表/拓扑表格（避免隐藏 DOM 全量 paint）
   const inAnalyze = workspaceMode === 'analyze';
+  const doDomUpdate = (now - _lastDomUpdateMs >= _DOM_THROTTLE_MS);
 
-  safeCall('metrics', updateMetrics);
-  safeCall('frames', updateFrames);
+  if (doDomUpdate) {
+    _lastDomUpdateMs = now;
+    safeCall('metrics', updateMetrics);
+    safeCall('frames', updateFrames);
+  }
 
   // 表格（topicStats / processTopics）：节流 1Hz，且只在 analyze 工作区更新
   if (inAnalyze && now - _lastTableUpdateMs >= _TABLE_THROTTLE_MS) {
@@ -849,10 +869,12 @@ function updateAll() {
     safeCall('scene3d', function () { update3D(topoData); });
   }
 
-  safeCall('topology', function() {
-    var nn = (topoData.nodes||[]).map(function(n){ return n.name; }).sort().join(',');
-    if (nn !== lastNodeNames) { lastNodeNames = nn; updateTopo(topoData); }
-  });
+  if (doDomUpdate) {
+    safeCall('topology', function() {
+      var nn = (topoData.nodes||[]).map(function(n){ return n.name; }).sort().join(',');
+      if (nn !== lastNodeNames) { lastNodeNames = nn; updateTopo(topoData); }
+    });
+  }
 
   // 图表：节流 1Hz（D3 重绘开销大，500ms 数据帧更新 2 次没有意义）
   if (now - _lastChartUpdateMs >= _CHART_THROTTLE_MS) {
@@ -860,10 +882,12 @@ function updateAll() {
     safeCall('charts', updateCharts);
   }
 
-  safeCall('counters', function() {
-    document.getElementById('node-n').textContent = (topoData.nodes||[]).length;
-    document.getElementById('frame-n').textContent = frameCount;
-  });
+  if (doDomUpdate) {
+    safeCall('counters', function() {
+      document.getElementById('node-n').textContent = (topoData.nodes||[]).length;
+      document.getElementById('frame-n').textContent = frameCount;
+    });
+  }
 }
 
 function switchSysView(view) {
