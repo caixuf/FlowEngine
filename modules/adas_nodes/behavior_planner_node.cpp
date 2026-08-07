@@ -133,6 +133,16 @@ struct BehaviorContext {
     int obs_count{0};
     volatile int has_obs{0};
 
+    /* raw 障碍缓存（on_raw_obstacles 每帧填充，世界坐标）。
+     * 用途：掉头触发点缩短时合并 raw+tracked。on_tracked_objects 会整体覆盖
+     * obs_*，一旦 tracker 把静止施工区丢掉（轨迹容量 KTRACKER_MAX_TRACKS=32、
+     * 覆盖丢失），施工区就从 obs_* 消失 → uturn_ref_x 不再缩短 → 撞施工。
+     * raw 是 perception/obstacles 直连、每帧无条件刷新，施工区恒在，故缩短点
+     * 必须把 raw 静止障碍也纳入。 */
+    double raw_obs_x[BEH_MAX_OBS]{}, raw_obs_y[BEH_MAX_OBS]{};
+    double raw_obs_vx[BEH_MAX_OBS]{}, raw_obs_vy[BEH_MAX_OBS]{};
+    int raw_obs_count{0};
+
     /* 道路几何（从 road/geometry JSON 解析） */
     int    lane_count{2};
     double lane_width{3.5};
@@ -447,6 +457,7 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
     double ch = cos(g.ego_heading), sh = sin(g.ego_heading);
     int n = obs_list.count < BEH_MAX_OBS ? (int)obs_list.count : BEH_MAX_OBS;
     g.obs_count = 0;
+    g.raw_obs_count = 0;
     for (int i = 0; i < n; i++) {
         const Obstacle* o = &obs_list.obstacles[i];
         /* 车体系 → 世界系（位置和速度都需要旋转） */
@@ -455,6 +466,13 @@ static void on_raw_obstacles(const Message* msg, void* user_data) {
         g.obs_vx[i] = (double)o->vx * ch - (double)o->vy * sh;
         g.obs_vy[i] = (double)o->vx * sh + (double)o->vy * ch;
         g.obs_type[i] = (uint8_t)o->type;
+
+        /* 同步维护 raw 缓存（世界系）——掉头缩短点合并用，独立于 tracked */
+        g.raw_obs_x[i] = g.obs_x[i];
+        g.raw_obs_y[i] = g.obs_y[i];
+        g.raw_obs_vx[i] = g.obs_vx[i];
+        g.raw_obs_vy[i] = g.obs_vy[i];
+        g.raw_obs_count++;
 
         /* DBG: 346257217 100 3452702473462112233452152603452112153344270252351232234347244231347211251 body=world 345235220346240207345217230346215242357274214347241256350256244344274240346204237346225260346215256345215217350256256 */
         if (i < 3 && g.seq % 100 == 0) {
@@ -928,6 +946,12 @@ protected:
 
             {
                 StateId cur = statem_current(&g.sm);
+                /* 内侧道（掉头必须从内侧道发起）与 at_inner_lane：掉头触发块、
+                 * CRUISE/FOLLOW/变道分支都要用，故声明在外层决策块（覆盖全部
+                 * 分支），不能在 if(cur!=U_TURN) 内声明（作用域覆盖不到下方
+                 * CRUISE/FOLLOW/LEFT_CHANGE/RIGHT_CHANGE 分支）。 */
+                const int inner_lane = (g.on_return) ? (lc / 2 - 1) : (lc / 2);
+                const bool at_inner_lane = (current_idx == inner_lane);
                 /* ── 掉头触发（优先级最高：路端是硬约束，任何状态生效）──
                  * 前进 trip：ego_x 接近 ref_path 终点 → 掉头到对向车道
                  * 返程 trip：ego_x 接近路起点（x≈0）→ 掉头回前进车道
@@ -973,11 +997,24 @@ protected:
                      * 提前触发掉头（实测启动即 U_TURN）。 */
                     if (at_road_end &&
                         g.ego_x > g.road_end_x - g.uturn_approach_dist_m * 3.0) {
+                        /* 合并 raw + tracked 静止障碍（2026-08-07 脆弱点修复）：
+                         * obs_* 可能被 tracked 覆盖且 tracker 丢点（施工区因轨迹容量
+                         * 或覆盖丢失从 tracked 消失），此时若只看 obs_* 则施工区不再
+                         * 缩短触发点 → 撞施工。raw 缓存每帧无条件刷新、施工区恒在，
+                         * 故两路都扫，取最近的前方静止障碍。重复（同一障碍两路都有）
+                         * 无副作用——min 单调。 */
                         for (int i = 0; i < g.obs_count; ++i) {
                             if (std::fabs(g.obs_vx[i]) < 0.5 &&
                                 std::fabs(g.obs_vy[i]) < 0.5 &&
                                 g.obs_x[i] > g.ego_x && g.obs_x[i] < uturn_ref_x) {
                                 uturn_ref_x = g.obs_x[i];
+                            }
+                        }
+                        for (int i = 0; i < g.raw_obs_count; ++i) {
+                            if (std::fabs(g.raw_obs_vx[i]) < 0.5 &&
+                                std::fabs(g.raw_obs_vy[i]) < 0.5 &&
+                                g.raw_obs_x[i] > g.ego_x && g.raw_obs_x[i] < uturn_ref_x) {
+                                uturn_ref_x = g.raw_obs_x[i];
                             }
                         }
                     }
@@ -1006,9 +1043,27 @@ protected:
                      * 掉头前倒车 2.5-3m）。360m 减速区让 v=5 提前到障碍前
                      * ~130m，触发时前向空间 ~98-118m，无需腾挪。 */
                     const double approach3 = g.uturn_approach_dist_m * 3.0;
-                    if (!g.on_return && at_road_end && uturn_ref_x < 1e8 &&
-                        g.ego_x > uturn_ref_x - approach3 &&
-                        g.cooldown <= 0.0) {
+                    /* 掉头必须从内侧道发起（2026-08-07）：外侧道（|y| 更大）整车
+                     * 4 角点扫掠 |y| 从一开始就超路沿上限 → 前进弧第一步即收 →
+                     * 掉头永远完不成 / 撞施工。内侧道 = 当前行进方向靠中心线车道：
+                     * 前进（on_return=0，朝 +x）= lc/2；返程（on_return=1，朝 -x）
+                     * = lc/2-1。approach 区若在外侧道，先并回内侧道再掉头。
+                     * inner_lane/at_inner_lane 已在外层决策块声明，此处复用。 */
+                    /* 掉头 approach 区判定与 at_inner_lane 解耦（2026-08-07 修复）：
+                     * 旧实现把 at_inner_lane 放进 approach 区门槛 → 外侧道时整个
+                     * approach 块被跳过 → uturn_approach_active 恒 false → 下方
+                     * CRUISE/FOLLOW/变道分支的归位变道（都依赖 uturn_approach_active）
+                     * 永不触发 → ego 以外侧道满速逼近施工 → 撞施工（东端掉头实测）。
+                     * 进区即置 approach_active，让决策分支负责归位（外侧道）或
+                     * 减速保持（内侧道）；实际掉头触发仍要求 at_inner_lane。 */
+                    const bool uturn_zone =
+                        (g.on_return) ? (g.ego_x < approach3)
+                                      : (at_road_end && uturn_ref_x < 1e8 &&
+                                         g.ego_x > uturn_ref_x - approach3);
+                    if (uturn_zone) {
+                        uturn_approach_active = true;
+                    }
+                    if (!g.on_return && uturn_zone && at_inner_lane && g.cooldown <= 0.0) {
                         /* 距离兜底触发（2026-08-04）：approach 目标速度经 planning
                          * 轨迹链路衰减慢（实测 20→5 需 230m，v=5 恰在障碍前 13m
                          * 才达到 → 被迫 Phase 0 倒车腾挪）。距障碍 ≤30m 且 v≤7
@@ -1035,9 +1090,7 @@ protected:
                              * CRUISE 块恢复 20 后触发条件又失配 → 振荡） */
                             uturn_approach_active = true;
                         }
-                    } else if (g.on_return &&
-                               g.ego_x < approach3 &&
-                               g.cooldown <= 0.0) {
+                    } else if (g.on_return && uturn_zone && at_inner_lane && g.cooldown <= 0.0) {
                         /* 返程自然减速目标（Fix B）：对称于前向，dist_ref = ego_x
                          * （距返程起点 x=0），在触发区前沿降到触发速度。 */
                         {
@@ -1081,12 +1134,28 @@ protected:
                              g.ego_x, g.ref_path_end_x, g.on_return);
                 } else if (cur == BEH_ST_CRUISE) {
                     if (uturn_approach_active) {
-                        /* 掉头减速区：抑制变道/超车/归位决策，只保持自然减速目标
-                         * （掉头在即，变道无意义；实测旧行为变道+减速打架） */
-                        new_target_speed = uturn_natural_target;
-                        snprintf(reason, sizeof(reason),
-                                 "uturn approach active: hold %.1f m/s (x=%.1f)",
-                                 g.uturn_max_trigger_speed, g.ego_x);
+                        if (!at_inner_lane) {
+                            /* 掉头 approach 区且在外侧道：先并回内侧道再掉头
+                             * （掉头必须从内侧道发起）。归位变道与掉头减速同时
+                             * 进行，触发由 at_inner_lane 条件保证只在归位完成后
+                             * 发生。2026-08-07：旧实现在 approach 区一律抑制
+                             * 归位/变道 → 外侧道逼近施工触发掉头 → 角点越界 +
+                             * 前向空间不足 → 撞施工。 */
+                            ev = (inner_lane < current_idx)
+                                     ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
+                            new_target_lane = inner_lane;
+                            new_target_speed = uturn_natural_target;
+                            snprintf(reason, sizeof(reason),
+                                     "uturn approach: merge lane%d -> lane%d while decel %.1f m/s (x=%.1f)",
+                                     current_idx, inner_lane, uturn_natural_target, g.ego_x);
+                        } else {
+                            /* 掉头减速区（已在内侧道）：抑制变道/超车/归位决策，
+                             * 只保持自然减速目标（掉头在即，变道无意义） */
+                            new_target_speed = uturn_natural_target;
+                            snprintf(reason, sizeof(reason),
+                                     "uturn approach active: hold %.1f m/s (x=%.1f)",
+                                     g.uturn_max_trigger_speed, g.ego_x);
+                        }
                     } else if (worthwhile && adj_idx >= 0 &&
                         !lane_ahead_stop_light(adj_idx, lc, lw)) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
@@ -1167,9 +1236,20 @@ protected:
                              * 否则 ego 被前车拖着接近路端，触发时前向空间不足 →
                              * Phase 0 倒车腾挪（"掉头直接倒车"，不真实）。approach
                              * 区尽早减速到 uturn_max_trigger_speed，提前触发掉头，
-                             * 留足前向空间（≥12m 免倒车）。 */
-                            new_target_speed = uturn_natural_target;
-                            new_follow_id = 0;
+                             * 留足前向空间（≥12m 免倒车）。外侧道时先并回内侧道
+                             * （2026-08-07，掉头必须从内侧道发起）。 */
+                            if (!at_inner_lane) {
+                                ev = (inner_lane < current_idx)
+                                         ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
+                                new_target_lane = inner_lane;
+                                new_target_speed = uturn_natural_target;
+                                snprintf(reason, sizeof(reason),
+                                         "uturn approach(follow): merge lane%d -> lane%d while decel %.1f (x=%.1f)",
+                                         current_idx, inner_lane, uturn_natural_target, g.ego_x);
+                            } else {
+                                new_target_speed = uturn_natural_target;
+                                new_follow_id = 0;
+                            }
                         } else {
                             new_target_speed = follow_speed;
                             new_follow_id = lead_id;
@@ -1194,7 +1274,22 @@ protected:
                      * !g.on_return 抑制，返程永远无法借道——实测 car14 堵死
                      * 返程 25s+）。返程变道由 committed_lane 的 on_return 例外
                      * （变道中跟随 target）配套完成判定。 */
-                    if (g.committed_lane_idx == g.target_lane_idx) {
+                    if (uturn_approach_active && g.target_lane_idx != inner_lane) {
+                        /* 掉头 approach 区且正在朝外侧道变道（超车方向错）：
+                         * 放弃当前变道回 CRUISE，由 CRUISE 分支发起并回内侧道
+                         * 的归位变道。旧实现变道中保持超车速度逼近施工区 → 触发
+                         * 太晚（前向空间不足）且在外侧道 → 撞施工（2026-08-07）。
+                         * cooldown=0 让归位/掉头立刻可触发。 */
+                        ev = BEH_EV_TIMEOUT;
+                        new_target_lane = -1;
+                        g.cooldown = 0.0;
+                        new_target_speed = uturn_natural_target;
+                        snprintf(reason, sizeof(reason),
+                                 "uturn approach: abort lane change (target=%d != inner=%d) → merge back + decel %.1f",
+                                 g.target_lane_idx, inner_lane, uturn_natural_target);
+                        LOG_WARN("behavior", "uturn approach abort lane change (target=%d inner=%d)",
+                                 g.target_lane_idx, inner_lane);
+                    } else if (g.committed_lane_idx == g.target_lane_idx) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_s;
@@ -1208,6 +1303,14 @@ protected:
                         snprintf(reason, sizeof(reason), "timeout %.1fs → CRUISE fallback (cooldown=%.1fs)", g.state_timer, g.lane_change_cooldown_timeout_s);
                         LOG_WARN("behavior", "lane change timeout (state=%s, target_lane=%d, current=%d, timer=%.1f)",
                                  statem_state_name(&g.sm, cur), g.target_lane_idx, g.committed_lane_idx, g.state_timer);
+                    } else if (uturn_approach_active) {
+                        /* approach 区归位变道进行中（target==inner_lane）：
+                         * 合并期间同时按掉头减速目标减速，避免以超车速度
+                         * 冲近施工区（2026-08-07）。 */
+                        new_target_speed = uturn_natural_target;
+                        snprintf(reason, sizeof(reason),
+                                 "uturn approach merge in progress: decel %.1f m/s (x=%.1f)",
+                                 uturn_natural_target, g.ego_x);
                     }
                     /* 变道进行中且未超时：不覆盖 target_speed，保持进入时的超车速度 */
                 } else if (cur == BEH_ST_U_TURN) {
@@ -1474,6 +1577,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     g.has_obs = 0;
     g.has_road_geometry = 0;
     g.obs_count = 0;
+    g.raw_obs_count = 0;
     g.seq = 0;
     g.state = BEH_CRUISE;
     g.state_timer = 0.0;

@@ -300,6 +300,23 @@ function updateTopo(data) {
   var g = svg.append('g');
   var defs = svg.append('defs');
 
+  // 背景径向光晕（SVG 内叠加，增强层次）
+  var bgGrad = defs.append('radialGradient').attr('id','topo-bg').attr('cx','50%').attr('cy','35%').attr('r','75%');
+  bgGrad.append('stop').attr('offset','0%').attr('stop-color','#1f6feb').attr('stop-opacity',0.12);
+  bgGrad.append('stop').attr('offset','100%').attr('stop-color','#1f6feb').attr('stop-opacity',0);
+  // 背景 rect 必须 pointer-events:none——它铺满全图且排在 <g>(节点/链路)之后，
+  // 若默认接收指针事件会盖住下方节点，导致点击/拖拽/缩放全部失效。
+  svg.append('rect').attr('width','100%').attr('height','100%').attr('fill','url(#topo-bg)')
+    .attr('pointer-events','none');
+
+  // 网格底纹（与 #topo::before CSS 叠加，SVG 层负责缩放跟随）
+  defs.append('pattern').attr('id','topo-grid').attr('width',36).attr('height',36)
+    .attr('patternUnits','userSpaceOnUse')
+    .append('path').attr('d','M 36 0 L 0 0 0 36').attr('fill','none')
+    .attr('stroke','rgba(88,166,255,0.05)').attr('stroke-width',1);
+  svg.append('rect').attr('width','100%').attr('height','100%').attr('fill','url(#topo-grid)')
+    .attr('pointer-events','none');
+
   // Arrow markers
   var ARROW_COLORS = ['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#8b949e'];
   ARROW_COLORS.forEach(function(color, i) {
@@ -311,6 +328,34 @@ function updateTopo(data) {
       .attr('orient','auto')
       .append('path').attr('d','M 0 0 L 14 7 L 0 14 L 3 7 Z')
       .attr('fill',color).attr('opacity',0.85);
+  });
+
+  // 节点填充/光晕径向渐变（按 caps 色，玻璃球质感）
+  var COLOR_KEYS = [1,2,4,8,0];
+  COLOR_KEYS.forEach(function(k) {
+    var c = COLORS[k];
+    var ng = defs.append('radialGradient').attr('id','node-grad-'+k)
+      .attr('cx','35%').attr('cy','30%').attr('r','85%');
+    ng.append('stop').attr('offset','0%').attr('stop-color','#ffffff').attr('stop-opacity',0.9);
+    ng.append('stop').attr('offset','38%').attr('stop-color',c);
+    ng.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0.7);
+    var hg = defs.append('radialGradient').attr('id','node-halo-'+k)
+      .attr('cx','50%').attr('cy','50%').attr('r','50%');
+    hg.append('stop').attr('offset','0%').attr('stop-color',c).attr('stop-opacity',0.5);
+    hg.append('stop').attr('offset','100%').attr('stop-color',c).attr('stop-opacity',0);
+  });
+  var dg = defs.append('radialGradient').attr('id','node-grad-dead').attr('cx','35%').attr('cy','30%').attr('r','85%');
+  dg.append('stop').attr('offset','0%').attr('stop-color','#8b949e').attr('stop-opacity',0.55);
+  dg.append('stop').attr('offset','100%').attr('stop-color','#484f58');
+  var dh = defs.append('radialGradient').attr('id','node-halo-dead').attr('cx','50%').attr('cy','50%').attr('r','50%');
+  dh.append('stop').attr('offset','0%').attr('stop-color','#484f58').attr('stop-opacity',0.4);
+  dh.append('stop').attr('offset','100%').attr('stop-color','#484f58').attr('stop-opacity',0);
+
+  function colorKeyOf(d) { return (d.caps||0)&8 ? 8 : (d.caps||0)&4 ? 4 : (d.caps||0)&2 ? 2 : 1; }
+  // 节点半径按度（hub 更大）
+  var nodeR = ns.map(function(n, i) {
+    var deg = nodeDeg[i] || 0;
+    return Math.max(13, Math.min(27, 15 + deg * 1.3));
   });
 
   // Multi-link arc parameters
@@ -332,18 +377,31 @@ function updateTopo(data) {
   }));
 
   // Links
+  // 关键链路（cmd/plan/traj）叠加发光的"电光"底层 + 流动虚线层，突出数据流动
   var linkG = g.append('g').selectAll('path').data(links).join('path')
-    .attr('class','link')
+    .attr('class', function(d) {
+      return d._orphan ? 'link' :
+        ('link' + (/(cmd|plan|traj)/.test(d.topic) ? ' link-heat link-flow' : ''));
+    })
     .attr('stroke', function(d,i) { return d._orphan ? 'transparent' : ARROW_COLORS[i%ARROW_COLORS.length]; })
-    .attr('stroke-width', function(d) { return d._orphan ? 0 : (/(cmd|plan|traj)/.test(d.topic) ? 2.0 : 1.5); })
+    .attr('stroke-width', function(d) { return d._orphan ? 0 : (/(cmd|plan|traj)/.test(d.topic) ? 2.6 : 1.5); })
     .attr('fill','none')
-    .attr('stroke-dasharray', function(d) { return d._orphan ? null : (/(cmd|plan|traj)/.test(d.topic) ? '6,3' : null); })
+    .attr('stroke-dasharray', function(d) { return d._orphan ? null : (/(cmd|plan|traj)/.test(d.topic) ? '8,6' : null); })
     .attr('marker-end', function(d,i) { return d._orphan ? null : 'url(#arrow-'+(i%ARROW_COLORS.length)+')'; });
 
   var linkL = g.append('g').selectAll('text').data(links).join('text')
     .attr('class','link-label')
     .attr('font-size','8px').attr('fill','#8b949e').attr('text-anchor','middle')
     .text(function(d) { return d._orphan ? '' : d.topic.split('/').pop(); });
+
+  // 流动粒子：沿 cmd/plan/traj 关键链路穿梭的亮点，让"数据流动"可见
+  var particleLinks = links.filter(function(d){ return !d._orphan && /(cmd|plan|traj)/.test(d.topic); });
+  var particleG = g.append('g').selectAll('circle').data(particleLinks).join('circle')
+    .attr('class','node-sheen')
+    .attr('pointer-events','none')
+    .attr('r', 2.6)
+    .attr('fill', function(d,i){ return ARROW_COLORS[i%ARROW_COLORS.length]; })
+    .attr('opacity', 0.95);
 
   // Nodes
   var nodeG = g.append('g').selectAll('g').data(ns).join('g')
@@ -355,11 +413,31 @@ function updateTopo(data) {
       .on('end', function(e,d) { if (!e.sourceEvent.ctrlKey) { d.fx = null; d.fy = null; } })
     );
 
+  // 节点三层结构：外层光晕(halo) + 中间脉冲(pulse) + 内层玻璃球核心(core)
+  // 复用上方按 caps 色生成的径向渐变，真正把 CSS 里的炫酷类接上
   nodeG.append('circle')
-    .attr('r', 20)
+    .attr('class', 'node-halo')
+    .attr('pointer-events','none')
+    .attr('r', function(d,i) { return nodeR[i] * 1.9; })
     .attr('fill', function(d) {
-      return d.alive === false ? '#484f58' :
-        COLORS[(d.caps||0)&8 ? 8 : (d.caps||0)&4 ? 4 : (d.caps||0)&2 ? 2 : 1];
+      return d.alive === false ? 'url(#node-halo-dead)' : 'url(#node-halo-'+colorKeyOf(d)+')';
+    })
+    .attr('opacity', function(d) { return d.alive === false ? 0 : 0.45; });
+
+  nodeG.append('circle')
+    .attr('class', 'node-pulse')
+    .attr('pointer-events','none')
+    .attr('r', function(d,i) { return nodeR[i] * 1.35; })
+    .attr('fill', function(d) {
+      return d.alive === false ? 'url(#node-halo-dead)' : 'url(#node-halo-'+colorKeyOf(d)+')';
+    })
+    .attr('opacity', function(d) { return d.alive === false ? 0.1 : 0.5; });
+
+  nodeG.append('circle')
+    .attr('class', 'node-core')
+    .attr('r', function(d,i) { return nodeR[i]; })
+    .attr('fill', function(d) {
+      return d.alive === false ? 'url(#node-grad-dead)' : 'url(#node-grad-'+colorKeyOf(d)+')';
     })
     .attr('stroke','#21262d').attr('stroke-width',2)
     .style('cursor','pointer')
@@ -367,10 +445,10 @@ function updateTopo(data) {
       e.stopPropagation();
       if (selectedNode === d) {
         selectedNode = null;
-        nodeG.selectAll('circle').classed('node-selected', false);
+        nodeG.selectAll('.node-core').classed('node-selected', false);
       } else {
         selectedNode = d;
-        nodeG.selectAll('circle').classed('node-selected', false);
+        nodeG.selectAll('.node-core').classed('node-selected', false);
         d3.select(this).classed('node-selected', true);
         showNodeDetail(d.name);
       }
@@ -393,7 +471,7 @@ function updateTopo(data) {
 
   function applyHighlight(ng, lg, ll) {
     if (!selectedNode) {
-      ng.selectAll('circle').attr('opacity',1);
+      ng.selectAll('.node-core').attr('opacity',1);
       lg.attr('opacity',1);
       ll.attr('opacity',1);
       return;
@@ -405,7 +483,7 @@ function updateTopo(data) {
       if (s === selId) { connIds.add(t); connEdges.add(i); }
       if (t === selId) { connIds.add(s); connEdges.add(i); }
     });
-    ng.selectAll('circle').attr('opacity', function(d) { return connIds.has(d.id)||d===selectedNode ? 1 : 0.25; });
+    ng.selectAll('.node-core').attr('opacity', function(d) { return connIds.has(d.id)||d===selectedNode ? 1 : 0.25; });
     lg.attr('opacity', function(d,i) { return connEdges.has(i) ? 1 : 0.12; });
     ll.attr('opacity', function(d,i) { return connEdges.has(i) ? 1 : 0.12; });
   }
@@ -446,6 +524,26 @@ function updateTopo(data) {
         return 0.25*sy + 0.5*cy + 0.25*ty - 4;
       });
       nodeG.attr('transform', function(d) { return 'translate('+d.x+','+d.y+')'; });
+
+      // 流动粒子沿二次贝塞尔(与链路同公式)匀速穿梭
+      var pt = (Date.now() % 1600) / 1600;
+      particleG.attr('cx', function(d) {
+        var sx=d.source.x, sy=d.source.y, tx=d.target.x, ty=d.target.y;
+        var dx=tx-sx, dy=ty-sy, dist=Math.sqrt(dx*dx+dy*dy)||1;
+        var px=-dy/dist, py=dx/dist;
+        var total=d._total||1, idx=d._idx||0, arcOff=(idx-(total-1)/2)*28;
+        var ccx=(sx+tx)/2+px*arcOff, ccy=(sy+ty)/2+py*arcOff;
+        var u=1-pt;
+        return u*u*sx + 2*u*pt*ccx + pt*pt*tx;
+      }).attr('cy', function(d) {
+        var sx=d.source.x, sy=d.source.y, tx=d.target.x, ty=d.target.y;
+        var dx=tx-sx, dy=ty-sy, dist=Math.sqrt(dx*dx+dy*dy)||1;
+        var px=-dy/dist, py=dx/dist;
+        var total=d._total||1, idx=d._idx||0, arcOff=(idx-(total-1)/2)*28;
+        var ccx=(sx+tx)/2+px*arcOff, ccy=(sy+ty)/2+py*arcOff;
+        var u=1-pt;
+        return u*u*sy + 2*u*pt*ccy + pt*pt*ty;
+      });
     });
 
   _topoSim.alpha(1).restart();

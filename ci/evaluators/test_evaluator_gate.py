@@ -93,13 +93,19 @@ def run_all_checks() -> int:
     check("speed flagged dead", rep["speed"]["dead"])
     check("x still alive", not rep["x"]["dead"])
 
-    print("\n[2] dead signal — steer constant (lateral control never acts)")
+    # ── 2/3. straight-lane constancy is allowed (2026-08-07 修复 34b1c8f 漏更新) ──
+    # 34b1c8f 将 y/heading/steer_signed 标为 may_be_const=True：直线车道场景
+    # (multi_light/oncoming cruise) 中这些量合法恒定，作为全局硬死信会误报
+    # straight-road false positive。故恒定 steer/heading 不再全局判 dead；
+    # 死值检测落在 speed/x 等必须动态的量（见 [1]/[6]），
+    # steer/heading 的异常由 scenario 级门禁校验（[18] bang-bang 等）。
+    print("\n[2] straight-lane — steer constant is allowed (not globally dead)")
     rep = de.liveness_report(_series(steer_signed=0.0))
-    check("steer flagged dead", rep["steer_signed"]["dead"])
+    check("steer constant NOT globally dead", not rep["steer_signed"]["dead"])
 
-    print("\n[3] dead signal — heading constant (flowsim resetting heading)")
+    print("\n[3] straight-lane — heading constant is allowed (not globally dead)")
     rep = de.liveness_report(_series(heading=0.0))
-    check("heading flagged dead", rep["heading"]["dead"])
+    check("heading constant NOT globally dead", not rep["heading"]["dead"])
 
     print("\n[4] healthy run must NOT trip the liveness gate")
     rep = de.liveness_report(_series())
