@@ -12,6 +12,7 @@ cmake_install.cmake
 Makefile
 *.cmake
 !CMakeLists.txt
+!cmake/*.cmake
 
 # 编译生成的文件
 *.o
