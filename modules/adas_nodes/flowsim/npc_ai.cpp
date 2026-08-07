@@ -422,17 +422,18 @@ static void recycle_npc(Entity& npc, const Route& route, double ego_route_s,
                 npc.x = wp.x;
                 npc.y = wp.y;
                 double h = wp.h + (npc.route_dir < 0 ? M_PI : 0.0);
-                /* 对向：lane/参考线 h 不稳，改用几何切线 */
+                /* 对向：lane/参考线 h 不稳，改用几何切线；失败则回退 wp.h+π */
                 if (npc.route_dir < 0) {
                     int rid = 0, ridx = -1;
                     double s_local = 0.0;
                     route.locate(npc.route_s, rid, s_local, ridx);
-                    (void)road_tangent_heading(*roads, rid, s_local, npc.offset,
-                                               npc.route_dir, h);
-                } else {
-                    while (h >  M_PI) h -= 2.0 * M_PI;
-                    while (h < -M_PI) h += 2.0 * M_PI;
+                    if (!road_tangent_heading(*roads, rid, s_local, npc.offset,
+                                              npc.route_dir, h)) {
+                        h = wp.h + M_PI;
+                    }
                 }
+                while (h >  M_PI) h -= 2.0 * M_PI;
+                while (h < -M_PI) h += 2.0 * M_PI;
                 npc.heading = h;
                 /* vx/vy 已在上面清零，保持 0 即可（speed=0） */
             }
