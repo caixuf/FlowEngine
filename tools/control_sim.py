@@ -49,6 +49,22 @@ LC_TRIGGER_TIME  = 3.0     # 变道触发时间 s
 ROAD_GUARD_THRESHOLD = 3.0  # m
 
 
+def _rect_max_abs_y(y, h, half_len=2.3, half_wid=1.0):
+    """整车矩形 4 角点 |y| 最大值（2026-08-07 Fix A 占据空间）。
+
+    与 C++ generate_uturn_trajectory 的 rect_max_abs_y 一致：校验车身全部
+    4 角点的 |y| 都落在路沿内，任意角越界即收（人手式"不碰路边"），
+    替代旧实现只看单个"外侧角点"。
+    """
+    sh, ch = math.sin(h), math.cos(h)
+    c = [y + half_len * sh + half_wid * ch,
+         y + half_len * sh - half_wid * ch,
+         y - half_len * sh + half_wid * ch,
+         y - half_len * sh - half_wid * ch]
+    return max(abs(v) for v in c)
+
+
+
 # ══════════════════════════════════════════════════════════════
 #  LTV MPC 求解器（完全移植 ltv_mpc.c）
 # ══════════════════════════════════════════════════════════════
@@ -928,7 +944,11 @@ class UturnParams:
         self.phase2_duration = 0.0
 
         # ── multi 模式（多把方向，角点约束退出）──
-        self.corner_limit = 6.5           # 前弧车身角点上限（路沿 7.0 − 0.5 余量）
+        # 2026-08-07 Fix A：路沿从真实车道布局推导（不再硬编码 4 车道 7.0），
+        # 角点上限 = 路沿 − 护栏余量，与 C++ generate_uturn_trajectory 一致。
+        self.road_half = (N_LANES / 2.0) * LANE_WIDTH   # 路沿 y（4 车道 = 7.0）
+        self.guardrail_margin = 1.0                     # 护栏安全余量 m
+        self.corner_limit = self.road_half - self.guardrail_margin
         self.reverse_corridor = 0.5       # 倒车回撤走廊（中心回到 |y|≤0.5 即收）
         self.max_strokes = 5              # 最多前进弧把数
         self.stroke_steer = 0.60          # 前弧满舵（掉头规范"向左打死"，去/返程同号）
@@ -1094,8 +1114,8 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
             result.x.append(ego.x); result.y.append(ego.y)
             result.v.append(ego.v); result.heading.append(ego.heading)
             result.steer.append(steer)
-            corner = ego.y + 2.3 * math.sin(ego.heading) + stroke_dir * 1.0 * abs(math.cos(ego.heading))
-            result.corner_max = max(result.corner_max, abs(corner))
+            corner = _rect_max_abs_y(ego.y, ego.heading)   # Fix A：整车 4 角点扫掠
+            result.corner_max = max(result.corner_max, corner)
 
         done = False
         for stroke in range(params.max_strokes):
@@ -1112,8 +1132,8 @@ def run_uturn_simulation(params=None, start_lane_y=-1.75, start_heading=0.0):
                 ego.y += params.cruise_speed * math.sin(ego.heading) * DT + hb * math.cos(ego.heading) * yaw_rate * DT
                 ego.v = params.cruise_speed
                 _record(steer, ego.v)
-                corner = ego.y + 2.3 * math.sin(ego.heading) + stroke_dir * 1.0 * abs(math.cos(ego.heading))
-                corner_ok = (corner <= params.corner_limit) if stroke_dir > 0 else (corner >= -params.corner_limit)
+                corner = _rect_max_abs_y(ego.y, ego.heading)   # Fix A：整车 4 角点扫掠
+                corner_ok = corner <= params.corner_limit      # 双向统一按 |y| 判越界
                 aligned = (abs(_norm(ego.heading) - target_h) < params.finish_heading_tol
                            and abs(ego.y - target_y) < params.finish_lane_tol)
                 t_stroke += DT

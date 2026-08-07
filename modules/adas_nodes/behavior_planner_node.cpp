@@ -941,6 +941,10 @@ protected:
                  * 的 5 m/s 目标覆盖回 20 → 减速形同虚设，实测减速全靠 Frenet
                  * 近距刹停，v=5 恰在障碍前 10m 才达到 → 被迫 Phase 0 倒车。 */
                 bool uturn_approach_active = false;
+                /* 掉头自然减速目标（2026-08-07 Fix B）：按制动距离自洽，远处
+                 * 保持巡航，临近触发点才平滑降到 uturn_max_trigger_speed。
+                 * 替代旧实现"进入 360m 减速区就全程封顶 5 m/s"的硬限速。 */
+                double uturn_natural_target = 0.0;
                 if (cur != BEH_ST_U_TURN) {
                     /* 掉头触发参考点 = min(路端, 触发区内前方最近静止障碍)。
                      * 施工区在路端时必须在施工前完成掉头（2026-08-03 实测：
@@ -977,6 +981,24 @@ protected:
                             }
                         }
                     }
+                    /* 掉头自然减速目标（Fix B）：在触发区前沿（距离 uturn_ref_x
+                     * 恰为 uturn_approach_dist_m 处）降到触发速度，再往前按制动
+                     * 距离自洽平滑减速。a_dec 取整链路可达悲观减速度（控制实测
+                     * 0.8-1.0 m/s²）。远处 v_env 超巡航 → 保持巡航车速自然接近，
+                     * 不再像旧实现一路 5 m/s 爬行。 */
+                    {
+                        const double a_dec = 1.0;   /* 可达减速度 (m/s²)，悲观取 1.0 */
+                        double dist_ref = uturn_ref_x - g.ego_x;
+                        double v_env;
+                        if (dist_ref <= g.uturn_approach_dist_m) {
+                            v_env = g.uturn_max_trigger_speed;
+                        } else {
+                            v_env = sqrt(2.0 * a_dec * (dist_ref - g.uturn_approach_dist_m)
+                                         + g.uturn_max_trigger_speed * g.uturn_max_trigger_speed);
+                        }
+                        uturn_natural_target = (v_env > g.cfg_cruise_speed)
+                                               ? g.cfg_cruise_speed : v_env;
+                    }
                     /* 减速区 = 3×approach（360m），触发区 = 1×approach（120m）+ v≤5。
                      * 2026-08-04 修复：旧实现减速区 120m（实测控制减速仅 ~0.8-1.0
                      * m/s²，20→5 需 230m）—— v=5 恰在障碍前 10m 才达到 →
@@ -1001,7 +1023,7 @@ protected:
                             uturn_trigger = true;
                         } else if (g.ego_v > g.uturn_max_trigger_speed) {
                             new_target_lane = -1;
-                            new_target_speed = g.uturn_max_trigger_speed;
+                            new_target_speed = uturn_natural_target;
                             uturn_approach_active = true;
                             snprintf(reason, sizeof(reason),
                                      "uturn approach: decelerate %.1f→%.1f m/s before trigger (x=%.1f end=%.1f)",
@@ -1016,11 +1038,26 @@ protected:
                     } else if (g.on_return &&
                                g.ego_x < approach3 &&
                                g.cooldown <= 0.0) {
+                        /* 返程自然减速目标（Fix B）：对称于前向，dist_ref = ego_x
+                         * （距返程起点 x=0），在触发区前沿降到触发速度。 */
+                        {
+                            const double a_dec = 1.0;
+                            double dist_ref = g.ego_x;
+                            double v_env;
+                            if (dist_ref <= g.uturn_approach_dist_m) {
+                                v_env = g.uturn_max_trigger_speed;
+                            } else {
+                                v_env = sqrt(2.0 * a_dec * (dist_ref - g.uturn_approach_dist_m)
+                                             + g.uturn_max_trigger_speed * g.uturn_max_trigger_speed);
+                            }
+                            uturn_natural_target = (v_env > g.cfg_cruise_speed)
+                                                   ? g.cfg_cruise_speed : v_env;
+                        }
                         if (g.ego_x < 30.0 && g.ego_v <= 7.0) {
                             uturn_trigger = true;
                         } else if (g.ego_v > g.uturn_max_trigger_speed) {
                             new_target_lane = -1;
-                            new_target_speed = g.uturn_max_trigger_speed;
+                            new_target_speed = uturn_natural_target;
                             uturn_approach_active = true;
                             snprintf(reason, sizeof(reason),
                                      "uturn approach(return): decelerate %.1f→%.1f m/s",
@@ -1044,9 +1081,9 @@ protected:
                              g.ego_x, g.ref_path_end_x, g.on_return);
                 } else if (cur == BEH_ST_CRUISE) {
                     if (uturn_approach_active) {
-                        /* 掉头减速区：抑制变道/超车/归位决策，只保持减速目标
+                        /* 掉头减速区：抑制变道/超车/归位决策，只保持自然减速目标
                          * （掉头在即，变道无意义；实测旧行为变道+减速打架） */
-                        new_target_speed = g.uturn_max_trigger_speed;
+                        new_target_speed = uturn_natural_target;
                         snprintf(reason, sizeof(reason),
                                  "uturn approach active: hold %.1f m/s (x=%.1f)",
                                  g.uturn_max_trigger_speed, g.ego_x);
@@ -1131,7 +1168,7 @@ protected:
                              * Phase 0 倒车腾挪（"掉头直接倒车"，不真实）。approach
                              * 区尽早减速到 uturn_max_trigger_speed，提前触发掉头，
                              * 留足前向空间（≥12m 免倒车）。 */
-                            new_target_speed = g.uturn_max_trigger_speed;
+                            new_target_speed = uturn_natural_target;
                             new_follow_id = 0;
                         } else {
                             new_target_speed = follow_speed;

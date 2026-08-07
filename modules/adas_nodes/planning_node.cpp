@@ -667,7 +667,14 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
      *   去程北角点: y + 2.3*sin(h) + 1.0*|cos(h)|
      *   返程南角点: y + 2.3*sin(h) - 1.0*|cos(h)|
      */
-    const double uturn_corner_limit = 6.0;         /* 前弧角点上限（路沿 7.0 − 1.0 余量）*/
+    /* ── 路沿/护栏边界（2026-08-07 Fix A：占据空间）──
+     * 旧实现 uturn_corner_limit=6.0 写死，默认 4 车道路（半宽 7.0）减 1.0 余量；
+     * 窄路（如 2 车道，半宽 3.5）时 6.0 远超实际路沿 → 角点检查永不触发 →
+     * 车身甩出路面撞护栏。改为从真实车道布局推导路沿，护栏留固定余量。 */
+    const double road_half_width =
+        ((g.lane_count >= 1) ? (double)g.lane_count : 2.0) * 0.5 * g.lane_width;
+    const double guardrail_margin = 1.0;           /* 护栏安全余量 (m) */
+    const double uturn_corner_limit = road_half_width - guardrail_margin;
     const double uturn_reverse_corridor = 0.5;     /* 倒车回撤走廊（中心回 |y|≤0.5）*/
     const int    uturn_max_strokes = 5;            /* 最多前进弧把数 */
     const double uturn_stroke_timeout_s = 4.0;     /* 每把超时 */
@@ -711,11 +718,23 @@ static int generate_uturn_trajectory(TrajectoryPoint* points, int max_points,
             stroke_t += dt;
             t_us += (uint32_t)(dt * 1e6);
 
-            /* 外侧角点（方向相关）*/
-            double corner_y = y + half_body_len * sin(h)
-                            + stroke_dir * half_body_wid * fabs(cos(h));
-            bool corner_ok = (stroke_dir > 0) ? (corner_y <= uturn_corner_limit)
-                                              : (corner_y >= -uturn_corner_limit);
+            /* ── 整车矩形 4 角点扫掠占据（2026-08-07 Fix A）──
+             * 旧实现只看单个"外侧角点"（y + a·sin(h) + b·|cos(h)|），车尾
+             * 另一侧角或倒车段仍可能越界。改为校验车身矩形全部 4 角点的 |y|
+             * 都落在路沿内，任意角越界即收（人手式"不碰路边"）。 */
+            auto rect_max_abs_y = [&](double hh) {
+                double c[4] = {
+                    y + half_body_len * sin(hh) + half_body_wid * cos(hh),
+                    y + half_body_len * sin(hh) - half_body_wid * cos(hh),
+                    y - half_body_len * sin(hh) + half_body_wid * cos(hh),
+                    y - half_body_len * sin(hh) - half_body_wid * cos(hh),
+                };
+                double m = 0.0;
+                for (int k = 0; k < 4; k++) { double ay = fabs(c[k]); if (ay > m) m = ay; }
+                return m;
+            };
+            double corner_y = rect_max_abs_y(h);
+            bool corner_ok = (corner_y <= uturn_corner_limit);
             /* 对准目标车道即收（末把自然对齐，残差方向收敛由全锁弧完成）*/
             bool aligned = (fabs(norm_h(h - uturn_target_h)) < 0.10)
                         && (fabs(y - target_lane_center_y) < 1.75);
