@@ -1,6 +1,6 @@
 {
   "name": "straight_road",
-  "description": "综合直路+S弯场景：3000m 双向 4 车道，前 350m/后 700m 直道（两端物理掉头），中段插入一对缓 S 弯（峰值横向约 ±35m，min R≳500m），验证曲率限速 + LTV MPC kappa 前馈与 NPC/红绿灯/施工区综合交互。演示起点 x≈20 朝西（西端掉头点前），开场即做西端掉头，随后沿东行方向长途巡航 20m/s，途经 S 弯与多组红绿灯/慢车。NPC 仍用旧格式 x/y + 符号 vx（vy=0）约定：flowsim 以 vy==0 && vx<0 识别对向车并翻 heading。",
+  "description": "综合直路+S弯场景：3000m 双向 4 车道，前 350m/后 700m 直道（两端物理掉头），中段缓 S 弯（峰值横向约 ±35m，min R≳500m）。NPC 用旧格式世界 x/y（已按 s/l 投影到中心线），vx 符号+vy=0 保留对向约定；flowsim 在 roads_loaded 时把 x/y 当世界坐标 snap 到路网。",
   "random_seed": 137,
   "duration_s": 0,
   "ego": {
