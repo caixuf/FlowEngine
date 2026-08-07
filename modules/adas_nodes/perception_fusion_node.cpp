@@ -428,14 +428,12 @@ protected:
         LOG_INFO("perception_fusion", "FlowCoro perception fusion started (thread-pool resume)");
         long period_us = 1000000L / (g.publish_hz > 0 ? g.publish_hz : 10);
 
+        /* BusQueueBridge 常驻订阅，替代 select_for 每次循环反复注册/退订 */
+        BusQueueBridge pf_bridge(bus(), {g.input_a_topic, g.input_b_topic});
+
         while (!should_stop()) {
-            /* select_for 替代 usleep(period_us)：等任一输入或 period 超时。
-             * 超时作 watchdog（无数据时定期醒来，与旧 usleep 等价）；
-             * 有数据即醒，融合延迟比旧 usleep 更低。自动注入 CancelToken，
-             * stop() 可立即唤醒。 */
-            auto res = co_await select_for(bus(), {g.input_a_topic, g.input_b_topic},
-                                           (uint64_t)period_us);
-            (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
+            /* recv_any_for: 等任一输入或 period 超时；超时作 watchdog */
+            (void)co_await pf_bridge.recv_any_for((uint64_t)period_us);
             if (should_stop() || !g.enabled) break;
 
             uint64_t now = clock_now_us();

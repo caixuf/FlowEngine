@@ -129,12 +129,12 @@ protected:
     Task run() override {
         LOG_INFO("fusion", "FlowCoro fusion started (thread-pool resume)");
 
+        /* BusQueueBridge 常驻订阅，替代 select_for 每次循环反复注册/退订 */
+        BusQueueBridge fusion_bridge(bus(), {"sensor/lidar", "sensor/gps", "sensor/pose"});
+
         while (!should_stop()) {
-            /* 替代 pthread_cond_timedwait(100ms)：100ms 超时作 watchdog，
-             * 防止 lidar 停发时协程卡死。select_for 自动注入 cancel_token_，
-             * stop() 可立即唤醒。 */
-            auto res = co_await select_for(bus(), {"sensor/lidar", "sensor/gps", "sensor/pose"}, 100000);
-            (void)res;  /* 唤醒即可，数据从 MessageBuffer 读取 */
+            /* recv_any_for: 100ms 超时作 watchdog，防止 lidar 停发时协程卡死 */
+            (void)co_await fusion_bridge.recv_any_for(100000);
             if (should_stop()) break;
 
             /* §11.2: heartbeat 上报 — monitor_node 的 degrade_supervisor_tick 据此检测超时 */

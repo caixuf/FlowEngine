@@ -1347,13 +1347,14 @@ protected:
          * 导致 planning 线程挂掉。 */
         update_reference_path(0.0);
 
+        /* BusQueueBridge 常驻订阅，替代 select_for 每次循环反复注册/退订 */
+        BusQueueBridge plan_bridge(bus(),
+            {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES,
+             TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_REF_PATH});
+
         while (!should_stop()) {
-            /* select_for: 等待 fusion、障碍物或道路几何更新触发规划（消息驱动），
-             * 50ms 超时兜底。替代 sleep_us 轮询，降低空等 CPU 占用。 */
-            auto r = co_await select_for(bus(),
-                {TOPIC_FUSION_LOCALIZATION, TOPIC_PERCEPTION_OBSTACLES,
-                 TOPIC_ROAD_GEOMETRY, TOPIC_ROAD_REF_PATH}, 50000);
-            (void)r;
+            /* recv_any_for: 等待 fusion、障碍物或道路几何更新触发规划，50ms 超时兜底 */
+            (void)co_await plan_bridge.recv_any_for(50000);
             if (should_stop()) break;
 
             /* 20Hz rate limit */

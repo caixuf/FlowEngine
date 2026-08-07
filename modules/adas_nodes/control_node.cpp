@@ -461,13 +461,13 @@ public:
 
 protected:
     Task run() override {
+        /* BusQueueBridge 常驻订阅，替代 select_for 每次循环反复注册/退订 */
+        BusQueueBridge ctrl_bridge(bus(),
+            {TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY});
         while (!should_stop()) {
-            /* select_for: 等待 fusion 或 planning 消息（消息驱动），
-             * 50ms 超时兜底保持 DATA_TIMEOUT fallback 及时性。
-             * 替代 usleep/sleep_us 轮询，降低空等 CPU 占用。 */
-            auto r = co_await select_for(bus(),
-                {TOPIC_FUSION_LOCALIZATION, TOPIC_PLANNING_TRAJECTORY}, 50000);
-            (void)r;
+            /* recv_any_for: 等待 fusion 或 planning 消息（消息驱动），
+             * 50ms 超时兜底保持 DATA_TIMEOUT fallback 及时性。 */
+            (void)co_await ctrl_bridge.recv_any_for(50000);
             if (should_stop()) break;
 
             /* 40Hz rate limit */
