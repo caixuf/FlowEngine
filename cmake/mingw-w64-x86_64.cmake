@@ -6,11 +6,22 @@ set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
 # Prefer posix-thread variant (supports C++11 threads, std::mutex, etc.)
-find_program(MINGW_CC  x86_64-w64-mingw32-gcc-posix
-             NAMES     x86_64-w64-mingw32-gcc)
-find_program(MINGW_CXX x86_64-w64-mingw32-g++-posix
-             NAMES     x86_64-w64-mingw32-g++)
+find_program(MINGW_CC
+    NAMES x86_64-w64-mingw32-gcc-posix x86_64-w64-mingw32-gcc)
+find_program(MINGW_CXX
+    NAMES x86_64-w64-mingw32-g++-posix x86_64-w64-mingw32-g++)
 find_program(MINGW_RC  x86_64-w64-mingw32-windres)
+
+if(NOT MINGW_CC)
+    message(FATAL_ERROR
+        "mingw-w64 C compiler not found. "
+        "Install it with: sudo apt-get install gcc-mingw-w64-x86-64")
+endif()
+if(NOT MINGW_CXX)
+    message(FATAL_ERROR
+        "mingw-w64 C++ compiler not found. "
+        "Install it with: sudo apt-get install g++-mingw-w64-x86-64")
+endif()
 
 set(CMAKE_C_COMPILER   "${MINGW_CC}")
 set(CMAKE_CXX_COMPILER "${MINGW_CXX}")
