@@ -111,8 +111,23 @@ static inline const char* traffic_light_state_str(TrafficLightState s) {
     }
 }
 
+/**
+ * Whether a signal controls the current travel direction.
+ *
+ * y_lane is a forward-reference lateral offset: negative controls the
+ * forward carriageway, positive controls the return carriageway. A centered
+ * signal controls both directions. Each signal governs every lane on its
+ * carriageway, not only the lane whose center equals y_lane.
+ */
+static inline int traffic_light_controls_direction(double lane_offset,
+                                                   int on_return) {
+    if (fabs(lane_offset) < 0.25) return 1;
+    return on_return ? (lane_offset > 0.0) : (lane_offset < 0.0);
+}
+
 /* ── road/traffic_lights topic 共享解析 ──────────────────────────
- * flowsim 把灯序列化为 {"lights":[{x,y_lane,state},...]}，
+ * flowsim 把灯序列化为
+ * {"lights":[{x,y,lane_offset,state},...]}，
  * planning/behavior/inference/data_recorder 等多个节点消费同一份
  * topic。2026-07 起每个节点手写一份 cJSON 循环解析——schema 一改
  * 就要同步 N 处，漏一处就静默漂移。统一在此解析成 TrafficLightCache，
@@ -122,8 +137,9 @@ static inline const char* traffic_light_state_str(TrafficLightState s) {
 #define TL_CACHE_MAX 16
 
 typedef struct {
-    double x[TL_CACHE_MAX];        /* 停止线 x（m） */
-    double y_lane[TL_CACHE_MAX];   /* 管辖车道中心 y（m） */
+    double x[TL_CACHE_MAX];           /* 停止线世界 x（m） */
+    double y[TL_CACHE_MAX];           /* 停止线世界 y（m） */
+    double lane_offset[TL_CACHE_MAX]; /* 前向参考系管辖半幅偏移（m） */
     int    state[TL_CACHE_MAX];    /* TrafficLightState */
     int    count;                  /* 灯数量 */
     int    valid;                  /* 收到过非空 lights 数组 */
@@ -142,11 +158,20 @@ static inline void traffic_lights_parse(const char* json, TrafficLightCache* c) 
         cJSON_ArrayForEach(light, lights) {
             if (c->count >= TL_CACHE_MAX) break;
             cJSON* item;
-            c->x[c->count]      = 0.0;
-            c->y_lane[c->count] = -1.75;
-            c->state[c->count]  = TL_GREEN;
-            if ((item = cJSON_GetObjectItemCaseSensitive(light, "x")))       c->x[c->count]      = item->valuedouble;
-            if ((item = cJSON_GetObjectItemCaseSensitive(light, "y_lane")))  c->y_lane[c->count] = item->valuedouble;
+            c->x[c->count]           = 0.0;
+            c->y[c->count]           = 0.0;
+            c->lane_offset[c->count] = -1.75;
+            c->state[c->count]       = TL_GREEN;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "x")) &&
+                cJSON_IsNumber(item)) c->x[c->count] = item->valuedouble;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "y")) &&
+                cJSON_IsNumber(item)) c->y[c->count] = item->valuedouble;
+            else if ((item = cJSON_GetObjectItemCaseSensitive(light, "y_lane")) &&
+                     cJSON_IsNumber(item)) c->y[c->count] = item->valuedouble;
+            if ((item = cJSON_GetObjectItemCaseSensitive(light, "lane_offset")) &&
+                cJSON_IsNumber(item)) {
+                c->lane_offset[c->count] = item->valuedouble;
+            }
             if ((item = cJSON_GetObjectItemCaseSensitive(light, "state")) && cJSON_IsString(item)) {
                 if (strcmp(item->valuestring, "red") == 0)       c->state[c->count] = TL_RED;
                 else if (strcmp(item->valuestring, "yellow") == 0) c->state[c->count] = TL_YELLOW;

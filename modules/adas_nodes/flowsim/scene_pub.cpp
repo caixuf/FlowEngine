@@ -336,8 +336,12 @@ cJSON* build_traffic_light_json(const Entity& e) {
     cJSON* j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "type", "tl");
     cJSON_AddNumberToObject(j, "id", (double)e.id);
+    cJSON_AddNumberToObject(j, "scenario_id", (double)e.scenario_id);
     cJSON_AddNumberToObject(j, "x", e.x);
     cJSON_AddNumberToObject(j, "y", e.y);
+    cJSON_AddNumberToObject(j, "stop_x", e.signal_stop_x);
+    cJSON_AddNumberToObject(j, "stop_y", e.signal_stop_y);
+    cJSON_AddNumberToObject(j, "lane_offset", e.offset);
     cJSON_AddNumberToObject(j, "heading", e.heading);
     cJSON_AddStringToObject(j, "state", tl_phase_str(e.phase_state));
     cJSON_AddNumberToObject(j, "remain_s", e.phase_timer);

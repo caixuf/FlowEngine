@@ -158,6 +158,7 @@ struct PlanningContext {
     double        map_ref_s[128]{};
     int           map_ref_count{0};
     uint64_t      last_map_ref_us{0};
+    int           on_return{0};
     double cfg_highway_speed_mps{13.0}; /* CP->NP 升级所需的持续速度阈值 (m/s) */
 
     /* 道路几何（可选弯道，来自场景文件 "road"；全零 = 直道，行为不变） */
@@ -178,8 +179,9 @@ struct PlanningContext {
      * 缓存前方最近的红/黄灯，用于在 Frenet 障碍物数组中注入虚拟停止线墙。
      * 红灯/黄灯时注入一面跨车道宽度的静止"墙"，绿灯时不注入——
      * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
-    double tl_x[TL_CACHE_MAX];         /* 停止线 x（世界坐标） */
-    double tl_y_lane[TL_CACHE_MAX];    /* 灯所在车道 y */
+    double tl_x[TL_CACHE_MAX];         /* 停止线世界 x */
+    double tl_y[TL_CACHE_MAX];         /* 停止线世界 y */
+    double tl_lane_offset[TL_CACHE_MAX]; /* 前向参考系管辖半幅 */
     int    tl_state[TL_CACHE_MAX];     /* TrafficLightState */
     int    tl_count{0};
     volatile int has_traffic_lights{0};
@@ -318,6 +320,19 @@ static bool project_to_reference_path(double x, double y,
     if (out_ref_y) *out_ref_y = projection.ref_y;
     if (out_heading) *out_heading = projection.heading;
     return true;
+}
+
+static double traffic_light_ahead_distance(int index) {
+    double ego_s = 0.0, ego_d = 0.0;
+    double light_s = 0.0, light_d = 0.0;
+    if (project_to_reference_path(g.ego_x, g.ego_y, ego_s, ego_d) &&
+        project_to_reference_path(
+            g.tl_x[index], g.tl_y[index], light_s, light_d)) {
+        return light_s - ego_s;
+    }
+    const double dx = g.tl_x[index] - g.ego_x;
+    const double dy = g.tl_y[index] - g.ego_y;
+    return dx * std::cos(g.ego_heading) + dy * std::sin(g.ego_heading);
 }
 
 static void update_reference_path(double start_x, bool opposite = false) {
@@ -1099,6 +1114,8 @@ static void on_road_ref_path(const Message* msg, void* user_data) {
     if (!msg) return;
     cJSON* root = cJSON_Parse((const char*)msg->data);
     if (!root) return;
+    cJSON* reverse = cJSON_GetObjectItemCaseSensitive(root, "reverse");
+    if (cJSON_IsBool(reverse)) g.on_return = cJSON_IsTrue(reverse) ? 1 : 0;
     cJSON* points = cJSON_GetObjectItemCaseSensitive(root, "points");
     if (!cJSON_IsArray(points)) {
         cJSON_Delete(root);
@@ -1345,10 +1362,10 @@ static void on_scene_frame(const Message* msg, void* user_data) {
 
 /* ── road/traffic_lights 订阅回调（Phase 2 红绿灯） ────────── */
 /* 从 flowsim_node 发布的 road/traffic_lights topic 获取红绿灯状态。
- * JSON 格式: {"lights":[{"id":0,"x":100.0,"y_lane":-1.75,
+ * JSON 格式: {"lights":[{"id":0,"x":100.0,"y":-12.0,"lane_offset":-1.75,
  *                         "state":"red","remain_s":12.3},...]}
- * 解析每个灯的 x(停止线位置)、y_lane(车道)、state(green/yellow/red)。
- * 缓存到 g.tl_x/tl_y_lane/tl_state，供 Frenet 障碍物注入逻辑读取。 */
+ * x/y 是世界停止线，lane_offset 是前向参考系管辖半幅。
+ * 缓存后供 Frenet 障碍物注入逻辑读取。 */
 static void on_traffic_lights(const Message* msg, void* user_data) {
     (void)user_data;
     if (!msg) return;  /* data 是定长数组，永不为 NULL；空载由 data_size 判定 */
@@ -1357,9 +1374,10 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
     g.tl_count = c.count;
     g.has_traffic_lights = c.valid;
     for (int i = 0; i < c.count; i++) {
-        g.tl_x[i]      = c.x[i];
-        g.tl_y_lane[i] = c.y_lane[i];
-        g.tl_state[i]  = c.state[i];
+        g.tl_x[i]           = c.x[i];
+        g.tl_y[i]           = c.y[i];
+        g.tl_lane_offset[i] = c.lane_offset[i];
+        g.tl_state[i]       = c.state[i];
     }
 }
 
@@ -1771,26 +1789,9 @@ protected:
                     for (int ti = 0; ti < g.tl_count && n_obs < 128; ti++) {
                         if (g.tl_state[ti] == TL_GREEN ||
                             g.tl_state[ti] == TL_FLASHING_GREEN) continue;
-                        double dx_tl = g.tl_x[ti] - g.ego_x;
-                        /* 方向感知（2026-08-04 掉头后对向灯误停修复）：
-                         * 旧实现 dx_tl>0 = 世界 +x 判"前方"——返程朝 -x 时已越过
-                         * 的灯（dx>0）被当"前方灯"注入墙 → 掉头后每盏已过灯都
-                         * 刹停（实测返程 x=1785 停在对向灯后 15m）。返程前方
-                         * 的灯 dx<0，翻转后同语义；且返程只响应管辖本侧车道的
-                         * 灯（对向车道的灯管不到返程车道）。与 behavior
-                         * lane_ahead_stop_light 的 on_return 翻转同源。 */
-                        /* 行进方向 = flowsim road/ref_path.reverse 同式推导
-                         * （u_turn_active = |hn| > π/2，见 flowsim_node.cpp），
-                         * planning 未订阅 ref_path 故本地同式计算，与权威一致 */
-                        double hn_r = g.ego_heading;
-                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
-                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
-                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
-                        if (tl_on_return) {
-                            dx_tl = -dx_tl;
-                        }
-                        if (fabs(g.tl_y_lane[ti] - g.ego_y) >
-                            g.lane_width * 0.5) continue;
+                        const double dx_tl = traffic_light_ahead_distance(ti);
+                        if (!traffic_light_controls_direction(
+                                g.tl_lane_offset[ti], g.on_return)) continue;
                         if (dx_tl <= 0.0) continue;  /* 已过停止线 */
                         if (dx_tl > 60.0) continue;  /* 太远，不注入 */
 
@@ -1806,9 +1807,8 @@ protected:
 
                         /* 注入虚拟墙：位置在停止线前 1m，宽度覆盖全路（8m > 6m OBS_MAX_ABS_Y），
                          * 长度给薄墙 0.5m。vx=0 静止。返程墙在停止线的 -x 侧。 */
-                        ox[n_obs]  = tl_on_return ? (g.tl_x[ti] + 1.0)
-                                                      : (g.tl_x[ti] - 1.0);  /* 停止线前 1m */
-                        oy[n_obs]  = 0.0;               /* 路中心 */
+                        ox[n_obs]  = g.tl_x[ti];
+                        oy[n_obs]  = g.tl_y[ti];
                         ow[n_obs]  = 8.0;                /* 跨双车道 */
                         ol[n_obs]  = 0.5;                /* 薄墙 */
                         ovx[n_obs] = 0.0;                /* 静止虚拟墙 */
@@ -2210,19 +2210,12 @@ protected:
                     /* 红绿灯 → ST 图墙（方向感知沿用 1221fad 同式推导：
                      * 返程翻转 dx + 只响应本侧车道灯。掉头后对向灯不再误停） */
                     if (g.has_traffic_lights) {
-                        double hn_r = g.ego_heading;
-                        while (hn_r > M_PI) hn_r -= 2.0 * M_PI;
-                        while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
-                        const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
                         for (int ti = 0; ti < g.tl_count && stg.n_walls < 4; ti++) {
                             if (g.tl_state[ti] == TL_GREEN ||
                                 g.tl_state[ti] == TL_FLASHING_GREEN) continue;
-                            double dx_tl = g.tl_x[ti] - g.ego_x;
-                            if (tl_on_return) {
-                                dx_tl = -dx_tl;
-                            }
-                            if (fabs(g.tl_y_lane[ti] - g.ego_y) >
-                                g.lane_width * 0.5) continue;
+                            const double dx_tl = traffic_light_ahead_distance(ti);
+                            if (!traffic_light_controls_direction(
+                                    g.tl_lane_offset[ti], g.on_return)) continue;
                             if (dx_tl <= 0.0 || dx_tl > 80.0) continue;  /* 视界内才参与 */
                             if (g.tl_state[ti] == TL_YELLOW) {
                                 const double v = std::max(0.0, g.ego_v);

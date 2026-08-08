@@ -6,7 +6,7 @@
 ## 数据流
 
 ```
-flowsim(50Hz 真值) → sensor_model(FOV/遮挡/噪声) → perception(DBSCAN)
+flowsim(60Hz 真值) → sensor_model(FOV/遮挡/噪声) → perception(DBSCAN)
     → object_tracker(卡尔曼跟踪) → fusion(EKF 定位)
     → behavior_planner(FSM 决策) ⇄ navigation(路由/travel_dir)
     → planning(Frenet 轨迹 + ST 图 DP 速度 + 掉头 N 把方向)
@@ -30,8 +30,8 @@ flowsim(50Hz 真值) → sensor_model(FOV/遮挡/噪声) → perception(DBSCAN)
 | 规划-路径 | Frenet 最优轨迹（横向五次多项式；变道段固定曲率圆弧回填 kappa） | `planning_node.cpp` | 速度/轨迹唯一权威 |
 | 规划-速度 | **ST 图 + DP 速度规划**（红灯墙 + 动态障碍占据 + 曲率限速，90×101 DP 表） | `st_graph.c` | 1:1 移植自 `tools/speed_planner_sim.py`（11/11 场景 PASS 后冻结） |
 | 规划-掉头 | N 把方向多段掉头（前进满舵弧 → 刹停换 R → 倒车反打 → 循环，≤5 把），512 点细生成 + 段感知下采样 64 | `planning_node.cpp` generate_uturn_trajectory | 生成一次即缓存重放，防「重规划抖动死循环」 |
-| 控制-横向 | Stanley + kappa 前馈（默认）；LTV MPC（`use_ltv_mpc` 参数启用，机动模式跳过） | `control_node.cpp` `ltv_mpc.h` | MPC 求解前注入真实 steer 限幅（内外限幅必须一致） |
-| 控制-纵向 | PID + ACC 跟车（anti-windup：error 翻负清正积分） | `control_node.cpp` | 50Hz |
+| 控制-横向 | Stanley + kappa 前馈（默认）；LTV MPC（`use_ltv_mpc` 参数启用，机动模式跳过） | `control_node.cpp` `ltv_mpc.c` | MPC 求解前注入真实 steer 限幅（内外限幅必须一致） |
+| 控制-纵向 | PID + ACC 跟车（anti-windup：error 翻负清正积分） | `control_node.cpp` | 20Hz |
 | 控制-机动 | ManeuverTracker：弧长推进 + D/R 挡位状态机 + 倒挡横向反馈反号 | `maneuver_tracker.h` | 掉头/泊车共用；header-only 可独立单测 |
 | 安全 | TTC 闸门（前车/迎头/行人/横向交叉，全部沿车头方向投影）+ MRM + 机动窗口豁免 | `safety_control_node.cpp` | FlowCoro 协程；只做限幅+紧急制动，不理解任务意图 |
 | 学习 | BC（tiny-MLP / PyTorch）→ DAgger 自我对弈回灌 → PPO（换老师路线）；ONNX 导出 + 等价性门禁；影子评估 + promote 门禁 + OTA | `inference_node.cpp` `tools/train_e2e/` | 详见 [LEARNING_LOOP.md](LEARNING_LOOP.md) |
@@ -48,11 +48,11 @@ flowsim(50Hz 真值) → sensor_model(FOV/遮挡/噪声) → perception(DBSCAN)
 
 | 阶段 | 频率 | 备注 |
 |------|------|------|
-| flowsim 物理 | 50Hz | 场景 JSON 加载 actor |
+| flowsim 物理 | 60Hz | 场景 JSON 加载 actor |
 | 感知 DBSCAN | 10Hz | 点云规模敏感 |
 | 融合 EKF | 20Hz | |
 | 规划（Frenet+ST 图） | 20Hz | DP 表静态 142KB，单线程 |
-| 控制（MPC+PID） | 50Hz | |
+| 控制（MPC+PID） | 20Hz | |
 | 消息总线 | — | 进程内 <100µs |
 
 ## 第三方算法库集成

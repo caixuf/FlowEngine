@@ -118,27 +118,28 @@ open http://localhost:8800
 
 把「场景库 × 评估指标」做成一条命令的批量回归，用于替代实车路测的"验证"职能。
 
-当前只有一个内置场景 `scenarios/straight_road.json`。批量回归套件 `scenarios/suite.json`
-与 `tools/scenario_regression.py` 是规划中的设计，尚未实现。
+场景库由 `scenarios/` 目录下的多份场景 JSON（直道/弯道/密集 NPC/多灯/对向/泊车/
+驾考科目一~四/城市挑战等）+ `scenarios/suite.json` 场景矩阵组成。批量回归套件由
+`ci/evaluators/scenario_regression.py` 驱动。
 
 ```bash
 # 列出套件里将运行的全部场景（不启动 demo）
-python3 tools/scenario_regression.py --dry-run
+python3 ci/evaluators/scenario_regression.py --dry-run
 
 # 跑整个套件，输出 PASS/FAIL 矩阵报告
-python3 tools/scenario_regression.py
+python3 ci/evaluators/scenario_regression.py
 
 # 首次录制回归基线（落到 tests/baseline/）
-python3 tools/scenario_regression.py --update-baseline
+python3 ci/evaluators/scenario_regression.py --update-baseline
 
 # 跑套件并与基线做数值对比，退化即 FAIL（用于回归门禁）
-python3 tools/scenario_regression.py --baseline
+python3 ci/evaluators/scenario_regression.py --baseline
 
 # 只跑单个场景（按文件名去后缀匹配）
-python3 tools/scenario_regression.py --only ghost_pedestrian
+python3 ci/evaluators/scenario_regression.py --only ghost_pedestrian
 ```
 
-底层由 `tools/demo_evaluator.py` 逐场景执行；后者新增两个可组合参数：
+底层由 `ci/evaluators/demo_evaluator.py` 逐场景执行；后者新增两个可组合参数：
 
 - `--scenario <path>`：临时把 `config/pipeline.json` 的 `sim_world.scenario_file`
   指向该场景（运行后自动还原）。
@@ -147,4 +148,4 @@ python3 tools/scenario_regression.py --only ghost_pedestrian
 
 数值回归阈值支持两种门：`min_ratio`（当前值 ≥ 基线 × 比例）与
 `max_abs_increase`（当前值 ≤ 基线 + 增量）。判定逻辑见
-`tools/scenario_regression.py::compare_summary()`。
+`ci/evaluators/scenario_regression.py::compare_summary()`。

@@ -229,4 +229,4 @@ if (g.cycle % 20 == 0 && g.digest_initialized) {
 | `modules/adas_nodes/flowsim/sim_digest.h` | 公开 API：结构体 + 函数声明 |
 | `modules/adas_nodes/flowsim/sim_digest.cpp` | 实现：digest 构建 + invariant + ASCII |
 | `modules/adas_nodes/flowsim_node.cpp` | 调用方：init 构建 static_digest，主循环每 20 帧跑 invariant + 写 ASCII |
-| `tools/demo_evaluator.py` | 解析 stderr 的 invariant 失败详情 |
+| `ci/evaluators/demo_evaluator.py` | 解析 stderr 的 invariant 失败详情 |

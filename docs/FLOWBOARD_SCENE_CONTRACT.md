@@ -33,6 +33,7 @@ flowsim_node                     │
 - **monitor_node**：将多个 topic 融合为 `metrics.scene`，写入状态文件
 - **flowboard/vis/**：仅消费 `metrics.scene`，不反向影响上游
 - **注**：`road/traffic_lights` topic 仍由 flowsim 发布，供 planning/inference/recognition 消费，但不再流入 `metrics.scene`（v2.0.0 移除）
+- `road/traffic_lights.lights[]` 使用 `x/y` 表示世界停止线位置，`lane_offset` 表示前向参考系下的管辖半幅；`y_lane` 仅为旧消费者保留，不得再用于判断行驶方向。
 
 ## 3. 坐标系约定
 

@@ -96,7 +96,7 @@ ego 沿这条 route 行驶；control_node 的 Stanley 控制器从 `sample_ahead
 
 ## evaluator 路沿判定
 
-`tools/demo_evaluator.py` 的路沿判定公式（line 382）：
+`ci/evaluators/demo_evaluator.py` 的路沿判定公式（line 382）：
 ```python
 road_edge_margin = lane_width * lane_count * 0.5 - abs(y_rel) - 1.0
 ```

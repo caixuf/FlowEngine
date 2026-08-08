@@ -1,6 +1,6 @@
 # FlowEngine Pipeline 架构
 
-FlowEngine 的 ADAS 演示 pipeline 由 12 个节点插件组成，通过 `flow_launcher config/pipeline.json` 配置驱动启动。
+FlowEngine 的 ADAS 演示 pipeline 由 15 个节点插件组成，通过 `flow_launcher config/pipeline.json` 配置驱动启动。
 
 ## 数据流
 
@@ -30,7 +30,10 @@ flowsim ─── vehicle/state ──→ sensor_model ─── sensor/lidar �
 | `flowsim` | `libflowsim_node.so` | `control/cmd` | `vehicle/state`, `road/geometry`, `road/traffic_lights`, `scene/frame`, `sim/tick`, `sim/collision` | Bicycle model + esmini RoadManager + OBB SAT 碰撞 + NPC AI 状态机 |
 | `sensor_model` | `libsensor_model_node.so` | `vehicle/state` | `sensor/lidar`, `sensor/gps`, `sensor/camera` | 噪声注入 + FOV 裁剪 + NMEA GPS 回放 |
 | `perception` | `libperception_node.so` | `vehicle/state`, `sensor/lidar` | `perception/obstacles` | DBSCAN (eps=2m, min_pts=4) + RANSAC 地面去除 |
+| `object_tracker` | `libobject_tracker_node.so` | `perception/obstacles`, `vehicle/state` | `perception/tracked_objects` | 卡尔曼多目标跟踪 |
 | `fusion` | `libfusion_node.so` | `sensor/lidar`, `sensor/gps` | `fusion/localization`, `fusion/latency` | EKF 5D (x, y, v, heading, yaw_rate) |
+| `behavior_planner` | `libbehavior_planner_node.so` | `fusion/localization`, `perception/tracked_objects`, `road/traffic_lights` | `planning/behavior` | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
+| `navigation` | `libnavigation_node.so` | `fusion/localization` | `navigation/path` | 路由步骤 + 行进方向（消费 `ref_path.reverse`） |
 | `planning` | `libplanning_node.so` | `fusion/localization`, `vehicle/state` | `planning/trajectory` | Frenet 最优轨迹规划（依赖 Eigen3） |
 | `control` | `libcontrol_node.so` | `fusion/localization`, `planning/trajectory`, `vehicle/state` | `control/raw_cmd` | PID 纵向 + Stanley 横向 + ACC + 自适应变道 |
 | `safety_control` | `libsafety_control_node.so` | `control/raw_cmd`, `vehicle/state` | `control/cmd` | FlowCoro 安全包络：TTC/横向交叉/行人 |
@@ -52,7 +55,7 @@ control (PID) → control/raw_cmd → safety_control → control/cmd → flowsim
                                               └──────── planning/trajectory ←── planning ←── fusion/localization ←── fusion ←── sensor/lidar,gps
 ```
 
-- **频率**: flowsim 20Hz，planning 20Hz，control 20Hz
+- **频率**: flowsim 60Hz，planning 20Hz，control 20Hz
 - **安全包络**: safety_control 限制 throttle ≤ 0.85，steer ≤ 0.22 rad（低速 0.18 rad）
 - **ACC**: time headway 1.4s，最小 gap 5m
 - **Stuck recovery**: 静止 >3s + 横向卡在线附近 → 强制收敛到最近车道中心
@@ -129,7 +132,7 @@ control (PID) → control/raw_cmd → safety_control → control/cmd → flowsim
 
 ```bash
 # 回归评估器
-python3 tools/demo_evaluator.py --duration 45
+python3 ci/evaluators/demo_evaluator.py --duration 45
 
 # 烟测试
 bash scripts/launcher_smoke.sh

@@ -155,7 +155,7 @@ ctest --test-dir build -R e2e_training_tools --output-on-failure
 | `--init-from` 报 feature mismatch | 旧模型和新 dataset 的特征 schema 不一致 | 用同一版 `feature_schema.py` 重新导出 dataset / 重新训 baseline |
 | tiny promote 失败 | artifact 不是 `backend=tiny_mlp` | PyTorch artifact 只能 eval/sidecar，不能直接 promote |
 | C runtime 没变化 | 只训练了 `models/<name>`，没有 promote | 运行 `python3 tools/modelctl.py promote models/<tiny_name>` |
-| 训练 loss 下降但 demo 变差 | imitation loss 不等于闭环驾驶质量 | 跑 `tools/demo_evaluator.py` 做闭环验证 |
+| 训练 loss 下降但 demo 变差 | imitation loss 不等于闭环驾驶质量 | 跑 `ci/evaluators/demo_evaluator.py` 做闭环验证 |
 | 路径混乱 | runtime 模型和训练 artifact 混用 | 用 `python3 tools/modelctl.py list` 查权威位置 |
 
 ## 推荐迭代节奏

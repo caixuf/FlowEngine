@@ -211,7 +211,7 @@ powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 30
 
 | 节点 | 插件 (.so) | 频率 | 功能 |
 |------|-----------|------|------|
-| `flowsim` | `libflowsim_node.so` | 50Hz | 车辆动力学 + NPC（IDM）+ 场景加载 + 真值发布 |
+| `flowsim` | `libflowsim_node.so` | 60Hz | 车辆动力学 + NPC（IDM）+ 场景加载 + 真值发布 |
 | `sensor_model` | `libsensor_model.so` | 20Hz | LiDAR/GPS/Camera 传感器模型（FOV/遮挡/噪声） |
 | `perception` | `libperception_node.so` | 10Hz | DBSCAN 点云聚类 + 目标检测 |
 | `object_tracker` | `libobject_tracker.so` | 20Hz | 卡尔曼多目标跟踪 |
@@ -219,7 +219,7 @@ powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 30
 | `behavior_planner` | `libbehavior_planner.so` | 10Hz | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
 | `navigation` | `libnavigation_node.so` | 10Hz | 路由步骤 + 行进方向（消费 `ref_path.reverse`） |
 | `planning` | `libplanning_node.so` | 20Hz | Frenet 轨迹 + ST 图 DP 速度规划 + N 把方向掉头 |
-| `control` | `libcontrol_node.so` | 50Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker 机动 |
+| `control` | `libcontrol_node.so` | 20Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker 机动 |
 | `safety_control` | `libsafety_control_node.so` | 协程 | FlowCoro 安全闸门（TTC / 横向交叉 / 行人保护 / MRM） |
 | `inference` | `libinference_node.so` | 20Hz | tiny-MLP/ONNX 影子推理（shadow mode，不执行） |
 | `data_recorder` | `libdata_recorder_node.so` | 20Hz | 训练样本采集（模仿学习 JSONL） |

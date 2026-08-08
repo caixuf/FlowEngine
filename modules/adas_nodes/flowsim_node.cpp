@@ -795,6 +795,9 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
             e.steer    = tl->red_s;
             e.target_vx = tl->phase_offset_s;
             e.heading = tl->heading;
+            e.offset = tl->y_lane;
+            e.signal_stop_x = tl->x;
+            e.signal_stop_y = tl->y_lane;
             double sign = (tl->y_lane >= 0.0) ? 1.0 : -1.0;
             /* esmini 接管世界坐标：world_to_frenet → 反算真值。
              * 两层语义：
@@ -814,12 +817,25 @@ static void populate_entities_from_scenario(const ScenarioConfig* sc) {
                         cached_half_width = (n_drivable * g.lane_width) / 2.0;
                         e.road_id = fp.road_id;
                     }
-                    /* 车道中心 y：从道路中心 + sign * |y_lane|（沿路宽方向） */
-                    double lane_center_y = have_rc ? (rc_wp.y + tl->y_lane) : tl->y_lane;
+                    flowsim::WorldPos stop_wp;
+                    const bool have_stop = g.roads.frenet_to_world(
+                        fp.road_id, 0, fp.s, tl->y_lane, stop_wp);
+                    const double lane_center_x = have_stop ? stop_wp.x
+                                                           : (have_rc ? rc_wp.x : tl->x);
+                    const double lane_center_y = have_stop ? stop_wp.y
+                                                           : (have_rc ? rc_wp.y + tl->y_lane
+                                                                      : tl->y_lane);
                     /* 灯杆 3D 位置：车道侧路缘外 +1.5m 退让 */
-                    double pole_y = have_rc ? (rc_wp.y + sign * (cached_half_width + 1.5)) : (sign * (cached_half_width + 1.5));
-                    e.x = have_rc ? rc_wp.x : tl->x;
-                    e.y = pole_y;
+                    flowsim::WorldPos pole_wp;
+                    const bool have_pole = g.roads.frenet_to_world(
+                        fp.road_id, 0, fp.s,
+                        sign * (cached_half_width + 1.5), pole_wp);
+                    e.x = have_pole ? pole_wp.x : (have_rc ? rc_wp.x : tl->x);
+                    e.y = have_pole ? pole_wp.y
+                                    : (have_rc ? rc_wp.y + sign * (cached_half_width + 1.5)
+                                               : sign * (cached_half_width + 1.5));
+                    e.signal_stop_x = lane_center_x;
+                    e.signal_stop_y = lane_center_y;
                     /* e.width 存车道中心 y，供 NPC 红绿灯响应判断同侧车流 */
                     e.width = lane_center_y;
                     /* heading：灯杆臂垂直于道路切线方向（指向道路中心）。
@@ -1202,11 +1218,13 @@ static void publish_traffic_lights() {
          * e.id 是 pool 索引（全局唯一但与场景无关），scenario_id 是场景里
          * 写死的业务 id，二者不可混用——前端旧代码用 e.id 反查场景配置会失败。 */
         cJSON_AddNumberToObject(light, "scenario_id", e.scenario_id);
-        cJSON_AddNumberToObject(light, "x", e.x);
-        /* y_lane = 车道中心 y（停止线判定用），非灯杆 3D 位置。
+        cJSON_AddNumberToObject(light, "x", e.signal_stop_x);
+        /* y = 车道中心世界 y（停止线判定用），非灯杆 3D 位置。
          * 灯杆的 3D y 在 scene/frame entities 中以 "y" 字段发布。
          * 这里复用 e.width 存储初始化时写入的 lane_center_y（见 line 701）。 */
-        cJSON_AddNumberToObject(light, "y_lane", e.width);
+        cJSON_AddNumberToObject(light, "y", e.signal_stop_y);
+        cJSON_AddNumberToObject(light, "y_lane", e.signal_stop_y);
+        cJSON_AddNumberToObject(light, "lane_offset", e.offset);
         flowsim::TLPhase ph = static_cast<flowsim::TLPhase>(e.phase_state);
         cJSON_AddStringToObject(light, "state", tl_phase_str(ph));
         cJSON_AddNumberToObject(light, "remain_s", e.phase_timer);

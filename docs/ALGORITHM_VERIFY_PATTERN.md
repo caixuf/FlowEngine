@@ -14,7 +14,7 @@
   → python3 tools/pipeline_check.py           (3s, 不启动 demo)
   → python3 tools/quick_verify.py             (实时交互式调参)
   → python3 tests/test_param_regression.py    (改参前后对比)
-  → python3 tools/demo_evaluator.py           (45s 全量回归)
+  → python3 ci/evaluators/demo_evaluator.py           (45s 全量回归)
   → commit
 ```
 
@@ -85,7 +85,7 @@ python3 tests/test_param_regression.py
 
 ### Step 6: 全量回归
 ```bash
-python3 tools/demo_evaluator.py --duration 45
+python3 ci/evaluators/demo_evaluator.py --duration 45
 python3 tools/pipeline_check.py
 ```
 

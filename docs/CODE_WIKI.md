@@ -137,7 +137,7 @@ flowctl param set control.k_vy 0.5     # 下一帧生效，无需重启
 | `behavior_planner` | libbehavior_planner.so | 10Hz | 8 状态 FSM 行为决策（跟车/变道/停车/让行/掉头） |
 | `navigation` | libnavigation_node.so | 10Hz | 路由步骤 + 行进方向（消费 `ref_path.reverse`） |
 | `planning` | libplanning_node.so | 20Hz | Frenet 轨迹 + ST 图 DP 速度规划 + N 把方向掉头 |
-| `control` | libcontrol_node.so | 50Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker |
+| `control` | libcontrol_node.so | 20Hz | Stanley 横向（可选 LTV MPC）+ PID/ACC 纵向 + ManeuverTracker |
 | `safety_control` | libsafety_control_node.so | 协程 | FlowCoro 安全包络（TTC/横向交叉/行人/MRM） |
 | `inference` | libinference_node.so | 20Hz | tiny-MLP/ONNX 影子推理（shadow mode） |
 | `data_recorder` | libdata_recorder_node.so | 20Hz | 训练样本采集（模仿学习 JSONL） |
@@ -562,8 +562,8 @@ flowctl graph                           # ASCII 拓扑
 
 ```bash
 # 改完 pipeline 链路必跑评估器（45s 真跑，PR 门禁）
-python3 tools/demo_evaluator.py --duration 45 --interval 0.5
-python3 tools/demo_evaluator.py --no-run    # 仅分析当前数据
+python3 ci/evaluators/demo_evaluator.py --duration 45 --interval 0.5
+python3 ci/evaluators/demo_evaluator.py --no-run    # 仅分析当前数据
 ```
 
 评估器采样 `/tmp/flow_topology.json`，检查：拓扑完整性、topic 频率、碰撞、路沿偏离、停滞、变道次数、yaw/steer 振荡、NPC 瞬移、丢帧。WARN 可忽略，FAIL 必须修复。

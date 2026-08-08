@@ -162,7 +162,8 @@ struct BehaviorContext {
      * 定义的 16）。归位（超车后切回内侧道）前要确认目标车道前方没有
      * 红灯，否则切回去立刻停在灯前——2026-07-31 实跑：RIGHT 超车后
      * CRUISE 归位回 lane2，距 x=350 红灯仅 ~15m，当场刹停。 */
-    double tl_x[TL_CACHE_MAX]{}, tl_y_lane[TL_CACHE_MAX]{};
+    double tl_x[TL_CACHE_MAX]{}, tl_y[TL_CACHE_MAX]{};
+    double tl_lane_offset[TL_CACHE_MAX]{};
     int    tl_state[TL_CACHE_MAX]{};  /* 0=green 1=yellow 2=red */
     int    tl_count{0};
     volatile int has_traffic_lights{0};
@@ -538,9 +539,10 @@ static void on_traffic_lights(const Message* msg, void* user_data) {
     g.tl_count = c.count;
     g.has_traffic_lights = c.valid;
     for (int i = 0; i < c.count; i++) {
-        g.tl_x[i]      = c.x[i];
-        g.tl_y_lane[i] = c.y_lane[i];
-        g.tl_state[i]  = c.state[i];
+        g.tl_x[i]           = c.x[i];
+        g.tl_y[i]           = c.y[i];
+        g.tl_lane_offset[i] = c.lane_offset[i];
+        g.tl_state[i]       = c.state[i];
     }
 }
 
@@ -620,10 +622,9 @@ static void on_scene_frame(const Message* msg, void* user_data) {
     cJSON_Delete(root);
 }
 
-/* 归位目标车道（idx-1）前方 stop_range 内是否有非绿灯？有则不归位。 */
-static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
+/* 当前行进方向前方 stop_range 内是否有非绿灯？有则不发起变道。 */
+static bool carriageway_ahead_stop_light(void) {
     if (!g.has_traffic_lights || g.tl_count <= 0) return false;
-    double lane_c = lane_center_y(lane_idx, lc, lw, 0.0, 0.0);
     double v = g.ego_v; if (v < 0.0) v = 0.0;
     /* 刹车距离 base = v²/8 + 3（≈4m/s² 减速度 + 3m 余量），与 planning_node
      * 红灯 override（brake_dist = v*v/8 + 3，floor 5m）同源，此处再加 20m
@@ -634,9 +635,18 @@ static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
     for (int i = 0; i < g.tl_count; i++) {
         if (g.tl_state[i] == TL_GREEN ||
             g.tl_state[i] == TL_FLASHING_GREEN) continue;
-        if (fabs(g.tl_y_lane[i] - lane_c) > lw * 0.5) continue;  /* 只查目标车道 */
-        double dx = g.tl_x[i] - g.ego_x;
-        if (g.on_return) dx = -dx;  /* 返程朝 -x：灯在前方时 dx<0 */
+        if (!traffic_light_controls_direction(
+                g.tl_lane_offset[i], g.on_return)) continue;
+        double dx = 0.0;
+        planning_coord::Projection ego_projection, light_projection;
+        if (project_to_ref(g.ego_x, g.ego_y, ego_projection) &&
+            project_to_ref(g.tl_x[i], g.tl_y[i], light_projection)) {
+            dx = light_projection.s - ego_projection.s;
+        } else {
+            const double wx = g.tl_x[i] - g.ego_x;
+            const double wy = g.tl_y[i] - g.ego_y;
+            dx = wx * std::cos(g.ego_heading) + wy * std::sin(g.ego_heading);
+        }
         if (dx <= 0.0 || dx > stop_range) continue;
         return true;
     }
@@ -1271,7 +1281,7 @@ protected:
                                      g.uturn_max_trigger_speed, g.ego_x);
                         }
                     } else if (worthwhile && adj_idx >= 0 &&
-                        !lane_ahead_stop_light(adj_idx, lc, lw)) {
+                        !carriageway_ahead_stop_light()) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
                         new_target_speed = fmax(adj_speed, g.ego_v);
@@ -1289,7 +1299,7 @@ protected:
                                  best_gap, desired_gap, lead_speed, lead_id, follow_speed,
                                  left_ok, right_ok, g.cooldown);
                     } else if (!g.on_return && left_ok && current_idx > 0 && g.cooldown <= 0.0 &&
-                               !lane_ahead_stop_light(current_idx - 1, lc, lw) &&
+                               !carriageway_ahead_stop_light() &&
                                (left_gap >= 1e8 ||
                                 left_lead_v >= g.cfg_cruise_speed * 0.7)) {
                         /* 超车完成归位：巡航且未被堵时，若内侧道（idx-1，same_side
@@ -1302,8 +1312,8 @@ protected:
                          * 只管辖 y_lane=-1.75 的内侧道，导致红灯不停车。
                          * 归位用 LEFT_CHANGE 转移，速度恢复巡航基准。
                          *
-                         * 2026-07-31：加 lane_ahead_stop_light 条件——归位前
-                         * 确认目标车道前方 60m 内没有红灯/黄灯。否则切回 lane2
+                         * 2026-07-31：加 carriageway_ahead_stop_light 条件——
+                         * 归位前确认本方向前方 60m 内没有红灯/黄灯。否则切回 lane2
                          * 立刻停在灯前（实跑：距 x=350 红灯 ~15m 切回即刹停），
                          * 归位变成无效变道。目标车道有灯时留在外侧道继续巡航。 */
                         ev = BEH_EV_OVERTAKE_LEFT;
@@ -1331,7 +1341,7 @@ protected:
                                  "lead lost (gap=%.1f > %.1f) → CRUISE", best_gap, blocked_range);
                     } else if (worthwhile && adj_idx >= 0 &&
                                !uturn_approach_active && g.cooldown <= 0.0 &&
-                               !lane_ahead_stop_light(adj_idx, lc, lw)) {
+                               !carriageway_ahead_stop_light()) {
                         ev = (adj_idx < current_idx) ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
                         new_target_lane = adj_idx;
                         new_target_speed = fmax(adj_speed, g.ego_v);

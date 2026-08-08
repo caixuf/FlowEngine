@@ -36,6 +36,18 @@ def should_stop_on_yellow(speed_mps: float, distance_m: float,
     return distance_m >= stop_distance
 
 
+def controls_direction(signal_lane_offset: float, on_return: bool) -> bool:
+    """A signal controls its whole carriageway, not one exact lane center."""
+    if abs(signal_lane_offset) < 0.25:
+        return True
+    return signal_lane_offset > 0.0 if on_return else signal_lane_offset < 0.0
+
+
+def crossed_stop_line(prev_along: float, curr_along: float) -> bool:
+    """Travel-oriented distance crosses from before to beyond the stop line."""
+    return prev_along < 0.0 <= curr_along
+
+
 def run_all() -> None:
     sequence = [phase_at(t, 20, 3, 3, 15).state for t in (0, 19.9, 20, 22.9, 23, 25.9, 26)]
     assert sequence == [
@@ -45,6 +57,13 @@ def run_all() -> None:
     assert phase_at(20, 20, 3, 3, 15).remain_s == 3
     assert should_stop_on_yellow(10, 25)
     assert not should_stop_on_yellow(10, 8)
+    assert controls_direction(-1.75, False)
+    assert not controls_direction(-1.75, True)
+    assert controls_direction(1.75, True)
+    assert crossed_stop_line(-2.0, 1.0)
+    # Return travel also uses increasing travel-oriented progress.
+    assert crossed_stop_line(-1.0, 0.5)
+    assert not crossed_stop_line(1.0, -1.0)
     print("traffic light simulation: PASS")
 
 

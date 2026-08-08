@@ -332,12 +332,17 @@ tools/flowboard/js/
         ├── ViaductView.js    # 高架桥（静态 build，含环境）
         ├── StreetlightView.js # 路灯（InstancedMesh 静态 build）
         ├── BarrierView.js    # 护栏（InstancedMesh 静态 build）
+        ├── ConstructionView.js # 施工区（静态 build，黄黑锥桶/围挡）
         ├── TreeView.js       # 树（InstancedMesh 静态 build）
+        ├── BuildingView.js   # 建筑/楼宇（静态 build，单独 build 不入 Layer 树）
         ├── VehicleLights.js  # 纯函数：车灯位掩码 → 状态（零 THREE 依赖）
         ├── LabelView.js      # 实体标签（动态 update，CSS2D-style Sprite 文字标签）
         ├── PerceptionView.js # 感知标注覆盖层（3D 角标框 + 检测射线 + 雷达扫描）
-        └── MapOverlayView.js # 小地图 + HUD 叠加层（Canvas 2D）
+        ├── EffectView.js     # 动态特效（紧急制动光晕/双闪/障碍物标记/切入预警）
+        ├── TrajectoryView.js # 预测轨迹线（运动学外推 3s，颜色编码速度/转向/急刹）
+        └── StatsView.js      # 性能统计 HUD（帧率/耗时，Canvas 2D，独立挂载）
 ```
+> 另有 `MinimapHUD.js`（小地图 + HUD 叠加层，Canvas 2D）位于 vis/ 根目录，非 view/。
 
 ### SceneStore — 单一数据契约
 
@@ -406,17 +411,22 @@ function tickAnimation(now) {
 3. **递归 dispose** — 父 dispose 自动递归子层（深度优先，孙先销毁），
    view 若有 `dispose()` 则调，否则退化为 `clear()`。幂等。
 
-SceneDirector 构造时建 4-Layer 树，所有 12 个 View 都挂到对应层：
+SceneDirector 构造时建 4-Layer 树，View 全部挂到对应层（映射见
+`SceneDirector.js` 的 `[layerName, viewNames]` 表）：
 
 ```
 root
-├── env     (ground, viaduct)                      — 环境层
-├── road    (road, streetlight, barrier, connector) — 道路层
-├── agent   (vehicle, label, perception)           — 智能体层（含 NPC 标签 + 感知标注）
-└── infra   (trafficLight, etcGate, mapOverlay)    — 路侧设施层 + 叠加层
+├── env     (ground, viaduct)                            — 环境层
+├── road    (road, streetlight, barrier, connector, tree, construction) — 道路层
+├── agent   (vehicle, label, perception, effect, trajectory)  — 智能体层（含 NPC 标签 + 感知标注 + 特效/轨迹）
+└── infra   (trafficLight, etcGate)                      — 路侧设施层
 ```
 
-**13 个 View 实例**：10 个静态（road/ground/connector/streetlight/barrier/viaduct/tree）+ 3 个动态（vehicle/trafficLight/etcGate）+ 2 个覆盖层（label/perception）+ 1 个 HUD 层（mapOverlay）
+**16 个 View 注册**（`ViewRegistry.register`）：road/ground/vehicle/connector/
+trafficLight/etcGate/viaduct/streetlight/barrier/construction/tree/building/
+label/perception/effect/trajectory。其中 15 个挂入 4-Layer 树；`building` 单独
+`build` 不入层。旧的 `mapOverlay` 已更名为 `MinimapHUD`（Canvas 2D HUD，独立于
+Layer 树）。
 
 **关键 API**：
 - `build(ctx)` / `update(store, now)` / `clear()` — 递归调用所有后代

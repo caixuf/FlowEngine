@@ -1,6 +1,6 @@
 # Demo Evaluator — 回归评估器
 
-`tools/demo_evaluator.py` 是 FlowEngine 的自动化回归测试工具。它启动 demo pipeline，
+`ci/evaluators/demo_evaluator.py` 是 FlowEngine 的自动化回归测试工具。它启动 demo pipeline，
 采样运行时数据，按预定义标准评分，输出 PASS/FAIL 判定。
 
 ## 为什么需要它
@@ -12,13 +12,13 @@
 
 ```bash
 # 默认 15 秒运行
-python3 tools/demo_evaluator.py
+python3 ci/evaluators/demo_evaluator.py
 
 # 长运行（捕获慢漂移 — 路边缘 creep 需要 >20s 才出现）
-python3 tools/demo_evaluator.py --duration 45 --interval 0.5
+python3 ci/evaluators/demo_evaluator.py --duration 45 --interval 0.5
 
 # 只分析已存在的数据，不重新启动 demo
-python3 tools/demo_evaluator.py --no-run
+python3 ci/evaluators/demo_evaluator.py --no-run
 ```
 
 ## 工作原理
@@ -140,6 +140,6 @@ for e in d['metrics']['scene']['entities']:
 
 ```bash
 # 在 GitHub Actions 中运行
-python3 tools/demo_evaluator.py --duration 30
+python3 ci/evaluators/demo_evaluator.py --duration 30
 # 退出码: 0=PASS, 2=FAIL
 ```

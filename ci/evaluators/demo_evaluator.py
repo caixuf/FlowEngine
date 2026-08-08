@@ -577,6 +577,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     min_abs_gap = math.inf
     obs_world = []
     ego_projection = _road_network_projection(scene, x, y)
+    road_s = ego_projection[0] if ego_projection is not None else None
     for obs in obstacles:
         rel_x = float(obs.get("x", math.inf))
         rel_y_signed = float(obs.get("y", math.inf))
@@ -636,6 +637,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         "lane_error": lane_error,
         "road_edge_margin": road_edge_margin,
         "road_heading": road_heading,          # road_network 局部道路朝向（rad）或 None
+        "road_s": road_s,                      # road_network 全局弧长（m）或 None
         "road_signed_offset": road_signed_offset,  # road_network 横向偏移（m）或 None
         "lane_count": lane_count,
         "y_rel": y_rel,
@@ -1366,6 +1368,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
     scenario_lights = traffic_lights if traffic_lights else []
     has_red_light_check = bool(criteria.get("no_red_light_violation", False))
     red_light_violation = False
+    red_light_violation_details = []
     green_phase_max_stop_s = 0.0
     has_signal_data = False
 
@@ -1378,22 +1381,42 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 continue
             stop_x = float(tl_def.get("x", 0.0) or 0.0)
             signal_lane_y = float(tl_def.get("y_lane", -1.75) or -1.75)
+            signal_s = None
+            signal_id = tl_def.get("id")
+            signal_world_x = stop_x
+            signal_world_y = signal_lane_y
 
             prev_ego_x = None
+            prev_ego_y = None
             prev_state = "unknown"
+            prev_travel_sign = None
             green_stop_start_ts = None
 
             for i, m in enumerate(series):
                 ego_x_i = m["x"]
+                ego_y_i = m["y"]
                 ts_i = timestamps[i] if i < len(timestamps) else 0.0
 
                 # 从样本中查找对应红绿灯的当前状态（按 x 匹配同一盏灯）
                 curr_state = None
                 for s_tl in m.get("entities", []):
                     if isinstance(s_tl, dict) and s_tl.get("type") == "tl":
-                        s_x = float(s_tl.get("x", stop_x) or stop_x)
-                        if abs(s_x - stop_x) < 2.0:
+                        same_id = (
+                            signal_id is not None
+                            and s_tl.get("scenario_id") is not None
+                            and int(s_tl["scenario_id"]) == int(signal_id)
+                        )
+                        s_x = float(s_tl.get("stop_x", s_tl.get("x", stop_x)) or stop_x)
+                        if same_id or abs(s_x - stop_x) < 2.0:
                             curr_state = str(s_tl.get("state", "") or "")
+                            stop_world_y = s_tl.get("stop_y")
+                            signal_world_x = s_x
+                            if stop_world_y is not None and isinstance(scenario, dict):
+                                signal_world_y = float(stop_world_y)
+                                signal_projection = _road_network_projection(
+                                    scenario, s_x, float(stop_world_y))
+                                if signal_projection is not None:
+                                    signal_s = signal_projection[0]
                             has_signal_data = True
                             break
 
@@ -1401,20 +1424,68 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 if curr_state is None:
                     curr_state = prev_state
 
-                # 闯红灯检测：ego 从停止线前越到停止线后，且当前或上一帧灯为红
+                road_offset = m.get("road_signed_offset")
+                if road_offset is None:
+                    road_offset = m.get("y_rel")
+                in_controlled_lane = (
+                    road_offset is not None
+                    and (
+                        abs(signal_lane_y) < 0.25
+                        or road_offset * signal_lane_y > 0.0
+                    )
+                )
+
+                # 沿局部道路切线检测双向越线。世界 x 在弯道上不单调，返程
+                # 更是反向，因此不能使用 prev_x < stop_x <= x。
+                road_heading_i = m.get("road_heading")
+                travel_sign = 1.0
+                if road_heading_i is not None:
+                    heading_delta = m["heading"] - road_heading_i
+                    travel_sign = 1.0 if math.cos(heading_delta) >= 0.0 else -1.0
                 if prev_ego_x is not None:
-                    in_controlled_lane = abs(m["y"] - signal_lane_y) <= lane_width_default * 0.5
-                    crossed = prev_ego_x < stop_x and ego_x_i >= stop_x and in_controlled_lane
+                    curr_road_s = m.get("road_s")
+                    prev_road_s = series[i - 1].get("road_s") if i > 0 else None
+                    if signal_s is not None and curr_road_s is not None and prev_road_s is not None:
+                        prev_along = (prev_road_s - signal_s) * travel_sign
+                        curr_along = (curr_road_s - signal_s) * travel_sign
+                    else:
+                        tangent_h = road_heading_i if road_heading_i is not None else m["heading"]
+                        ch, sh = math.cos(tangent_h), math.sin(tangent_h)
+                        prev_along = (prev_ego_x - stop_x) * ch * travel_sign
+                        curr_along = (ego_x_i - stop_x) * ch * travel_sign
+                    crossed = (
+                        prev_travel_sign == travel_sign
+                        and prev_along < 0.0 <= curr_along
+                        and in_controlled_lane
+                        and math.hypot(
+                            ego_x_i - signal_world_x,
+                            ego_y_i - signal_world_y
+                        ) < 20.0
+                    )
                     if crossed and "red" in (prev_state, curr_state):
                         red_light_violation = True
+                        red_light_violation_details.append(
+                            f"id={signal_id} x={stop_x:.1f} t={ts_i:.1f}s "
+                            f"state={prev_state}->{curr_state}"
+                        )
 
                 # 绿灯期间不必要停车检测：灯为绿、ego 在停止线前的合理接近范围内、车速极低。
                 #
                 # 近邻约束不可省：本循环对每盏灯各跑一遍，而场景有 10 盏
                 # （x=200..9200）。对远处的灯 "ego_x_i < stop_x" 恒为真，ego 在
                 # x=177 等红灯的静止会被记到 1000m 外那盏绿灯头上，误报 5-6.8s。
-                near_stop_line = -GREEN_STOP_NEAR_M < (stop_x - ego_x_i) <= GREEN_STOP_NEAR_M
-                if curr_state in ("green", "flashing_green") and near_stop_line and m["speed"] < 0.5:
+                curr_road_s = m.get("road_s")
+                if signal_s is not None and curr_road_s is not None:
+                    distance_to_stop = (signal_s - curr_road_s) * travel_sign
+                else:
+                    tangent_h = road_heading_i if road_heading_i is not None else m["heading"]
+                    distance_to_stop = (
+                        (stop_x - ego_x_i) * math.cos(tangent_h)
+                    ) * travel_sign
+                near_stop_line = -GREEN_STOP_NEAR_M < distance_to_stop <= GREEN_STOP_NEAR_M
+                if (curr_state in ("green", "flashing_green")
+                        and in_controlled_lane and near_stop_line
+                        and m["speed"] < 0.5):
                     if green_stop_start_ts is None:
                         green_stop_start_ts = ts_i
                 else:
@@ -1425,7 +1496,9 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                         green_stop_start_ts = None
 
                 prev_ego_x = ego_x_i
+                prev_ego_y = ego_y_i
                 prev_state = curr_state
+                prev_travel_sign = travel_sign
 
             # 样本序列结束时仍在绿灯期停车
             if green_stop_start_ts is not None and len(timestamps) > 0:
@@ -1442,7 +1515,11 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 "(scene.entities may not include tl type)"
             )
         elif red_light_violation and has_red_light_check:
-            failures.append("red light violation: ego crossed stop line during red phase")
+            detail = "; ".join(red_light_violation_details[:3])
+            failures.append(
+                "red light violation: ego crossed stop line during red phase"
+                + (f" ({detail})" if detail else "")
+            )
         if green_phase_max_stop_s > 5.0:
             # FAIL 而非 WARN：绿灯下长时间不动是功能性死锁。只报 WARN 时，
             # 45s 里静止 30s 的 run 照样 PASS，只靠 avg_speed 偶然兜底 ——
@@ -1828,6 +1905,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
         "shadow_speed_mae_settled": shadow_mae,
         "has_traffic_lights": bool(scenario_lights),
         "red_light_violation": red_light_violation,
+        "red_light_violation_details": red_light_violation_details,
         "green_phase_max_stop_s": green_phase_max_stop_s,
         # Task 5：分层识别率 + 预警提前量
         "recognition_rate_vehicle": round(perception["recognition_rate_vehicle"], 3),
