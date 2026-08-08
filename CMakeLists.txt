@@ -245,18 +245,7 @@ if(NOT _FLOWCORO_FOUND_LOCAL)
     FetchContent_MakeAvailable(flowcoro)
 endif()
 
-if(WIN32 AND flowcoro_SOURCE_DIR AND EXISTS "${flowcoro_SOURCE_DIR}/src/c_api.cpp")
-    file(READ "${flowcoro_SOURCE_DIR}/src/c_api.cpp" _flowcoro_c_api)
-    string(REPLACE
-        "using namespace std::chrono;\n    return task->future.wait_for(0ms)"
-        "return task->future.wait_for(std::chrono::milliseconds(0))"
-        _flowcoro_c_api "${_flowcoro_c_api}")
-    string(REPLACE
-        "using namespace std::chrono_literals;\n    return task->future.wait_for(0ms)"
-        "return task->future.wait_for(std::chrono::milliseconds(0))"
-        _flowcoro_c_api "${_flowcoro_c_api}")
-    file(WRITE "${flowcoro_SOURCE_DIR}/src/c_api.cpp" "${_flowcoro_c_api}")
-endif()
+# flowcoro >= 9a7d9ea 已修复 Windows 下的 0ms 字面量问题，无需再打补丁
 
 # flowcoro 的 CMakeLists 用 `CACHE ... FORCE` 往全局塞了 GNU/x86/Linux 专属构建
 # 标志(-march=native -flto=auto -Wl,--as-needed -Wl,-O1)。这些在 Apple ld64/MSVC
