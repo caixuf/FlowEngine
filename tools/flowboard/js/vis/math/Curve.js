@@ -3,6 +3,27 @@
  * 从控制点采样等距点，用于路面 ribbon 和车道线生成。
  */
 
+const DEFAULT_SAMPLE_SPACING_M = 3.0;
+const MIN_EDGE_SAMPLES = 16;
+const MAX_EDGE_SAMPLES = 2048;
+
+/** 按控制点折线弧长估算 edge 采样数，保证长弯道不会被少量直线弦切穿。 */
+export function edgeSampleCount(nodes, spacingM = DEFAULT_SAMPLE_SPACING_M) {
+  if (!nodes || nodes.length < 2) return 0;
+  let length = 0;
+  for (let i = 1; i < nodes.length; i++) {
+    const a = nodes[i - 1], b = nodes[i];
+    length += Math.hypot(
+      (b[0] || 0) - (a[0] || 0),
+      (b[1] || 0) - (a[1] || 0),
+      (b[2] || 0) - (a[2] || 0)
+    );
+  }
+  const spacing = Math.max(0.5, spacingM);
+  return Math.max(MIN_EDGE_SAMPLES,
+    Math.min(MAX_EDGE_SAMPLES, Math.ceil(length / spacing) + 1));
+}
+
 /** 从控制点数组采样 n 个点，返回 [x,y,z,...] 扁平数组 */
 export function sampleCatmullRom(points, n) {
   if (!points || points.length < 2) return [];
@@ -19,7 +40,7 @@ export function sampleCatmullRom(points, n) {
 }
 
 /** 从 edge 的 nodes 数组采样路面点 */
-export function sampleEdgeNodes(nodes, samplesPerEdge = 16) {
+export function sampleEdgeNodes(nodes, samplesPerEdge = edgeSampleCount(nodes)) {
   if (!nodes || nodes.length < 2) return [];
   if (nodes.length === 2) {
     // 直道：线性插值

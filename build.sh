@@ -10,6 +10,23 @@ INSTALL_PREFIX="/usr/local"
 NPROC="$( (command -v nproc >/dev/null 2>&1 && nproc) \
           || sysctl -n hw.ncpu 2>/dev/null || echo 4 )"
 
+# ── 环境净化：剔除 IDE/TraE 注入的旧 libstdc++ 库目录（remote-agent）──
+# IDE 终端会把 .../lib/remote-agent 注入 LD_LIBRARY_PATH，其自带旧版 libstdc++
+# 缺 GLIBCXX_3.4.30+ 符号，导致 cmake/gcc 启动即报 "version not found"。
+# 系统自带 libstdc++ (6.0.33) 是新的、含所需符号；本项目不依赖 remote-agent 库。
+sanitize_ld_path() {
+    [ -z "${LD_LIBRARY_PATH:-}" ] && return 0
+    local cleaned
+    cleaned="$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' \
+               | grep -v 'remote-agent' | grep -v '^$' | paste -sd: -)"
+    if [ -z "$cleaned" ]; then
+        unset LD_LIBRARY_PATH
+    else
+        export LD_LIBRARY_PATH="$cleaned"
+    fi
+}
+sanitize_ld_path
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'

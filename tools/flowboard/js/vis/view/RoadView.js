@@ -17,7 +17,7 @@
  * road_network 变化时重建，ego 位姿变化不重建。
  */
 
-import { sampleEdgeNodes } from '../math/Curve.js';
+import { sampleEdgeNodes, edgeSampleCount as adaptiveEdgeSampleCount } from '../math/Curve.js';
 import { mergeGeometries } from '../math/GeometryMerge.js';
 import { LANE_WIDTH, DEFAULT_LANES, EDGE_TYPE } from '../core/Constants.js';
 import { tangentToNormal, offsetAlongNormal, forwardENU } from '../math/Coord.js';
@@ -281,7 +281,7 @@ export function createRoadView(scene) {
   /** 确定 edge 的采样密度 */
   function edgeSampleCount(nodes, edgeType) {
     if (edgeType === EDGE_TYPE.RAMP_CURVE) return SAMPLES_RAMP;
-    if (nodes.length > 2) return SAMPLES_CURVE;  // 弯道
+    if (nodes.length > 2) return Math.max(SAMPLES_CURVE, adaptiveEdgeSampleCount(nodes));
     return SAMPLES_STRAIGHT;
   }
 

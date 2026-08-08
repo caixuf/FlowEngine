@@ -31,6 +31,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "clock_service.h"
+#include "planning_coordinates.h"
 #include "construction_zones.h"
 #include <cjson/cJSON.h>
 
@@ -171,6 +172,11 @@ struct BehaviorContext {
      * OVERTAKE_LEFT 把 ego 从对向内道拽到对向外道（y=5.25）绕圈。返程一律纯
      * 车道保持（抑制所有变道事件），纵向仍正常 CRUISE/FOLLOW。 */
     volatile int on_return{0};
+    static constexpr int kMaxRefPoints = 128;
+    double ref_x[kMaxRefPoints]{};
+    double ref_y[kMaxRefPoints]{};
+    double ref_s[kMaxRefPoints]{};
+    int ref_count{0};
 
     /* 进入 U_TURN 时的行进方向（on_return 快照）：掉头完成判定按进入方向
      * 对齐目标 heading —— 去程掉头（进入时朝 +x）目标 |h|≈π，返程掉头
@@ -558,6 +564,25 @@ static void on_ref_path(const Message* msg, void* user_data) {
     cJSON* pts = cJSON_GetObjectItemCaseSensitive(root, "points");
     if (cJSON_IsArray(pts)) {
         int n = cJSON_GetArraySize(pts);
+        int out_n = 0;
+        double accum_s = 0.0;
+        double prev_x = 0.0, prev_y = 0.0;
+        for (int i = 0; i < n && out_n < BehaviorContext::kMaxRefPoints; i++) {
+            cJSON* point = cJSON_GetArrayItem(pts, i);
+            cJSON* jx = point ? cJSON_GetObjectItemCaseSensitive(point, "x") : nullptr;
+            cJSON* jy = point ? cJSON_GetObjectItemCaseSensitive(point, "y") : nullptr;
+            if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) continue;
+            const double x = jx->valuedouble;
+            const double y = jy->valuedouble;
+            if (out_n > 0) accum_s += std::hypot(x - prev_x, y - prev_y);
+            g.ref_x[out_n] = x;
+            g.ref_y[out_n] = y;
+            g.ref_s[out_n] = accum_s;
+            prev_x = x;
+            prev_y = y;
+            out_n++;
+        }
+        g.ref_count = out_n;
         if (n > 0) {
             cJSON* last = cJSON_GetArrayItem(pts, n - 1);
             if (last) {
@@ -569,6 +594,11 @@ static void on_ref_path(const Message* msg, void* user_data) {
         }
     }
     cJSON_Delete(root);
+}
+
+static bool project_to_ref(double x, double y, planning_coord::Projection& out) {
+    return planning_coord::project_to_path(
+        x, y, g.ref_x, g.ref_y, g.ref_s, g.ref_count, out);
 }
 
 /* scene/frame：缓存施工区权威几何（掉头触发点缩短，不依赖感知）。 */
@@ -666,14 +696,12 @@ protected:
              *
              * 修复：变道进行中先检测"是否已进入目标车道"（阈值取半车道0.875m，比0.15m合理），
              * 若已进入则锁定 committed_lane_idx=target，不再重算；否则用重算值但不锁定。*/
-            int recalc_idx;
-            {
-                double offset = (-g.ego_y) / lw + (lc - 1) * 0.5;
-                int idx = (int)(offset >= 0.0 ? offset + 0.5 : offset - 0.5);
-                if (idx < 0) idx = 0;
-                if (idx >= lc) idx = lc - 1;
-                recalc_idx = idx;
-            }
+            planning_coord::Projection ego_projection;
+            const bool has_ego_projection = project_to_ref(
+                g.ego_x, g.ego_y, ego_projection);
+            const double ego_lane_d = has_ego_projection ? ego_projection.d : g.ego_y;
+            const int recalc_idx = planning_coord::nearest_lane(
+                ego_lane_d, lc, lw, !g.road_oneway);
 
             StateId cur_sm = statem_current(&g.sm);
             bool in_lane_change = (cur_sm == BEH_ST_LEFT_CHANGE || cur_sm == BEH_ST_RIGHT_CHANGE);
@@ -689,8 +717,9 @@ protected:
                  * LEFT/RIGHT_CHANGE 的 committed==target 完成判定能触发；
                  * 否则返程变道永远完不成 → TIMEOUT 弹回原车道 → 超车无效。 */
                 if (in_lane_change && g.target_lane_idx >= 0) {
-                    double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
-                    double dist_to_target = fabs(g.ego_y - target_lane_y);
+                    double target_lane_d = planning_coord::lane_center_d(
+                        g.target_lane_idx, lc, lw);
+                    double dist_to_target = fabs(ego_lane_d - target_lane_d);
                     if (dist_to_target < lw * 0.3) {
                         g.committed_lane_idx = g.target_lane_idx;
                     } else {
@@ -700,8 +729,9 @@ protected:
                     g.committed_lane_idx = recalc_idx;
                 }
             } else if (in_lane_change && g.target_lane_idx >= 0) {
-                double target_lane_y = lane_center_y(g.target_lane_idx, lc, lw, 0.0, 0.0);
-                double dist_to_target = fabs(g.ego_y - target_lane_y);
+                double target_lane_d = planning_coord::lane_center_d(
+                    g.target_lane_idx, lc, lw);
+                double dist_to_target = fabs(ego_lane_d - target_lane_d);
                 /* 进入目标车道中心半个车道宽度内(1.75/2≈0.875m)即判定变道完成 */
                 if (dist_to_target < lw * 0.3) {
                     g.committed_lane_idx = g.target_lane_idx;
@@ -830,9 +860,6 @@ protected:
             int adj_idx = -1;
             double adj_speed = g.target_speed;
 
-            /* 道路中心 y（双向道路用0，单向road/geometry可传side_offset） */
-            double road_center_y_pos = 0.0;
-
             /* 变道纵向方向：沿车头投影（2026-08-04 返程修复）——旧实现
              * dx>0/dx<0 硬编码前进向 +x，掉头返程（heading≈π 朝 -x）时
              * 前/后判定全反：前方 95m 的车被当后方、后方被当前方 →
@@ -848,14 +875,16 @@ protected:
             bool left_same_side = false;  /* 是否与 ego 在道路中心同侧 */
             if (current_idx > 0) {
                 int tl = current_idx - 1;
-                double tl_y = lane_center_y(tl, lc, lw, 0.0, 0.0);
-                left_same_side = (tl_y - road_center_y_pos) * (g.ego_y - road_center_y_pos) > 0.0;
+                double tl_y = planning_coord::lane_center_d(tl, lc, lw);
+                left_same_side = g.road_oneway || tl_y * ego_lane_d > 0.0;
 
                 if (left_same_side) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
                         if (g.obs_vx[i] < 0) continue;
-                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        planning_coord::Projection obs_projection;
+                        if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
@@ -863,7 +892,9 @@ protected:
                     }
                     left_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
-                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        planning_coord::Projection obs_projection;
+                        if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
@@ -884,14 +915,16 @@ protected:
             bool right_same_side = false;
             if (current_idx < lc - 1) {
                 int tl = current_idx + 1;
-                double tl_y = lane_center_y(tl, lc, lw, 0.0, 0.0);
-                right_same_side = (tl_y - road_center_y_pos) * (g.ego_y - road_center_y_pos) > 0.0;
+                double tl_y = planning_coord::lane_center_d(tl, lc, lw);
+                right_same_side = g.road_oneway || tl_y * ego_lane_d > 0.0;
 
                 if (right_same_side) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
                         if (g.obs_vx[i] < 0) continue;
-                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        planning_coord::Projection obs_projection;
+                        if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
@@ -899,7 +932,9 @@ protected:
                     }
                     right_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
-                        if (fabs(g.obs_y[i] - tl_y) > lat_tol) continue;
+                        planning_coord::Projection obs_projection;
+                        if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
@@ -930,13 +965,13 @@ protected:
              * 后变道到 y=+5.2 对向最左，20 m/s 逆行）。单向路（oneway=1）
              * 全部车道同向，不受限。 */
             if (!g.road_oneway) {
-                double ego_lane_y = lane_center_y(current_idx, lc, lw, 0.0, 0.0);
+                double ego_lane_y = planning_coord::lane_center_d(current_idx, lc, lw);
                 if (current_idx - 1 >= 0 &&
-                    lane_center_y(current_idx - 1, lc, lw, 0.0, 0.0) * ego_lane_y < 0.0) {
+                    planning_coord::lane_center_d(current_idx - 1, lc, lw) * ego_lane_y < 0.0) {
                     left_ok = false;   /* 左移跨中心线 → 对向 → 禁止 */
                 }
                 if (current_idx + 1 < lc &&
-                    lane_center_y(current_idx + 1, lc, lw, 0.0, 0.0) * ego_lane_y < 0.0) {
+                    planning_coord::lane_center_d(current_idx + 1, lc, lw) * ego_lane_y < 0.0) {
                     right_ok = false;  /* 右移跨中心线 → 对向 → 禁止 */
                 }
             }

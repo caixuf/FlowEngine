@@ -445,13 +445,11 @@ def nearest_lane_error(y: float, lane_width: float = 3.5, lane_count: int = 2, r
     return min(abs(y - c) for c in lane_centers)
 
 
-def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, float] | None:
-    """Return (lane_error, road_edge_margin) from scene.road_network if present.
+def _road_network_projection(scene: dict, x: float, y: float) -> tuple[float, float, int, float, float, float] | None:
+    """Project a world point onto the nearest road-network polyline segment.
 
-    The legacy evaluator only mirrored ``road_center_y(x)`` for single-curve
-    scenarios. Multi-edge road-network scenes publish sampled polyline nodes in
-    ``scene.road_network.edges[].nodes``; use the nearest segment's local normal
-    to measure lateral offset against the actual routed road geometry.
+    Returns cumulative arc length, signed lateral offset, lane count, lane
+    width, road-edge margin, and local heading.
     """
     road_network = scene.get("road_network")
     if not isinstance(road_network, dict):
@@ -460,10 +458,10 @@ def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, f
     if not isinstance(edges, list):
         return None
 
-    # (dist, signed_offset, lane_count, lane_width, margin, road_heading)
-    best: tuple[float, float, int, float, float, float] | None = None
+    best: tuple[float, float, int, float, float, float, float] | None = None
     px = float(x)
     py = float(y)
+    edge_s_base = 0.0
     for edge in edges:
         if not isinstance(edge, dict):
             continue
@@ -474,6 +472,7 @@ def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, f
         lane_count = int(edge.get("lanes", 2) or 2)
         if lane_width <= 0.0 or lane_count <= 0:
             continue
+        local_s = 0.0
         for i in range(len(nodes) - 1):
             a = nodes[i]
             b = nodes[i + 1]
@@ -486,26 +485,46 @@ def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, f
             seg_len2 = dx * dx + dy * dy
             if seg_len2 <= 1e-9:
                 continue
+            seg_len = math.sqrt(seg_len2)
             t = ((px - ax) * dx + (py - ay) * dy) / seg_len2
             t = max(0.0, min(1.0, t))
             cx = ax + t * dx
             cy = ay + t * dy
-            seg_len = math.sqrt(seg_len2)
             nx = -dy / seg_len
             ny = dx / seg_len
             signed_offset = (px - cx) * nx + (py - cy) * ny
             dist = math.hypot(px - cx, py - cy)
             margin = lane_width * lane_count * 0.5 - abs(signed_offset) - 1.0
             seg_heading = math.atan2(dy, dx)
+            candidate = (
+                dist, edge_s_base + local_s + t * seg_len, signed_offset,
+                lane_count, lane_width, margin, seg_heading,
+            )
             if (best is None or
-                    margin > best[4] + 1e-9 or
-                    (abs(margin - best[4]) <= 1e-9 and dist < best[0])):
-                best = (dist, signed_offset, lane_count, lane_width, margin, seg_heading)
+                    margin > best[5] + 1e-9 or
+                    (abs(margin - best[5]) <= 1e-9 and dist < best[0])):
+                best = candidate
+            local_s += seg_len
+        edge_s_base += local_s
 
     if best is None:
         return None
+    _, s, signed_offset, lane_count, lane_width, margin, road_heading = best
+    return s, signed_offset, lane_count, lane_width, margin, road_heading
 
-    _, signed_offset, lane_count, lane_width, margin, road_heading = best
+
+def _road_network_cross_track(scene: dict, x: float, y: float) -> tuple[float, float, float, float] | None:
+    """Return (lane_error, road_edge_margin) from scene.road_network if present.
+
+    The legacy evaluator only mirrored ``road_center_y(x)`` for single-curve
+    scenarios. Multi-edge road-network scenes publish sampled polyline nodes in
+    ``scene.road_network.edges[].nodes``; use the nearest segment's local normal
+    to measure lateral offset against the actual routed road geometry.
+    """
+    projection = _road_network_projection(scene, x, y)
+    if projection is None:
+        return None
+    _, signed_offset, lane_count, lane_width, margin, road_heading = projection
     return (
         nearest_lane_error(signed_offset, lane_width, lane_count, 0.0),
         margin,
@@ -557,6 +576,7 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
     min_forward_gap = math.inf
     min_abs_gap = math.inf
     obs_world = []
+    ego_projection = _road_network_projection(scene, x, y)
     for obs in obstacles:
         rel_x = float(obs.get("x", math.inf))
         rel_y_signed = float(obs.get("y", math.inf))
@@ -573,9 +593,22 @@ def sample_metrics(sample: dict, road: dict | None = None) -> dict:
         gap_x = abs(rel_x) - (4.6 + length) * 0.5
         gap_y = rel_y - (2.0 + width) * 0.5
         min_abs_gap = min(min_abs_gap, max(gap_x, gap_y))
-        lateral_overlap = rel_y < (2.0 + width) * 0.5
-        if rel_x > 0 and lateral_overlap:
-            min_forward_gap = min(min_forward_gap, rel_x - (4.6 + length) * 0.5)
+        if ego_projection is not None:
+            obs_projection = _road_network_projection(scene, x + rel_x, y + rel_y_signed)
+            if obs_projection is not None:
+                ego_s, ego_d = ego_projection[0], ego_projection[1]
+                obs_s, obs_d = obs_projection[0], obs_projection[1]
+                route_forward = math.cos(angle_diff(heading, ego_projection[5])) >= 0.0
+                along = (obs_s - ego_s) * (1.0 if route_forward else -1.0)
+                lateral_overlap = abs(obs_d - ego_d) < (2.0 + width) * 0.5
+                if along > 0.0 and lateral_overlap:
+                    min_forward_gap = min(
+                        min_forward_gap, along - (4.6 + length) * 0.5)
+        else:
+            lateral_overlap = rel_y < (2.0 + width) * 0.5
+            if rel_x > 0 and lateral_overlap:
+                min_forward_gap = min(
+                    min_forward_gap, rel_x - (4.6 + length) * 0.5)
 
     # P3: 提取每个 truth entity 的 tp_cycle（last_teleport_cycle），供 NPC teleport
     # 检查区分合法 recycle（设计内瞬移）vs id-collision pollution。entity id 与

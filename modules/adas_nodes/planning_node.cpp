@@ -33,6 +33,7 @@
 #undef LOG_FATAL
 #include "logger.h"
 #include "clock_service.h"
+#include "planning_coordinates.h"
 #include "degrade_ladder.h"
 #include <cjson/cJSON.h>
 
@@ -297,7 +298,7 @@ static bool has_fresh_map_ref(void) {
 }
 
 static double lane_center_offset(int lane_idx, int n_lanes, double lane_w) {
-    return lane_center_y(lane_idx, n_lanes, lane_w, 0.0, 0.0);
+    return planning_coord::lane_center_d(lane_idx, n_lanes, lane_w);
 }
 
 static bool project_to_reference_path(double x, double y,
@@ -307,40 +308,16 @@ static bool project_to_reference_path(double x, double y,
                                       double* out_heading = nullptr) {
     if (!has_fresh_map_ref()) return false;
 
-    double best_dist2 = 1e300;
-    bool found = false;
-    for (int i = 0; i + 1 < g.map_ref_count; ++i) {
-        double x0 = g.map_ref_x[i];
-        double y0 = g.map_ref_y[i];
-        double x1 = g.map_ref_x[i + 1];
-        double y1 = g.map_ref_y[i + 1];
-        double vx = x1 - x0;
-        double vy = y1 - y0;
-        double seg_len2 = vx * vx + vy * vy;
-        if (seg_len2 <= 1e-9) continue;
-
-        double t = ((x - x0) * vx + (y - y0) * vy) / seg_len2;
-        if (t < 0.0) t = 0.0;
-        if (t > 1.0) t = 1.0;
-
-        double px = x0 + t * vx;
-        double py = y0 + t * vy;
-        double dx = x - px;
-        double dy = y - py;
-        double dist2 = dx * dx + dy * dy;
-        if (dist2 >= best_dist2) continue;
-
-        double theta = atan2(vy, vx);
-        double seg_len = sqrt(seg_len2);
-        out_s = g.map_ref_s[i] + t * seg_len;
-        out_d = -dx * sin(theta) + dy * cos(theta);
-        if (out_ref_x) *out_ref_x = px;
-        if (out_ref_y) *out_ref_y = py;
-        if (out_heading) *out_heading = theta;
-        best_dist2 = dist2;
-        found = true;
-    }
-    return found;
+    planning_coord::Projection projection;
+    if (!planning_coord::project_to_path(
+            x, y, g.map_ref_x, g.map_ref_y, g.map_ref_s,
+            g.map_ref_count, projection)) return false;
+    out_s = projection.s;
+    out_d = projection.d;
+    if (out_ref_x) *out_ref_x = projection.ref_x;
+    if (out_ref_y) *out_ref_y = projection.ref_y;
+    if (out_heading) *out_heading = projection.heading;
+    return true;
 }
 
 static void update_reference_path(double start_x, bool opposite = false) {
@@ -1630,7 +1607,6 @@ protected:
                 int cur_lane = (int)(lc_f >= 0.0 ? lc_f + 0.5 : lc_f - 0.5);
                 if (cur_lane < 0) cur_lane = 0;
                 if (cur_lane >= g.lane_count) cur_lane = g.lane_count - 1;
-                double lane_center = lane_center_y(cur_lane, g.lane_count, lane_w);
                 double min_gap = 1e9;
                 int gap_src = 0;  /* 0=none 1=perception 2=truth */
                 /* 前方 = 沿车头方向（2026-08-04 掉头返程撞车修复）：
@@ -1877,11 +1853,8 @@ protected:
                      * 车道。不 clamp 则 ego 被扰动推过道路中心时"最近车道"跟着
                      * ego 翻到对向侧（正反馈），最终锁定逆行目标（2026-08-03
                      * demo12 实测：返程 ego 漂到 y=-8，目标锁 y=-5.25 东行道）。 */
-                    double off = (-ego_lane_d) / lane_w + (n_lanes - 1) * 0.5;
-                    int cur_lane = (int)(off >= 0.0 ? off + 0.5 : off - 0.5);
-                    int own_side_min = n_lanes / 2;
-                    if (cur_lane < own_side_min) cur_lane = own_side_min;
-                    if (cur_lane >= n_lanes) cur_lane = n_lanes - 1;
+                    int cur_lane = planning_coord::nearest_own_lane(
+                        ego_lane_d, n_lanes, lane_w);
                     g.target_lane_offset = lane_center_offset(cur_lane, n_lanes, lane_w);
                 }
                 if (g.plan_count % 200 == 0) {
@@ -2050,15 +2023,17 @@ protected:
              *   - 圆弧半径 R = (L²+D²)/(2|D|)，|D| 下限保护。 */
             if (g.has_behavior && n_wp > 2 &&
                 (g.current_behavior.command == BEH_LEFT_CHANGE || g.current_behavior.command == BEH_RIGHT_CHANGE)) {
-                double target_world_y = road_center_y(g.ego_x, g.curve_start_x,
-                                                      g.curve_length_m, g.curve_offset_m)
-                                      + g.target_lane_offset;
-                double target_ref_s = 0, target_ref_d = 0;
-                if (project_to_reference_path(g.ego_x, target_world_y, target_ref_s, target_ref_d)) {
-                    const double D = target_ref_d - ego_ref_d;
+                /* target_lane_offset 已是 map_ref Frenet 坐标系中的目标 d。
+                 * 禁止先用 legacy road_center_y(x) 拼世界 y 再投影：road_network
+                 * S 弯没有 legacy curve 参数，该函数返回 0，目标点会被投影成
+                 * 随道路中心漂移的 d（实测 -7m），轨迹因此驶出护栏。 */
+                const double target_ref_d = g.target_lane_offset;
+                {
                     const double L = 50.0;  /* 变道纵向长度固定（投影鲁棒） */
-                    const double absD = std::fabs(D);
-                    if (absD > 0.2 && absD < 8.0) {  /* 有效变道范围 */
+                    double end_d = ego_ref_d;
+                    if (planning_coord::quintic_lane_change(
+                            ego_ref_d, target_ref_d, L, L, end_d)) {
+                        const double D = target_ref_d - ego_ref_d;
                         /* 五次多项式横向轨迹（Apollo LateralQPOptimizer 标准解，
                          * 2026-08-04 用户认可的 Apollo 对齐路线第一步）：
                          *   l(s) = a0 + a1·s + a2·s² + a3·s³ + a4·s⁴ + a5·s⁵
@@ -2072,11 +2047,8 @@ protected:
                         for (int i = 0; i < n_wp; i++) {
                             const double t = (double)i / (double)(n_wp - 1);
                             const double s = t * L;
-                            const double s2 = s * s;
-                            d_out[i] = ego_ref_d
-                                     + a3 * s2 * s
-                                     + a4 * s2 * s2
-                                     + a5 * s2 * s2 * s;
+                            (void)planning_coord::quintic_lane_change(
+                                ego_ref_d, target_ref_d, L, s, d_out[i]);
                         }
                         /* kappa 前馈：五次多项式曲率 l''/(1+l'²)^1.5，取中段
                          * 曲率近似（l''(L/4) = 5.625·D/L²，端点 l''=0）——

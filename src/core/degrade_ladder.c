@@ -65,6 +65,7 @@ static DegradeState g_degrade = {
 typedef struct {
     char    name[DEGRADE_NODE_NAME_LEN];
     int64_t last_heartbeat_ms;  /* 上次心跳时间 (ms), 0=未注册 */
+    int64_t timeout_since_ms;
 } DegradeNodeEntry;
 
 static struct {
@@ -190,6 +191,12 @@ void degrade_supervisor_record_heartbeat(const char* node_name, int64_t now_ms) 
     g_supervisor.nodes[idx].last_heartbeat_ms = now_ms;
 }
 
+static int reason_for_node(const char* name) {
+    if (strcmp(name, "planning_node") == 0) return DEGRADE_REASON_PLANNING_TO;
+    if (strcmp(name, "fusion_node") == 0) return DEGRADE_REASON_FUSION_TO;
+    return DEGRADE_REASON_CONTROL_TO;
+}
+
 void degrade_supervisor_tick(int64_t now_ms) {
     /* 统计各节点超时状态 */
     int timeout_count = 0;
@@ -205,7 +212,16 @@ void degrade_supervisor_tick(int64_t now_ms) {
 
         if (age < oldest_heartbeat) oldest_heartbeat = age;
 
-        if (age > 500) timeout_count++;       /* >500ms */
+        if (age > 500) {
+            if (g_supervisor.nodes[i].timeout_since_ms == 0)
+                g_supervisor.nodes[i].timeout_since_ms = now_ms;
+        } else {
+            g_supervisor.nodes[i].timeout_since_ms = 0;
+        }
+
+        /* 超过阈值后再持续 150ms 才确认，去抖不依赖 supervisor tick 频率。 */
+        if (g_supervisor.nodes[i].timeout_since_ms != 0 &&
+            now_ms - g_supervisor.nodes[i].timeout_since_ms >= 150) timeout_count++;
         if (age > 2000) timeout_1s_count++;   /* >2000ms */
     }
 
@@ -240,9 +256,13 @@ void degrade_supervisor_tick(int64_t now_ms) {
         /* 单节点超时 >2s → L2 */
         if (current < DEGRADE_L2) {
             g_degrade.degrade_timestamp_ms = now_ms;
-            int reason = (g_supervisor.nodes[0].last_heartbeat_ms < now_ms - 2000)
-                         ? DEGRADE_REASON_PLANNING_TO
-                         : DEGRADE_REASON_CONTROL_TO;
+            int reason = DEGRADE_REASON_CONTROL_TO;
+            for (int i = 0; i < g_supervisor.node_count; i++) {
+                if (g_supervisor.nodes[i].last_heartbeat_ms < now_ms - 2000) {
+                    reason = reason_for_node(g_supervisor.nodes[i].name);
+                    break;
+                }
+            }
             degrade_set_level(DEGRADE_L2, reason);
         }
     } else if (timeout_count >= 2) {
@@ -255,9 +275,14 @@ void degrade_supervisor_tick(int64_t now_ms) {
         /* 单节点超时 >500ms → L1 */
         if (current < DEGRADE_L1) {
             g_degrade.degrade_timestamp_ms = now_ms;
-            int reason = (g_supervisor.nodes[0].last_heartbeat_ms < now_ms - 500)
-                         ? DEGRADE_REASON_PLANNING_TO
-                         : DEGRADE_REASON_CONTROL_TO;
+            int reason = DEGRADE_REASON_CONTROL_TO;
+            for (int i = 0; i < g_supervisor.node_count; i++) {
+                if (g_supervisor.nodes[i].timeout_since_ms != 0 &&
+                    now_ms - g_supervisor.nodes[i].timeout_since_ms >= 150) {
+                    reason = reason_for_node(g_supervisor.nodes[i].name);
+                    break;
+                }
+            }
             degrade_set_level(DEGRADE_L1, reason);
         }
     }

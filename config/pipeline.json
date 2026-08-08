@@ -157,7 +157,10 @@
           "topic": "fusion/localization",
           "type": "Localization",
           "qos": {
-            "depth": 1
+            "depth": 8,
+            "policy": "drop_oldest",
+            "reliability": "best_effort",
+            "deadline_ms": 50
           }
         },
         {

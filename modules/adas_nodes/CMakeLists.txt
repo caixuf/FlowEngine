@@ -422,6 +422,10 @@ else()
     message(STATUS "planning_node: building in fallback mode (no frenet/Eigen)")
 endif()
 
+add_executable(test_planning_coordinates test_planning_coordinates.cpp)
+target_include_directories(test_planning_coordinates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME planning_coordinates COMMAND test_planning_coordinates)
+
 # control_node: PID 纵向/横向控制 (FlowCoro 协程版)
 # 采用 CoroutineTask（同步 resume）：control 是延迟敏感的闭环控制，FlowCoroTask
 # 线程池 resume 的调度抖动会导致 20Hz 周期不一致，prev_steer 低通滤波时间间隔

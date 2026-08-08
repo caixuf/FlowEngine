@@ -67,7 +67,7 @@ export function createBarrierView(scene) {
         nodes = nodes.map(n => [n.x || 0, n.y || 0, n.z || 0]);
       }
 
-      const points = sampleEdgeNodes(nodes, 24);
+      const points = sampleEdgeNodes(nodes);
       const lanes = edge.lanes || 2;
       const laneWidth = edge.lane_width || LANE_WIDTH;
       const halfWidth = (lanes * laneWidth) / 2;

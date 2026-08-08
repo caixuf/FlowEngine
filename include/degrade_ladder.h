@@ -120,7 +120,7 @@ void degrade_supervisor_record_heartbeat(const char* node_name,
  * 建议 20Hz 调用（与 control 同频）。
  *
  * 超时策略：
- *   - 单节点超时 > 500ms → L1
+ *   - 单节点超时 > 500ms 且额外持续 150ms → L1
  *   - 单节点超时 > 2000ms → L2
  *   - 多节点同时超时 > 500ms → L2
  *   - 全链路超时 > 2000ms → L3
