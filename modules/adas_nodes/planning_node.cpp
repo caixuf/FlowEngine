@@ -180,7 +180,7 @@ struct PlanningContext {
      * safety_control 现有的 TTC/brake 逻辑直接对虚拟墙生效，无需改安全层。 */
     double tl_x[TL_CACHE_MAX];         /* 停止线 x（世界坐标） */
     double tl_y_lane[TL_CACHE_MAX];    /* 灯所在车道 y */
-    int    tl_state[TL_CACHE_MAX];     /* 0=green 1=yellow 2=red */
+    int    tl_state[TL_CACHE_MAX];     /* TrafficLightState */
     int    tl_count{0};
     volatile int has_traffic_lights{0};
 
@@ -1769,7 +1769,8 @@ protected:
                     double min_yellow_stop = (v > 2.0) ? 3.0 : 0.0;
 
                     for (int ti = 0; ti < g.tl_count && n_obs < 128; ti++) {
-                        if (g.tl_state[ti] == 0) continue;  /* 绿灯，不注入 */
+                        if (g.tl_state[ti] == TL_GREEN ||
+                            g.tl_state[ti] == TL_FLASHING_GREEN) continue;
                         double dx_tl = g.tl_x[ti] - g.ego_x;
                         /* 方向感知（2026-08-04 掉头后对向灯误停修复）：
                          * 旧实现 dx_tl>0 = 世界 +x 判"前方"——返程朝 -x 时已越过
@@ -1787,12 +1788,13 @@ protected:
                         const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
                         if (tl_on_return) {
                             dx_tl = -dx_tl;
-                            if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
                         }
+                        if (fabs(g.tl_y_lane[ti] - g.ego_y) >
+                            g.lane_width * 0.5) continue;
                         if (dx_tl <= 0.0) continue;  /* 已过停止线 */
                         if (dx_tl > 60.0) continue;  /* 太远，不注入 */
 
-                        if (g.tl_state[ti] == 2) {
+                        if (g.tl_state[ti] == TL_RED) {
                             /* 红灯：在刹停距离内注入墙
                              * 加大余量到 brake_dist + 20m 补 fusion 滞后。 */
                             if (dx_tl > brake_dist + 20.0) continue;  /* 还很远，不急 */
@@ -2213,22 +2215,37 @@ protected:
                         while (hn_r < -M_PI) hn_r += 2.0 * M_PI;
                         const bool tl_on_return = (std::fabs(hn_r) > M_PI * 0.5);
                         for (int ti = 0; ti < g.tl_count && stg.n_walls < 4; ti++) {
-                            if (g.tl_state[ti] == 0) continue;  /* 绿灯 */
+                            if (g.tl_state[ti] == TL_GREEN ||
+                                g.tl_state[ti] == TL_FLASHING_GREEN) continue;
                             double dx_tl = g.tl_x[ti] - g.ego_x;
                             if (tl_on_return) {
                                 dx_tl = -dx_tl;
-                                if (fabs(g.tl_y_lane[ti] - g.ego_y) > g.lane_width * 0.5) continue;
                             }
+                            if (fabs(g.tl_y_lane[ti] - g.ego_y) >
+                                g.lane_width * 0.5) continue;
                             if (dx_tl <= 0.0 || dx_tl > 80.0) continue;  /* 视界内才参与 */
-                            stg.walls[stg.n_walls].stopline_s = g.tl_x[ti];
+                            if (g.tl_state[ti] == TL_YELLOW) {
+                                const double v = std::max(0.0, g.ego_v);
+                                const double safe_stop_dist =
+                                    v * 0.8 + v * v / 8.0 + 2.0;
+                                if (dx_tl < safe_stop_dist) continue;
+                            }
+                            /* ST 图坐标从 ego 起算，停止线必须使用方向投影距离，
+                             * 不能塞世界 x；否则 wall 与 s_list(0..horizon) 不同系，
+                             * 约束形同虚设并导致闯红。 */
+                            stg.walls[stg.n_walls].stopline_s = dx_tl;
                             stg.walls[stg.n_walls].t_red = -1.0;  /* 红/黄=一直红（阶段 1 简化） */
-                            stg.walls[stg.n_walls].wall_margin = 1.0;
+                            /* 给控制跟踪、定位采样和车头长度留足余量，目标停在
+                             * 停止线前 5m，避免速度剖面数学上到零但车辆中心因
+                             * 离散控制跨线。 */
+                            stg.walls[stg.n_walls].wall_margin = 5.0;
                             stg.n_walls++;
                         }
                         /* 最近红墙 → 硬停点（制动自洽从墙前开始压速） */
                         double nearest = 1e9;
                         for (int w = 0; w < stg.n_walls; w++) {
-                            double d = stg.walls[w].stopline_s - stg.walls[w].wall_margin - g.ego_x;
+                            double d = stg.walls[w].stopline_s -
+                                       stg.walls[w].wall_margin;
                             if (d > 0.0 && d < nearest) nearest = d;
                         }
                         if (nearest < 1e8) {

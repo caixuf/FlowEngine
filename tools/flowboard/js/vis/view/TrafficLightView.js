@@ -69,15 +69,18 @@ export function createTrafficLightView(scene) {
     return { group: g, lamps };
   }
 
-  /** 切换灯状态：state='red'/'yellow'/'green' 或 0/1/2 */
+  /** 切换灯状态；闪绿由仿真时间驱动，2Hz 闪烁。 */
   function _setLight(entry, state) {
     const idx = typeof state === 'number' ? state
               : state === 'red' ? 0
               : state === 'yellow' ? 1
-              : state === 'green' ? 2
+              : state === 'green' || state === 'flashing_green' ? 2
               : -1;
+    const flashingOff = state === 'flashing_green' &&
+      Math.floor(performance.now() / 250) % 2 === 0;
     entry.lamps.forEach((lamp, i) => {
-      lamp.material.emissiveIntensity = (i === idx) ? 2.0 : 0.05;
+      lamp.material.emissiveIntensity =
+        (i === idx && !flashingOff) ? 2.0 : 0.05;
     });
   }
 

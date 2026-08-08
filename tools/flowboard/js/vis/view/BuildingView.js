@@ -10,7 +10,8 @@ import { directionToRotationY, tangentToNormal } from '../math/Coord.js';
 import { EDGE_TYPE, LANE_WIDTH } from '../core/Constants.js';
 
 const SPACING = { high: 55, medium: 80, low: 120 };
-const SETBACK = 14;
+// 楼体完整落在路肩外的草地上，并给行道树/人行空间留出视觉缓冲。
+const SETBACK = 32;
 
 function buildingTexture() {
   const canvas = document.createElement('canvas');

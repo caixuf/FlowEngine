@@ -159,9 +159,7 @@ export function createSceneDirector(scene) {
       const hash = roadNetworkHash(rn);
       if (hash !== lastRoadHash) {
         const edgesArr = Array.isArray(rn.edges) ? rn.edges : [];
-        const urlViaduct = typeof window !== 'undefined' &&
-                           new URLSearchParams(window.location.search).get('viaduct') === '1';
-        const isViaduct = urlViaduct || edgesArr.some(e =>
+        const isViaduct = edgesArr.some(e =>
           e && (e.name === EDGE_TYPE.VIADUCT_HIGHWAY || e.type === EDGE_TYPE.VIADUCT_HIGHWAY)
         );
 
@@ -186,7 +184,25 @@ export function createSceneDirector(scene) {
           ViewRegistry.safeCall('barrier', 'build', rn);
           ViewRegistry.safeCall('tree', 'build', rn);
           ViewRegistry.safeCall('building', 'build', rn, store);
-          ViewRegistry.safeCall('viaduct', 'build', { edges: [] });
+          const edge0 = edgesArr[0] || {};
+          const nodes = Array.isArray(edge0.nodes) ? edge0.nodes : [];
+          const isStraight = nodes.length >= 2 && nodes.every((node) => {
+            const y = Array.isArray(node) ? node[1] : node.y;
+            const y0 = Array.isArray(nodes[0]) ? nodes[0][1] : nodes[0].y;
+            return Math.abs((y || 0) - (y0 || 0)) < 1;
+          });
+          if (isStraight) {
+            ViewRegistry.safeCall('viaduct', 'build', {
+              laneCount: 4,
+              laneWidth: edge0.lane_width || LANE_WIDTH,
+              length: Math.min(edge0.length || edge0.length_m || 1000, 1600),
+              lateralOffset: 70,
+              withNationalHighway: false,
+              withEnvironment: false,
+            });
+          } else {
+            ViewRegistry.safeCall('viaduct', 'build', { enabled: false });
+          }
           store.isViaduct = false;
           store.viaductVisLength = VIADUCT_VIS_LENGTH;
         }

@@ -624,7 +624,8 @@ static bool lane_ahead_stop_light(int lane_idx, int lc, double lw) {
     double stop_range = v * v / 8.0 + 3.0 + 20.0;
     if (stop_range < 60.0) stop_range = 60.0;
     for (int i = 0; i < g.tl_count; i++) {
-        if (g.tl_state[i] == 0) continue;  /* 绿灯 */
+        if (g.tl_state[i] == TL_GREEN ||
+            g.tl_state[i] == TL_FLASHING_GREEN) continue;
         if (fabs(g.tl_y_lane[i] - lane_c) > lw * 0.5) continue;  /* 只查目标车道 */
         double dx = g.tl_x[i] - g.ego_x;
         if (g.on_return) dx = -dx;  /* 返程朝 -x：灯在前方时 dx<0 */

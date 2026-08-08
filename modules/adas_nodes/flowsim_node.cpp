@@ -1169,6 +1169,7 @@ static void publish_ref_path(void) {
 static const char* tl_phase_str(flowsim::TLPhase ph) {
     switch (ph) {
         case flowsim::TLPhase::Green:  return "green";
+        case flowsim::TLPhase::FlashingGreen: return "flashing_green";
         case flowsim::TLPhase::Yellow: return "yellow";
         case flowsim::TLPhase::Red:    return "red";
     }

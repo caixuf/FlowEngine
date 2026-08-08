@@ -116,7 +116,13 @@ static void test_traffic_light_cycle() {
     tick_traffic_lights(pool, 0.0);
     CHECK(light.phase_state == (int)TLPhase::Green, "t=0 green");
 
-    // t=5: 绿灯结束，黄灯开始
+    // 最后 3s 绿灯闪烁，给驾驶员明确预告
+    tick_traffic_lights(pool, 2.0);
+    CHECK(light.phase_state == (int)TLPhase::FlashingGreen, "t=2 flashing green");
+    CHECK(light.phase_timer >= 2.9 && light.phase_timer <= 3.0,
+          "flashing green lasts 3s");
+
+    // t=5: 闪绿结束，黄灯开始
     tick_traffic_lights(pool, 5.0);
     CHECK(light.phase_state == (int)TLPhase::Yellow, "t=5 yellow");
 

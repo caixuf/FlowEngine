@@ -14,6 +14,7 @@
 #define FLOWSIM_SCENE_EVENTS_H
 
 #include "entity.h"
+#include "traffic_light.h"
 
 /* 前向声明：Choreography 定义在 scenario_loader.h（C 头） */
 struct Choreography;
@@ -25,9 +26,10 @@ namespace flowsim {
 
 /** 红绿灯相位（存在 Entity::phase_state） */
 enum class TLPhase : int {
-    Green  = 0,
-    Yellow = 1,
-    Red    = 2,
+    Green          = TL_GREEN,
+    FlashingGreen  = TL_FLASHING_GREEN,
+    Yellow         = TL_YELLOW,
+    Red            = TL_RED,
 };
 
 /**

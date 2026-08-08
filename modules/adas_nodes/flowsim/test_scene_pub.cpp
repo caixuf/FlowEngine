@@ -76,7 +76,7 @@ static EntityPool build_test_pool() {
     Entity& tl = pool[tl_id];
     tl.id = 6;
     tl.x = 200.0; tl.y = -1.75;
-    tl.phase_state = 2;  /* Red */
+    tl.phase_state = TL_RED;
     tl.phase_timer = 12.3;
 
     EntityId gate_id = pool.alloc(EntityType::ETCGate);

@@ -16,6 +16,7 @@
  */
 
 #include "scene_pub.h"
+#include "traffic_light.h"
 #include "road_geometry.h"   /* road_center_y / road_center_heading */
 #include "transport.h"
 #include "logger.h"
@@ -61,11 +62,12 @@ const char* npc_state_str(NpcState s) {
 }
 
 const char* tl_phase_str(int phase_state) {
-    /* phase_state 与 TLPhase 枚举一致（scene_events.h）：0=Green 1=Yellow 2=Red */
+    /* phase_state 与 TLPhase 枚举一致（scene_events.h）。 */
     switch (phase_state) {
-        case 0:  return "green";
-        case 1:  return "yellow";
-        case 2:  return "red";
+        case TL_GREEN:          return "green";
+        case TL_FLASHING_GREEN: return "flashing_green";
+        case TL_YELLOW:         return "yellow";
+        case TL_RED:            return "red";
         default: return "green";
     }
 }

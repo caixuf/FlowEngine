@@ -604,6 +604,8 @@ export function createViaductView(scene) {
         });
       }
     }
+    built = false;
+    if (opts.enabled === false || Array.isArray(opts.edges)) return;
 
     const laneCount = opts.laneCount || 4;
     const laneWidth = opts.laneWidth || 3.5;
@@ -613,8 +615,11 @@ export function createViaductView(scene) {
 
     // deck 加 LOOKAHEAD 前瞻：wrap 周期仍是 visLen（SceneDirector 按 edge.length），
     // 但 deck 多建 LOOKAHEAD 米，followEgo 居中后末端外伸 LOOKAHEAD/2，消除"路到头"。
-    _buildElevatedHighway(group, 0, 0, length + LOOKAHEAD, width, 7, laneCount);
-    _buildNationalHighway(group, 0, -34, length, width, laneCount);
+    const lateralOffset = opts.lateralOffset || 0;
+    _buildElevatedHighway(group, 0, lateralOffset, length + LOOKAHEAD, width, 7, laneCount);
+    if (opts.withNationalHighway !== false) {
+      _buildNationalHighway(group, 0, lateralOffset - 34, length, width, laneCount);
+    }
 
     if (withEnv) {
       _createTrees(group, laneCount, laneWidth);

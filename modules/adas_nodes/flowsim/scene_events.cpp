@@ -74,14 +74,21 @@ void tick_traffic_lights(EntityPool& pool, double sim_time_s) {
         double tp = std::fmod(sim_time_s + offset, T);
         if (tp < 0) tp += T;  // fmod 可能返回负
 
-        if (tp < green_s) {
+        const double flashing_s = std::min(TL_FLASHING_GREEN_SECONDS, green_s);
+        const double steady_green_s = green_s - flashing_s;
+        if (tp < steady_green_s) {
             tl.phase_state = (int)TLPhase::Green;
+            tl.phase_timer = steady_green_s - tp;
+        } else if (tp < green_s) {
+            tl.phase_state = (int)TLPhase::FlashingGreen;
+            tl.phase_timer = green_s - tp;
         } else if (tp < green_s + yellow_s) {
             tl.phase_state = (int)TLPhase::Yellow;
+            tl.phase_timer = green_s + yellow_s - tp;
         } else {
             tl.phase_state = (int)TLPhase::Red;
+            tl.phase_timer = T - tp;
         }
-        tl.phase_timer = T - tp;  // 当前相位剩余时间
     }
 
     // 单路口多信号灯相位互斥校验（潜在设计缺口检测）。
@@ -91,11 +98,13 @@ void tick_traffic_lights(EntityPool& pool, double sim_time_s) {
     for (int i = 0; i < pool.size(); ++i) {
         const Entity& tl_i = pool[i];
         if (!tl_i.active || tl_i.type != EntityType::TrafficLight) continue;
-        if (tl_i.phase_state != (int)TLPhase::Green) continue;
+        if (tl_i.phase_state != (int)TLPhase::Green &&
+            tl_i.phase_state != (int)TLPhase::FlashingGreen) continue;
         for (int j = i + 1; j < pool.size(); ++j) {
             const Entity& tl_j = pool[j];
             if (!tl_j.active || tl_j.type != EntityType::TrafficLight) continue;
-            if (tl_j.phase_state != (int)TLPhase::Green) continue;
+            if (tl_j.phase_state != (int)TLPhase::Green &&
+                tl_j.phase_state != (int)TLPhase::FlashingGreen) continue;
             if (std::fabs(tl_i.x - tl_j.x) <= 1.0) {
                 LOG_WARN("flowsim",
                          "tick_traffic_lights: two traffic lights at same junction "

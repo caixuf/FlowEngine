@@ -1371,6 +1371,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
             if not isinstance(tl_def, dict):
                 continue
             stop_x = float(tl_def.get("x", 0.0) or 0.0)
+            signal_lane_y = float(tl_def.get("y_lane", -1.75) or -1.75)
 
             prev_ego_x = None
             prev_state = "unknown"
@@ -1396,7 +1397,8 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
 
                 # 闯红灯检测：ego 从停止线前越到停止线后，且当前或上一帧灯为红
                 if prev_ego_x is not None:
-                    crossed = prev_ego_x < stop_x and ego_x_i >= stop_x
+                    in_controlled_lane = abs(m["y"] - signal_lane_y) <= lane_width_default * 0.5
+                    crossed = prev_ego_x < stop_x and ego_x_i >= stop_x and in_controlled_lane
                     if crossed and "red" in (prev_state, curr_state):
                         red_light_violation = True
 
@@ -1406,7 +1408,7 @@ def score(samples: list[dict], launcher_log: Path, criteria: dict | None = None,
                 # （x=200..9200）。对远处的灯 "ego_x_i < stop_x" 恒为真，ego 在
                 # x=177 等红灯的静止会被记到 1000m 外那盏绿灯头上，误报 5-6.8s。
                 near_stop_line = -GREEN_STOP_NEAR_M < (stop_x - ego_x_i) <= GREEN_STOP_NEAR_M
-                if curr_state == "green" and near_stop_line and m["speed"] < 0.5:
+                if curr_state in ("green", "flashing_green") and near_stop_line and m["speed"] < 0.5:
                     if green_stop_start_ts is None:
                         green_stop_start_ts = ts_i
                 else:

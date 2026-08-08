@@ -9,7 +9,7 @@
  * monitor 三方 include 同一份计算，保证仿真发布、规划决策、可视化对
  * "当前是什么灯"的理解完全一致。
  *
- * 相位循环：GREEN → YELLOW → RED → GREEN → ...
+ * 相位循环：GREEN → FLASHING_GREEN → YELLOW → RED → GREEN → ...
  *   green_s    绿灯时长（s）
  *   yellow_s   黄灯时长（s）
  *   red_s      红灯时长（s）
@@ -36,10 +36,13 @@ extern "C" {
 /* ── 灯状态枚举 ─────────────────────────────────────────── */
 
 typedef enum {
-    TL_GREEN  = 0,
-    TL_YELLOW = 1,
-    TL_RED    = 2
+    TL_GREEN          = 0,
+    TL_FLASHING_GREEN = 1,
+    TL_YELLOW         = 2,
+    TL_RED            = 3
 } TrafficLightState;
+
+#define TL_FLASHING_GREEN_SECONDS 3.0
 
 /* ── 相位计算结果 ───────────────────────────────────────── */
 
@@ -76,8 +79,14 @@ static inline TrafficLightPhase traffic_light_phase_at(double t,
     double tp_mod = fmod(tp, T);
     if (tp_mod < 0.0) tp_mod += T;
 
-    if (tp_mod < green_s) {
+    const double flashing_s = green_s > TL_FLASHING_GREEN_SECONDS
+                                ? TL_FLASHING_GREEN_SECONDS : 0.0;
+    const double steady_green_s = green_s - flashing_s;
+    if (tp_mod < steady_green_s) {
         ph.state    = TL_GREEN;
+        ph.remain_s = steady_green_s - tp_mod;
+    } else if (tp_mod < green_s) {
+        ph.state    = TL_FLASHING_GREEN;
         ph.remain_s = green_s - tp_mod;
     } else if (tp_mod < green_s + yellow_s) {
         ph.state    = TL_YELLOW;
@@ -95,6 +104,7 @@ static inline TrafficLightPhase traffic_light_phase_at(double t,
 static inline const char* traffic_light_state_str(TrafficLightState s) {
     switch (s) {
         case TL_GREEN:  return "green";
+        case TL_FLASHING_GREEN: return "flashing_green";
         case TL_YELLOW: return "yellow";
         case TL_RED:    return "red";
         default:        return "green";
@@ -107,7 +117,8 @@ static inline const char* traffic_light_state_str(TrafficLightState s) {
  * topic。2026-07 起每个节点手写一份 cJSON 循环解析——schema 一改
  * 就要同步 N 处，漏一处就静默漂移。统一在此解析成 TrafficLightCache，
  * 消费端只读缓存。state 字符串与 traffic_light_state_str() 对应：
- * "red"→TL_RED、"yellow"→TL_YELLOW、其余→TL_GREEN。 */
+ * "red"→TL_RED、"yellow"→TL_YELLOW、"flashing_green"→
+ * TL_FLASHING_GREEN、其余→TL_GREEN。 */
 #define TL_CACHE_MAX 16
 
 typedef struct {
@@ -139,6 +150,8 @@ static inline void traffic_lights_parse(const char* json, TrafficLightCache* c) 
             if ((item = cJSON_GetObjectItemCaseSensitive(light, "state")) && cJSON_IsString(item)) {
                 if (strcmp(item->valuestring, "red") == 0)       c->state[c->count] = TL_RED;
                 else if (strcmp(item->valuestring, "yellow") == 0) c->state[c->count] = TL_YELLOW;
+                else if (strcmp(item->valuestring, "flashing_green") == 0)
+                    c->state[c->count] = TL_FLASHING_GREEN;
             }
             c->count++;
         }
