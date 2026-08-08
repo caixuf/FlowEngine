@@ -806,7 +806,9 @@ def _compute_perception_metrics(series: list[dict], timestamps: list[float]) -> 
 
 
 def collect_samples(duration: int, json_file: Path, interval: float,
-                    scenario: str | None = None) -> tuple[list[dict], int]:
+                    scenario: str | None = None,
+                    start_s: float | None = None,
+                    start_d: float | None = None) -> tuple[list[dict], int]:
     try:
         json_file.unlink()
     except FileNotFoundError:
@@ -819,6 +821,10 @@ def collect_samples(duration: int, json_file: Path, interval: float,
     cmd = [str(ROOT / "scripts" / "demo.sh"), "--no-browser"]
     if scenario:
         cmd += ["--scenario", scenario]
+    if start_s is not None:
+        cmd += ["--start-s", str(start_s)]
+    if start_d is not None:
+        cmd += ["--start-d", str(start_d)]
     cmd += [str(duration)]
     proc = subprocess.Popen(
         cmd,
@@ -1893,6 +1899,10 @@ def main() -> int:
     parser.add_argument("--no-run", action="store_true", help="evaluate current JSON/logs without starting demo.sh")
     parser.add_argument("--scenario", type=str, default=None,
                         help="scenario JSON path; temporarily overrides flowsim.scenario_file for this run")
+    parser.add_argument("--start-s", type=float, default=None,
+                        help="override ego start at route arc length (meters)")
+    parser.add_argument("--start-d", type=float, default=None,
+                        help="override ego lateral offset from route reference (meters)")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="write the machine-readable evaluation result to this JSON path")
     args = parser.parse_args()
@@ -1974,7 +1984,9 @@ def main() -> int:
             effective_scenario = _pipeline_flowsim_scenario_file()
         with pipeline_scenario_override(effective_scenario):
             samples, returncode = collect_samples(duration, args.json_file, args.interval,
-                                                  scenario=effective_scenario)
+                                                  scenario=effective_scenario,
+                                                  start_s=args.start_s,
+                                                  start_d=args.start_d)
             # Read pass_criteria/route while the override is still active, otherwise
             # the context manager's restore-on-exit would make this reflect the
             # pre-override (default) scenario instead of the one just run.

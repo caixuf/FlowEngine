@@ -117,6 +117,8 @@ struct FlowSimContext {
     double            target_speed{12.0};
     double            lane_width{3.5};
     uint32_t          random_seed{42};
+    double            start_s{-1.0};   /* >=0: route 弧长起点覆盖 */
+    double            start_d{0.0};    /* route 参考线横向偏移 */
 
     /* 道路几何（可选弯道，兼容旧场景；esmini 加载失败时仍用此做车道保持） */
     double            curve_start_x{0};
@@ -227,6 +229,8 @@ static void reset_runtime_state() {
     g.target_speed = 12.0;
     g.lane_width = 3.5;
     g.random_seed = 42;
+    g.start_s = -1.0;
+    g.start_d = 0.0;
     g.curve_start_x = 0.0;
     g.curve_length_m = 0.0;
     g.curve_offset_m = 0.0;
@@ -2087,6 +2091,10 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
             }
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "random_seed")) && cJSON_IsNumber(j))
                 g.random_seed = (uint32_t)j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "start_s")) && cJSON_IsNumber(j))
+                g.start_s = j->valuedouble;
+            if ((j = cJSON_GetObjectItemCaseSensitive(p, "start_d")) && cJSON_IsNumber(j))
+                g.start_d = j->valuedouble;
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "scenario_file")) && cJSON_IsString(j))
                 strncpy(g.scenario_file, j->valuestring, sizeof(g.scenario_file) - 1);
             if ((j = cJSON_GetObjectItemCaseSensitive(p, "physics_model")) && cJSON_IsString(j)) {
@@ -2156,6 +2164,27 @@ static int flowsim_init(MessageBus* bus, Transport* transport,
                          "  3) 库格式: file lib/libesminiRMLib.so 应为 ELF",
                          g.scenario_file);
             }
+        }
+    }
+
+    /* 专项回归起点覆盖：route 构建后把 (start_s,start_d) 精确映射到世界
+     * 坐标。无需复制/修改场景 JSON，可直接从施工区、路口或掉头前起跑。 */
+    if (g.start_s >= 0.0 && g.route.ok() && g.roads_loaded) {
+        int road_id = 0, route_idx = 0;
+        double local_s = 0.0;
+        g.route.locate(g.start_s, road_id, local_s, route_idx);
+        flowsim::WorldPos wp;
+        if (g.roads.frenet_to_world(road_id, 0, local_s, g.start_d, wp)) {
+            g.scenario->ego.x = wp.x;
+            g.scenario->ego.y = wp.y;
+            g.scenario->ego.heading = wp.h;
+            LOG_INFO("flowsim",
+                     "start override: route_s=%.1f d=%.2f -> road=%d local_s=%.1f world=(%.1f,%.1f h=%.2f)",
+                     g.start_s, g.start_d, road_id, local_s, wp.x, wp.y, wp.h);
+        } else {
+            LOG_ERROR("flowsim", "start override failed: route_s=%.1f d=%.2f",
+                      g.start_s, g.start_d);
+            return -1;
         }
     }
 

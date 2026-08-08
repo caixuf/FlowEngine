@@ -10,6 +10,8 @@ static bool near(double a, double b, double eps = 1e-9) {
 int main() {
     assert(near(planning_coord::lane_center_d(0, 4, 3.5), 5.25));
     assert(near(planning_coord::lane_center_d(2, 4, 3.5), -1.75));
+    assert(planning_coord::first_legal_lane(4, false) == 2);
+    assert(planning_coord::first_legal_lane(4, true) == 0);
     assert(planning_coord::nearest_own_lane(6.0, 4, 3.5) == 2);
     assert(planning_coord::nearest_own_lane(-6.0, 4, 3.5) == 3);
     assert(planning_coord::nearest_lane(1.75, 4, 3.5, false) == 1);

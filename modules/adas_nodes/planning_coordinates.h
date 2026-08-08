@@ -19,6 +19,10 @@ inline double lane_center_d(int lane_idx, int lane_count, double lane_width) {
     return -(lane_idx - (lane_count - 1) * 0.5) * lane_width;
 }
 
+inline int first_legal_lane(int lane_count, bool road_oneway) {
+    return road_oneway ? 0 : lane_count / 2;
+}
+
 inline int nearest_lane(double d, int lane_count, double lane_width,
                         bool own_side_only = true) {
     if (lane_count <= 0 || lane_width <= 0.0) return 0;

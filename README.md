@@ -166,6 +166,7 @@ bash scripts/demo.sh 30     # 30 秒演示
 bash scripts/demo.sh --multi      # 多进程模式（各节点独立 fork+exec）
 bash scripts/demo.sh --record     # 录制 Bag 文件
 bash scripts/demo.sh --no-browser # 不打开浏览器
+bash scripts/demo.sh --start-s 2700 --start-d -1.75  # 从 route 指定位置起跑
 
 # Windows 原生单进程模式
 powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -Duration 30

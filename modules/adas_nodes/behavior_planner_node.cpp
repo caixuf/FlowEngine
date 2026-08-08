@@ -167,10 +167,9 @@ struct BehaviorContext {
     int    tl_count{0};
     volatile int has_traffic_lights{0};
 
-    /* 行进方向：flowsim road/ref_path.reverse（掉头返程=1）。返程时几何镜像，
-     * 前进向的变道/归位逻辑（merge back、overtake 的左右/gap）全部失配，会误发
-     * OVERTAKE_LEFT 把 ego 从对向内道拽到对向外道（y=5.25）绕圈。返程一律纯
-     * 车道保持（抑制所有变道事件），纵向仍正常 CRUISE/FOLLOW。 */
+    /* 行进方向：flowsim road/ref_path.reverse（掉头返程=1）。ref_path 会按
+     * 行进方向反序，因此纵向前后使用 heading 投影，横向 Frenet d/车道索引
+     * 则天然保持“右侧半幅”为后半区，禁止再按 on_return 二次翻转。 */
     volatile int on_return{0};
     static constexpr int kMaxRefPoints = 128;
     double ref_x[kMaxRefPoints]{};
@@ -710,25 +709,6 @@ protected:
             if (in_uturn) {
                 /* 掉头中：不重算 committed_lane，保持原值。
                  * 掉头期间 ego 会跨过全部车道，重算会导致 committed_lane 剧烈抖动。 */
-            } else if (g.on_return) {
-                /* 掉头返程：几何镜像，锁定 committed_lane 为 ego 当前所在车道，
-                 * 忽略残留 target（前进向变道逻辑发的 stale 指令）。纯车道保持。
-                 * 例外：返程中进行的合法超车变道（2026-08-04 允许返程借道
-                 * 超车），变道进行中 committed 跟随 target 逼近，让
-                 * LEFT/RIGHT_CHANGE 的 committed==target 完成判定能触发；
-                 * 否则返程变道永远完不成 → TIMEOUT 弹回原车道 → 超车无效。 */
-                if (in_lane_change && g.target_lane_idx >= 0) {
-                    double target_lane_d = planning_coord::lane_center_d(
-                        g.target_lane_idx, lc, lw);
-                    double dist_to_target = fabs(ego_lane_d - target_lane_d);
-                    if (dist_to_target < lw * 0.3) {
-                        g.committed_lane_idx = g.target_lane_idx;
-                    } else {
-                        g.committed_lane_idx = recalc_idx;
-                    }
-                } else {
-                    g.committed_lane_idx = recalc_idx;
-                }
             } else if (in_lane_change && g.target_lane_idx >= 0) {
                 double target_lane_d = planning_coord::lane_center_d(
                     g.target_lane_idx, lc, lw);
@@ -746,6 +726,12 @@ protected:
 
             int current_idx = g.committed_lane_idx;
             if (current_idx < 0) current_idx = 0;
+            double dist_to_target_lane = 1e9;
+            if (g.target_lane_idx >= 0 && g.target_lane_idx < lc) {
+                dist_to_target_lane = fabs(
+                    ego_lane_d - planning_coord::lane_center_d(
+                        g.target_lane_idx, lc, lw));
+            }
 
             /* ── 找本车道前车 ──
              * 用横向距离而非车道号精确相等来筛。理由：离散车道号在车道线
@@ -868,6 +854,15 @@ protected:
              * 与主 lead 检测同款投影，前进/返程/任意 heading 正确。 */
             const double lc_fwd_x = std::cos(g.ego_heading);
             const double lc_fwd_y = std::sin(g.ego_heading);
+            /* ref_path 在返程时按行进方向反序发布，Frenet d 也随切线翻转。
+             * 因此“右侧通行半幅”在行进方向坐标中始终是 lane [lc/2, lc-1]；
+             * 再按 on_return 翻到 [0, lc/2-1] 会二次镜像，把返程车强制送回
+             * 去程物理半幅，与迎面 NPC 共道。 */
+            const int legal_first =
+                planning_coord::first_legal_lane(lc, g.road_oneway != 0);
+            const int legal_last = lc - 1;
+            const bool current_legal = g.road_oneway ||
+                (current_idx >= legal_first && current_idx <= legal_last);
 
             /* 左：lane_idx 减小 → y 增大方向 */
             double left_gap = 1e9;
@@ -877,19 +872,23 @@ protected:
             if (current_idx > 0) {
                 int tl = current_idx - 1;
                 double tl_y = planning_coord::lane_center_d(tl, lc, lw);
-                left_same_side = g.road_oneway || tl_y * ego_lane_d > 0.0;
+                left_same_side = g.road_oneway ||
+                    (tl >= legal_first && tl <= legal_last);
 
                 if (left_same_side) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
-                        if (g.obs_vx[i] < 0) continue;
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
-                        if (along > 0.0 && along < left_gap) { left_gap = along; left_lead_v = g.obs_vx[i]; }
+                        if (along > 0.0 && along < left_gap) {
+                            left_gap = along;
+                            left_lead_v = g.obs_vx[i] * lc_fwd_x +
+                                          g.obs_vy[i] * lc_fwd_y;
+                        }
                     }
                     left_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
@@ -901,7 +900,9 @@ protected:
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
                         if (along < 0.0) {
                             double rd = -along;
-                            double rrs = g.obs_vx[i] - g.ego_v;
+                            double obs_along_v = g.obs_vx[i] * lc_fwd_x +
+                                                 g.obs_vy[i] * lc_fwd_y;
+                            double rrs = obs_along_v - g.ego_v;
                             double min_rd = (rrs > 0.0) ? fmax(g.rear_safe_min_m, rrs * g.rear_safe_time_s) : g.rear_safe_min_m;
                             if (rd < min_rd) left_rear_safe = false;
                         }
@@ -917,19 +918,23 @@ protected:
             if (current_idx < lc - 1) {
                 int tl = current_idx + 1;
                 double tl_y = planning_coord::lane_center_d(tl, lc, lw);
-                right_same_side = g.road_oneway || tl_y * ego_lane_d > 0.0;
+                right_same_side = g.road_oneway ||
+                    (tl >= legal_first && tl <= legal_last);
 
                 if (right_same_side) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
-                        if (g.obs_vx[i] < 0) continue;
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
                         const double rx = g.obs_x[i] - g.ego_x;
                         const double ry = g.obs_y[i] - g.ego_y;
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
-                        if (along > 0.0 && along < right_gap) { right_gap = along; right_lead_v = g.obs_vx[i]; }
+                        if (along > 0.0 && along < right_gap) {
+                            right_gap = along;
+                            right_lead_v = g.obs_vx[i] * lc_fwd_x +
+                                           g.obs_vy[i] * lc_fwd_y;
+                        }
                     }
                     right_rear_safe = true;
                     for (int i = 0; i < g.obs_count; i++) {
@@ -941,7 +946,9 @@ protected:
                         const double along = rx * lc_fwd_x + ry * lc_fwd_y;
                         if (along < 0.0) {
                             double rd = -along;
-                            double rrs = g.obs_vx[i] - g.ego_v;
+                            double obs_along_v = g.obs_vx[i] * lc_fwd_x +
+                                                 g.obs_vy[i] * lc_fwd_y;
+                            double rrs = obs_along_v - g.ego_v;
                             /* 右侧后方安全距离增强（超车后切回场景）：
                              * 左道超车后切回右道时，被超的车虽在后方且更慢，
                              * 但 ego 切回后立即减速至车流速度，后车会追上来。
@@ -960,20 +967,22 @@ protected:
 
             bool left_ok  = left_same_side && left_rear_safe && (left_gap > min_gap * g.lc_gap_mult);
             bool right_ok = right_same_side && right_rear_safe && (right_gap > min_gap * g.lc_gap_mult);
-            /* 双向路保护（2026-08）：变道候选不得跨过中心线（目标车道 y 与
-             * ego 同号）。旧实现不感知单双向 —— 双向 4 车道（2 同向 + 2 对向）
-             * 上超车变道（左移）越过中心线进入对向车道 → 逆行（实测启动
-             * 后变道到 y=+5.2 对向最左，20 m/s 逆行）。单向路（oneway=1）
-             * 全部车道同向，不受限。 */
+            /* 双向路保护：合法半幅按行进方向 Frenet 坐标固定，绝不以世界 y
+             * 或 on_return 再次翻转。掉头若短暂落在错误半幅，只允许恢复到
+             * 最近合法车道，不参与常规 gap 竞选。 */
             if (!g.road_oneway) {
-                double ego_lane_y = planning_coord::lane_center_d(current_idx, lc, lw);
-                if (current_idx - 1 >= 0 &&
-                    planning_coord::lane_center_d(current_idx - 1, lc, lw) * ego_lane_y < 0.0) {
-                    left_ok = false;   /* 左移跨中心线 → 对向 → 禁止 */
+                if (current_idx - 1 < legal_first || current_idx - 1 > legal_last) {
+                    left_ok = false;
                 }
-                if (current_idx + 1 < lc &&
-                    planning_coord::lane_center_d(current_idx + 1, lc, lw) * ego_lane_y < 0.0) {
-                    right_ok = false;  /* 右移跨中心线 → 对向 → 禁止 */
+                if (current_idx + 1 < legal_first || current_idx + 1 > legal_last) {
+                    right_ok = false;
+                }
+                /* 错误半幅恢复只准朝最近合法车道移动，不参与常规 gap 竞选。 */
+                if (!current_legal) {
+                    left_ok = current_idx > legal_last;
+                    right_ok = current_idx < legal_first;
+                    left_gap = right_gap = 1e9;
+                    left_rear_safe = right_rear_safe = true;
                 }
             }
 
@@ -1004,7 +1013,7 @@ protected:
                  * CRUISE/FOLLOW/变道分支都要用，故声明在外层决策块（覆盖全部
                  * 分支），不能在 if(cur!=U_TURN) 内声明（作用域覆盖不到下方
                  * CRUISE/FOLLOW/LEFT_CHANGE/RIGHT_CHANGE 分支）。 */
-                const int inner_lane = (g.on_return) ? (lc / 2 - 1) : (lc / 2);
+                const int inner_lane = lc / 2;
                 const bool at_inner_lane = (current_idx == inner_lane);
                 /* ── 掉头触发（优先级最高：路端是硬约束，任何状态生效）──
                  * 前进 trip：ego_x 接近 ref_path 终点 → 掉头到对向车道
@@ -1195,6 +1204,19 @@ protected:
                     snprintf(reason, sizeof(reason),
                              "uturn trigger: ego_x=%.1f ref_end=%.1f on_return=%d → U_TURN",
                              g.ego_x, g.ref_path_end_x, g.on_return);
+                } else if (!current_legal &&
+                           (cur == BEH_ST_CRUISE || cur == BEH_ST_FOLLOW)) {
+                    const int recovery_lane = current_idx > legal_last
+                                                ? legal_last : legal_first;
+                    ev = recovery_lane < current_idx
+                           ? BEH_EV_OVERTAKE_LEFT : BEH_EV_OVERTAKE_RIGHT;
+                    new_target_lane = recovery_lane;
+                    new_target_speed = std::min(g.cfg_cruise_speed,
+                                                std::max(3.0, g.ego_v));
+                    new_follow_id = 0;
+                    snprintf(reason, sizeof(reason),
+                             "wrong carriageway lane%d on_return=%d → recover lane%d",
+                             current_idx, g.on_return, recovery_lane);
                 } else if (cur == BEH_ST_CRUISE) {
                     if (uturn_approach_active) {
                         if (!at_inner_lane) {
@@ -1352,7 +1374,8 @@ protected:
                                  g.target_lane_idx, inner_lane, uturn_natural_target);
                         LOG_WARN("behavior", "uturn approach abort lane change (target=%d inner=%d)",
                                  g.target_lane_idx, inner_lane);
-                    } else if (g.committed_lane_idx == g.target_lane_idx) {
+                    } else if (g.target_lane_idx >= 0 &&
+                               dist_to_target_lane < 0.35) {
                         ev = BEH_EV_COMPLETED;
                         new_target_lane = -1;
                         g.cooldown = g.lane_change_cooldown_s;
@@ -1421,6 +1444,30 @@ protected:
                         LOG_WARN("behavior", "uturn timeout (timer=%.1f) → cooldown=%.1fs", g.state_timer, g.cooldown);
                     }
                     /* U_TURN 稳态：不覆盖 target_speed */
+                }
+            }
+
+            /* 状态机硬门：同车道或越出行进方向合法半幅的“变道”绝不下发。
+             * 这是最终一致性保护，防止任一上游候选分支的 stale target 造成
+             * LEFT/RIGHT_CHANGE(target==current) 循环或跨入对向物理半幅。 */
+            if (ev == BEH_EV_OVERTAKE_LEFT || ev == BEH_EV_OVERTAKE_RIGHT) {
+                const bool invalid_target =
+                    new_target_lane < legal_first ||
+                    new_target_lane > legal_last ||
+                    new_target_lane == current_idx;
+                if (invalid_target) {
+                    LOG_ERROR("behavior",
+                              "reject invalid lane change: current=%d target=%d legal=[%d,%d] return=%d",
+                              current_idx, new_target_lane, legal_first, legal_last,
+                              g.on_return);
+                    new_target_lane = -1;
+                    if (cur_sm == BEH_ST_CRUISE && blocked) {
+                        ev = BEH_EV_BLOCKED;
+                        new_target_speed = follow_speed;
+                        new_follow_id = lead_id;
+                    } else {
+                        ev = SM_EVENT_NONE;
+                    }
                 }
             }
 

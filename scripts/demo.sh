@@ -11,6 +11,7 @@
 #   bash scripts/demo.sh --multi      # fork+exec 多进程模式
 #   bash scripts/demo.sh --manual     # 游戏模式：终端 WASD 键盘直接驾驶 ego
 #   bash scripts/demo.sh --scenario scenarios/straight_road.json  # 指定场景
+#   bash scripts/demo.sh --start-s 2700 --start-d -1.75            # 从 route 2700m 起跑
 #   bash scripts/demo.sh --no-browser # 不自动打开浏览器（仅对 --replay 模式生效）
 # =============================================================================
 set -e
@@ -150,6 +151,8 @@ RECORD_MODE=false
 GAME_MODE=false
 REPLAY_FILE=""
 SCENARIO=""  # 留空则用 DEFAULT_SCENARIO（旗舰场景）
+START_S=""
+START_D=""
 MANUAL_MODE=false
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build"
@@ -167,6 +170,8 @@ while [ $# -gt 0 ]; do
     --replay) REPLAY_FILE="$2"; shift ;;
     --game) GAME_MODE=true ;;
     --scenario) SCENARIO="$2"; shift ;;
+    --start-s) START_S="$2"; shift ;;
+    --start-d) START_D="$2"; shift ;;
     ''|*[!0-9]*) ;;
     *) DURATION="$1" ;;
   esac
@@ -208,6 +213,28 @@ if [ -n "$SCENARIO" ]; then
   trap 'cleanup_pipeline_tmp' EXIT
   SCENARIO_ABS="$([ -f "$SCENARIO" ] && echo "$(cd "$(dirname "$SCENARIO")" && pwd)/$(basename "$SCENARIO")" || echo "$SCENARIO")"
   sed 's|\\"scenario_file\\": \\"[^\\"]*\\"|\\"scenario_file\\": \\"'$SCENARIO_ABS'\\"|g' "$PIPELINE_ORIG" > "$PIPELINE_TMP"
+  if [ -n "$START_S" ] || [ -n "$START_D" ]; then
+    python3 - "$PIPELINE_TMP" "$START_S" "$START_D" <<'PY'
+import json
+import sys
+
+path, start_s, start_d = sys.argv[1:]
+with open(path, encoding="utf-8") as f:
+    pipeline = json.load(f)
+for process in pipeline.get("processes", []):
+    if process.get("name") != "flowsim":
+        continue
+    params = json.loads(process.get("params", "{}"))
+    if start_s:
+        params["start_s"] = float(start_s)
+    if start_d:
+        params["start_d"] = float(start_d)
+    process["params"] = json.dumps(params, separators=(",", ":"))
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(pipeline, f, indent=2)
+PY
+    echo "  Start override: s=${START_S:-scenario} d=${START_D:-0}"
+  fi
   PIPELINE="$PIPELINE_TMP"
   echo "  Scenario: $SCENARIO_ABS"
 fi
