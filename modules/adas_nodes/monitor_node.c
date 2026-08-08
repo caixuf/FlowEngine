@@ -136,7 +136,7 @@ static struct {
      * path 在 JSON 部分内，cJSON 解析时忽略尾部文本。 */
     char driver_mode[32];
     int  route_lane;
-    char trajectory_path_json[4096];  /* path 数组 JSON 文本，如 [[s,d,spd],...] */
+    char trajectory_path_json[4096];  /* 世界 ENU path，如 [[x,y,spd],...] */
     int  ego_road_id;                 /* ego 所在道路段 id（flowsim_node 发布） */
 
     /* 行为规划状态（来自 behavior/state JSON topic）*/

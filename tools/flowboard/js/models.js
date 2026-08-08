@@ -158,7 +158,7 @@ export function initModelCache() {
       loader.load(
         // ?v= 缓存破坏：models/ 曾以 immutable 提供，模型左右修复后浏览器
         // 一直用旧缓存。改了模型就 bump 这个版本号（服务端已改 no-cache）。
-        '/tools/flowboard/models/' + name + '.gltf?v=20260731',
+        '/tools/flowboard/models/' + name + '.gltf?v=20260808',
         function(n) { return function(g) { onModelLoaded(n, g); }; }(name),
         undefined,
         function(n) { return function(e) { onModelError(n, e); }; }(name)
@@ -342,5 +342,4 @@ export function _setVehicleLights(group, state, blinkPhase) {
     }
   }
 }
-
 

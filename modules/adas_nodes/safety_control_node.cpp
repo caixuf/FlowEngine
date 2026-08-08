@@ -507,6 +507,11 @@ private:
             const double ch = std::cos(state.heading), sh = std::sin(state.heading);
             for (int i = 0; i < kMaxObs; ++i) {
                 if (!state.obs_valid[i]) continue;
+                /* 施工区是 planning 生成机动轨迹的边界约束，不是动态碰撞体。
+                 * Phase 0 的语义正是从施工前缘倒车腾挪；若把墙体感知点纳入
+                 * 倒车硬门，墙在车后 4.8m 内时会永久 brake=1，机动直到 40s
+                 * TIMEOUT。真实车辆/行人仍保留双向硬碰撞保护。 */
+                if (std::strcmp(state.obs_type[i], "construction") == 0) continue;
                 const double dx = state.obs_x[i] - state.x;
                 const double dy = state.obs_y[i] - state.y;
                 /* 车体系投影：掉头转过 90°/180° 后世界系 +x 早已不是"前方" */

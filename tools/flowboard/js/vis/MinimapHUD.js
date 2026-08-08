@@ -13,7 +13,11 @@
  *   - 小地图统一用 ENU：enu_x = three_x, enu_y = -three_z
  */
 
-import { forwardENU } from './math/Coord.js';
+import {
+  drawRoadNetwork2D,
+  strokePolyline,
+  worldToEgoCanvas,
+} from './math/MapProjection.js';
 
 const W = 220;   // canvas 物理像素宽（px）
 const H = 160;   // canvas 物理像素高（px）
@@ -45,60 +49,19 @@ export function createMinimapHUD(container) {
 
   const ctx = canvas.getContext('2d');
   let _visible = true;
-  let _roadEdges = null;  // 缓存道路边数组，roadHash 变才更新
-  let _lastRoadHash = '';
   let _range = DEFAULT_RANGE;
 
   // ── 坐标映射：ENU → canvas 相对坐标（相对 ego 中心，未平移/旋转）──
   // 车头朝上模式（2026-08）：draw() 外层 translate(W/2,H/2)+rotate(-h)，
   // 此处只返回相对偏移。ENU y 轴向上 → canvas y 向下取负。
-  function toCanvas(ex, ey, cx, cy) {
-    const scaleX = W / (2 * _range);
-    const scaleY = H / (2 * _range);
-    return [
-      (ex - cx) * scaleX,
-      -(ey - cy) * scaleY,
-    ];
-  }
-
-  // ── 从 edge 提取 ENU 点序列（中心线采样） ──
-  function edgeToPoints(edge) {
-    const sx = edge.start_x || 0;
-    const sz = edge.start_z || 0;
-    const ex_enu = sx;
-    const ey_enu = -sz;  // THREE.z → ENU.y
-
-    const len = edge.length_m || edge.length || 100;
-    const h = edge.heading || 0;  // THREE heading（绕 Y 轴）
-
-    // THREE heading：前进方向 = (cos(h), 0, sin(h))
-    // ENU 前进方向：Coord forwardENU(h) = [cos(h), sin(h)]，
-    // 但 road edge heading 是 THREE 空间角（THREE.z 分量 = sin(h) = -ENU.y）
-    // 所以 ENU.y = -sin(h)，用 forwardENU 取 x 分量，y 分量需取反。  // Coord forwardENU
-    const [dx, _dy] = forwardENU(h);
-    const dy = -_dy; // THREE.z = -ENU.y，方向符号反转  // Coord forwardENU
-
-    return [
-      [ex_enu, ey_enu],
-      [ex_enu + dx * len, ey_enu + dy * len],
-    ];
-  }
-
-  // ── 更新路网缓存 ──
-  function _syncRoadEdges(store) {
-    const rn = store.roadNetwork;
-    if (!rn || !rn.edges) { _roadEdges = []; return; }
-    const hash = store.roadHash || '';
-    if (hash === _lastRoadHash && _roadEdges) return;
-    _lastRoadHash = hash;
-    _roadEdges = rn.edges;
+  function toCanvas(ex, ey, cx, cy, heading) {
+    const scale = Math.min(W, H) / (2 * _range);
+    return worldToEgoCanvas(ex, ey, cx, cy, heading, scale, 0, 0);
   }
 
   // ── 主绘制函数（每帧调用）──
   function draw(store) {
     if (!_visible || !store) return;
-
-    _syncRoadEdges(store);
 
     const ego = store.ego;
     const cx = ego ? ego.x : 0;
@@ -117,43 +80,23 @@ export function createMinimapHUD(container) {
     // ENU heading 逆时针为正（0=东），canvas 旋转顺时针为正 → 取负。
     ctx.save();
     ctx.translate(W / 2, H / 2);
-    ctx.rotate(-h);
 
     // ── 道路 ──
-    if (_roadEdges) {
-      ctx.strokeStyle = '#2a3a52';
-      ctx.lineWidth = 5;
-      ctx.lineCap = 'round';
-      for (const edge of _roadEdges) {
-        const pts = edgeToPoints(edge);
-        const [x0, y0] = toCanvas(pts[0][0], pts[0][1], cx, cy);
-        const [x1, y1] = toCanvas(pts[1][0], pts[1][1], cx, cy);
-        ctx.beginPath();
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ctx.stroke();
-      }
-      // 中心线虚线
-      ctx.strokeStyle = '#3d5270';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 6]);
-      for (const edge of _roadEdges) {
-        const pts = edgeToPoints(edge);
-        const [x0, y0] = toCanvas(pts[0][0], pts[0][1], cx, cy);
-        const [x1, y1] = toCanvas(pts[1][0], pts[1][1], cx, cy);
-        ctx.beginPath();
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ctx.stroke();
-      }
-      ctx.setLineDash([]);
-    }
+    drawRoadNetwork2D(ctx, store.roadNetwork,
+      (x, y) => toCanvas(x, y, cx, cy, h),
+      {
+        asphalt: '#253246', edgeColor: '#44546d', dividerColor: '#8392aa',
+        pxPerMeter: Math.min(W, H) / (2 * _range),
+      });
+
+    strokePolyline(ctx, store.trajectoryPath,
+      (x, y) => toCanvas(x, y, cx, cy, h), '#58a6ff', 1.5, [4, 3]);
 
     // ── NPC 实体（车头朝上坐标系：相对 ego 中心）──
     const entities = store.entities || [];
     for (const e of entities) {
       if (!e || e.type === 'pedestrian') continue;
-      const [px, py] = toCanvas(e.x, e.y, cx, cy);
+      const [px, py] = toCanvas(e.x, e.y, cx, cy, h);
       if (Math.abs(px) > W / 2 + 8 || Math.abs(py) > H / 2 + 8) continue;
       ctx.fillStyle = e.type === 'vehicle' ? '#f7a825' : '#a0b4c8';
       ctx.beginPath();

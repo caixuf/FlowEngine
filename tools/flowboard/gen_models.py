@@ -88,6 +88,43 @@ def box_indices(base: int) -> list[int]:
     return tris  # 36 u16s
 
 
+def tapered_box_vertices(cx: float, cy: float, cz: float,
+                         length: float, height: float,
+                         width_bottom: float, width_top: float,
+                         front_top_inset: float = 0.0,
+                         rear_top_inset: float = 0.0) -> list[float]:
+    """低成本流线车身块：底面矩形、顶面收窄并可前后内缩。
+
+    仍只有 12 个三角面，与 box 相同；通过斜侧面形成肩线、机盖坡度和
+    溜背轮廓，显著减少“方盒车”观感而不增加三角面或 draw call。
+    """
+    x0, x1 = cx - length / 2, cx + length / 2
+    y0, y1 = cy - height / 2, cy + height / 2
+    z0b, z1b = cz - width_bottom / 2, cz + width_bottom / 2
+    z0t, z1t = cz - width_top / 2, cz + width_top / 2
+    xt0, xt1 = x0 + rear_top_inset, x1 - front_top_inset
+    corners = [
+        (x0, y0, z0b), (x1, y0, z0b), (x1, y0, z1b), (x0, y0, z1b),
+        (xt0, y1, z0t), (xt1, y1, z0t), (xt1, y1, z1t), (xt0, y1, z1t),
+    ]
+    faces = [
+        (0, 1, 2, 3), (4, 7, 6, 5),
+        (1, 5, 6, 2), (3, 7, 4, 0),
+        (0, 4, 5, 1), (2, 6, 7, 3),
+    ]
+    verts: list[float] = []
+    for a, b, c, d in faces:
+        p0, p1, p2 = corners[a], corners[b], corners[c]
+        ux, uy, uz = (p1[i] - p0[i] for i in range(3))
+        vx, vy, vz = (p2[i] - p0[i] for i in range(3))
+        nx, ny, nz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+        nl = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+        normal = (nx / nl, ny / nl, nz / nl)
+        for idx in (a, b, c, d):
+            verts.extend([*corners[idx], *normal])
+    return verts
+
+
 def cylinder_vertices(cx: float, cy: float, cz: float,
                       radius: float, height: float, axis: str = "z",
                       segments: int = 16) -> tuple[list[float], list[int]]:
@@ -305,11 +342,15 @@ MODEL_SPECS = [
         "parts": [
             # 车身件 (car_paint, mat 0) — 目标 L=4.6 H=1.45 W=1.80 L:H≈3.2
             # body: cy=0.53 sy=0.52 → top=0.79 bottom=0.27
-            {"name": "body",     "mat": 0, "build_fn": lambda: box_vertices(0.0,   0.53,  0.0,  4.6,  0.52, 1.80)},
+            {"name": "body",     "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                0.0, 0.53, 0.0, 4.6, 0.52, 1.80, 1.62, 0.18, 0.12)},
             # cabin: cy=1.19 sy=0.52 → top=1.45 (= 目标 H)
-            {"name": "cabin",    "mat": 0, "build_fn": lambda: box_vertices(0.05,  1.19,  0.0,  2.2,  0.52, 1.50)},
-            {"name": "hood",     "mat": 0, "build_fn": lambda: box_vertices(1.50,  0.80,  0.0,  1.4,  0.06, 1.50)},
-            {"name": "trunklid", "mat": 0, "build_fn": lambda: box_vertices(-1.60, 0.80,  0.0,  1.1,  0.05, 1.48)},
+            {"name": "cabin",    "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                0.05, 1.19, 0.0, 2.2, 0.52, 1.50, 1.24, 0.42, 0.34)},
+            {"name": "hood",     "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                1.50, 0.80, 0.0, 1.4, 0.06, 1.50, 1.34, 0.12, 0.0)},
+            {"name": "trunklid", "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                -1.60, 0.80, 0.0, 1.1, 0.05, 1.48, 1.34, 0.0, 0.10)},
             # 4 车门（薄板贴车身侧面）
             {"name": "door_FL",  "mat": 0, "build_fn": lambda: box_vertices(0.7,   0.53,  -0.91, 1.1,  0.62, 0.04)},
             {"name": "door_FR",  "mat": 0, "build_fn": lambda: box_vertices(0.7,   0.53, 0.91, 1.1,  0.62, 0.04)},
@@ -361,13 +402,17 @@ MODEL_SPECS = [
                       "ads_indicator", "su7_taillight_bar"],
         "parts": [
             # 车身件 (su7_paint, mat 0) — 低趴运动造型，L=5.0
-            {"name": "body",       "mat": 0, "build_fn": lambda: box_vertices( 0.00, 0.45,  0.00, 5.00, 0.55, 1.92)},
+            {"name": "body",       "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                0.00, 0.45, 0.00, 5.00, 0.55, 1.92, 1.68, 0.28, 0.18)},
             # 引擎盖（下压式）
-            {"name": "hood",       "mat": 0, "build_fn": lambda: box_vertices( 1.65, 0.75,  0.00, 1.40, 0.06, 1.78)},
+            {"name": "hood",       "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                1.65, 0.75, 0.00, 1.40, 0.06, 1.78, 1.48, 0.16, 0.0)},
             # 驾驶舱（溜背，cy=1.20 sy=0.50 → top=1.45 = 目标 H）
-            {"name": "cabin",      "mat": 0, "build_fn": lambda: box_vertices(-0.05, 1.20,  0.00, 2.30, 0.50, 1.55)},
+            {"name": "cabin",      "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                -0.05, 1.20, 0.00, 2.30, 0.50, 1.55, 1.20, 0.46, 0.58)},
             # 后备厢盖（fastback 溜背）
-            {"name": "trunklid",   "mat": 0, "build_fn": lambda: box_vertices(-1.95, 0.78,  0.00, 0.85, 0.06, 1.78)},
+            {"name": "trunklid",   "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                -1.95, 0.78, 0.00, 0.85, 0.06, 1.78, 1.50, 0.0, 0.12)},
             # 后扰流板唇（小鸭尾）
             {"name": "spoiler",    "mat": 0, "build_fn": lambda: box_vertices(-2.40, 0.82,  0.00, 0.10, 0.04, 1.55)},
             # 前唇 splitter
@@ -447,10 +492,13 @@ MODEL_SPECS = [
         "name": "suv",
         "materials": ["suv_paint", "glass", "tire", "headlight", "brakelight", "turnsignal"],
         "parts": [
-            {"name": "body",       "mat": 0, "build_fn": lambda: box_vertices( 0.0,  0.58,  0.0,  4.6, 0.95, 1.90)},
+            {"name": "body",       "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                0.0, 0.58, 0.0, 4.6, 0.95, 1.90, 1.68, 0.16, 0.10)},
             # cabin: cy=1.40 sy=0.60 → top=1.70 = 目标 H
-            {"name": "cabin",      "mat": 0, "build_fn": lambda: box_vertices(-0.3,  1.40,  0.0,  1.8, 0.60, 1.50)},
-            {"name": "rear",       "mat": 0, "build_fn": lambda: box_vertices( 1.0,  1.35,  0.0,  1.2, 0.55, 1.50)},
+            {"name": "cabin",      "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                -0.3, 1.40, 0.0, 1.8, 0.60, 1.50, 1.28, 0.30, 0.22)},
+            {"name": "rear",       "mat": 0, "build_fn": lambda: tapered_box_vertices(
+                1.0, 1.35, 0.0, 1.2, 0.55, 1.50, 1.30, 0.18, 0.0)},
             {"name": "windshield", "mat": 1, "build_fn": lambda: box_vertices( 1.10, 1.12,  0.0,  0.06, 0.48, 1.45)},
             {"name": "headlight_L",  "mat": 3, "build_fn": lambda: box_vertices( 2.28, 0.62,  -0.60, 0.10, 0.18, 0.42)},
             {"name": "headlight_R",  "mat": 3, "build_fn": lambda: box_vertices( 2.28, 0.62, 0.60, 0.10, 0.18, 0.42)},

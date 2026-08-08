@@ -17,6 +17,11 @@
 import { safeCall, reportDiag } from './utils.js';
 import { _dr, tickDeadReckon } from './vis/core/DeadReckon.js';
 import { init3DScene, resize3D } from './vis/main.js';
+import {
+  drawRoadNetwork2D,
+  strokePolyline,
+  worldToEgoCanvas,
+} from './vis/math/MapProjection.js';
 
 // ── 2D state ────────────────────────────────────────────────────────────────
 // egoT / gpsHistory were removed: dead-reckoning state (last*/smooth*) is
@@ -111,31 +116,27 @@ export function draw2D() {
     heading: _dr.lastHeading,
     speed: _dr.lastSpeed
   };
+  var scn = (_topoData.metrics || {}).scene || {};
+  var roadNetwork = scn.road_network || null;
+  var project = function (x, y) {
+    return worldToEgoCanvas(x, y, e.x, e.y, e.heading, s, carX, carY);
+  };
+  var relativeToCanvas = function (rx, ry) {
+    return project(e.x + rx, e.y + ry);
+  };
 
   // ── Background (dark ADAS display) ──
   ctx.fillStyle = '#060a0f';
   ctx.fillRect(0, 0, W, H);
 
-  // ── Road: NS only — no intersection. Left/right shoulders. ──
-  var rw = 3.5 * s;           // one lane width in px
-  var rdW = 2 * rw;           // 2 lanes each side = 4-lane road half-width
-  // Road drawn in ego-relative frame: world lane-center offset from screen center
-  // so the ego marker correctly sits inside its actual lane.
-  var cx = carX + (e.y || 0) * s;
-  // Longitudinal scroll: dashed markings flow backwards as ego advances
-  var scroll = ((e.x || 0) * s) % (s * 3);
-  // Shoulder grass
-  ctx.fillStyle = '#0b1008';
-  ctx.fillRect(0, 0, cx - rdW, H);
-  ctx.fillRect(cx + rdW, 0, W - (cx + rdW), H);
-  // Kerb strip
-  ctx.fillStyle = '#1a2218';
-  ctx.fillRect(cx - rdW - 6, 0, 6, H);
-  ctx.fillStyle = '#1a2218';
-  ctx.fillRect(cx + rdW, 0, 6, H);
-  // Asphalt
-  ctx.fillStyle = '#111520';
-  ctx.fillRect(cx - rdW, 0, rdW * 2, H);
+  drawRoadNetwork2D(ctx, roadNetwork, project, {
+    asphalt: '#111722', edgeColor: '#344054',
+    dividerColor: '#778397', centerColor: '#e9bd45', pxPerMeter: s
+  });
+
+  var rw = 3.5 * s;
+  var rdW = 2 * rw;
+  var cx = carX;
 
   // ── Range rings (semi-circles ahead of ego) ──
   ctx.save();
@@ -159,46 +160,6 @@ export function draw2D() {
   });
   ctx.setLineDash([]);
   ctx.restore();
-
-  // ── Lane markings ──
-  ctx.lineWidth = 2;
-  // Solid road edge lines
-  ctx.strokeStyle = '#2a3a28';
-  ctx.setLineDash([]);
-  ctx.beginPath();
-  ctx.moveTo(cx - rdW, 0);
-  ctx.lineTo(cx - rdW, H);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx + rdW, 0);
-  ctx.lineTo(cx + rdW, H);
-  ctx.stroke();
-  // Inner dashed lane dividers (1 divider each side of center)
-  ctx.strokeStyle = '#223322';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([s * 1.5, s * 1.2]);
-  ctx.lineDashOffset = scroll;
-  for (var li = -1; li <= 1; li += 2) {
-    ctx.beginPath();
-    ctx.moveTo(cx + li * rw, 0);
-    ctx.lineTo(cx + li * rw, H);
-    ctx.stroke();
-  }
-  // Yellow dashed centerline (two-way traffic, passing allowed)
-  ctx.strokeStyle = '#ffd700';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([s * 3, s * 2]);
-  ctx.lineDashOffset = scroll;
-  ctx.beginPath();
-  ctx.moveTo(cx - 3, 0);
-  ctx.lineTo(cx - 3, H);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx + 3, 0);
-  ctx.lineTo(cx + 3, H);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.lineDashOffset = 0;
 
   // ── Forward-distance ruler (right side of road) ──
   ctx.font = "8px 'JetBrains Mono',monospace";
@@ -226,7 +187,7 @@ export function draw2D() {
     ctx.setLineDash([3, 4]);
     ctx.beginPath();
     for (var ti = 0; ti < _2d.trail.length; ti++) {
-      var tp = _2d.trail[ti], tpx = carX - (tp.y - e.y) * s, tpy = carY - (tp.x - e.x) * s;
+      var tp = _2d.trail[ti], tq = project(tp.x, tp.y), tpx = tq[0], tpy = tq[1];
       if (ti === 0) ctx.moveTo(tpx, tpy);
       else ctx.lineTo(tpx, tpy);
     }
@@ -290,11 +251,13 @@ export function draw2D() {
   ctx.restore();
 
   // ── LiDAR point cloud ──
-  var scn = (_topoData.metrics || {}).scene;
+  if (Array.isArray(scn.trajectory_path)) {
+    strokePolyline(ctx, scn.trajectory_path, project, '#58a6ff', 2, [5, 4]);
+  }
   if (scn && scn.lidar && scn.lidar.length) {
     scn.lidar.forEach(function (pt) {
       var rx = pt[0] || 0, ry = pt[1] || 0;
-      var px = carX - ry * s, py = carY - rx * s;
+      var pq = relativeToCanvas(rx, ry), px = pq[0], py = pq[1];
       var dist = Math.sqrt(rx * rx + ry * ry);
       var t = Math.min(1, dist / 60);
       var lr = Math.floor(255 * (1 - t) + 40 * t),
@@ -310,7 +273,8 @@ export function draw2D() {
   // ── Detection rays: ego → each obstacle ──
   if (scn && scn.obstacles && scn.obstacles.length) {
     scn.obstacles.forEach(function (o) {
-      var dtx = carX - (o.y || 0) * s, dty = carY - (o.x || 0) * s;
+      var dq = relativeToCanvas(o.x || 0, o.y || 0);
+      var dtx = dq[0], dty = dq[1];
       var dist = Math.sqrt((o.x || 0) * (o.x || 0) + (o.y || 0) * (o.y || 0));
       if (dist < 2 || dist > 100) return;
       // Gradient ray: cyan near ego → green at target
@@ -342,7 +306,8 @@ export function draw2D() {
           egVy = e.speed * Math.sin(e.heading || 0);
       var relVx = (o.vx || 0) - egVx, relVy = (o.vy || 0) - egVy;
       // Data target in screen coords (data updates ~10Hz)
-      var dtx = carX - (o.y || 0) * s, dty = carY - (o.x || 0) * s;
+      var target = relativeToCanvas(o.x || 0, o.y || 0);
+      var dtx = target[0], dty = target[1];
       var cur = _obsTargets2d[i];
       // isNaN guard: handles stale entries after obstacle count changes
       if (!cur || isNaN(cur.x)) {
@@ -360,8 +325,9 @@ export function draw2D() {
       }
       // Extrapolate screen position using relative velocity since last data tick
       var age = Math.min(_dtNow - cur.lastDataT, 0.5);
-      var ex = carX - (((o.y || 0) + relVy * age)) * s,
-          ey = carY - (((o.x || 0) + relVx * age)) * s;
+      var extrapolated = relativeToCanvas(
+        (o.x || 0) + relVx * age, (o.y || 0) + relVy * age);
+      var ex = extrapolated[0], ey = extrapolated[1];
       // Smooth toward extrapolated target
       cur.x += (ex - cur.x) * 0.28;
       cur.y += (ey - cur.y) * 0.28;
@@ -451,7 +417,7 @@ export function draw2D() {
   } else {
     // Static demo obstacles when no live data
     [{ x: 20, y: -1.75, col: '#00ff88', lbl: 'CAR' }, { x: 40, y: 1.75, col: '#00ff88', lbl: 'CAR' }, { x: 30, y: 8, col: '#44ee88', lbl: 'PED' }].forEach(function (p) {
-      var bx = carX - p.y * s, by = carY - p.x * s;
+      var bq = relativeToCanvas(p.x, p.y), bx = bq[0], by = bq[1];
       var hw = 13, hl = 9, cl = 5;
       ctx.save();
       ctx.translate(bx, by);
@@ -493,7 +459,6 @@ export function draw2D() {
   // ── Ego vehicle (detailed top-down view, with subtle speed animation) ──
   ctx.save();
   ctx.translate(carX, carY);
-  ctx.rotate(-e.heading);
   // Speed-based forward tilt (visual acceleration cue)
   if (e.speed > 0.5) ctx.translate(0, -Math.min(3, e.speed * 0.3));
   // Glow (pulses with speed)
