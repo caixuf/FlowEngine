@@ -188,6 +188,7 @@ struct BehaviorContext {
     int    state{0};        /* BehaviorCommand enum (镜像 sm.current) */
     double state_timer{0};  /* 当前状态持续秒数 */
     double cooldown{0};     /* 变道冷却秒数 */
+    double uturn_cooldown{0}; /* 掉头重触发冷却，不得阻塞正常变道 */
 
     /* 框架反射式状态机 */
     ReflectiveStateMachine sm{};
@@ -600,6 +601,14 @@ static bool project_to_ref(double x, double y, planning_coord::Projection& out) 
         x, y, g.ref_x, g.ref_y, g.ref_s, g.ref_count, out);
 }
 
+static bool projection_near_road(double x, double y,
+                                 const planning_coord::Projection& projection,
+                                 int lane_count, double lane_width) {
+    const double residual = std::hypot(
+        x - projection.ref_x, y - projection.ref_y);
+    return residual <= lane_count * lane_width * 0.5 + 2.0;
+}
+
 /* scene/frame：缓存施工区权威几何（掉头触发点缩短，不依赖感知）。 */
 static void on_scene_frame(const Message* msg, void* user_data) {
     (void)user_data;
@@ -685,6 +694,7 @@ protected:
             /* ── 状态计时 ── */
             g.state_timer += 0.05;
             if (g.cooldown > 0.0) g.cooldown -= 0.05;
+            if (g.uturn_cooldown > 0.0) g.uturn_cooldown -= 0.05;
 
             /* ── 当前车道索引：每帧从 ego_y 重算（变道进行中由变道完成检测接管） ──
              *
@@ -744,22 +754,35 @@ protected:
             double best_gap = 1e9;
             double lead_speed = g.target_speed;
             uint32_t lead_id = 0;
-            /* 前方车检测（2026-08-04 修复掉头返程撞车）：
-             * 旧实现硬编码 obs_vx>0 && dx>0（前进 +x 方向）—— 掉头返程
-             * （heading≈π 朝 -x）时前方车 vx<0 被跳过、-x 方向被忽略 →
-             * 找不到前车 → 不减速 → 撞车（实测掉头后追尾）。
-             * 修复：沿车头方向投影（沿向距离 + 横向距离），对前进/返程/
-             * 任意 heading 正确。 */
+            /* 前方车检测使用行进方向 ref_path Frenet 坐标。不能拿 ego 当前
+             * heading 对百米外目标做直线投影：弯道上对向车会落入本车横向
+             * 窗口，被误判为慢前车，继而触发错误 FOLLOW/变道。 */
             {
                 const double fwd_x = std::cos(g.ego_heading);
                 const double fwd_y = std::sin(g.ego_heading);
+                const double current_lane_d =
+                    planning_coord::lane_center_d(current_idx, lc, lw);
                 for (int i = 0; i < g.obs_count; i++) {
-                    const double rx = g.obs_x[i] - g.ego_x;
-                    const double ry = g.obs_y[i] - g.ego_y;
-                    const double along = rx * fwd_x + ry * fwd_y;  /* 沿车头方向 */
-                    if (along < 0.0) continue;                      /* 后方 */
-                    const double lat = std::fabs(-rx * fwd_y + ry * fwd_x);
-                    if (lat > lead_lat_tol) continue;               /* 不在本车道 */
+                    planning_coord::Projection obs_projection;
+                    double along;
+                    double lat;
+                    if (has_ego_projection &&
+                        project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection)) {
+                        if (!projection_near_road(
+                                g.obs_x[i], g.obs_y[i], obs_projection,
+                                lc, lw)) {
+                            continue;
+                        }
+                        along = obs_projection.s - ego_projection.s;
+                        lat = std::fabs(obs_projection.d - current_lane_d);
+                    } else {
+                        const double rx = g.obs_x[i] - g.ego_x;
+                        const double ry = g.obs_y[i] - g.ego_y;
+                        along = rx * fwd_x + ry * fwd_y;
+                        lat = std::fabs(-rx * fwd_y + ry * fwd_x);
+                    }
+                    if (lat > lead_lat_tol) continue;
+                    if (along < 0.0) continue;
                     if (along < best_gap) {
                         best_gap = along;
                         /* 沿车头方向的投影速度（2026-08-04 返程撞车修复）：
@@ -875,15 +898,16 @@ protected:
                 left_same_side = g.road_oneway ||
                     (tl >= legal_first && tl <= legal_last);
 
-                if (left_same_side) {
+                if (left_same_side && has_ego_projection) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            !projection_near_road(
+                                g.obs_x[i], g.obs_y[i], obs_projection, lc, lw) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
-                        const double rx = g.obs_x[i] - g.ego_x;
-                        const double ry = g.obs_y[i] - g.ego_y;
-                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        const double along =
+                            obs_projection.s - ego_projection.s;
                         if (along > 0.0 && along < left_gap) {
                             left_gap = along;
                             left_lead_v = g.obs_vx[i] * lc_fwd_x +
@@ -894,10 +918,11 @@ protected:
                     for (int i = 0; i < g.obs_count; i++) {
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            !projection_near_road(
+                                g.obs_x[i], g.obs_y[i], obs_projection, lc, lw) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
-                        const double rx = g.obs_x[i] - g.ego_x;
-                        const double ry = g.obs_y[i] - g.ego_y;
-                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        const double along =
+                            obs_projection.s - ego_projection.s;
                         if (along < 0.0) {
                             double rd = -along;
                             double obs_along_v = g.obs_vx[i] * lc_fwd_x +
@@ -921,15 +946,16 @@ protected:
                 right_same_side = g.road_oneway ||
                     (tl >= legal_first && tl <= legal_last);
 
-                if (right_same_side) {
+                if (right_same_side && has_ego_projection) {
                     double lat_tol = lw * 0.5 + g.same_lane_tol_offset;
                     for (int i = 0; i < g.obs_count; i++) {
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            !projection_near_road(
+                                g.obs_x[i], g.obs_y[i], obs_projection, lc, lw) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
-                        const double rx = g.obs_x[i] - g.ego_x;
-                        const double ry = g.obs_y[i] - g.ego_y;
-                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        const double along =
+                            obs_projection.s - ego_projection.s;
                         if (along > 0.0 && along < right_gap) {
                             right_gap = along;
                             right_lead_v = g.obs_vx[i] * lc_fwd_x +
@@ -940,10 +966,11 @@ protected:
                     for (int i = 0; i < g.obs_count; i++) {
                         planning_coord::Projection obs_projection;
                         if (!project_to_ref(g.obs_x[i], g.obs_y[i], obs_projection) ||
+                            !projection_near_road(
+                                g.obs_x[i], g.obs_y[i], obs_projection, lc, lw) ||
                             fabs(obs_projection.d - tl_y) > lat_tol) continue;
-                        const double rx = g.obs_x[i] - g.ego_x;
-                        const double ry = g.obs_y[i] - g.ego_y;
-                        const double along = rx * lc_fwd_x + ry * lc_fwd_y;
+                        const double along =
+                            obs_projection.s - ego_projection.s;
                         if (along < 0.0) {
                             double rd = -along;
                             double obs_along_v = g.obs_vx[i] * lc_fwd_x +
@@ -1135,7 +1162,8 @@ protected:
                     if (uturn_zone) {
                         uturn_approach_active = true;
                     }
-                    if (!g.on_return && uturn_zone && at_inner_lane && g.cooldown <= 0.0) {
+                    if (!g.on_return && uturn_zone && at_inner_lane &&
+                        g.uturn_cooldown <= 0.0) {
                         /* 距离兜底触发（2026-08-04）：approach 目标速度经 planning
                          * 轨迹链路衰减慢（实测 20→5 需 230m，v=5 恰在障碍前 13m
                          * 才达到 → 被迫 Phase 0 倒车腾挪）。距障碍 ≤30m 且 v≤7
@@ -1162,7 +1190,8 @@ protected:
                              * CRUISE 块恢复 20 后触发条件又失配 → 振荡） */
                             uturn_approach_active = true;
                         }
-                    } else if (g.on_return && uturn_zone && at_inner_lane && g.cooldown <= 0.0) {
+                    } else if (g.on_return && uturn_zone && at_inner_lane &&
+                               g.uturn_cooldown <= 0.0) {
                         /* 返程自然减速目标（Fix B）：对称于前向，dist_ref = ego_x
                          * （距返程起点 x=0），在触发区前沿降到触发速度。 */
                         {
@@ -1427,7 +1456,8 @@ protected:
                         /* 完成后同样冷却：防止执行残差（车还没回到车道中心）
                          * 让触发条件再次满足 → 连环掉头（2026-08-03 demo8：
                          * COMPLETED 9s 后重触发，车越跑越偏）。 */
-                        g.cooldown = g.lane_change_cooldown_timeout_s * 6.0;  /* 30s，同 TIMEOUT */
+                        g.uturn_cooldown =
+                            g.lane_change_cooldown_timeout_s * 6.0;  /* 30s */
                         snprintf(reason, sizeof(reason),
                                  "uturn completed (entry_on_return=%d h=%.2f target=%.2f) → CRUISE",
                                  g.uturn_entry_on_return, g.ego_heading, uturn_target_h);
@@ -1438,10 +1468,15 @@ protected:
                         /* 掉头失败冷却：TIMEOUT 后一段时间内不再触发掉头，
                          * 防止 planning 轨迹/车位置异常时反复进入掉头死循环
                          * （实测 2026-08-03：失败后每帧重触发，卡死 3 分钟）。 */
-                        g.cooldown = g.lane_change_cooldown_timeout_s * 6.0;  /* 30s */
+                        g.uturn_cooldown =
+                            g.lane_change_cooldown_timeout_s * 6.0;  /* 30s */
                         new_target_speed = g.cfg_cruise_speed;
-                        snprintf(reason, sizeof(reason), "uturn timeout %.1fs → CRUISE fallback (cooldown=%.1fs)", g.state_timer, g.cooldown);
-                        LOG_WARN("behavior", "uturn timeout (timer=%.1f) → cooldown=%.1fs", g.state_timer, g.cooldown);
+                        snprintf(reason, sizeof(reason),
+                                 "uturn timeout %.1fs → CRUISE fallback (uturn_cooldown=%.1fs)",
+                                 g.state_timer, g.uturn_cooldown);
+                        LOG_WARN("behavior",
+                                 "uturn timeout (timer=%.1f) → uturn_cooldown=%.1fs",
+                                 g.state_timer, g.uturn_cooldown);
                     }
                     /* U_TURN 稳态：不覆盖 target_speed */
                 }
@@ -1565,6 +1600,8 @@ protected:
                     cJSON_AddNumberToObject(root, "speed", g.ego_v);
                     cJSON_AddNumberToObject(root, "target_speed", g.target_speed);
                     cJSON_AddNumberToObject(root, "cooldown", g.cooldown);
+                    cJSON_AddNumberToObject(root, "uturn_cooldown",
+                                           g.uturn_cooldown);
                     cJSON_AddNumberToObject(root, "state_timer", g.state_timer);
                     cJSON_AddNumberToObject(root, "elapsed_ms", (double)elapsed_ms);
                     cJSON_AddNumberToObject(root, "obs_count", g.obs_count);
@@ -1695,6 +1732,7 @@ static int behavior_init(MessageBus* bus, Transport* transport,
     g.state = BEH_CRUISE;
     g.state_timer = 0.0;
     g.cooldown = 0.0;
+    g.uturn_cooldown = 0.0;
     g.committed_lane_idx = 0;
     g.target_lane_idx = -1;
     g.target_speed = 10.0;
