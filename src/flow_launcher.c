@@ -513,16 +513,31 @@ int main(int argc, char** argv) {
             LOG_INFO("launcher", "bag saved: %s", bag_path);
         }
 
+        LOG_INFO("launcher", "stopping scheduler...");
         scheduler_stop(scheduler);  scheduler_destroy(scheduler);
+        LOG_INFO("launcher", "stopping transport...");
         transport_stop(transport);  transport_destroy(transport);
+        LOG_INFO("launcher", "stopping discovery...");
         discovery_stop(discovery);  discovery_destroy(discovery);
+        LOG_INFO("launcher", "destroying message bus...");
         message_bus_destroy(bus);
+        LOG_INFO("launcher", "message bus destroyed");
 
         /* dlclose 必须在 message_bus_destroy 之后：dispatch 线程已停止，
-         * 不会再调用任何节点回调，此时卸载 .so 代码段是安全的。 */
+         * 不会再调用任何节点回调，此时卸载 .so 代码段是安全的。
+         * Windows: FreeLibrary 在 C++ 静态析构/残留线程时可能死锁挂起；
+         * 进程即将退出，OS 回收映像，跳过显式卸载。 */
+#if defined(_WIN32)
+        for (int i = 0; i < g_node_count; i++) {
+            g_nodes[i].lib_handle = NULL;
+        }
+        LOG_INFO("launcher", "skip dlclose on Windows (process exit reclaim)");
+#else
         for (int i = 0; i < g_node_count; i++) {
             if (g_nodes[i].lib_handle) { dlclose(g_nodes[i].lib_handle); g_nodes[i].lib_handle = NULL; }
         }
+#endif
+        LOG_INFO("launcher", "shutdown complete");
     }
 
     log_shutdown();

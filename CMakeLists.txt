@@ -92,6 +92,8 @@ if(WIN32)
         add_compile_options(/FI${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
     else()
         add_compile_options(-include ${CMAKE_CURRENT_SOURCE_DIR}/include/platform_compat.h)
+        # Main-thread stack: PE default ~1MB; raise to 8MB (matches Linux).
+        add_link_options(-Wl,--stack,8388608)
     endif()
     include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/compat_win)
 elseif(APPLE)
@@ -299,6 +301,12 @@ set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
 # Try to get Eigen 3.4.0; degrade gracefully if network is unavailable.
 # Eigen is header-only so we only need the source tree, not a full CMake build.
 set(_EIGEN_SRC_DIR "${CMAKE_BINARY_DIR}/_deps/eigen-src")
+set(_EIGEN_VENDOR_DIR "${CMAKE_SOURCE_DIR}/third_party/eigen")
+# Prefer vendored tree (offline Windows / CI mirror) before network clone.
+if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core" AND EXISTS "${_EIGEN_VENDOR_DIR}/Eigen/Core")
+    set(_EIGEN_SRC_DIR "${_EIGEN_VENDOR_DIR}")
+    message(STATUS "Eigen found (third_party/eigen)")
+endif()
 if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
     message(STATUS "Attempting to download Eigen 3.4.0 (non-interactive)...")
     find_package(Git QUIET)
@@ -307,17 +315,32 @@ if(NOT EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
     else()
         find_program(_GIT_EXE git)
     endif()
+    set(_EIGEN_SRC_DIR "${CMAKE_BINARY_DIR}/_deps/eigen-src")
     execute_process(
         COMMAND ${_GIT_EXE} clone
             --depth 1 --branch 3.4.0 --quiet
             -c credential.helper=   # disable interactive credential prompts so the clone fails fast if auth is needed
-            https://github.com/libeigen/eigen.git
+            https://gitlab.com/libeigen/eigen.git
             "${_EIGEN_SRC_DIR}"
-        TIMEOUT 60
+        TIMEOUT 90
         RESULT_VARIABLE _eigen_clone_result
         OUTPUT_QUIET
         ERROR_QUIET
     )
+    if(NOT _eigen_clone_result EQUAL 0)
+        # Fallback: GitHub mirror
+        execute_process(
+            COMMAND ${_GIT_EXE} clone
+                --depth 1 --branch 3.4.0 --quiet
+                -c credential.helper=
+                https://github.com/libeigen/eigen.git
+                "${_EIGEN_SRC_DIR}"
+            TIMEOUT 90
+            RESULT_VARIABLE _eigen_clone_result
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+    endif()
     if(_eigen_clone_result EQUAL 0)
         message(STATUS "Eigen 3.4.0 downloaded to ${_EIGEN_SRC_DIR}")
     else()
@@ -339,7 +362,7 @@ elseif(EXISTS "${_EIGEN_SRC_DIR}/Eigen/Core")
         target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_SRC_DIR}")
     endif()
     set(FLOWENGINE_HAVE_EIGEN TRUE)
-    message(STATUS "Eigen found (downloaded) — frenet planner will be built")
+    message(STATUS "Eigen found (local/downloaded) — frenet planner will be built")
 else()
     set(FLOWENGINE_HAVE_EIGEN FALSE)
     message(STATUS "Eigen not available — building without frenet planner. "

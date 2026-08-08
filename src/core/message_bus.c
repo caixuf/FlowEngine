@@ -79,6 +79,13 @@ typedef struct {
     pthread_cond_t  not_full;
 } RingBuffer;
 
+/* GCC14+：同布局匿名 struct 也是不同完整类型，命名后 create/cast 共用一型。 */
+typedef struct MsgBusDispatchCtx {
+    MessageBus* bus;
+    RingBuffer* shard;
+    int         tid;
+} MsgBusDispatchCtx;
+
 /* ── Req/Reply state ──────────────────────────────────── */
 
 typedef struct {
@@ -220,7 +227,7 @@ struct MessageBus {
     atomic_bool running;
 
     /* 每个分发线程的上下文（create 时填充，供线程函数定位自身分片） */
-    struct { MessageBus* bus; RingBuffer* shard; int tid; } dispatch_ctx[MSG_BUS_DISPATCH_THREADS];
+    MsgBusDispatchCtx dispatch_ctx[MSG_BUS_DISPATCH_THREADS];
 
     /* Message ID counter */
     atomic_uint_fast32_t msg_id_counter;
@@ -605,8 +612,7 @@ retry_snapshot:
 
 static void* dispatch_thread_fn(void* arg) {
     /* 每个分发线程独占一个分片队列，无跨分片锁竞争 */
-    struct { MessageBus* bus; RingBuffer* shard; int tid; }* dc =
-        (struct { MessageBus* bus; RingBuffer* shard; int tid; }*)arg;
+    MsgBusDispatchCtx* dc = (MsgBusDispatchCtx*)arg;
     MessageBus* bus = dc->bus;
     int tid = dc->tid;
 

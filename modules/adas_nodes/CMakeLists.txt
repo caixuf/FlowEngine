@@ -33,7 +33,14 @@ if(WIN32 AND NOT TARGET m)
     add_library(m INTERFACE)
 endif()
 if(WIN32)
+    # MSVC-only: auto-generate .def from objects. No-op on MinGW/GCC.
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    # MinGW defaults to libfoo.dll; pipeline_windows.json expects foo_node.dll (MSVC-style).
+    # Drop the import-lib style prefix so LoadLibrary paths match across toolchains.
+    if(NOT MSVC)
+        set(CMAKE_SHARED_LIBRARY_PREFIX "")
+        set(CMAKE_IMPORT_LIBRARY_PREFIX "")
+    endif()
 endif()
 
 # ── 头文件目录 ────────────────────────────────────────────────
@@ -100,13 +107,21 @@ endif()
 # macOS: clang 用 libc++ 而非 libstdc++，原子操作为编译器内建、无独立 libatomic，
 # 故这两个库名不存在，替换为 c++（libc++）。
 if(WIN32)
-    set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} ws2_32)
+    if(MSVC)
+        set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} ws2_32)
+        set(NODE_CXX_RT "")
+    else()
+        # MinGW (POSIX threads): every plugin links libscheduler_cpp.a (C++),
+        # including pure-C nodes linked with gcc — must pull libstdc++ always.
+        # (Linux puts stdc++/atomic in NODE_LINK_LIBS for the same reason.)
+        set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} ws2_32 pthread stdc++ atomic)
+        set(NODE_CXX_RT stdc++ atomic)
+    endif()
     # flowengine_core was compiled with ZLIB; all node DLLs that pull in core must link it
     find_package(ZLIB QUIET)
     if(ZLIB_FOUND)
         list(APPEND NODE_LINK_LIBS ZLIB::ZLIB)
     endif()
-    set(NODE_CXX_RT "")
 elseif(APPLE)
     set(NODE_LINK_LIBS ${FLOWENGINE_CORE} ${SCHEDULER_CPP} m pthread c++)
     # 各节点 target_link_libraries 里额外重申的 C++/atomic 运行时:macOS 用 libc++,
@@ -190,6 +205,10 @@ if(WIN32)
         add_compile_options(/FI${FLOW_ROOT}/include/platform_compat.h)
     else()
         add_compile_options(-include ${FLOW_ROOT}/include/platform_compat.h)
+        # PE DLLs export nothing by default (unlike ELF .so). flow_launcher uses
+        # GetProcAddress("node_get_plugin"). CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS is
+        # MSVC-only — MinGW needs an explicit linker export switch.
+        add_link_options(-Wl,--export-all-symbols)
     endif()
     include_directories(BEFORE ${FLOW_ROOT}/include/compat_win)
 elseif(APPLE)

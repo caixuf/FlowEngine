@@ -1,4 +1,4 @@
-{
+﻿{
   "version": 3,
   "configurePresets": [
     {
@@ -14,10 +14,27 @@
       }
     },
     {
-      "name": "windows-ninja",
-      "displayName": "Windows Ninja",
+      "name": "windows-mingw",
+      "displayName": "Windows MinGW (primary)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-win",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-ninja",
+      "displayName": "Windows Ninja (MSVC/clang cl)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-win-ninja",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
@@ -47,6 +64,10 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "windows-mingw",
+      "configurePreset": "windows-mingw"
     },
     {
       "name": "windows-ninja",

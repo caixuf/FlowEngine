@@ -9,8 +9,16 @@
 #include <stdint.h>
 #include <errno.h>
 
+/* MinGW already provides socklen_t/ssize_t via sys/types + ws2tcpip. */
+#if defined(_MSC_VER)
 typedef int socklen_t;
 typedef intptr_t ssize_t;
+#else
+#include <sys/types.h>
+#ifndef _SOCKLEN_T
+typedef int socklen_t;
+#endif
+#endif
 
 #ifndef MSG_DONTWAIT
 #define MSG_DONTWAIT 0

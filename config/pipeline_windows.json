@@ -11,7 +11,7 @@
   "processes": [
     {
       "name": "flowsim",
-      "library_path": "build/lib/Release/flowsim_node.dll",
+      "library_path": "build-win/lib/flowsim_node.dll",
       "auto_start": true,
       "subscribe": [
         "control/cmd"
@@ -73,7 +73,7 @@
     },
     {
       "name": "sensor_model",
-      "library_path": "build/lib/Release/sensor_model.dll",
+      "library_path": "build-win/lib/sensor_model.dll",
       "auto_start": true,
       "subscribe": [
         "vehicle/state"
@@ -113,7 +113,7 @@
     },
     {
       "name": "perception",
-      "library_path": "build/lib/Release/perception_node.dll",
+      "library_path": "build-win/lib/perception_node.dll",
       "auto_start": true,
       "subscribe": [
         "vehicle/state",
@@ -129,7 +129,7 @@
     },
     {
       "name": "object_tracker",
-      "library_path": "build/lib/Release/object_tracker_node.dll",
+      "library_path": "build-win/lib/object_tracker_node.dll",
       "auto_start": true,
       "subscribe": [
         "perception/obstacles",
@@ -145,7 +145,7 @@
     },
     {
       "name": "fusion",
-      "library_path": "build/lib/Release/fusion_node.dll",
+      "library_path": "build-win/lib/fusion_node.dll",
       "auto_start": true,
       "subscribe": [
         "sensor/gps",
@@ -169,7 +169,7 @@
     },
     {
       "name": "behavior_planner",
-      "library_path": "build/lib/Release/behavior_planner_node.dll",
+      "library_path": "build-win/lib/behavior_planner_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -193,7 +193,7 @@
     },
     {
       "name": "navigation",
-      "library_path": "build/lib/Release/navigation_node.dll",
+      "library_path": "build-win/lib/navigation_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization"
@@ -213,7 +213,7 @@
     },
     {
       "name": "planning",
-      "library_path": "build/lib/Release/planning_node.dll",
+      "library_path": "build-win/lib/planning_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -237,7 +237,7 @@
     },
     {
       "name": "control",
-      "library_path": "build/lib/Release/control_node.dll",
+      "library_path": "build-win/lib/control_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -261,7 +261,7 @@
     },
     {
       "name": "safety_control",
-      "library_path": "build/lib/Release/safety_control_node.dll",
+      "library_path": "build-win/lib/safety_control_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -283,7 +283,7 @@
     },
     {
       "name": "inference",
-      "library_path": "build/lib/Release/inference_node.dll",
+      "library_path": "build-win/lib/inference_node.dll",
       "auto_start": true,
       "subscribe": [
         "control/cmd",
@@ -306,7 +306,7 @@
     },
     {
       "name": "data_recorder",
-      "library_path": "build/lib/Release/data_recorder_node.dll",
+      "library_path": "build-win/lib/data_recorder_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -318,7 +318,7 @@
     },
     {
       "name": "learner",
-      "library_path": "build/lib/Release/learner_node.dll",
+      "library_path": "build-win/lib/learner_node.dll",
       "auto_start": true,
       "subscribe": [
         "fusion/localization",
@@ -340,7 +340,7 @@
     },
     {
       "name": "model_ota",
-      "library_path": "build/lib/Release/model_ota_node.dll",
+      "library_path": "build-win/lib/model_ota_node.dll",
       "auto_start": true,
       "subscribe": [
         "model_ota/cmd",
@@ -376,7 +376,7 @@
     },
     {
       "name": "monitor",
-      "library_path": "build/lib/Release/monitor_node.dll",
+      "library_path": "build-win/lib/monitor_node.dll",
       "auto_start": true,
       "subscribe": [
         "perception/obstacles",

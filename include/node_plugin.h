@@ -137,6 +137,20 @@ typedef struct NodePlugin {
 typedef NodePlugin* (*NodeGetPluginFn)(void);
 #define NODE_PLUGIN_SYMBOL "node_get_plugin"
 
+/*
+ * Windows PE 默认不导出符号（与 ELF .so 不同）。插件入口必须显式 dllexport，
+ * 或由 MinGW 链接加 -Wl,--export-all-symbols（见 modules/adas_nodes/CMakeLists.txt）。
+ * 新节点定义入口时请加 NODE_PLUGIN_EXPORT，例如：
+ *   NODE_PLUGIN_EXPORT NodePlugin* node_get_plugin(void) { return &s_plugin; }
+ */
+#if defined(_WIN32) || defined(__CYGWIN__)
+#  define NODE_PLUGIN_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) && (__GNUC__ >= 4)
+#  define NODE_PLUGIN_EXPORT __attribute__((visibility("default")))
+#else
+#  define NODE_PLUGIN_EXPORT
+#endif
+
 /* ── 托管模式：让 NodePlugin 自动管理线程 ─────────────────────── */
 
 /**

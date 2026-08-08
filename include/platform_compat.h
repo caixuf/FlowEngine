@@ -268,6 +268,32 @@ static inline int flow_win_posix_memalign(void** memptr, size_t alignment, size_
     flow_win_posix_memalign((memptr), (alignment), (size))
 #endif
 
+/* ── 线程栈大小（对齐 macOS 段 [6]）────────────────────────────────────
+ * Windows 次级线程默认栈约 1MB；本项目节点线程在栈上放了大缓冲
+ * （monitor scene_entities_json[64KB]、DBSCAN 网格等），FlowCoro + 嵌套帧
+ * 易触发 STATUS_STACK_OVERFLOW (0xC00000FD)。抬到 8MB 对齐 Linux 默认。
+ * MinGW 走真实 winpthreads；MSVC 走 compat_win/pthread.h（_beginthreadex
+ * 亦已设 8MB 下限，此包装双保险）。 */
+#include <pthread.h>
+#ifndef FLOW_MIN_THREAD_STACK
+#define FLOW_MIN_THREAD_STACK (8u * 1024u * 1024u)
+#endif
+static inline int flow_win_pthread_create(pthread_t* thread,
+                                          const pthread_attr_t* attr,
+                                          void* (*start)(void*), void* arg) {
+    pthread_attr_t local;
+    if (attr) local = *attr;
+    else      pthread_attr_init(&local);
+    size_t cur = 0;
+    if (pthread_attr_getstacksize(&local, &cur) != 0 || cur < FLOW_MIN_THREAD_STACK)
+        pthread_attr_setstacksize(&local, FLOW_MIN_THREAD_STACK);
+    int rc = pthread_create(thread, &local, start, arg);
+    pthread_attr_destroy(&local);
+    return rc;
+}
+#define pthread_create(thread, attr, start, arg) \
+    flow_win_pthread_create((thread), (attr), (start), (arg))
+
 #endif /* _WIN32 */
 
 #endif /* FLOWENGINE_PLATFORM_COMPAT_H */

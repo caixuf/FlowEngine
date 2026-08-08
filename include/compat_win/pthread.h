@@ -1,5 +1,12 @@
-#ifndef FLOWENGINE_COMPAT_WIN_PTHREAD_H
+﻿#ifndef FLOWENGINE_COMPAT_WIN_PTHREAD_H
 #define FLOWENGINE_COMPAT_WIN_PTHREAD_H
+
+/* MinGW-w64 (POSIX thread model) ships real winpthreads. Prefer that
+ * implementation so libstdc++ gthr-posix and our code share one pthread ABI.
+ * MSVC has no pthread — use the SRWLock/condvar shim below. */
+#if defined(__MINGW32__) && !defined(_MSC_VER)
+#include_next <pthread.h>
+#else
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -216,5 +223,7 @@ static inline int pthread_getname_np(pthread_t thread, char* name, size_t len) {
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* !__MINGW32__ || _MSC_VER */
 
 #endif /* FLOWENGINE_COMPAT_WIN_PTHREAD_H */

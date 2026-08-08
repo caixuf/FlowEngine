@@ -149,3 +149,13 @@ build_*/
 # 运行时拓扑产物（flow_launcher dump，勿提交）
 _topo.json
 !models_released/
+
+# Local toolchains / caches
+.tools/
+configure_out.txt
+build-win/
+build-win-vs/
+build-mingw/
+# Offline Eigen vendor tree (header-only; prefer build/_deps clone or this local cache)
+third_party/eigen/
+

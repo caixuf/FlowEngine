@@ -20,7 +20,7 @@
 
 /* ── 协议常量 ─────────────────────────────────────────────── */
 
-#define DISC_MAGIC      0x43534944u  /* "DISC" in LE */
+#define DISC_MAGIC      0x43524944u  /* "DISC" in LE */
 #define DISC_VERSION    1
 #define DISC_MSG_HELLO      0
 #define DISC_MSG_HEARTBEAT  1
@@ -251,9 +251,16 @@ static void* beacon_thread_fn(void* arg) {
         sendto(dm->sock_fd, buf, (size_t)len, 0,
                (const struct sockaddr*)&dm->mcast_addr, sizeof(dm->mcast_addr));
 
-    /* 用条件变量定时等待而非 usleep：discovery_stop 发信号后能立即退出，
-     * 避免在 usleep(2s) 中间被 pthread_join 卡住最多 2 秒（CI 超时失败的根因之一）。 */
+    /* 用条件变量定时等待而非 usleep：discovery_stop 发信号后能立即退出。
+     * Windows winpthread 上绝对时间 CLOCK 与 cond 时钟偶发不一致时，
+     * timedwait 可能永不返回；因此额外用短片 usleep 兜底，并在每片后
+     * 复查 running（stop 置 false 后最多约 50ms 退出）。 */
     while (dm->running) {
+#if defined(_WIN32)
+        for (int w = 0; dm->running && w < DISC_HEARTBEAT_MS; w += 50)
+            usleep(50000);
+        if (!dm->running) break;
+#else
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         uint64_t ns = (uint64_t)ts.tv_nsec
@@ -267,6 +274,7 @@ static void* beacon_thread_fn(void* arg) {
             rc = pthread_cond_timedwait(&dm->stop_cv, &dm->stop_mutex, &ts);
         pthread_mutex_unlock(&dm->stop_mutex);
         if (!dm->running) break;
+#endif
 
         /* Send HEARTBEAT */
         len = serialize_beacon(buf, sizeof(buf), DISC_MSG_HEARTBEAT, dm);
@@ -442,10 +450,20 @@ void discovery_stop(DiscoveryManager* dm) {
 
     /* 唤醒 beacon 线程：它可能在 pthread_cond_timedwait 中等待最长 2s，
      * 不发信号的话 stop 会被 pthread_join 卡住直到超时。
-     * recv 线程用非阻塞 recvfrom + 100ms 轮询，最坏 100ms 退出，可接受。 */
+     * recv 线程用非阻塞 recvfrom + 100ms 轮询，最坏 100ms 退出，可接受。
+     * Windows: MSG_DONTWAIT=0 且若 FIONBIO 未生效时 recvfrom 会永久阻塞，
+     * 必须先 shutdown 套接字才能让 join 返回。 */
     pthread_mutex_lock(&dm->stop_mutex);
-    pthread_cond_signal(&dm->stop_cv);
+    pthread_cond_broadcast(&dm->stop_cv);
     pthread_mutex_unlock(&dm->stop_mutex);
+
+    if (dm->sock_fd >= 0) {
+#if defined(_WIN32)
+        shutdown((SOCKET)dm->sock_fd, SD_BOTH);
+#else
+        shutdown(dm->sock_fd, SHUT_RDWR);
+#endif
+    }
 
     pthread_join(dm->beacon_thread, NULL);
     pthread_join(dm->recv_thread, NULL);
@@ -586,7 +604,7 @@ void discovery_print_graph(DiscoveryManager* dm) {
     bool has_rel = false;
     for (uint32_t i = 0; i < dm->topology.node_count; i++) {
         for (uint32_t j = 0; j < dm->topology.node_count; j++) {
-            if (dm->topology.relation[i][j]) {
+            if (dm->topology.relation[i][j] != 0) {
                 if (!has_rel) { printf("  relations:\n"); has_rel = true; }
                 printf("    %s -> %s (pub/sub)\n",
                        dm->topology.nodes[i].name, dm->topology.nodes[j].name);
